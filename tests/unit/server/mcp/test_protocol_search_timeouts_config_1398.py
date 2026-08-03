@@ -190,18 +190,31 @@ _CONFIGURED_REGEX_SUBPROCESS_TIMEOUT_SECONDS = 200
 _SHORT_ASYNC_DEADLINE_SECONDS = 0.05
 _LONGER_THAN_DEADLINE_SLEEP_SECONDS = 10
 
+# Story #1491 AC6 code-review fix: regex_search is exempt from the async
+# deadline entirely, so these constants exist only to prove a slow/
+# multi-repo-shaped handler is never killed early -- not to derive a cap.
+_REGEX_EXEMPT_SLEEP_SECONDS = 0.1
+_REGEX_OMNI_SINGLE_REPO_FLOOR_SECONDS = 0.05
+_REGEX_OMNI_REPO_COUNT = 3
+_REGEX_OMNI_DEADLINE_BUFFER_SECONDS = 0.02
+
 
 class TestRegexSearchIndependentOfSearchTimeoutsConfig:
     """Regression: regex_search is dispatched ASYNCHRONOUSLY (async def
     handler). Story #1491 AC6 (Finding B6) added a real asyncio.wait_for
-    deadline to the async dispatch branch -- so, unlike before, async
-    dispatch NOW does apply timeout_seconds. This class proves the two
-    tools remain independently configurable anyway: _resolve_handler_timeout
-    special-cases "regex_search" to derive its floor from
-    search_limits_config.timeout_seconds (its own subprocess bound), NEVER
-    from search_timeouts_config.default_handler_timeout_seconds /
-    search_code_handler_timeout_seconds, so tuning those two fields cannot
-    silently starve regex_search's genuinely-configured search time."""
+    deadline to the async dispatch branch -- but regex_search is EXEMPT
+    from it (code-review correction, round 2): _omni_regex_search loops
+    repos SEQUENTIALLY, each bounded by its own
+    search_limits_config.timeout_seconds subprocess call, so an omni
+    search over N repos has legitimate cumulative runtime of
+    N x single-repo-floor. No single fixed outer deadline (however
+    derived) can accommodate an unbounded N without either being too
+    tight for a real multi-repo omni search or too loose to be a
+    meaningful deadline at all. Per this project's own documented
+    invariant (CLAUDE.md Issue #1398): "regex_search is async-dispatched
+    (governed entirely by search_limits_config.timeout_seconds + its own
+    subprocess timeout ...) -- the two are independently configurable and
+    NEVER interact." AC6's new deadline must not violate that."""
 
     def test_regex_search_handler_is_registered_as_async(self) -> None:
         from code_indexer.server.mcp.handlers.search import handle_regex_search
@@ -213,37 +226,84 @@ class TestRegexSearchIndependentOfSearchTimeoutsConfig:
             "mechanism, changing long-standing behavior silently."
         )
 
-    def test_regex_search_timeout_floor_ignores_default_and_search_code_fields(
-        self, isolated_config_service
+    @pytest.mark.asyncio
+    async def test_regex_search_async_dispatch_is_exempt_from_ac6_deadline(
+        self,
     ) -> None:
-        """Driving default_handler_timeout_seconds and
-        search_code_handler_timeout_seconds to near-zero must have ZERO
-        effect on regex_search's resolved timeout -- it is derived solely
-        from search_limits_config.timeout_seconds."""
-        isolated_config_service.update_setting(
-            "search_timeouts",
-            "default_handler_timeout_seconds",
-            _NEAR_ZERO_DEFAULT_HANDLER_TIMEOUT_SECONDS,
-        )
-        config = isolated_config_service.get_config()
-        config.search_timeouts_config.search_code_handler_timeout_seconds = (
-            _NEAR_ZERO_SEARCH_CODE_TIMEOUT_SECONDS
-        )
-        config.search_limits_config.timeout_seconds = (
-            _CONFIGURED_REGEX_SUBPROCESS_TIMEOUT_SECONDS
-        )
-        isolated_config_service.save_config(config)
+        """tool_name="regex_search" must bypass the AC6 wait_for wrapper
+        entirely -- an arbitrarily small timeout_seconds must have ZERO
+        effect when the handler is dispatched as regex_search."""
 
-        resolved = _resolve_handler_timeout("regex_search")
+        async def slow_regex_handler(arguments, user):
+            await asyncio.sleep(_REGEX_EXEMPT_SLEEP_SECONDS)
+            return {"success": True, "matches": []}
 
-        # Must be strictly larger than the configured subprocess bound
-        # (proving it derives from search_limits, not the near-zero
-        # search_timeouts fields above) -- the extra headroom accounts for
-        # the Python-side prefilter/rerank/JSON work that runs beyond the
-        # raw ripgrep subprocess call.
-        assert resolved > _CONFIGURED_REGEX_SUBPROCESS_TIMEOUT_SECONDS
-        assert resolved != _NEAR_ZERO_DEFAULT_HANDLER_TIMEOUT_SECONDS
-        assert resolved != _NEAR_ZERO_SEARCH_CODE_TIMEOUT_SECONDS
+        user = _make_user()
+        sig = inspect.signature(slow_regex_handler)
+
+        result = await _invoke_handler(
+            handler=slow_regex_handler,
+            arguments={},
+            user=user,
+            session_state=None,
+            sig=sig,
+            is_async=True,
+            timeout_seconds=_SHORT_ASYNC_DEADLINE_SECONDS,
+            tool_name="regex_search",
+        )
+
+        assert result == {"success": True, "matches": []}, (
+            "regex_search must be exempt from the AC6 async deadline -- "
+            "a slow handler must complete normally regardless of "
+            "timeout_seconds."
+        )
+
+    @pytest.mark.asyncio
+    async def test_regex_search_omni_style_cumulative_time_exceeding_single_repo_floor_is_not_killed(
+        self,
+    ) -> None:
+        """Discriminating test (reviewer-requested): simulates
+        _omni_regex_search's real sequential-per-repo loop shape -- N
+        repos, each bounded by its own single-repo timeout floor -- with a
+        cumulative total that EXCEEDS a deadline shaped like the old,
+        now-removed buggy "single-repo-derived" cap (a single floor plus a
+        fixed buffer). Proves the omni-style handler is not killed early."""
+        single_repo_derived_deadline = (
+            _REGEX_OMNI_SINGLE_REPO_FLOOR_SECONDS + _REGEX_OMNI_DEADLINE_BUFFER_SECONDS
+        )
+
+        async def omni_style_regex_handler(arguments, user):
+            for _ in range(_REGEX_OMNI_REPO_COUNT):
+                await asyncio.sleep(_REGEX_OMNI_SINGLE_REPO_FLOOR_SECONDS)
+            return {
+                "success": True,
+                "matches": [],
+                "repos_searched": _REGEX_OMNI_REPO_COUNT,
+            }
+
+        user = _make_user()
+        sig = inspect.signature(omni_style_regex_handler)
+
+        result = await _invoke_handler(
+            handler=omni_style_regex_handler,
+            arguments={},
+            user=user,
+            session_state=None,
+            sig=sig,
+            is_async=True,
+            timeout_seconds=single_repo_derived_deadline,
+            tool_name="regex_search",
+        )
+
+        assert result == {
+            "success": True,
+            "matches": [],
+            "repos_searched": _REGEX_OMNI_REPO_COUNT,
+        }, (
+            "An omni-style regex search whose cumulative sequential "
+            "runtime exceeds a single-repo-derived deadline must still "
+            "complete successfully -- it must never be killed early."
+        )
 
     @pytest.mark.asyncio
     async def test_async_dispatch_now_respects_a_real_deadline_per_ac6(
