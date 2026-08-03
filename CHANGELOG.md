@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [11.101.0] - 2026-08-03
+
+### Performance
+
+- Story #1491: MCP authentication work (bcrypt credential verification, elevated-session creation, JWT validation) is now offloaded onto worker threads instead of running directly on the shared asyncio event loop, so concurrent request handling is no longer serialized behind auth checks. Eleven research-assistant routes that were `async def` with no actual `await` inside are now plain `def`, letting FastAPI threadpool them correctly instead of running them on the event loop. Restored the C-accelerated JSON encoder path for MCP responses.
+
+### Fixed
+
+- Story #1491: Async-dispatched MCP tools now have a genuine timeout deadline (previously unbounded, so a hung tool could block forever). `regex_search`, `xray_search`, `xray_explore`, and the three CI/CD `*_search_logs` handlers are explicitly exempted, since they manage their own internal per-unit time budget across a multi-repo/multi-job fan-out that can legitimately exceed a single-call deadline.
+
 ## [11.100.0] - 2026-08-02
 
 ### Performance
