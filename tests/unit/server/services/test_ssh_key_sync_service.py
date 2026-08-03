@@ -19,12 +19,38 @@ import json
 import os
 import stat
 from pathlib import Path
+from typing import List, Set
 from unittest.mock import MagicMock
 
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+MANIFEST_NAME = ".cidx-ssh-keys.json"
+
+# Bug #1521: the manifest is a SINGLE file shared by every server process
+# pointed at one ssh directory, so its entries are namespaced by a stable
+# backend identity (``{"version": 2, "backends": {<id>: [names]}}``) instead of
+# the old flat ``{"keys": [...]}`` list.  Production backends derive that
+# identity from their own locator (SQLite db path / PostgreSQL DSN); a
+# MagicMock has none, which by design disables stale-key cleanup -- so these
+# tests state the identity outright.
+TEST_BACKEND_IDENTITY = "test-backend-identity"
+
+
+def _write_manifest(ssh_dir: Path, names: List[str]) -> None:
+    """Seed a v2 manifest claiming the given names for the test backend."""
+    ssh_dir.mkdir(parents=True, exist_ok=True)
+    (ssh_dir / MANIFEST_NAME).write_text(
+        json.dumps({"version": 2, "backends": {TEST_BACKEND_IDENTITY: sorted(names)}})
+    )
+
+
+def _managed_names(ssh_dir: Path) -> Set[str]:
+    """Read back the names the test backend currently claims to manage."""
+    data = json.loads((ssh_dir / MANIFEST_NAME).read_text())
+    return set(data["backends"].get(TEST_BACKEND_IDENTITY, []))
 
 
 def _make_backend(keys: list) -> MagicMock:
@@ -53,7 +79,11 @@ def _key_data(
 def _make_service(backend, ssh_dir: Path):
     from code_indexer.server.services.ssh_key_sync_service import SSHKeySyncService
 
-    return SSHKeySyncService(ssh_keys_backend=backend, ssh_dir=str(ssh_dir))
+    return SSHKeySyncService(
+        ssh_keys_backend=backend,
+        ssh_dir=str(ssh_dir),
+        backend_identity=TEST_BACKEND_IDENTITY,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -150,9 +180,9 @@ class TestSyncSkipsExistingKeys:
 
 class TestSyncRemovesStaleKeys:
     def test_stale_private_key_removed(self, tmp_path: Path) -> None:
-        # Manifest says we manage "old_key" but backend no longer has it
-        manifest = {"keys": ["old_key"]}
-        (tmp_path / ".cidx-ssh-keys.json").write_text(json.dumps(manifest))
+        # Manifest says THIS backend manages "old_key" but the backend no
+        # longer has it -- the legitimate stale-cleanup case.
+        _write_manifest(tmp_path, ["old_key"])
         (tmp_path / "old_key").write_text("STALE_PRIVATE")
         (tmp_path / "old_key.pub").write_text("STALE_PUBLIC")
 
@@ -176,15 +206,13 @@ class TestSyncRemovesStaleKeys:
         assert (tmp_path / "user_own_key").exists()
 
     def test_stale_key_removed_from_manifest(self, tmp_path: Path) -> None:
-        manifest = {"keys": ["old_key"]}
-        (tmp_path / ".cidx-ssh-keys.json").write_text(json.dumps(manifest))
+        _write_manifest(tmp_path, ["old_key"])
 
         backend = _make_backend([])
         svc = _make_service(backend, tmp_path)
         svc.sync()
 
-        updated = json.loads((tmp_path / ".cidx-ssh-keys.json").read_text())
-        assert "old_key" not in updated["keys"]
+        assert "old_key" not in _managed_names(tmp_path)
 
 
 # ---------------------------------------------------------------------------
@@ -205,8 +233,7 @@ class TestManifestTracking:
         svc = _make_service(backend, tmp_path)
         svc.sync()
 
-        data = json.loads((tmp_path / ".cidx-ssh-keys.json").read_text())
-        assert set(data["keys"]) == {"key_x", "key_y"}
+        assert _managed_names(tmp_path) == {"key_x", "key_y"}
 
     def test_manifest_updated_when_key_added(self, tmp_path: Path) -> None:
         # First sync: one key
@@ -218,8 +245,7 @@ class TestManifestTracking:
         backend.list_keys.return_value = [_key_data("key_a"), _key_data("key_b")]
         svc.sync()
 
-        data = json.loads((tmp_path / ".cidx-ssh-keys.json").read_text())
-        assert set(data["keys"]) == {"key_a", "key_b"}
+        assert _managed_names(tmp_path) == {"key_a", "key_b"}
 
     def test_corrupted_manifest_treated_as_empty(self, tmp_path: Path) -> None:
         # Write garbage JSON
@@ -476,8 +502,7 @@ class TestManifestProvenanceBug1519:
 
         # ...and critically, the manifest must NOT claim we manage it --
         # this service never proved it wrote this file.
-        manifest = json.loads((tmp_path / ".cidx-ssh-keys.json").read_text())
-        assert "id_ed25519" not in manifest["keys"]
+        assert "id_ed25519" not in _managed_names(tmp_path)
 
     def test_personal_key_survives_backend_rename_after_name_collision(
         self, tmp_path: Path
@@ -526,8 +551,7 @@ class TestManifestProvenanceBug1519:
         first = svc.sync()
         assert "fresh_key" in first["written"]
 
-        manifest = json.loads((tmp_path / ".cidx-ssh-keys.json").read_text())
-        assert "fresh_key" in manifest["keys"]
+        assert "fresh_key" in _managed_names(tmp_path)
 
         # Backend drops the key.
         backend.list_keys.return_value = []
