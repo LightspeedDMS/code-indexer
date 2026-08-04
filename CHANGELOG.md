@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [11.107.0] - 2026-08-04
+
+### Fixed
+
+- **HIGH** #1523: `remove_golden_repo`'s background worker called `GlobalActivator.deactivate_golden_repo()` (plus three sibling detach hooks -- cidx-meta description, group-access revocation, wiki view records) INSIDE an `if cleanup_successful:` branch, so a filesystem-cleanup failure skipped all four even though the `golden_repos` row was already deleted -- a permanently wedged global-registry orphan with no front-door recovery, confirmed live on clustered staging. Fixed by treating row removal, global deactivation, and on-disk cleanup as three separable steps: all four detach steps now run unconditionally and before filesystem cleanup. Also adds a reconcile Pass 4 (`_reconcile_global_registry_orphans`) to heal installations wedged before this fix shipped.
+- **HIGH** #1524: `SSHKeyManager._list_keys_internal()` classified keys as managed/unmanaged from node-local state only, so the same cluster-managed key was reported `managed` on the node that created it and `unmanaged` on every other node at the same instant -- reproduced 4/4 across a 3-node cluster. Now unions the shared PostgreSQL backend's keys into the node-local view, matching the convention `create_key`/`assign_host`/`delete_key` already use. Confirmed not to weaken the #1519/#1521 safety guards, which read through a different path entirely.
+- #1526 (sibling of #1524): `get_public_key()` and `assign_key_to_host()` still resolved keys from node-local state only, so a key correctly listed as `managed` by #1524's fix could still 404 on those two operations if not yet materialized on the current node. Extended the same cluster-lookup convention to both.
+- #1525: MCP `get_job_details` failed with "Object of type datetime is not JSON serializable" for any cluster-claimed job, because `claimed_at` was the only timestamp column in `BackgroundJobsPostgresBackend._row_to_dict` not wrapped in the existing `_dt()` normalization helper.
+- Fixed a pre-existing gap surfaced by #1526: the `ssh_keys` REST router's `get_public_key` endpoint only caught `KeyNotFoundError`, so `PublicKeyNotFoundError` escaped as a bare 500 instead of a 404.
+
 ## [11.106.0] - 2026-08-03
 
 ### Fixed

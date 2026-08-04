@@ -1369,8 +1369,92 @@ class GoldenRepoManager:
 
             del self.golden_repos[alias]
 
-            # Filesystem cleanup happens only now, after the registry row is
-            # confirmed removed.
+            # Bug #1523: every satellite-state detach step below runs
+            # UNCONDITIONALLY, and BEFORE filesystem cleanup. These four
+            # steps used to sit inside an `if cleanup_successful:` branch, so
+            # a _cleanup_repository_files() failure skipped them entirely --
+            # even though the golden_repos row was ALREADY gone by then. For
+            # the global registry that produced a permanently wedged
+            # "registry-orphan" in the OPPOSITE direction from Bug #1317: no
+            # row, but a live global registry entry + `-global` alias pointer
+            # still advertising a repo whose clone was gone or half-deleted,
+            # un-removable (metadata already gone) and un-re-addable (clone
+            # directory still blocking the alias). Row removal, global
+            # deactivation, and on-disk cleanup are three SEPARABLE steps: a
+            # failure in the last one must never skip the second.
+            #
+            # Ordering is deliberate -- deactivate BEFORE deleting files, so
+            # the repo stops resolving through its `-global` alias before its
+            # clone starts disappearing, never the reverse. `actual_path` was
+            # already resolved above, so removing the alias pointer here
+            # cannot invalidate the cleanup target. None of these steps can
+            # be "undone" once the row is gone, which is exactly why gating
+            # them on a later step's success bought nothing and cost
+            # consistency. Each remains individually non-fatal.
+
+            # Deactivate global activation (Story #532)
+            # Remove GlobalRegistry entry and alias pointer file
+            try:
+                from code_indexer.global_repos.global_activation import (
+                    GlobalActivator,
+                )
+
+                global_activator = GlobalActivator(self.golden_repos_dir)
+                global_activator.deactivate_golden_repo(alias)
+                logging.info(f"Golden repository '{alias}' deactivated globally")
+                cascade_results["global_alias_deleted"] = True
+            except Exception as deactivation_error:
+                # Log error but don't fail removal - the registry row is already gone
+                # This is consistent with add_golden_repo() behavior (AC4)
+                logging.error(
+                    f"Global deactivation failed for '{alias}': {deactivation_error}. "
+                    f"Golden repository removed but some global resources may remain."
+                )
+
+            # Lifecycle hook: Delete .md file from cidx-meta (Story #538)
+            try:
+                from code_indexer.global_repos.meta_description_hook import (
+                    on_repo_removed,
+                )
+
+                on_repo_removed(repo_name=alias, golden_repos_dir=self.golden_repos_dir)
+            except Exception as hook_error:
+                # Log error but don't fail removal - the repo is already removed
+                logging.error(
+                    f"Meta description hook failed for '{alias}': {hook_error}. "
+                    f"Golden repository removed but meta description not deleted."
+                )
+
+            # Lifecycle hook: Revoke group access (Story #706)
+            try:
+                if self.group_access_manager is not None:
+                    from code_indexer.server.services.group_access_hooks import (
+                        on_repo_removed as group_access_on_repo_removed,
+                    )
+
+                    group_access_on_repo_removed(alias, self.group_access_manager)
+            except Exception as hook_error:
+                # Log error but don't fail removal - the repo is already removed
+                logging.error(
+                    f"Group access hook failed for '{alias}': {hook_error}. "
+                    f"Golden repository removed but access records may remain."
+                )
+
+            # Lifecycle hook: Delete wiki article view records (Story #287, AC4)
+            try:
+                from code_indexer.server.wiki.wiki_cache import WikiCache
+
+                wiki_cache = WikiCache(self.db_path)
+                wiki_cache.delete_views_for_repo(alias)
+            except Exception as hook_error:
+                logging.error(
+                    f"Wiki view cleanup hook failed for '{alias}': {hook_error}. "
+                    f"Golden repository removed but view records may remain."
+                )
+
+            # Filesystem cleanup happens LAST -- after the registry row is
+            # confirmed removed (Bug #1317) and after every satellite-state
+            # detach above (Bug #1523).
             if repo_exists_on_disk:
                 assert actual_path is not None
                 cleanup_successful = self._cleanup_repository_files(actual_path)
@@ -1379,97 +1463,37 @@ class GoldenRepoManager:
 
             # ANTI-FALLBACK RULE: Fail operation when cleanup is incomplete
             # Per MESSI Rule 2: "Graceful failure over forced success"
-            # Don't report "success with warnings" - either succeed or fail clearly
-            if cleanup_successful:
-                # Deactivate global activation (Story #532)
-                # Remove GlobalRegistry entry, alias pointer file, meta-directory .md file
-                try:
-                    from code_indexer.global_repos.global_activation import (
-                        GlobalActivator,
-                    )
-
-                    global_activator = GlobalActivator(self.golden_repos_dir)
-                    global_activator.deactivate_golden_repo(alias)
-                    logging.info(f"Golden repository '{alias}' deactivated globally")
-                    cascade_results["global_alias_deleted"] = True
-                except Exception as deactivation_error:
-                    # Log error but don't fail removal - the repo files are already deleted
-                    # This is consistent with add_golden_repo() behavior (AC4)
-                    logging.error(
-                        f"Global deactivation failed for '{alias}': {deactivation_error}. "
-                        f"Golden repository removed but some global resources may remain."
-                    )
-
-                # Lifecycle hook: Delete .md file from cidx-meta (Story #538)
-                try:
-                    from code_indexer.global_repos.meta_description_hook import (
-                        on_repo_removed,
-                    )
-
-                    on_repo_removed(
-                        repo_name=alias, golden_repos_dir=self.golden_repos_dir
-                    )
-                except Exception as hook_error:
-                    # Log error but don't fail removal - the repo is already removed
-                    logging.error(
-                        f"Meta description hook failed for '{alias}': {hook_error}. "
-                        f"Golden repository removed but meta description not deleted."
-                    )
-
-                # Lifecycle hook: Revoke group access (Story #706)
-                try:
-                    if self.group_access_manager is not None:
-                        from code_indexer.server.services.group_access_hooks import (
-                            on_repo_removed as group_access_on_repo_removed,
-                        )
-
-                        group_access_on_repo_removed(alias, self.group_access_manager)
-                except Exception as hook_error:
-                    # Log error but don't fail removal - the repo is already removed
-                    logging.error(
-                        f"Group access hook failed for '{alias}': {hook_error}. "
-                        f"Golden repository removed but access records may remain."
-                    )
-
-                # Lifecycle hook: Delete wiki article view records (Story #287, AC4)
-                try:
-                    from code_indexer.server.wiki.wiki_cache import WikiCache
-
-                    wiki_cache = WikiCache(self.db_path)
-                    wiki_cache.delete_views_for_repo(alias)
-                except Exception as hook_error:
-                    logging.error(
-                        f"Wiki view cleanup hook failed for '{alias}': {hook_error}. "
-                        f"Golden repository removed but view records may remain."
-                    )
-
-                # Mark golden repo as deleted
-                cascade_results["golden_repo_deleted"] = True
-
-                # Build enhanced message with cascade deletion counts
-                activated_count = len(cascade_results["activated_repos_deleted"])
-                failed_count = len(cascade_results["activated_repos_failed"])
-
-                message = f"Golden repository '{alias}' removed successfully"
-                if activated_count > 0:
-                    message += f" (cascade deleted {activated_count} activated repos)"
-                if failed_count > 0:
-                    message += (
-                        f" (WARNING: {failed_count} activated repos failed to delete)"
-                    )
-
-                return {
-                    "success": True,
-                    "alias": alias,
-                    "message": message,
-                    "cascade_results": cascade_results,
-                }
-            else:
-                # FAIL the operation - don't mask cleanup failures
+            # Don't report "success with warnings" - either succeed or fail clearly.
+            # Bug #1523: this signal is unchanged -- an incomplete cleanup is
+            # still reported as a resource leak; it just no longer suppresses
+            # the detach steps above.
+            if not cleanup_successful:
                 raise GitOperationError(
                     "Repository metadata removed but cleanup incomplete. "
                     "Resource leak detected: some cleanup operations did not complete fully."
                 )
+
+            # Mark golden repo as deleted
+            cascade_results["golden_repo_deleted"] = True
+
+            # Build enhanced message with cascade deletion counts
+            activated_count = len(cascade_results["activated_repos_deleted"])
+            failed_count = len(cascade_results["activated_repos_failed"])
+
+            message = f"Golden repository '{alias}' removed successfully"
+            if activated_count > 0:
+                message += f" (cascade deleted {activated_count} activated repos)"
+            if failed_count > 0:
+                message += (
+                    f" (WARNING: {failed_count} activated repos failed to delete)"
+                )
+
+            return {
+                "success": True,
+                "alias": alias,
+                "message": message,
+                "cascade_results": cascade_results,
+            }
 
         # Submit to BackgroundJobManager
         job_id = self.background_job_manager.submit_job(

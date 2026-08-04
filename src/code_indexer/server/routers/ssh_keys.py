@@ -17,6 +17,7 @@ from ..services.ssh_key_manager import (
     SSHKeyManager,
     KeyNotFoundError,
     HostConflictError,
+    PublicKeyNotFoundError,
 )
 from ..services.ssh_key_generator import (
     InvalidKeyNameError,
@@ -238,6 +239,8 @@ def get_public_key(name: str) -> Response:
         return Response(content=public_key, media_type="text/plain")
     except KeyNotFoundError:
         raise HTTPException(status_code=404, detail=f"Key not found: {name}")
+    except PublicKeyNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
 
 
 def assign_host(name: str, request: AssignHostRequest) -> KeyWithHostsResponse:
