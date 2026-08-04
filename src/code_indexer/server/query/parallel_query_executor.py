@@ -39,9 +39,30 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 from typing import Optional
 
-#: Unchanged concurrency ceiling -- this issue is about REUSE of worker
-#: threads across requests, never about raising parallelism.
-_MAX_WORKERS = 2
+#: Issue #1516 code-review Defect 1 (HIGH): this pool is now shared
+#: PROCESS-WIDE across every concurrent request's parallel-provider
+#: dispatch, not a per-request cap. Each parallel-strategy query only ever
+#: submits at most 2 tasks (voyage-ai + cohere) -- but under real concurrent
+#: request load (e.g. MCP sync handlers dispatched via
+#: `loop.run_in_executor(None, ...)` in `server/mcp/protocol.py`), many
+#: queries genuinely overlap. A pool sized at 2 would queue 2N provider
+#: tasks behind 2 workers for N concurrent queries, and
+#: `as_completed(..., timeout=_parallel_timeout)` in
+#: `semantic_query_manager.py` counts queue-wait time as provider latency
+#: -- a task that never even started before the timeout gets recorded as
+#: `success=False`, which can sin-bin a perfectly healthy provider purely
+#: because the shared pool was saturated by UNRELATED concurrent requests.
+#:
+#: 64 supports 32 fully-concurrent parallel-dispatch queries with zero
+#: queuing-induced false-timeout risk, and is still effectively free when
+#: idle: `ThreadPoolExecutor` spawns worker threads lazily, one per
+#: submitted task up to this cap, never all 64 up front. Do NOT reduce this
+#: back toward 2 -- that was the exact bug this comment documents. Follows
+#: the same generously-sized-static-pool convention already established by
+#: `server/startup/lifespan.py`'s `_mcp_executor`
+#: (`_DEFAULT_MCP_POOL_SIZE = 128`), `_query_executor`
+#: (`_DEFAULT_QUERY_POOL_SIZE = 256`), and `_xray_executor`.
+_DEFAULT_PARALLEL_DISPATCH_POOL_SIZE = 64
 
 _global_parallel_query_executor_instance: Optional[ThreadPoolExecutor] = None
 _global_parallel_query_executor_lock = threading.Lock()
@@ -50,6 +71,12 @@ _global_parallel_query_executor_lock = threading.Lock()
 def get_global_parallel_query_executor() -> ThreadPoolExecutor:
     """Get or create the process-wide parallel-query ThreadPoolExecutor
     singleton.
+
+    Sized for PROCESS-WIDE aggregate concurrent load (many overlapping
+    requests), NOT the per-request task count -- one parallel-strategy
+    query only ever submits 2 tasks (voyage-ai + cohere), but the pool must
+    have enough headroom that unrelated concurrent queries never queue
+    behind each other and get misclassified as provider failures/timeouts.
 
     Returns the SAME instance on every call. Never shut down mid-request --
     callers must submit tasks and wait for their own futures, but must NOT
@@ -63,7 +90,7 @@ def get_global_parallel_query_executor() -> ThreadPoolExecutor:
         with _global_parallel_query_executor_lock:
             if _global_parallel_query_executor_instance is None:
                 _global_parallel_query_executor_instance = ThreadPoolExecutor(
-                    max_workers=_MAX_WORKERS
+                    max_workers=_DEFAULT_PARALLEL_DISPATCH_POOL_SIZE
                 )
     return _global_parallel_query_executor_instance
 

@@ -1879,11 +1879,39 @@ class SemanticQueryManager:
             # This executor MUST NEVER be shut down here — it is shared across
             # the whole process lifetime (see parallel_query_executor.py).
             executor: ThreadPoolExecutor = get_global_parallel_query_executor()
+            # ThreadPoolExecutor.submit() raises RuntimeError with EXACTLY
+            # one of these two message prefixes when the pool has been shut
+            # down (CPython concurrent/futures/thread.py) -- no other
+            # RuntimeError shares this prefix.
+            _SUBMIT_AFTER_SHUTDOWN_PREFIX = "cannot schedule new futures after"
             futures = {}
             for name, fn in provider_tasks.items():
                 _t0 = time.monotonic()
                 _provider_ctx = contextvars.copy_context()
-                fut = executor.submit(_provider_ctx.run, fn)
+                try:
+                    fut = executor.submit(_provider_ctx.run, fn)
+                except RuntimeError as _submit_exc:
+                    if not str(_submit_exc).startswith(_SUBMIT_AFTER_SHUTDOWN_PREFIX):
+                        raise
+                    # Issue #1516 code-review Defect 2: reset_global_
+                    # parallel_query_executor() clears the singleton inside
+                    # its lock but shuts down the OLD instance OUTSIDE the
+                    # lock, so a caller holding a stale reference (this
+                    # `executor` variable, captured moments earlier) can
+                    # race a concurrent reset. This is an infra-level
+                    # pool-shutdown condition, NOT a genuine provider
+                    # failure -- skip this provider gracefully (like a
+                    # down/sin-binned provider above) and never sin-bin a
+                    # healthy provider for it.
+                    logger.warning(
+                        "Parallel query provider '%s' could not be "
+                        "submitted to the shared executor (pool shutdown "
+                        "race): %s",
+                        name,
+                        _submit_exc,
+                        extra=get_log_extra("QUERY-STRATEGY-008"),
+                    )
+                    continue
                 futures[fut] = name
                 _future_start[fut] = _t0
             try:

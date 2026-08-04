@@ -22,9 +22,12 @@ from code_indexer.server.query.parallel_query_executor import (
     reset_global_parallel_query_executor,
 )
 
-# Must match parallel_query_executor.py's configured worker cap exactly --
-# this issue is about REUSE, never about raising the concurrency ceiling.
-EXPECTED_MAX_WORKERS = 2
+# Must match parallel_query_executor.py's configured pool size exactly.
+# Issue #1516 code-review Defect 1: this is a PROCESS-WIDE pool shared by
+# every concurrent request's parallel-provider dispatch (2 tasks/query), not
+# a per-request cap -- so it must be sized for aggregate concurrent load,
+# not "2 workers because one query submits 2 tasks".
+EXPECTED_POOL_SIZE = 64
 SEQUENTIAL_SUBMISSION_COUNT = 10
 FUTURE_RESULT_TIMEOUT_SECONDS = 5
 
@@ -47,12 +50,12 @@ class TestSharedExecutorSingletonIdentity:
         assert first is second
         assert second is third
 
-    def test_returns_a_real_threadpoolexecutor_with_expected_max_workers(self):
+    def test_returns_a_real_threadpoolexecutor_with_expected_pool_size(self):
         executor = get_global_parallel_query_executor()
 
         assert isinstance(executor, ThreadPoolExecutor)
         # ThreadPoolExecutor stores the configured cap on _max_workers.
-        assert executor._max_workers == EXPECTED_MAX_WORKERS
+        assert executor._max_workers == EXPECTED_POOL_SIZE
 
     def test_reset_causes_a_fresh_instance_on_next_access(self):
         first = get_global_parallel_query_executor()
@@ -93,8 +96,8 @@ class TestSharedExecutorThreadReuseAcrossSequentialCalls:
 
         distinct_thread_ids = set(observed_thread_ids)
 
-        assert len(distinct_thread_ids) <= EXPECTED_MAX_WORKERS, (
-            f"Expected at most {EXPECTED_MAX_WORKERS} distinct worker thread "
+        assert len(distinct_thread_ids) <= EXPECTED_POOL_SIZE, (
+            f"Expected at most {EXPECTED_POOL_SIZE} distinct worker thread "
             f"ids, got {len(distinct_thread_ids)}: {distinct_thread_ids}. A "
             f"fresh executor per submission would show up to "
             f"{SEQUENTIAL_SUBMISSION_COUNT} distinct threads."
