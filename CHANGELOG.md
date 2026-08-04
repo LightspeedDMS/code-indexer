@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [11.106.0] - 2026-08-03
+
+### Fixed
+
+- Fixed SSH config manager blank-line growth: `~/.ssh/config`'s CIDX-managed section grew by one blank line on every sync round-trip because the leading blank line the writer added was re-captured into the user section on the next parse, then compounded by another writer-added blank line each cycle. Fixed by stripping leading blank lines from the parsed user section before rejoining.
+- Fixed #1516: query dispatch built a fresh `ThreadPoolExecutor(max_workers=2)` per request instead of a shared, process-wide pool, defeating Story #1492's thread-local `ChunkStoreThreadCache`. Now uses a shared, generously-sized (64-worker) singleton executor, matching this codebase's other server-mode executor conventions, with a guard against a shutdown-race `RuntimeError` during concurrent executor resets.
+- Fixed #1517 and its sibling #1522: two independent call sites (`temporal_worker.py`'s `run_temporal_worker` and `semantic_query_manager.py`'s `SemanticQueryManager.__init__`/`load_golden_temporal_config`) constructed a `GoldenRepoManager`/`ActivatedRepoManager` without honoring `CIDX_SERVER_DATA_DIR`, causing temporal queries to silently fall back to stale embedder configuration -- or, in #1522's case, to return zero results for genuinely-present sister-relocated temporal data -- on any deployment where the server's data directory differs from the OS default (i.e. any normal production/staging/cluster configuration).
+- Investigated #1518 (HNSW cache governor RED-band evictions under concurrent temporal load) and confirmed it is NOT a bug -- the governor is correctly reverting to the pre-Epic-#1213 safe baseline under genuine memory pressure, exactly as designed. Closed with real balloon-test reproduction evidence.
+
 ## [11.105.0] - 2026-08-03
 
 ### Fixed
