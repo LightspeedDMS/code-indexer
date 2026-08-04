@@ -215,9 +215,7 @@ class TestFreshness:
         assert (scip_dir / ".build_commit").read_text().strip() == "sha1 no-index"
         assert scip_db_is_fresh(tmp_path, scip_dir) is True
 
-    def test_no_index_marker_not_fresh_when_commit_differs(
-        self, tmp_path, monkeypatch
-    ):
+    def test_no_index_marker_not_fresh_when_commit_differs(self, tmp_path, monkeypatch):
         monkeypatch.setattr(scip_lifecycle, "get_current_commit", lambda _p: "sha2")
         scip_dir = tmp_path / ".code-indexer" / "scip"
         scip_dir.mkdir(parents=True)
@@ -362,3 +360,56 @@ class TestClearRebuild:
         # No marker present — must not raise.
         remove_scip_build_commit(scip_dir)
         assert not (scip_dir / ".build_commit").exists()
+
+
+class TestFunnelGoldenScip:
+    """EVO-65365: the ONE home for the golden ``-global``→bare normalization.
+
+    Every golden-repo SCIP entrypoint funnels through ``funnel_golden_scip``, so
+    the CRITICAL-1 invariant (normalize the ``-global`` REGISTRY alias to the
+    BARE golden alias before handing it to the sandbox — otherwise it resolves to
+    a non-existent ``.../<alias>-global`` path and every golden repo silently
+    loses SCIP) lives and is regression-tested in exactly one place.
+    """
+
+    def test_global_suffix_normalized_to_bare_and_args_passed_through(
+        self, tmp_path, monkeypatch
+    ):
+        from pathlib import Path
+
+        from code_indexer.server.services.scip_lifecycle import funnel_golden_scip
+
+        captured = {}
+
+        def _fake_funnel(*, alias, repo_root, config):
+            captured["alias"] = alias
+            captured["repo_root"] = repo_root
+            captured["config"] = config
+            return ScipDelegationOutcome.ENQUEUED
+
+        monkeypatch.setattr(scip_lifecycle, "funnel_scip_generation", _fake_funnel)
+
+        cfg = _delegated_cfg()
+        out = funnel_golden_scip("my-repo-global", str(tmp_path), cfg)
+
+        assert out is ScipDelegationOutcome.ENQUEUED
+        # The ``-global`` registry suffix is stripped to the bare golden alias.
+        assert captured["alias"] == "my-repo"
+        # repo_root is coerced to a Path and the config is threaded through.
+        assert captured["repo_root"] == Path(tmp_path)
+        assert captured["config"] is cfg
+
+    def test_bare_alias_unchanged(self, tmp_path, monkeypatch):
+        from code_indexer.server.services.scip_lifecycle import funnel_golden_scip
+
+        captured = {}
+
+        def _fake_funnel(*, alias, repo_root, config):
+            captured["alias"] = alias
+            return ScipDelegationOutcome.NOT_DELEGATED
+
+        monkeypatch.setattr(scip_lifecycle, "funnel_scip_generation", _fake_funnel)
+
+        funnel_golden_scip("my-repo", str(tmp_path), _local_cfg())
+        # removesuffix strips only a trailing ``-global``; a bare alias is intact.
+        assert captured["alias"] == "my-repo"

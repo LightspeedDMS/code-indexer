@@ -3654,6 +3654,82 @@ class GoldenRepoManager:
             submitter_username=submitter_username,
         )
 
+    def _run_scip_index(
+        self,
+        alias: str,
+        repo_path: str,
+        allocator: Any,
+        progress_callback: Optional[Callable[..., None]],
+    ) -> tuple[str, str]:
+        """Run the add-index SCIP step through the EVO-65021 single funnel.
+
+        Third golden-repo SCIP entrypoint (mirrors
+        ``refresh_scheduler._run_source_scip``). Under
+        ``scip_backend='delegated'`` the build is enqueued on the serialized
+        delegated queue (never blocking this add-index job) and the local
+        ``cidx scip generate`` subprocess is skipped; the funnel is fail-soft and
+        never raises, so a delegated backend gap leaves the repo at
+        "skipped: No SCIP index available" instead of failing the add-index job.
+        Under the default ``local`` backend the existing subprocess runs
+        unchanged and still raises ``GoldenRepoError`` on failure (preserving the
+        prior fail-loud behaviour). Returns ``(stdout, stderr)`` for the caller to
+        accumulate.
+        """
+        from code_indexer.server.services.scip_lifecycle import (
+            funnel_golden_scip,
+            ScipDelegationOutcome,
+        )
+        from code_indexer.server.services.config_service import get_config_service
+
+        # SCIP is fast: coarse start/end markers only
+        if progress_callback is not None:
+            progress_callback(
+                int(allocator.phase_start("scip")),
+                phase="scip",
+                detail="SCIP: generating...",
+            )
+
+        # EVO-65365: the ``-global``→bare normalization (CRITICAL-1) is the shared
+        # golden-repo invariant; it lives in ``funnel_golden_scip`` (its single
+        # home) so all three golden entrypoints cannot drift.
+        scip_outcome = funnel_golden_scip(
+            alias, repo_path, get_config_service().get_config()
+        )
+        if scip_outcome is not ScipDelegationOutcome.NOT_DELEGATED:
+            logging.info(
+                "SCIP delegated backend: %s for golden repo %s",
+                scip_outcome.value,
+                alias,
+            )
+            if progress_callback is not None:
+                progress_callback(
+                    int(allocator.phase_end("scip")),
+                    phase="scip",
+                    detail=f"SCIP: {scip_outcome.value}",
+                )
+            return "", ""
+
+        command = ["cidx", "scip", "generate"]
+        result = subprocess.run(
+            command,
+            cwd=repo_path,
+            capture_output=True,
+            text=True,
+            env=build_cidx_subprocess_env(),
+        )
+        if result.returncode != 0:
+            error_details = (
+                result.stderr or result.stdout or f"Exit code {result.returncode}"
+            )
+            raise GoldenRepoError(f"Failed to create SCIP index: {error_details}")
+        if progress_callback is not None:
+            progress_callback(
+                int(allocator.phase_end("scip")),
+                phase="scip",
+                detail="SCIP: complete",
+            )
+        return result.stdout or "", result.stderr or ""
+
     def add_indexes_to_golden_repo(
         self,
         alias: str,
@@ -4042,38 +4118,15 @@ class GoldenRepoManager:
                             )
 
                     elif index_type == "scip":
-                        # SCIP is fast: coarse start/end markers only
-                        if progress_callback is not None:
-                            progress_callback(
-                                int(allocator.phase_start("scip")),
-                                phase="scip",
-                                detail="SCIP: generating...",
-                            )
-                        command = ["cidx", "scip", "generate"]
-                        result = subprocess.run(
-                            command,
-                            cwd=repo_path,
-                            capture_output=True,
-                            text=True,
-                            env=build_cidx_subprocess_env(),
+                        # EVO-65365: route through the delegated funnel (mirrors
+                        # refresh_scheduler._run_source_scip). Delegated backend →
+                        # enqueue + skip local subprocess (fail-soft); local
+                        # backend → run subprocess (fail-loud, unchanged).
+                        _out, _err = self._run_scip_index(
+                            alias, repo_path, allocator, progress_callback
                         )
-                        all_stdout += result.stdout or ""
-                        all_stderr += result.stderr or ""
-                        if result.returncode != 0:
-                            error_details = (
-                                result.stderr
-                                or result.stdout
-                                or f"Exit code {result.returncode}"
-                            )
-                            raise GoldenRepoError(
-                                f"Failed to create SCIP index: {error_details}"
-                            )
-                        if progress_callback is not None:
-                            progress_callback(
-                                int(allocator.phase_end("scip")),
-                                phase="scip",
-                                detail="SCIP: complete",
-                            )
+                        all_stdout += _out
+                        all_stderr += _err
 
                 # CoW snapshot phase: coarse start marker before operation
                 if progress_callback is not None:

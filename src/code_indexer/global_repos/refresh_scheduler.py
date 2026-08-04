@@ -2858,24 +2858,15 @@ class RefreshScheduler:
         unchanged (and can still raise, preserving prior behaviour).
         """
         from code_indexer.server.services.scip_lifecycle import (
-            funnel_scip_generation,
+            funnel_golden_scip,
             ScipDelegationOutcome,
         )
 
-        # EVO-65021 CRITICAL-1: under Option C (EVO-65365) the delegated backend
-        # addresses a golden repo by its BARE alias — the sandbox resolves it to
-        # the filesystem path ``<GOLDEN_REPOS_ROOT>/<alias>``. This entrypoint is
-        # handed the ``-global``-suffixed REGISTRY alias, which would resolve to a
-        # non-existent path (``.../<alias>-global``) → a generic failed build, not
-        # a clean typed skip. Normalize to bare before funnelling — mirroring the
-        # existing in-file pattern (Bug #1414 / #1373) — or every golden repo
-        # silently loses SCIP under scip_backend='delegated'.
-        _GLOBAL_SUFFIX = "-global"
-        bare_alias = alias_name.removesuffix(_GLOBAL_SUFFIX)
-        scip_outcome = funnel_scip_generation(
-            alias=bare_alias,
-            repo_root=Path(source_path),
-            config=get_config_service().get_config(),
+        # EVO-65365: the ``-global``→bare normalization (CRITICAL-1) is the shared
+        # golden-repo invariant; it lives in ``funnel_golden_scip`` (its single
+        # home) so all three golden entrypoints cannot drift.
+        scip_outcome = funnel_golden_scip(
+            alias_name, source_path, get_config_service().get_config()
         )
         if scip_outcome is not ScipDelegationOutcome.NOT_DELEGATED:
             logger.info(
