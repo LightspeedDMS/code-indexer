@@ -9,6 +9,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, Mock, patch
 
 from code_indexer.global_repos.refresh_scheduler import RefreshScheduler
+from code_indexer.server.repositories.golden_repo_manager import GoldenRepoManager
 from code_indexer.server.services import scip_lifecycle
 from code_indexer.server.services.activated_repo_index_manager import (
     ActivatedRepoIndexManager,
@@ -17,6 +18,8 @@ from code_indexer.server.services.scip_lifecycle import ScipDelegationOutcome
 
 _REFRESH_MOD = "code_indexer.global_repos.refresh_scheduler"
 _ACT_MOD = "code_indexer.server.services.activated_repo_index_manager"
+_GRM_MOD = "code_indexer.server.repositories.golden_repo_manager"
+_CONFIG_MOD = "code_indexer.server.services.config_service"
 _FUNNEL = "code_indexer.server.services.scip_lifecycle.funnel_scip_generation"
 
 
@@ -170,3 +173,69 @@ class TestActivatedRepoEntrypoint:
         # Guard: the entrypoints import these symbols lazily at call time.
         assert hasattr(scip_lifecycle, "funnel_scip_generation")
         assert hasattr(scip_lifecycle, "ScipDelegationOutcome")
+
+
+# --------------------------------------------------------------------------- #
+# golden_repo_manager.add_indexes_to_golden_repo (third golden-repo entrypoint)
+# --------------------------------------------------------------------------- #
+def _golden_repo_manager() -> GoldenRepoManager:
+    # Bypass the heavy __init__: _run_scip_index only uses its params + module
+    # functions, none of the manager's instance state.
+    return GoldenRepoManager.__new__(GoldenRepoManager)
+
+
+class TestGoldenRepoManagerAddIndexEntrypoint:
+    def test_delegated_skips_local_subprocess(self):
+        mgr = _golden_repo_manager()
+        pcb = Mock()
+        with (
+            patch(f"{_CONFIG_MOD}.get_config_service"),
+            patch(_FUNNEL, return_value=ScipDelegationOutcome.ENQUEUED) as funnel,
+            patch(f"{_GRM_MOD}.subprocess.run") as srun,
+        ):
+            out, err = mgr._run_scip_index("my-repo", "/repo", _allocator(), pcb)
+        funnel.assert_called_once()
+        assert funnel.call_args.kwargs["alias"] == "my-repo"
+        srun.assert_not_called()  # delegated build enqueued, not run inline
+        assert (out, err) == ("", "")  # nothing to accumulate for the caller
+        # phase_end progress marker emitted carrying the delegated outcome
+        assert pcb.call_args.kwargs["phase"] == "scip"
+        assert pcb.call_args.kwargs["detail"] == "SCIP: enqueued"
+
+    def test_local_backend_runs_subprocess(self):
+        mgr = _golden_repo_manager()
+        with (
+            patch(f"{_CONFIG_MOD}.get_config_service"),
+            patch(_FUNNEL, return_value=ScipDelegationOutcome.NOT_DELEGATED),
+            patch(f"{_GRM_MOD}.subprocess.run") as srun,
+            patch(f"{_GRM_MOD}.build_cidx_subprocess_env", return_value={}),
+        ):
+            srun.return_value = SimpleNamespace(returncode=0, stdout="", stderr="")
+            mgr._run_scip_index("my-repo", "/repo", _allocator(), None)
+        srun.assert_called_once()
+        assert srun.call_args.args[0] == ["cidx", "scip", "generate"]
+
+    def test_delegated_fail_soft_does_not_raise(self):
+        mgr = _golden_repo_manager()
+        with (
+            patch(f"{_CONFIG_MOD}.get_config_service"),
+            patch(_FUNNEL, return_value=ScipDelegationOutcome.SKIPPED),
+            patch(f"{_GRM_MOD}.subprocess.run") as srun,
+        ):
+            # Must not raise — the enclosing add-index job is not failed by a
+            # SCIP-backend gap.
+            mgr._run_scip_index("my-repo", "/repo", _allocator(), None)
+        srun.assert_not_called()
+
+    def test_global_suffix_normalized_to_bare_alias(self):
+        # CRITICAL-1 regression (mirrors refresh_scheduler): a ``-global`` alias
+        # would resolve to a non-existent sandbox path, so it must be normalized
+        # to bare before funnelling.
+        mgr = _golden_repo_manager()
+        with (
+            patch(f"{_CONFIG_MOD}.get_config_service"),
+            patch(_FUNNEL, return_value=ScipDelegationOutcome.ENQUEUED) as funnel,
+            patch(f"{_GRM_MOD}.subprocess.run"),
+        ):
+            mgr._run_scip_index("my-repo-global", "/repo", _allocator(), None)
+        assert funnel.call_args.kwargs["alias"] == "my-repo"
