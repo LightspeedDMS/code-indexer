@@ -99,9 +99,20 @@ class TestDelegated:
         with pytest.raises(RuntimeError, match="sandbox-mcp not reachable"):
             build_scip_generator(_delegated_config(), tmp_path, workspace_id="W")
 
+    @patch("requests.get")
+    def test_health_error_names_scip_sandbox_endpoint(self, mock_get, tmp_path):
+        """EVO-65365: the endpoint now resolves from scip_sandbox (fallback
+        workspace_mcp), so the boot-outage diagnostic must point the operator at
+        ``scip_sandbox.endpoint`` — NOT ``workspace_mcp.endpoint`` alone, which
+        misdirects them to the (correct-for-ITS-backend) clone-delegation key."""
+        mock_get.side_effect = RuntimeError("connection refused")
+        with pytest.raises(RuntimeError) as exc:
+            build_scip_generator(_delegated_config(), tmp_path, workspace_id="W")
+        assert "scip_sandbox.endpoint" in str(exc.value)
+
     def test_delegated_missing_workspace_mcp_fails_loud(self, tmp_path):
         cfg = SimpleNamespace(scip_backend="delegated", workspace_mcp=None)
-        with pytest.raises(RuntimeError, match="requires workspace_mcp.endpoint"):
+        with pytest.raises(RuntimeError, match="requires scip_sandbox.endpoint"):
             build_scip_generator(cfg, tmp_path, workspace_id="W")
 
     def test_delegated_empty_endpoint_fails_loud(self, tmp_path):
@@ -109,7 +120,7 @@ class TestDelegated:
             scip_backend="delegated",
             workspace_mcp=SimpleNamespace(endpoint="", api_key=""),
         )
-        with pytest.raises(RuntimeError, match="requires workspace_mcp.endpoint"):
+        with pytest.raises(RuntimeError, match="requires scip_sandbox.endpoint"):
             build_scip_generator(cfg, tmp_path, workspace_id="W")
 
 
@@ -161,7 +172,7 @@ class TestValidateScipBackendConfig:
 
     def test_delegated_missing_workspace_mcp_raises(self):
         cfg = SimpleNamespace(scip_backend="delegated", workspace_mcp=None)
-        with pytest.raises(RuntimeError, match="requires workspace_mcp.endpoint"):
+        with pytest.raises(RuntimeError, match="requires scip_sandbox.endpoint"):
             validate_scip_backend_config(cfg)
 
     def test_delegated_empty_endpoint_raises(self):
@@ -169,8 +180,118 @@ class TestValidateScipBackendConfig:
             scip_backend="delegated",
             workspace_mcp=SimpleNamespace(endpoint="", api_key=""),
         )
-        with pytest.raises(RuntimeError, match="requires workspace_mcp.endpoint"):
+        with pytest.raises(RuntimeError, match="requires scip_sandbox.endpoint"):
             validate_scip_backend_config(cfg)
+
+
+class TestScipSandboxEndpointDecoupling:
+    """EVO-65365: the delegated SCIP backend targets the STANDING sandbox-mcp via
+    ``scip_sandbox`` (a different service than the workspace-mcp that
+    ``workspace_mcp`` addresses for clone/git delegation). ``scip_sandbox`` wins
+    when set; ``workspace_mcp`` is the backward-compat fallback."""
+
+    @patch("requests.get")
+    def test_scip_sandbox_endpoint_is_used_when_set(self, mock_get, tmp_path):
+        mock_get.return_value = MagicMock(status_code=200)
+        cfg = SimpleNamespace(
+            scip_backend="delegated",
+            scip_sandbox=SimpleNamespace(
+                endpoint="http://sandbox-mcp.claude-code-indexer:8200",
+                api_key="scip-tok",
+            ),
+            workspace_mcp=SimpleNamespace(
+                endpoint="http://workspace-mcp.internal/workspace", api_key="ws-tok"
+            ),
+        )
+        gen = build_scip_generator(cfg, tmp_path, golden_alias="svc")
+        indexer = gen._indexers["typescript"]
+        assert isinstance(indexer, DelegatedIndexer)
+        # SCIP goes to sandbox-mcp, NOT the workspace-mcp endpoint.
+        assert indexer._endpoint == "http://sandbox-mcp.claude-code-indexer:8200"
+        assert indexer._api_key == "scip-tok"
+        # The health check hit the sandbox-mcp endpoint.
+        assert mock_get.call_args.args[0].startswith(
+            "http://sandbox-mcp.claude-code-indexer:8200"
+        )
+
+    @patch("requests.get")
+    def test_falls_back_to_workspace_mcp_when_scip_sandbox_absent(
+        self, mock_get, tmp_path
+    ):
+        mock_get.return_value = MagicMock(status_code=200)
+        cfg = SimpleNamespace(
+            scip_backend="delegated",
+            scip_sandbox=None,
+            workspace_mcp=SimpleNamespace(
+                endpoint="http://workspace-mcp.internal/workspace", api_key="ws-tok"
+            ),
+        )
+        gen = build_scip_generator(cfg, tmp_path, golden_alias="svc")
+        indexer = gen._indexers["typescript"]
+        assert isinstance(indexer, DelegatedIndexer)
+        assert indexer._endpoint == "http://workspace-mcp.internal/workspace"
+        assert indexer._api_key == "ws-tok"
+
+    @patch("requests.get")
+    def test_empty_scip_sandbox_endpoint_falls_back_to_workspace_mcp(
+        self, mock_get, tmp_path
+    ):
+        """A scip_sandbox with an EMPTY endpoint is not usable → fall back."""
+        mock_get.return_value = MagicMock(status_code=200)
+        cfg = SimpleNamespace(
+            scip_backend="delegated",
+            scip_sandbox=SimpleNamespace(endpoint="", api_key=""),
+            workspace_mcp=SimpleNamespace(
+                endpoint="http://workspace-mcp.internal/workspace", api_key="ws-tok"
+            ),
+        )
+        gen = build_scip_generator(cfg, tmp_path, golden_alias="svc")
+        assert gen._indexers["typescript"]._endpoint == (
+            "http://workspace-mcp.internal/workspace"
+        )
+
+    def test_both_absent_fails_loud(self, tmp_path):
+        cfg = SimpleNamespace(
+            scip_backend="delegated", scip_sandbox=None, workspace_mcp=None
+        )
+        with pytest.raises(RuntimeError, match="requires scip_sandbox.endpoint"):
+            build_scip_generator(cfg, tmp_path, golden_alias="svc")
+
+    def test_validate_uses_scip_sandbox_when_set(self):
+        cfg = SimpleNamespace(
+            scip_backend="delegated",
+            scip_sandbox=SimpleNamespace(endpoint="http://sb", api_key="k"),
+            workspace_mcp=None,
+        )
+        # scip_sandbox satisfies the endpoint requirement even with no workspace_mcp.
+        assert validate_scip_backend_config(cfg) is None
+
+    def test_validate_both_absent_raises(self):
+        cfg = SimpleNamespace(
+            scip_backend="delegated", scip_sandbox=None, workspace_mcp=None
+        )
+        with pytest.raises(RuntimeError, match="requires scip_sandbox.endpoint"):
+            validate_scip_backend_config(cfg)
+
+
+class TestGoldenRepoAllowDegenerate:
+    """EVO-65365: golden-repo builds opt into the sandbox allow_degenerate path."""
+
+    @patch("requests.get")
+    def test_golden_repo_generator_has_allow_degenerate_true(self, mock_get, tmp_path):
+        mock_get.return_value = MagicMock(status_code=200)
+        mgr = _FakeManager()
+        gen = build_scip_generator_for_golden_repo(
+            _delegated_config(),
+            tmp_path,
+            golden_repo_manager=mgr,
+            alias="svc-foo",
+        )
+        assert gen.allow_degenerate is True
+
+    def test_non_golden_build_scip_generator_defaults_false(self, tmp_path):
+        gen = build_scip_generator(_local_config(), tmp_path, workspace_id="W")
+        assert gen.allow_degenerate is False
 
 
 class TestGoldenRepoBridge:

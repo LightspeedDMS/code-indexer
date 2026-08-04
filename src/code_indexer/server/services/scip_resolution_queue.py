@@ -467,6 +467,23 @@ def _detect_backpressure(result: Optional["GenerationResult"]) -> bool:
     return False
 
 
+def _count_degenerate_projects(result: Optional["GenerationResult"]) -> int:
+    """Count per-project results flagged DEGENERATE (EVO-65365).
+
+    A degenerate (locals-only) index is surfaced on ``IndexerResult.degenerate``
+    by the DelegatedIndexer. ``getattr`` defaults keep this safe against older /
+    lightweight result stubs that carry no ``degenerate`` attribute.
+    """
+    if result is None:
+        return 0
+    count = 0
+    for project_result in getattr(result, "project_results", []) or []:
+        indexer_result = getattr(project_result, "indexer_result", None)
+        if getattr(indexer_result, "degenerate", False):
+            count += 1
+    return count
+
+
 @dataclass
 class DelegatedScipBuild:
     """A queued delegated SCIP build (EVO-65021).
@@ -657,6 +674,20 @@ class DelegatedScipBuildQueue:
 
             if _result_is_success(result):
                 record_scip_metric("delegated_build_success")
+                # EVO-65365: a DEGENERATE (locals-only) index is a success but must
+                # be OBSERVABLE and distinct from a full one. The DelegatedIndexer
+                # surfaces it per project on ``IndexerResult.degenerate``; count
+                # those here and meter them. (The metric lives in this server layer,
+                # so the pure scip/indexers layer carries no server-metrics import.)
+                degenerate_count = _count_degenerate_projects(result)
+                if degenerate_count:
+                    record_scip_metric("delegated_degenerate", degenerate_count)
+                    logger.info(
+                        "EVO-65365: delegated SCIP build for '%s' produced %d "
+                        "degenerate (locals-only) index(es)",
+                        build.alias,
+                        degenerate_count,
+                    )
                 if build.on_success is not None:
                     try:
                         build.on_success(result)

@@ -21,6 +21,7 @@ class PythonIndexer(SCIPIndexer):
         workspace_id: Optional[str] = None,
         golden_alias: Optional[str] = None,
         language: Optional[str] = None,
+        allow_degenerate: bool = False,  # EVO-65365: delegated-only; local indexer ignores it
     ) -> IndexerResult:
         """Generate SCIP index for Python project."""
         start_time = time.time()

@@ -192,6 +192,7 @@ BOOTSTRAP_KEYS = frozenset(
         "clone_backend",  # Story #510 / #1034 - needed pre-DB by build_snapshot_manager() at lifespan startup
         "git_backend",  # EVO-64678 - needed pre-DB by build_git_backend() at lifespan startup
         "workspace_mcp",  # EVO-64616 - endpoint/api_key read pre-DB by the delegated clone/git backends at startup
+        "scip_sandbox",  # EVO-65365 - endpoint/api_key read pre-DB by the delegated SCIP backend at startup (sandbox-mcp, distinct from workspace_mcp)
         "cow_daemon",  # Story #510 / #1034 - daemon config for CowDaemonBackend wiring at startup
     }
 )

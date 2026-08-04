@@ -33,8 +33,12 @@ Contract (FROZEN — ``EVO-65021 FROZEN-CONTRACT.md``):
 Auth/transport (contract §5): a direct in-cluster JSON-RPC call reusing the same
 client-config surface cidx already uses for the delegated clone backend
 (``WorkspaceMcpConfig`` — endpoint + bearer api_key), pointed at the sandbox-mcp
-service. No API-GW authorizer secret is distributed to cidx; the route is
-constrained by K8s NetworkPolicy + service account.
+service. EVO-65365: the endpoint this indexer receives is resolved by
+``scip_backend_wiring._resolve_scip_sandbox_config`` from the ``scip_sandbox``
+config block (primary), falling back to ``workspace_mcp`` for backward
+compatibility — the DelegatedIndexer itself is source-agnostic and just consumes
+the resolved endpoint. No API-GW authorizer secret is distributed to cidx; the
+route is constrained by K8s NetworkPolicy + service account.
 """
 
 from __future__ import annotations
@@ -52,7 +56,6 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 
 logger = logging.getLogger(__name__)
 
-
 # The MCP tool name the sandbox image exposes for SCIP generation. sandbox-mcp
 # prefixes every ``.mcp-sandbox.yaml`` tool with ``sandbox_`` — the YAML tool is
 # ``scip`` → the MCP tool is ``sandbox_scip`` (contract §2).
@@ -65,7 +68,8 @@ _DEFAULT_TIMEOUT_SECONDS = 1800
 
 # Path appended to the sandbox-mcp base endpoint for the JSON-RPC front door
 # (reconciled EVO-65021 seam #2 — the authoritative sandbox contract). The
-# ``workspace_mcp.endpoint`` config is the sandbox-mcp *base* URL (e.g.
+# resolved ``scip_sandbox.endpoint`` (or ``workspace_mcp.endpoint`` as a
+# fallback, EVO-65365) is the sandbox-mcp *base* URL (e.g.
 # ``http://sandbox-mcp:8200``); ``SandboxMcpController`` mounts the MCP handler
 # at ``POST /v1/sandbox/mcp`` (URI versioning prefix 'v', v1). A dedicated param
 # keeps it tunable without a config-schema change if the route ever moves.
@@ -99,8 +103,10 @@ class DelegatedIndexer(SCIPIndexer):
         """Initialize the delegated indexer.
 
         Args:
-            config: Reused ``WorkspaceMcpConfig`` (endpoint + bearer api_key)
-                whose ``endpoint`` is the sandbox-mcp *base* URL (e.g.
+            config: Reused ``WorkspaceMcpConfig`` (endpoint + bearer api_key),
+                resolved by ``_resolve_scip_sandbox_config`` from the
+                ``scip_sandbox`` block (primary) or ``workspace_mcp`` (fallback,
+                EVO-65365), whose ``endpoint`` is the sandbox-mcp *base* URL (e.g.
                 ``http://sandbox-mcp:8200``); the JSON-RPC front door and health
                 routes are appended per the sandbox contract (§5, seam #2).
             repo_root: Golden-repo root (== the sandbox ``/workspace`` mount).
@@ -155,6 +161,7 @@ class DelegatedIndexer(SCIPIndexer):
         build_system: str,
         language: str,
         output_dir: str,
+        allow_degenerate: bool = False,
     ) -> Dict[str, Any]:
         """Build the ``tools/call`` request for ``sandbox_scip``.
 
@@ -162,6 +169,10 @@ class DelegatedIndexer(SCIPIndexer):
         ``arguments`` (never both, never neither — ``generate`` enforces the XOR
         before calling here). Everything else is repo-root-relative and
         unchanged across both addressing modes.
+
+        EVO-65365: ``allow_degenerate`` is added ONLY when True (a golden repo
+        opts into the sandbox's locals-only fallback for a bare/unbuilt repo);
+        omitted otherwise so a non-golden request is byte-identical to before.
         """
         self._request_id += 1
         arguments: Dict[str, Any] = {
@@ -174,6 +185,8 @@ class DelegatedIndexer(SCIPIndexer):
             arguments["golden_alias"] = golden_alias
         else:
             arguments["workspace_id"] = workspace_id
+        if allow_degenerate:
+            arguments["allow_degenerate"] = True
         return {
             "jsonrpc": "2.0",
             "id": self._request_id,
@@ -229,6 +242,7 @@ class DelegatedIndexer(SCIPIndexer):
         workspace_id: Optional[str] = None,
         golden_alias: Optional[str] = None,
         language: Optional[str] = None,
+        allow_degenerate: bool = False,
     ) -> IndexerResult:
         """Delegate SCIP generation for one project to sandbox-mcp.
 
@@ -262,8 +276,9 @@ class DelegatedIndexer(SCIPIndexer):
         if not self._endpoint:
             return self._failure(
                 start_time,
-                "DelegatedIndexer has no endpoint configured "
-                "(workspace_mcp.endpoint pointed at sandbox-mcp).",
+                "DelegatedIndexer has no endpoint configured (set "
+                "scip_sandbox.endpoint, or workspace_mcp.endpoint as a fallback, "
+                "pointed at sandbox-mcp).",
             )
 
         try:
@@ -296,6 +311,7 @@ class DelegatedIndexer(SCIPIndexer):
             build_system=build_system,
             language=language,
             output_dir=output_rel,
+            allow_degenerate=allow_degenerate,
         )
 
         requests = self._requests()
@@ -403,6 +419,18 @@ class DelegatedIndexer(SCIPIndexer):
         file_exists = scip_file.exists()
 
         if exit_code == 0 and file_exists:
+            # EVO-65365: the sandbox reports ``degenerate`` in its envelope when it
+            # emitted a locals-only index (the ``allow_degenerate`` path for a
+            # bare/unbuilt golden repo). Surface it on the result so a degenerate
+            # index is OBSERVABLE and distinct from a full one — the delegated-build
+            # worker records the ``delegated_degenerate`` metric from this flag.
+            degenerate = bool(run_result.get("degenerate"))
+            if degenerate:
+                logger.info(
+                    "DelegatedIndexer: sandbox produced a DEGENERATE (locals-only) "
+                    "index at %s (allow_degenerate path)",
+                    scip_file,
+                )
             return IndexerResult(
                 status=IndexerStatus.SUCCESS,
                 duration_seconds=duration,
@@ -410,6 +438,7 @@ class DelegatedIndexer(SCIPIndexer):
                 stdout=combined_output,
                 stderr="",
                 exit_code=exit_code,
+                degenerate=degenerate,
             )
 
         errors = run_result.get("errors")

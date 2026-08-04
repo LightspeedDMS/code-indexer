@@ -203,6 +203,124 @@ class TestDelegatedIndexerGoldenAlias:
         assert "workspace_id" not in args
 
 
+class TestDelegatedIndexerAllowDegenerate:
+    """EVO-65365: golden repos opt into the sandbox's locals-only fallback."""
+
+    def test_allow_degenerate_true_adds_argument(self, tmp_path):
+        output_dir = tmp_path / ".code-indexer" / "scip"
+        output_dir.mkdir(parents=True)
+        fake = _fake_requests(
+            post_side_effect=_post_writing_index(
+                output_dir, _rpc_result(exit_code=0, output="ok", duration_ms=1)
+            )
+        )
+        indexer = _make_indexer(tmp_path, fake)
+
+        indexer.generate(
+            tmp_path,
+            output_dir,
+            "npm",
+            golden_alias="svc-foo",
+            language="typescript",
+            allow_degenerate=True,
+        )
+        args = fake.post.call_args.kwargs["json"]["params"]["arguments"]
+        assert args["allow_degenerate"] is True
+
+    def test_allow_degenerate_false_omits_argument(self, tmp_path):
+        """Default (workspace_id path) → no allow_degenerate key in the request."""
+        output_dir = tmp_path / ".code-indexer" / "scip"
+        output_dir.mkdir(parents=True)
+        fake = _fake_requests(
+            post_side_effect=_post_writing_index(
+                output_dir, _rpc_result(exit_code=0, output="ok", duration_ms=1)
+            )
+        )
+        indexer = _make_indexer(tmp_path, fake)
+
+        indexer.generate(
+            tmp_path,
+            output_dir,
+            "npm",
+            workspace_id="W-1",
+            language="typescript",
+        )
+        args = fake.post.call_args.kwargs["json"]["params"]["arguments"]
+        assert "allow_degenerate" not in args
+
+    def test_degenerate_response_flag_is_surfaced_on_result(self, tmp_path):
+        """A ``degenerate: true`` envelope → IndexerResult.degenerate is True."""
+        output_dir = tmp_path / ".code-indexer" / "scip"
+        output_dir.mkdir(parents=True)
+        fake = _fake_requests(
+            post_side_effect=_post_writing_index(
+                output_dir,
+                _rpc_result(exit_code=0, output="ok", duration_ms=1, degenerate=True),
+            )
+        )
+        indexer = _make_indexer(tmp_path, fake)
+
+        result = indexer.generate(
+            tmp_path,
+            output_dir,
+            "npm",
+            golden_alias="svc-foo",
+            language="typescript",
+            allow_degenerate=True,
+        )
+        assert result.status == IndexerStatus.SUCCESS
+        assert result.degenerate is True
+
+    def test_no_degenerate_flag_defaults_false(self, tmp_path):
+        output_dir = tmp_path / ".code-indexer" / "scip"
+        output_dir.mkdir(parents=True)
+        fake = _fake_requests(
+            post_side_effect=_post_writing_index(
+                output_dir, _rpc_result(exit_code=0, output="ok", duration_ms=1)
+            )
+        )
+        indexer = _make_indexer(tmp_path, fake)
+
+        result = indexer.generate(
+            tmp_path, output_dir, "npm", workspace_id="W", language="typescript"
+        )
+        assert result.status == IndexerStatus.SUCCESS
+        assert result.degenerate is False
+
+
+class TestDelegatedIndexerGoldenRepoContract:
+    """EVO-65365: the exact golden-repo request cidx sends to sandbox_scip."""
+
+    def test_golden_repo_request_full_contract(self, tmp_path):
+        """The exact arguments dict cidx sends for a golden repo (EVO-65365)."""
+        output_dir = tmp_path / ".code-indexer" / "scip"
+        output_dir.mkdir(parents=True)
+        fake = _fake_requests(
+            post_side_effect=_post_writing_index(
+                output_dir, _rpc_result(exit_code=0, output="ok", duration_ms=1)
+            )
+        )
+        indexer = _make_indexer(tmp_path, fake)
+
+        indexer.generate(
+            tmp_path,
+            output_dir,
+            "npm",
+            golden_alias="svc-foo",
+            language="typescript",
+            allow_degenerate=True,
+        )
+        args = fake.post.call_args.kwargs["json"]["params"]["arguments"]
+        assert args == {
+            "golden_alias": "svc-foo",
+            "project_path": ".",
+            "build_system": "npm",
+            "language": "typescript",
+            "output_dir": ".code-indexer/scip",
+            "allow_degenerate": True,
+        }
+
+
 class TestDelegatedIndexerFailure:
     def test_nonzero_exit_is_failure(self, tmp_path):
         """exit_code != 0 => FAILED, no output_file, stderr from errors."""
@@ -397,6 +515,27 @@ class TestDelegatedIndexerFailure:
         )
         assert result.status == IndexerStatus.FAILED
         assert "EXACTLY ONE" in result.stderr
+        fake.post.assert_not_called()
+
+    def test_no_endpoint_failure_names_scip_sandbox_endpoint(self, tmp_path):
+        """EVO-65365: the endpoint resolves from scip_sandbox (fallback
+        workspace_mcp), so the no-endpoint fail-soft message must reference
+        ``scip_sandbox`` — pointing an operator only at ``workspace_mcp.endpoint``
+        misdirects them to the correct-for-ITS-backend clone-delegation key."""
+        fake = _fake_requests(
+            post_return=_fake_response(payload=_rpc_result(exit_code=0))
+        )
+        indexer = DelegatedIndexer(
+            config=SimpleNamespace(endpoint="", api_key=""), repo_root=tmp_path
+        )
+        indexer._requests = lambda: fake  # type: ignore[method-assign]
+        output_dir = tmp_path / ".code-indexer" / "scip"
+
+        result = indexer.generate(
+            tmp_path, output_dir, "npm", workspace_id="W", language="typescript"
+        )
+        assert result.status == IndexerStatus.FAILED
+        assert "scip_sandbox" in result.stderr
         fake.post.assert_not_called()
 
     def test_missing_language_is_failure(self, tmp_path):

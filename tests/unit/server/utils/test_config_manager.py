@@ -292,3 +292,49 @@ class TestExpectedOrphanKeys:
         assert pos_auto < pos_mfa, (
             f"Expected 'auto_watch_config' before 'mfa_config' in sorted INFO message, got: {summary_msg}"
         )
+
+
+class TestScipSandboxConfig:
+    """EVO-65365: the delegated SCIP backend targets the STANDING sandbox-mcp via
+    a dedicated ``scip_sandbox`` block — a DIFFERENT service than the workspace-mcp
+    that ``workspace_mcp`` addresses for clone/git delegation."""
+
+    def test_scip_sandbox_dict_becomes_workspace_mcp_config(self, tmp_path):
+        """A ``scip_sandbox`` dict is converted to a WorkspaceMcpConfig on load."""
+        from code_indexer.server.utils.config_manager import WorkspaceMcpConfig
+
+        config_manager = ServerConfigManager(str(tmp_path))
+        config = config_manager.create_default_config()
+        config_manager.save_config(config)
+
+        config_path = tmp_path / "config.json"
+        raw = json.loads(config_path.read_text())
+        raw["scip_backend"] = "delegated"
+        raw["scip_sandbox"] = {
+            "endpoint": "http://sandbox-mcp.claude-code-indexer:8200",
+            "api_key": "scip-token",
+        }
+        config_path.write_text(json.dumps(raw))
+
+        loaded = config_manager.load_config()
+        assert isinstance(loaded.scip_sandbox, WorkspaceMcpConfig)
+        assert (
+            loaded.scip_sandbox.endpoint
+            == "http://sandbox-mcp.claude-code-indexer:8200"
+        )
+        assert loaded.scip_sandbox.api_key == "scip-token"
+
+    def test_scip_sandbox_defaults_none_when_absent(self, tmp_path):
+        """Absent ``scip_sandbox`` stays None (wiring falls back to workspace_mcp)."""
+        config_manager = ServerConfigManager(str(tmp_path))
+        config = config_manager.create_default_config()
+        assert config.scip_sandbox is None
+
+    def test_scip_sandbox_is_pre_db_read_key(self):
+        """``scip_sandbox`` is read pre-DB (endpoint/api_key needed at startup by the
+        delegated SCIP backend, before the DB-backed config layer is available)."""
+        from code_indexer.server.services.config_service import (
+            BOOTSTRAP_KEYS,
+        )
+
+        assert "scip_sandbox" in BOOTSTRAP_KEYS
