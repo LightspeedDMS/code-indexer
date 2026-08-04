@@ -12,6 +12,7 @@ from code_indexer.storage.filesystem_vector_store import LocalIndexNotFoundError
 import contextvars
 import json
 import logging
+import os
 import re
 import io
 import sys
@@ -32,6 +33,7 @@ from code_indexer.services.query_strategy import (
 )
 from code_indexer.services.provider_health_monitor import ProviderHealthMonitor
 
+from .parallel_query_executor import get_global_parallel_query_executor
 from ..repositories.activated_repo_manager import ActivatedRepoManager
 from ..repositories.background_jobs import BackgroundJobManager
 from ..services.constants import is_internal_meta_repo
@@ -381,11 +383,32 @@ class SemanticQueryManager:
         if data_dir:
             self.data_dir = data_dir
         else:
-            home_dir = Path.home()
-            self.data_dir = str(home_dir / ".cidx-server" / "data")
+            # Bug #1522 (sibling of Bug #1517's temporal_worker.py fix): a
+            # bare, no-arg SemanticQueryManager() must NOT resolve its
+            # default data_dir purely from Path.home() -- that ignores
+            # CIDX_SERVER_DATA_DIR, the env var this codebase otherwise
+            # treats as the canonical way to locate the server's
+            # configured data directory for a standalone construction
+            # outside the normal DI chain (see
+            # ActivatedRepoIndexManager.__init__, mcp/handlers/_legacy.py,
+            # git_operations_service.py, and temporal_worker.py's
+            # run_temporal_worker per Bug #1517). On any real deployment
+            # where the server's data dir differs from the OS default,
+            # ignoring the env var here would make this manager's
+            # internally-constructed GoldenRepoManager look in the wrong
+            # metadata store, silently losing Story #1461's "use the
+            # golden repo's own current config for embedder selection"
+            # correctness fix. Byte-identical when the env var is unset
+            # (the common local/default case).
+            env_server_dir = os.environ.get("CIDX_SERVER_DATA_DIR")
+            self.data_dir = (
+                str(Path(env_server_dir) / "data")
+                if env_server_dir
+                else str(Path.home() / ".cidx-server" / "data")
+            )
 
         self.activated_repo_manager = activated_repo_manager or ActivatedRepoManager(
-            data_dir
+            self.data_dir
         )
         self.background_job_manager = background_job_manager or BackgroundJobManager()
 
@@ -1871,79 +1894,102 @@ class SemanticQueryManager:
             secondary_results: List[QueryResult] = []
             # Bug #678: track per-future start times for failure latency recording
             _future_start: Dict[Any, float] = {}
-            # Use explicit lifecycle (not `with`) so we can call shutdown(wait=False)
-            # on timeout — the `with` form always calls shutdown(wait=True) which
-            # blocks until all threads finish, defeating the timeout.
-            executor: ThreadPoolExecutor = ThreadPoolExecutor(max_workers=2)
-            try:
-                futures = {}
-                for name, fn in provider_tasks.items():
-                    _t0 = time.monotonic()
-                    _provider_ctx = contextvars.copy_context()
-                    fut = executor.submit(_provider_ctx.run, fn)
-                    futures[fut] = name
-                    _future_start[fut] = _t0
+            # Issue #1516: use the shared, process-wide executor singleton so
+            # worker threads (and Story #1492's ChunkStoreThreadCache entries
+            # keyed on them) are reused across requests, instead of a fresh
+            # ThreadPoolExecutor being spawned and torn down on every query.
+            # This executor MUST NEVER be shut down here — it is shared across
+            # the whole process lifetime (see parallel_query_executor.py).
+            executor: ThreadPoolExecutor = get_global_parallel_query_executor()
+            # ThreadPoolExecutor.submit() raises RuntimeError with EXACTLY
+            # one of these two message prefixes when the pool has been shut
+            # down (CPython concurrent/futures/thread.py) -- no other
+            # RuntimeError shares this prefix.
+            _SUBMIT_AFTER_SHUTDOWN_PREFIX = "cannot schedule new futures after"
+            futures = {}
+            for name, fn in provider_tasks.items():
+                _t0 = time.monotonic()
+                _provider_ctx = contextvars.copy_context()
                 try:
-                    for future in as_completed(futures, timeout=_parallel_timeout):
-                        provider_name = futures[future]
-                        _latency_ms = (
-                            time.monotonic() - _future_start[future]
-                        ) * 1000.0
-                        try:
-                            batch = future.result()
-                            if provider_name == "voyage-ai":
-                                primary_results = batch
-                            else:
-                                secondary_results = batch
-                        except Exception as _e:
-                            logger.warning(
-                                "Parallel query provider '%s' failed: %s",
-                                provider_name,
-                                _e,
-                                extra=get_log_extra("QUERY-STRATEGY-002"),
-                            )
-                            # Bug #1236: LocalIndexNotFoundError is a local storage
-                            # problem — the embedding provider completed successfully
-                            # and must NOT be sin-binned.  Only genuine provider
-                            # failures (HTTP errors, rate limits, timeouts, etc.)
-                            # should record a failure against the provider health.
-                            if not isinstance(_e, LocalIndexNotFoundError):
-                                # Bug #678: record failure so health monitor can sinbin the provider
-                                _health_monitor.record_call(
-                                    provider_name,
-                                    latency_ms=_latency_ms,
-                                    success=False,
-                                )
-                except concurrent.futures.TimeoutError:
-                    # Bug #678: capture unfinished futures BEFORE cancel() so the
-                    # done() check below correctly identifies them — cancel() marks
-                    # futures as cancelled which makes done() return True afterward.
-                    _unfinished = [fut for fut in futures if not fut.done()]
-                    for future in futures:
-                        future.cancel()
+                    fut = executor.submit(_provider_ctx.run, fn)
+                except RuntimeError as _submit_exc:
+                    if not str(_submit_exc).startswith(_SUBMIT_AFTER_SHUTDOWN_PREFIX):
+                        raise
+                    # Issue #1516 code-review Defect 2: reset_global_
+                    # parallel_query_executor() clears the singleton inside
+                    # its lock but shuts down the OLD instance OUTSIDE the
+                    # lock, so a caller holding a stale reference (this
+                    # `executor` variable, captured moments earlier) can
+                    # race a concurrent reset. This is an infra-level
+                    # pool-shutdown condition, NOT a genuine provider
+                    # failure -- skip this provider gracefully (like a
+                    # down/sin-binned provider above) and never sin-bin a
+                    # healthy provider for it.
                     logger.warning(
-                        "Parallel query timed out after %ds; some providers did not respond",
-                        _parallel_timeout,
-                        extra=get_log_extra("QUERY-STRATEGY-004"),
+                        "Parallel query provider '%s' could not be "
+                        "submitted to the shared executor (pool shutdown "
+                        "race): %s",
+                        name,
+                        _submit_exc,
+                        extra=get_log_extra("QUERY-STRATEGY-008"),
                     )
-                    # Bug #678: record timeout as failure for all unfinished providers
-                    for future in _unfinished:
-                        provider_name = futures[future]
-                        _latency_ms = (
-                            time.monotonic() - _future_start[future]
-                        ) * 1000.0
-                        _health_monitor.record_call(
+                    continue
+                futures[fut] = name
+                _future_start[fut] = _t0
+            try:
+                for future in as_completed(futures, timeout=_parallel_timeout):
+                    provider_name = futures[future]
+                    _latency_ms = (time.monotonic() - _future_start[future]) * 1000.0
+                    try:
+                        batch = future.result()
+                        if provider_name == "voyage-ai":
+                            primary_results = batch
+                        else:
+                            secondary_results = batch
+                    except Exception as _e:
+                        logger.warning(
+                            "Parallel query provider '%s' failed: %s",
                             provider_name,
-                            latency_ms=_latency_ms,
-                            success=False,
+                            _e,
+                            extra=get_log_extra("QUERY-STRATEGY-002"),
                         )
-                    # Non-blocking shutdown: let timed-out threads finish as daemons
-                    # rather than blocking here until the slow thread completes.
-                    executor.shutdown(wait=False)
-                    executor = None  # type: ignore[assignment]
-            finally:
-                if executor is not None:
-                    executor.shutdown(wait=True)
+                        # Bug #1236: LocalIndexNotFoundError is a local storage
+                        # problem — the embedding provider completed successfully
+                        # and must NOT be sin-binned.  Only genuine provider
+                        # failures (HTTP errors, rate limits, timeouts, etc.)
+                        # should record a failure against the provider health.
+                        if not isinstance(_e, LocalIndexNotFoundError):
+                            # Bug #678: record failure so health monitor can sinbin the provider
+                            _health_monitor.record_call(
+                                provider_name,
+                                latency_ms=_latency_ms,
+                                success=False,
+                            )
+            except concurrent.futures.TimeoutError:
+                # Bug #678: capture unfinished futures BEFORE cancel() so the
+                # done() check below correctly identifies them — cancel() marks
+                # futures as cancelled which makes done() return True afterward.
+                _unfinished = [fut for fut in futures if not fut.done()]
+                for future in futures:
+                    # Cancelling a not-yet-started future prevents it from ever
+                    # running; an already-running future is unaffected and keeps
+                    # running to completion on its shared-pool worker thread,
+                    # independent of this (already-abandoned) request.
+                    future.cancel()
+                logger.warning(
+                    "Parallel query timed out after %ds; some providers did not respond",
+                    _parallel_timeout,
+                    extra=get_log_extra("QUERY-STRATEGY-004"),
+                )
+                # Bug #678: record timeout as failure for all unfinished providers
+                for future in _unfinished:
+                    provider_name = futures[future]
+                    _latency_ms = (time.monotonic() - _future_start[future]) * 1000.0
+                    _health_monitor.record_call(
+                        provider_name,
+                        latency_ms=_latency_ms,
+                        success=False,
+                    )
 
             # Story #638: Symmetric score-gated filtering — cull weak provider
             # results before fusion to prevent low-quality candidates from diluting
