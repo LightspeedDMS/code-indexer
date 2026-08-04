@@ -7,7 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [11.107.0] - 2026-08-04
+## [11.108.0] - 2026-08-04
+
+### Fixed
+
+- **MEDIUM** #1527: `SSHKeyManager.delete_key()` -- the third sibling gap in this class after #1524 (list path) and #1526 (get_public_key/assign_key_to_host) -- never consulted the shared PostgreSQL backend before concluding a key was untracked, so Bug #1519's provenance guard falsely refused to delete a genuinely cluster-managed key on any node that hadn't itself created it (reproduced live: only 2 of 6 HAProxy-round-robinned delete attempts succeeded). Fixed by consulting the shared backend before falling through to the (unchanged) provenance guard, so a real foreign-file collision is still correctly refused.
+
+### Removed
+
+- GitLab SSH keys and deploy keys removed from the local dev machine, solo staging, and clustered staging per operator directive to stop using GitLab on this equipment. No stored PAT-based git credentials existed on any of the three servers.
 
 ### Fixed
 
