@@ -167,6 +167,15 @@ class TestExplicitDeletionAuthorizedOverrideBypassesConfig:
         vfile = _vector_json_path(collection_dir, "bbbb2222")
 
         legacy_shard_dir = index_path / "code-indexer-temporal-voyage_code_3-2024Q1"
+        legacy_shard_dir.mkdir(parents=True, exist_ok=True)
+        (legacy_shard_dir / "collection_meta.json").write_text(
+            json.dumps(
+                {
+                    "name": "code-indexer-temporal-voyage_code_3-2024Q1",
+                    "vector_size": 2,
+                }
+            )
+        )
         _write_vector_json(legacy_shard_dir, "row00001", [0.1, 0.2])
 
         sister_root = tmp_path / "sister"
@@ -197,9 +206,14 @@ class TestExplicitDeletionAuthorizedOverrideBypassesConfig:
         assert result.snapshot_path is None
         assert vfile.exists()
         assert legacy_shard_dir.exists()
-        # Sister already has the temporal data published, even though the
-        # legacy in-repo tree is untouched (bake window).
-        assert sister_alias_manager.alias_exists(
+        # Bug #1528 bake window, in place: the shard's consolidated
+        # chunks.db is already written and committed in the SAME directory
+        # while its legacy vector_*.json rows are deliberately left behind
+        # (deletion withheld) -- both an old and a new reader see correct
+        # data. No duplicate sister copy is published any more.
+        assert (legacy_shard_dir / "chunks.db").is_file()
+        assert list(legacy_shard_dir.rglob("vector_*.json"))
+        assert not sister_alias_manager.alias_exists(
             "evolution-temporal-voyage_code_3-2024Q1"
         )
 

@@ -1,6 +1,21 @@
 """maybe_relocate_shard_to_sister_location() -- Story #1457 AC1's actual
 relocation trigger.
 
+RETIRED BY BUG #1528 -- NOT WIRED INTO ANY PRODUCTION WRITE PATH, AND MUST
+NOT BE RE-WIRED. Temporal collections are now written directly in the
+consolidated ``chunks.db`` layout and migrated IN PLACE (fleet migration
+server-side, ``cidx index --migrate-chunks-to-sqlite`` for a standalone
+CLI), so there is no reason to publish a second copy elsewhere. Re-wiring
+this would also be actively DESTRUCTIVE: every row this module publishes
+comes from ``read_legacy_shard_rows`` (a ``vector_*.json`` scan), which
+finds NOTHING in a ``chunks.db`` shard -- it would publish an EMPTY sister
+version and swap the namespace pointer onto it, and
+``TemporalShardResolver`` is pointer-first, so later queries for that
+namespace would silently return zero rows. The READ side (the resolver and
+any alias pointers already published before this fix) remains fully
+supported so previously relocated data stays queryable; this module is kept
+only as the reference for how that existing data was produced.
+
 Wires AC6's already-built build+publish machinery
 (temporal_refresh_dispatch.execute_temporal_refresh_branch) into the real
 temporal indexing pipeline, gated on the CIDX_SERVER_REFRESH_CONTEXT env

@@ -190,6 +190,54 @@ def _content_manifest_path(collection_dir: Path) -> Path:
     return collection_dir / _CONTENT_MANIFEST_FILENAME
 
 
+def _is_natively_built_chunks_db(collection_dir: Path) -> bool:
+    """True iff this collection was built DIRECTLY in the consolidated
+    layout and therefore has nothing to migrate (found while verifying Bug
+    #1528 against a real indexing run).
+
+    The content-integrity manifest is written ONLY by this module, purely to
+    make the DESTRUCTIVE deletion of legacy sharded files safe. A collection
+    created with the chunks_db layout from the start -- every
+    server-provisioned collection since Story #1488 stamps
+    ``--new-collection-layout=chunks_db`` on every server-spawned `cidx
+    index` child, and every temporal collection since Bug #1528 -- never had
+    legacy files, so it never gets a manifest and there is no destructive
+    decision to guard. Requiring one there made
+    :func:`verify_collection_fully_migrated` report a perfectly consolidated
+    collection as unmigrated, and made
+    :func:`consolidate_collection_in_place` raise
+    :class:`UnrecoverableConsolidationCorruptionError` over it.
+
+    Deliberately conservative -- ALL FIVE conditions must hold:
+      * the ``chunks_db`` discriminator is committed;
+      * ``chunks.db`` physically exists;
+      * NO manifest exists (a manifest means a real migration DID happen
+        here, so the normal verified/resume path must govern);
+      * NO top-level authoritative ``vector_count`` in
+        ``collection_meta.json`` (only the migration engine writes it, so
+        its presence proves a migration ran here -- which makes a MISSING
+        manifest a LOST manifest, not a native build);
+      * ZERO legacy ``vector_*.json`` files remain anywhere beneath the
+        collection. This is the load-bearing condition: a crashed migration
+        (flag flipped, legacy files still on disk, manifest absent) is a
+        genuine destructive-decision situation and must keep failing loudly.
+    """
+    if resolve_chunk_layout(collection_dir) != ChunkLayout.CHUNKS_DB:
+        return False
+    if not (collection_dir / CHUNKS_DB_FILENAME).is_file():
+        return False
+    if _content_manifest_path(collection_dir).exists():
+        return False
+    if _read_authoritative_vector_count(collection_dir) is not None:
+        # Only the migration engine writes collection_meta.json's top-level
+        # authoritative `vector_count`. Its presence PROVES a migration ran
+        # here, so an absent manifest means the manifest was LOST (tamper /
+        # corruption), not that it never existed -- that must keep failing
+        # loudly instead of being mistaken for a native build.
+        return False
+    return next(collection_dir.rglob("vector_*.json"), None) is None
+
+
 def _atomic_write_json(target_path: Path, data: Dict[str, Any]) -> None:
     """Atomic + durable JSON write (temp file in the SAME directory,
     flush+fsync, ``os.replace``, then an ``nfs_safe_fsync`` of the
@@ -2362,6 +2410,17 @@ def verify_collection_fully_migrated(collection_dir: Union[str, Path]) -> bool:
         # Legacy files still on disk: cleanup did not fully complete.
         return False
 
+    if _is_natively_built_chunks_db(collection_dir):
+        # Built directly in the consolidated layout: no manifest can exist
+        # and nothing was ever migrated, so the manifest-requiring resume
+        # verifier below would reject a perfectly consolidated collection.
+        # Still PROVE the store itself is intact, via the same
+        # fresh-connection integrity check the resume path relies on.
+        integrity_ok, _detail = _check_integrity_fresh_connection(
+            collection_dir / CHUNKS_DB_FILENAME
+        )
+        return integrity_ok
+
     try:
         # Bug #1486 Codex Finding #3: this predicate is side-effect-free and
         # runs WITHOUT the repo write lock -- it must VALIDATE a legacy flat
@@ -2436,6 +2495,24 @@ def consolidate_collection_in_place(
     collection_dir = Path(collection_dir)
 
     if resolve_chunk_layout(collection_dir) == ChunkLayout.CHUNKS_DB:
+        if _is_natively_built_chunks_db(collection_dir):
+            # Built directly in the consolidated layout (never migrated):
+            # zero legacy files to clean up and no manifest can exist, so
+            # the resume verification below would raise
+            # UnrecoverableConsolidationCorruptionError over a perfectly
+            # healthy collection. Nothing to migrate -- but still PROVE the
+            # store is intact first, so a corrupt chunks.db is never
+            # silently accepted as "already consolidated".
+            integrity_ok, integrity_detail = _check_integrity_fresh_connection(
+                collection_dir / CHUNKS_DB_FILENAME
+            )
+            if not integrity_ok:
+                raise UnrecoverableConsolidationCorruptionError(
+                    f"Refusing to treat {collection_dir} as consolidated: its "
+                    f"chunks.db was built natively (no migration manifest "
+                    f"exists) but does NOT open cleanly -- {integrity_detail}"
+                )
+            return ConsolidationResult(status="already_consolidated")
         # Resume path. Finding #4: fail loudly on any rejected legacy
         # record found during the fresh re-scan (never silently proceed).
         still_present_id_map = _scan_or_fail_on_rejected_records(collection_dir)

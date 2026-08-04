@@ -5,14 +5,15 @@ BASE CLONE in place. Executes, in order, under a SINGLE held write lock:
 
   (1) consolidate every SEMANTIC collection (Story #1458 AC3, via
       ``consolidate_collection_in_place``);
-  (2) bootstrap every in-repo TEMPORAL namespace to the sister location
-      (Story #1457 AC11, via ``bootstrap_temporal_namespace_to_sister``) --
-      a literal sub-step of THIS job, inside the SAME write-lock hold, not
-      an independently-scheduled operation;
-  (3) only after BOTH complete AND the completion gate (zero residual
-      in-repo temporal directories of either shape, AND no semantic
-      collection skipped for insufficient disk) passes, fire the single
-      post-consolidation snapshot (AC10), exactly once for the repo.
+  (2) consolidate every in-repo TEMPORAL shard IN PLACE via that SAME
+      engine (Bug #1528 -- previously this published each namespace to the
+      Story #1457 "sister location" instead) -- a literal sub-step of THIS
+      job, inside the SAME write-lock hold, not an independently-scheduled
+      operation;
+  (3) only after BOTH complete AND the completion gate (every real in-repo
+      temporal shard verified fully consolidated, AND no collection skipped
+      for insufficient disk) passes, fire the single post-consolidation
+      snapshot (AC10), exactly once for the repo.
 
 AC2: the write lock is acquired BEFORE touching the base clone and released
 in ``finally``, held continuously through the whole sequence including the
@@ -41,6 +42,7 @@ it is inherited "for free" because migration acquires the SAME
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, List, Optional, Tuple
@@ -49,7 +51,7 @@ from code_indexer.global_repos.alias_manager import AliasManager
 from code_indexer.server.services.config_service import get_config_service
 from code_indexer.server.services.fleet_migration.completion_gate import (
     mark_post_consolidation_snapshot_published,
-    repo_has_zero_residual_temporal_dirs,
+    repo_temporal_dirs_fully_consolidated,
 )
 from code_indexer.server.services.fleet_migration.snapshot_trigger import (
     trigger_post_consolidation_snapshot,
@@ -58,9 +60,6 @@ from code_indexer.server.services.query_path_cache import (
     is_immutable_versioned_snapshot,
 )
 from code_indexer.server.services.job_tracker import DuplicateJobError
-from code_indexer.services.temporal.temporal_bootstrap import (
-    bootstrap_temporal_namespace_to_sister,
-)
 from code_indexer.storage.shared.collection_migration import (
     consolidate_collection_in_place,
     verify_collection_fully_migrated,
@@ -68,6 +67,8 @@ from code_indexer.storage.shared.collection_migration import (
 
 if TYPE_CHECKING:
     from code_indexer.global_repos.refresh_scheduler import RefreshScheduler
+
+logger = logging.getLogger(__name__)
 
 #: Owner identity recorded in the WriteLockManager lock file (AC2/AC7).
 MIGRATION_OWNER_NAME = "fleet_migration"
@@ -149,12 +150,18 @@ def _bare_alias(alias: str) -> str:
     return alias[: -len(_GLOBAL_SUFFIX)] if alias.endswith(_GLOBAL_SUFFIX) else alias
 
 
-def _consolidate_semantic_collections(
-    semantic_collection_dirs: List[Path],
+def _consolidate_collections(
+    collection_dirs: List[Path],
     *,
     deletion_authorized: bool = True,
 ) -> Tuple[int, int]:
     """AC1 step (1). Returns (consolidated_count, skipped_disk_count).
+
+    Bug #1528: kind-agnostic. TEMPORAL shard directories now flow through
+    this SAME helper -- and therefore the same symlink/immutable-path
+    re-validation and the same in-place engine -- as semantic collections,
+    instead of being published to a separate "sister" location by a
+    parallel mechanism.
 
     ``deletion_authorized`` is Story #1460's AC1/AC2 rollout-safety gate,
     threaded straight through to ``consolidate_collection_in_place`` --
@@ -162,7 +169,7 @@ def _consolidate_semantic_collections(
     """
     consolidated_count = 0
     skipped_disk_count = 0
-    for collection_dir in semantic_collection_dirs:
+    for collection_dir in collection_dirs:
         # Codex round-6 CRITICAL finding #4 (TOCTOU): discovery.py's own
         # is_symlink() rejection only proves this path was safe AT
         # DISCOVERY TIME -- re-validate immediately before the
@@ -191,29 +198,88 @@ def _consolidate_semantic_collections(
     return consolidated_count, skipped_disk_count
 
 
-def _bootstrap_temporal_namespaces(
+def _consolidate_temporal_namespaces(
     temporal_namespaces: List[TemporalNamespaceSpec],
     sister_alias_manager: AliasManager,
     sister_root: Path,
     *,
     deletion_authorized: bool = True,
-) -> None:
-    """AC1 step (2): synchronous, in-process, inside THIS same write-lock
-    hold, as a literal sub-step of this job (Story #1457 AC11).
+) -> Tuple[int, int]:
+    """AC1 step (2), Bug #1528 revision: consolidate every in-repo temporal
+    shard IN PLACE, synchronously, inside THIS same write-lock hold, as a
+    literal sub-step of this job.
 
-    ``deletion_authorized`` is Story #1460's AC1/AC2 rollout-safety gate,
-    threaded straight through to ``bootstrap_temporal_namespace_to_sister``
-    -- see that function's own docstring for the full semantics.
+    Previously this published each namespace to the Story #1457 "sister
+    location" (``bootstrap_temporal_namespace_to_sister``): a second
+    consolidated copy elsewhere, an alias pointer to it, and only then
+    reclamation of the in-repo tree. That was a parallel migration system
+    for temporal alone, which existed only because temporal was excluded
+    from the CHUNKS_DB write path. With that exclusion gone, temporal is
+    migrated by the ONE engine semantic collections already use -- same
+    directory, discriminator flip, legacy files deleted only after a
+    verified durable write.
+
+    Returns ``(consolidated_count, skipped_disk_count)`` from that shared
+    helper; ``deletion_authorized`` is Story #1460's AC1/AC2 rollout-safety
+    gate, threaded straight through to ``consolidate_collection_in_place``.
+
+    A namespace that ALREADY has a sister alias pointer (published by the
+    retired mechanism before this fix) is still consolidated in place, but
+    is reported as an operator-actionable WARNING: ``TemporalShardResolver``
+    is pointer-first, so reads for that namespace keep resolving to the
+    previously-published sister copy rather than to the shard just
+    consolidated here.
     """
     for spec in temporal_namespaces:
-        bootstrap_temporal_namespace_to_sister(
-            alias_manager=sister_alias_manager,
-            sister_root=sister_root,
-            pointer_namespace=spec.pointer_namespace,
-            legacy_shard_dir=spec.legacy_shard_dir,
-            embedder_slug=spec.embedder_slug,
-            deletion_authorized=deletion_authorized,
-        )
+        if sister_alias_manager.alias_exists(spec.pointer_namespace):
+            logger.warning(
+                "fleet migration: temporal namespace '%s' still has a "
+                "legacy sister alias pointer under %s -- consolidating the "
+                "in-repo shard %s in place, but pointer-first query "
+                "resolution will keep reading the previously-published "
+                "sister copy for this namespace until that pointer is "
+                "retired",
+                spec.pointer_namespace,
+                sister_root,
+                spec.legacy_shard_dir,
+            )
+
+    consolidatable: List[Path] = []
+    for spec in temporal_namespaces:
+        if not (spec.legacy_shard_dir / "collection_meta.json").is_file():
+            # No metadata file means the in-place engine has nothing to flip
+            # a chunks_db discriminator in and would raise, so this
+            # directory is skipped rather than aborting the whole pass. A
+            # genuine ROWLESS "empty artifact" (Story #1458 AC1a) is
+            # unremarkable; one that still holds legacy rows is an
+            # un-migratable anomaly that will keep the completion gate
+            # closed, so the operator must see it.
+            has_legacy_rows = (
+                next(spec.legacy_shard_dir.rglob("vector_*.json"), None) is not None
+            )
+            if has_legacy_rows:
+                logger.warning(
+                    "fleet migration: temporal shard %s holds legacy "
+                    "vector_*.json rows but has NO collection_meta.json -- "
+                    "it cannot be consolidated in place, so this repo will "
+                    "stay incomplete until the directory is repaired or "
+                    "removed",
+                    spec.legacy_shard_dir,
+                )
+            else:
+                logger.info(
+                    "fleet migration: temporal shard %s is a rowless "
+                    "artifact with no collection_meta.json -- nothing to "
+                    "consolidate, skipping",
+                    spec.legacy_shard_dir,
+                )
+            continue
+        consolidatable.append(spec.legacy_shard_dir)
+
+    return _consolidate_collections(
+        consolidatable,
+        deletion_authorized=deletion_authorized,
+    )
 
 
 def _run_migration_sequence(
@@ -232,36 +298,38 @@ def _run_migration_sequence(
     AFTER AC9's in-flight-refresh check has already passed.
 
     ``deletion_authorized`` is Story #1460's AC1/AC2 rollout-safety gate --
-    when False, both the semantic and temporal DESTRUCTIVE deletion steps
-    are withheld while the non-destructive build/publish work still runs
-    (see ``consolidate_collection_in_place``/
-    ``bootstrap_temporal_namespace_to_sister`` docstrings). The completion
-    gate below naturally refuses to fire AC10's snapshot in that case,
-    since withheld deletion always leaves either a residual temporal
-    directory or a not-yet-fully-migrated semantic collection.
+    when False, the DESTRUCTIVE legacy-file deletion step is withheld for
+    both collection kinds while the non-destructive build/verify/flip work
+    still runs (see ``consolidate_collection_in_place``'s docstring). The
+    completion gate below naturally refuses to fire AC10's snapshot in that
+    case, since withheld deletion always leaves legacy sharded files behind
+    and therefore a not-yet-fully-migrated collection.
     """
-    consolidated_count, skipped_disk_count = _consolidate_semantic_collections(
+    consolidated_count, skipped_disk_count = _consolidate_collections(
         semantic_collection_dirs, deletion_authorized=deletion_authorized
     )
-    _bootstrap_temporal_namespaces(
+    temporal_consolidated, temporal_skipped_disk = _consolidate_temporal_namespaces(
         temporal_namespaces,
         sister_alias_manager,
         sister_root,
         deletion_authorized=deletion_authorized,
     )
+    consolidated_count += temporal_consolidated
+    skipped_disk_count += temporal_skipped_disk
 
-    # AC1 step (3) / AC10: the completion gate is UNCONDITIONAL physical
-    # absence of every in-repo temporal directory, AND no semantic
-    # collection left unconsolidated for lack of disk headroom -- either
-    # failure means this repo is not yet fully consolidated, so the
-    # snapshot must not fire.
-    temporal_complete = repo_has_zero_residual_temporal_dirs(index_path)
+    # AC1 step (3) / AC10: Bug #1528 -- temporal shards are migrated IN
+    # PLACE, so their directories legitimately remain; the gate is that
+    # every real temporal shard verifies as fully consolidated to
+    # chunks.db, AND no collection was left unconsolidated for lack of disk
+    # headroom. Either failure means this repo is not yet fully
+    # consolidated, so the snapshot must not fire.
+    temporal_complete = repo_temporal_dirs_fully_consolidated(index_path)
     if skipped_disk_count > 0 or not temporal_complete:
         detail = (
-            "one or more semantic collections were skipped for "
-            "insufficient disk headroom"
+            "one or more collections were skipped for insufficient disk headroom"
             if skipped_disk_count > 0
-            else "residual in-repo temporal directories remain"
+            else "one or more in-repo temporal shards are still in the "
+            "legacy sharded layout"
         )
         return FleetMigrationRepoResult(
             status="incomplete",

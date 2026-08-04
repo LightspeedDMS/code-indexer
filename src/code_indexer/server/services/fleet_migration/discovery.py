@@ -25,7 +25,7 @@ trigger's own construction.
 ``is_repo_already_migrated`` deliberately does NOT read from a separate
 durable-cursor table. It re-derives completeness FRESH from disk every
 call, using the SAME two authorities already governing correctness
-elsewhere in this story: ``repo_has_zero_residual_temporal_dirs``
+elsewhere in this story: ``repo_temporal_dirs_fully_consolidated``
 (completion_gate.py, AC1/AC10's own completion predicate) and
 ``resolve_chunk_layout`` (AC12's canonical, uncached layout resolver). This
 keeps a fleet-wide scheduler naturally idempotent and crash-safe without
@@ -43,7 +43,7 @@ from typing import Any, Iterator, List, Optional, Tuple
 from code_indexer.global_repos.alias_manager import AliasManager
 from code_indexer.server.services.fleet_migration.completion_gate import (
     repo_has_published_post_consolidation_snapshot,
-    repo_has_zero_residual_temporal_dirs,
+    repo_temporal_dirs_fully_consolidated,
 )
 from code_indexer.server.services.query_path_cache import (
     is_immutable_versioned_snapshot,
@@ -282,7 +282,7 @@ def is_repo_already_migrated(candidate: FleetMigrationCandidate) -> bool:
     pass, collections or not, so the marker's presence is the one true
     signal that this repo has been through a real, complete pass.
     """
-    if not repo_has_zero_residual_temporal_dirs(candidate.index_path):
+    if not repo_temporal_dirs_fully_consolidated(candidate.index_path):
         return False
     if not all(
         verify_collection_fully_migrated(collection_dir)

@@ -63,7 +63,14 @@ class TestWriteChokepointSelfHeal:
         the fix: the same upsert_points() call must not raise, and the matrix
         file must exist on disk afterward.
         """
-        vector_store = FilesystemVectorStore(base_path=tmp_path / "index")
+        vector_store = FilesystemVectorStore(
+            base_path=tmp_path / "index",
+            # Bug #1528: temporal is CHUNKS_DB by default now, and the
+            # projection-matrix self-heal under test belongs to the legacy
+            # write path (CHUNKS_DB needs no projection matrix), so pin the
+            # legacy layout explicitly.
+            use_chunks_db_for_new_collections=False,
+        )
         collection_name = "code-indexer-temporal-voyage_code_3-2009Q4"
         vector_store.create_collection(collection_name, _DIM)
 
@@ -105,7 +112,14 @@ class TestWriteChokepointSelfHeal:
         the Bug #1242 "copy from base" preference so bucket layout stays
         aligned with any vectors the base/monolith already wrote.
         """
-        vector_store = FilesystemVectorStore(base_path=tmp_path / "index")
+        vector_store = FilesystemVectorStore(
+            base_path=tmp_path / "index",
+            # Bug #1528: temporal is CHUNKS_DB by default now, and the
+            # projection-matrix self-heal under test belongs to the legacy
+            # write path (CHUNKS_DB needs no projection matrix), so pin the
+            # legacy layout explicitly.
+            use_chunks_db_for_new_collections=False,
+        )
         base_name = "code-indexer-temporal-voyage_code_3"
         shard_name = f"{base_name}-2024Q1"
 
@@ -134,7 +148,14 @@ class TestWriteChokepointSelfHeal:
         chokepoint self-heal must still succeed by regenerating a fresh,
         correctly-shaped matrix rather than raising.
         """
-        vector_store = FilesystemVectorStore(base_path=tmp_path / "index")
+        vector_store = FilesystemVectorStore(
+            base_path=tmp_path / "index",
+            # Bug #1528: temporal is CHUNKS_DB by default now, and the
+            # projection-matrix self-heal under test belongs to the legacy
+            # write path (CHUNKS_DB needs no projection matrix), so pin the
+            # legacy layout explicitly.
+            use_chunks_db_for_new_collections=False,
+        )
         shard_name = "code-indexer-temporal-voyage_code_3-2026Q2"
         vector_store.create_collection(shard_name, _DIM)
 
@@ -162,7 +183,14 @@ class TestWriteChokepointSelfHeal:
         the PRE-heal ValueError guard (collection_exists() check), not a
         failure surfacing after a heal attempt was made.
         """
-        vector_store = FilesystemVectorStore(base_path=tmp_path / "index")
+        vector_store = FilesystemVectorStore(
+            base_path=tmp_path / "index",
+            # Bug #1528: temporal is CHUNKS_DB by default now, and the
+            # projection-matrix self-heal under test belongs to the legacy
+            # write path (CHUNKS_DB needs no projection matrix), so pin the
+            # legacy layout explicitly.
+            use_chunks_db_for_new_collections=False,
+        )
 
         with pytest.raises(ValueError, match="does not exist"):
             vector_store.upsert_points(
@@ -194,7 +222,14 @@ class TestAtomicShardHeal:
             _ensure_shard_has_projection_matrix,
         )
 
-        vector_store = FilesystemVectorStore(base_path=tmp_path / "index")
+        vector_store = FilesystemVectorStore(
+            base_path=tmp_path / "index",
+            # Bug #1528: temporal is CHUNKS_DB by default now, and the
+            # projection-matrix self-heal under test belongs to the legacy
+            # write path (CHUNKS_DB needs no projection matrix), so pin the
+            # legacy layout explicitly.
+            use_chunks_db_for_new_collections=False,
+        )
         base_name = "code-indexer-temporal-voyage_code_3"
         shard_name = f"{base_name}-2024Q1"
 
@@ -246,7 +281,14 @@ class TestAtomicShardHeal:
             _ensure_shard_has_projection_matrix,
         )
 
-        vector_store = FilesystemVectorStore(base_path=tmp_path / "index")
+        vector_store = FilesystemVectorStore(
+            base_path=tmp_path / "index",
+            # Bug #1528: temporal is CHUNKS_DB by default now, and the
+            # projection-matrix self-heal under test belongs to the legacy
+            # write path (CHUNKS_DB needs no projection matrix), so pin the
+            # legacy layout explicitly.
+            use_chunks_db_for_new_collections=False,
+        )
         shard_name = "code-indexer-temporal-voyage_code_3-2026Q2"
         vector_store.create_collection(shard_name, _DIM)
         shard_path = vector_store._get_collection_path(shard_name)
@@ -301,7 +343,14 @@ class TestAtomicShardHeal:
             _ensure_shard_has_projection_matrix,
         )
 
-        vector_store = FilesystemVectorStore(base_path=tmp_path / "index")
+        vector_store = FilesystemVectorStore(
+            base_path=tmp_path / "index",
+            # Bug #1528: temporal is CHUNKS_DB by default now, and the
+            # projection-matrix self-heal under test belongs to the legacy
+            # write path (CHUNKS_DB needs no projection matrix), so pin the
+            # legacy layout explicitly.
+            use_chunks_db_for_new_collections=False,
+        )
         shard_name = "code-indexer-temporal-voyage_code_3-2025Q4"
         vector_store.create_collection(shard_name, _DIM)
         shard_path = vector_store._get_collection_path(shard_name)

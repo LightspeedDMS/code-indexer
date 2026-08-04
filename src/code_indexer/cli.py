@@ -3466,8 +3466,19 @@ def index(
 
                 # Initialize vector store
                 index_dir = config.codebase_dir / ".code-indexer" / "index"
+                # Bug #1528: thread the requested new-collection layout through
+                # to the temporal store, exactly as the semantic paths already
+                # do. Omitting it here silently discarded every explicit
+                # --new-collection-layout choice on the temporal path --
+                # including the server's own --new-collection-layout=chunks_db,
+                # appended to every server-spawned temporal index child by
+                # append_server_layout_args.
                 vector_store = FilesystemVectorStore(
-                    base_path=index_dir, project_root=config.codebase_dir
+                    base_path=index_dir,
+                    project_root=config.codebase_dir,
+                    use_chunks_db_for_new_collections=_resolve_new_collection_layout(
+                        new_collection_layout
+                    ),
                 )
 
                 # Check if --clear flag is set for temporal collection
@@ -3491,6 +3502,43 @@ def index(
                 # path before the legacy directory has been renamed, so temporal_meta.json
                 # is not found and last_commit = None -> full git log with no limit.
                 migrate_legacy_temporal_collection(index_dir, config)
+
+                # Bug #1528: temporal must never write another legacy
+                # vector_*.json file. The write-path fix only governs BRAND-NEW
+                # collections -- an existing collection's committed on-disk
+                # layout always wins -- so a repo indexed before that fix would
+                # otherwise keep growing its legacy tree on every incremental
+                # run. Migrate those shards IN PLACE first, reusing the same
+                # engine `--migrate-chunks-to-sqlite` drives, under the
+                # index-mutation lock already held above. Skipped ONLY for an
+                # explicit `--new-collection-layout=sharded_json` request.
+                if new_collection_layout != "sharded_json":
+                    from .services.chunk_migration_cli import (
+                        consolidate_legacy_temporal_shards,
+                    )
+
+                    _migrated, _failed = consolidate_legacy_temporal_shards(
+                        index_dir, console=console
+                    )
+                    if _failed:
+                        # Fail LOUD: a failed shard is still authoritative in
+                        # its legacy layout, so proceeding would write more
+                        # legacy rows into it.
+                        console.print(
+                            f"❌ {_failed} legacy temporal shard(s) could not "
+                            "be consolidated to chunks.db storage. Refusing to "
+                            "index, because that would keep adding "
+                            "vector_*.json files to them. Fix or remove the "
+                            "reported shard(s) and retry.",
+                            style="red",
+                        )
+                        sys.exit(1)
+                    if _migrated:
+                        console.print(
+                            f"✅ Consolidated {_migrated} legacy temporal "
+                            "shard(s) to chunks.db storage",
+                            style="green",
+                        )
 
                 # Initialize temporal indexer with provider-aware collection name.
                 # Story #1290 (E2E-discovered bug): the actual collection_name MUST
