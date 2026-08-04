@@ -136,7 +136,7 @@ def materialize_on_node(
         ssh_dir=str(manager.ssh_dir),
         fernet=key_fernet,
     )
-    return sync_service.sync()
+    return sync_service.sync()  # type: ignore[no-any-return]
 
 
 @pytest.fixture
