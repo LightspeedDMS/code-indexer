@@ -254,6 +254,37 @@ class TestRepoResolution:
         assert captured["body"]["repoUrl"] == "https://example.com/r.git"
         assert captured["body"]["branch"] == "dev"
 
+    def test_resolve_repo_strips_embedded_credentials(self, invoker, monkeypatch):
+        def fake_run(cmd, **kwargs):
+            class R:
+                returncode = 0
+            r = R()
+            if "config" in cmd:
+                r.stdout = "https://oauth2:glpat-XXXX@gitlab.com/org/repo.git\n"
+            else:
+                r.stdout = "main\n"
+            return r
+
+        monkeypatch.setattr(plugin.subprocess, "run", fake_run)
+        info = invoker._resolve_repo("/some/clone")
+        assert info["repoUrl"] == "https://gitlab.com/org/repo.git"
+        assert "glpat" not in info["repoUrl"]
+
+    def test_resolve_repo_passes_clean_urls_through(self, invoker, monkeypatch):
+        def fake_run(cmd, **kwargs):
+            class R:
+                returncode = 0
+            r = R()
+            if "config" in cmd:
+                r.stdout = "https://gitlab.com/org/repo.git\n"
+            else:
+                r.stdout = "main\n"
+            return r
+
+        monkeypatch.setattr(plugin.subprocess, "run", fake_run)
+        info = invoker._resolve_repo("/some/clone")
+        assert info["repoUrl"] == "https://gitlab.com/org/repo.git"
+
     def test_unresolved_repo_leaves_gitaware_off_and_no_repourl(
         self, invoker, monkeypatch
     ):
