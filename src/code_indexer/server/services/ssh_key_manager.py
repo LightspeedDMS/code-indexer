@@ -16,7 +16,7 @@ import os
 from dataclasses import dataclass, field, asdict
 from datetime import datetime
 from pathlib import Path
-from typing import Any, List, Optional
+from typing import Any, List, Optional, Tuple
 import filelock
 
 from .ssh_key_generator import SSHKeyGenerator
@@ -524,9 +524,14 @@ class SSHKeyManager:
                     except (json.JSONDecodeError, TypeError):
                         continue
 
+        # --- Cluster mode: union with the shared backend's truth (Bug #1524) ---
+        managed_keys = self._merge_cluster_managed_keys(managed_keys)
+
         # Discover all keys on filesystem
         all_discovered = self.discovery_service.discover_existing_keys()
-        managed_paths = {k.private_path for k in managed_keys}
+        # KeyMetadata.private_path is declared `str`; str() makes the
+        # string-to-string comparison below explicit at the call site.
+        managed_paths = {str(k.private_path) for k in managed_keys}
 
         # Find unmanaged keys
         unmanaged_keys: List[KeyInfo] = []
@@ -535,6 +540,112 @@ class SSHKeyManager:
                 unmanaged_keys.append(key_info)
 
         return KeyListResult(managed=managed_keys, unmanaged=unmanaged_keys)
+
+    def _local_materialized_paths(self, key_name: str) -> Optional[Tuple[str, str]]:
+        """Resolve where a cluster-tracked key named ``key_name`` lives on THIS node.
+
+        Returns ``(private_path, public_path)`` as strings, or None when
+        ``key_name`` cannot be trusted as a path component.  Key names reach
+        this method from a shared backend row, so they are never assumed safe:
+
+        1. The name must be a BARE FILENAME -- ``key_name == Path(key_name).name``
+           rejects anything carrying a separator (``a/b``, ``foo/../bar``), the
+           traversal names ``.``/``..``, and absolute paths, before any
+           filesystem call happens.
+        2. Both resolved paths must still be direct children of
+           ``self.ssh_dir`` -- defense in depth against a symlinked ssh_dir
+           entry, using the same containment technique
+           ``_has_untracked_conflicting_file`` applies for Bug #1519.
+        """
+        if not key_name or key_name != Path(key_name).name:
+            logger.warning(
+                "SSHKeyManager: cluster key name %r is not a bare filename -- "
+                "excluding it from this node's key list",
+                key_name,
+            )
+            return None
+
+        private_path = self.ssh_dir / key_name
+        public_path = self.ssh_dir / f"{key_name}.pub"
+        ssh_dir_resolved = self.ssh_dir.resolve()
+
+        if not (
+            private_path.resolve().parent == ssh_dir_resolved
+            and public_path.resolve().parent == ssh_dir_resolved
+        ):
+            logger.warning(
+                "SSHKeyManager: cluster key name %r does not resolve to a direct "
+                "child of %s -- excluding it from this node's key list",
+                key_name,
+                self.ssh_dir,
+            )
+            return None
+
+        return str(private_path), str(public_path)
+
+    def _merge_cluster_managed_keys(
+        self, local_keys: List[KeyMetadata]
+    ) -> List[KeyMetadata]:
+        """Union node-local managed keys with the shared cluster backend's keys.
+
+        Bug #1524: without this, "managed vs unmanaged" was decided purely from
+        node-local state, so a key created on one cluster node was reported
+        managed there and unmanaged on every other node -- for the identical
+        key, in the identical cluster, at the identical moment.  Every mutating
+        operation in this class (create_key, assign_key_to_host, delete_key)
+        already treats the shared backend as cluster truth; the read path must
+        agree with them.
+
+        A locally-tracked key keeps its local record verbatim -- only names the
+        node does not know locally are added.  Those cluster-only entries are
+        rebased onto THIS node's materialized paths (``ssh_dir/<name>``), since
+        the originating node's recorded ``private_path`` is meaningless here;
+        that is the same convention ``SSHKeySyncService`` uses when it writes
+        the key files and the ``~/.ssh/config`` IdentityFile lines.
+
+        Solo mode (no ``_pg_backend``) returns ``local_keys`` unchanged, so
+        behavior there is byte-identical to before this fix.
+
+        Raises:
+            Exception: whatever the backend raised.  Mirrors this class's
+                existing policy for the shared backend (log then re-raise):
+                silently degrading to the node-local view is exactly the
+                divergence this method exists to prevent.
+        """
+        pg_backend = self._pg_backend
+        if pg_backend is None:
+            return local_keys
+
+        try:
+            cluster_rows = pg_backend.list_keys()
+        except Exception:
+            logger.exception(
+                "SSHKeyManager: failed to list keys from PG backend",
+            )
+            raise
+
+        merged = list(local_keys)
+        known_names = {key.name for key in merged}
+        for row in cluster_rows:
+            name = row.get("name")
+            if not isinstance(name, str):
+                logger.warning(
+                    "SSHKeyManager: cluster key row has a non-string name (%r) -- "
+                    "excluding it from this node's key list",
+                    name,
+                )
+                continue
+            if name in known_names:
+                continue
+            local_paths = self._local_materialized_paths(name)
+            if local_paths is None:
+                continue
+            known_names.add(name)
+            metadata = self._key_metadata_from_backend(row)
+            metadata.private_path, metadata.public_path = local_paths
+            merged.append(metadata)
+
+        return merged
 
     @staticmethod
     def _key_metadata_from_backend(data: dict) -> "KeyMetadata":
