@@ -661,3 +661,27 @@ def test_clone_backend_cow_daemon_are_bootstrap_keys() -> None:
         "cow_daemon must be in BOOTSTRAP_KEYS: it is read at startup before "
         "the runtime DB is available and is stripped by _strip_config_file_to_bootstrap()"
     )
+
+
+def test_scip_backend_and_scip_sandbox_are_bootstrap_keys() -> None:
+    """EVO-65365: scip_backend and scip_sandbox must be bootstrap keys.
+
+    Exactly like clone_backend/git_backend, scip_backend selects the SCIP backend
+    and is read during scip_backend_wiring at startup (validate_scip_backend_config /
+    build_scip_generator), before the runtime DB is available. If scip_backend is
+    NOT in BOOTSTRAP_KEYS, _strip_config_file_to_bootstrap() drops it from config.json
+    on startup, so scip_backend='delegated' written to config.json never takes effect
+    and the SCIP backend always falls back to 'local'. scip_sandbox (the endpoint block)
+    must likewise survive so the delegated backend can resolve sandbox-mcp.
+    """
+    from code_indexer.server.services.config_service import BOOTSTRAP_KEYS
+
+    assert "scip_backend" in BOOTSTRAP_KEYS, (
+        "scip_backend must be in BOOTSTRAP_KEYS: it is the SCIP backend selector, "
+        "read at startup before the DB, and is stripped by "
+        "_strip_config_file_to_bootstrap() otherwise (falls back to 'local')"
+    )
+    assert "scip_sandbox" in BOOTSTRAP_KEYS, (
+        "scip_sandbox must be in BOOTSTRAP_KEYS: the delegated SCIP backend reads "
+        "its endpoint pre-DB at startup"
+    )

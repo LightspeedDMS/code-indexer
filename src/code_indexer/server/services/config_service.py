@@ -191,6 +191,7 @@ BOOTSTRAP_KEYS = frozenset(
         "orphan_trash_sweep_per_startup_cap",  # Story #1032 HIGH #3 - cap startup orphan sweep entries
         "clone_backend",  # Story #510 / #1034 - needed pre-DB by build_snapshot_manager() at lifespan startup
         "git_backend",  # EVO-64678 - needed pre-DB by build_git_backend() at lifespan startup
+        "scip_backend",  # EVO-65365 - SCIP backend selector, read pre-DB by validate_scip_backend_config/build_scip_generator at lifespan startup (parallels clone_backend/git_backend; without it config.json is stripped and scip falls back to 'local')
         "workspace_mcp",  # EVO-64616 - endpoint/api_key read pre-DB by the delegated clone/git backends at startup
         "scip_sandbox",  # EVO-65365 - endpoint/api_key read pre-DB by the delegated SCIP backend at startup (sandbox-mcp, distinct from workspace_mcp)
         "cow_daemon",  # Story #510 / #1034 - daemon config for CowDaemonBackend wiring at startup
