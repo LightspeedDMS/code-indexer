@@ -12,6 +12,7 @@ from code_indexer.storage.filesystem_vector_store import LocalIndexNotFoundError
 import contextvars
 import json
 import logging
+import os
 import re
 import io
 import sys
@@ -382,11 +383,32 @@ class SemanticQueryManager:
         if data_dir:
             self.data_dir = data_dir
         else:
-            home_dir = Path.home()
-            self.data_dir = str(home_dir / ".cidx-server" / "data")
+            # Bug #1522 (sibling of Bug #1517's temporal_worker.py fix): a
+            # bare, no-arg SemanticQueryManager() must NOT resolve its
+            # default data_dir purely from Path.home() -- that ignores
+            # CIDX_SERVER_DATA_DIR, the env var this codebase otherwise
+            # treats as the canonical way to locate the server's
+            # configured data directory for a standalone construction
+            # outside the normal DI chain (see
+            # ActivatedRepoIndexManager.__init__, mcp/handlers/_legacy.py,
+            # git_operations_service.py, and temporal_worker.py's
+            # run_temporal_worker per Bug #1517). On any real deployment
+            # where the server's data dir differs from the OS default,
+            # ignoring the env var here would make this manager's
+            # internally-constructed GoldenRepoManager look in the wrong
+            # metadata store, silently losing Story #1461's "use the
+            # golden repo's own current config for embedder selection"
+            # correctness fix. Byte-identical when the env var is unset
+            # (the common local/default case).
+            env_server_dir = os.environ.get("CIDX_SERVER_DATA_DIR")
+            self.data_dir = (
+                str(Path(env_server_dir) / "data")
+                if env_server_dir
+                else str(Path.home() / ".cidx-server" / "data")
+            )
 
         self.activated_repo_manager = activated_repo_manager or ActivatedRepoManager(
-            data_dir
+            self.data_dir
         )
         self.background_job_manager = background_job_manager or BackgroundJobManager()
 

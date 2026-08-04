@@ -198,8 +198,22 @@ def _sandboxed_temporal_repo(tmp_path, monkeypatch):
     own internal `ActivatedRepoManager()` (unconditional, un-injectable)
     construction never touches the real developer machine's
     ~/.cidx-server state.
+
+    Bug #1522: also explicitly pins CIDX_SERVER_DATA_DIR to the SAME
+    tmp_path-derived directory HOME's fallback would produce. Without
+    this, run_temporal_worker's construction (fixed by Bug #1517 to prefer
+    CIDX_SERVER_DATA_DIR over Path.home() when the env var is set) silently
+    diverges from this fixture's own data_dir whenever CIDX_SERVER_DATA_DIR
+    happens to be set in the ambient shell environment -- exactly what
+    server-fast-automation.sh's per-chunk isolation does (each parallel
+    chunk sets its own CIDX_SERVER_DATA_DIR for the whole pytest
+    invocation), which is why this test failed reliably under that script
+    but never under a bare `pytest <this file>` invocation (where the var
+    is normally unset and the two resolutions coincidentally agree).
+    Pinning both env vars in lockstep removes that ambient dependency.
     """
     monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("CIDX_SERVER_DATA_DIR", str(tmp_path / ".cidx-server"))
     monkeypatch.setenv(CIDX_SERVER_REFRESH_CONTEXT_ENV, "1")
     monkeypatch.setenv("CIDX_TEMPORAL_SISTER_RELOCATION_ENABLED", "1")
 
