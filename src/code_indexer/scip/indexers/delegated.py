@@ -33,8 +33,12 @@ Contract (FROZEN — ``EVO-65021 FROZEN-CONTRACT.md``):
 Auth/transport (contract §5): a direct in-cluster JSON-RPC call reusing the same
 client-config surface cidx already uses for the delegated clone backend
 (``WorkspaceMcpConfig`` — endpoint + bearer api_key), pointed at the sandbox-mcp
-service. No API-GW authorizer secret is distributed to cidx; the route is
-constrained by K8s NetworkPolicy + service account.
+service. EVO-65365: the endpoint this indexer receives is resolved by
+``scip_backend_wiring._resolve_scip_sandbox_config`` from the ``scip_sandbox``
+config block (primary), falling back to ``workspace_mcp`` for backward
+compatibility — the DelegatedIndexer itself is source-agnostic and just consumes
+the resolved endpoint. No API-GW authorizer secret is distributed to cidx; the
+route is constrained by K8s NetworkPolicy + service account.
 """
 
 from __future__ import annotations
@@ -43,7 +47,7 @@ import json
 import logging
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Dict, Optional
+from typing import TYPE_CHECKING, Any, Dict, Optional, cast
 
 from code_indexer.utils.git_runner import get_current_commit
 
@@ -53,6 +57,11 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
     from code_indexer.server.utils.config_manager import WorkspaceMcpConfig
 
 logger = logging.getLogger(__name__)
+
+# Sentinel for the per-instance project-version cache: distinguishes "not yet
+# resolved" from a legitimately cached ``None`` (a repo with no resolvable HEAD),
+# so a None/empty commit is cached too and never re-shells to git (MAJOR-1).
+_PROJECT_VERSION_UNSET = object()
 
 
 # The MCP tool name the sandbox image exposes for SCIP generation. sandbox-mcp
@@ -67,7 +76,8 @@ _DEFAULT_TIMEOUT_SECONDS = 1800
 
 # Path appended to the sandbox-mcp base endpoint for the JSON-RPC front door
 # (reconciled EVO-65021 seam #2 — the authoritative sandbox contract). The
-# ``workspace_mcp.endpoint`` config is the sandbox-mcp *base* URL (e.g.
+# resolved ``scip_sandbox.endpoint`` (or ``workspace_mcp.endpoint`` as a
+# fallback, EVO-65365) is the sandbox-mcp *base* URL (e.g.
 # ``http://sandbox-mcp:8200``); ``SandboxMcpController`` mounts the MCP handler
 # at ``POST /v1/sandbox/mcp`` (URI versioning prefix 'v', v1). A dedicated param
 # keeps it tunable without a config-schema change if the route ever moves.
@@ -101,8 +111,10 @@ class DelegatedIndexer(SCIPIndexer):
         """Initialize the delegated indexer.
 
         Args:
-            config: Reused ``WorkspaceMcpConfig`` (endpoint + bearer api_key)
-                whose ``endpoint`` is the sandbox-mcp *base* URL (e.g.
+            config: Reused ``WorkspaceMcpConfig`` (endpoint + bearer api_key),
+                resolved by ``_resolve_scip_sandbox_config`` from the
+                ``scip_sandbox`` block (primary) or ``workspace_mcp`` (fallback,
+                EVO-65365), whose ``endpoint`` is the sandbox-mcp *base* URL (e.g.
                 ``http://sandbox-mcp:8200``); the JSON-RPC front door and health
                 routes are appended per the sandbox contract (§5, seam #2).
             repo_root: Golden-repo root (== the sandbox ``/workspace`` mount).
@@ -124,6 +136,9 @@ class DelegatedIndexer(SCIPIndexer):
         self._jsonrpc_path = jsonrpc_path
         self._health_path = health_path
         self._request_id = 0
+        # MAJOR-1: memoise the repo's git HEAD (see _project_version). repo_root is
+        # fixed for the instance's life, so it is resolved at most ONCE.
+        self._project_version_cache: Any = _PROJECT_VERSION_UNSET
 
     # ------------------------------------------------------------------ helpers
     def _requests(self) -> Any:
@@ -140,6 +155,20 @@ class DelegatedIndexer(SCIPIndexer):
 
     def _rpc_url(self) -> str:
         return f"{self._endpoint}{self._jsonrpc_path}"
+
+    def _project_version(self) -> Optional[str]:
+        """Return the repo's git HEAD commit, memoised per instance (MAJOR-1).
+
+        ``get_current_commit`` shells to git (``git rev-parse HEAD``) and, because
+        ``repo_root`` is fixed at construction, returns the SAME HEAD on every
+        ``generate()`` call. Resolve it AT MOST ONCE and cache the result — even a
+        ``None``/empty commit is cached (via ``_PROJECT_VERSION_UNSET``) so a repo
+        with no resolvable HEAD does not re-shell to git per project. Collapses the
+        old N-git-calls-per-build (one per project) down to one.
+        """
+        if self._project_version_cache is _PROJECT_VERSION_UNSET:
+            self._project_version_cache = get_current_commit(self._repo_root)
+        return cast(Optional[str], self._project_version_cache)
 
     def _relative(self, path: Path) -> str:
         """Workspace-relative POSIX string for *path* under ``repo_root``.
@@ -280,8 +309,9 @@ class DelegatedIndexer(SCIPIndexer):
         if not self._endpoint:
             return self._failure(
                 start_time,
-                "DelegatedIndexer has no endpoint configured "
-                "(workspace_mcp.endpoint pointed at sandbox-mcp).",
+                "DelegatedIndexer has no endpoint configured (set "
+                "scip_sandbox.endpoint, or workspace_mcp.endpoint as a fallback, "
+                "pointed at sandbox-mcp).",
             )
 
         try:
@@ -311,8 +341,10 @@ class DelegatedIndexer(SCIPIndexer):
         # wrapper passes it as ``--project-version`` and scip stops shelling to git
         # for the version (git-mcp owns git). Reuses the existing commit helper
         # (also used by scip_lifecycle for the alias@commit dedupe key) — NO new
-        # git subprocess here. Best-effort: omitted from the request when None.
-        project_version = get_current_commit(self._repo_root)
+        # git subprocess here. MAJOR-1: memoised on the instance so the git call
+        # runs at most once per indexer, not once per generate(). Best-effort:
+        # omitted from the request when empty/None.
+        project_version = self._project_version()
 
         request = self._build_request(
             workspace_id=workspace_id,

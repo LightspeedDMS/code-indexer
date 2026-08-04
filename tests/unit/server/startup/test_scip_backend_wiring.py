@@ -99,6 +99,17 @@ class TestDelegated:
         with pytest.raises(RuntimeError, match="sandbox-mcp not reachable"):
             build_scip_generator(_delegated_config(), tmp_path, workspace_id="W")
 
+    @patch("requests.get")
+    def test_health_error_names_scip_sandbox_endpoint(self, mock_get, tmp_path):
+        """EVO-65365: the endpoint now resolves from scip_sandbox (fallback
+        workspace_mcp), so the boot-outage diagnostic must point the operator at
+        ``scip_sandbox.endpoint`` — NOT ``workspace_mcp.endpoint`` alone, which
+        misdirects them to the (correct-for-ITS-backend) clone-delegation key."""
+        mock_get.side_effect = RuntimeError("connection refused")
+        with pytest.raises(RuntimeError) as exc:
+            build_scip_generator(_delegated_config(), tmp_path, workspace_id="W")
+        assert "scip_sandbox.endpoint" in str(exc.value)
+
     def test_delegated_missing_workspace_mcp_fails_loud(self, tmp_path):
         cfg = SimpleNamespace(scip_backend="delegated", workspace_mcp=None)
         with pytest.raises(RuntimeError, match="requires scip_sandbox.endpoint"):

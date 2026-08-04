@@ -61,7 +61,8 @@ def _check_scip_backend_health(endpoint: str, api_key: str) -> None:
         raise RuntimeError(
             f"sandbox-mcp not reachable at {endpoint} for the delegated scip "
             f"backend. Ensure sandbox-mcp is running and the config "
-            f"workspace_mcp.endpoint is correct. Error: {exc}"
+            f"scip_sandbox.endpoint (or workspace_mcp.endpoint as a fallback) is "
+            f"correct. Error: {exc}"
         ) from exc
     logger.info("sandbox-mcp (scip backend) health check: OK")
 
@@ -74,7 +75,8 @@ def validate_scip_backend_config(config: Any) -> None:
     (``scip_lifecycle.funnel_scip_generation``) wraps the whole build in a
     blanket ``except Exception -> SKIPPED``, so a *configuration* error — a
     typo'd ``scip_backend`` value, or a ``delegated`` backend with no
-    ``workspace_mcp.endpoint`` — would otherwise be swallowed per-job as an
+    ``scip_sandbox.endpoint`` (nor the ``workspace_mcp.endpoint`` fallback) —
+    would otherwise be swallowed per-job as an
     ordinary fail-soft skip, indistinguishable from a legitimate one and with
     nothing naming the bad value. Calling this once at startup (mirroring how
     ``clone_backend_wiring.build_snapshot_manager`` is invoked from
@@ -89,7 +91,8 @@ def validate_scip_backend_config(config: Any) -> None:
     ------
     RuntimeError
         If ``scip_backend`` is an unrecognised value, or is ``"delegated"``
-        with no ``workspace_mcp.endpoint`` configured.
+        with no ``scip_sandbox.endpoint`` (nor the ``workspace_mcp.endpoint``
+        fallback) configured.
     """
     from code_indexer.scip.indexers.factory import (  # noqa: PLC0415
         ScipBackendFactory,
@@ -178,8 +181,9 @@ def build_scip_generator(
     logger.info("Building SCIPGenerator with scip_backend=%r", backend_type)
 
     # EVO-65021 fail-loud: reject an unrecognised scip_backend value or a
-    # delegated backend with no workspace_mcp.endpoint BEFORE constructing
-    # anything. Shared with the eager startup call site (lifespan.py) so both
+    # delegated backend with no scip_sandbox.endpoint (nor the
+    # workspace_mcp.endpoint fallback) BEFORE constructing anything. Shared with
+    # the eager startup call site (lifespan.py) so both
     # paths use the identical check (DRY) — see validate_scip_backend_config.
     validate_scip_backend_config(config)
 
@@ -259,7 +263,8 @@ def build_scip_generator_for_golden_repo(
     ----------
     config:
         Server config (``ServerConfig``) — read for ``scip_backend`` and, when
-        delegated, the ``workspace_mcp`` block (endpoint + api_key).
+        delegated, the ``scip_sandbox`` block (endpoint + api_key), falling back
+        to ``workspace_mcp`` — see :func:`_resolve_scip_sandbox_config`.
     repo_root:
         Golden-repo root (== the sandbox ``/workspace`` mount).
     golden_repo_manager:
@@ -280,7 +285,8 @@ def build_scip_generator_for_golden_repo(
     ------
     RuntimeError
         Propagated from :func:`build_scip_generator` when the delegated backend
-        is selected but ``workspace_mcp.endpoint`` is unset or sandbox-mcp is
+        is selected but the resolved ``scip_sandbox.endpoint`` (or the
+        ``workspace_mcp.endpoint`` fallback) is unset or sandbox-mcp is
         unreachable (a misconfiguration/outage that fails loud at wiring time).
     """
     del golden_repo_manager  # EVO-65365: no workspace_id resolution — alias-addressed.

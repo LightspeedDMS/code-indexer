@@ -339,6 +339,69 @@ class TestDelegatedIndexerProjectVersion:
         args = fake.post.call_args.kwargs["json"]["params"]["arguments"]
         assert "project_version" not in args
 
+    def test_project_version_computed_at_most_once_per_indexer(
+        self, tmp_path, monkeypatch
+    ):
+        """MAJOR-1 (EVO-65365): ``get_current_commit`` shells to git and returns
+        the same HEAD for the fixed ``repo_root`` on every ``generate()`` call, so
+        it must be memoised at the instance level — run AT MOST ONCE per
+        DelegatedIndexer regardless of how many projects it builds."""
+        output_dir = tmp_path / ".code-indexer" / "scip"
+        output_dir.mkdir(parents=True)
+        spy = MagicMock(return_value="deadbeefcafe")
+        monkeypatch.setattr(
+            "code_indexer.scip.indexers.delegated.get_current_commit", spy
+        )
+        fake = _fake_requests(
+            post_side_effect=_post_writing_index(
+                output_dir, _rpc_result(exit_code=0, output="ok", duration_ms=1)
+            )
+        )
+        indexer = _make_indexer(tmp_path, fake)
+
+        for _ in range(2):
+            indexer.generate(
+                tmp_path,
+                output_dir,
+                "npm",
+                golden_alias="svc-foo",
+                language="typescript",
+            )
+
+        assert spy.call_count == 1
+        # ...and the cached value is still threaded into the request every call.
+        args = fake.post.call_args.kwargs["json"]["params"]["arguments"]
+        assert args["project_version"] == "deadbeefcafe"
+
+    def test_project_version_none_is_cached_not_recomputed(self, tmp_path, monkeypatch):
+        """A None/empty commit must be cached too (sentinel init), so a repo with
+        no resolvable HEAD does not re-shell to git on every build."""
+        output_dir = tmp_path / ".code-indexer" / "scip"
+        output_dir.mkdir(parents=True)
+        spy = MagicMock(return_value=None)
+        monkeypatch.setattr(
+            "code_indexer.scip.indexers.delegated.get_current_commit", spy
+        )
+        fake = _fake_requests(
+            post_side_effect=_post_writing_index(
+                output_dir, _rpc_result(exit_code=0, output="ok", duration_ms=1)
+            )
+        )
+        indexer = _make_indexer(tmp_path, fake)
+
+        for _ in range(2):
+            indexer.generate(
+                tmp_path,
+                output_dir,
+                "npm",
+                golden_alias="svc-foo",
+                language="typescript",
+            )
+
+        assert spy.call_count == 1
+        args = fake.post.call_args.kwargs["json"]["params"]["arguments"]
+        assert "project_version" not in args
+
     def test_golden_repo_request_full_contract(self, tmp_path, monkeypatch):
         """The exact arguments dict cidx sends for a golden repo (EVO-65365)."""
         output_dir = tmp_path / ".code-indexer" / "scip"
@@ -568,6 +631,27 @@ class TestDelegatedIndexerFailure:
         )
         assert result.status == IndexerStatus.FAILED
         assert "EXACTLY ONE" in result.stderr
+        fake.post.assert_not_called()
+
+    def test_no_endpoint_failure_names_scip_sandbox_endpoint(self, tmp_path):
+        """EVO-65365: the endpoint resolves from scip_sandbox (fallback
+        workspace_mcp), so the no-endpoint fail-soft message must reference
+        ``scip_sandbox`` — pointing an operator only at ``workspace_mcp.endpoint``
+        misdirects them to the correct-for-ITS-backend clone-delegation key."""
+        fake = _fake_requests(
+            post_return=_fake_response(payload=_rpc_result(exit_code=0))
+        )
+        indexer = DelegatedIndexer(
+            config=SimpleNamespace(endpoint="", api_key=""), repo_root=tmp_path
+        )
+        indexer._requests = lambda: fake  # type: ignore[method-assign]
+        output_dir = tmp_path / ".code-indexer" / "scip"
+
+        result = indexer.generate(
+            tmp_path, output_dir, "npm", workspace_id="W", language="typescript"
+        )
+        assert result.status == IndexerStatus.FAILED
+        assert "scip_sandbox" in result.stderr
         fake.post.assert_not_called()
 
     def test_missing_language_is_failure(self, tmp_path):
