@@ -4428,6 +4428,26 @@ def make_lifespan(
                 _sel_stop_exc,
             )
 
+        # Issue #1516: non-blocking reset of the shared parallel-query
+        # ThreadPoolExecutor singleton. Defense-in-depth for graceful
+        # in-process lifespan cycles (e.g. test suites that spin up/tear
+        # down the FastAPI app repeatedly in one process) -- a true
+        # interpreter exit is already handled by concurrent.futures.thread's
+        # own atexit handler, which joins all worker threads regardless of
+        # whether shutdown() was ever called.
+        try:
+            from code_indexer.server.query.parallel_query_executor import (
+                reset_global_parallel_query_executor,
+            )
+
+            reset_global_parallel_query_executor()
+        except Exception as _pqe_reset_exc:
+            logger.warning(
+                "Issue #1516: failed to reset shared parallel-query executor "
+                "during shutdown: %s",
+                _pqe_reset_exc,
+            )
+
         # Story #1293: drain the search-embed-event writer on shutdown and
         # clear the process-level accessor.
         try:
