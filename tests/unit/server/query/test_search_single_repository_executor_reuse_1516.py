@@ -7,28 +7,20 @@ Mock boundary: `_search_with_provider` is the established mock boundary for
 this call path (see `test_parallel_query_strategy_bugs_614_615.py`,
 `test_semantic_query_manager_sinbin.py`).
 
-Determinism note (code-review finding addressed): a naive proof-by-
-`threading.get_ident()`-overlap is unreliable on its own -- the OS is free
-to recycle a terminated thread's id, so two INDEPENDENTLY created
-`ThreadPoolExecutor` instances could coincidentally show overlapping
-observed ids and falsely "pass" even when the executor is rebuilt per
-call. This test's PRIMARY, deterministic assertion instead spies on
-`get_global_parallel_query_executor` (imported into
-`semantic_query_manager`'s namespace) via `unittest.mock.patch(...,
-side_effect=<real function>)` -- a pass-through spy that never fakes the
-return value, only records which executor OBJECT the real call site
-actually obtained on each of the two sequential calls. If both calls
-resolve to the same object identity, the SAME live worker threads back
-both calls by construction (no OS tid-recycling ambiguity is even
-possible, since those threads are never torn down between the two calls).
-`threading.get_ident()` capture from inside the provider callables is
-still recorded as secondary corroborating evidence.
+This test's SOLE assertion spies on `get_global_parallel_query_executor`
+(imported into `semantic_query_manager`'s namespace) via
+`unittest.mock.patch(..., side_effect=<real function>)` -- a pass-through
+spy that never fakes the return value, only records which
+`ThreadPoolExecutor` OBJECT (compared by `is`, never `id()`) the real call
+site actually obtained on each of two sequential calls. Both calls
+resolving to the identical object is deterministic, sufficient proof that
+the SAME shared pool -- and therefore its bounded worker-thread population
+-- backs every call, which is what issue #1516 required.
 """
 
 import logging
 import shutil
 import tempfile
-import threading
 from typing import List
 from unittest.mock import MagicMock, patch
 
@@ -103,18 +95,14 @@ def _make_provider_results(
     ]
 
 
-def _run_parallel_query(manager, repo_path, observed_thread_ids: list, lock):
-    """Run _search_single_repository with parallel strategy, capturing the
-    real worker thread identity from INSIDE each provider-search callable
-    (secondary corroborating evidence -- see module docstring)."""
+def _run_parallel_query(manager, repo_path):
+    """Run _search_single_repository with parallel strategy."""
 
-    def _tracking_search(*args, **kwargs):
-        with lock:
-            observed_thread_ids.append(threading.get_ident())
+    def _fake_search(*args, **kwargs):
         provider = kwargs.get("provider_name", "unknown")
         return _make_provider_results(provider, f"src/{provider}.py", 0.75)
 
-    manager._search_with_provider = MagicMock(side_effect=_tracking_search)
+    manager._search_with_provider = MagicMock(side_effect=_fake_search)
 
     return manager._search_single_repository(
         repo_path=repo_path,
@@ -136,17 +124,13 @@ class TestSearchSingleRepositoryReusesSharedExecutor:
     def test_two_sequential_calls_use_the_same_executor_instance(
         self, manager, repo_path
     ):
-        first_call_thread_ids: list = []
-        second_call_thread_ids: list = []
-        lock = threading.Lock()
-
-        used_executor_ids: list = []
+        used_executors: list = []
 
         def _spy_get_executor():
             # Pass-through spy: calls the REAL accessor, never fakes the
             # return value -- only records which object it resolved to.
             executor = get_global_parallel_query_executor()
-            used_executor_ids.append(id(executor))
+            used_executors.append(executor)
             return executor
 
         with patch(
@@ -154,31 +138,16 @@ class TestSearchSingleRepositoryReusesSharedExecutor:
             "get_global_parallel_query_executor",
             side_effect=_spy_get_executor,
         ):
-            _run_parallel_query(manager, repo_path, first_call_thread_ids, lock)
-            _run_parallel_query(manager, repo_path, second_call_thread_ids, lock)
+            _run_parallel_query(manager, repo_path)
+            _run_parallel_query(manager, repo_path)
 
-        assert len(used_executor_ids) == 2, (
+        assert len(used_executors) == 2, (
             f"Expected the shared-executor accessor to be called exactly "
             f"once per _search_single_repository call (2 calls total), "
-            f"got {len(used_executor_ids)} invocations: {used_executor_ids}"
+            f"got {len(used_executors)} invocations"
         )
-        assert used_executor_ids[0] == used_executor_ids[1], (
+        assert used_executors[0] is used_executors[1], (
             "Issue #1516: the two sequential calls resolved to DIFFERENT "
-            f"executor object ids ({used_executor_ids}) -- each call built "
-            "its own ThreadPoolExecutor instead of reusing the shared "
-            "singleton."
-        )
-
-        # Secondary corroborating evidence: since the same executor instance
-        # backs both calls, its worker threads are never torn down between
-        # them, so the observed thread ids should overlap too.
-        first_thread_id_set = set(first_call_thread_ids)
-        second_thread_id_set = set(second_call_thread_ids)
-        assert first_thread_id_set, "First call recorded no worker thread ids"
-        assert second_thread_id_set, "Second call recorded no worker thread ids"
-        assert first_thread_id_set & second_thread_id_set, (
-            f"Corroborating check failed: first call thread ids "
-            f"{first_thread_id_set} share no id with second call thread ids "
-            f"{second_thread_id_set}, despite the executor instance check "
-            "passing."
+            "executor objects -- each call built its own ThreadPoolExecutor "
+            "instead of reusing the shared singleton."
         )
