@@ -288,128 +288,13 @@ class TestDelegatedIndexerAllowDegenerate:
         assert result.degenerate is False
 
 
-class TestDelegatedIndexerProjectVersion:
-    """EVO-65365 Part 3: send the repo's git HEAD so scip stops shelling to git."""
+class TestDelegatedIndexerGoldenRepoContract:
+    """EVO-65365: the exact golden-repo request cidx sends to sandbox_scip."""
 
-    def test_project_version_from_commit_is_sent(self, tmp_path, monkeypatch):
-        output_dir = tmp_path / ".code-indexer" / "scip"
-        output_dir.mkdir(parents=True)
-        monkeypatch.setattr(
-            "code_indexer.scip.indexers.delegated.get_current_commit",
-            lambda _root: "deadbeefcafe",
-        )
-        fake = _fake_requests(
-            post_side_effect=_post_writing_index(
-                output_dir, _rpc_result(exit_code=0, output="ok", duration_ms=1)
-            )
-        )
-        indexer = _make_indexer(tmp_path, fake)
-
-        indexer.generate(
-            tmp_path,
-            output_dir,
-            "npm",
-            golden_alias="svc-foo",
-            language="typescript",
-        )
-        args = fake.post.call_args.kwargs["json"]["params"]["arguments"]
-        assert args["project_version"] == "deadbeefcafe"
-
-    def test_project_version_omitted_when_commit_none(self, tmp_path, monkeypatch):
-        output_dir = tmp_path / ".code-indexer" / "scip"
-        output_dir.mkdir(parents=True)
-        monkeypatch.setattr(
-            "code_indexer.scip.indexers.delegated.get_current_commit",
-            lambda _root: None,
-        )
-        fake = _fake_requests(
-            post_side_effect=_post_writing_index(
-                output_dir, _rpc_result(exit_code=0, output="ok", duration_ms=1)
-            )
-        )
-        indexer = _make_indexer(tmp_path, fake)
-
-        indexer.generate(
-            tmp_path,
-            output_dir,
-            "npm",
-            golden_alias="svc-foo",
-            language="typescript",
-        )
-        args = fake.post.call_args.kwargs["json"]["params"]["arguments"]
-        assert "project_version" not in args
-
-    def test_project_version_computed_at_most_once_per_indexer(
-        self, tmp_path, monkeypatch
-    ):
-        """MAJOR-1 (EVO-65365): ``get_current_commit`` shells to git and returns
-        the same HEAD for the fixed ``repo_root`` on every ``generate()`` call, so
-        it must be memoised at the instance level — run AT MOST ONCE per
-        DelegatedIndexer regardless of how many projects it builds."""
-        output_dir = tmp_path / ".code-indexer" / "scip"
-        output_dir.mkdir(parents=True)
-        spy = MagicMock(return_value="deadbeefcafe")
-        monkeypatch.setattr(
-            "code_indexer.scip.indexers.delegated.get_current_commit", spy
-        )
-        fake = _fake_requests(
-            post_side_effect=_post_writing_index(
-                output_dir, _rpc_result(exit_code=0, output="ok", duration_ms=1)
-            )
-        )
-        indexer = _make_indexer(tmp_path, fake)
-
-        for _ in range(2):
-            indexer.generate(
-                tmp_path,
-                output_dir,
-                "npm",
-                golden_alias="svc-foo",
-                language="typescript",
-            )
-
-        assert spy.call_count == 1
-        # ...and the cached value is still threaded into the request every call.
-        args = fake.post.call_args.kwargs["json"]["params"]["arguments"]
-        assert args["project_version"] == "deadbeefcafe"
-
-    def test_project_version_none_is_cached_not_recomputed(self, tmp_path, monkeypatch):
-        """A None/empty commit must be cached too (sentinel init), so a repo with
-        no resolvable HEAD does not re-shell to git on every build."""
-        output_dir = tmp_path / ".code-indexer" / "scip"
-        output_dir.mkdir(parents=True)
-        spy = MagicMock(return_value=None)
-        monkeypatch.setattr(
-            "code_indexer.scip.indexers.delegated.get_current_commit", spy
-        )
-        fake = _fake_requests(
-            post_side_effect=_post_writing_index(
-                output_dir, _rpc_result(exit_code=0, output="ok", duration_ms=1)
-            )
-        )
-        indexer = _make_indexer(tmp_path, fake)
-
-        for _ in range(2):
-            indexer.generate(
-                tmp_path,
-                output_dir,
-                "npm",
-                golden_alias="svc-foo",
-                language="typescript",
-            )
-
-        assert spy.call_count == 1
-        args = fake.post.call_args.kwargs["json"]["params"]["arguments"]
-        assert "project_version" not in args
-
-    def test_golden_repo_request_full_contract(self, tmp_path, monkeypatch):
+    def test_golden_repo_request_full_contract(self, tmp_path):
         """The exact arguments dict cidx sends for a golden repo (EVO-65365)."""
         output_dir = tmp_path / ".code-indexer" / "scip"
         output_dir.mkdir(parents=True)
-        monkeypatch.setattr(
-            "code_indexer.scip.indexers.delegated.get_current_commit",
-            lambda _root: "c0ffee",
-        )
         fake = _fake_requests(
             post_side_effect=_post_writing_index(
                 output_dir, _rpc_result(exit_code=0, output="ok", duration_ms=1)
@@ -433,7 +318,6 @@ class TestDelegatedIndexerProjectVersion:
             "language": "typescript",
             "output_dir": ".code-indexer/scip",
             "allow_degenerate": True,
-            "project_version": "c0ffee",
         }
 
 

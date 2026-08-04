@@ -47,9 +47,7 @@ import json
 import logging
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Dict, Optional, cast
-
-from code_indexer.utils.git_runner import get_current_commit
+from typing import TYPE_CHECKING, Any, Dict, Optional
 
 from .base import IndexerResult, IndexerStatus, SCIPIndexer
 
@@ -57,12 +55,6 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
     from code_indexer.server.utils.config_manager import WorkspaceMcpConfig
 
 logger = logging.getLogger(__name__)
-
-# Sentinel for the per-instance project-version cache: distinguishes "not yet
-# resolved" from a legitimately cached ``None`` (a repo with no resolvable HEAD),
-# so a None/empty commit is cached too and never re-shells to git (MAJOR-1).
-_PROJECT_VERSION_UNSET = object()
-
 
 # The MCP tool name the sandbox image exposes for SCIP generation. sandbox-mcp
 # prefixes every ``.mcp-sandbox.yaml`` tool with ``sandbox_`` — the YAML tool is
@@ -136,9 +128,6 @@ class DelegatedIndexer(SCIPIndexer):
         self._jsonrpc_path = jsonrpc_path
         self._health_path = health_path
         self._request_id = 0
-        # MAJOR-1: memoise the repo's git HEAD (see _project_version). repo_root is
-        # fixed for the instance's life, so it is resolved at most ONCE.
-        self._project_version_cache: Any = _PROJECT_VERSION_UNSET
 
     # ------------------------------------------------------------------ helpers
     def _requests(self) -> Any:
@@ -155,20 +144,6 @@ class DelegatedIndexer(SCIPIndexer):
 
     def _rpc_url(self) -> str:
         return f"{self._endpoint}{self._jsonrpc_path}"
-
-    def _project_version(self) -> Optional[str]:
-        """Return the repo's git HEAD commit, memoised per instance (MAJOR-1).
-
-        ``get_current_commit`` shells to git (``git rev-parse HEAD``) and, because
-        ``repo_root`` is fixed at construction, returns the SAME HEAD on every
-        ``generate()`` call. Resolve it AT MOST ONCE and cache the result — even a
-        ``None``/empty commit is cached (via ``_PROJECT_VERSION_UNSET``) so a repo
-        with no resolvable HEAD does not re-shell to git per project. Collapses the
-        old N-git-calls-per-build (one per project) down to one.
-        """
-        if self._project_version_cache is _PROJECT_VERSION_UNSET:
-            self._project_version_cache = get_current_commit(self._repo_root)
-        return cast(Optional[str], self._project_version_cache)
 
     def _relative(self, path: Path) -> str:
         """Workspace-relative POSIX string for *path* under ``repo_root``.
@@ -187,7 +162,6 @@ class DelegatedIndexer(SCIPIndexer):
         language: str,
         output_dir: str,
         allow_degenerate: bool = False,
-        project_version: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Build the ``tools/call`` request for ``sandbox_scip``.
 
@@ -199,11 +173,6 @@ class DelegatedIndexer(SCIPIndexer):
         EVO-65365: ``allow_degenerate`` is added ONLY when True (a golden repo
         opts into the sandbox's locals-only fallback for a bare/unbuilt repo);
         omitted otherwise so a non-golden request is byte-identical to before.
-
-        EVO-65365: ``project_version`` (the repo's git HEAD commit) is added when
-        non-empty. The sandbox wrapper passes it as ``--project-version`` so scip
-        stops shelling to git for the version (git-mcp owns git); the field is
-        harmless if the sandbox ignores it. Omitted when empty/None.
         """
         self._request_id += 1
         arguments: Dict[str, Any] = {
@@ -218,8 +187,6 @@ class DelegatedIndexer(SCIPIndexer):
             arguments["workspace_id"] = workspace_id
         if allow_degenerate:
             arguments["allow_degenerate"] = True
-        if project_version:
-            arguments["project_version"] = project_version
         return {
             "jsonrpc": "2.0",
             "id": self._request_id,
@@ -337,15 +304,6 @@ class DelegatedIndexer(SCIPIndexer):
         if stale_removed is not None:
             return self._failure(start_time, stale_removed)
 
-        # EVO-65365: send the repo's git HEAD as project_version so the sandbox
-        # wrapper passes it as ``--project-version`` and scip stops shelling to git
-        # for the version (git-mcp owns git). Reuses the existing commit helper
-        # (also used by scip_lifecycle for the alias@commit dedupe key) — NO new
-        # git subprocess here. MAJOR-1: memoised on the instance so the git call
-        # runs at most once per indexer, not once per generate(). Best-effort:
-        # omitted from the request when empty/None.
-        project_version = self._project_version()
-
         request = self._build_request(
             workspace_id=workspace_id,
             golden_alias=golden_alias,
@@ -354,7 +312,6 @@ class DelegatedIndexer(SCIPIndexer):
             language=language,
             output_dir=output_rel,
             allow_degenerate=allow_degenerate,
-            project_version=project_version,
         )
 
         requests = self._requests()
