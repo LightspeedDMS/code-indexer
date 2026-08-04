@@ -31,6 +31,7 @@ SELECT
     COALESCE(g.enable_temporal, false),
     g.temporal_options
 FROM global_repos g
-WHERE regexp_replace(g.alias_name, '-global$', '') NOT IN (
+WHERE g.repo_url IS NOT NULL
+  AND regexp_replace(g.alias_name, '-global$', '') NOT IN (
     SELECT alias FROM golden_repos_metadata
 );
