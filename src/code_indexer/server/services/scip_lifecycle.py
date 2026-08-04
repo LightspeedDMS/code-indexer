@@ -287,8 +287,7 @@ def funnel_scip_generation(
             remove_scip_build_commit(scip_dir)
         elif scip_db_is_fresh(repo_root, scip_dir):
             logger.info(
-                "EVO-65021: SCIP DBs already fresh for '%s'; skipping delegated "
-                "build",
+                "EVO-65021: SCIP DBs already fresh for '%s'; skipping delegated build",
                 alias,
             )
             record_scip_metric("delegated_fresh")
@@ -330,9 +329,7 @@ def funnel_scip_generation(
             # unsupported language) is tagged ``no-index`` so freshness does not
             # require an index.scip.db that will never exist.
             produced_index = bool(getattr(result, "successful_projects", 0) > 0)
-            record_scip_build_commit(
-                scip_dir, commit, produced_index=produced_index
-            )
+            record_scip_build_commit(scip_dir, commit, produced_index=produced_index)
 
         build = DelegatedScipBuild(
             alias=alias,
@@ -363,6 +360,29 @@ def funnel_scip_generation(
         )
         record_scip_metric("delegated_skipped_error")
         return ScipDelegationOutcome.SKIPPED
+
+
+def funnel_golden_scip(
+    alias: str, repo_root: Any, config: Any
+) -> ScipDelegationOutcome:
+    """Funnel a GOLDEN-repo SCIP generation, normalizing the alias first.
+
+    The single home of the EVO-65021 CRITICAL-1 invariant, shared by every
+    golden-repo entrypoint (``refresh_scheduler._run_source_scip``,
+    ``golden_repo_manager._run_scip_index``). Under Option C (EVO-65365) the
+    delegated backend addresses a golden repo by its BARE alias — the sandbox
+    resolves it to the filesystem path ``<GOLDEN_REPOS_ROOT>/<alias>``. These
+    entrypoints are handed the ``-global``-suffixed REGISTRY alias, which would
+    resolve to a non-existent path (``.../<alias>-global``) → a generic failed
+    build instead of a clean typed skip. Normalize to bare before funnelling, or
+    every golden repo silently loses SCIP under ``scip_backend='delegated'``.
+
+    This is GOLDEN entrypoints only — the activated (per-user) entrypoint passes
+    ``activated_repo=True`` and does NOT normalize (an activated alias lives in a
+    different namespace), so it calls :func:`funnel_scip_generation` directly.
+    """
+    bare = alias.removesuffix("-global")
+    return funnel_scip_generation(alias=bare, repo_root=Path(repo_root), config=config)
 
 
 def _default_generator_builder(

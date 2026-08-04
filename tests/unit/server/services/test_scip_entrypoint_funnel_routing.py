@@ -5,11 +5,18 @@ local ``cidx scip generate`` subprocess, and that a fail-soft skip does not fail
 the enclosing job; under the default ``local`` backend the subprocess still runs.
 """
 
+from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import MagicMock, Mock, patch
 
+import pytest
+
 from code_indexer.global_repos.refresh_scheduler import RefreshScheduler
-from code_indexer.server.repositories.golden_repo_manager import GoldenRepoManager
+from code_indexer.server.repositories.golden_repo_manager import (
+    GoldenRepo,
+    GoldenRepoError,
+    GoldenRepoManager,
+)
 from code_indexer.server.services import scip_lifecycle
 from code_indexer.server.services.activated_repo_index_manager import (
     ActivatedRepoIndexManager,
@@ -239,3 +246,102 @@ class TestGoldenRepoManagerAddIndexEntrypoint:
         ):
             mgr._run_scip_index("my-repo-global", "/repo", _allocator(), None)
         assert funnel.call_args.kwargs["alias"] == "my-repo"
+
+    def test_local_backend_failure_raises_golden_repo_error(self):
+        # Local-backend failure path: NOT_DELEGATED + a non-zero cidx exit must
+        # fail-loud with GoldenRepoError. The prior local test stubbed
+        # returncode=0, so a deleted ``if returncode != 0: raise`` went unnoticed
+        # — this pins the raise.
+        mgr = _golden_repo_manager()
+        with (
+            patch(f"{_CONFIG_MOD}.get_config_service"),
+            patch(_FUNNEL, return_value=ScipDelegationOutcome.NOT_DELEGATED),
+            patch(f"{_GRM_MOD}.subprocess.run") as srun,
+            patch(f"{_GRM_MOD}.build_cidx_subprocess_env", return_value={}),
+        ):
+            srun.return_value = SimpleNamespace(
+                returncode=1, stdout="", stderr="scip toolchain exploded"
+            )
+            with pytest.raises(GoldenRepoError) as exc_info:
+                mgr._run_scip_index("my-repo", "/repo", _allocator(), None)
+        srun.assert_called_once()
+        assert "Failed to create SCIP index" in str(exc_info.value)
+        assert "scip toolchain exploded" in str(exc_info.value)
+
+
+# --------------------------------------------------------------------------- #
+# add_indexes_to_golden_repo dispatches the ``scip`` branch to _run_scip_index
+# --------------------------------------------------------------------------- #
+def _registered_manager(tmp_path) -> GoldenRepoManager:
+    """A GoldenRepoManager with one repo persisted (in-memory + SQLite backend).
+
+    Mirrors tests/unit/golden_repos/test_add_index_commands.py::registered_manager
+    — the background worker resolves the repo AUTHORITATIVELY via the SQLite
+    backend (Bug #1316), so the repo must exist there, not only in the cache.
+    No ``_refresh_scheduler`` is attached, so the write-lock and CoW/alias-swap
+    blocks (both guarded by ``scheduler is not None``) are skipped — the lightest
+    seam that still exercises the ``elif index_type == "scip":`` dispatch.
+    """
+    mgr = GoldenRepoManager(data_dir=str(tmp_path))
+    repo_path = tmp_path / "repos" / "test-repo"
+    repo_path.mkdir(parents=True)
+    created_at = datetime.now(timezone.utc).isoformat()
+    mgr.golden_repos["test-repo"] = GoldenRepo(
+        alias="test-repo",
+        repo_url="git@github.com:org/test-repo.git",
+        clone_path=str(repo_path),
+        default_branch="main",
+        created_at=created_at,
+    )
+    mgr._sqlite_backend.add_repo(
+        alias="test-repo",
+        repo_url="git@github.com:org/test-repo.git",
+        default_branch="main",
+        clone_path=str(repo_path),
+        created_at=created_at,
+        enable_temporal=False,
+        temporal_options=None,
+    )
+    mgr.background_job_manager = MagicMock()
+    return mgr, str(repo_path)
+
+
+class TestAddIndexesDispatchesScipBranch:
+    def test_scip_branch_calls_run_scip_index(self, tmp_path):
+        # WIRING: the ``scip`` index_type branch in add_indexes_to_golden_repo
+        # must DISPATCH to _run_scip_index (the delegated funnel entrypoint). If
+        # the call-site is reverted to an inline ``cidx scip generate``
+        # subprocess, _run_scip_index is never called and this reddens.
+        mgr, repo_path = _registered_manager(tmp_path)
+
+        def fake_submit_job(operation_type, func, **kwargs):
+            # cidx init runs a real subprocess.run — stub it to a clean exit.
+            def recording_run(cmd, **kw):
+                return SimpleNamespace(returncode=0, stdout="ok", stderr="")
+
+            with (
+                patch("subprocess.run", side_effect=recording_run),
+                patch.object(mgr, "get_actual_repo_path", return_value=repo_path),
+                patch.object(mgr, "_run_scip_index", return_value=("", "")) as spy,
+            ):
+                func()
+                fake_submit_job.spy = spy
+            return "fake-job-id"
+
+        with patch.object(
+            mgr.background_job_manager, "submit_job", side_effect=fake_submit_job
+        ):
+            mgr.add_indexes_to_golden_repo("test-repo", ["scip"])
+
+        spy = fake_submit_job.spy
+        spy.assert_called_once()
+        args = spy.call_args.args
+        # (alias, repo_path, allocator, progress_callback)
+        assert args[0] == "test-repo"
+        assert args[1] == repo_path
+        from code_indexer.services.progress_phase_allocator import (
+            ProgressPhaseAllocator,
+        )
+
+        assert isinstance(args[2], ProgressPhaseAllocator)
+        assert len(args) == 4  # progress_callback threaded through as the 4th arg

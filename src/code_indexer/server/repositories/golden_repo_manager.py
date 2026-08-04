@@ -3676,7 +3676,7 @@ class GoldenRepoManager:
         accumulate.
         """
         from code_indexer.server.services.scip_lifecycle import (
-            funnel_scip_generation,
+            funnel_golden_scip,
             ScipDelegationOutcome,
         )
         from code_indexer.server.services.config_service import get_config_service
@@ -3689,23 +3689,17 @@ class GoldenRepoManager:
                 detail="SCIP: generating...",
             )
 
-        # EVO-65021 CRITICAL-1 (mirrors refresh_scheduler): the delegated backend
-        # addresses a golden repo by its BARE alias — a ``-global``-suffixed
-        # registry alias would resolve to a non-existent sandbox path
-        # (``.../<alias>-global``) → a generic failed build instead of a clean
-        # typed skip. Normalize to bare before funnelling, or every golden repo
-        # silently loses SCIP under scip_backend='delegated'.
-        bare_alias = alias.removesuffix("-global")
-        scip_outcome = funnel_scip_generation(
-            alias=bare_alias,
-            repo_root=Path(repo_path),
-            config=get_config_service().get_config(),
+        # EVO-65365: the ``-global``→bare normalization (CRITICAL-1) is the shared
+        # golden-repo invariant; it lives in ``funnel_golden_scip`` (its single
+        # home) so all three golden entrypoints cannot drift.
+        scip_outcome = funnel_golden_scip(
+            alias, repo_path, get_config_service().get_config()
         )
         if scip_outcome is not ScipDelegationOutcome.NOT_DELEGATED:
             logging.info(
                 "SCIP delegated backend: %s for golden repo %s",
                 scip_outcome.value,
-                bare_alias,
+                alias,
             )
             if progress_callback is not None:
                 progress_callback(
