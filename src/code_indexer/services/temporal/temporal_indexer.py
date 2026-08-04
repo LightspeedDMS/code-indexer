@@ -42,7 +42,6 @@ from .temporal_collection_naming import (
 from .temporal_point_builder import build_chunk_payload, build_point_id
 from .temporal_projection_matrix import _ensure_shard_has_projection_matrix
 from .temporal_progressive_metadata import TemporalProgressiveMetadata
-from .temporal_relocation_trigger import maybe_relocate_shard_to_sister_location
 from .temporal_structure_marker import is_v2_structure, write_structure_marker
 
 logger = logging.getLogger(__name__)
@@ -878,19 +877,20 @@ class TemporalIndexer:
                     # _use_stale_barrier guard above).
                     self.vector_store.end_indexing(collection_name=_shard_name)
 
-                # Story #1457 AC1: relocation trigger. No-op in standalone
-                # CLI (the function's own CIDX_SERVER_REFRESH_CONTEXT
-                # check) -- in server context, builds+publishes this
-                # shard's data to the sister location via AC6's dispatch.
-                maybe_relocate_shard_to_sister_location(
-                    codebase_dir=self.codebase_dir,
-                    shard_name=_shard_name,
-                    local_shard_dir=collection_path,
-                    new_commit_hashes={c.hash for c in _shard_commits},
-                    vector_dim=shard_vector_size,
-                    force_rebuild=was_stale,
-                )
-
+                # Bug #1528: Story #1457 AC1's sister-location relocation
+                # trigger used to fire here. It is RETIRED and must NOT be
+                # re-wired: its publish path sourced rows exclusively from
+                # the legacy hash-sharded vector_*.json files, so now that a
+                # shard is finalized as a consolidated chunks.db it would
+                # build an EMPTY sister version and swap the namespace
+                # pointer onto it -- and TemporalShardResolver is
+                # pointer-first, so every later query for that namespace
+                # would silently read zero rows. Temporal shards are now
+                # migrated IN PLACE by fleet migration (server) or
+                # `cidx index --migrate-chunks-to-sqlite` (standalone CLI),
+                # never duplicated to a second location. The READ side
+                # (resolver + any already-published alias pointers) is
+                # untouched, so previously relocated data stays queryable.
                 self._processed_shards.append(_shard_name)
         finally:
             self.collection_name = _original_collection_name

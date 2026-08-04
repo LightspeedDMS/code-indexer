@@ -169,16 +169,30 @@ class TestRunFleetMigrationForRepoHappyPath:
         assert scheduler.is_write_locked("evolution") is False
 
 
+def _write_legacy_temporal_shard(index_path: Path) -> Path:
+    """A REAL legacy temporal shard: collection metadata plus a sharded
+    ``vector_*.json`` row (Bug #1528 -- the in-place engine needs the
+    metadata file, exactly as a production shard has)."""
+    shard_dir = index_path / "code-indexer-temporal-voyage_code_3-2024Q1"
+    shard_dir.mkdir(parents=True, exist_ok=True)
+    (shard_dir / "collection_meta.json").write_text(
+        json.dumps(
+            {"name": "code-indexer-temporal-voyage_code_3-2024Q1", "vector_size": 2}
+        )
+    )
+    _write_vector_json(shard_dir, "row00001", [0.1, 0.2])
+    return shard_dir
+
+
 class TestRunFleetMigrationForRepoAC1Ordering:
-    def test_temporal_namespaces_bootstrapped_before_snapshot_fires(
+    def test_temporal_namespaces_consolidated_in_place_before_snapshot_fires(
         self, tmp_path: Path
     ) -> None:
         scheduler = _make_scheduler(tmp_path)
         base_clone = _setup_base_clone(tmp_path)
         index_path = base_clone / ".code-indexer" / "index"
 
-        legacy_shard_dir = index_path / "code-indexer-temporal-voyage_code_3-2024Q1"
-        _write_vector_json(legacy_shard_dir, "row00001", [0.1, 0.2])
+        legacy_shard_dir = _write_legacy_temporal_shard(index_path)
 
         sister_root = tmp_path / "sister"
         sister_alias_manager = AliasManager(str(sister_root / "aliases"))
@@ -203,8 +217,13 @@ class TestRunFleetMigrationForRepoAC1Ordering:
 
         assert result.status == "completed"
         assert result.temporal_namespaces_processed == 1
-        assert not legacy_shard_dir.exists()
-        assert sister_alias_manager.alias_exists(
+        # Bug #1528: migrated IN PLACE -- the directory stays, its layout
+        # changes, and no duplicate sister copy is published.
+        assert legacy_shard_dir.is_dir()
+        assert (legacy_shard_dir / "chunks.db").is_file()
+        assert list(legacy_shard_dir.rglob("vector_*.json")) == []
+        assert resolve_chunk_layout(legacy_shard_dir) == ChunkLayout.CHUNKS_DB
+        assert not sister_alias_manager.alias_exists(
             "evolution-temporal-voyage_code_3-2024Q1"
         )
         assert result.snapshot_path is not None
@@ -212,13 +231,13 @@ class TestRunFleetMigrationForRepoAC1Ordering:
     def test_incomplete_when_residual_temporal_dir_remains(
         self, tmp_path: Path
     ) -> None:
-        # Simulate a repo with a residual temporal dir that was NOT passed
-        # in temporal_namespaces (e.g. discovery gap upstream) -- the
+        # Simulate a repo with a still-legacy temporal shard that was NOT
+        # passed in temporal_namespaces (e.g. discovery gap upstream) -- the
         # completion gate must still catch it and refuse to fire AC10.
         scheduler = _make_scheduler(tmp_path)
         base_clone = _setup_base_clone(tmp_path)
         index_path = base_clone / ".code-indexer" / "index"
-        (index_path / "code-indexer-temporal-voyage_code_3-2024Q1").mkdir()
+        _write_legacy_temporal_shard(index_path)
 
         sister_root = tmp_path / "sister"
         sister_alias_manager = AliasManager(str(sister_root / "aliases"))
@@ -245,7 +264,7 @@ class TestRunFleetMigrationForRepoAC1Ordering:
         scheduler = _make_scheduler(tmp_path)
         base_clone = _setup_base_clone(tmp_path)
         index_path = base_clone / ".code-indexer" / "index"
-        (index_path / "code-indexer-temporal-voyage_code_3-2024Q1").mkdir()
+        _write_legacy_temporal_shard(index_path)
 
         sister_root = tmp_path / "sister"
         sister_alias_manager = AliasManager(str(sister_root / "aliases"))
@@ -305,7 +324,11 @@ class TestRunFleetMigrationForRepoAC1aRowlessEmptyArtifact:
         )
 
         assert result.status == "completed"
-        assert not rowless_dir.exists()
+        # Bug #1528: in-place migration never deletes a directory, so the
+        # rowless artifact may remain -- what matters is that it can never
+        # block completion (it holds no rows and no collection metadata, so
+        # there is nothing to consolidate).
+        assert list(rowless_dir.rglob("vector_*.json")) == []
         # Never published to the sister location -- nothing to migrate.
         assert not sister_alias_manager.alias_exists(
             "evolution-temporal-voyage_code_3-2024Q1"
@@ -366,7 +389,7 @@ class TestConsolidateSemanticCollectionsRefusesSymlinkIntoImmutableSnapshot:
         self, tmp_path: Path
     ) -> None:
         from code_indexer.server.services.fleet_migration.orchestrator import (
-            _consolidate_semantic_collections,
+            _consolidate_collections,
         )
         from code_indexer.server.services.query_path_cache import (
             is_immutable_versioned_snapshot,
@@ -413,7 +436,7 @@ class TestConsolidateSemanticCollectionsRefusesSymlinkIntoImmutableSnapshot:
         )
 
         try:
-            consolidated_count, _skipped = _consolidate_semantic_collections(
+            consolidated_count, _skipped = _consolidate_collections(
                 [symlinked_collection]
             )
             raised = None

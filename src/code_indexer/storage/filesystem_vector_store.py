@@ -417,7 +417,11 @@ class FilesystemVectorStore:
                 when True, create_collection() marks fresh collections to
                 be built using the consolidated chunks.db layout. When
                 explicitly False, always uses the legacy sharded-JSON
-                layout regardless of environment. When None (default),
+                layout regardless of environment -- for every collection
+                kind, temporal included. When None (default), a TEMPORAL
+                collection resolves to CHUNKS_DB regardless of environment
+                (Bug #1528: temporal never writes a new legacy
+                vector_*.json file), while a SEMANTIC collection
                 falls back to the CIDX_CHUNKS_DB_NEW_COLLECTIONS env var
                 (which itself defaults to False when unset), so all ~20
                 existing call sites inherit the SHARDED_JSON default
@@ -565,6 +569,16 @@ class FilesystemVectorStore:
         self._repo_root_lock: threading.Lock = threading.Lock()
 
         # Story #1456: production write-path opt-in (see __init__ docstring).
+        # Bug #1528: the caller's TRI-STATE value is ALSO retained verbatim,
+        # because create_collection() must distinguish "no layout
+        # instruction given" (None -> env/context default) from an EXPLICIT
+        # sharded_json request (False): TEMPORAL collections default to
+        # CHUNKS_DB (temporal never writes a new legacy vector_*.json file)
+        # while SEMANTIC collections keep Story #1488's SHARDED_JSON
+        # CLI/daemon default.
+        self._new_collection_layout_explicit: Optional[bool] = (
+            use_chunks_db_for_new_collections
+        )
         if use_chunks_db_for_new_collections is not None:
             self._use_chunks_db_for_new_collections: bool = (
                 use_chunks_db_for_new_collections
@@ -812,13 +826,28 @@ class FilesystemVectorStore:
 
         # Story #1456: record CHUNKS_DB build intent for THIS session. The
         # on-disk discriminator is committed later (end_indexing), only
-        # AFTER chunks.db + all its indexes are durable -- see AC1. Temporal
-        # collections are explicitly OUT OF SCOPE for CHUNKS_DB (Epic #1289
-        # is a separate, large dual-embedder sharding subsystem untouched
-        # by this story) and never get this mode regardless of the flag.
-        if self._use_chunks_db_for_new_collections and not (
-            TemporalMetadataStore.is_temporal_collection(collection_name)
-        ):
+        # AFTER chunks.db + all its indexes are durable -- see AC1.
+        #
+        # Bug #1528: temporal collections used to be excluded from CHUNKS_DB
+        # UNCONDITIONALLY here, which discarded even an explicit caller
+        # request (including the server's own
+        # `--new-collection-layout=chunks_db` child arg) and made Epic
+        # #1454's consolidation inert for exactly the workload that
+        # motivated it -- one real repo accumulated 487,076 individual
+        # vector_*.json files. Temporal is now the STRICTEST case instead of
+        # the exempt one: a fresh temporal collection is built as CHUNKS_DB
+        # by DEFAULT (no flag, no env var, no server context required), and
+        # only an EXPLICIT sharded_json request from the caller
+        # (`use_chunks_db_for_new_collections=False`, e.g. a legacy-layout
+        # test fixture) still produces the legacy layout. Semantic
+        # collections are UNCHANGED: Story #1488's context-dependent
+        # default (SHARDED_JSON for CLI/daemon, explicit chunks_db from the
+        # server) still governs them.
+        if TemporalMetadataStore.is_temporal_collection(collection_name):
+            build_as_chunks_db = self._new_collection_layout_explicit is not False
+        else:
+            build_as_chunks_db = self._use_chunks_db_for_new_collections
+        if build_as_chunks_db:
             self._chunks_db_mode[collection_name] = True
 
         return True
@@ -1478,9 +1507,14 @@ class FilesystemVectorStore:
         preserved via the SAME ``PathIndex``, but eviction targets
         chunk-store rows (``ChunkStore.delete``) instead of unlinking files.
 
-        Temporal collections never reach this method -- create_collection()
-        excludes them from CHUNKS_DB mode entirely (Epic #1289 is a
-        separate, untouched subsystem).
+        Bug #1528: TEMPORAL collections are now a PRIMARY consumer of this
+        path (they used to be excluded from CHUNKS_DB entirely). Because of
+        that, this method owes them the same two side effects the legacy
+        path performs and nothing else does: the batched temporal METADATA
+        write (a separate store used by reconciliation, the incremental
+        gate, and at-commit scoping) and the SKIP of the git
+        blob-hash/uncommitted lookups. Any future write-path side effect
+        added to one branch MUST be added to both.
 
         Args:
             subdirectory: Optional explicit subdirectory (e.g.
@@ -1501,7 +1535,15 @@ class FilesystemVectorStore:
         ]
         blob_hashes: Dict[str, str] = {}
         uncommitted_files: set = set()
-        if repo_root is not None and file_paths:
+        # Bug #1528: skip the git blob-hash/uncommitted lookups for temporal
+        # collections, exactly as the legacy path does (FIX 1 -- avoids Errno
+        # 7 argument-list overflow and pointless git work on large temporal
+        # indexes, whose payload paths are historical commit diffs).
+        if (
+            repo_root is not None
+            and file_paths
+            and not TemporalMetadataStore.is_temporal_collection(collection_name)
+        ):
             blob_hashes = self._get_blob_hashes_batch(file_paths, repo_root)
             uncommitted_files = self._check_uncommitted_batch(file_paths, repo_root)
 
@@ -1601,6 +1643,24 @@ class FilesystemVectorStore:
                 chunk_store.delete(orphan_ids)
         finally:
             chunk_store.close()
+
+        # Bug #1528: the temporal METADATA store is a SEPARATE store from the
+        # chunk data (shared temporal_metadata.db in solo mode, PostgreSQL in
+        # cluster mode) and is what reconcile_temporal_index, the incremental
+        # gate and at-commit scoping read. Its batch write used to exist only
+        # in the legacy sharded-JSON loop, so routing temporal through this
+        # CHUNKS_DB path silently stopped populating it. Same batch API and
+        # same flush-AFTER-success ordering as the legacy path (Bug #1206):
+        # chunk rows are durable first, then ONE metadata transaction, so a
+        # crash in between leaves chunks without metadata and the indexer
+        # re-indexes those commits on resume (deterministic point ids ->
+        # INSERT OR REPLACE, never duplicates).
+        if TemporalMetadataStore.is_temporal_collection(collection_name) and points:
+            metadata_store = self._get_temporal_metadata_store()
+            metadata_store.save_metadata_batch(
+                [(point["id"], point.get("payload", {})) for point in points]
+            )
+            metadata_store.checkpoint_wal()
 
         if orphan_ids and collection_name in self._indexing_session_changes:
             self._indexing_session_changes[collection_name]["deleted"].update(

@@ -1,23 +1,20 @@
-"""repo_has_zero_residual_temporal_dirs() -- Story #1458 AC1 / AC10
-completion-gate predicate.
+"""repo_temporal_dirs_fully_consolidated() -- Story #1458 AC1 / AC10
+completion-gate predicate (Bug #1528 revision).
 
 Per AC1's binding Definition of Done and AC10's firing condition: a repo's
 migration is complete (and AC10's post-consolidation snapshot may fire)
-ONLY once there is ZERO residual in-repo temporal directory of EITHER
-shape -- no quarter-shard directory
-(``code-indexer-temporal-{slug}-YYYYQN``) and no quarter-less monolith
-directory (``code-indexer-temporal-{slug}``) remaining under
-``.code-indexer/index/``.
+ONLY once every one of its temporal shards has actually been migrated.
 
-This predicate is deliberately UNCONDITIONAL PHYSICAL ABSENCE -- it does
-NOT run a row-existence scan or an ``hnsw_index.bin``-presence check to
-re-derive whether a directory "should" be migrated or swept. That
-DISPOSITION decision belongs to Story #1457 AC11 / this story's AC1a
-(``classify_bootstrap_disposition`` / ``bootstrap_temporal_namespace_to_
-sister``). A physically-present directory of either shape FAILS this gate
-regardless of its row content -- both a row-bearing "needs bootstrap"
-directory and a rowless "empty artifact" directory must end up PHYSICALLY
-GONE for this gate to pass.
+Bug #1528 changed WHAT "migrated" looks like on disk. Under the retired
+Story #1457 sister-location model a migrated namespace was published to a
+DIFFERENT location and its in-repo directory reclaimed, so the gate was
+unconditional PHYSICAL ABSENCE of every ``code-indexer-temporal*``
+directory. Temporal now migrates IN PLACE through the same
+``consolidate_collection_in_place`` engine semantic collections use: the
+directory legitimately remains and only its internal chunk layout changes.
+The gate is therefore a LAYOUT predicate -- every real temporal shard must
+verify as fully consolidated (``verify_collection_fully_migrated``) -- and
+physical absence is no longer expected, or required, at all.
 """
 
 from __future__ import annotations
@@ -29,6 +26,12 @@ from typing import Union
 
 from code_indexer.services.temporal.temporal_collection_naming import (
     TEMPORAL_COLLECTION_PREFIX,
+)
+from code_indexer.services.temporal.temporal_shard_resolver import (
+    parse_physical_temporal_name,
+)
+from code_indexer.storage.shared.collection_migration import (
+    verify_collection_fully_migrated,
 )
 from code_indexer.utils.file_locking import nfs_safe_fsync
 
@@ -48,8 +51,8 @@ def repo_has_published_post_consolidation_snapshot(
     for this repo's ``.code-indexer/index/`` directory.
 
     A missing ``index_path`` (repo never indexed, or the marker was never
-    written) trivially returns False -- the same "physical absence"
-    convention :func:`repo_has_zero_residual_temporal_dirs` uses.
+    written) trivially returns False -- the same "absent means not done"
+    convention :func:`repo_temporal_dirs_fully_consolidated` uses.
     """
     return (Path(index_path) / _SNAPSHOT_PUBLISHED_MARKER_FILENAME).is_file()
 
@@ -137,26 +140,69 @@ def mark_post_consolidation_snapshot_published(index_path: Union[str, Path]) -> 
         os.close(dir_fd)
 
 
-def repo_has_zero_residual_temporal_dirs(index_path: Union[str, Path]) -> bool:
-    """Return True iff ``index_path`` contains ZERO temporal directories of
-    either shape (quarter-shard or quarter-less monolith).
+def repo_temporal_dirs_fully_consolidated(index_path: Union[str, Path]) -> bool:
+    """Return True iff EVERY real temporal shard directory under
+    ``index_path`` has been fully consolidated to the ``chunks.db`` layout.
+
+    Bug #1528: this REPLACES the previous physical-absence predicate
+    (``repo_has_zero_residual_temporal_dirs``). That predicate encoded the
+    retired Story #1457 sister-location model, where a migrated temporal
+    namespace was published ELSEWHERE and its in-repo directory reclaimed,
+    so "directory still here" meant "not migrated". Temporal now migrates
+    IN PLACE through the same ``consolidate_collection_in_place`` engine
+    semantic collections use, so the directory legitimately REMAINS -- what
+    changes is its internal layout. Physical absence would therefore be
+    permanently unreachable and the AC10 snapshot could never fire again.
+
+    Completeness is delegated to :func:`verify_collection_fully_migrated`
+    (discriminator set AND zero legacy sharded files left AND chunks.db
+    reopens cleanly) -- never a bare discriminator check, for exactly the
+    crash-recovery reason that function documents.
+
+    Skipped, matching ``chunk_migration_cli.enumerate_migration_targets``'s
+    established exclusions rather than inventing new ones here:
+      * the bare ``code-indexer-temporal`` bookkeeping directory (it anchors
+        the shared temporal metadata store and is never a shard);
+      * any temporal-prefixed name that does not parse as a real
+        ``{slug}[-{quarter}]`` physical shard name.
 
     Args:
         index_path: The repo's ``.code-indexer/index/`` directory.
 
     Returns:
-        True if ``index_path`` does not exist, or exists and contains no
-        directory whose name starts with the temporal collection prefix.
-        False if any such directory is physically present, regardless of
-        whether it holds committed rows.
+        True if ``index_path`` does not exist, or contains no real temporal
+        shard, or every real temporal shard verifies as fully consolidated.
+        False as soon as one real shard is still (even partially) in the
+        legacy sharded layout.
     """
     index_path = Path(index_path)
     if not index_path.is_dir():
-        # No index directory at all -- trivially zero residual dirs.
+        # No index directory at all -- trivially nothing left to consolidate.
         return True
 
-    for entry in index_path.iterdir():
-        if entry.is_dir() and entry.name.startswith(TEMPORAL_COLLECTION_PREFIX):
+    for entry in sorted(index_path.iterdir()):
+        if not entry.is_dir() or not entry.name.startswith(TEMPORAL_COLLECTION_PREFIX):
+            continue
+        if parse_physical_temporal_name(entry.name) is None:
+            continue
+        if not (entry / "collection_meta.json").is_file():
+            # No metadata file means nothing can flip a chunks_db
+            # discriminator here, so this directory can never be
+            # consolidated. Two very different cases:
+            #   * a genuine ROWLESS "empty artifact" (Story #1458 AC1a) --
+            #     skip it, or it would block completion forever now that
+            #     in-place migration never deletes directories (under the
+            #     retired sister model the bootstrap removed it outright);
+            #   * a directory that DOES hold legacy vector_*.json rows but
+            #     has no metadata -- an un-migratable anomaly (the same
+            #     class chunk_migration_cli reports rather than migrates).
+            #     That must FAIL this gate loudly: silently reporting the
+            #     repo complete would leave real row data unconsolidated
+            #     and publish an AC10 snapshot over it.
+            if next(entry.rglob("vector_*.json"), None) is not None:
+                return False
+            continue
+        if not verify_collection_fully_migrated(entry):
             return False
 
     return True

@@ -23,6 +23,31 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def legacy_temporal_refusal_response(pending_shards: List[Path]) -> Dict[str, Any]:
+    """Bug #1528: the daemon's refusal to extend legacy temporal shards.
+
+    Uses the ``cli_daemon_delegation`` client contract -- ``status ==
+    "error"`` plus a ``message`` -- because that is the ONLY shape the client
+    renders as a real failure with its reason. A real daemon-mode run proved
+    a ``{"status": "failed", "error": ...}`` dict prints as "Unexpected
+    status: failed / Message:" with the reason silently dropped.
+
+    Migrating here is deliberately not offered: the in-place consolidation
+    needs the repo's exclusive index-mutation lock and can legitimately run
+    for hours on a large repo, neither of which belongs inside an RPC.
+    """
+    names = ", ".join(sorted(shard.name for shard in pending_shards))
+    message = (
+        f"Refusing temporal indexing: {len(pending_shards)} temporal shard(s) "
+        f"are still in the legacy vector_*.json layout ({names}). Indexing "
+        f"them would add more legacy files. Run `cidx index "
+        f"--migrate-chunks-to-sqlite` to consolidate them first (it holds the "
+        f"exclusive index-mutation lock a daemon RPC cannot)."
+    )
+    logger.error(message)
+    return {"status": "error", "message": message}
+
+
 class CIDXDaemonService(Service):
     """RPyC daemon service for in-memory index caching.
 
@@ -693,6 +718,22 @@ class CIDXDaemonService(Service):
                 # Only setup what's needed for temporal
                 config_manager = ConfigManager.create_with_backtrack(Path(project_path))
                 index_dir = Path(project_path) / ".code-indexer" / "index"
+                # Bug #1528: temporal must never write another legacy
+                # vector_*.json file. An existing collection's committed
+                # layout always wins, so a repo indexed before that fix would
+                # keep growing its legacy tree here. Unlike `cidx index`'s own
+                # temporal branch, this daemon RPC cannot safely run the
+                # in-place migration itself -- that needs the repo's exclusive
+                # index-mutation lock and can legitimately run for hours on a
+                # large repo -- so REFUSE and point at the explicit command.
+                from code_indexer.services.chunk_migration_cli import (
+                    find_pending_legacy_temporal_shards,
+                )
+
+                _pending_legacy = find_pending_legacy_temporal_shards(index_dir)
+                if _pending_legacy:
+                    return legacy_temporal_refusal_response(_pending_legacy)
+
                 vector_store = FilesystemVectorStore(
                     base_path=index_dir, project_root=Path(project_path)
                 )
