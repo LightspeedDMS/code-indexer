@@ -469,6 +469,104 @@ class SSHKeyManager:
         )
         return True
 
+    def _unlink_key_files(self, private_path: str, public_path: str) -> None:
+        """Remove the key pair a provenance-bearing record points at.
+
+        Shared by every ``delete_key`` path (node-local SQLite, node-local
+        JSON, and the cluster-resolved path added for Bug #1527) so the three
+        cannot drift.  Absent files are not an error: delete is idempotent, and
+        a cluster-managed key legitimately has no local copy on a node that
+        never ran ``SSHKeySyncService.sync()``.
+        """
+        for path in (Path(private_path), Path(public_path)):
+            if path.exists():
+                path.unlink()
+
+    def _delete_cluster_managed_or_refuse(self, key_name: str) -> bool:
+        """Resolve a node-local delete miss against cluster truth (Bug #1527).
+
+        ``delete_key`` used to conclude "untracked" straight from a node-local
+        miss, so a genuinely cluster-managed key -- one the shared backend
+        tracks, and that Bug #1524 already reports as ``managed`` here -- hit
+        Bug #1519's provenance refusal on every node that had not itself
+        created it.  On clustered staging that made a real key undeletable
+        through HAProxy round-robin except on the minority of nodes holding a
+        local record.
+
+        The shared backend row IS provenance: this service (on some node)
+        created that key, and ``SSHKeySyncService`` materializes it here as
+        ``ssh_dir/<name>`` -- which is exactly the path
+        ``_cluster_managed_key_metadata`` returns, since
+        ``_local_materialized_paths`` rebases the row onto this node and
+        refuses any name that would not resolve to a direct child of
+        ``ssh_dir``.  Cluster truth therefore can never authorize a deletion
+        outside ``ssh_dir``, and a same-named file is only removed for a name
+        the cluster positively confirms.
+
+        When the shared backend has NO record either (solo mode always, or a
+        genuinely foreign name collision), the decision falls through to
+        ``_has_untracked_conflicting_file`` unchanged -- Bug #1519/#1521's
+        refusal is preserved verbatim, which is the whole point of routing the
+        cluster check BEFORE it rather than instead of it.
+
+        Returns:
+            True when the delete must be refused (Bug #1519 guard fired),
+            False when there is nothing to refuse -- either the key was
+            cluster-managed and its local files have now been removed, or no
+            same-named file exists at all (idempotent no-op).
+
+        Raises:
+            Exception: whatever the shared backend raised, via
+                ``_cluster_managed_key_metadata``.  Mirrors this class's policy
+                for the shared backend (log then re-raise): degrading to the
+                node-local view would silently reintroduce the false refusal.
+        """
+        metadata = self._cluster_managed_key_metadata(key_name)
+        if metadata is None:
+            return self._has_untracked_conflicting_file(key_name)
+
+        logger.info(
+            "SSHKeyManager.delete_key('%s'): no node-local record, but the "
+            "shared cluster backend confirms the key is managed -- deleting "
+            "this node's materialized copy (Bug #1527)",
+            key_name,
+        )
+        self._unlink_key_files(metadata.private_path, metadata.public_path)
+        return False
+
+    def _delete_from_cluster_backend(self, key_name: str) -> None:
+        """Remove the key's row from the shared cluster backend.
+
+        Without this the key resurrects on the next ``SSHKeySyncService.sync()``,
+        which reads exclusively from the shared backend.  A no-op in solo mode
+        (no ``_pg_backend``).
+
+        Applies to BOTH storage modes: this used to live inside ``delete_key``'s
+        SQLite-only branch, so a JSON-metadata node in cluster mode never
+        removed the shared row.  That asymmetry became load-bearing once Bug
+        #1527 let a cluster-managed key be deleted from a node holding no local
+        record -- the local files would go and the row would stay, resurrecting
+        the key on the next sync.
+
+        Raises:
+            Exception: whatever the backend raised.  Mirrors create_key's and
+                assign_key_to_host's policy -- log, then re-raise; never
+                swallowed.
+        """
+        pg_backend = self._pg_backend
+        if pg_backend is None:
+            return
+
+        try:
+            pg_backend.delete_key(key_name)
+            logger.info("SSHKeyManager: deleted key '%s' from PG backend", key_name)
+        except Exception:
+            logger.exception(
+                "SSHKeyManager: failed to delete key '%s' from PG backend",
+                key_name,
+            )
+            raise
+
     def delete_key(self, key_name: str) -> bool:
         """
         Delete an SSH key, its config entries, and metadata.
@@ -479,8 +577,9 @@ class SSHKeyManager:
         Returns:
             True on success, including the idempotent case where no
             metadata AND no on-disk file exist for key_name (nothing to
-            delete). Returns False when no metadata exists for key_name but
-            a same-named file is present in ssh_dir (Bug #1519 provenance
+            delete). Returns False when neither node-local metadata NOR the
+            shared cluster backend (Bug #1527) has a record of key_name but a
+            same-named file is present in ssh_dir (Bug #1519 provenance
             guard) -- this service never proved it wrote that file, so it
             refuses to delete it rather than blindly trusting the name.
         """
@@ -493,46 +592,24 @@ class SSHKeyManager:
                 key_data = self._sqlite_backend.get_key(key_name)
 
                 if key_data:
-                    private_path = Path(key_data["private_path"])
-                    public_path = Path(key_data["public_path"])
-                    if private_path.exists():
-                        private_path.unlink()
-                    if public_path.exists():
-                        public_path.unlink()
+                    self._unlink_key_files(
+                        key_data["private_path"], key_data["public_path"]
+                    )
                 else:
-                    untracked_file_blocked = self._has_untracked_conflicting_file(
+                    untracked_file_blocked = self._delete_cluster_managed_or_refuse(
                         key_name
                     )
 
                 # Remove from SQLite (cascade deletes hosts)
                 self._sqlite_backend.delete_key(key_name)
-
-                # --- Cluster mode: remove from PG so key cannot resurrect on next sync ---
-                if self._pg_backend is not None:
-                    try:
-                        self._pg_backend.delete_key(key_name)
-                        logger.info(
-                            "SSHKeyManager: deleted key '%s' from PG backend", key_name
-                        )
-                    except Exception:
-                        logger.exception(
-                            "SSHKeyManager: failed to delete key '%s' from PG backend",
-                            key_name,
-                        )
-                        raise
             else:
                 # JSON file storage (backward compatible)
                 metadata = self._load_metadata(key_name)
 
                 if metadata:
-                    private_path = Path(metadata.private_path)
-                    public_path = Path(metadata.public_path)
-                    if private_path.exists():
-                        private_path.unlink()
-                    if public_path.exists():
-                        public_path.unlink()
+                    self._unlink_key_files(metadata.private_path, metadata.public_path)
                 else:
-                    untracked_file_blocked = self._has_untracked_conflicting_file(
+                    untracked_file_blocked = self._delete_cluster_managed_or_refuse(
                         key_name
                     )
 
@@ -540,6 +617,10 @@ class SSHKeyManager:
                 metadata_path = self.metadata_dir / f"{key_name}.json"
                 if metadata_path.exists():
                     metadata_path.unlink()
+
+            # Cluster mode: remove from the shared backend so the key cannot
+            # resurrect on the next sync.  Applies to both storage modes above.
+            self._delete_from_cluster_backend(key_name)
 
             # Update SSH config to remove entries
             self._update_ssh_config()
