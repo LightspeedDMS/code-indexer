@@ -126,6 +126,7 @@ class SCIPGenerator:
         indexer_map: Optional[Dict[str, SCIPIndexer]] = None,
         workspace_id: Optional[str] = None,
         golden_alias: Optional[str] = None,
+        allow_degenerate: bool = False,
     ):
         """
         Initialize SCIP generator.
@@ -149,12 +150,19 @@ class SCIPGenerator:
                 workspace_id (the common case — cidx-owned golden repos have
                 none). Only the delegated backend uses it; ``None`` (default) is
                 correct for the local backend.
+            allow_degenerate: EVO-65365. Threaded into every ``indexer.generate``
+                call. When True (set for golden repos — best-effort builds), the
+                delegated backend opts into the sandbox's locals-only fallback so a
+                bare/unbuilt golden repo emits a degenerate index rather than
+                exit-71. Only the delegated backend uses it; ``False`` (default) is
+                correct for the local backend and the non-golden delegated path.
         """
         self.repo_root = Path(repo_root)
         self.scip_dir = self.repo_root / ".code-indexer" / "scip"
         self.max_workers = max_workers
         self.workspace_id = workspace_id
         self.golden_alias = golden_alias
+        self.allow_degenerate = allow_degenerate
 
         # Initialize indexers. Default = today's local subprocess map (built
         # inline so tests that patch these classes at this module keep working);
@@ -317,6 +325,7 @@ class SCIPGenerator:
                 workspace_id=self.workspace_id,
                 golden_alias=self.golden_alias,
                 language=project.language,
+                allow_degenerate=self.allow_degenerate,
             )
 
             project_results.append(ProjectGenerationResult(project, indexer_result))
@@ -465,6 +474,7 @@ class SCIPGenerator:
                 workspace_id=self.workspace_id,
                 golden_alias=self.golden_alias,
                 language=project_status.language,
+                allow_degenerate=self.allow_degenerate,
             )
 
             # Build database from protobuf if successful - REQUIRED FOR SUCCESS

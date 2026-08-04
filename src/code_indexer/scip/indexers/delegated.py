@@ -45,6 +45,8 @@ import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, Optional
 
+from code_indexer.utils.git_runner import get_current_commit
+
 from .base import IndexerResult, IndexerStatus, SCIPIndexer
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -155,6 +157,8 @@ class DelegatedIndexer(SCIPIndexer):
         build_system: str,
         language: str,
         output_dir: str,
+        allow_degenerate: bool = False,
+        project_version: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Build the ``tools/call`` request for ``sandbox_scip``.
 
@@ -162,6 +166,15 @@ class DelegatedIndexer(SCIPIndexer):
         ``arguments`` (never both, never neither — ``generate`` enforces the XOR
         before calling here). Everything else is repo-root-relative and
         unchanged across both addressing modes.
+
+        EVO-65365: ``allow_degenerate`` is added ONLY when True (a golden repo
+        opts into the sandbox's locals-only fallback for a bare/unbuilt repo);
+        omitted otherwise so a non-golden request is byte-identical to before.
+
+        EVO-65365: ``project_version`` (the repo's git HEAD commit) is added when
+        non-empty. The sandbox wrapper passes it as ``--project-version`` so scip
+        stops shelling to git for the version (git-mcp owns git); the field is
+        harmless if the sandbox ignores it. Omitted when empty/None.
         """
         self._request_id += 1
         arguments: Dict[str, Any] = {
@@ -174,6 +187,10 @@ class DelegatedIndexer(SCIPIndexer):
             arguments["golden_alias"] = golden_alias
         else:
             arguments["workspace_id"] = workspace_id
+        if allow_degenerate:
+            arguments["allow_degenerate"] = True
+        if project_version:
+            arguments["project_version"] = project_version
         return {
             "jsonrpc": "2.0",
             "id": self._request_id,
@@ -229,6 +246,7 @@ class DelegatedIndexer(SCIPIndexer):
         workspace_id: Optional[str] = None,
         golden_alias: Optional[str] = None,
         language: Optional[str] = None,
+        allow_degenerate: bool = False,
     ) -> IndexerResult:
         """Delegate SCIP generation for one project to sandbox-mcp.
 
@@ -289,6 +307,13 @@ class DelegatedIndexer(SCIPIndexer):
         if stale_removed is not None:
             return self._failure(start_time, stale_removed)
 
+        # EVO-65365: send the repo's git HEAD as project_version so the sandbox
+        # wrapper passes it as ``--project-version`` and scip stops shelling to git
+        # for the version (git-mcp owns git). Reuses the existing commit helper
+        # (also used by scip_lifecycle for the alias@commit dedupe key) — NO new
+        # git subprocess here. Best-effort: omitted from the request when None.
+        project_version = get_current_commit(self._repo_root)
+
         request = self._build_request(
             workspace_id=workspace_id,
             golden_alias=golden_alias,
@@ -296,6 +321,8 @@ class DelegatedIndexer(SCIPIndexer):
             build_system=build_system,
             language=language,
             output_dir=output_rel,
+            allow_degenerate=allow_degenerate,
+            project_version=project_version,
         )
 
         requests = self._requests()
@@ -403,6 +430,18 @@ class DelegatedIndexer(SCIPIndexer):
         file_exists = scip_file.exists()
 
         if exit_code == 0 and file_exists:
+            # EVO-65365: the sandbox reports ``degenerate`` in its envelope when it
+            # emitted a locals-only index (the ``allow_degenerate`` path for a
+            # bare/unbuilt golden repo). Surface it on the result so a degenerate
+            # index is OBSERVABLE and distinct from a full one — the delegated-build
+            # worker records the ``delegated_degenerate`` metric from this flag.
+            degenerate = bool(run_result.get("degenerate"))
+            if degenerate:
+                logger.info(
+                    "DelegatedIndexer: sandbox produced a DEGENERATE (locals-only) "
+                    "index at %s (allow_degenerate path)",
+                    scip_file,
+                )
             return IndexerResult(
                 status=IndexerStatus.SUCCESS,
                 duration_seconds=duration,
@@ -410,6 +449,7 @@ class DelegatedIndexer(SCIPIndexer):
                 stdout=combined_output,
                 stderr="",
                 exit_code=exit_code,
+                degenerate=degenerate,
             )
 
         errors = run_result.get("errors")

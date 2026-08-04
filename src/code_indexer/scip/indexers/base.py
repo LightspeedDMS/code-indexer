@@ -26,6 +26,13 @@ class IndexerResult:
     stdout: str
     stderr: str
     exit_code: int
+    # EVO-65365: True when the delegated build emitted a DEGENERATE (locals-only)
+    # index instead of a full one — the sandbox's ``allow_degenerate`` path for a
+    # bare/unbuilt golden repo. Defaults False (full index / local indexers).
+    # Surfaced here so a degenerate index is OBSERVABLE and distinct from a full
+    # one; the delegated-build worker records the ``delegated_degenerate`` metric
+    # from it (the pure indexer layer holds no server-metrics dependency).
+    degenerate: bool = False
 
     def is_success(self) -> bool:
         """Check if indexing succeeded."""
@@ -49,6 +56,7 @@ class SCIPIndexer(ABC):
         workspace_id: Optional[str] = None,
         golden_alias: Optional[str] = None,
         language: Optional[str] = None,
+        allow_degenerate: bool = False,
     ) -> IndexerResult:
         """
         Generate SCIP index for a project.
@@ -66,6 +74,10 @@ class SCIPIndexer(ABC):
                 one of workspace_id/golden_alias is set. Local indexers ignore it.
             language: Discovered project language (EVO-65021). Used by the delegated
                 backend to select the remote indexer; local indexers ignore it.
+            allow_degenerate: EVO-65365. When True, the delegated backend opts the
+                build into the sandbox's ``allow_degenerate`` path — a bare/unbuilt
+                (golden) repo emits a locals-only index instead of exit-71. Only the
+                delegated backend forwards it; local indexers ignore it. Keyword-only.
 
         Returns:
             IndexerResult with generation status and details

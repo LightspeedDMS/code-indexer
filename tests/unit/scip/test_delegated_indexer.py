@@ -203,6 +203,177 @@ class TestDelegatedIndexerGoldenAlias:
         assert "workspace_id" not in args
 
 
+class TestDelegatedIndexerAllowDegenerate:
+    """EVO-65365: golden repos opt into the sandbox's locals-only fallback."""
+
+    def test_allow_degenerate_true_adds_argument(self, tmp_path):
+        output_dir = tmp_path / ".code-indexer" / "scip"
+        output_dir.mkdir(parents=True)
+        fake = _fake_requests(
+            post_side_effect=_post_writing_index(
+                output_dir, _rpc_result(exit_code=0, output="ok", duration_ms=1)
+            )
+        )
+        indexer = _make_indexer(tmp_path, fake)
+
+        indexer.generate(
+            tmp_path,
+            output_dir,
+            "npm",
+            golden_alias="svc-foo",
+            language="typescript",
+            allow_degenerate=True,
+        )
+        args = fake.post.call_args.kwargs["json"]["params"]["arguments"]
+        assert args["allow_degenerate"] is True
+
+    def test_allow_degenerate_false_omits_argument(self, tmp_path):
+        """Default (workspace_id path) → no allow_degenerate key in the request."""
+        output_dir = tmp_path / ".code-indexer" / "scip"
+        output_dir.mkdir(parents=True)
+        fake = _fake_requests(
+            post_side_effect=_post_writing_index(
+                output_dir, _rpc_result(exit_code=0, output="ok", duration_ms=1)
+            )
+        )
+        indexer = _make_indexer(tmp_path, fake)
+
+        indexer.generate(
+            tmp_path,
+            output_dir,
+            "npm",
+            workspace_id="W-1",
+            language="typescript",
+        )
+        args = fake.post.call_args.kwargs["json"]["params"]["arguments"]
+        assert "allow_degenerate" not in args
+
+    def test_degenerate_response_flag_is_surfaced_on_result(self, tmp_path):
+        """A ``degenerate: true`` envelope → IndexerResult.degenerate is True."""
+        output_dir = tmp_path / ".code-indexer" / "scip"
+        output_dir.mkdir(parents=True)
+        fake = _fake_requests(
+            post_side_effect=_post_writing_index(
+                output_dir,
+                _rpc_result(exit_code=0, output="ok", duration_ms=1, degenerate=True),
+            )
+        )
+        indexer = _make_indexer(tmp_path, fake)
+
+        result = indexer.generate(
+            tmp_path,
+            output_dir,
+            "npm",
+            golden_alias="svc-foo",
+            language="typescript",
+            allow_degenerate=True,
+        )
+        assert result.status == IndexerStatus.SUCCESS
+        assert result.degenerate is True
+
+    def test_no_degenerate_flag_defaults_false(self, tmp_path):
+        output_dir = tmp_path / ".code-indexer" / "scip"
+        output_dir.mkdir(parents=True)
+        fake = _fake_requests(
+            post_side_effect=_post_writing_index(
+                output_dir, _rpc_result(exit_code=0, output="ok", duration_ms=1)
+            )
+        )
+        indexer = _make_indexer(tmp_path, fake)
+
+        result = indexer.generate(
+            tmp_path, output_dir, "npm", workspace_id="W", language="typescript"
+        )
+        assert result.status == IndexerStatus.SUCCESS
+        assert result.degenerate is False
+
+
+class TestDelegatedIndexerProjectVersion:
+    """EVO-65365 Part 3: send the repo's git HEAD so scip stops shelling to git."""
+
+    def test_project_version_from_commit_is_sent(self, tmp_path, monkeypatch):
+        output_dir = tmp_path / ".code-indexer" / "scip"
+        output_dir.mkdir(parents=True)
+        monkeypatch.setattr(
+            "code_indexer.scip.indexers.delegated.get_current_commit",
+            lambda _root: "deadbeefcafe",
+        )
+        fake = _fake_requests(
+            post_side_effect=_post_writing_index(
+                output_dir, _rpc_result(exit_code=0, output="ok", duration_ms=1)
+            )
+        )
+        indexer = _make_indexer(tmp_path, fake)
+
+        indexer.generate(
+            tmp_path,
+            output_dir,
+            "npm",
+            golden_alias="svc-foo",
+            language="typescript",
+        )
+        args = fake.post.call_args.kwargs["json"]["params"]["arguments"]
+        assert args["project_version"] == "deadbeefcafe"
+
+    def test_project_version_omitted_when_commit_none(self, tmp_path, monkeypatch):
+        output_dir = tmp_path / ".code-indexer" / "scip"
+        output_dir.mkdir(parents=True)
+        monkeypatch.setattr(
+            "code_indexer.scip.indexers.delegated.get_current_commit",
+            lambda _root: None,
+        )
+        fake = _fake_requests(
+            post_side_effect=_post_writing_index(
+                output_dir, _rpc_result(exit_code=0, output="ok", duration_ms=1)
+            )
+        )
+        indexer = _make_indexer(tmp_path, fake)
+
+        indexer.generate(
+            tmp_path,
+            output_dir,
+            "npm",
+            golden_alias="svc-foo",
+            language="typescript",
+        )
+        args = fake.post.call_args.kwargs["json"]["params"]["arguments"]
+        assert "project_version" not in args
+
+    def test_golden_repo_request_full_contract(self, tmp_path, monkeypatch):
+        """The exact arguments dict cidx sends for a golden repo (EVO-65365)."""
+        output_dir = tmp_path / ".code-indexer" / "scip"
+        output_dir.mkdir(parents=True)
+        monkeypatch.setattr(
+            "code_indexer.scip.indexers.delegated.get_current_commit",
+            lambda _root: "c0ffee",
+        )
+        fake = _fake_requests(
+            post_side_effect=_post_writing_index(
+                output_dir, _rpc_result(exit_code=0, output="ok", duration_ms=1)
+            )
+        )
+        indexer = _make_indexer(tmp_path, fake)
+
+        indexer.generate(
+            tmp_path,
+            output_dir,
+            "npm",
+            golden_alias="svc-foo",
+            language="typescript",
+            allow_degenerate=True,
+        )
+        args = fake.post.call_args.kwargs["json"]["params"]["arguments"]
+        assert args == {
+            "golden_alias": "svc-foo",
+            "project_path": ".",
+            "build_system": "npm",
+            "language": "typescript",
+            "output_dir": ".code-indexer/scip",
+            "allow_degenerate": True,
+            "project_version": "c0ffee",
+        }
+
+
 class TestDelegatedIndexerFailure:
     def test_nonzero_exit_is_failure(self, tmp_path):
         """exit_code != 0 => FAILED, no output_file, stderr from errors."""

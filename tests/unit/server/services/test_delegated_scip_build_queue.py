@@ -114,6 +114,62 @@ class TestSuccess:
         assert get_scip_metrics().get("delegated_build_success") == 1
 
 
+class TestDegenerateMetric:
+    """EVO-65365: a DEGENERATE (locals-only) index is a success that must be
+    OBSERVABLE — the worker meters ``delegated_degenerate`` from the per-project
+    ``IndexerResult.degenerate`` flag surfaced by the DelegatedIndexer."""
+
+    def _degenerate_result(self, *, degenerate_flags):
+        project_results = [
+            SimpleNamespace(indexer_result=SimpleNamespace(stderr="", degenerate=flag))
+            for flag in degenerate_flags
+        ]
+        return GenerationResult(
+            total_projects=len(degenerate_flags),
+            successful_projects=len(degenerate_flags),
+            failed_projects=0,
+            project_results=project_results,
+        )
+
+    def test_degenerate_success_records_metric(self):
+        q = _queue()
+        build = DelegatedScipBuild(
+            alias="bare-repo",
+            dedupe_key="bare-repo@abc",
+            run_build=lambda: self._degenerate_result(degenerate_flags=[True]),
+        )
+        q.enqueue(build, start_worker=False)
+        q.drain_pending()
+        metrics = get_scip_metrics()
+        assert metrics.get("delegated_build_success") == 1
+        assert metrics.get("delegated_degenerate") == 1
+
+    def test_degenerate_metric_counts_each_degenerate_project(self):
+        q = _queue()
+        build = DelegatedScipBuild(
+            alias="mixed-repo",
+            dedupe_key="mixed-repo@abc",
+            run_build=lambda: self._degenerate_result(
+                degenerate_flags=[True, False, True]
+            ),
+        )
+        q.enqueue(build, start_worker=False)
+        q.drain_pending()
+        assert get_scip_metrics().get("delegated_degenerate") == 2
+
+    def test_full_index_success_does_not_record_degenerate(self):
+        q = _queue()
+        build = DelegatedScipBuild(
+            alias="full-repo",
+            dedupe_key="full-repo@abc",
+            run_build=lambda: self._degenerate_result(degenerate_flags=[False]),
+        )
+        q.enqueue(build, start_worker=False)
+        q.drain_pending()
+        assert get_scip_metrics().get("delegated_build_success") == 1
+        assert "delegated_degenerate" not in get_scip_metrics()
+
+
 class TestBackpressure:
     def test_http_429_reenqueues_then_succeeds(self):
         q = _queue()

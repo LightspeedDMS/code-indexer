@@ -1581,10 +1581,20 @@ class ServerConfig:
     workspace_mcp: Optional[WorkspaceMcpConfig] = (
         None  # EVO-64616: workspace-mcp delegated clone backend settings
     )
+    # EVO-65365: the delegated SCIP backend targets the STANDING sandbox-mcp
+    # service (http://sandbox-mcp.claude-code-indexer:8200) — a DIFFERENT service
+    # than the workspace-mcp that ``workspace_mcp`` (above) points at for the
+    # clone/git delegation backends. One endpoint cannot be both, so ``scip_sandbox``
+    # lets the SCIP backend point at sandbox-mcp while ``workspace_mcp`` stays
+    # workspace-mcp. Reuses the ``WorkspaceMcpConfig`` shape (endpoint + api_key +
+    # timeout). When unset, ``scip_backend_wiring`` falls back to ``workspace_mcp``
+    # for backward compatibility.
+    scip_sandbox: Optional[WorkspaceMcpConfig] = None
     # EVO-65021: SCIP compile-step backend — "local" (in-pod subprocess indexers,
-    # default) or "delegated" (compile via sandbox-mcp). "delegated" reuses the
-    # workspace_mcp block above (endpoint + api_key) pointed at sandbox-mcp; see
-    # server/startup/scip_backend_wiring.py (fail-loud, no local fallback).
+    # default) or "delegated" (compile via sandbox-mcp). "delegated" reads its
+    # endpoint + api_key from ``scip_sandbox`` (falling back to ``workspace_mcp``)
+    # pointed at sandbox-mcp; see server/startup/scip_backend_wiring.py (fail-loud,
+    # no local fallback).
     scip_backend: str = "local"
 
     # Story #923 - Admin TOTP step-up elevation enforcement (runtime, never bootstrap)
@@ -2612,6 +2622,18 @@ class ServerConfigManager:
         ):
             config_dict["workspace_mcp"] = WorkspaceMcpConfig(
                 **config_dict["workspace_mcp"]
+            )
+
+        # EVO-65365: Convert scip_sandbox dict to WorkspaceMcpConfig. The delegated
+        # SCIP backend targets the standing sandbox-mcp (a different service than
+        # workspace-mcp used by clone/git delegation); scip_sandbox lets SCIP point
+        # at sandbox-mcp while workspace_mcp stays workspace-mcp. Reuses the same
+        # WorkspaceMcpConfig shape (endpoint + api_key + timeout).
+        if "scip_sandbox" in config_dict and isinstance(
+            config_dict["scip_sandbox"], dict
+        ):
+            config_dict["scip_sandbox"] = WorkspaceMcpConfig(
+                **config_dict["scip_sandbox"]
             )
 
         # Story #565: Convert password_expiry_config dict to PasswordExpiryConfig

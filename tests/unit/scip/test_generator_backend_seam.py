@@ -27,6 +27,7 @@ class _RecordingIndexer(SCIPIndexer):
         workspace_id: Optional[str] = None,
         golden_alias: Optional[str] = None,
         language: Optional[str] = None,
+        allow_degenerate: bool = False,
     ) -> IndexerResult:
         self.calls.append(
             {
@@ -36,6 +37,7 @@ class _RecordingIndexer(SCIPIndexer):
                 "workspace_id": workspace_id,
                 "golden_alias": golden_alias,
                 "language": language,
+                "allow_degenerate": allow_degenerate,
             }
         )
         # Return FAILED so the generator does not attempt the DB build.
@@ -191,6 +193,76 @@ class TestBackendSeam:
         assert call["language"] == "typescript"
 
 
+class TestAllowDegenerateThreading:
+    """EVO-65365: allow_degenerate is threaded into every indexer.generate() call
+    (both generate() and rebuild_projects()), the same way golden_alias is."""
+
+    def _seed_failed_ts_status(self, gen):
+        from code_indexer.scip.status import (
+            StatusTracker,
+            GenerationStatus,
+            ProjectStatus,
+            OverallStatus,
+        )
+        from datetime import datetime
+
+        tracker = StatusTracker(gen.scip_dir)
+        status = GenerationStatus(
+            overall_status=OverallStatus.FAILED,
+            total_projects=1,
+            successful_projects=0,
+            failed_projects=1,
+            projects={
+                ".": ProjectStatus(
+                    status=OverallStatus.FAILED,
+                    language="typescript",
+                    build_system="npm",
+                    timestamp=datetime.now().isoformat(),
+                )
+            },
+        )
+        tracker.save(status)
+
+    def test_generate_threads_allow_degenerate_true(self, tmp_path):
+        (tmp_path / "package.json").write_text("{}")
+        recorder = _RecordingIndexer()
+        gen = SCIPGenerator(
+            tmp_path,
+            indexer_map={"typescript": recorder},
+            golden_alias="svc-foo",
+            allow_degenerate=True,
+        )
+        gen.generate()
+        assert recorder.calls[0]["allow_degenerate"] is True
+
+    def test_generate_defaults_allow_degenerate_false(self, tmp_path):
+        (tmp_path / "package.json").write_text("{}")
+        recorder = _RecordingIndexer()
+        gen = SCIPGenerator(
+            tmp_path,
+            indexer_map={"typescript": recorder},
+            workspace_id="W-1",
+        )
+        gen.generate()
+        assert recorder.calls[0]["allow_degenerate"] is False
+
+    def test_rebuild_threads_allow_degenerate_true(self, tmp_path):
+        """rebuild_projects() also threads it — mutation-check like golden_alias:
+        removing the kwarg at the rebuild call site fails this test."""
+        (tmp_path / "package.json").write_text("{}")
+        recorder = _RecordingIndexer()
+        gen = SCIPGenerator(
+            tmp_path,
+            indexer_map={"typescript": recorder},
+            golden_alias="svc-foo",
+            allow_degenerate=True,
+        )
+        self._seed_failed_ts_status(gen)
+        gen.rebuild_projects(["."], force=True)
+        assert len(recorder.calls) == 1
+        assert recorder.calls[0]["allow_degenerate"] is True
+
+
 class _FixedResultIndexer(SCIPIndexer):
     """Returns a caller-specified FAILED result (exit code / stderr)."""
 
@@ -207,6 +279,7 @@ class _FixedResultIndexer(SCIPIndexer):
         workspace_id=None,
         golden_alias=None,
         language=None,
+        allow_degenerate=False,
     ):
         return IndexerResult(
             status=IndexerStatus.FAILED,
