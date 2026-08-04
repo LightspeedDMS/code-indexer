@@ -40,6 +40,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import subprocess
 import threading
 import time
@@ -57,6 +58,9 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_URL = "http://orchestrator.agent-orchestrator.svc.cluster.local:3001"
 TERMINAL = {"completed", "failed", "cancelled", "error"}
+
+_URL_CREDENTIALS_RE = re.compile(r"(://)[^/@\s]+@")
+
 CLI_USED = "orchestrator"
 
 
@@ -154,7 +158,10 @@ class OrchestratorInvoker:
                 text=True,
                 timeout=10,
             )
-            info: Dict[str, Any] = {"repoUrl": url.stdout.strip()}
+            raw_url = url.stdout.strip()
+            info: Dict[str, Any] = {
+                "repoUrl": _URL_CREDENTIALS_RE.sub(r"\1", raw_url),
+            }
             b = branch.stdout.strip()
             if branch.returncode == 0 and b and b != "HEAD":
                 info["branch"] = b
