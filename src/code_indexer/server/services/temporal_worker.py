@@ -27,6 +27,7 @@ failure is job-fatal.
 """
 
 import logging
+import os
 import time
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
@@ -241,7 +242,28 @@ def run_temporal_worker(
             ActivatedRepoManager,
         )
 
-        _activated_repo_manager = ActivatedRepoManager()
+        # Bug #1517: a bare, no-arg ActivatedRepoManager() resolves its
+        # OWN default data_dir purely from Path.home(), never consulting
+        # CIDX_SERVER_DATA_DIR -- the env var this codebase otherwise
+        # treats as the canonical way to locate the server's configured
+        # data directory for a standalone construction outside the normal
+        # DI chain (see ActivatedRepoIndexManager.__init__). On any real
+        # deployment where the server's data dir differs from the OS
+        # default, that mismatch made this worker's internally-
+        # constructed GoldenRepoManager look in the wrong metadata store,
+        # so get_actual_repo_path() raised GoldenRepoNotFoundError for a
+        # golden repo that genuinely exists elsewhere -- fail-open (caught
+        # below by load_golden_temporal_config), but permanently losing
+        # Story #1461's "use the golden repo's own current config for
+        # embedder selection" correctness fix and logging noise on every
+        # temporal query.
+        _env_server_dir = os.environ.get("CIDX_SERVER_DATA_DIR")
+        _worker_data_dir = (
+            str(Path(_env_server_dir) / "data")
+            if _env_server_dir
+            else str(Path.home() / ".cidx-server" / "data")
+        )
+        _activated_repo_manager = ActivatedRepoManager(data_dir=_worker_data_dir)
         golden_repo_alias = _resolve_golden_repo_alias(
             worker_input.username,
             worker_input.repository_alias,
