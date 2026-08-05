@@ -41,7 +41,7 @@ import os
 import tempfile
 from enum import Enum
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterator, Optional
+from typing import Any, Callable, Optional
 
 from code_indexer.storage.background_index_rebuilder import BackgroundIndexRebuilder
 from code_indexer.storage.hnsw_index_manager import (

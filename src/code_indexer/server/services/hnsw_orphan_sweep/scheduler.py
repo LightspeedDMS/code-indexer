@@ -249,9 +249,7 @@ class HNSWOrphanRepairSweepScheduler:
         for candidate in batch:
             outcome = self._process_one(candidate)
             counts[outcome.value] += 1
-            self._state_backend.record_item_processed(
-                candidate.sort_key, outcome.value
-            )
+            self._state_backend.record_item_processed(candidate.sort_key, outcome.value)
 
         # Pass is complete when this tick's batch consumed the ENTIRE
         # pending list -- i.e. no candidate remains whose key is greater

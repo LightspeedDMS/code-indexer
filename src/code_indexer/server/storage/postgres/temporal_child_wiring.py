@@ -83,7 +83,6 @@ _TEMPORAL_CHILD_POOL_TIMEOUT_SECONDS = 30.0
 CIDX_SERVER_REFRESH_CONTEXT_ENV = "CIDX_SERVER_REFRESH_CONTEXT"
 
 
-
 def build_temporal_child_env(
     server_config: Optional[ServerConfig], base_env: Optional[Dict[str, str]] = None
 ) -> Dict[str, str]:

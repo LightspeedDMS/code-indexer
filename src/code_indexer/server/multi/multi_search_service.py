@@ -597,7 +597,6 @@ class MultiSearchService:
                 memory_governor=get_memory_governor(),
             )
 
-
             # Execute temporal query via fusion dispatch (Story #640).
             # NOTE: the shared thread pool (self.thread_executor) is intentionally NOT
             # forwarded as parallel_executor here.  Outer per-repo tasks already run on

@@ -62,7 +62,7 @@ def temporal_shard_has_committed_rows(shard_dir: Path) -> bool:
 
         # treat_absent: this is a side-effect-free inspection predicate, so a
         # missing/corrupt store means "no data", never an exception.
-        return chunk_store_has_real_data(shard_dir / "chunks.db")
+        return bool(chunk_store_has_real_data(shard_dir / "chunks.db"))
 
     for _ in shard_dir.rglob("vector_*.json"):
         return True

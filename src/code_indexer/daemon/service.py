@@ -554,7 +554,6 @@ class CIDXDaemonService(Service):
 
             index_dir = project_root / ".code-indexer" / "index"
 
-
             try:
                 results = execute_temporal_query_with_fusion(
                     config=config,

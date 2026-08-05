@@ -8,7 +8,6 @@ Used by CLI, server (semantic_query_manager), multi_search_service, and daemon.
 """
 
 import logging
-import time
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -292,30 +291,28 @@ def execute_temporal_query_with_fusion(
             )
             precomputed_query_vector = None
 
-    results_by_shard, shards_attempted, shards_succeeded = (
-        _query_shards_raw(
-            config,
-            vector_store,
-            shards,
-            query_text,
-            limit * _effective_overfetch_multiplier(vector_store),
-            time_range,
-            file_path_filter,
-            language=language,
-            exclude_language=exclude_language,
-            exclude_path=exclude_path,
-            diff_types=diff_types,
-            author=author,
-            chunk_type=chunk_type,
-            no_embedding_cache_shortcut=no_embedding_cache_shortcut,
-            at_commit_ts=at_commit_ts,
-            precomputed_query_vector=precomputed_query_vector,
-            true_user_limit=limit,
-            display_limit=limit,
-            on_shard_complete=on_shard_complete,
-            cancel_check=cancel_check,
-            maybe_inject_internal_latency=maybe_inject_internal_latency,
-        )
+    results_by_shard, shards_attempted, shards_succeeded = _query_shards_raw(
+        config,
+        vector_store,
+        shards,
+        query_text,
+        limit * _effective_overfetch_multiplier(vector_store),
+        time_range,
+        file_path_filter,
+        language=language,
+        exclude_language=exclude_language,
+        exclude_path=exclude_path,
+        diff_types=diff_types,
+        author=author,
+        chunk_type=chunk_type,
+        no_embedding_cache_shortcut=no_embedding_cache_shortcut,
+        at_commit_ts=at_commit_ts,
+        precomputed_query_vector=precomputed_query_vector,
+        true_user_limit=limit,
+        display_limit=limit,
+        on_shard_complete=on_shard_complete,
+        cancel_check=cancel_check,
+        maybe_inject_internal_latency=maybe_inject_internal_latency,
     )
     # Bug #1529: the pin-exhaustion warning is gone with the resolver -- a
     # shard's path is fixed, so there is no alias swap to lose a race against.
@@ -492,7 +489,7 @@ def _query_shards_raw(
     on_shard_complete: Optional[Callable[[int, int, List[Any]], None]] = None,
     cancel_check: Optional[Callable[[], bool]] = None,
     maybe_inject_internal_latency: Optional[Callable[[str], None]] = None,
-) -> Tuple[Dict[str, list], int, int, List[str]]:
+) -> Tuple[Dict[str, list], int, int]:
     """Query shards SEQUENTIALLY and return raw per-shard result lists (no fusion).
 
     Shards are loaded one at a time to bound peak RAM usage. Returns a dict

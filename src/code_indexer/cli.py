@@ -5887,7 +5887,6 @@ def query(
 
             index_dir = config.codebase_dir / ".code-indexer" / "index"
 
-
             if not quiet:
                 if time_range != "all":
                     console.print(
