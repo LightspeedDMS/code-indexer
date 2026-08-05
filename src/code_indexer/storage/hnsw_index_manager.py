@@ -499,7 +499,16 @@ class HNSWIndexManager:
         os.close(tmp_hnsw_fd)  # hnswlib opens by path, not fd
         try:
             index.save_index(tmp_hnsw_path)
+            # Bug #1529 finding #7(a): atomic was not enough. A fixed temporal
+            # path means refreshes rewrite this file IN PLACE, so flush the
+            # contents BEFORE publishing them, and fsync the directory AFTER
+            # the rename so the rename itself survives power-loss. The
+            # ordering is the whole point: an fsync on the wrong side of
+            # os.replace provides no durability at all.
+            with open(tmp_hnsw_path, "rb") as saved_index_f:
+                nfs_safe_fsync(saved_index_f.fileno())
             os.replace(tmp_hnsw_path, str(index_file))
+            _fsync_directory(collection_path)
         except Exception:
             try:
                 os.unlink(tmp_hnsw_path)
@@ -1430,35 +1439,11 @@ class HNSWIndexManager:
 
                 metadata["hnsw_index"] = hnsw_meta
 
-                # Save metadata atomically — temp file + rename prevents corruption on crash
-                tmp_fd, tmp_path = tempfile.mkstemp(
-                    dir=str(collection_path), suffix=".tmp"
-                )
-                fd_owned = False
-                try:
-                    try:
-                        tmp_f = os.fdopen(tmp_fd, "w")
-                        fd_owned = True
-                        with tmp_f:
-                            json.dump(metadata, tmp_f, indent=2)
-                        os.replace(tmp_path, str(meta_file))
-                    finally:
-                        if not fd_owned:
-                            try:
-                                os.close(tmp_fd)
-                            except OSError:
-                                pass  # Already closed or invalid — discard
-                except Exception:
-                    try:
-                        os.unlink(tmp_path)
-                    except OSError as cleanup_err:
-                        # Best-effort cleanup — log and discard so original exception propagates
-                        logger.warning(
-                            "Failed to clean up temp metadata file %s: %s",
-                            tmp_path,
-                            cleanup_err,
-                        )
-                    raise
+                # Bug #1529 finding #7(a): route through the ONE durable
+                # writer instead of re-implementing temp-file+rename a third
+                # time. This copy had no fsync at all, so a crash could tear
+                # the file that holds the load-bearing hnsw_index.id_mapping.
+                self._atomic_write_metadata_durable(collection_path, metadata)
             finally:
                 # Release lock
                 nfs_safe_funlock(lock_f.fileno(), _used_lockf)
@@ -1783,33 +1768,11 @@ class HNSWIndexManager:
                     new_hnsw["last_marked_stale"] = None
                 metadata["hnsw_index"] = new_hnsw
 
-                # Save metadata atomically — temp file + rename prevents corruption on crash
-                tmp_meta_fd, tmp_meta_path = tempfile.mkstemp(
-                    dir=str(collection_path), suffix=".tmp"
-                )
-                fd_owned_by_file_obj = False
-                try:
-                    try:
-                        tmp_f = os.fdopen(tmp_meta_fd, "w")
-                        fd_owned_by_file_obj = (
-                            True  # fdopen took ownership; do not close fd directly
-                        )
-                        with tmp_f:
-                            json.dump(metadata, tmp_f, indent=2)
-                        os.replace(tmp_meta_path, str(meta_file))
-                    finally:
-                        if not fd_owned_by_file_obj:
-                            # fdopen raised before taking ownership — close raw fd explicitly
-                            try:
-                                os.close(tmp_meta_fd)
-                            except OSError:
-                                pass  # Already closed or invalid — discard
-                except Exception:
-                    try:
-                        os.unlink(tmp_meta_path)
-                    except FileNotFoundError:
-                        pass  # Already gone — nothing to clean up
-                    raise
+                # Bug #1529 finding #7(a): route through the ONE durable
+                # writer instead of re-implementing temp-file+rename a second
+                # time. This copy had no fsync at all, so a crash could tear
+                # the file that holds the load-bearing hnsw_index.id_mapping.
+                self._atomic_write_metadata_durable(collection_path, metadata)
             finally:
                 # Release lock
                 nfs_safe_funlock(lock_f.fileno(), _used_lockf)
