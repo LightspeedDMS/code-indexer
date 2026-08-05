@@ -2914,6 +2914,39 @@ def _install_embedding_stats_writer_for_index() -> None:
         EmbeddingStatsWriter.set_active(NoOpWriter())
 
 
+def reject_sharded_json_for_temporal(
+    *, index_commits: bool, new_collection_layout: Optional[str]
+) -> None:
+    """Refuse `--index-commits` with `--new-collection-layout=sharded_json`.
+
+    Bug #1529 finding #3. Bug #1528's binding rule is that temporal indexing
+    never writes another legacy `vector_*.json` file -- that explosion
+    (487,076 files for one real repo) is why Epic #1454 exists. `sharded_json`
+    defeated it through two independent doors: it SKIPPED the temporal
+    branch's pre-index in-place consolidation, and
+    `FilesystemVectorStore.create_collection` honors an explicit `False` for
+    temporal collections, so brand-new shards were built legacy too.
+
+    This CLI flag is the only production route to that explicit `False` for
+    temporal (the server always passes chunks_db; the daemon refuses legacy
+    shards outright), so refusing the combination here closes both doors.
+
+    Refused rather than silently upgraded to `chunks_db`: an operator who
+    asked for a layout that must not exist should be told, not quietly
+    overridden (Messi #2 -- no silent fallbacks).
+
+    Raises:
+        ValueError: when the two are combined.
+    """
+    if index_commits and new_collection_layout == "sharded_json":
+        raise ValueError(
+            "--new-collection-layout=sharded_json is not supported with "
+            "--index-commits: temporal indexing must never write legacy "
+            "vector_*.json files (Bug #1528). Use chunks_db, or omit the "
+            "flag -- temporal defaults to the consolidated chunks.db layout."
+        )
+
+
 def _resolve_new_collection_layout(choice: Optional[str]) -> Optional[bool]:
     """Story #1488: map the `--new-collection-layout` Click choice to the
     FilesystemVectorStore/BackendFactory `use_chunks_db_for_new_collections`
@@ -3162,6 +3195,20 @@ def index(
     global console
     if progress_json:
         console = Console(stderr=True)
+
+    # Bug #1529 finding #3: refuse an impossible flag combination BEFORE any
+    # indexing work begins, so no legacy temporal shard is ever created.
+    # Sits beside the sibling --diff-context validation below, and after the
+    # `global console` block above (referencing console before that statement
+    # is a SyntaxError).
+    try:
+        reject_sharded_json_for_temporal(
+            index_commits=index_commits,
+            new_collection_layout=new_collection_layout,
+        )
+    except ValueError as exc:
+        console.print(f"❌ {exc}", style="red")
+        sys.exit(1)
 
     # Validate --diff-context flag (must happen before daemon delegation)
     if diff_context is not None and not index_commits:
@@ -3525,35 +3572,40 @@ def index(
                 # otherwise keep growing its legacy tree on every incremental
                 # run. Migrate those shards IN PLACE first, reusing the same
                 # engine `--migrate-chunks-to-sqlite` drives, under the
-                # index-mutation lock already held above. Skipped ONLY for an
-                # explicit `--new-collection-layout=sharded_json` request.
-                if new_collection_layout != "sharded_json":
-                    from .services.chunk_migration_cli import (
-                        consolidate_legacy_temporal_shards,
-                    )
+                # index-mutation lock already held above.
+                #
+                # Bug #1529 finding #3: this is now UNCONDITIONAL. It used to
+                # be skipped for `--new-collection-layout=sharded_json`, which
+                # let a repo with pre-existing legacy shards keep growing its
+                # legacy tree on every incremental run. That combination is
+                # now refused at the top of this command, so the skip could
+                # only ever be dead code that silently reopened Bug #1528.
+                from .services.chunk_migration_cli import (
+                    consolidate_legacy_temporal_shards,
+                )
 
-                    _migrated, _failed = consolidate_legacy_temporal_shards(
-                        index_dir, console=console
+                _migrated, _failed = consolidate_legacy_temporal_shards(
+                    index_dir, console=console
+                )
+                if _failed:
+                    # Fail LOUD: a failed shard is still authoritative in
+                    # its legacy layout, so proceeding would write more
+                    # legacy rows into it.
+                    console.print(
+                        f"❌ {_failed} legacy temporal shard(s) could not "
+                        "be consolidated to chunks.db storage. Refusing to "
+                        "index, because that would keep adding "
+                        "vector_*.json files to them. Fix or remove the "
+                        "reported shard(s) and retry.",
+                        style="red",
                     )
-                    if _failed:
-                        # Fail LOUD: a failed shard is still authoritative in
-                        # its legacy layout, so proceeding would write more
-                        # legacy rows into it.
-                        console.print(
-                            f"❌ {_failed} legacy temporal shard(s) could not "
-                            "be consolidated to chunks.db storage. Refusing to "
-                            "index, because that would keep adding "
-                            "vector_*.json files to them. Fix or remove the "
-                            "reported shard(s) and retry.",
-                            style="red",
-                        )
-                        sys.exit(1)
-                    if _migrated:
-                        console.print(
-                            f"✅ Consolidated {_migrated} legacy temporal "
-                            "shard(s) to chunks.db storage",
-                            style="green",
-                        )
+                    sys.exit(1)
+                if _migrated:
+                    console.print(
+                        f"✅ Consolidated {_migrated} legacy temporal "
+                        "shard(s) to chunks.db storage",
+                        style="green",
+                    )
 
                 # Initialize temporal indexer with provider-aware collection name.
                 # Story #1290 (E2E-discovered bug): the actual collection_name MUST

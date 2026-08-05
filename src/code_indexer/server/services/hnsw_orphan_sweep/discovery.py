@@ -32,6 +32,7 @@ from typing import Any, Iterator
 from code_indexer.storage.hnsw_index_manager import HNSWIndexManager
 from code_indexer.server.storage.shared.snapshot_paths import is_versioned_snapshot
 from code_indexer.services.temporal.temporal_server_paths import (
+    resolve_golden_repo_coordinates,
     server_temporal_index_root,
 )
 
@@ -207,7 +208,34 @@ def _golden_candidates(golden_repo_manager: Any) -> Iterator[SweepCandidate]:
         # alias pointers), so they are swept and repaired IN PLACE exactly
         # like everything else -- this replaces Story #1457's bespoke
         # sister-pointer candidate/repair pair entirely.
-        temporal_root = server_temporal_index_root(repo_root.parent, alias)
+        #
+        # Bug #1529 finding #6: the derivation MUST go through
+        # resolve_golden_repo_coordinates, never a bare `repo_root.parent`.
+        # get_actual_repo_path() can legitimately return the VERSIONED form
+        # ({golden_repos_dir}/.versioned/{alias}/v_*/ -- see memory
+        # feedback_versioned_path_trap), whose .parent is
+        # {golden_repos_dir}/.versioned/{alias}; the temporal root computed
+        # from that never exists, so every versioned-topology repo's temporal
+        # shards were silently skipped, voiding Epic #1333's zero-tolerance
+        # orphan guarantee for them. The resolver handles BOTH layouts and
+        # returns identical coordinates for each.
+        coordinates = resolve_golden_repo_coordinates(repo_root)
+        if coordinates is None:
+            # Never a silent skip: an unrecognized layout is a real temporal
+            # sweep coverage hole, and invisibility is what let finding #6
+            # survive review in the first place.
+            logger.warning(
+                "enumerate_sweep_candidates: could not derive the fixed "
+                "temporal index root for golden repo '%s' from %s "
+                "(unrecognized layout); its temporal shards are NOT being "
+                "swept this pass",
+                alias,
+                repo_root,
+            )
+            continue
+
+        golden_repos_dir, bare_alias = coordinates
+        temporal_root = server_temporal_index_root(golden_repos_dir, bare_alias)
         for relpath in iter_hnsw_collections_under(
             temporal_root, relative_to=temporal_root
         ):
