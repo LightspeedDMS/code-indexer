@@ -60,7 +60,7 @@ import socket
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import Any, List
+from typing import Any, List, Tuple
 
 from code_indexer.services.temporal.temporal_collection_naming import (
     LEGACY_TEMPORAL_COLLECTION,
@@ -319,7 +319,22 @@ def enumerate_migration_targets(index_dir: Path) -> MigrationInventory:
             # Codex Finding 7: the bare directory is NEVER a shard. Exclude
             # it by EXACT NAME (not the data-presence discriminator, which
             # would misclassify a bare dir WITH data as migratable).
-            if name == LEGACY_TEMPORAL_COLLECTION:
+            # Bug #1528 (found by a real `cidx index --index-commits` run)
+            # adds a SECOND never-a-shard case to Codex Finding 7's bare
+            # name: any temporal directory with no `collection_meta.json`.
+            # Without it this is not a collection at all and can NEVER be
+            # consolidated -- the engine has no metadata file to record the
+            # authoritative vector_count in, so migration always failed.
+            # TemporalIndexer creates exactly such a directory per embedder
+            # (`code-indexer-temporal-{slug}`, the quarter-less shape) to
+            # anchor its shared bookkeeping store. Both cases share the same
+            # handling: silently skipped when the directory holds no data,
+            # surfaced through the existing operator-visible anomaly channel
+            # (never migrated, never deleted) when it does.
+            if (
+                name == LEGACY_TEMPORAL_COLLECTION
+                or not (entry / "collection_meta.json").exists()
+            ):
                 if _bare_temporal_has_vector_data(entry):
                     inventory.anomalies.append(entry)
                 continue
@@ -456,6 +471,71 @@ def _is_already_fully_migrated(path: Path) -> bool:
         return bool(verify_collection_fully_migrated(path))
     except Exception:  # pragma: no cover - oracle is documented never-raising
         return False
+
+
+def find_pending_legacy_temporal_shards(index_dir: Path) -> List[Path]:
+    """Temporal shards under ``index_dir`` that are not already fully
+    consolidated. Reuses ``enumerate_migration_targets`` (which classifies
+    temporal shards and excludes the bare ``code-indexer-temporal``
+    bookkeeping directory) and ``_is_already_fully_migrated``.
+
+    Public because it has TWO consumers and must stay a single authority:
+    :func:`consolidate_legacy_temporal_shards` (which migrates them) and the
+    daemon's own temporal-indexing branch (``daemon/service.py``), which
+    cannot safely run a long, lock-held migration inside an RPC and instead
+    REFUSES to index while any shard is pending, pointing the operator at
+    `cidx index --migrate-chunks-to-sqlite`.
+
+    A missing ``index_dir`` yields an empty list (never raises)."""
+    if not index_dir.is_dir():
+        return []
+    return [
+        path
+        for path in enumerate_migration_targets(index_dir).temporal
+        if not _is_already_fully_migrated(path)
+    ]
+
+
+def consolidate_legacy_temporal_shards(
+    index_dir: Path, *, console: Any
+) -> Tuple[int, int]:
+    """Bug #1528: consolidate every legacy TEMPORAL shard under ``index_dir``
+    in place, returning ``(migrated, failed)``.
+
+    Called by `cidx index --index-commits` BEFORE any temporal write (under
+    the index-mutation lock that branch already holds), so an incremental
+    run against a repo indexed before this fix MIGRATES its shards instead
+    of appending yet more ``vector_*.json`` files -- an existing
+    collection's committed layout always wins, so the write-path fix alone
+    cannot cover pre-existing data. SEMANTIC collections are never touched:
+    their layout stays an explicit CLI opt-in (Story #1488).
+
+    A ``failed`` shard is left fully authoritative in its legacy state, so
+    the caller must treat any failure as fatal rather than proceed to write
+    more legacy rows.
+    """
+    pending = find_pending_legacy_temporal_shards(Path(index_dir))
+    if not pending:
+        return 0, 0
+
+    console.print(
+        f"🔧 Consolidating {len(pending)} legacy temporal shard(s) to "
+        "chunks.db storage before indexing...",
+        style="blue",
+    )
+
+    migrated = 0
+    failed = 0
+    for path in pending:
+        outcome = _migrate_one(path, MigrationTargetKind.TEMPORAL, console=console)
+        if outcome.status in (
+            MigrationStatus.MIGRATED,
+            MigrationStatus.ALREADY_MIGRATED,
+        ):
+            migrated += 1
+        else:
+            failed += 1
+    return migrated, failed
 
 
 def _migrate_one(

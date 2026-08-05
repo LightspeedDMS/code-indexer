@@ -118,7 +118,15 @@ def _make_config_manager(tmp_path: Path, aggregation_chunk_chars: int = 4096):
 
 def _make_indexer(repo: Path, index_dir: Path, aggregation_chunk_chars: int = 4096):
     index_dir.mkdir(parents=True, exist_ok=True)
-    vector_store = FilesystemVectorStore(base_path=index_dir, project_root=repo)
+    vector_store = FilesystemVectorStore(
+        base_path=index_dir,
+        project_root=repo,
+        # Bug #1528: temporal collections are CHUNKS_DB by default now. These
+        # tests inspect vector_*.json files directly, so they pin the legacy
+        # layout explicitly (still fully supported on request); the CHUNKS_DB
+        # temporal path is covered by test_temporal_chunks_db_layout_1528.py.
+        use_chunks_db_for_new_collections=False,
+    )
     config_manager = _make_config_manager(repo, aggregation_chunk_chars)
     indexer = TemporalIndexer(
         config_manager,
@@ -580,7 +588,15 @@ class TestDeterministicFixtureCounts:
 
         index_dir = tmp_path / "index"
         index_dir.mkdir(parents=True, exist_ok=True)
-        vector_store = FilesystemVectorStore(base_path=index_dir, project_root=repo)
+        vector_store = FilesystemVectorStore(
+            base_path=index_dir,
+            project_root=repo,
+            # Bug #1528: temporal collections are CHUNKS_DB by default now. These
+            # tests inspect vector_*.json files directly, so they pin the legacy
+            # layout explicitly (still fully supported on request); the CHUNKS_DB
+            # temporal path is covered by test_temporal_chunks_db_layout_1528.py.
+            use_chunks_db_for_new_collections=False,
+        )
 
         config = Config(codebase_dir=repo)
         config.embedding_provider = "voyage-ai"

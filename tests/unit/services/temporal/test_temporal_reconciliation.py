@@ -94,7 +94,13 @@ class TestMissingCommitsAcrossShards:
     """AC15: reconcile returns exactly the set of missing (absent) commits."""
 
     def test_commit_absent_from_nonexistent_shard_is_missing(self, tmp_path):
-        vector_store = FilesystemVectorStore(base_path=tmp_path / "index")
+        vector_store = FilesystemVectorStore(
+            base_path=tmp_path / "index",
+            # Bug #1528: temporal is CHUNKS_DB by default now; these tests
+            # write/inspect legacy vector_*.json fixtures, so pin the legacy
+            # layout explicitly (still supported on request).
+            use_chunks_db_for_new_collections=False,
+        )
         all_commits = [_commit("aaa111", _TS_Q1)]
 
         missing = reconcile_temporal_index(vector_store, all_commits, MODEL_NAME)
@@ -102,7 +108,13 @@ class TestMissingCommitsAcrossShards:
         assert [c.hash for c in missing] == ["aaa111"]
 
     def test_complete_commit_is_not_missing(self, tmp_path):
-        vector_store = FilesystemVectorStore(base_path=tmp_path / "index")
+        vector_store = FilesystemVectorStore(
+            base_path=tmp_path / "index",
+            # Bug #1528: temporal is CHUNKS_DB by default now; these tests
+            # write/inspect legacy vector_*.json fixtures, so pin the legacy
+            # layout explicitly (still supported on request).
+            use_chunks_db_for_new_collections=False,
+        )
         _write_complete_commit(vector_store, SHARD_2024Q1, "proj", "aaa111")
 
         all_commits = [_commit("aaa111", _TS_Q1)]
@@ -113,7 +125,13 @@ class TestMissingCommitsAcrossShards:
     def test_mixed_shards_only_missing_ones_returned(self, tmp_path):
         """Commits spanning two different quarterly shards: only the
         genuinely missing ones come back, in original chronological order."""
-        vector_store = FilesystemVectorStore(base_path=tmp_path / "index")
+        vector_store = FilesystemVectorStore(
+            base_path=tmp_path / "index",
+            # Bug #1528: temporal is CHUNKS_DB by default now; these tests
+            # write/inspect legacy vector_*.json fixtures, so pin the legacy
+            # layout explicitly (still supported on request).
+            use_chunks_db_for_new_collections=False,
+        )
         _write_complete_commit(vector_store, SHARD_2024Q1, "proj", "aaa111")
         # bbb222 (Q1) and ccc333 (Q2) are never indexed.
 
@@ -127,7 +145,13 @@ class TestMissingCommitsAcrossShards:
         assert [c.hash for c in missing] == ["bbb222", "ccc333"]
 
     def test_preserves_chronological_order(self, tmp_path):
-        vector_store = FilesystemVectorStore(base_path=tmp_path / "index")
+        vector_store = FilesystemVectorStore(
+            base_path=tmp_path / "index",
+            # Bug #1528: temporal is CHUNKS_DB by default now; these tests
+            # write/inspect legacy vector_*.json fixtures, so pin the legacy
+            # layout explicitly (still supported on request).
+            use_chunks_db_for_new_collections=False,
+        )
         _write_complete_commit(vector_store, SHARD_2024Q1, "proj", "commit3")
 
         all_commits = [
@@ -141,7 +165,13 @@ class TestMissingCommitsAcrossShards:
         assert [c.hash for c in missing] == ["commit1", "commit2", "commit4"]
 
     def test_all_commits_indexed_returns_empty(self, tmp_path):
-        vector_store = FilesystemVectorStore(base_path=tmp_path / "index")
+        vector_store = FilesystemVectorStore(
+            base_path=tmp_path / "index",
+            # Bug #1528: temporal is CHUNKS_DB by default now; these tests
+            # write/inspect legacy vector_*.json fixtures, so pin the legacy
+            # layout explicitly (still supported on request).
+            use_chunks_db_for_new_collections=False,
+        )
         _write_complete_commit(vector_store, SHARD_2024Q1, "proj", "commit1")
         _write_complete_commit(vector_store, SHARD_2024Q1, "proj", "commit2")
 
@@ -151,7 +181,13 @@ class TestMissingCommitsAcrossShards:
         assert missing == []
 
     def test_no_commits_indexed_returns_all(self, tmp_path):
-        vector_store = FilesystemVectorStore(base_path=tmp_path / "index")
+        vector_store = FilesystemVectorStore(
+            base_path=tmp_path / "index",
+            # Bug #1528: temporal is CHUNKS_DB by default now; these tests
+            # write/inspect legacy vector_*.json fixtures, so pin the legacy
+            # layout explicitly (still supported on request).
+            use_chunks_db_for_new_collections=False,
+        )
         all_commits = [_commit("commit1", _TS_Q1), _commit("commit2", _TS_Q2)]
 
         missing = reconcile_temporal_index(vector_store, all_commits, MODEL_NAME)
@@ -165,7 +201,13 @@ class TestPartialCommitDetectionAndRewrite:
     not create duplicates or leave orphaned points behind."""
 
     def test_partial_commit_is_returned_as_missing(self, tmp_path):
-        vector_store = FilesystemVectorStore(base_path=tmp_path / "index")
+        vector_store = FilesystemVectorStore(
+            base_path=tmp_path / "index",
+            # Bug #1528: temporal is CHUNKS_DB by default now; these tests
+            # write/inspect legacy vector_*.json fixtures, so pin the legacy
+            # layout explicitly (still supported on request).
+            use_chunks_db_for_new_collections=False,
+        )
         _write_partial_commit(vector_store, SHARD_2024Q1, "proj", "aaa111")
 
         all_commits = [_commit("aaa111", _TS_Q1)]
@@ -178,7 +220,13 @@ class TestPartialCommitDetectionAndRewrite:
         shard -- re-indexing will not create duplicate/orphaned point_ids."""
         from code_indexer.storage.id_index_manager import IDIndexManager
 
-        vector_store = FilesystemVectorStore(base_path=tmp_path / "index")
+        vector_store = FilesystemVectorStore(
+            base_path=tmp_path / "index",
+            # Bug #1528: temporal is CHUNKS_DB by default now; these tests
+            # write/inspect legacy vector_*.json fixtures, so pin the legacy
+            # layout explicitly (still supported on request).
+            use_chunks_db_for_new_collections=False,
+        )
         _write_partial_commit(
             vector_store, SHARD_2024Q1, "proj", "aaa111", num_chunks=3
         )
@@ -199,7 +247,13 @@ class TestPartialCommitDetectionAndRewrite:
         already-complete commit's points in the SAME shard."""
         from code_indexer.storage.id_index_manager import IDIndexManager
 
-        vector_store = FilesystemVectorStore(base_path=tmp_path / "index")
+        vector_store = FilesystemVectorStore(
+            base_path=tmp_path / "index",
+            # Bug #1528: temporal is CHUNKS_DB by default now; these tests
+            # write/inspect legacy vector_*.json fixtures, so pin the legacy
+            # layout explicitly (still supported on request).
+            use_chunks_db_for_new_collections=False,
+        )
         _write_complete_commit(vector_store, SHARD_2024Q1, "proj", "good111")
         _write_partial_commit(vector_store, SHARD_2024Q1, "proj", "bad222")
 
@@ -221,7 +275,13 @@ class TestPartialCommitDetectionAndRewrite:
         the expected point count, no duplicates."""
         from code_indexer.storage.id_index_manager import IDIndexManager
 
-        vector_store = FilesystemVectorStore(base_path=tmp_path / "index")
+        vector_store = FilesystemVectorStore(
+            base_path=tmp_path / "index",
+            # Bug #1528: temporal is CHUNKS_DB by default now; these tests
+            # write/inspect legacy vector_*.json fixtures, so pin the legacy
+            # layout explicitly (still supported on request).
+            use_chunks_db_for_new_collections=False,
+        )
         _write_partial_commit(
             vector_store, SHARD_2024Q1, "proj", "aaa111", num_chunks=2
         )
@@ -245,7 +305,13 @@ class TestShardAwareGrouping:
     """Reconcile resolves each commit's shard independently by timestamp."""
 
     def test_commits_in_different_shards_checked_independently(self, tmp_path):
-        vector_store = FilesystemVectorStore(base_path=tmp_path / "index")
+        vector_store = FilesystemVectorStore(
+            base_path=tmp_path / "index",
+            # Bug #1528: temporal is CHUNKS_DB by default now; these tests
+            # write/inspect legacy vector_*.json fixtures, so pin the legacy
+            # layout explicitly (still supported on request).
+            use_chunks_db_for_new_collections=False,
+        )
         _write_complete_commit(vector_store, SHARD_2024Q1, "proj", "q1_done")
         _write_complete_commit(vector_store, SHARD_2024Q2, "proj", "q2_done")
 
@@ -270,7 +336,13 @@ class TestCorruptProgressMetadataAborts:
     corruption (the exact Bug #1390/#1406 incident class)."""
 
     def test_reconcile_raises_on_corrupt_progress_metadata(self, tmp_path):
-        vector_store = FilesystemVectorStore(base_path=tmp_path / "index")
+        vector_store = FilesystemVectorStore(
+            base_path=tmp_path / "index",
+            # Bug #1528: temporal is CHUNKS_DB by default now; these tests
+            # write/inspect legacy vector_*.json fixtures, so pin the legacy
+            # layout explicitly (still supported on request).
+            use_chunks_db_for_new_collections=False,
+        )
         _write_complete_commit(vector_store, SHARD_2024Q1, "proj", "good111")
 
         shard_dir = vector_store.base_path / SHARD_2024Q1
@@ -286,7 +358,13 @@ class TestCorruptProgressMetadataAborts:
         points as a side effect of raising."""
         from code_indexer.storage.id_index_manager import IDIndexManager
 
-        vector_store = FilesystemVectorStore(base_path=tmp_path / "index")
+        vector_store = FilesystemVectorStore(
+            base_path=tmp_path / "index",
+            # Bug #1528: temporal is CHUNKS_DB by default now; these tests
+            # write/inspect legacy vector_*.json fixtures, so pin the legacy
+            # layout explicitly (still supported on request).
+            use_chunks_db_for_new_collections=False,
+        )
         _write_complete_commit(
             vector_store, SHARD_2024Q1, "proj", "good111", num_chunks=2
         )

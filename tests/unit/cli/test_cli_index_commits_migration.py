@@ -40,6 +40,18 @@ _TEMPORAL_INDEXER_PATH = (
 _VECTOR_STORE_PATH = (
     "code_indexer.storage.filesystem_vector_store.FilesystemVectorStore"
 )
+# Bug #1528: cli.py's --index-commits branch now also calls
+# consolidate_legacy_temporal_shards (a lazily-imported local import,
+# patched at its defining module) before migrate/resolve run. Left
+# unmocked, it performs a REAL in-place SQLite migration against
+# whatever legacy temporal shards exist under this process's actual CWD
+# -- which, for this repo's own dogfooded `.code-indexer/index/`, is real
+# production-sized data that blows past pytest's default timeout. Must
+# be a no-op here: this test suite is about migrate/resolve ordering
+# (Bug #642), not chunk_migration_cli's own behavior (covered elsewhere).
+_CONSOLIDATE_LEGACY_TEMPORAL_SHARDS_PATH = (
+    "code_indexer.services.chunk_migration_cli.consolidate_legacy_temporal_shards"
+)
 
 
 def _stub_indexer_result() -> MagicMock:
@@ -69,8 +81,9 @@ def _patch_index_commits_path(
     """Context manager that patches only the temporal parts of --index-commits.
 
     Allows the real ConfigManager to run (it uses backtracking from CWD).
-    Only migrate_legacy_temporal_collection, resolve, TemporalIndexer, and
-    FilesystemVectorStore are patched.
+    Only migrate_legacy_temporal_collection, resolve, TemporalIndexer,
+    FilesystemVectorStore, and consolidate_legacy_temporal_shards are
+    patched.
 
     Yields (runner,) to the caller.
     """
@@ -87,6 +100,7 @@ def _patch_index_commits_path(
         patch(_RESOLVE_PATH, side_effect=resolve_side_effect or _default_resolve),
         patch(_TEMPORAL_INDEXER_PATH, return_value=mock_ti_instance),
         patch(_VECTOR_STORE_PATH, return_value=mock_vs_instance),
+        patch(_CONSOLIDATE_LEGACY_TEMPORAL_SHARDS_PATH, return_value=(0, 0)),
     ):
         yield (runner,)
 
