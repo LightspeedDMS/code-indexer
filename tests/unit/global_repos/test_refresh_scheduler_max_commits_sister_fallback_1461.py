@@ -41,7 +41,9 @@ import json
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from code_indexer.global_repos.alias_manager import AliasManager
+from code_indexer.services.temporal.temporal_server_paths import (
+    server_temporal_index_root,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -135,26 +137,32 @@ def _make_sister_temporal_fixture(
     quarter: str = "2024Q1",
     completed_commits=None,
 ) -> Path:
-    """Build a real sister-location temporal namespace: a version directory
-    with a real hnsw_index.bin marker (queryable) and a real
-    temporal_progress.json (the file the NEW consolidated build actually
-    writes -- never temporal_meta.json), published via a real AliasManager
-    pointer file. Mirrors
-    test_refresh_scheduler_sister_temporal_reconcile_1461.py's
-    _make_sister_temporal_fixture recipe, extended with temporal_progress.json.
+    """Build a real temporal shard at the FIXED server-owned root.
+
+    Bug #1529: temporal data for a golden repo lives at
+    ``{golden_repos_dir}/.temporal/{alias}/`` -- a fixed, deterministic path --
+    rather than a ``.versioned/`` snapshot published behind an AliasManager
+    pointer. The behavior under test is UNCHANGED: a real hnsw_index.bin
+    marker (queryable) plus a real temporal_progress.json (the file the
+    consolidated build actually writes -- never temporal_meta.json) living
+    OUTSIDE the repo tree must still supply the max_commits bound.
     """
-    namespace = f"{bare_alias}-temporal-{embedder_slug}-{quarter}"
-    sister_version_dir = golden_repos_dir / ".versioned" / namespace / "v_1700000000"
-    sister_version_dir.mkdir(parents=True)
-    (sister_version_dir / "hnsw_index.bin").write_bytes(b"fake-hnsw")
+    shard_dir: Path = (
+        server_temporal_index_root(golden_repos_dir, bare_alias)
+        / f"code-indexer-temporal-{embedder_slug}-{quarter}"
+    )
+    shard_dir.mkdir(parents=True)
+    (shard_dir / "hnsw_index.bin").write_bytes(b"fake-hnsw")
+    # A real committed row: discovery keys off DATA presence, not merely the
+    # presence of an index file (row-existence-is-not-queryability).
+    (shard_dir / "vector_aaaa1111.json").write_text(
+        json.dumps({"id": "proj:commit:aaaaaaaa:0"})
+    )
     if completed_commits is not None:
-        (sister_version_dir / "temporal_progress.json").write_text(
+        (shard_dir / "temporal_progress.json").write_text(
             json.dumps({"completed_commits": completed_commits})
         )
-
-    aliases_dir = golden_repos_dir / "aliases"
-    AliasManager(str(aliases_dir)).create_alias(namespace, str(sister_version_dir))
-    return sister_version_dir
+    return shard_dir
 
 
 # ---------------------------------------------------------------------------
