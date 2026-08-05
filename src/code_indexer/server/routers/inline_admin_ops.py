@@ -324,10 +324,19 @@ def register_admin_ops_routes(
             )
 
         except Exception as e:
+            # EVO-64608: surface the swallowed cause. Without this the exception's
+            # detail goes ONLY into the 500 response body (never into cidx logs), so a
+            # high registration-failure rate is undiagnosable (hard evidence: ~315
+            # unlogged registration 500s / 3h on the multipod). logger.exception logs
+            # the full traceback at ERROR; `from e` chains the cause.
+            logger.exception(
+                "add_golden_repo: failed to submit registration job for alias=%s",
+                repo_data.alias,
+            )
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail=f"Failed to submit job: {str(e)}",
-            )
+            ) from e
 
     @app.post(
         "/api/admin/golden-repos/{alias}/refresh",
