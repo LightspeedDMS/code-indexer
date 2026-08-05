@@ -13,7 +13,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.routing import APIRoute
 from fastapi.testclient import TestClient
-from unittest.mock import patch, AsyncMock
+from unittest.mock import patch, AsyncMock, MagicMock
 from code_indexer.server.routers.diagnostics import router
 from code_indexer.server.services.diagnostics_service import (
     DiagnosticCategory,
@@ -140,13 +140,20 @@ class TestRunAllDiagnosticsEndpoint:
     """Test POST /admin/diagnostics/run-all endpoint."""
 
     def test_run_all_triggers_service(self, client, mock_diagnostics_service):
-        """Test run-all endpoint triggers diagnostics service."""
-        mock_diagnostics_service.run_all_diagnostics = AsyncMock()
+        """Test run-all endpoint triggers diagnostics service.
+
+        Story #1491 AC4: the route schedules the SYNC entry point
+        (run_all_diagnostics_sync) so Starlette threadpools the run instead of
+        awaiting its synchronous work on the event loop. A plain MagicMock is
+        correct here precisely because the registered callable must NOT be a
+        coroutine function.
+        """
+        mock_diagnostics_service.run_all_diagnostics_sync = MagicMock()
 
         response = client.post("/admin/diagnostics/run-all")
 
         assert response.status_code in [200, 202]
-        mock_diagnostics_service.run_all_diagnostics.assert_called_once()
+        mock_diagnostics_service.run_all_diagnostics_sync.assert_called_once()
 
     def test_run_all_returns_html_partial(self, client, mock_diagnostics_service):
         """Test run-all endpoint returns HTML partial for HTMX to swap in."""
@@ -182,8 +189,8 @@ class TestRunAllDiagnosticsEndpoint:
         self, client, mock_diagnostics_service
     ):
         """Test run-all endpoint uses BackgroundTasks (doesn't await completion)."""
-        # Mock diagnostics service
-        mock_diagnostics_service.run_all_diagnostics = AsyncMock()
+        # Story #1491 AC4: the scheduled callable is the SYNC entry point.
+        mock_diagnostics_service.run_all_diagnostics_sync = MagicMock()
         mock_diagnostics_service.get_status.return_value = {}
         mock_diagnostics_service.is_running.return_value = True
 
@@ -196,20 +203,24 @@ class TestRunAllDiagnosticsEndpoint:
         # Service method should be called (via background task)
         # Note: TestClient executes background tasks before returning,
         # but in production this runs truly async
-        mock_diagnostics_service.run_all_diagnostics.assert_called_once()
+        mock_diagnostics_service.run_all_diagnostics_sync.assert_called_once()
 
 
 class TestRunCategoryEndpoint:
     """Test POST /admin/diagnostics/run/{category} endpoint."""
 
     def test_run_category_triggers_service(self, client, mock_diagnostics_service):
-        """Test run category endpoint triggers diagnostics service."""
-        mock_diagnostics_service.run_category = AsyncMock()
+        """Test run category endpoint triggers diagnostics service.
+
+        Story #1491 AC4: the scheduled callable is the SYNC entry point
+        (run_category_sync), threadpooled by Starlette.
+        """
+        mock_diagnostics_service.run_category_sync = MagicMock()
 
         response = client.post("/admin/diagnostics/run/cli_tools")
 
         assert response.status_code in [200, 202]
-        mock_diagnostics_service.run_category.assert_called_once()
+        mock_diagnostics_service.run_category_sync.assert_called_once()
 
     def test_run_category_accepts_valid_categories(
         self, client, mock_diagnostics_service
@@ -255,8 +266,8 @@ class TestRunCategoryEndpoint:
         self, client, mock_diagnostics_service
     ):
         """Test run-category endpoint uses BackgroundTasks (doesn't await completion)."""
-        # Mock diagnostics service
-        mock_diagnostics_service.run_category = AsyncMock()
+        # Story #1491 AC4: the scheduled callable is the SYNC entry point.
+        mock_diagnostics_service.run_category_sync = MagicMock()
         mock_diagnostics_service.get_status.return_value = {}
         mock_diagnostics_service.is_running.return_value = True
 
@@ -269,7 +280,7 @@ class TestRunCategoryEndpoint:
         # Service method should be called (via background task)
         # Note: TestClient executes background tasks before returning,
         # but in production this runs truly async
-        mock_diagnostics_service.run_category.assert_called_once()
+        mock_diagnostics_service.run_category_sync.assert_called_once()
 
 
 class TestStatusPollingEndpoint:

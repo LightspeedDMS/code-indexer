@@ -1,0 +1,72 @@
+{
+  "ac1_mcp_auth_bcrypt": {
+    "after_real_dependency_max_probe_latency_s": 0.0022234090138226748,
+    "after_real_dependency_probe_latencies_s": [
+      0.001860017015133053,
+      0.0019121360091958195,
+      0.0022234090138226748
+    ],
+    "after_real_dependency_total_wall_s": 0.24111417098902166,
+    "bcrypt_rounds": 12,
+    "before_on_loop_max_probe_latency_s": 0.2714940769947134,
+    "before_on_loop_probe_latencies_s": [
+      0.27112523300456814,
+      0.2714940769947134,
+      0.2707872339815367
+    ],
+    "before_on_loop_total_wall_s": 0.3308521590079181,
+    "probe_budget_s": 0.25
+  },
+  "ac2_regex_search_dispatch": {
+    "after_sync_dispatch_max_probe_latency_s": 0.004923391010379419,
+    "after_sync_dispatch_probe_latencies_s": [
+      0.004923391010379419,
+      0.0021914690150879323,
+      0.003213760006474331
+    ],
+    "after_sync_dispatch_total_wall_s": 0.5845622629858553,
+    "before_async_dispatch_max_probe_latency_s": 0.044302734022494406,
+    "before_async_dispatch_probe_latencies_s": [
+      0.044302734022494406,
+      0.04079061700031161,
+      0.04178367301938124
+    ],
+    "before_async_dispatch_total_wall_s": 0.5157778509892523,
+    "corpus_files": 3000,
+    "matches": 3000,
+    "probe_budget_s": 0.25
+  },
+  "ac3_branch_discovery": {
+    "measured_max_probe_latency_s": 0.0032197519904002547,
+    "measured_probe_latencies_s": [
+      0.0026192200020886958,
+      0.0029368349933065474,
+      0.0032197519904002547
+    ],
+    "measured_total_wall_s": 0.6035096080158837,
+    "per_repo_block_s": 0.6,
+    "probe_budget_s": 0.25,
+    "repo_count": 4,
+    "sequential_on_loop_expectation_s": 2.4
+  },
+  "ac4_diagnostics_background_task": {
+    "background_block_s": 0.6,
+    "measured_max_probe_latency_s": 0.04035887698410079,
+    "measured_probe_latencies_s": [
+      0.03949816100066528,
+      0.03992310297326185,
+      0.04035887698410079
+    ],
+    "probe_budget_s": 0.25
+  },
+  "ac5_research_assistant_poll": {
+    "measured_max_probe_latency_s": 0.004052990989293903,
+    "measured_probe_latencies_s": [
+      0.0020563279977068305,
+      0.004052990989293903,
+      0.001988892996450886
+    ],
+    "per_boundary_block_s": 0.3,
+    "probe_budget_s": 0.25
+  }
+}

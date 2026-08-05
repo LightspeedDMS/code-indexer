@@ -1952,6 +1952,36 @@ async def handle_regex_search(args: Dict[str, Any], user: User) -> Dict[str, Any
         return _mcp_response({"success": False, "error": str(e)})
 
 
+def handle_regex_search_sync(args: Dict[str, Any], user: User) -> Dict[str, Any]:
+    """Sync-dispatched entry point for the regex_search MCP tool (AC2).
+
+    Story #1491 AC2 (report Finding B2): ``handle_regex_search`` is async, so
+    ``protocol.py``'s dispatcher took the ``await handler(...)`` branch and ran
+    the handler's SYNCHRONOUS sections directly on the event loop -- the SQLite
+    trigram prefilter, up to ``_MAX_PREFILTER_CANDIDATES`` (8000)
+    ``Path.resolve()`` calls, the whole multi-MB ripgrep JSON output read, and
+    the per-line ``json.loads`` plus per-match resolve. An omni (``*``) search
+    multiplies all of it by the repo count.
+
+    Registering this plain ``def`` instead sends the tool down the dispatcher's
+    sync branch (``run_in_executor``), so the entire handler -- awaitable and
+    synchronous parts alike -- runs on a worker thread and the loop stays free.
+
+    Deliberate, documented consequence for the Issue #1398 sync/async dispatch
+    distinction: ``regex_search`` is now SYNC-dispatched. Its MCP-layer timeout
+    semantics are unchanged nonetheless -- ``regex_search`` is a member of
+    ``_ASYNC_DISPATCH_TIMEOUT_EXEMPT_TOOLS``, which the dispatcher honours on
+    BOTH branches, so the tool remains governed solely by its own configured
+    ``search_limits_config.timeout_seconds`` plus its ripgrep subprocess
+    timeout (Issue #1398 Group A), never by a handler-level deadline.
+
+    The coroutine runs on a private loop owned by this worker thread. Nothing
+    it awaits is shared across loops: ``RegexSearchService`` is constructed per
+    request and its ``SubprocessExecutor`` owns a per-call thread pool.
+    """
+    return asyncio.run(handle_regex_search(args, user))
+
+
 def handle_get_cached_content(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Handler for get_cached_content tool.
 
@@ -2065,6 +2095,10 @@ def handle_poll_search_job(args: Dict[str, Any], user: User) -> Dict[str, Any]:
 def _register(registry: dict) -> None:
     """Register search handlers in the HANDLER_REGISTRY."""
     registry["search_code"] = search_code
-    registry["regex_search"] = handle_regex_search
+    # Story #1491 AC2: sync-dispatched (handle_regex_search_sync, defined above)
+    # so protocol.py offloads the handler's synchronous work -- trigram
+    # prefilter, Path.resolve fan-out, ripgrep output read + json.loads -- to
+    # the executor instead of running it on the event loop.
+    registry["regex_search"] = handle_regex_search_sync
     registry["poll_search_job"] = handle_poll_search_job
     registry["get_cached_content"] = handle_get_cached_content

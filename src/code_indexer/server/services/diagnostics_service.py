@@ -16,6 +16,7 @@ import json
 import os
 import re
 import sqlite3
+import threading
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from enum import Enum
@@ -157,7 +158,16 @@ class DiagnosticsService:
         self._cache_ttl = timedelta(minutes=10)
         self._running = False
         self._running_categories: set = set()
-        self.__lock: Optional[asyncio.Lock] = None
+        # Story #1491 AC4: a threading.Lock, NOT an asyncio.Lock. Once the
+        # diagnostics run is dispatched as a SYNC Starlette background task it
+        # executes in a worker thread while other requests (get_status,
+        # run_category) still touch this state from the event loop. An
+        # asyncio.Lock gives no cross-thread protection at all and, being
+        # loop-bound, breaks once contended from a second loop/thread. Every
+        # critical section it guards is short and purely synchronous (dict
+        # writes plus the sync _save_results_to_db call), so a plain
+        # threading.Lock is both correct and non-blocking in practice.
+        self.__lock: Optional[threading.Lock] = None
         self._backend = storage_backend
 
         # Database path for persistence
@@ -176,9 +186,9 @@ class DiagnosticsService:
         self._load_results_from_db()
 
     @property
-    def _lock(self) -> asyncio.Lock:
+    def _lock(self) -> threading.Lock:
         if self.__lock is None:
-            self.__lock = asyncio.Lock()
+            self.__lock = threading.Lock()
         return self.__lock
 
     def is_running(self) -> bool:
@@ -304,7 +314,7 @@ class DiagnosticsService:
 
         logger = logging.getLogger(__name__)
 
-        async with self._lock:
+        with self._lock:
             self._running = True
         try:
             # Run diagnostics for each category with exception isolation
@@ -337,15 +347,44 @@ class DiagnosticsService:
 
                 # Store results in cache (always executes, even after exception)
                 now = datetime.now()
-                async with self._lock:
+                with self._lock:
                     self._cache[category] = results
                     self._cache_timestamps[category] = now
                     # Persist to database
                     self._save_results_to_db(category, results)
 
         finally:
-            async with self._lock:
+            with self._lock:
                 self._running = False
+
+    def run_all_diagnostics_sync(self) -> None:
+        """Synchronous entry point for the Starlette background task (AC4).
+
+        Story #1491 AC4 (report Finding B4): Starlette AWAITS an async
+        BackgroundTask on the event loop, so registering the
+        ``run_all_diagnostics`` coroutine directly meant its synchronous SQLite
+        writes and per-repo/per-collection filesystem calls froze every other
+        connection for the whole run. Starlette instead runs a SYNC background
+        task in its threadpool, so this plain ``def`` wrapper moves the entire
+        run off the event loop.
+
+        The coroutine itself is unchanged and runs on a private loop owned by
+        this worker thread. That is safe because the shared-state guard is a
+        threading.Lock (see ``__init__``) rather than a loop-bound
+        asyncio.Lock, and every awaitable the run touches (httpx.AsyncClient,
+        asyncio subprocesses) is created inside the run rather than shared
+        across loops.
+        """
+        asyncio.run(self.run_all_diagnostics())
+
+    def run_category_sync(self, category: DiagnosticCategory) -> None:
+        """Synchronous entry point for the per-category background task (AC4).
+
+        Same rationale and the same safety argument as
+        ``run_all_diagnostics_sync``; the story requires both registrations in
+        ``routers/diagnostics.py`` to leave the event loop.
+        """
+        asyncio.run(self.run_category(category))
 
     async def run_category(self, category: DiagnosticCategory) -> None:
         """
@@ -372,7 +411,7 @@ class DiagnosticsService:
         ):
             return  # Cache is valid, no need to re-run
 
-        async with self._lock:
+        with self._lock:
             self._running_categories.add(category)
         try:
             # Run category-specific diagnostics
@@ -392,7 +431,7 @@ class DiagnosticsService:
                 results = self._get_placeholder_results(category)
 
             # Store results in cache for this category
-            async with self._lock:
+            with self._lock:
                 self._cache[category] = results
                 self._cache_timestamps[category] = datetime.now()
 
@@ -400,7 +439,7 @@ class DiagnosticsService:
             self._save_results_to_db(category, results)
 
         finally:
-            async with self._lock:
+            with self._lock:
                 self._running_categories.discard(category)
 
     def get_category_status(

@@ -7,6 +7,8 @@ Provides admin web interface routes for CIDX server administration.
 from code_indexer import __version__ as _cidx_version
 from code_indexer.server.middleware.correlation import get_correlation_id
 
+import asyncio
+import functools
 import html
 import json
 import logging
@@ -53,6 +55,13 @@ from code_indexer.server.auto_update.deployment_executor import RESTART_SIGNAL_P
 from code_indexer.server.storage.database_manager import DatabaseConnectionManager
 
 logger = logging.getLogger(__name__)
+
+# Story #1491 AC3: upper bound on how many synchronous git ls-remote branch
+# fetches fetch_discovery_branches may offload to the executor at once. The
+# story requires the introduced concurrency to be BOUNDED -- a large
+# auto-discovery repo list must never fan out into an unbounded burst of git
+# subprocesses.
+_DISCOVERY_BRANCH_FETCH_MAX_CONCURRENCY = 8
 
 # Self-Monitoring constants (Story #74)
 SCAN_HISTORY_LIMIT = 50
@@ -8706,18 +8715,63 @@ async def fetch_discovery_branches(request: Request):
         # Get token manager to retrieve stored credentials
         token_manager = _get_token_manager()
 
-        # Build requests and fetch branches
-        results = {}  # type: ignore[var-annotated]
+        # Story #1491 AC3 (report Finding B3): fetch_remote_branches is
+        # SYNCHRONOUS -- subprocess.run(["git","ls-remote",...], timeout=30).
+        # Calling it in a plain sequential loop from this async route froze the
+        # whole event loop for N x 30 s when N remotes were unreachable. Each
+        # call is now offloaded to the default executor, with concurrency
+        # BOUNDED by _DISCOVERY_BRANCH_FETCH_MAX_CONCURRENCY so a large repo
+        # list can never fan out into an unbounded burst of git subprocesses.
+        #
+        # Semantics are deliberately unchanged: credential lookups still run
+        # once per repo in the original order, the per-repo response dicts are
+        # built from the same fields, the missing-clone_url entry still keys on
+        # str(repo), results are inserted in the ORIGINAL request order (so
+        # duplicate clone_urls collapse exactly as before), and an unexpected
+        # exception still propagates to the outer handler as a 500. The 30 s
+        # per-remote timeout lives inside fetch_remote_branches and is
+        # untouched.
+        loop = asyncio.get_event_loop()
+        semaphore = asyncio.Semaphore(_DISCOVERY_BRANCH_FETCH_MAX_CONCURRENCY)
+
+        async def _fetch_one(
+            clone_url: str, platform: str, credentials: Optional[str]
+        ) -> Dict[str, Any]:
+            async with semaphore:
+                result = await loop.run_in_executor(
+                    None,
+                    functools.partial(
+                        service.fetch_remote_branches,
+                        clone_url=clone_url,
+                        platform=platform,
+                        credentials=credentials,
+                    ),
+                )
+            return {
+                "branches": result.branches,
+                "default_branch": result.default_branch,
+                "error": result.error,
+            }
+
+        # Pass 1: resolve response keys + credentials sequentially on the loop
+        # (cheap local token reads), recording either an immediate error entry
+        # or an in-flight task for each repo, in request order.
+        planned: List[Tuple[str, Union[Dict[str, Any], "asyncio.Future"]]] = []
         for repo in repos:
             clone_url = repo.get("clone_url")
             platform = repo.get("platform", "github")
 
             if not clone_url:
-                results[str(repo)] = {
-                    "branches": [],
-                    "default_branch": None,
-                    "error": "Missing clone_url",
-                }
+                planned.append(
+                    (
+                        str(repo),
+                        {
+                            "branches": [],
+                            "default_branch": None,
+                            "error": "Missing clone_url",
+                        },
+                    )
+                )
                 continue
 
             # Retrieve credentials based on platform
@@ -8731,18 +8785,33 @@ async def fetch_discovery_branches(request: Request):
                 if token_data:
                     credentials = token_data.token
 
-            # Fetch branches for this repo with credentials
-            result = service.fetch_remote_branches(
-                clone_url=clone_url,
-                platform=platform,
-                credentials=credentials,
+            planned.append(
+                (
+                    clone_url,
+                    asyncio.ensure_future(_fetch_one(clone_url, platform, credentials)),
+                )
             )
 
-            results[clone_url] = {
-                "branches": result.branches,
-                "default_branch": result.default_branch,
-                "error": result.error,
-            }
+        # Pass 2: await all in-flight fetches concurrently.
+        # return_exceptions=True is deliberate: it guarantees EVERY task is
+        # awaited to completion, so no sibling is left orphaned with an
+        # unretrieved exception when one fetch fails. The first failure -- in
+        # ORIGINAL request order -- is then re-raised, so a genuine error still
+        # surfaces to the outer except-handler as a 500 exactly as the previous
+        # sequential loop's would have.
+        pending = [entry for _, entry in planned if not isinstance(entry, dict)]
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+
+        results: Dict[str, Dict[str, Any]] = {}
+        for key, entry in planned:
+            if isinstance(entry, dict):
+                results[key] = entry
+                continue
+            fetch_error = entry.exception()
+            if fetch_error is not None:
+                raise fetch_error
+            results[key] = entry.result()
 
         return JSONResponse(content=results)
 

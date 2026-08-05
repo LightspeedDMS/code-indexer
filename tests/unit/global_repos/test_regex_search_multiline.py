@@ -161,7 +161,22 @@ def ripgrep_executor_fixture():
 
 
 class TestDetectPcre2Support:
-    """Test _detect_pcre2_support() method."""
+    """Test _detect_pcre2_support() method.
+
+    Story #1491 AC2 moved the probe cache from per-instance to PROCESS-WIDE
+    (a fresh RegexSearchService is built per request, so a per-instance cache
+    re-forked `rg --pcre2-version` on every pcre2 request). These tests each
+    need a clean probe state, so the class-level cache is reset around every
+    one of them -- without this the first test's cached answer would leak into
+    the rest, which is exactly the caching behaviour under test.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _reset_process_wide_pcre2_cache(self):
+        original = RegexSearchService._pcre2_supported_global
+        RegexSearchService._pcre2_supported_global = None
+        yield
+        RegexSearchService._pcre2_supported_global = original
 
     def test_detect_pcre2_support_returns_true_when_available(self, service_ripgrep):
         """Should return True when rg --pcre2-version exits with return code 0."""

@@ -154,8 +154,11 @@ async def run_all_diagnostics(
         HTML response with diagnostics status partial (starts polling)
     """
     try:
-        # Run diagnostics asynchronously in background
-        background_tasks.add_task(diagnostics_service.run_all_diagnostics)
+        # Story #1491 AC4 (report Finding B4): register the SYNC entry point.
+        # Starlette awaits an async background task ON the event loop, which
+        # froze every other connection for the whole diagnostics run; a sync
+        # background task is dispatched to Starlette's threadpool instead.
+        background_tasks.add_task(diagnostics_service.run_all_diagnostics_sync)
 
         # Get current status (will be empty/not-run initially)
         status = diagnostics_service.get_status()
@@ -215,8 +218,9 @@ async def run_category_diagnostics(
                 detail=f"Invalid category: {category}. Valid categories: {[c.value for c in DiagnosticCategory]}",
             )
 
-        # Run diagnostics for this category in background
-        background_tasks.add_task(diagnostics_service.run_category, category_enum)
+        # Story #1491 AC4: sync entry point, threadpooled by Starlette (see
+        # the run-all route above for the full rationale).
+        background_tasks.add_task(diagnostics_service.run_category_sync, category_enum)
 
         # Get current status
         status = diagnostics_service.get_status()

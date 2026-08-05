@@ -411,6 +411,18 @@ async def _invoke_handler(
             )
         loop = asyncio.get_running_loop()
         bound = functools.partial(handler, *call_args, **extra_kwargs)
+        if tool_name in _ASYNC_DISPATCH_TIMEOUT_EXEMPT_TOOLS:
+            # Story #1491 AC2: the exemption is a property of the TOOL, not of
+            # the dispatch branch. regex_search became sync-dispatched so its
+            # synchronous work leaves the event loop; that offload must not
+            # also silently impose an MCP-layer deadline it never had. Exempt
+            # tools are offloaded WITHOUT an outer wait_for, staying governed
+            # solely by their own configured timeouts (for regex_search:
+            # search_limits_config.timeout_seconds plus the ripgrep subprocess
+            # timeout, Issue #1398 Group A). Note an outer wait_for could not
+            # have cancelled the executor's thread anyway -- it would only have
+            # abandoned it while returning a timeout error.
+            return await loop.run_in_executor(None, bound)
         try:
             return await asyncio.wait_for(
                 loop.run_in_executor(None, bound),

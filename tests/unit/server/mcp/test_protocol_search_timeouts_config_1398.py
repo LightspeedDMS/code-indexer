@@ -216,14 +216,44 @@ class TestRegexSearchIndependentOfSearchTimeoutsConfig:
     subprocess timeout ...) -- the two are independently configurable and
     NEVER interact." AC6's new deadline must not violate that."""
 
-    def test_regex_search_handler_is_registered_as_async(self) -> None:
-        from code_indexer.server.mcp.handlers.search import handle_regex_search
+    def test_regex_search_is_sync_dispatched_and_still_deadline_exempt(self) -> None:
+        """Story #1491 AC2: regex_search is now SYNC-dispatched, deliberately.
 
-        assert asyncio.iscoroutinefunction(handle_regex_search), (
-            "handle_regex_search must be async def -- if this ever changes "
-            "to sync def, it would start being wrapped by the sync branch's "
-            "asyncio.wait_for cap instead of the async-branch/regex-floor "
-            "mechanism, changing long-standing behavior silently."
+        The registered handler was changed from the async implementation to the
+        plain-``def`` ``handle_regex_search_sync`` so the dispatcher's
+        ``run_in_executor`` branch takes the handler's synchronous work
+        (trigram prefilter, Path.resolve fan-out, ripgrep output read +
+        json.loads) OFF the event loop (report Finding B2).
+
+        The timeout invariant this class exists to protect is unchanged, and
+        that is exactly what is asserted here: ``regex_search`` remains a
+        member of ``_ASYNC_DISPATCH_TIMEOUT_EXEMPT_TOOLS``, which the
+        dispatcher honours on BOTH branches, so the tool is still governed
+        solely by ``search_limits_config.timeout_seconds`` plus its own
+        subprocess timeout -- never by a handler-level cap. If a future change
+        drops the exemption or re-registers the coroutine, this fails.
+        """
+        from code_indexer.server.mcp.handlers import search as search_handlers
+        from code_indexer.server.mcp.protocol import (
+            _ASYNC_DISPATCH_TIMEOUT_EXEMPT_TOOLS,
+        )
+
+        registry: dict = {}
+        search_handlers._register(registry)
+        registered = registry["regex_search"]
+
+        assert not asyncio.iscoroutinefunction(registered), (
+            "the registered regex_search handler must be a plain def so the "
+            "dispatcher offloads it to the executor (Story #1491 AC2)"
+        )
+        assert registered is search_handlers.handle_regex_search_sync
+        assert asyncio.iscoroutinefunction(search_handlers.handle_regex_search), (
+            "the async implementation must remain a coroutine -- "
+            "_omni_regex_search awaits it per repo"
+        )
+        assert "regex_search" in _ASYNC_DISPATCH_TIMEOUT_EXEMPT_TOOLS, (
+            "regex_search must stay deadline-exempt: sync dispatch must not "
+            "silently impose an MCP-layer cap it never had"
         )
 
     @pytest.mark.asyncio
