@@ -1038,6 +1038,114 @@ class GoldenRepoManager:
         """
         return self._sqlite_backend.list_repos()  # type: ignore[no-any-return]
 
+    def _reconstruct_repo_identity(self, repo_dir: "Path") -> tuple[str, str]:
+        """Reconstruct (repo_url, default_branch) for a registry backfill from the
+        on-disk git clone. Falls back to a ``file://`` URL and ``main`` when git
+        metadata is unavailable (non-git / detached HEAD)."""
+        repo_url = f"file://{repo_dir}"
+        default_branch = "main"
+        try:
+            url = subprocess.run(
+                ["git", "-C", str(repo_dir), "config", "--get", "remote.origin.url"],
+                capture_output=True,
+                text=True,
+                timeout=15,
+            )
+            if url.returncode == 0 and url.stdout.strip():
+                repo_url = url.stdout.strip()
+            branch = subprocess.run(
+                ["git", "-C", str(repo_dir), "rev-parse", "--abbrev-ref", "HEAD"],
+                capture_output=True,
+                text=True,
+                timeout=15,
+            )
+            resolved = branch.stdout.strip()
+            if branch.returncode == 0 and resolved and resolved != "HEAD":
+                default_branch = resolved
+        except (subprocess.SubprocessError, OSError):
+            pass
+        return repo_url, default_branch
+
+    def reconcile_registry_from_filesystem(self) -> Dict[str, int]:
+        """EVO-65484: backfill registry entries for golden repos that are indexed on
+        disk but missing from the registry, making the registry a faithful
+        projection of on-disk state.
+
+        Registration persists the index (``_execute_post_clone_workflow``) BEFORE
+        the registry row (``add_repo``), so a crash / pod eviction between the two
+        leaves an index with no registry entry. The workspace-mcp seeder then sees
+        the repo as unregistered and re-provisions it (EVO-65481). This reconcile
+        heals that drift: for each ``<golden_repos_dir>/<alias>`` that has a
+        completed semantic index but no registry row, reconstruct its identity from
+        the on-disk clone and add the row. It NEVER re-indexes (the index already
+        exists), is idempotent, and tolerates a sibling pod winning the insert.
+
+        Returns counts: scanned / indexed / backfilled / skipped_registered / errors.
+        """
+        from code_indexer.server.routers.repository_health import detect_semantic_index
+
+        counts = {
+            "scanned": 0,
+            "indexed": 0,
+            "backfilled": 0,
+            "skipped_registered": 0,
+            "errors": 0,
+        }
+        root = Path(self.golden_repos_dir)
+        if not root.is_dir():
+            return counts
+        registered = {r["alias"] for r in self.list_golden_repos()}
+        for entry in sorted(root.iterdir(), key=lambda p: p.name):
+            if entry.name.startswith(".") or not entry.is_dir():
+                continue
+            counts["scanned"] += 1
+            if not detect_semantic_index(entry / ".code-indexer" / "index"):
+                continue
+            counts["indexed"] += 1
+            alias = entry.name
+            if alias in registered:
+                counts["skipped_registered"] += 1
+                continue
+            try:
+                repo_url, default_branch = self._reconstruct_repo_identity(entry)
+                created_at = datetime.now(timezone.utc).isoformat()
+                self._sqlite_backend.add_repo(
+                    alias=alias,
+                    repo_url=repo_url,
+                    default_branch=default_branch,
+                    clone_path=str(entry),
+                    created_at=created_at,
+                )
+                self.golden_repos[alias] = GoldenRepo(
+                    alias=alias,
+                    repo_url=repo_url,
+                    default_branch=default_branch,
+                    clone_path=str(entry),
+                    created_at=created_at,
+                )
+                counts["backfilled"] += 1
+                logging.info(
+                    "EVO-65484: backfilled registry entry for indexed-but-unregistered "
+                    "golden repo '%s' (repo_url=%s branch=%s)",
+                    alias,
+                    mask_url_credentials(repo_url),
+                    default_branch,
+                )
+            except Exception as exc:  # noqa: BLE001
+                # IntegrityError => a sibling pod backfilled it first (benign);
+                # any other error is logged and skipped so one bad repo can't abort
+                # the whole reconcile.
+                counts["errors"] += 1
+                logging.warning(
+                    "EVO-65484: could not backfill registry entry for '%s': %s",
+                    entry.name,
+                    exc,
+                )
+        logging.info(
+            "EVO-65484: registry reconcile from filesystem complete: %s", counts
+        )
+        return counts
+
     def is_globally_active(self, alias: str) -> bool:
         """Return True if *alias* is registered and globally activated (Story #1039).
 

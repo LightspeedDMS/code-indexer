@@ -951,6 +951,37 @@ def make_lifespan(
                     global_lifecycle_manager.refresh_scheduler
                 )
 
+            # EVO-65484: heal registry/disk drift in the background. Registration
+            # persists the index BEFORE the registry row (add_repo), so a crash / pod
+            # eviction between the two leaves an index with no registry entry; the
+            # workspace-mcp seeder then re-provisions it destructively (EVO-65481).
+            # Backfill those rows so the registry is a faithful projection of on-disk
+            # state. Runs OFF the event loop (an NFS scan of the golden set) so pod
+            # readiness is not delayed; idempotent + IntegrityError-tolerant, so all
+            # pods may run it concurrently.
+            if golden_repo_manager is not None:
+                _grm_for_reconcile = golden_repo_manager
+
+                async def _run_registry_reconcile() -> None:
+                    try:
+                        import anyio.to_thread as _to_thread
+
+                        _counts = await _to_thread.run_sync(
+                            _grm_for_reconcile.reconcile_registry_from_filesystem
+                        )
+                        logger.info(
+                            "EVO-65484: startup registry reconcile from filesystem: %s",
+                            _counts,
+                        )
+                    except Exception as _reconcile_err:  # noqa: BLE001 — startup safety
+                        logger.warning(
+                            "EVO-65484: startup registry reconcile failed: %s",
+                            _reconcile_err,
+                            exc_info=True,
+                        )
+
+                asyncio.create_task(_run_registry_reconcile())
+
             # Story #1034: inject snapshot_manager into GoldenRepoManager so
             # change_branch CoW routes through VersionedSnapshotManager (single
             # source of truth).  Belt-and-suspenders: also wire directly into
