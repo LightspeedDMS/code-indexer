@@ -8731,7 +8731,7 @@ async def fetch_discovery_branches(request: Request):
         # exception still propagates to the outer handler as a 500. The 30 s
         # per-remote timeout lives inside fetch_remote_branches and is
         # untouched.
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         semaphore = asyncio.Semaphore(_DISCOVERY_BRANCH_FETCH_MAX_CONCURRENCY)
 
         async def _fetch_one(
@@ -8754,24 +8754,20 @@ async def fetch_discovery_branches(request: Request):
             }
 
         # Pass 1: resolve response keys + credentials sequentially on the loop
-        # (cheap local token reads), recording either an immediate error entry
-        # or an in-flight task for each repo, in request order.
-        planned: List[Tuple[str, Union[Dict[str, Any], "asyncio.Future"]]] = []
+        # (cheap local token reads). NO task is created in this pass -- that is
+        # deliberate. token_manager.get_token() is a real credential-store read
+        # that can raise; if tasks were created as we went, a failure on repo N
+        # would leave the tasks for repos 0..N-1 running and never awaited
+        # (unretrieved exceptions, git subprocesses outliving the response).
+        # Planning fully first means an exception here escapes with zero tasks
+        # in flight.
+        plan: List[Tuple[str, Optional[Tuple[str, str, Optional[str]]]]] = []
         for repo in repos:
             clone_url = repo.get("clone_url")
             platform = repo.get("platform", "github")
 
             if not clone_url:
-                planned.append(
-                    (
-                        str(repo),
-                        {
-                            "branches": [],
-                            "default_branch": None,
-                            "error": "Missing clone_url",
-                        },
-                    )
-                )
+                plan.append((str(repo), None))
                 continue
 
             # Retrieve credentials based on platform
@@ -8785,12 +8781,25 @@ async def fetch_discovery_branches(request: Request):
                 if token_data:
                     credentials = token_data.token
 
-            planned.append(
-                (
-                    clone_url,
-                    asyncio.ensure_future(_fetch_one(clone_url, platform, credentials)),
+            plan.append((clone_url, (clone_url, platform, credentials)))
+
+        # Pass 2: the plan is complete, so creating tasks can no longer be
+        # interleaved with anything that raises.
+        planned: List[Tuple[str, Union[Dict[str, Any], "asyncio.Future"]]] = []
+        for key, fetch_args in plan:
+            if fetch_args is None:
+                planned.append(
+                    (
+                        key,
+                        {
+                            "branches": [],
+                            "default_branch": None,
+                            "error": "Missing clone_url",
+                        },
+                    )
                 )
-            )
+                continue
+            planned.append((key, asyncio.ensure_future(_fetch_one(*fetch_args))))
 
         # Pass 2: await all in-flight fetches concurrently.
         # return_exceptions=True is deliberate: it guarantees EVERY task is

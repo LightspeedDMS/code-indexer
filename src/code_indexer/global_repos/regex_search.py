@@ -194,6 +194,18 @@ class RegexSearchService:
 
         An explicitly set per-instance value still wins, so a caller (or test)
         that pins the capability keeps overriding the probe entirely.
+
+        STICKY FAILURE (deliberate, documented): a probe that fails -- ripgrep
+        missing from PATH, the probe timing out, or any OSError -- caches False
+        for the REST OF THE PROCESS LIFETIME. If ripgrep is installed or
+        upgraded to a PCRE2-capable build while the server is running, pcre2
+        patterns stay rejected until the process restarts. That is the accepted
+        trade-off for not re-forking a subprocess per request on every request
+        of a deployment that genuinely lacks PCRE2 (the exact per-request
+        fork+exec this cache exists to eliminate). The reset hook, if a caller
+        ever needs to re-probe without a restart, is a single assignment:
+        ``RegexSearchService._pcre2_supported_global = None`` -- which is
+        precisely what TestDetectPcre2Support's autouse fixture does.
         """
         if self._pcre2_supported is not None:
             return self._pcre2_supported

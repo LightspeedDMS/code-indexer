@@ -439,7 +439,8 @@ class _CompletedProcessStub:
         self.stderr = ""
 
 
-def test_ac3_branch_discovery_concurrency_is_bounded(
+@pytest.mark.asyncio
+async def test_ac3_branch_discovery_concurrency_is_bounded(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The introduced concurrency must be BOUNDED (explicit AC3 requirement).
@@ -492,7 +493,7 @@ def test_ac3_branch_discovery_concurrency_is_bounded(
         ) as client:
             return await client.post("/api/discovery/branches", json=payload)
 
-    resp = asyncio.run(_drive())
+    resp = await _drive()
     assert resp.status_code == 200
     body = resp.json()
     assert len(body) == repo_count
@@ -504,6 +505,89 @@ def test_ac3_branch_discovery_concurrency_is_bounded(
         f"exceeding the bounded cap of {cap}"
     )
     assert peak > 1, "no concurrency observed at all -- fetches are sequential"
+
+
+class _FailingTokenStore:
+    """Credential store that raises after N successful reads.
+
+    Models the real failure AC3's planning loop must survive: the credential
+    store is a genuine external read that can fail partway through a repo list.
+    """
+
+    def __init__(self, fail_after: int) -> None:
+        self._fail_after = fail_after
+        self.calls = 0
+
+    def get_token(self, platform: str) -> None:
+        self.calls += 1
+        if self.calls > self._fail_after:
+            raise RuntimeError("credential store unavailable")
+        return None
+
+
+@pytest.mark.asyncio
+async def test_ac3_credential_failure_orphans_no_tasks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A credential-store failure mid-plan must orphan ZERO fetch tasks.
+
+    The planning loop resolves per-repo credentials by really reading the
+    credential store, which can raise. If fetch tasks were created while that
+    loop was still running, a failure on repo N would leave repos 0..N-1's
+    tasks running and never awaited -- unretrieved exceptions plus git
+    subprocesses outliving the response. Asserted by counting how many fetches
+    ever started: it must be exactly zero.
+    """
+    from code_indexer.server.services import remote_branch_service as rbs_module
+    from code_indexer.server.web import routes as routes_module
+
+    started = 0
+
+    def _counting_fetch(
+        service_self: rbs_module.RemoteBranchService,
+        clone_url: str,
+        platform: str = "github",
+        credentials: Optional[str] = None,
+    ) -> rbs_module.BranchFetchResult:
+        nonlocal started
+        started += 1
+        return rbs_module.BranchFetchResult(
+            success=True, branches=["main"], default_branch="main", error=None
+        )
+
+    monkeypatch.setattr(
+        rbs_module.RemoteBranchService, "fetch_remote_branches", _counting_fetch
+    )
+    monkeypatch.setattr(
+        routes_module, "_require_admin_session", lambda request: {"username": "admin"}
+    )
+    failing_store = _FailingTokenStore(fail_after=2)
+    monkeypatch.setattr(routes_module, "_get_token_manager", lambda: failing_store)
+
+    app = _app_with_probe()
+    app.post("/api/discovery/branches")(routes_module.fetch_discovery_branches)
+
+    payload = {
+        "repos": [
+            {
+                "clone_url": _UNRESOLVABLE_CLONE_URL_TEMPLATE.format(index=i),
+                "platform": "github",
+            }
+            for i in range(5)
+        ]
+    }
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url=_TEST_BASE_URL
+    ) as client:
+        resp = await client.post("/api/discovery/branches", json=payload)
+
+    # The route's own outer handler turns the failure into a 500, unchanged.
+    assert resp.status_code == 500
+    assert started == 0, (
+        f"{started} branch fetches were started before planning failed -- those "
+        "tasks are orphaned (never awaited, exceptions never retrieved)"
+    )
 
 
 # ===========================================================================

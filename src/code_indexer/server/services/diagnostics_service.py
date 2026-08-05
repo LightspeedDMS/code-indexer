@@ -158,15 +158,21 @@ class DiagnosticsService:
         self._cache_ttl = timedelta(minutes=10)
         self._running = False
         self._running_categories: set = set()
-        # Story #1491 AC4: a threading.Lock, NOT an asyncio.Lock. Once the
-        # diagnostics run is dispatched as a SYNC Starlette background task it
-        # executes in a worker thread while other requests (get_status,
-        # run_category) still touch this state from the event loop. An
-        # asyncio.Lock gives no cross-thread protection at all and, being
-        # loop-bound, breaks once contended from a second loop/thread. Every
-        # critical section it guards is short and purely synchronous (dict
-        # writes plus the sync _save_results_to_db call), so a plain
-        # threading.Lock is both correct and non-blocking in practice.
+        # Story #1491 AC4: a threading.Lock, NOT an asyncio.Lock.
+        #
+        # The precise reason: both diagnostics entry points are now dispatched
+        # as SYNC Starlette background tasks, and each runs its coroutine on
+        # its OWN private event loop via asyncio.run() inside a Starlette
+        # threadpool worker. Two such runs (run-all and run-category, or two
+        # categories) can therefore be in flight on two different threads with
+        # two different loops. An asyncio.Lock offers ZERO protection across
+        # threads, and being loop-bound it raises outright once contended from
+        # a second loop -- so it is not merely weaker here, it is incorrect.
+        #
+        # Every critical section it guards is a short, purely in-memory dict
+        # write; the synchronous DB persistence is performed OUTSIDE the lock
+        # (see run_all_diagnostics/run_category) so no reader ever blocks
+        # behind disk I/O.
         self.__lock: Optional[threading.Lock] = None
         self._backend = storage_backend
 
@@ -350,8 +356,13 @@ class DiagnosticsService:
                 with self._lock:
                     self._cache[category] = results
                     self._cache_timestamps[category] = now
-                    # Persist to database
-                    self._save_results_to_db(category, results)
+                # Story #1491 AC4: persistence is deliberately OUTSIDE the
+                # lock. self._lock is a cross-thread threading.Lock, and this
+                # run executes on a worker thread -- holding it across a
+                # synchronous SQLite write would make any concurrent
+                # status/read path block on disk I/O. The in-memory cache is
+                # already updated above, so a reader never waits on the write.
+                self._save_results_to_db(category, results)
 
         finally:
             with self._lock:
