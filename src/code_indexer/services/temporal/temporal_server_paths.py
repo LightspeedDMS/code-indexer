@@ -60,6 +60,7 @@ preserved either way:
 
 from __future__ import annotations
 
+import logging
 import os
 from pathlib import Path
 from typing import Mapping, Optional, Tuple, Union
@@ -72,6 +73,10 @@ from typing import Mapping, Optional, Tuple, Union
 #: into the standalone CLI's temporal path (the Bug #1468 import-budget
 #: regression class).
 CIDX_SERVER_REFRESH_CONTEXT_ENV = "CIDX_SERVER_REFRESH_CONTEXT"
+
+#: stdlib only, so this module stays dependency-free and off the import-budget
+#: critical path (Bug #1468).
+logger = logging.getLogger(__name__)
 
 #: Dot-prefixed container for every golden repo's server-owned temporal index
 #: roots, a sibling of the established ``.versioned/`` convention.
@@ -242,6 +247,20 @@ def resolve_temporal_index_dir(
         sister_root = resolve_server_temporal_index_root_for_codebase(codebase_dir)
         if sister_root is not None:
             return sister_root
+        # Bug #1529 finding #8: in SERVER context this combination is an
+        # anomaly, not a normal case -- the server side expects the fixed
+        # root, so falling through means writing/reading somewhere it will not
+        # look. Behavior is deliberately unchanged (still the in-repo path);
+        # only the silence is fixed, so the mismatch is discoverable instead
+        # of invisible. Never warned outside server context: that is the
+        # ordinary standalone CLI path and would be noise on every run.
+        logger.warning(
+            "temporal: server context is active but %s is not a recognized "
+            "golden repo layout, so the fixed temporal root could not be "
+            "derived; falling back to the in-repo location, which the server "
+            "read path does not consult",
+            codebase_dir,
+        )
     return in_repo_temporal_index_dir(codebase_dir)
 
 

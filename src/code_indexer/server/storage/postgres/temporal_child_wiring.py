@@ -80,7 +80,18 @@ _TEMPORAL_CHILD_POOL_TIMEOUT_SECONDS = 30.0
 #: "this child was spawned by the server" (as opposed to a genuine
 #: standalone `cidx index` with no server process at all). Distinct from
 #: TEMPORAL_PG_BOOTSTRAP_DIR_ENV, which remains postgres-only.
-CIDX_SERVER_REFRESH_CONTEXT_ENV = "CIDX_SERVER_REFRESH_CONTEXT"
+# Bug #1529 finding #11: re-exported from the canonical, dependency-free
+# definition rather than re-declared here. Two independent literals for one
+# wire protocol drift silently the moment either is edited, and the failure
+# mode is temporal data going to a location the reader disagrees with. The
+# import direction is deliberate and must not be inverted: server -> services
+# only, since the reverse would drag the server/psycopg import chain into the
+# standalone CLI's temporal path (the Bug #1468 import-budget regression).
+from code_indexer.services.temporal.temporal_server_paths import (  # noqa: E402
+    CIDX_SERVER_REFRESH_CONTEXT_ENV,
+)
+
+__all__ = ["CIDX_SERVER_REFRESH_CONTEXT_ENV"]
 
 
 def build_temporal_child_env(
