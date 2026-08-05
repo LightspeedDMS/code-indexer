@@ -840,13 +840,6 @@ class ConfigService:
                     if config.indexing_config is not None
                     else False
                 ),
-                # Story #1457 AC1 (2026-07-24 re-review, Codex finding #4):
-                # sister-location relocation safety gate display wiring.
-                "temporal_sister_relocation_enabled": (
-                    config.indexing_config.temporal_sister_relocation_enabled
-                    if config.indexing_config is not None
-                    else False
-                ),
             },
             # Story #323 - Wiki metadata fields configuration
             # Story #325 - Configurable metadata display order
@@ -2799,18 +2792,6 @@ class ConfigService:
             logger.info(
                 "Updated indexing.temporal_all_branches_enabled to %s",
                 indexing.temporal_all_branches_enabled,
-                extra={"correlation_id": get_correlation_id()},
-            )
-            return
-
-        # Story #1457 AC1 (2026-07-24 re-review, Codex finding #4):
-        # sister-location relocation safety gate (default OFF).
-        if key == "temporal_sister_relocation_enabled":
-            indexing.temporal_sister_relocation_enabled = _parse_bool(value)
-            self.save_config(config)
-            logger.info(
-                "Updated indexing.temporal_sister_relocation_enabled to %s",
-                indexing.temporal_sister_relocation_enabled,
                 extra={"correlation_id": get_correlation_id()},
             )
             return

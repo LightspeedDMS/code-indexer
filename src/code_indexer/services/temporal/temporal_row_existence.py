@@ -40,6 +40,30 @@ def temporal_shard_has_committed_rows(shard_dir: Path) -> bool:
     shard_dir = Path(shard_dir)
     if not shard_dir.is_dir():
         return False
+
+    # Bug #1529: this scan was vector_*.json-ONLY, which became wrong the
+    # moment Bug #1528 made temporal indexing write the consolidated
+    # chunks.db layout -- a fully-populated temporal shard reported "no
+    # data". That is not cosmetic: golden_repo_manager's
+    # _temporal_vectors_exist_for_repo() uses this predicate to decide
+    # whether an explicit temporal add-indexes/reindex must pass --clear,
+    # so a false negative forced a FULL re-embed of the entire git history
+    # (real embedding cost) on every such run. Layout dispatch uses the
+    # project's sole authority (resolve_chunk_layout) and the read-only,
+    # never-creating row-existence primitive -- never a bare chunks.db
+    # existence probe, and never an open that could create the file.
+    from code_indexer.storage.shared.chunk_layout import (
+        ChunkLayout,
+        resolve_chunk_layout,
+    )
+
+    if resolve_chunk_layout(shard_dir) is ChunkLayout.CHUNKS_DB:
+        from code_indexer.storage.sqlite_chunk_store import chunk_store_has_real_data
+
+        # treat_absent: this is a side-effect-free inspection predicate, so a
+        # missing/corrupt store means "no data", never an exception.
+        return chunk_store_has_real_data(shard_dir / "chunks.db")
+
     for _ in shard_dir.rglob("vector_*.json"):
         return True
     return False

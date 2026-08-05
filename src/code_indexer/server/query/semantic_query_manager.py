@@ -2885,14 +2885,6 @@ class SemanticQueryManager:
                         val = diff_type.strip()
                         diff_types_list = [val] if val else None
 
-            # Bug #1529: NO resolver. Story #1457's pointer-first
-            # TemporalShardResolver is retired -- under the locked design a
-            # shard's path is fixed from first creation, so there is nothing
-            # to resolve and no second location to disagree with. Leaving the
-            # resolver live while the write side had been retired is exactly
-            # the half-wiring #1529 was filed for.
-            resolver = None
-
             # Execute temporal query via fusion dispatch (Story #640)
             temporal_results = execute_temporal_query_with_fusion(
                 config=config,
@@ -2913,9 +2905,6 @@ class SemanticQueryManager:
                 no_embedding_cache_shortcut=no_embedding_cache_shortcut,
                 # Story #1291 AC7/AC8: forward explicit embedder override
                 temporal_embedder=temporal_embedder,
-                # Story #1457 AC1/AC2: forward the resolver (None unless
-                # golden_repo_alias + a real query_tracker were both given).
-                resolver=resolver,
             )
 
             # If fusion dispatch found no temporal index, fall back gracefully

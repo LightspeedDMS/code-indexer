@@ -554,51 +554,6 @@ class CIDXDaemonService(Service):
 
             index_dir = project_root / ".code-indexer" / "index"
 
-            # Bug #1482 extension: construct a TemporalShardResolver only
-            # when project_root structurally IS a golden repo's own clone
-            # (the ONE genuine standalone case -- see
-            # temporal_sister_root_detection.py; entirely inert/None for
-            # an ordinary standalone repo). The in-process daemon has no
-            # QueryTracker construct at all, so the resolver is built
-            # without one (pin() is then a documented true no-op, matching
-            # the same no-tracker convention get_temporal_repo_status()
-            # already uses). Attaching to self.vector_store (the
-            # "disconnected reader" lesson) is required -- a resolver
-            # threaded only into fusion's own bookkeeping would not change
-            # what _get_collection_path() resolves on the store instance
-            # that actually performs the search. Fail-open on any error.
-            _daemon_temporal_resolver = None
-            try:
-                from code_indexer.services.temporal.temporal_sister_root_detection import (
-                    detect_golden_repo_sister_root,
-                )
-
-                _sister_root = detect_golden_repo_sister_root(project_root)
-                if _sister_root is not None:
-                    from code_indexer.global_repos.alias_manager import AliasManager
-                    from code_indexer.services.temporal.temporal_shard_resolver import (
-                        TemporalShardResolver,
-                    )
-
-                    _daemon_temporal_resolver = TemporalShardResolver(
-                        alias_manager=AliasManager(
-                            str(_sister_root.golden_repos_dir / "aliases")
-                        ),
-                        repo_alias=_sister_root.repo_alias,
-                        sister_root=_sister_root.golden_repos_dir,
-                        legacy_index_path=index_dir,
-                    )
-                    self.vector_store._temporal_shard_resolver = (
-                        _daemon_temporal_resolver
-                    )
-            except Exception:
-                logger.warning(
-                    "exposed_query_temporal: sister-relocated resolver "
-                    "construction failed (isolated, non-fatal); using "
-                    "legacy-only resolution",
-                    exc_info=True,
-                )
-                _daemon_temporal_resolver = None
 
             try:
                 results = execute_temporal_query_with_fusion(
@@ -616,7 +571,6 @@ class CIDXDaemonService(Service):
                     ),
                     chunk_type=chunk_type,
                     temporal_embedder=temporal_embedder,
-                    resolver=_daemon_temporal_resolver,
                 )
             except ValueError as e:
                 return {"error": str(e), "results": []}

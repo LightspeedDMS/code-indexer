@@ -475,11 +475,10 @@ def test_disjoint_shard_fusion_preserves_true_score_ordering_bug_1299(tmp_path):
         ),
         patch(
             "code_indexer.services.temporal.temporal_fusion_dispatch._query_shards_raw",
-            # Story #1400 Phase 4: _query_shards_raw returns
-            # (results_by_shard, shards_attempted, shards_succeeded,
-            # pin_exhausted_shards) -- the 4th element added by Story
-            # #1457 HIGH #6 (2026-07-23 code review).
-            return_value=(results_by_shard, 2, 2, []),
+            # _query_shards_raw returns (results_by_shard, shards_attempted,
+            # shards_succeeded). Bug #1529 removed the former 4th element
+            # (pin_exhausted_shards) along with the resolver pin mechanism.
+            return_value=(results_by_shard, 2, 2),
         ),
     ):
         result = execute_temporal_query_with_fusion(

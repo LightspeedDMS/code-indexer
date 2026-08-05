@@ -5794,18 +5794,20 @@ def query(
         # local-scan value.
         if not _has_temporal:
             try:
-                from code_indexer.services.temporal.temporal_sister_root_detection import (
-                    detect_golden_repo_sister_root,
+                # Bug #1529: same structural golden-repo detection, now from
+                # temporal_server_paths (the single location authority).
+                from code_indexer.services.temporal.temporal_server_paths import (
+                    resolve_golden_repo_coordinates,
                 )
                 from code_indexer.services.temporal.temporal_status import (
                     get_temporal_repo_status,
                 )
 
-                _sister_root = detect_golden_repo_sister_root(config.codebase_dir)
-                if _sister_root is not None:
+                _coords = resolve_golden_repo_coordinates(config.codebase_dir)
+                if _coords is not None:
                     _sister_status = get_temporal_repo_status(
-                        _sister_root.golden_repos_dir,
-                        _sister_root.repo_alias,
+                        _coords[0],
+                        _coords[1],
                         index_dir,
                     )
                     _has_temporal = _sister_status.has_data
@@ -5885,65 +5887,6 @@ def query(
 
             index_dir = config.codebase_dir / ".code-indexer" / "index"
 
-            # Bug #1482 extension: construct a TemporalShardResolver only
-            # when config.codebase_dir structurally IS a golden repo's own
-            # clone (see the existence-gate detection above for the full
-            # rationale) -- entirely inert/None for an ordinary standalone
-            # repo. Standalone CLI has no QueryTracker construct at all, so
-            # the resolver is built without one (pin() is then a
-            # documented true no-op, matching the exact same no-tracker
-            # convention get_temporal_repo_status() already uses).
-            # Attaching to vector_store_client (the "disconnected reader"
-            # lesson) is required -- a resolver threaded only into fusion's
-            # own bookkeeping would not change what _get_collection_path()
-            # resolves on the store instance that actually performs the
-            # search.
-            _cli_temporal_resolver = None
-            try:
-                from code_indexer.services.temporal.temporal_sister_root_detection import (
-                    detect_golden_repo_sister_root,
-                )
-
-                _sister_root = detect_golden_repo_sister_root(config.codebase_dir)
-                if _sister_root is not None:
-                    # Aliased import: `AliasManager` may already be a
-                    # LOCAL name earlier in this same query() function
-                    # scope (the global-repo-handling branch, conditional
-                    # on mode) -- relying on that binding unconditionally
-                    # here would be a latent NameError on other code
-                    # paths, and re-importing under the same name trips
-                    # mypy's redefinition check.
-                    from code_indexer.global_repos.alias_manager import (
-                        AliasManager as _AliasManager,
-                    )
-                    from code_indexer.services.temporal.temporal_shard_resolver import (
-                        TemporalShardResolver,
-                    )
-
-                    _cli_temporal_resolver = TemporalShardResolver(
-                        alias_manager=_AliasManager(
-                            str(_sister_root.golden_repos_dir / "aliases")
-                        ),
-                        repo_alias=_sister_root.repo_alias,
-                        sister_root=_sister_root.golden_repos_dir,
-                        legacy_index_path=index_dir,
-                    )
-                    vector_store_client._temporal_shard_resolver = (
-                        _cli_temporal_resolver
-                    )
-            except Exception:
-                # NOTE: uses logging.getLogger(...) directly -- see the
-                # matching comment on the existence-gate block above for
-                # why the bare `logger` name cannot be used here.
-                import logging as _logging
-
-                _logging.getLogger(__name__).warning(
-                    "cidx query temporal: sister-relocated resolver "
-                    "construction failed (isolated, non-fatal); using "
-                    "legacy-only resolution",
-                    exc_info=True,
-                )
-                _cli_temporal_resolver = None
 
             if not quiet:
                 if time_range != "all":
@@ -5971,7 +5914,6 @@ def query(
                 author=author,
                 chunk_type=chunk_type,
                 temporal_embedder=temporal_embedder,
-                resolver=_cli_temporal_resolver,
             )
 
             # Story #905: Apply unified rerank funnel to temporal results.
@@ -8298,20 +8240,20 @@ def _status_impl(ctx):
                     _sister_temporal_status = None
                     if not temporal_collections:
                         try:
-                            from .services.temporal.temporal_sister_root_detection import (
-                                detect_golden_repo_sister_root,
+                            from .services.temporal.temporal_server_paths import (
+                                resolve_golden_repo_coordinates,
                             )
                             from .services.temporal.temporal_status import (
                                 get_temporal_repo_status,
                             )
 
-                            _sister_root = detect_golden_repo_sister_root(
+                            _coords = resolve_golden_repo_coordinates(
                                 config.codebase_dir
                             )
-                            if _sister_root is not None:
+                            if _coords is not None:
                                 _sister_temporal_status = get_temporal_repo_status(
-                                    _sister_root.golden_repos_dir,
-                                    _sister_root.repo_alias,
+                                    _coords[0],
+                                    _coords[1],
                                     index_path,
                                 )
                         except Exception as e_sister:

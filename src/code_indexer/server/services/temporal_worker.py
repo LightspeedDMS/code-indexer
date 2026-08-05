@@ -330,13 +330,6 @@ def run_temporal_worker(
     # CoW clone's point-in-time config.json snapshot. Entirely fail-open:
     # any resolution failure leaves `config` (and thus behavior) unchanged.
     #
-    # Bug #1529: NO resolver. Story #1457's pointer-first
-    # TemporalShardResolver is retired -- a shard's path is now fixed from
-    # first creation, so there is nothing to resolve and no second location
-    # that could disagree. The location itself was already applied above, at
-    # backend-construction time (temporal_index_dir), which is the only place
-    # it can take effect for the store that actually performs the search.
-    resolver: Optional[Any] = None
     if golden_repo_alias and _activated_repo_manager is not None:
         try:
             golden_config = load_golden_temporal_config(
@@ -388,7 +381,6 @@ def run_temporal_worker(
         on_shards_discovered=checkpointer.on_shards_discovered,
         on_shard_complete=checkpointer.on_shard_complete,
         cancel_check=cancel_check,
-        resolver=resolver,
     )
 
     qr_final = _to_dicts(final.results, worker_input.repository_alias)
