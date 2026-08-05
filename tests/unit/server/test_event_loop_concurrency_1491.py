@@ -97,6 +97,26 @@ _SLOW_SECONDS = 0.6
 # well under this.  A blocked loop would make it >= _SLOW_SECONDS.
 _PROMPT_LATENCY_BUDGET_SECONDS = 0.25
 
+# Shared by the two before/after comparisons (AC1's bcrypt and AC2's regex
+# dispatch): the post-change probe must be dramatically faster than the
+# pre-change one, not merely under an absolute budget, since the real work's
+# duration is machine-dependent.
+_MIN_PROBE_IMPROVEMENT_RATIO = 4.0
+
+# AC2's own, tighter promptness bar. regex_search's synchronous share is real
+# work of a few hundred milliseconds rather than a fixed _SLOW_SECONDS block, so
+# AC2 measures against this instead of the shared budget above; it is still more
+# than an order of magnitude above the single-digit-millisecond latencies the
+# offloaded path actually produces.
+_AC2_PROBE_BUDGET_SECONDS = 0.05
+
+# Anti-vacuity guard for AC2 (review item 2): before trusting ANY before/after
+# comparison, the pre-change baseline must be shown to genuinely stall the loop
+# by at least this multiple of AC2's budget. Without it, a corpus too small to
+# block would let the comparison "pass" against completely unfixed code -- which
+# is exactly what both reviewers demonstrated on the previous revision.
+_AC2_MIN_BASELINE_STALL_MULTIPLE = 4.0
+
 # ASGITransport requires a syntactically valid base URL; no socket is opened
 # and no name is resolved, so this host never leaves the process.
 _TEST_BASE_URL = "http://testserver"
@@ -177,38 +197,96 @@ def _app_with_probe() -> FastAPI:
     return app
 
 
+class _BlockingBarrier:
+    """The instant the slow operation ENTERS its blocking section.
+
+    Story #1491 review item 16: probe timing must not depend on a fixed timing
+    stagger.  A staggered probe is a lottery -- if the blocking section happens
+    to start after the probes fired, an unfixed (still-blocking) code path
+    measures fast and the comparison silently proves nothing.  This is the
+    explicit synchronisation point instead: the operation under test signals
+    ``enter()`` at the top of the section that must not run on the event loop,
+    and every probe waits for that signal and measures from the recorded
+    instant.
+
+    The recorded instant is what makes it work in BOTH directions: when the
+    work is still on the loop, the probes' own polling sleep cannot resume
+    until the block ends, so they report the full residual stall; when the work
+    is offloaded, they observe the signal immediately and report milliseconds.
+
+    ``enter()`` may be called from either the event-loop thread or a worker
+    thread, and only the FIRST call is recorded (a section entered repeatedly
+    within one measurement is anchored at its first entry).
+    """
+
+    def __init__(self) -> None:
+        self._event = threading.Event()
+        self._lock = threading.Lock()
+        self._entered_at: Optional[float] = None
+
+    def enter(self) -> None:
+        with self._lock:
+            if self._entered_at is None:
+                self._entered_at = time.perf_counter()
+        self._event.set()
+
+    def is_entered(self) -> bool:
+        return self._event.is_set()
+
+    def entered_at(self) -> float:
+        with self._lock:
+            assert self._entered_at is not None, "barrier was never entered"
+            return self._entered_at
+
+
+# Poll interval for a probe waiting on the barrier. Small relative to the
+# promptness budget so the wait itself contributes negligible latency.
+_BARRIER_POLL_SECONDS = 0.005
+
+# Bounded wait (Messi Rule #14): if the slow operation never signals its
+# blocking section, fail loudly rather than hang.
+_BARRIER_WAIT_TIMEOUT_SECONDS = 60.0
+
+
 async def _measure_probe_latency_during(
     app: FastAPI,
     slow_request: SlowRequest,
     *,
+    barrier: _BlockingBarrier,
     probe_count: int = 3,
-    probe_stagger_seconds: float = 0.02,
 ) -> Dict[str, object]:
     """Run ``slow_request`` and concurrently issue ``probe_count`` /ping calls.
 
     Returns the slow request's response plus the measured per-probe latencies.
 
-    Each probe's latency is measured from its SCHEDULED fire time (origin +
-    stagger), not from the moment its pre-request ``asyncio.sleep`` happens to
-    return.  This is essential: when the loop is blocked, the starvation is
-    absorbed inside that sleep's own overrun, so a timer started after the
-    sleep would report a fast probe against a completely frozen loop.
+    Every probe waits for ``barrier`` -- the slow operation's own signal that it
+    has entered the section that must not execute on the event loop -- and then
+    measures from the instant the barrier recorded, NOT from when its polling
+    sleep happened to resume.  That distinction is essential: when the loop is
+    blocked, the starvation is absorbed inside the sleep's own overrun, so a
+    timer started after the sleep would report a fast probe against a
+    completely frozen loop.
     """
+    if probe_count < 1:
+        raise ValueError(f"probe_count must be >= 1, got {probe_count}")
+
     transport = httpx.ASGITransport(app=app)
 
     async with httpx.AsyncClient(
         transport=transport, base_url=_TEST_BASE_URL
     ) as client:
         probe_latencies: List[float] = []
-        origin = time.perf_counter()
 
         async def _probe(ordinal: int) -> None:
-            # Stagger slightly so the first probe lands after the slow request
-            # has genuinely entered its blocking section.
-            scheduled_at = origin + probe_stagger_seconds * (ordinal + 1)
-            await asyncio.sleep(probe_stagger_seconds * (ordinal + 1))
+            deadline = time.perf_counter() + _BARRIER_WAIT_TIMEOUT_SECONDS
+            while not barrier.is_entered():
+                assert time.perf_counter() < deadline, (
+                    "the slow operation never signalled its blocking section"
+                )
+                await asyncio.sleep(_BARRIER_POLL_SECONDS)
+            entered_at = barrier.entered_at()
             resp = await client.get("/ping")
-            probe_latencies.append(time.perf_counter() - scheduled_at)
+            probe_latencies.append(time.perf_counter() - entered_at)
             assert resp.status_code == 200
 
         slow_started = time.perf_counter()
@@ -273,7 +351,9 @@ class _NoStoredTokens:
 # ===========================================================================
 
 
-def _install_slow_branch_fetch(monkeypatch: pytest.MonkeyPatch) -> None:
+def _install_slow_branch_fetch(
+    monkeypatch: pytest.MonkeyPatch, barrier: _BlockingBarrier
+) -> None:
     """Replace the real git ls-remote subprocess with a known-duration block."""
     from code_indexer.server.services import remote_branch_service as rbs_module
 
@@ -284,7 +364,10 @@ def _install_slow_branch_fetch(monkeypatch: pytest.MonkeyPatch) -> None:
         credentials: Optional[str] = None,
     ) -> rbs_module.BranchFetchResult:
         # A REAL synchronous block of known duration standing in for the real
-        # git ls-remote subprocess (see module docstring).
+        # git ls-remote subprocess (see module docstring). The barrier marks the
+        # exact instant the block starts, so probes are anchored to it rather
+        # than to a guessed stagger.
+        barrier.enter()
         time.sleep(_SLOW_SECONDS)
         return rbs_module.BranchFetchResult(
             success=True,
@@ -350,7 +433,8 @@ async def test_ac3_branch_discovery_does_not_block_event_loop(
        concurrently (bounded), not sequentially.
     """
     repo_count = 4
-    _install_slow_branch_fetch(monkeypatch)
+    barrier = _BlockingBarrier()
+    _install_slow_branch_fetch(monkeypatch, barrier)
     app = _branch_discovery_app(monkeypatch)
 
     clone_urls = [
@@ -364,7 +448,7 @@ async def test_ac3_branch_discovery_does_not_block_event_loop(
     async def _slow(client: httpx.AsyncClient) -> httpx.Response:
         return await client.post("/api/discovery/branches", json=payload)
 
-    measured = await _measure_probe_latency_during(app, _slow)
+    measured = await _measure_probe_latency_during(app, _slow, barrier=barrier)
     _assert_branch_discovery_body(_slow_response(measured), clone_urls)
 
     total_wall = _total_wall(measured)
@@ -615,7 +699,9 @@ class _StubProcess:
         return _CLI_TOOL_STDOUT, b""
 
 
-def _install_blocking_subprocess_boundary(monkeypatch: pytest.MonkeyPatch) -> None:
+def _install_blocking_subprocess_boundary(
+    monkeypatch: pytest.MonkeyPatch, barrier: _BlockingBarrier
+) -> None:
     """Stand in for asyncio.create_subprocess_exec with a real blocking call.
 
     Only the EXTERNAL process boundary is replaced -- every real diagnostic
@@ -633,6 +719,9 @@ def _install_blocking_subprocess_boundary(monkeypatch: pytest.MonkeyPatch) -> No
     async def _stub_exec(*args: object, **kwargs: object) -> _StubProcess:
         if not blocked_once.is_set():
             blocked_once.set()
+            # Anchor the probes to the exact start of the real block rather than
+            # to a guessed stagger (review item 16).
+            barrier.enter()
             time.sleep(_SLOW_SECONDS)
         return _StubProcess()
 
@@ -699,16 +788,20 @@ async def test_ac4_diagnostics_background_task_does_not_block_event_loop(
     """
     from code_indexer.server.routers import diagnostics as diagnostics_router
 
-    # Baseline: the pre-change path, awaited directly on the event loop.
-    _install_blocking_subprocess_boundary(monkeypatch)
+    # Baseline: the pre-change path, awaited directly on the event loop. Its
+    # barrier is never observed -- no concurrent probe runs against the
+    # baseline here, only the records it produces are compared.
+    _install_blocking_subprocess_boundary(monkeypatch, _BlockingBarrier())
     baseline_service = _new_diagnostics_service(monkeypatch, tmp_path / "baseline.db")
     await baseline_service.run_all_diagnostics()
     baseline_records = _comparable_records(baseline_service)
 
     # Under test: the real route + real background-task registration.  The
     # blocking boundary is re-installed so this run blocks too (the latch above
-    # was consumed by the baseline run).
-    _install_blocking_subprocess_boundary(monkeypatch)
+    # was consumed by the baseline run), this time with the barrier the probes
+    # are anchored to.
+    barrier = _BlockingBarrier()
+    _install_blocking_subprocess_boundary(monkeypatch, barrier)
     service = _new_diagnostics_service(monkeypatch, tmp_path / "under_test.db")
     monkeypatch.setattr(diagnostics_router, "diagnostics_service", service)
     app = _app_with_probe()
@@ -717,7 +810,7 @@ async def test_ac4_diagnostics_background_task_does_not_block_event_loop(
     async def _slow(client: httpx.AsyncClient) -> httpx.Response:
         return await client.post("/run-all")
 
-    measured = await _measure_probe_latency_during(app, _slow)
+    measured = await _measure_probe_latency_during(app, _slow, barrier=barrier)
     assert _slow_response(measured).status_code == 200
 
     _record(
@@ -739,19 +832,21 @@ async def test_ac4_diagnostics_background_task_does_not_block_event_loop(
 # AC2 -- regex_search MCP dispatch (mcp/handlers/search.py::handle_regex_search)
 # ===========================================================================
 
-# Corpus size: large enough that the handler's SYNCHRONOUS sections (the
-# per-match Path.resolve calls, the whole-output read and per-line json.loads
-# of ripgrep's JSON stream) take tens to hundreds of milliseconds of REAL work
-# -- no artificial sleep is used anywhere in the AC2 proof.
-_REGEX_CORPUS_FILES = 3000
+# Corpus size: large enough that the handler's SYNCHRONOUS sections take
+# hundreds of milliseconds of REAL work -- no artificial sleep is used anywhere
+# in the AC2 proof. Deliberately just under _MAX_PREFILTER_CANDIDATES (8000):
+# above that ceiling regex_search SKIPS the trigram pre-filter entirely, and the
+# pre-filter plus its Path.resolve fan-out are two of the heaviest synchronous
+# line items AC2 names.
+_REGEX_CORPUS_FILES = 7500
 _REGEX_CORPUS_PACKAGES = 50
 _REGEX_REPO_ALIAS = "story1491repo"
 _REGEX_PATTERN = "needle_target_"
 
-# The post-change probe must be dramatically faster than the pre-change one,
-# not merely under an absolute budget: the real work's duration is
-# machine-dependent, so the RATIO is the meaningful discriminator.
-_MIN_PROBE_IMPROVEMENT_RATIO = 4.0
+# Lower bound on pre-filter candidates the measured runs must actually have
+# resolved. Proves the corpus really exercises the trigram intersection and the
+# per-candidate Path.resolve fan-out rather than silently full-scanning.
+_MIN_OBSERVED_PREFILTER_CANDIDATES = 1000
 
 
 def _build_regex_corpus(root: Path) -> None:
@@ -761,7 +856,16 @@ def _build_regex_corpus(root: Path) -> None:
     (``_legacy._resolve_repo_path``) accepts the absolute path via its
     full-path branch -- no server-only registry wiring needed, and the whole
     resolve + search + parse path stays real.
+
+    Also builds a REAL trigram index with the production TrigramIndexManager,
+    which is what makes ``_prefilter_candidate_files`` do its actual work: a
+    multi-statement SQLite trigram intersection followed by one
+    ``Path.resolve()`` per candidate (report Finding B2's first two line items).
+    Without an index present that method returns None immediately and neither
+    line item is ever measured.
     """
+    from code_indexer.global_repos.trigram_index_manager import TrigramIndexManager
+
     (root / ".git").mkdir(parents=True, exist_ok=True)
     (root / ".git" / "HEAD").write_text("ref: refs/heads/main\n")
     for index in range(_REGEX_CORPUS_FILES):
@@ -770,9 +874,62 @@ def _build_regex_corpus(root: Path) -> None:
         (package / f"mod{index}.py").write_text(
             f"def {_REGEX_PATTERN}{index}():\n    return {index}\n"
         )
+    TrigramIndexManager(root / ".code-indexer" / "trigram_index").build(root)
 
 
-def _regex_dispatch_app(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> FastAPI:
+class _PrefilterObserver:
+    """Pass-through observer around the real trigram pre-filter.
+
+    Signals the CURRENT measurement's barrier at the instant the pre-filter
+    starts -- the handler's first synchronous section, and the one report
+    Finding B2 lists first -- then calls the real implementation unchanged and
+    records how many candidates it resolved.  Nothing about the pre-filter's
+    behaviour is altered; this only observes WHEN it runs and WHAT it produced,
+    which is what lets the test prove the corpus really exercises the SQLite
+    trigram intersection and its per-candidate ``Path.resolve()`` fan-out.
+    """
+
+    def __init__(self) -> None:
+        self.barrier: Optional[_BlockingBarrier] = None
+        self._lock = threading.Lock()
+        self._candidate_counts: List[int] = []
+
+    def install(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from code_indexer.global_repos import regex_search as regex_search_module
+
+        real = regex_search_module.RegexSearchService._prefilter_candidate_files
+
+        def _observed(
+            service_self: object,
+            pattern: str,
+            search_path: Path,
+            path: Optional[str],
+            case_sensitive: bool,
+        ) -> Optional[List[Path]]:
+            if self.barrier is not None:
+                self.barrier.enter()
+            raw = real(service_self, pattern, search_path, path, case_sensitive)
+            result: Optional[List[Path]] = None if raw is None else list(raw)
+            with self._lock:
+                # -1 records "no usable pre-filter, full scan" distinctly from a
+                # real but empty candidate list.
+                self._candidate_counts.append(-1 if result is None else len(result))
+            return result
+
+        monkeypatch.setattr(
+            regex_search_module.RegexSearchService,
+            "_prefilter_candidate_files",
+            _observed,
+        )
+
+    def max_candidates(self) -> int:
+        with self._lock:
+            return max(self._candidate_counts) if self._candidate_counts else 0
+
+
+def _regex_dispatch_app(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> Tuple[FastAPI, _PrefilterObserver]:
     """Real app with two routes, both dispatching via the REAL MCP dispatcher.
 
     ``/dispatch/registered`` invokes whatever ``regex_search`` handler the
@@ -782,6 +939,9 @@ def _regex_dispatch_app(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Fast
     compare against.  Nothing about the dispatcher, the handler, ripgrep, or
     the filesystem is mocked: only ``app.state.golden_repos_dir`` is pointed at
     the temp corpus so repo resolution finds it.
+
+    Returns the app plus the pre-filter observer, whose ``barrier`` the caller
+    sets before each measurement.
     """
     import inspect
 
@@ -795,6 +955,9 @@ def _regex_dispatch_app(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Fast
     monkeypatch.setattr(
         app_module.app.state, "golden_repos_dir", str(golden_repos_dir), raising=False
     )
+
+    observer = _PrefilterObserver()
+    observer.install(monkeypatch)
 
     user = User(
         username="story1491",
@@ -834,7 +997,7 @@ def _regex_dispatch_app(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Fast
     async def _dispatch_async_impl() -> JSONResponse:
         return await _dispatch(search_handlers.handle_regex_search)
 
-    return app
+    return app, observer
 
 
 def test_ac2_pcre2_probe_runs_at_most_once_per_process(
@@ -904,8 +1067,17 @@ async def test_ac2_regex_search_does_not_block_event_loop(
     Measured with REAL work over a REAL corpus and REAL ripgrep -- no sleeps.
     Both dispatch paths are exercised through the REAL ``_invoke_handler``, and
     their results must be identical.
+
+    Review item 2: the comparison is only trusted AFTER a precondition proves
+    the pre-change baseline genuinely stalls the loop.  The previous revision
+    asserted a single absolute budget that the OLD, unfixed async dispatch
+    already satisfied, so it could pass without proving anything.  Two things
+    fix that: probes anchored to the barrier the pre-filter enters (so timing no
+    longer depends on a stagger guess), and a corpus carrying a REAL trigram
+    index so the pre-filter and its ``Path.resolve()`` fan-out -- AC2's two
+    heaviest synchronous line items -- actually execute.
     """
-    app = _regex_dispatch_app(monkeypatch, tmp_path)
+    app, observer = _regex_dispatch_app(monkeypatch, tmp_path)
 
     async def _slow_async_impl(client: httpx.AsyncClient) -> httpx.Response:
         return await client.post("/dispatch/async-impl")
@@ -913,8 +1085,17 @@ async def test_ac2_regex_search_does_not_block_event_loop(
     async def _slow_registered(client: httpx.AsyncClient) -> httpx.Response:
         return await client.post("/dispatch/registered")
 
-    before = await _measure_probe_latency_during(app, _slow_async_impl)
-    after = await _measure_probe_latency_during(app, _slow_registered)
+    before_barrier = _BlockingBarrier()
+    observer.barrier = before_barrier
+    before = await _measure_probe_latency_during(
+        app, _slow_async_impl, barrier=before_barrier
+    )
+
+    after_barrier = _BlockingBarrier()
+    observer.barrier = after_barrier
+    after = await _measure_probe_latency_during(
+        app, _slow_registered, barrier=after_barrier
+    )
 
     before_resp = _slow_response(before)
     after_resp = _slow_response(after)
@@ -927,42 +1108,244 @@ async def test_ac2_regex_search_does_not_block_event_loop(
 
     before_probe = _max_probe_latency(before)
     after_probe = _max_probe_latency(after)
+    observed_candidates = observer.max_candidates()
     _record(
         "ac2_regex_search_dispatch",
         {
             "corpus_files": _REGEX_CORPUS_FILES,
             "matches": _regex_match_count(after_resp),
+            "observed_prefilter_candidates": observed_candidates,
             "before_async_dispatch_total_wall_s": _total_wall(before),
             "before_async_dispatch_probe_latencies_s": _probe_latencies(before),
             "before_async_dispatch_max_probe_latency_s": before_probe,
             "after_sync_dispatch_total_wall_s": _total_wall(after),
             "after_sync_dispatch_probe_latencies_s": _probe_latencies(after),
             "after_sync_dispatch_max_probe_latency_s": after_probe,
-            "probe_budget_s": _PROMPT_LATENCY_BUDGET_SECONDS,
+            "ac2_probe_budget_s": _AC2_PROBE_BUDGET_SECONDS,
+            "ac2_min_baseline_stall_s": (
+                _AC2_MIN_BASELINE_STALL_MULTIPLE * _AC2_PROBE_BUDGET_SECONDS
+            ),
         },
     )
 
-    _assert_probe_was_prompt(after, "regex_search")
+    # The corpus must really drive the trigram pre-filter and its per-candidate
+    # resolve fan-out. A full-scan fallback records -1 and fails here.
+    assert observed_candidates >= _MIN_OBSERVED_PREFILTER_CANDIDATES, (
+        "the SQLite trigram pre-filter and its Path.resolve fan-out were not "
+        f"exercised (max observed candidates {observed_candidates}); AC2's two "
+        "heaviest synchronous line items would go unmeasured"
+    )
 
-    # Deliberately NOT a before/after ratio here (unlike AC1, whose bcrypt cost
-    # is large and stable). regex_search's real work is dominated by the ripgrep
-    # SUBPROCESS, which already yields at await points; only its synchronous
-    # share (prefilter, Path.resolve fan-out, output read + json.loads) blocks
-    # the loop, and that share is small enough that under concurrent-suite load
-    # a ratio comparison is noise-dominated and non-discriminating -- it was
-    # empirically observed to invert. The load-robust evidence is instead:
-    #   1. the absolute promptness budget asserted above, and
-    #   2. the deterministic dispatch property below -- the REGISTERED handler
-    #      is not a coroutine function, so protocol.py provably takes its
-    #      run_in_executor branch (whose off-loop thread execution is itself
-    #      pinned by tests/unit/server/mcp/test_invoke_handler_executor.py).
+    # PRECONDITION (review item 2): the baseline must be a genuine event-loop
+    # stall before its comparison against the fixed path means anything.
+    minimum_baseline_stall = (
+        _AC2_MIN_BASELINE_STALL_MULTIPLE * _AC2_PROBE_BUDGET_SECONDS
+    )
+    assert before_probe >= minimum_baseline_stall, (
+        "NON-DISCRIMINATING MEASUREMENT: the pre-change async-dispatch baseline "
+        f"only stalled the loop for {before_probe:.4f}s, under the "
+        f"{minimum_baseline_stall:.4f}s this test requires before trusting any "
+        "before/after comparison. The corpus is too small (or the pre-filter did "
+        "not run), so a passing 'after' would prove nothing about the fix."
+    )
+
+    assert after_probe < _AC2_PROBE_BUDGET_SECONDS, (
+        "a concurrent request was delayed while regex_search ran -- the "
+        f"blocking work is still on the event loop (max probe latency "
+        f"{after_probe:.4f}s, budget {_AC2_PROBE_BUDGET_SECONDS}s)"
+    )
+    assert after_probe * _MIN_PROBE_IMPROVEMENT_RATIO < before_probe, (
+        "sync dispatch did not measurably free the event loop: probe latency "
+        f"{after_probe:.4f}s vs pre-change async dispatch {before_probe:.4f}s"
+    )
+
+    # Deterministic dispatch property, independent of any timing: the REGISTERED
+    # handler is not a coroutine function, so protocol.py provably takes its
+    # run_in_executor branch (whose off-loop thread execution is itself pinned by
+    # tests/unit/server/mcp/test_invoke_handler_executor.py).
     from code_indexer.server.mcp.handlers import search as search_handlers
 
-    registered_handler = {}  # type: Dict[str, Callable[..., Any]]
+    registered_handler: Dict[str, Callable[..., Any]] = {}
     search_handlers._register(registered_handler)
     assert not asyncio.iscoroutinefunction(registered_handler["regex_search"]), (
         "regex_search must be sync-dispatched so the protocol dispatcher "
         "offloads its synchronous work to the executor (Story #1491 AC2)"
+    )
+
+
+# A small corpus is deliberate here: this test proves RESULT EQUIVALENCE across
+# the two dispatch paths, not timing, and two repos are enough to exercise the
+# omni fan-out (which loops repos sequentially).
+_OMNI_CORPUS_FILES = 20
+_OMNI_REPO_ALIASES = ("story1491omnia", "story1491omnib")
+
+# The ONLY field excluded from the payload comparison: wall-clock search time,
+# which necessarily differs between two runs of the same real search.
+_VOLATILE_PAYLOAD_KEY = "search_time_ms"
+
+# The match LIST is compared as an order-insensitive collection, and that is a
+# property of the production code, not a convenience. Measured on ONE unchanged
+# dispatch path, four identical searches over the same 20-file corpus returned
+# four DIFFERENT match orders (e.g. run 0 started mod19, mod9, mod18, mod14
+# while run 1 started mod19, mod18, mod17, mod16): ripgrep walks files on
+# multiple threads and regex_search does not pass --sort, so output order is
+# nondeterministic per run. Asserting order equality here would therefore assert
+# a guarantee regex_search never made, and would fail at random against
+# completely correct code. Every match and every other field is still compared
+# exactly.
+_MATCH_SORT_FIELDS = ("source_repo", "file_path", "line_number", "column")
+
+
+def _strip_volatile(value: object) -> object:
+    """Recursively drop the wall-clock timing so payloads are comparable."""
+    if isinstance(value, dict):
+        return {
+            key: _strip_volatile(item)
+            for key, item in value.items()
+            if key != _VOLATILE_PAYLOAD_KEY
+        }
+    if isinstance(value, list):
+        return [_strip_volatile(item) for item in value]
+    return value
+
+
+def _comparable_regex_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Payload with timings dropped and matches put in a deterministic order."""
+    comparable = _strip_volatile(payload)
+    assert isinstance(comparable, dict)
+    matches = comparable.get("matches")
+    if isinstance(matches, list):
+        comparable["matches"] = sorted(
+            matches,
+            key=lambda match: tuple(
+                str(match.get(field, "")) for field in _MATCH_SORT_FIELDS
+            ),
+        )
+    return comparable
+
+
+def _omni_regex_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Publish two repos as global aliases and enable wildcard expansion.
+
+    Everything the omni path touches is real: two real on-disk working trees
+    (each carrying a ``.git`` marker directory, which is what the production
+    resolver's ``_is_git_repo`` check looks for -- regex search reads the working
+    tree, so no commits are involved), a real ``AliasManager`` pointer file per
+    repo (the resolver's first-priority lookup), real ripgrep, and the real
+    response formatting.  The only stand-ins are the two registry lookups a live
+    server would answer from its database: the global-repo listing that wildcard
+    expansion enumerates, and the access-filtering service (absent, i.e. no
+    restriction).
+    """
+    import code_indexer.server.app as app_module
+    from code_indexer.global_repos.alias_manager import AliasManager
+    from code_indexer.server.mcp.handlers import _utils
+
+    golden_repos_dir = tmp_path / "golden-repos"
+    aliases_dir = golden_repos_dir / "aliases"
+    aliases_dir.mkdir(parents=True, exist_ok=True)
+    alias_manager = AliasManager(str(aliases_dir))
+
+    for ordinal, alias in enumerate(_OMNI_REPO_ALIASES):
+        repo_root = golden_repos_dir / alias
+        (repo_root / ".git").mkdir(parents=True, exist_ok=True)
+        (repo_root / ".git" / "HEAD").write_text("ref: refs/heads/main\n")
+        for index in range(_OMNI_CORPUS_FILES):
+            (repo_root / f"mod{index}.py").write_text(
+                f"def {_REGEX_PATTERN}{ordinal}_{index}():\n    return {index}\n"
+            )
+        alias_manager.create_alias(f"{alias}-global", str(repo_root), repo_name=alias)
+
+    monkeypatch.setattr(
+        app_module.app.state, "golden_repos_dir", str(golden_repos_dir), raising=False
+    )
+    monkeypatch.setattr(
+        _utils,
+        "_list_global_repos",
+        lambda: [{"alias_name": f"{alias}-global"} for alias in _OMNI_REPO_ALIASES],
+    )
+    monkeypatch.setattr(_utils, "_get_access_filtering_service", lambda: None)
+
+
+@pytest.mark.asyncio
+async def test_ac2_omni_regex_search_payload_identical_across_dispatch(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """An omni (*) regex search must return the SAME payload after AC2.
+
+    AC2 requires it explicitly: "an omni (*) regex search over multiple repos
+    still returns the same results as before".  The omni path is the amplifier
+    Finding B2 names -- ``_omni_regex_search`` loops repos SEQUENTIALLY, calling
+    the async ``handle_regex_search`` once per repo -- and switching the
+    REGISTERED handler to a sync wrapper that drives that coroutine on a private
+    loop is exactly the kind of change that could reorder or drop results.
+
+    Compares the WHOLE decoded payload (every match with all of its fields,
+    total_matches, truncated, search_engine, repos_searched, errors and any
+    query_metadata) between the registered handler and the original coroutine,
+    excluding only the wall-clock search time.  Matches are compared as an
+    order-insensitive collection because ripgrep's own output order is
+    nondeterministic per run -- see the _MATCH_SORT_FIELDS comment for the
+    measurement that established this.  Both go through the REAL dispatcher.
+    """
+    import inspect
+
+    from code_indexer.server.mcp import protocol as protocol_module
+    from code_indexer.server.mcp.handlers import search as search_handlers
+
+    from code_indexer.server.auth.user_manager import User, UserRole
+
+    _omni_regex_env(monkeypatch, tmp_path)
+    user = User(
+        username="story1491",
+        password_hash=_PLACEHOLDER_PASSWORD_HASH,
+        role=UserRole.ADMIN,
+        created_at=datetime(2024, 1, 1, tzinfo=timezone.utc),
+    )
+    registry: Dict[str, Callable[..., Any]] = {}
+    search_handlers._register(registry)
+
+    async def _dispatch(handler: Callable[..., Any]) -> Dict[str, Any]:
+        # A fresh argument dict per dispatch: handle_regex_search normalises
+        # repository_alias in place.
+        arguments: Dict[str, Any] = {
+            "repository_alias": "*",
+            "pattern": _REGEX_PATTERN,
+            "max_results": _OMNI_CORPUS_FILES * len(_OMNI_REPO_ALIASES),
+        }
+        result = await protocol_module._invoke_handler(
+            handler,
+            arguments,
+            user,
+            None,
+            inspect.signature(handler),
+            asyncio.iscoroutinefunction(handler),
+            tool_name="regex_search",
+        )
+        payload = json.loads(result["content"][0]["text"])
+        assert isinstance(payload, dict)
+        return payload
+
+    async_payload = await _dispatch(search_handlers.handle_regex_search)
+    sync_payload = await _dispatch(registry["regex_search"])
+
+    assert async_payload.get("success") is True, async_payload
+    assert sync_payload.get("success") is True, sync_payload
+    # Real matches from BOTH repos, otherwise the comparison is vacuous.
+    assert sync_payload["total_matches"] == (
+        _OMNI_CORPUS_FILES * len(_OMNI_REPO_ALIASES)
+    )
+    assert sync_payload["repos_searched"] == len(_OMNI_REPO_ALIASES)
+    assert {match["source_repo"] for match in sync_payload["matches"]} == {
+        f"{alias}-global" for alias in _OMNI_REPO_ALIASES
+    }
+
+    assert _comparable_regex_payload(sync_payload) == _comparable_regex_payload(
+        async_payload
+    ), (
+        "the sync-dispatched omni regex payload differs from the original "
+        "coroutine's -- AC2 permits a change in WHERE the work runs, never in "
+        "what it returns"
     )
 
 
@@ -993,12 +1376,17 @@ class _RealBcryptCredentialStore:
         self._hash = bcrypt.hashpw(
             secret.encode("utf-8"), bcrypt.gensalt(rounds=_BCRYPT_ROUNDS)
         )
+        # Set per measurement; marks the instant the real bcrypt work starts so
+        # probes are anchored to it rather than to a guessed stagger (item 16).
+        self.barrier: Optional[_BlockingBarrier] = None
 
     def verify_credential(self, client_id: str, client_secret: str) -> Optional[str]:
         import bcrypt
 
         if client_id != self._client_id:
             return None
+        if self.barrier is not None:
+            self.barrier.enter()
         if not bcrypt.checkpw(client_secret.encode("utf-8"), self._hash):
             return None
         return self._user_id
@@ -1133,11 +1521,12 @@ async def test_ac1_user_lookup_runs_off_the_event_loop_thread(
 
 def _mcp_auth_app(
     monkeypatch: pytest.MonkeyPatch,
-) -> Tuple[FastAPI, httpx.BasicAuth]:
+) -> Tuple[FastAPI, httpx.BasicAuth, _RealBcryptCredentialStore]:
     """Real app whose /whoami route depends on the REAL auth dependency.
 
-    Returns the app plus an ``httpx.BasicAuth`` for the request -- httpx's own
-    supported credential mechanism, so no authorization header is hand-built.
+    Returns the app, an ``httpx.BasicAuth`` for the request -- httpx's own
+    supported credential mechanism, so no authorization header is hand-built --
+    and the credential store, whose ``barrier`` the caller sets per measurement.
     The identifier and secret are generated per run and exist only in memory.
     """
     from fastapi import Depends
@@ -1179,7 +1568,7 @@ def _mcp_auth_app(
             content={"username": user.username if verified_user_id else None}
         )
 
-    return app, httpx.BasicAuth(client_id, client_secret)
+    return app, httpx.BasicAuth(client_id, client_secret), store
 
 
 @pytest.mark.asyncio
@@ -1197,9 +1586,10 @@ async def test_ac1_mcp_auth_bcrypt_does_not_block_event_loop(
     This drives the genuine production dependency over a real Basic-auth
     request with REAL bcrypt (never a mock, never a sleep), and compares the
     concurrent-probe latency against the identical real verification performed
-    on the loop.
+    on the loop.  Each measurement gets its own barrier, entered by the store at
+    the instant real bcrypt work begins, so both are anchored identically.
     """
-    app, auth = _mcp_auth_app(monkeypatch)
+    app, auth, store = _mcp_auth_app(monkeypatch)
 
     async def _on_loop(client: httpx.AsyncClient) -> httpx.Response:
         return await client.get("/whoami-on-loop")
@@ -1207,8 +1597,15 @@ async def test_ac1_mcp_auth_bcrypt_does_not_block_event_loop(
     async def _via_dependency(client: httpx.AsyncClient) -> httpx.Response:
         return await client.get("/whoami", auth=auth)
 
-    before = await _measure_probe_latency_during(app, _on_loop)
-    after = await _measure_probe_latency_during(app, _via_dependency)
+    before_barrier = _BlockingBarrier()
+    store.barrier = before_barrier
+    before = await _measure_probe_latency_during(app, _on_loop, barrier=before_barrier)
+
+    after_barrier = _BlockingBarrier()
+    store.barrier = after_barrier
+    after = await _measure_probe_latency_during(
+        app, _via_dependency, barrier=after_barrier
+    )
 
     # Identical authentication outcome either way.
     assert _slow_response(before).json() == {"username": "story1491"}
@@ -1284,7 +1681,12 @@ class _BlockingJobTracker:
     so the rest of the production logic runs unchanged.
     """
 
+    def __init__(self, barrier: _BlockingBarrier) -> None:
+        self._barrier = barrier
+
     def get_job(self, job_id: str) -> None:
+        # First of the route's two blocking boundaries: anchor the probes here.
+        self._barrier.enter()
         time.sleep(_RA_BOUNDARY_BLOCK_SECONDS)
         return None
 
@@ -1292,7 +1694,11 @@ class _BlockingJobTracker:
 class _BlockingMessageStore:
     """Message-store stand-in: the sync SQLite message read Finding B5 names."""
 
+    def __init__(self, barrier: _BlockingBarrier) -> None:
+        self._barrier = barrier
+
     def get_messages(self, session_id: str) -> List[Dict[str, str]]:
+        self._barrier.enter()
         time.sleep(_RA_BOUNDARY_BLOCK_SECONDS)
         if session_id != _RA_SESSION_ID:
             return []
@@ -1306,21 +1712,29 @@ class _BlockingMessageStore:
         ]
 
 
-def _research_assistant_app(monkeypatch: pytest.MonkeyPatch) -> FastAPI:
+def _research_assistant_app(
+    monkeypatch: pytest.MonkeyPatch, barrier: _BlockingBarrier
+) -> FastAPI:
     """Real app exposing the REAL poll_job route + /ping.
 
     Only external boundaries are stood in for: the GitHub token source, the
     JobTracker DB, the message store, and the admin-session dependency.  The
     route body, the real ResearchAssistantService, and the real markdown
-    rendering and Jinja template render all execute for real.
+    rendering and Jinja template render all execute for real.  Both blocking
+    boundaries share the caller's barrier, so whichever the route reaches first
+    anchors the probes.
     """
     from code_indexer.server.routers import research_assistant as ra_module
     from code_indexer.server.web.auth import require_admin_session
 
     monkeypatch.setattr(ra_module, "_get_github_token", lambda: None)
-    monkeypatch.setattr(ra_module, "_get_job_tracker", _BlockingJobTracker)
     monkeypatch.setattr(
-        ra_module, "_get_research_backend", lambda request: _BlockingMessageStore()
+        ra_module, "_get_job_tracker", lambda: _BlockingJobTracker(barrier)
+    )
+    monkeypatch.setattr(
+        ra_module,
+        "_get_research_backend",
+        lambda request: _BlockingMessageStore(barrier),
     )
 
     app = _app_with_probe()
@@ -1342,14 +1756,15 @@ async def test_ac5_research_assistant_poll_does_not_block_event_loop(
     end-to-end by blocking inside both of the real route's DB boundaries and
     measuring a concurrent request.
     """
-    app = _research_assistant_app(monkeypatch)
+    barrier = _BlockingBarrier()
+    app = _research_assistant_app(monkeypatch, barrier)
 
     async def _poll(client: httpx.AsyncClient) -> httpx.Response:
         return await client.get(
             f"/poll/{_RA_JOB_ID}", params={"session_id": _RA_SESSION_ID}
         )
 
-    measured = await _measure_probe_latency_during(app, _poll)
+    measured = await _measure_probe_latency_during(app, _poll, barrier=barrier)
     resp = _slow_response(measured)
     assert resp.status_code == 200
     # The real markdown rendering ran on the real message content.
