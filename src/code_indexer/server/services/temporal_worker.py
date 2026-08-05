@@ -101,25 +101,23 @@ class _GoldenTemporalContext(NamedTuple):
     temporal_index_dir: Optional[Path]
 
 
-
-
 def _resolve_golden_temporal_context(
     worker_input: TemporalWorkerInput, job_id: str
 ) -> _GoldenTemporalContext:
     """Resolve golden alias + the fixed temporal index dir.
 
-    Fail-open ONLY for the lineage LOOKUP: if the golden alias cannot be
-    determined (composite repo, no activated-repo record, backend error) the
-    context is all-None and the caller keeps the legacy in-repo derivation.
+    An all-None context (caller keeps the legacy in-repo derivation) is
+    returned ONLY for GENUINE ABSENCE of golden lineage -- a composite repo,
+    or no activated-repo record.
 
-    Bug #1529 finding #2: once the alias IS known, deriving the fixed root is
-    NOT fail-open. It happens OUTSIDE the try below, so a failure propagates
-    and fails the job. Swallowing it returned an all-None context, which sent
-    the caller on to `reconstruct_temporal_backend(repo_path, ...)` -- the
+    Bug #1529 finding #2: NOTHING here is fail-open any more. Neither the
+    lineage LOOKUP nor the fixed-root DERIVATION swallows a failure; both
+    propagate and fail the job. An all-None context is exactly what sends the
+    caller on to `reconstruct_temporal_backend(repo_path, ...)` -- the
     ACTIVATION'S own CoW clone -- silently serving the frozen-at-clone-time
-    duplicate this bug exists to eliminate. This seam is the LIVE MCP
-    temporal front door (Story #1400), so a silent local fallback here is the
-    primary read path being wrong.
+    duplicate this bug exists to eliminate, so it must never be produced by an
+    error. This seam is the LIVE MCP temporal front door (Story #1400), so a
+    silent local fallback here is the primary read path being wrong.
 
     The discriminator deliberately is NOT `CIDX_SERVER_REFRESH_CONTEXT`: that
     marker is injected only into the temporal CHILD SUBPROCESS and is absent
@@ -128,6 +126,8 @@ def _resolve_golden_temporal_context(
     Raises:
         ValueError: when the golden alias is known but its fixed temporal
             root cannot be derived.
+        Exception: any failure from the lineage lookup itself (e.g.
+            ActivatedRepoError) propagates unchanged.
     """
     # Bug #1529 finding #2: NO fail-open wrapper here. A failure in any of
     # these steps (import, data-dir derivation, manager construction, lineage
@@ -308,7 +308,13 @@ def run_temporal_worker(
         {"result_ready": True} on success.
 
     Raises:
-        ValueError: worker_input or job_id is missing.
+        ValueError: worker_input or job_id is missing; or (Bug #1529 finding
+            #2) the golden alias is known but its fixed temporal root cannot
+            be derived -- job-fatal by design, never a silent fallback to the
+            activation's own clone.
+        ActivatedRepoError: (or whatever the lookup raises) the golden-repo
+            lineage lookup itself failed. Propagated deliberately: "I could
+            not determine the lineage" is NOT "there is no lineage".
         TemporalSnapshotPersistenceError: the FINAL snapshot write could not
             be verified by read-back -- job-fatal, BGM records the job
             FAILED with error_code TEMPORAL_SNAPSHOT_PERSISTENCE_FAILED.
@@ -330,8 +336,10 @@ def run_temporal_worker(
     # defect #1529 was filed for, and this worker is the LIVE MCP temporal
     # front door (Story #1400 replaced _execute_temporal_query for that
     # path), so leaving it in-repo would half-wire the primary read path.
-    # Fail-open throughout: no golden lineage -> temporal_index_dir is None
-    # and the legacy in-repo derivation is used, unchanged.
+    # NOT fail-open (Bug #1529 finding #2): only GENUINE ABSENCE of golden
+    # lineage yields temporal_index_dir=None and the legacy in-repo
+    # derivation. Any failure -- lookup or fixed-root derivation -- propagates
+    # and fails the job rather than quietly reading the activation's clone.
     _golden_alias_ctx = _resolve_golden_temporal_context(worker_input, job_id)
     golden_repo_alias = _golden_alias_ctx.alias
     _activated_repo_manager = _golden_alias_ctx.activated_repo_manager
