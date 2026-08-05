@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [11.109.0] - 2026-08-04
+
+### Fixed
+
+- **CRITICAL** #1528: temporal indexing was unconditionally excluded from the consolidated `chunks.db` storage layout regardless of caller intent, reproducing the exact legacy-file-explosion pathology Epic #1454 was built to eliminate (measured live: 487,076 `vector_*.json` files for one real repo). Two compounding root causes fixed: `FilesystemVectorStore.create_collection()`'s unconditional temporal exclusion (now tri-state, honoring an explicit `--new-collection-layout=sharded_json` request), and the CLI temporal branch never threading a layout argument into `FilesystemVectorStore` at all. Pre-existing legacy shards are now migrated in place before any new temporal write (CLI, daemon-refusal, and fleet migration all route through the same `consolidate_collection_in_place` engine); Story #1457's separate "sister location" relocation write path is retired (its read path is untouched, so already-relocated data stays queryable). Also fixes two pre-existing bugs found while validating this change: a natively-built `chunks.db` collection was misjudged as unmigrated by the fleet-migration verifier, and the metadata-less temporal bookkeeping directory was wrongly enumerated as a migration target (breaking `--migrate-chunks-to-sqlite` for every real temporal repo).
+- **MEDIUM**: `cli_daemon_delegation.py`'s standalone-fallback path (`_index_standalone`, taken when daemon connection fails) crashed with `TypeError: index() got an unexpected keyword argument 'use_chunks_db_for_new_collections'` -- a pre-existing Story #1488 gap where the daemon-RPC kwarg name never matched the real `index()` Click command's `new_collection_layout` parameter. Found while validating #1528. Fixed by translating the resolved bool back to the string enum before `ctx.invoke`.
+
+### Testing
+
+- Fixed a test-only bug in `tests/unit/cli/test_cli_clear_temporal_progress.py`: a loosely-mocked `MagicMock()` config object made `daemon_enabled` (`config.daemon and config.daemon.enabled`) unintentionally truthy, routing a pure local-mode test through the real, unmocked daemon-delegation path -- which spawned a genuine background daemon subprocess that raced with the test's own real index-mutation lock acquisition. Found while validating #1528.
+
 ## [11.108.0] - 2026-08-04
 
 ### Fixed
