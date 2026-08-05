@@ -30,7 +30,7 @@ import logging
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Dict, List, Literal, Optional, Set, Tuple
 
 from code_indexer.services.temporal.temporal_collection_naming import (
     parse_physical_temporal_name,
@@ -130,13 +130,20 @@ def _scan_root(
 
 
 def _discover_shards(
-    golden_repos_dir: Path, repo_alias: str, legacy_index_path: Path
+    golden_repos_dir: Path,
+    repo_alias: str,
+    legacy_index_path: Path,
+    *,
+    on_error: Literal["treat_absent", "raise"] = "treat_absent",
 ) -> List[Tuple[Path, TemporalDataLocation]]:
     """Every ROW-BEARING temporal shard for this repo, across both roots.
 
     The fixed server root wins for a namespace present in both -- it is where
     the current write path targets, so an older in-repo copy of the same
     (embedder, quarter) is stale by construction.
+
+    ``on_error`` is forwarded verbatim to the row-existence predicate for each
+    candidate shard; see ``get_temporal_repo_status``.
     """
     in_repo = _scan_root(Path(legacy_index_path), TemporalDataLocation.IN_REPO)
     fixed = _scan_root(
@@ -150,7 +157,7 @@ def _discover_shards(
     shards: List[Tuple[Path, TemporalDataLocation]] = []
     for key in sorted(merged, key=lambda k: (k[0], k[1] or "")):
         path, location = merged[key]
-        if temporal_shard_has_committed_rows(path):
+        if temporal_shard_has_committed_rows(path, on_error=on_error):
             shards.append((path, location))
     return shards
 
@@ -159,6 +166,8 @@ def get_temporal_repo_status(
     golden_repos_dir: Path,
     repo_alias: str,
     legacy_index_path: Path,
+    *,
+    on_error: Literal["treat_absent", "raise"] = "treat_absent",
 ) -> TemporalRepoStatus:
     """Resolve repo-wide temporal-data status across both physical roots.
 
@@ -170,13 +179,27 @@ def get_temporal_repo_status(
             normalized away by the path helper).
         legacy_index_path: The golden repo clone's own
             ``.code-indexer/index/`` directory.
+        on_error: What to do when a shard's ``chunks.db`` cannot be read
+            (corrupt, locked, permission denied). ``"treat_absent"`` (the
+            default, and correct for every STATUS/health surface) reports it
+            as no data so reporting stays resilient. ``"raise"`` propagates
+            and MUST be used by any caller whose "no data" answer authorizes
+            a DESTRUCTIVE action -- see ``temporal_reindex_needs_clear``,
+            where a silent False wipes real shards and forces a full
+            re-embed of the entire git history (Bug #1529 finding #5).
 
     Returns:
         TemporalRepoStatus summarizing presence and queryability across every
         temporal namespace this repo has (any embedder, any quarter).
+
+    Raises:
+        Propagates the underlying store-read error when ``on_error="raise"``.
     """
     shards = _discover_shards(
-        Path(golden_repos_dir), repo_alias, Path(legacy_index_path)
+        Path(golden_repos_dir),
+        repo_alias,
+        Path(legacy_index_path),
+        on_error=on_error,
     )
     if not shards:
         return _NO_TEMPORAL_DATA
