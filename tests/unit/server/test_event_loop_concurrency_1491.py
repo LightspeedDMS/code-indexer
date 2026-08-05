@@ -54,6 +54,7 @@ established in reports/perf/temporal_overfetch_1493_ac4_concurrency_results.json
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import secrets
@@ -67,6 +68,7 @@ from typing import (
     Awaitable,
     Callable,
     Dict,
+    Iterator,
     List,
     Optional,
     Tuple,
@@ -589,6 +591,232 @@ async def test_ac3_branch_discovery_concurrency_is_bounded(
         f"exceeding the bounded cap of {cap}"
     )
     assert peak > 1, "no concurrency observed at all -- fetches are sequential"
+
+
+@pytest.mark.asyncio
+async def test_ac3_branch_discovery_concurrency_bound_is_process_wide(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The bound must hold across CONCURRENT REQUESTS, not just within one.
+
+    Review item 11: a bound created per request is not a bound. AC3 requires the
+    introduced concurrency to be BOUNDED so a large auto-discovery list can never
+    burst git subprocesses; if the limiter is constructed inside the route, K
+    concurrent admin requests permit cap x K simultaneous ``git ls-remote``
+    processes -- the exact fan-out the requirement exists to prevent.
+
+    Drives TWO concurrent requests through the REAL route, each carrying a full
+    cap's worth of repos, and counts overlap at the OS-subprocess boundary (the
+    only thing replaced; the whole production stack above it runs for real).
+    """
+    import subprocess
+
+    from code_indexer.server.web import routes as routes_module
+
+    cap = routes_module._DISCOVERY_BRANCH_FETCH_MAX_CONCURRENCY
+    counter_lock = threading.Lock()
+    in_flight = 0
+    peak = 0
+
+    def _counting_run(*args: object, **kwargs: object) -> _CompletedProcessStub:
+        nonlocal in_flight, peak
+        with counter_lock:
+            in_flight += 1
+            peak = max(peak, in_flight)
+        try:
+            time.sleep(_CONCURRENCY_OBSERVATION_WINDOW_SECONDS)
+        finally:
+            with counter_lock:
+                in_flight -= 1
+        return _CompletedProcessStub()
+
+    monkeypatch.setattr(subprocess, "run", _counting_run)
+    app = _branch_discovery_app(monkeypatch)
+    payload = {
+        "repos": [
+            {
+                "clone_url": _UNRESOLVABLE_CLONE_URL_TEMPLATE.format(index=i),
+                "platform": "github",
+            }
+            for i in range(cap)
+        ]
+    }
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url=_TEST_BASE_URL
+    ) as client:
+        first, second = await asyncio.gather(
+            client.post("/api/discovery/branches", json=payload),
+            client.post("/api/discovery/branches", json=payload),
+        )
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert peak <= cap, (
+        f"two concurrent discovery requests fanned out {peak} simultaneous git "
+        f"invocations against a cap of {cap} -- the concurrency bound is "
+        "per-request, so it does not actually bound the process"
+    )
+    assert peak > 1, "no concurrency observed at all -- fetches are sequential"
+
+
+# How long the loop is observed while a REAL git ls-remote sits blocked on a
+# never-answering remote. Bounded and short by design (Messi Rule #14): the
+# production per-remote timeout is 30 s, and a starved loop is unmistakable long
+# before then -- the pre-AC3 code could not serve a single probe in this window.
+_BLOCKED_REMOTE_OBSERVATION_SECONDS = 1.5
+
+# How often the concurrent probe fires during that window.
+_CONTINUOUS_PROBE_INTERVAL_SECONDS = 0.1
+
+# A healthy loop serves roughly window/interval probes; half of that is the floor
+# below which it was demonstrably starved.
+_MIN_EXPECTED_PROBES_IN_WINDOW = int(
+    _BLOCKED_REMOTE_OBSERVATION_SECONDS / _CONTINUOUS_PROBE_INTERVAL_SECONDS / 2
+)
+
+# Listen backlog for the never-answering remote: connections must be accepted by
+# the kernel (so git waits for data) but never answered by userspace.
+_NEVER_ANSWERING_LISTEN_BACKLOG = 8
+
+
+@contextlib.contextmanager
+def _never_answering_remote() -> Iterator[str]:
+    """Yield a git clone URL for a REAL socket that never answers.
+
+    The kernel completes the TCP handshake from the listen backlog while
+    userspace never accepts or writes, so a real ``git ls-remote`` against this
+    URL blocks waiting for the ref advertisement until it is killed -- a genuine
+    unreachable remote, with no sleep and no stubbed subprocess anywhere.
+
+    Loopback with an ephemeral port is intrinsic to the fixture rather than
+    environment configuration: the point is a socket this process owns and
+    deliberately never answers, which no external host could provide reliably.
+    """
+    import socket
+
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(_NEVER_ANSWERING_LISTEN_BACKLOG)
+        port = listener.getsockname()[1]
+        yield f"git://127.0.0.1:{port}/story1491-unreachable.git"
+    finally:
+        listener.close()
+
+
+def _max_starvation_gap(fire_times: List[float]) -> float:
+    """Worst extra delay between consecutive probes, net of their sleep interval.
+
+    This -- not each probe's own round-trip -- is what detects event-loop
+    starvation, and the difference was verified empirically: with the discovery
+    route's blocking call put back ON the loop, per-probe round-trips still
+    measured under 2 ms, because a starved probe is never SCHEDULED and then
+    completes instantly once the loop frees. Its absence from the schedule shows
+    up only as a gap between fire times. Same reasoning as the barrier-anchored
+    measurements elsewhere in this file, which time from the blocking section's
+    start rather than from a resumed sleep. Clamped at zero: a healthy loop can
+    fire marginally early relative to the nominal interval.
+    """
+    gaps = [
+        (later - earlier) - _CONTINUOUS_PROBE_INTERVAL_SECONDS
+        for earlier, later in zip(fire_times, fire_times[1:])
+    ]
+    return max(0.0, max(gaps, default=0.0))
+
+
+@pytest.mark.asyncio
+async def test_ac3_real_unreachable_remote_route_keeps_loop_responsive(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The REAL route + a REAL unreachable remote must not stall the loop.
+
+    Review item 5: AC3's timeout coverage called RemoteBranchService directly,
+    bypassing both the route and any concurrency, while the route-level
+    concurrency test used a time.sleep stand-in for the blocking work. This
+    closes both gaps with NOTHING stood in for that work and the PRODUCTION
+    timeout untouched: a real never-answering remote, the real
+    RemoteBranchService, and a real ``git ls-remote`` subprocess genuinely
+    blocked on it while a second request is issued repeatedly.
+
+    The request is observed for a bounded window and then cancelled rather than
+    waited out, because the production per-remote timeout is 30 s and a
+    half-minute idle test has no place in this suite. That costs nothing in
+    coverage: what must be proven here is that the blocked subprocess does not
+    starve the loop, which is fully visible during the window, while the timeout
+    ERROR semantics are separately proven end-to-end against the real service by
+    test_ac3_unreachable_remote_error_semantics_preserved.
+
+    Before AC3 this route awaited that subprocess ON the event loop, so /ping
+    could not be served at all -- visible as a starvation gap in the probe
+    schedule (see _max_starvation_gap for why round-trips cannot see it).
+    """
+    fire_times: List[float] = []
+
+    with _never_answering_remote() as clone_url:
+        app = _branch_discovery_app(monkeypatch)
+        payload = {"repos": [{"clone_url": clone_url, "platform": "github"}]}
+
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url=_TEST_BASE_URL
+        ) as client:
+            discovery = asyncio.ensure_future(
+                client.post("/api/discovery/branches", json=payload)
+            )
+            try:
+                observation_end = (
+                    time.perf_counter() + _BLOCKED_REMOTE_OBSERVATION_SECONDS
+                )
+                while time.perf_counter() < observation_end:
+                    fire_times.append(time.perf_counter())
+                    resp = await client.get("/ping")
+                    assert resp.status_code == 200
+                    await asyncio.sleep(_CONTINUOUS_PROBE_INTERVAL_SECONDS)
+                # Recorded, not asserted here: a STARVED loop also makes this
+                # true (the request runs to completion before the probe loop is
+                # ever rescheduled), and the measured gap below is the signal
+                # that must be reported in that case.
+                finished_within_window = discovery.done()
+            finally:
+                discovery.cancel()
+                # Await the cancellation so no task is left pending; the real
+                # subprocess exits on its own once the socket below closes.
+                with contextlib.suppress(asyncio.CancelledError):
+                    await discovery
+
+    # PRIMARY starvation signal: how many probes the loop actually served during
+    # the window. A frozen loop cannot serve them at all -- measured against a
+    # deliberately re-blocked route it served exactly ONE, then the window had
+    # already expired by the time the loop resumed.
+    minimum_probes = max(2, _MIN_EXPECTED_PROBES_IN_WINDOW)
+    assert len(fire_times) >= minimum_probes, (
+        f"the event loop served only {len(fire_times)} probe(s) in a "
+        f"{_BLOCKED_REMOTE_OBSERVATION_SECONDS}s window (expected at least "
+        f"{minimum_probes}) -- it was starved by the blocking git subprocess"
+    )
+    worst_gap = _max_starvation_gap(fire_times)
+    _record(
+        "ac3_real_blocked_remote_loop_starvation",
+        {
+            "observation_window_s": _BLOCKED_REMOTE_OBSERVATION_SECONDS,
+            "probe_count": len(fire_times),
+            "max_starvation_gap_s": worst_gap,
+            "probe_budget_s": _PROMPT_LATENCY_BUDGET_SECONDS,
+        },
+    )
+    assert worst_gap < _PROMPT_LATENCY_BUDGET_SECONDS, (
+        "the event loop was starved while a real git ls-remote blocked on an "
+        f"unreachable remote (worst gap {worst_gap:.3f}s across "
+        f"{len(fire_times)} probes)"
+    )
+    # Only meaningful once the gap above is healthy: it proves the probes were
+    # taken while a real subprocess was genuinely still blocked, so the promptness
+    # result cannot be a vacuous pass over an instantly-failed remote.
+    assert not finished_within_window, (
+        "the discovery request completed inside the observation window, so no "
+        "real git subprocess was blocked while probing"
+    )
 
 
 class _FailingTokenStore:

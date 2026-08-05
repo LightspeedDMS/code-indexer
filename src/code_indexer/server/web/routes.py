@@ -10,6 +10,7 @@ from code_indexer.server.middleware.correlation import get_correlation_id
 import asyncio
 import functools
 import html
+from concurrent.futures import ThreadPoolExecutor
 import json
 import logging
 import os
@@ -62,6 +63,43 @@ logger = logging.getLogger(__name__)
 # auto-discovery repo list must never fan out into an unbounded burst of git
 # subprocesses.
 _DISCOVERY_BRANCH_FETCH_MAX_CONCURRENCY = 8
+
+# Story #1491 review item 11: that bound must be PROCESS-WIDE, not per-request.
+# It was originally an asyncio.Semaphore constructed inside
+# fetch_discovery_branches, which bounded a single request's fan-out and nothing
+# else: K concurrent admin discovery requests permitted 8 x K simultaneous git
+# subprocesses -- exactly the burst AC3 exists to prevent (measured: two
+# concurrent requests reached 16).
+#
+# A dedicated pool is the limiter rather than a shared counter, for two specific
+# reasons:
+#   * An asyncio.Semaphore binds to the event loop that first awaits it, so a
+#     module-level one is a cross-loop hazard: a second loop in the same process
+#     (tests, or any loop-per-thread work such as the sync-dispatched handlers
+#     this same story introduced) either raises or shares nothing.
+#   * A threading.Semaphore acquired INSIDE the default executor would bound the
+#     git processes but hold default-executor threads hostage while they waited,
+#     starving every other run_in_executor caller in the process.
+# The pool size IS the bound: excess work queues inside this pool (never dropped,
+# never widened), the shared default executor is untouched, and no asyncio
+# primitive is involved. Created lazily so importing this module starts no
+# threads; never shut down, because it lives exactly as long as the process and
+# holds at most _DISCOVERY_BRANCH_FETCH_MAX_CONCURRENCY idle threads.
+_DISCOVERY_BRANCH_FETCH_EXECUTOR: Optional[ThreadPoolExecutor] = None
+_DISCOVERY_BRANCH_FETCH_EXECUTOR_LOCK = threading.Lock()
+
+
+def _get_discovery_branch_fetch_executor() -> ThreadPoolExecutor:
+    """Return the process-wide bounded pool for synchronous ls-remote fetches."""
+    global _DISCOVERY_BRANCH_FETCH_EXECUTOR
+    with _DISCOVERY_BRANCH_FETCH_EXECUTOR_LOCK:
+        if _DISCOVERY_BRANCH_FETCH_EXECUTOR is None:
+            _DISCOVERY_BRANCH_FETCH_EXECUTOR = ThreadPoolExecutor(
+                max_workers=_DISCOVERY_BRANCH_FETCH_MAX_CONCURRENCY,
+                thread_name_prefix="discovery-branch-fetch",
+            )
+        return _DISCOVERY_BRANCH_FETCH_EXECUTOR
+
 
 # Self-Monitoring constants (Story #74)
 SCAN_HISTORY_LIMIT = 50
@@ -8732,21 +8770,23 @@ async def fetch_discovery_branches(request: Request):
         # per-remote timeout lives inside fetch_remote_branches and is
         # untouched.
         loop = asyncio.get_running_loop()
-        semaphore = asyncio.Semaphore(_DISCOVERY_BRANCH_FETCH_MAX_CONCURRENCY)
+        # Review item 11: the bound is PROCESS-WIDE, enforced by the size of the
+        # shared pool below -- not by a per-request limiter, which bounded one
+        # request while K concurrent requests still burst 8 x K git subprocesses.
+        executor = _get_discovery_branch_fetch_executor()
 
         async def _fetch_one(
             clone_url: str, platform: str, credentials: Optional[str]
         ) -> Dict[str, Any]:
-            async with semaphore:
-                result = await loop.run_in_executor(
-                    None,
-                    functools.partial(
-                        service.fetch_remote_branches,
-                        clone_url=clone_url,
-                        platform=platform,
-                        credentials=credentials,
-                    ),
-                )
+            result = await loop.run_in_executor(
+                executor,
+                functools.partial(
+                    service.fetch_remote_branches,
+                    clone_url=clone_url,
+                    platform=platform,
+                    credentials=credentials,
+                ),
+            )
             return {
                 "branches": result.branches,
                 "default_branch": result.default_branch,

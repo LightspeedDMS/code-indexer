@@ -1,72 +1,85 @@
 {
   "ac1_mcp_auth_bcrypt": {
-    "after_real_dependency_max_probe_latency_s": 0.007726481999270618,
+    "after_real_dependency_max_probe_latency_s": 0.0069547749881166965,
     "after_real_dependency_probe_latencies_s": [
-      0.006537135021062568,
-      0.00733405101345852,
-      0.007726481999270618
+      0.006164410995552316,
+      0.006601759989280254,
+      0.0069547749881166965
     ],
-    "after_real_dependency_total_wall_s": 0.23207236698362976,
+    "after_real_dependency_total_wall_s": 0.22578422099468298,
     "bcrypt_rounds": 12,
-    "before_on_loop_max_probe_latency_s": 0.22401415999047458,
+    "before_on_loop_max_probe_latency_s": 0.22514901999966241,
     "before_on_loop_probe_latencies_s": [
-      0.22334910000790842,
-      0.22370728498208337,
-      0.22401415999047458
+      0.2244350340042729,
+      0.22480842901859432,
+      0.22514901999966241
     ],
-    "before_on_loop_total_wall_s": 0.22472293602186255,
+    "before_on_loop_total_wall_s": 0.2256346320209559,
     "probe_budget_s": 0.25
   },
   "ac2_regex_search_dispatch": {
     "ac2_min_baseline_stall_s": 0.2,
     "ac2_probe_budget_s": 0.05,
-    "after_sync_dispatch_max_probe_latency_s": 0.0053533780155703425,
+    "after_sync_dispatch_max_probe_latency_s": 0.00662403300520964,
     "after_sync_dispatch_probe_latencies_s": [
-      0.004137037001783028,
-      0.004773362015839666,
-      0.0053533780155703425
+      0.0059145969862584025,
+      0.006309972988674417,
+      0.00662403300520964
     ],
-    "after_sync_dispatch_total_wall_s": 1.3416453399986494,
-    "before_async_dispatch_max_probe_latency_s": 0.43029788602143526,
+    "after_sync_dispatch_total_wall_s": 1.3112019749823958,
+    "before_async_dispatch_max_probe_latency_s": 0.423747660999652,
     "before_async_dispatch_probe_latencies_s": [
-      0.4291702490008902,
-      0.4297308270179201,
-      0.43029788602143526
+      0.42233912702067755,
+      0.42275682801846415,
+      0.423747660999652
     ],
-    "before_async_dispatch_total_wall_s": 1.288464516022941,
+    "before_async_dispatch_total_wall_s": 1.1288627540052403,
     "corpus_files": 7500,
     "matches": 7500,
     "observed_prefilter_candidates": 7500
   },
   "ac3_branch_discovery": {
-    "measured_max_probe_latency_s": 0.007087703008437529,
+    "measured_max_probe_latency_s": 0.007560899975942448,
     "measured_probe_latencies_s": [
-      0.0060120560228824615,
-      0.006569788005435839,
-      0.007087703008437529
+      0.00663057598285377,
+      0.0072175340028479695,
+      0.007560899975942448
     ],
-    "measured_total_wall_s": 0.605150143004721,
+    "measured_total_wall_s": 0.6032629830006044,
     "per_repo_block_s": 0.6,
     "probe_budget_s": 0.25,
     "repo_count": 4,
     "sequential_on_loop_expectation_s": 2.4
   },
+  "ac3_real_blocked_remote_loop_starvation": {
+    "max_starvation_gap_s": 0.0017527059884741847,
+    "observation_window_s": 1.5,
+    "probe_budget_s": 0.25,
+    "probe_count": 15
+  },
+  "ac3_real_unreachable_remote_timeout": {
+    "max_probe_latency_s": 0.0007432130223605782,
+    "probe_budget_s": 0.25,
+    "probe_count": 1,
+    "real_git_timeout_s": 4,
+    "request_wall_s": 4.017433783999877
+  },
   "ac4_diagnostics_background_task": {
     "background_block_s": 0.6,
-    "measured_max_probe_latency_s": 0.006710379995638505,
+    "measured_max_probe_latency_s": 0.006145193998236209,
     "measured_probe_latencies_s": [
-      0.005865662009455264,
-      0.0063819630013313144,
-      0.006710379995638505
+      0.005481675994815305,
+      0.005849901004694402,
+      0.006145193998236209
     ],
     "probe_budget_s": 0.25
   },
   "ac5_research_assistant_poll": {
-    "measured_max_probe_latency_s": 0.007198898994829506,
+    "measured_max_probe_latency_s": 0.005475985002703965,
     "measured_probe_latencies_s": [
-      0.005833409988554195,
-      0.006502968986751512,
-      0.007198898994829506
+      0.004707203013822436,
+      0.005138790002092719,
+      0.005475985002703965
     ],
     "per_boundary_block_s": 0.3,
     "probe_budget_s": 0.25
