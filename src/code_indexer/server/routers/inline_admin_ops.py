@@ -42,6 +42,7 @@ from ..models.jobs import (
     IndexInfo,
     IndexStatusResponse,
     JobResponse,
+    JobStatusResponse,
     JobCleanupResponse,
 )
 
@@ -1198,3 +1199,40 @@ def register_admin_ops_routes(
             return {"enabled": False, "band": None, "active": False}
         snapshot: Dict[str, Any] = gov.get_snapshot()
         return snapshot
+
+    # EVO-64609: back-compat admin alias for GET /api/jobs/{job_id}. Multiple clients
+    # (the golden-repo-seeder and agent-orchestrator workers) poll job status at
+    # /api/admin/jobs/{id} -- a path that no longer exists post-multipod -> route-not
+    # -found 404, which a client can misread as a job failure. Delegate to the same
+    # background_job_manager.get_job_status, which already falls back to the shared
+    # persistent store (Story #267), so it resolves cross-pod. Registered LAST so the
+    # specific /api/admin/jobs/stats + /cleanup routes match first.
+    @app.get("/api/admin/jobs/{job_id}", response_model=JobStatusResponse)
+    def get_admin_job_status(
+        job_id: str,
+        current_user: dependencies.User = Depends(dependencies.get_current_admin_user),
+    ):
+        job_status = background_job_manager.get_job_status(
+            job_id,
+            current_user.username,
+            is_admin=True,
+        )
+        if not job_status:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Job not found: {job_id}",
+            )
+        return JobStatusResponse(
+            job_id=job_status["job_id"],
+            operation_type=job_status["operation_type"],
+            status=job_status["status"],
+            created_at=job_status["created_at"],
+            started_at=job_status["started_at"],
+            completed_at=job_status["completed_at"],
+            progress=job_status["progress"],
+            result=job_status["result"],
+            error=job_status["error"],
+            username=job_status["username"],
+            current_phase=job_status.get("current_phase"),
+            phase_detail=job_status.get("phase_detail"),
+        )
