@@ -921,14 +921,130 @@ class _RealBcryptCredentialStore:
 
 
 class _SingleUserManager:
-    """User lookup stand-in: the DB read boundary, returning one real User."""
+    """Stand-in for the dependency's EXTERNAL user store.
+
+    The system under test is ``get_current_user_for_mcp``. ``user_manager`` is
+    not part of it -- it is the dependency's collaborator backed by the user
+    database, i.e. exactly the kind of external boundary a unit test may stand
+    in for (the same boundary the pre-existing
+    test_mcp_auth_off_event_loop_1491.py already stands in for).
+
+    Records the thread identity of every ``get_user`` call so a test can prove
+    the synchronous user-DB read is offloaded to a worker thread rather than
+    executed on the event loop (Story #1491 AC1's third bullet). The list is
+    written from a worker thread and read from the event-loop thread, so it is
+    lock-guarded.
+    """
 
     def __init__(self, user_id: str, user: object) -> None:
         self._user_id = user_id
         self._user = user
+        self._lock = threading.Lock()
+        self._call_thread_idents: List[int] = []
 
     def get_user(self, user_id: str) -> object:
+        with self._lock:
+            self._call_thread_idents.append(threading.get_ident())
         return self._user if user_id == self._user_id else None
+
+    def recorded_thread_idents(self) -> List[int]:
+        with self._lock:
+            return list(self._call_thread_idents)
+
+
+def _wire_real_bcrypt_auth(
+    monkeypatch: pytest.MonkeyPatch,
+) -> Tuple[httpx.BasicAuth, _SingleUserManager]:
+    """Wire the REAL auth dependency's external collaborators.
+
+    Every opaque value here is generated fresh per run by ``secrets``, is never
+    written anywhere, and is meaningful only to the in-memory stand-in store
+    created in this function -- it authenticates against nothing real. Their
+    only purpose is to make the real bcrypt comparison perform real work.
+    """
+    import code_indexer.server.auth.dependencies as deps_module
+    from code_indexer.server.auth.user_manager import User, UserRole
+
+    client_id = secrets.token_hex(8)
+    client_secret = secrets.token_hex(16)
+    user_id = secrets.token_hex(4)
+    user = User(
+        username="story1491",
+        # Never read by this path; generated so no fixed value is committed.
+        password_hash=secrets.token_hex(8),
+        role=UserRole.ADMIN,
+        created_at=datetime(2024, 1, 1, tzinfo=timezone.utc),
+    )
+    manager = _SingleUserManager(user_id, user)
+
+    monkeypatch.setattr(
+        deps_module,
+        "mcp_credential_manager",
+        _RealBcryptCredentialStore(client_id, client_secret, user_id),
+    )
+    monkeypatch.setattr(deps_module, "user_manager", manager)
+    monkeypatch.setattr(deps_module, "elevated_session_manager", None)
+    return httpx.BasicAuth(client_id, client_secret), manager
+
+
+def _app_recording_loop_thread(loop_thread_idents: List[int]) -> FastAPI:
+    """App whose /whoami depends on the REAL auth dependency.
+
+    The route records the thread it runs on -- definitively the event-loop
+    thread, since an async route body always executes there.
+    """
+    from fastapi import Depends
+
+    import code_indexer.server.auth.dependencies as deps_module
+    from code_indexer.server.auth.user_manager import User
+
+    app = _app_with_probe()
+
+    @app.get("/whoami")
+    async def _whoami(
+        current_user: User = Depends(deps_module.get_current_user_for_mcp),
+    ) -> JSONResponse:
+        loop_thread_idents.append(threading.get_ident())
+        return JSONResponse(content={"username": current_user.username})
+
+    return app
+
+
+@pytest.mark.asyncio
+async def test_ac1_user_lookup_runs_off_the_event_loop_thread(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AC1: the synchronous user-DB read must leave the event loop too.
+
+    AC1's technical requirements list THREE blocking calls, not one: bcrypt
+    ``verify_credential``, the ``elevated_session_manager.create`` DB write, and
+    the synchronous user read. Offloading only bcrypt leaves
+    ``user_manager.get_user(user_id)`` running on the loop thread immediately
+    afterwards.
+
+    Proven by thread identity, not timing.
+    """
+    auth, manager = _wire_real_bcrypt_auth(monkeypatch)
+    loop_thread_idents: List[int] = []
+    app = _app_recording_loop_thread(loop_thread_idents)
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url=_TEST_BASE_URL
+    ) as client:
+        resp = await client.get("/whoami", auth=auth)
+
+    assert resp.status_code == 200
+    assert resp.json() == {"username": "story1491"}
+    recorded = manager.recorded_thread_idents()
+    assert recorded, "user_manager.get_user was never called"
+    assert loop_thread_idents, "the async route never ran"
+
+    loop_thread = loop_thread_idents[0]
+    assert all(ident != loop_thread for ident in recorded), (
+        f"user_manager.get_user ran on the event-loop thread ({recorded} vs "
+        f"loop {loop_thread}) -- AC1 requires the synchronous user DB read to "
+        "be offloaded alongside bcrypt"
+    )
 
 
 def _mcp_auth_app(
