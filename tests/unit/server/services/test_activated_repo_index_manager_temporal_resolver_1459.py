@@ -21,7 +21,9 @@ from unittest.mock import Mock
 
 import pytest
 
-from code_indexer.global_repos.alias_manager import AliasManager
+from code_indexer.services.temporal.temporal_server_paths import (
+    server_temporal_index_root,
+)
 from code_indexer.server.repositories.background_jobs import BackgroundJobManager
 from code_indexer.server.services.activated_repo_index_manager import (
     ActivatedRepoIndexManager,
@@ -142,17 +144,19 @@ def test_sister_relocated_temporal_data_is_detected_not_reported_missing(
     (repo_path / ".code-indexer" / "index").mkdir(parents=True)
 
     golden_repos_dir = Path(temp_data_dir) / "golden-repos"
+    # Bug #1529: temporal data lives at the FIXED server-owned root
+    # ({golden_repos_dir}/.temporal/{alias}/), not a .versioned
+    # snapshot behind an alias pointer. The behavior under test is
+    # unchanged: status must detect data OUTSIDE the repo tree.
     sister_version_dir = (
-        golden_repos_dir
-        / ".versioned"
-        / "backing-golden-temporal-voyage_code_3-2024Q1"
-        / "v_1700000000"
+        server_temporal_index_root(golden_repos_dir, "backing-golden")
+        / "code-indexer-temporal-voyage_code_3-2024Q1"
     )
     sister_version_dir.mkdir(parents=True)
     (sister_version_dir / "hnsw_index.bin").write_bytes(b"fake-hnsw")
-    AliasManager(str(golden_repos_dir / "aliases")).create_alias(
-        "backing-golden-temporal-voyage_code_3-2024Q1", str(sister_version_dir)
-    )
+    # A real committed row: status keys off DATA presence, not merely
+    # the presence of an index file.
+    (sister_version_dir / "vector_aaaa1111.json").write_text("{}")
 
     manager = _make_manager(
         temp_data_dir, repo_path, golden_repo_alias="backing-golden"

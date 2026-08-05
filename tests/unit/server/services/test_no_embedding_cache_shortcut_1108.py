@@ -993,8 +993,17 @@ class TestTemporalEntryPointValueFlow:
         service.config = _FakeMSSConfig()
         service.hnsw_index_cache = None  # attribute read at multi_search_service.py:538
 
+        # Bug #1529: the temporal read path resolves its (fixed, outside-the-
+        # repo-tree) data location from the golden repo's own coordinates. This
+        # stub previously returned a bare tmp_path, which is not structurally a
+        # golden-repo clone, so no location could be derived. Return a real
+        # golden-repo-shaped path -- <...>/golden-repos/<alias> -- exactly as
+        # the production _get_repository_path does.
+        _golden_clone = tmp_path / "golden-repos" / "myrepo"
+        _golden_clone.mkdir(parents=True, exist_ok=True)
+
         def _fake_get_repo_path(repo_id):
-            return str(tmp_path)
+            return str(_golden_clone)
 
         service._get_repository_path = _fake_get_repo_path
 

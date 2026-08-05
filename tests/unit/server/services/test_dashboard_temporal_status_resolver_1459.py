@@ -18,7 +18,9 @@ import logging
 from pathlib import Path
 from unittest.mock import patch
 
-from code_indexer.global_repos.alias_manager import AliasManager
+from code_indexer.services.temporal.temporal_server_paths import (
+    server_temporal_index_root,
+)
 from code_indexer.server.services.dashboard_service import DashboardService
 
 
@@ -44,17 +46,19 @@ def test_activated_repo_sister_relocated_temporal_data_is_detected(tmp_path):
     # preserved as-is; ensure it's empty (no local temporal copy).
     (data_dir / "index").mkdir(parents=True)
 
+    # Bug #1529: temporal data lives at the FIXED server-owned root
+    # ({golden_repos_dir}/.temporal/{alias}/), not a .versioned
+    # snapshot behind an alias pointer. The behavior under test is
+    # unchanged: status must detect data OUTSIDE the repo tree.
     sister_version_dir = (
-        golden_repos_dir
-        / ".versioned"
-        / "backing-golden-temporal-voyage_code_3-2024Q1"
-        / "v_1700000000"
+        server_temporal_index_root(golden_repos_dir, "backing-golden")
+        / "code-indexer-temporal-voyage_code_3-2024Q1"
     )
     sister_version_dir.mkdir(parents=True)
     (sister_version_dir / "hnsw_index.bin").write_bytes(b"fake-hnsw")
-    AliasManager(str(golden_repos_dir / "aliases")).create_alias(
-        "backing-golden-temporal-voyage_code_3-2024Q1", str(sister_version_dir)
-    )
+    # A real committed row: status keys off DATA presence, not merely
+    # the presence of an index file.
+    (sister_version_dir / "vector_aaaa1111.json").write_text("{}")
 
     manager = _FakeActivatedRepoManager(
         data_dir,
@@ -151,17 +155,19 @@ def test_global_repo_sister_relocated_temporal_data_is_detected(tmp_path):
     global_repo_root = tmp_path / "global-clone"
     (global_repo_root / ".code-indexer" / "index").mkdir(parents=True)
 
+    # Bug #1529: temporal data lives at the FIXED server-owned root
+    # ({golden_repos_dir}/.temporal/{alias}/), not a .versioned
+    # snapshot behind an alias pointer. The behavior under test is
+    # unchanged: status must detect data OUTSIDE the repo tree.
     sister_version_dir = (
-        golden_repos_dir
-        / ".versioned"
-        / "myrepo-temporal-voyage_code_3-2024Q1"
-        / "v_1700000001"
+        server_temporal_index_root(golden_repos_dir, "myrepo")
+        / "code-indexer-temporal-voyage_code_3-2024Q1"
     )
     sister_version_dir.mkdir(parents=True)
     (sister_version_dir / "hnsw_index.bin").write_bytes(b"fake-hnsw")
-    AliasManager(str(golden_repos_dir / "aliases")).create_alias(
-        "myrepo-temporal-voyage_code_3-2024Q1", str(sister_version_dir)
-    )
+    # A real committed row: status keys off DATA presence, not merely
+    # the presence of an index file.
+    (sister_version_dir / "vector_aaaa1111.json").write_text("{}")
 
     manager = _FakeActivatedRepoManager(data_dir, activated_repos_dir, repo_info={})
 

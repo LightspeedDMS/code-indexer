@@ -28,7 +28,9 @@ from unittest.mock import Mock, patch
 import numpy as np
 import pytest
 
-from code_indexer.global_repos.alias_manager import AliasManager
+from code_indexer.services.temporal.temporal_server_paths import (
+    server_temporal_index_root,
+)
 from code_indexer.server.services.diagnostics_service import (
     DiagnosticStatus,
     DiagnosticsService,
@@ -125,16 +127,14 @@ def _build_sister_only_repo(tmp_path: Path):
     local_index_dir = repo_dir / ".code-indexer" / "index"
     local_index_dir.mkdir(parents=True)
 
+    # Bug #1529: fixed server-owned root instead of a .versioned snapshot +
+    # alias pointer. Unchanged behavior under test: HNSW validation must cover
+    # temporal collections living OUTSIDE the repo tree.
     version_dir = (
-        golden_repos_dir
-        / ".versioned"
-        / POINTER_NAMESPACE
-        / f"v_{FIXTURE_VERSION_TIMESTAMP}"
+        server_temporal_index_root(golden_repos_dir, REPO_ALIAS)
+        / "code-indexer-temporal-voyage_code_3-2024Q1"
     )
     _create_valid_hnsw_index(version_dir, vector_count=10)
-
-    alias_manager = AliasManager(str(golden_repos_dir / "aliases"))
-    alias_manager.create_alias(POINTER_NAMESPACE, str(version_dir))
 
     db_path = tmp_path / "cidx_server.db"
     _create_database_with_registered_repos(db_path, [(REPO_ALIAS, str(repo_dir))])
