@@ -80,20 +80,39 @@ _HANDLER_TIMEOUT_OVERRIDES: Dict[str, int] = {
     "search_code": SEARCH_HANDLER_TIMEOUT_SECONDS,
 }
 
-# Story #1491 AC6 code-review fix: regex_search is dispatched
-# asynchronously and _omni_regex_search loops repos SEQUENTIALLY, each
-# bounded by its own search_limits_config.timeout_seconds subprocess call.
-# An omni search over N repos therefore has a legitimate cumulative
-# runtime of N x single-repo-floor -- no single fixed outer deadline
-# (however derived) can accommodate an unbounded N. regex_search is
-# EXEMPT from the AC6 async-branch wait_for entirely (see _invoke_handler
-# below); it stays governed solely by search_limits_config.timeout_seconds
-# + its own ripgrep subprocess timeout, per this project's own documented
-# Issue #1398 invariant: "regex_search is async-dispatched (governed
-# entirely by search_limits_config.timeout_seconds + its own subprocess
-# timeout ...) -- the two are independently configurable and NEVER
-# interact." _resolve_handler_timeout's result for "regex_search" is
-# therefore computed but never actually used to bound its dispatch.
+# Membership in this set is a property of the TOOL, not of the dispatch
+# branch: an exempt tool gets NO asyncio.wait_for on either branch.
+#
+# regex_search -- DELIBERATE, DOCUMENTED DEVIATION from AC2's literal
+# wording (Story #1491 review item 8). AC2's scenario text says "the regex
+# search is subject to the dispatcher's timeout guard"; it is not, and that
+# is an intentional decision rather than an oversight:
+#
+#   * As of AC2 regex_search is SYNC-dispatched (the registry entry is the
+#     plain-def handle_regex_search_sync), so it now takes the executor
+#     branch. Its synchronous work leaving the event loop -- the actual
+#     starvation hazard report Finding B2 identified -- is fully achieved by
+#     that change alone, independently of any deadline.
+#   * _omni_regex_search loops repos SEQUENTIALLY, each repo bounded by its
+#     own search_limits_config.timeout_seconds subprocess call, so an omni
+#     search over N repos has a legitimate cumulative runtime of
+#     N x single-repo-floor. No single fixed outer deadline (however
+#     derived) can accommodate an unbounded N without truncating correct
+#     work.
+#   * An outer wait_for around run_in_executor cannot cancel the worker
+#     thread anyway: on expiry it abandons a still-running thread while
+#     returning a timeout error. That is strictly worse than no deadline --
+#     the work continues, unbounded and now unobserved, and the client is
+#     told it failed.
+#
+# So regex_search remains governed solely by
+# search_limits_config.timeout_seconds plus its own ripgrep subprocess
+# timeout (Issue #1398 Group A) -- exactly its pre-#1491 semantics, which
+# this story preserves rather than changes. _resolve_handler_timeout's
+# result for "regex_search" is therefore computed but never used to bound
+# its dispatch. Any future change here must also update the "Query & Search
+# Timeouts Consolidation (Issue #1398)" section of CLAUDE.md, which records
+# the same deviation.
 #
 # Story #1491 AC6 code-review follow-up (secondary finding): the same
 # review that caught regex_search asked every OTHER async-dispatched MCP
@@ -319,10 +338,11 @@ async def _invoke_handler(
             that declare an `http_response` parameter (e.g. handle_authenticate,
             which needs it to set the HttpOnly cidx_session cookie).
         tool_name: The MCP tool name being dispatched, used ONLY to check
-            _ASYNC_DISPATCH_TIMEOUT_EXEMPT_TOOLS for the async branch
-            (Story #1491 AC6 code-review fix) -- regex_search's omni
-            sequential-per-repo loop has legitimate cumulative runtime
-            that no single fixed deadline can accommodate.
+            _ASYNC_DISPATCH_TIMEOUT_EXEMPT_TOOLS -- which is honoured on BOTH
+            the async and the sync/executor branch, since membership is a
+            property of the tool rather than of the dispatch mechanism. See
+            that constant for the full per-tool rationale, including the
+            deliberate deviation from AC2's literal wording for regex_search.
 
     Returns:
         Handler result
