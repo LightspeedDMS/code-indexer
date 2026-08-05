@@ -27,7 +27,7 @@ from typing import Union
 from code_indexer.services.temporal.temporal_collection_naming import (
     TEMPORAL_COLLECTION_PREFIX,
 )
-from code_indexer.services.temporal.temporal_shard_resolver import (
+from code_indexer.services.temporal.temporal_collection_naming import (
     parse_physical_temporal_name,
 )
 from code_indexer.storage.shared.collection_migration import (

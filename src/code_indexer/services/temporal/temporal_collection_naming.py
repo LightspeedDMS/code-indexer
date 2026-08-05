@@ -203,6 +203,49 @@ def is_sharded_temporal_collection(collection_name: str) -> bool:
     return bool(re.search(r"-\d{4}Q[1-4]$", collection_name))
 
 
+#: Capturing form of the quarter suffix, for parsing it back out of a name.
+_QUARTER_SUFFIX_RE = re.compile(r"-(\d{4}Q[1-4])$")
+
+
+def parse_physical_temporal_name(
+    collection_name: str,
+) -> Optional[Tuple[str, Optional[str]]]:
+    """Parse a bare physical collection name into (embedder_slug, quarter).
+
+    Relocated here by Bug #1529 from the deleted Story #1457
+    ``temporal_shard_resolver`` module, behavior unchanged. It lives with the
+    rest of the temporal NAMING logic because it is the inverse of
+    :func:`get_shard_collection_name` and has nothing to do with the retired
+    sister-location/pointer mechanism -- six unrelated consumers (fleet
+    migration discovery + completion gate, HNSW orphan-sweep discovery,
+    repository health aggregation, temporal status) depend on it.
+
+    Strips the ``code-indexer-temporal-`` prefix (physical/base-name form),
+    then recovers the quarter suffix using the SAME pattern
+    :func:`is_sharded_temporal_collection` uses. quarter is None for the
+    quarter-less monolith form.
+
+    Returns None if collection_name is not a temporal collection name at all
+    (no ``code-indexer-temporal-`` prefix), or is not a non-empty string.
+    """
+    if not isinstance(collection_name, str) or not collection_name:
+        return None
+    if not collection_name.startswith(TEMPORAL_COLLECTION_PREFIX):
+        return None
+
+    remainder = collection_name[len(TEMPORAL_COLLECTION_PREFIX) :]
+    if not remainder:
+        return None
+
+    match = _QUARTER_SUFFIX_RE.search(remainder)
+    if match:
+        quarter = match.group(1)
+        embedder_slug = remainder[: -len(quarter) - 1]
+        return (embedder_slug, quarter)
+
+    return (remainder, None)
+
+
 def base_collection_name(shard_name: str) -> str:
     """Strip the quarter suffix from a sharded collection name.
 

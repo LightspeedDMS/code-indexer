@@ -892,7 +892,20 @@ class TestTemporalEntryPointValueFlow:
 
         class _FakeFactory:
             @staticmethod
-            def create(config, project_root, hnsw_cache=None, memory_governor=None):
+            def create(
+                config,
+                project_root,
+                hnsw_cache=None,
+                memory_governor=None,
+                # Bug #1529: reconstruct_temporal_backend now also forwards
+                # index_dir (temporal's fixed outside-the-repo location).
+                # **kwargs keeps this stub from breaking on the real
+                # factory's other optional params (activation_id,
+                # use_chunks_db_for_new_collections) as well -- an unfaithful
+                # stub signature is what made this a test-only failure.
+                index_dir=None,
+                **kwargs,
+            ):
                 return _FakeBackend()
 
         monkeypatch.setattr(backend_mod, "BackendFactory", _FakeFactory)
