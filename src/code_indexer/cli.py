@@ -3465,7 +3465,22 @@ def index(
                     config_manager._config = config
 
                 # Initialize vector store
-                index_dir = config.codebase_dir / ".code-indexer" / "index"
+                #
+                # Bug #1529: in SERVER context a golden repo's temporal data
+                # must live OUTSIDE its own cloned tree at a fixed,
+                # deterministic path -- otherwise every per-user CoW
+                # activation clone copies the whole temporal history and then
+                # queries that frozen-at-clone-time copy forever. This ONE
+                # seam decides the location for the entire temporal branch
+                # below (clear, migrate, consolidate, index, reconcile), and
+                # the read side derives the identical path from the same
+                # module. Standalone CLI (no server marker) is byte-identical
+                # to before: the in-repo index directory.
+                from .services.temporal.temporal_server_paths import (
+                    resolve_temporal_index_dir,
+                )
+
+                index_dir = resolve_temporal_index_dir(config.codebase_dir)
                 # Bug #1528: thread the requested new-collection layout through
                 # to the temporal store, exactly as the semantic paths already
                 # do. Omitting it here silently discarded every explicit

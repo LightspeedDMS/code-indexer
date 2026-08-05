@@ -173,6 +173,7 @@ def reconstruct_temporal_backend(
     repo_path: Path,
     repository_alias: str,
     shard_ownership: Optional[Any] = None,
+    temporal_index_dir: Optional[Path] = None,
 ) -> Tuple[Any, Path, Any]:
     """Reconstruct (config, index_path, vector_store) for a temporal query.
 
@@ -190,6 +191,12 @@ def reconstruct_temporal_backend(
             SemanticQueryManager._owns_for_cache's None-safe fail-open
             semantics: None means sharding is off / no ownership info, so
             the shared cache is always used).
+        temporal_index_dir: Bug #1529 -- the fixed, deterministic location of
+            this golden repo's temporal data, OUTSIDE any repo's own cloned
+            tree. When provided it overrides BOTH the constructed store's
+            index root and the returned index_path. None keeps the legacy
+            in-repo derivation (standalone CLI / a caller with no golden-repo
+            lineage information).
 
     Returns:
         (config, index_path, vector_store) tuple.
@@ -220,9 +227,21 @@ def reconstruct_temporal_backend(
         # repos it owns; non-owned repos load-and-discard (fail-open).
         hnsw_cache=(_server_hnsw_cache if owns_for_cache else None),
         memory_governor=get_memory_governor(),
+        # Bug #1529: when the caller resolved a fixed sister location for
+        # this repo's temporal data, the store MUST be rooted there -- not at
+        # repo_path's own index dir. For an ACTIVATED repo, repo_path is the
+        # activation's CoW clone, whose temporal copy (if any) is frozen at
+        # clone time and diverges from the golden repo on every refresh.
+        index_dir=temporal_index_dir,
     )
     vector_store = backend.get_vector_store_client()
-    index_path = repo_path / ".code-indexer" / "index"
+    # Both the store's root and the index_path handed to shard discovery must
+    # agree, or discovery would enumerate one location while reads hit another.
+    index_path = (
+        Path(temporal_index_dir)
+        if temporal_index_dir is not None
+        else repo_path / ".code-indexer" / "index"
+    )
     return config, index_path, vector_store
 
 
@@ -2698,6 +2717,44 @@ class SemanticQueryManager:
 
         return results
 
+    def _resolve_temporal_index_dir(
+        self, golden_repo_alias: Optional[str]
+    ) -> Optional[Path]:
+        """The fixed temporal data location for a golden repo (Bug #1529).
+
+        Returns None when the caller has no golden-repo lineage information
+        (an explicit-repo_path query shape), in which case the temporal read
+        falls back to the legacy in-repo derivation unchanged.
+
+        `golden_repos_dir` is derived exactly as the pre-existing temporal
+        code already derived it -- from `activated_repos_dir`'s parent -- so
+        no new physical-root concept is introduced. Any failure resolving it
+        is non-fatal: returning None preserves today's behavior rather than
+        breaking the query.
+        """
+        if not golden_repo_alias:
+            return None
+
+        from ...services.temporal.temporal_server_paths import (
+            server_temporal_index_root,
+        )
+
+        try:
+            golden_repos_dir = (
+                Path(self.activated_repo_manager.activated_repos_dir).parent
+                / "golden-repos"
+            )
+            return server_temporal_index_root(golden_repos_dir, golden_repo_alias)
+        except Exception:
+            logger.warning(
+                "Bug #1529: could not resolve the fixed temporal index dir "
+                "for golden_repo_alias=%s; falling back to the in-repo "
+                "derivation for this query",
+                golden_repo_alias,
+                exc_info=True,
+            )
+            return None
+
     def _execute_temporal_query(
         self,
         repo_path: Path,
@@ -2764,6 +2821,17 @@ class SemanticQueryManager:
         )
 
         try:
+            # Bug #1529: resolve the FIXED, deterministic location of this
+            # golden repo's temporal data -- outside any repo's own cloned
+            # tree, derived from the golden repo's alias, never from
+            # repo_path. For a regular activated repo, repo_path is that
+            # activation's CoW clone: reading temporal data from there meant
+            # reading a frozen-at-clone-time duplicate that silently diverged
+            # from the golden repo on every refresh. Both query seams (this
+            # one and the golden-repo-direct/is_global one) resolve the SAME
+            # path from the SAME module the write side uses.
+            temporal_index_dir = self._resolve_temporal_index_dir(golden_repo_alias)
+
             # Story #1400 Phase 3: shared reconstruction helper -- the SAME
             # path a future standalone temporal worker will use, not a
             # duplicate inline block.
@@ -2771,6 +2839,7 @@ class SemanticQueryManager:
                 repo_path,
                 repository_alias,
                 shard_ownership=getattr(self, "_shard_ownership", None),
+                temporal_index_dir=temporal_index_dir,
             )
 
             # Story #1461 salvage item 4: embedder SELECTION must use the
@@ -2816,56 +2885,13 @@ class SemanticQueryManager:
                         val = diff_type.strip()
                         diff_types_list = [val] if val else None
 
-            # Story #1457 AC1/AC2 live wiring: construct a REAL
-            # TemporalShardResolver when a golden_repo_alias is known AND a
-            # real query_tracker is available. Gated on BOTH: without a
-            # query_tracker, pin() is a true no-op (per its own documented
-            # CLI/solo semantics) -- constructing a resolver anyway would
-            # silently reintroduce the mid-read deletion hazard AC8 Step 6
-            # exists to prevent, so we do NOT construct one in that case.
+            # Bug #1529: NO resolver. Story #1457's pointer-first
+            # TemporalShardResolver is retired -- under the locked design a
+            # shard's path is fixed from first creation, so there is nothing
+            # to resolve and no second location to disagree with. Leaving the
+            # resolver live while the write side had been retired is exactly
+            # the half-wiring #1529 was filed for.
             resolver = None
-            _query_tracker = getattr(self, "query_tracker", None)
-            if golden_repo_alias and _query_tracker is not None:
-                from ...global_repos.alias_manager import AliasManager
-                from ...services.temporal.temporal_shard_resolver import (
-                    TemporalShardResolver,
-                )
-
-                golden_repos_dir = (
-                    Path(self.activated_repo_manager.activated_repos_dir).parent
-                    / "golden-repos"
-                )
-                # 2026-07-23 code review HIGH #7 (global alias namespace
-                # mismatch): an is_global query passes its full
-                # '-global'-suffixed user_alias as golden_repo_alias, but
-                # maybe_relocate_shard_to_sister_location ALWAYS publishes
-                # under the bare codebase_dir.name (golden repo
-                # directories are never named with '-global' -- that
-                # suffix is purely a query-facing alias-registry
-                # convention). Strip exactly one trailing '-global' so
-                # the resolver's namespace matches what was published.
-                normalized_repo_alias = golden_repo_alias.removesuffix("-global")
-                resolver = TemporalShardResolver(
-                    alias_manager=AliasManager(str(golden_repos_dir / "aliases")),
-                    repo_alias=normalized_repo_alias,
-                    sister_root=golden_repos_dir,
-                    legacy_index_path=index_path,
-                    query_tracker=_query_tracker,
-                )
-
-                # 2026-07-23 code review CRITICAL #1 (the "disconnected
-                # reader"): the resolver was previously threaded ONLY into
-                # execute_temporal_query_with_fusion's discovery/pin
-                # bookkeeping -- the vector_store instance that actually
-                # PERFORMS the search (constructed above by
-                # reconstruct_temporal_backend) never received it, so
-                # _get_collection_path() silently fell back to the legacy
-                # base_path / collection_name path even after AC1
-                # relocated the data. Attach the resolver to the SAME
-                # store instance used for search, preserving its existing
-                # hnsw_index_cache/memory_governor wiring (no new store
-                # construction, no lost caching).
-                vector_store._temporal_shard_resolver = resolver
 
             # Execute temporal query via fusion dispatch (Story #640)
             temporal_results = execute_temporal_query_with_fusion(
