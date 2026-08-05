@@ -60,26 +60,28 @@ def _resolve_golden_repo_alias(
     activated-repo distinction).
 
     An is_global repository_alias (ends with '-global') IS its own golden
-    alias. A regular activated repo's golden alias is looked up via
-    ActivatedRepoManager.get_repository. Fail-open: any lookup failure
-    (repo not found, backend error) returns None, preserving today's
-    clone-config behavior for that query.
+    alias, resolved without any lookup.
+
+    Bug #1529 finding #2: ABSENCE and FAILURE are NOT the same answer, and
+    ``get_repository`` already distinguishes them -- it returns None when
+    there is no activated-repo record, and raises only when metadata
+    loading/refresh genuinely fails. This function therefore returns None
+    ONLY for real absence, and lets a failure propagate. Swallowing the
+    exception into None was enough to reintroduce the entire hazard: None
+    produces an all-None temporal context, which sends the caller to
+    ``reconstruct_temporal_backend(repo_path, ...)`` -- the ACTIVATION'S own
+    CoW clone -- silently serving frozen-at-clone-time data. "I could not
+    determine the lineage" must never be reported as "there is no lineage".
+
+    Raises:
+        Whatever ``get_repository`` raises (e.g. ActivatedRepoError) when the
+        lookup genuinely fails.
     """
     if repository_alias.endswith("-global"):
         return repository_alias
-    try:
-        repo_info = activated_repo_manager.get_repository(
-            username, repository_alias, touch=False
-        )
-    except Exception:
-        logger.warning(
-            "temporal worker: failed to resolve golden_repo_alias for "
-            "activated repo '%s' (user=%s); using clone config as-is",
-            repository_alias,
-            username,
-            exc_info=True,
-        )
-        return None
+    repo_info = activated_repo_manager.get_repository(
+        username, repository_alias, touch=False
+    )
     if not repo_info:
         return None
     golden_alias = repo_info.get("golden_repo_alias")
@@ -99,7 +101,6 @@ class _GoldenTemporalContext(NamedTuple):
     temporal_index_dir: Optional[Path]
 
 
-_EMPTY_GOLDEN_TEMPORAL_CONTEXT = _GoldenTemporalContext(None, None, None)
 
 
 def _resolve_golden_temporal_context(
@@ -128,47 +129,42 @@ def _resolve_golden_temporal_context(
         ValueError: when the golden alias is known but its fixed temporal
             root cannot be derived.
     """
-    try:
-        from code_indexer.server.repositories.activated_repo_manager import (
-            ActivatedRepoManager,
-        )
-        from code_indexer.services.temporal.temporal_server_paths import (
-            server_temporal_index_root,
-        )
+    # Bug #1529 finding #2: NO fail-open wrapper here. A failure in any of
+    # these steps (import, data-dir derivation, manager construction, lineage
+    # lookup) is "I could not determine the lineage", NOT "there is no
+    # lineage" -- and returning an all-None context for it is precisely what
+    # sends the caller to the activation's own CoW clone.
+    from code_indexer.server.repositories.activated_repo_manager import (
+        ActivatedRepoManager,
+    )
+    from code_indexer.services.temporal.temporal_server_paths import (
+        server_temporal_index_root,
+    )
 
-        # Bug #1517: a bare, no-arg ActivatedRepoManager() resolves its OWN
-        # default data_dir purely from Path.home(), never consulting
-        # CIDX_SERVER_DATA_DIR -- the env var this codebase otherwise treats
-        # as the canonical way to locate the server's configured data
-        # directory for a standalone construction outside the normal DI chain
-        # (see ActivatedRepoIndexManager.__init__). On any real deployment
-        # where the server's data dir differs from the OS default, that
-        # mismatch made this worker's internally-constructed
-        # GoldenRepoManager look in the wrong metadata store, so
-        # get_actual_repo_path() raised GoldenRepoNotFoundError for a golden
-        # repo that genuinely exists elsewhere -- and would now ALSO resolve
-        # the wrong temporal location.
-        _env_server_dir = os.environ.get("CIDX_SERVER_DATA_DIR")
-        _worker_data_dir = (
-            str(Path(_env_server_dir) / "data")
-            if _env_server_dir
-            else str(Path.home() / ".cidx-server" / "data")
-        )
-        activated_repo_manager = ActivatedRepoManager(data_dir=_worker_data_dir)
-        golden_repo_alias = _resolve_golden_repo_alias(
-            worker_input.username,
-            worker_input.repository_alias,
-            activated_repo_manager,
-        )
-    except Exception:
-        logger.warning(
-            "temporal worker %s: golden-repo lineage resolution failed "
-            "(isolated, non-fatal); using the legacy in-repo temporal "
-            "location and clone-derived config as-is",
-            job_id,
-            exc_info=True,
-        )
-        return _EMPTY_GOLDEN_TEMPORAL_CONTEXT
+    # Bug #1517: a bare, no-arg ActivatedRepoManager() resolves its OWN
+    # default data_dir purely from Path.home(), never consulting
+    # CIDX_SERVER_DATA_DIR -- the env var this codebase otherwise treats
+    # as the canonical way to locate the server's configured data
+    # directory for a standalone construction outside the normal DI chain
+    # (see ActivatedRepoIndexManager.__init__). On any real deployment
+    # where the server's data dir differs from the OS default, that
+    # mismatch made this worker's internally-constructed
+    # GoldenRepoManager look in the wrong metadata store, so
+    # get_actual_repo_path() raised GoldenRepoNotFoundError for a golden
+    # repo that genuinely exists elsewhere -- and would now ALSO resolve
+    # the wrong temporal location.
+    _env_server_dir = os.environ.get("CIDX_SERVER_DATA_DIR")
+    _worker_data_dir = (
+        str(Path(_env_server_dir) / "data")
+        if _env_server_dir
+        else str(Path.home() / ".cidx-server" / "data")
+    )
+    activated_repo_manager = ActivatedRepoManager(data_dir=_worker_data_dir)
+    golden_repo_alias = _resolve_golden_repo_alias(
+        worker_input.username,
+        worker_input.repository_alias,
+        activated_repo_manager,
+    )
 
     if not golden_repo_alias:
         return _GoldenTemporalContext(None, activated_repo_manager, None)
