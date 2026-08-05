@@ -15,6 +15,8 @@ import time
 from pathlib import Path
 from typing import List, Dict, Optional
 
+from code_indexer.utils.git_invoker import get_git_invoker, is_mutating_git
+
 
 def get_git_environment(project_dir: Path) -> Dict[str, str]:
     """
@@ -101,6 +103,26 @@ def run_git_command(
     """
     if not cmd or cmd[0] != "git":
         raise ValueError("Command must start with 'git'")
+
+    # Delegation seam (EVO-64616 Phase 2): this is the ONE chokepoint every git
+    # call bottoms out at (LocalGitBackend AND GitOperationsService both reach
+    # here), so a deployment that must not run git mutations in the cidx image
+    # installs a GitInvoker and every mutation delegates -- with zero call-site
+    # changes. Reads stay local (is_mutating_git); with no invoker installed the
+    # native subprocess path below runs, exactly as today.
+    invoker = get_git_invoker()
+    if invoker is not None and is_mutating_git(cmd):
+        completed: "subprocess.CompletedProcess[str]" = invoker.run(
+            cmd, cwd, timeout=timeout
+        )
+        if check and completed.returncode != 0:
+            raise subprocess.CalledProcessError(
+                completed.returncode,
+                cmd,
+                output=completed.stdout,
+                stderr=completed.stderr,
+            )
+        return completed
 
     # Get the proper environment with safe.directory configuration
     env = get_git_environment(cwd)
