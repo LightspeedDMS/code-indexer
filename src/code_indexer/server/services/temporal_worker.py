@@ -105,11 +105,28 @@ _EMPTY_GOLDEN_TEMPORAL_CONTEXT = _GoldenTemporalContext(None, None, None)
 def _resolve_golden_temporal_context(
     worker_input: TemporalWorkerInput, job_id: str
 ) -> _GoldenTemporalContext:
-    """Resolve golden alias + the fixed temporal index dir. Fail-open.
+    """Resolve golden alias + the fixed temporal index dir.
 
-    Any failure returns an all-None context, so the caller falls back to the
-    legacy in-repo derivation and unchanged behavior rather than failing the
-    job.
+    Fail-open ONLY for the lineage LOOKUP: if the golden alias cannot be
+    determined (composite repo, no activated-repo record, backend error) the
+    context is all-None and the caller keeps the legacy in-repo derivation.
+
+    Bug #1529 finding #2: once the alias IS known, deriving the fixed root is
+    NOT fail-open. It happens OUTSIDE the try below, so a failure propagates
+    and fails the job. Swallowing it returned an all-None context, which sent
+    the caller on to `reconstruct_temporal_backend(repo_path, ...)` -- the
+    ACTIVATION'S own CoW clone -- silently serving the frozen-at-clone-time
+    duplicate this bug exists to eliminate. This seam is the LIVE MCP
+    temporal front door (Story #1400), so a silent local fallback here is the
+    primary read path being wrong.
+
+    The discriminator deliberately is NOT `CIDX_SERVER_REFRESH_CONTEXT`: that
+    marker is injected only into the temporal CHILD SUBPROCESS and is absent
+    from this (server-side) process, so gating on it would be inert.
+
+    Raises:
+        ValueError: when the golden alias is known but its fixed temporal
+            root cannot be derived.
     """
     try:
         from code_indexer.server.repositories.activated_repo_manager import (
@@ -143,17 +160,6 @@ def _resolve_golden_temporal_context(
             worker_input.repository_alias,
             activated_repo_manager,
         )
-        if not golden_repo_alias:
-            return _GoldenTemporalContext(None, activated_repo_manager, None)
-
-        golden_repos_dir = (
-            Path(activated_repo_manager.activated_repos_dir).parent / "golden-repos"
-        )
-        return _GoldenTemporalContext(
-            golden_repo_alias,
-            activated_repo_manager,
-            server_temporal_index_root(golden_repos_dir, golden_repo_alias),
-        )
     except Exception:
         logger.warning(
             "temporal worker %s: golden-repo lineage resolution failed "
@@ -163,6 +169,22 @@ def _resolve_golden_temporal_context(
             exc_info=True,
         )
         return _EMPTY_GOLDEN_TEMPORAL_CONTEXT
+
+    if not golden_repo_alias:
+        return _GoldenTemporalContext(None, activated_repo_manager, None)
+
+    # Bug #1529 finding #2: deliberately OUTSIDE the fail-open try above. The
+    # alias is known, so the fixed root is the only correct location -- a
+    # failure here must fail the job, never silently degrade to the
+    # activation's own clone.
+    golden_repos_dir = (
+        Path(activated_repo_manager.activated_repos_dir).parent / "golden-repos"
+    )
+    return _GoldenTemporalContext(
+        golden_repo_alias,
+        activated_repo_manager,
+        server_temporal_index_root(golden_repos_dir, golden_repo_alias),
+    )
 
 
 def _build_ctx(worker_input: TemporalWorkerInput) -> Dict[str, Any]:

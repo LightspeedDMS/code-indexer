@@ -2722,15 +2722,35 @@ class SemanticQueryManager:
     ) -> Optional[Path]:
         """The fixed temporal data location for a golden repo (Bug #1529).
 
-        Returns None when the caller has no golden-repo lineage information
-        (an explicit-repo_path query shape), in which case the temporal read
-        falls back to the legacy in-repo derivation unchanged.
+        Returns None ONLY when the caller has no golden-repo lineage
+        information at all (an explicit-repo_path query shape), in which case
+        the temporal read falls back to the legacy in-repo derivation
+        unchanged. That is a legitimate query shape, not a failure.
 
         `golden_repos_dir` is derived exactly as the pre-existing temporal
         code already derived it -- from `activated_repos_dir`'s parent -- so
-        no new physical-root concept is introduced. Any failure resolving it
-        is non-fatal: returning None preserves today's behavior rather than
-        breaking the query.
+        no new physical-root concept is introduced.
+
+        Bug #1529 finding #2: once the golden alias IS known, the fixed root
+        is the ONLY correct location for this repo's temporal data, so a
+        failure deriving it RAISES rather than returning None. The previous
+        `except Exception: return None` sent the caller on to
+        `reconstruct_temporal_backend(repo_path, ...)` -- the ACTIVATION'S own
+        CoW clone -- silently reintroducing the frozen-at-clone-time
+        duplicate that diverges from the golden repo on every refresh, i.e.
+        exactly the defect this bug exists to close, and with no error
+        surfaced to anyone. Failing the query loudly is strictly better than
+        answering it from knowingly-wrong data.
+
+        Note the discriminator deliberately is NOT
+        `CIDX_SERVER_REFRESH_CONTEXT`: that marker is injected only into the
+        temporal CHILD SUBPROCESS by `build_temporal_child_env` and is absent
+        from the server's own process, which is where this seam runs --
+        gating on it would make this fix permanently inert.
+
+        Raises:
+            ValueError: when `golden_repo_alias` is known but its fixed
+                temporal root cannot be derived.
         """
         if not golden_repo_alias:
             return None
@@ -2739,21 +2759,11 @@ class SemanticQueryManager:
             server_temporal_index_root,
         )
 
-        try:
-            golden_repos_dir = (
-                Path(self.activated_repo_manager.activated_repos_dir).parent
-                / "golden-repos"
-            )
-            return server_temporal_index_root(golden_repos_dir, golden_repo_alias)
-        except Exception:
-            logger.warning(
-                "Bug #1529: could not resolve the fixed temporal index dir "
-                "for golden_repo_alias=%s; falling back to the in-repo "
-                "derivation for this query",
-                golden_repo_alias,
-                exc_info=True,
-            )
-            return None
+        golden_repos_dir = (
+            Path(self.activated_repo_manager.activated_repos_dir).parent
+            / "golden-repos"
+        )
+        return server_temporal_index_root(golden_repos_dir, golden_repo_alias)
 
     def _execute_temporal_query(
         self,

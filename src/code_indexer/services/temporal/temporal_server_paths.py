@@ -150,6 +150,40 @@ def resolve_golden_repo_coordinates(
     return None
 
 
+#: Path components that are never a legitimate repo alias. The empty string is
+#: included because ``normalize_repo_alias`` can PRODUCE it (alias == "-global").
+_UNSAFE_ALIAS_COMPONENTS = frozenset({"", ".", ".."})
+
+#: Separator characters rejected in an alias. ``\\`` is rejected even though it
+#: is a legal POSIX filename character: allowing it would make one alias denote
+#: a single directory here and a nested path on any non-POSIX consumer -- the
+#: same "two locations for one namespace" divergence this module exists to end.
+_ALIAS_SEPARATOR_CHARS = ("/", "\\", os.sep, os.altsep)
+
+
+def _validate_alias_path_component(bare_alias: str, repo_alias: str) -> None:
+    """Assert the normalized alias is ONE safe path component (Bug #1529 #4).
+
+    This module is the ONE place the physical temporal location is decided for
+    both the read and the write side, so an alias that escapes ``.temporal/``
+    here silently relocates real data (write) or reads from outside the root
+    entirely (read). Refused loudly rather than sanitized: silently rewriting
+    an alias would map two distinct aliases onto one directory, which is a
+    data-mixing bug rather than a fix.
+    """
+    if bare_alias in _UNSAFE_ALIAS_COMPONENTS:
+        raise ValueError(
+            f"server_temporal_index_root: repo_alias {repo_alias!r} is not a "
+            f"usable directory name (normalizes to {bare_alias!r})"
+        )
+    for separator in _ALIAS_SEPARATOR_CHARS:
+        if separator and separator in bare_alias:
+            raise ValueError(
+                f"server_temporal_index_root: repo_alias {repo_alias!r} must be "
+                f"a single path component, but contains {separator!r}"
+            )
+
+
 def server_temporal_index_root(
     golden_repos_dir: Union[Path, str], repo_alias: str
 ) -> Path:
@@ -157,17 +191,32 @@ def server_temporal_index_root(
 
     This is the single deterministic formula both the write child and the
     read-side server derive their path from.
+
+    Raises:
+        ValueError: if ``golden_repos_dir`` is missing, or ``repo_alias`` is
+            missing or is not a single safe path component (Bug #1529 #4).
     """
     if golden_repos_dir is None or str(golden_repos_dir) == "":
         raise ValueError("server_temporal_index_root: golden_repos_dir is required")
     if not repo_alias:
         raise ValueError("server_temporal_index_root: repo_alias is required")
 
-    return (
-        Path(golden_repos_dir)
-        / SERVER_TEMPORAL_ROOT_DIR_NAME
-        / normalize_repo_alias(repo_alias)
-    )
+    bare_alias = normalize_repo_alias(repo_alias)
+    _validate_alias_path_component(bare_alias, repo_alias)
+
+    container = Path(golden_repos_dir) / SERVER_TEMPORAL_ROOT_DIR_NAME
+    resolved = container / bare_alias
+
+    # Defense in depth: the component checks above are the real guard, but
+    # containment is the invariant that actually matters, so assert it
+    # directly rather than trusting the character blacklist is exhaustive.
+    if resolved.parent != container:
+        raise ValueError(
+            f"server_temporal_index_root: repo_alias {repo_alias!r} does not "
+            f"resolve directly beneath {container}"
+        )
+
+    return resolved
 
 
 def in_repo_temporal_index_dir(codebase_dir: Union[Path, str]) -> Path:
