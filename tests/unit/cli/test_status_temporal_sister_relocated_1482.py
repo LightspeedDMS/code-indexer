@@ -29,7 +29,9 @@ import click
 import pytest
 
 from code_indexer.config import ConfigManager
-from code_indexer.global_repos.alias_manager import AliasManager
+from code_indexer.services.temporal.temporal_server_paths import (
+    server_temporal_index_root,
+)
 
 REPO_ALIAS = "myrepo"
 POINTER_NAMESPACE = "myrepo-temporal-voyage_code_3-2024Q1"
@@ -60,16 +62,19 @@ def sister_only_golden_clone_config(tmp_path: Path):
     index_path = config_dir / "index"
     index_path.mkdir(parents=True, exist_ok=True)
 
+    # Bug #1529: temporal data for a golden repo lives at the FIXED
+    # server-owned root ({golden_repos_dir}/.temporal/{alias}/), not a
+    # .versioned snapshot behind an alias pointer. Unchanged behavior under
+    # test: status must recognize temporal data OUTSIDE the repo tree.
     version_dir = (
-        golden_repos_dir
-        / ".versioned"
-        / POINTER_NAMESPACE
-        / f"v_{FIXTURE_VERSION_TIMESTAMP}"
+        server_temporal_index_root(golden_repos_dir, REPO_ALIAS)
+        / "code-indexer-temporal-voyage_code_3-2024Q1"
     )
     version_dir.mkdir(parents=True)
     (version_dir / "hnsw_index.bin").write_bytes(b"fake-hnsw")
-    alias_manager = AliasManager(str(golden_repos_dir / "aliases"))
-    alias_manager.create_alias(POINTER_NAMESPACE, str(version_dir))
+    # A real committed row: detection keys off DATA presence, not merely the
+    # presence of an index file.
+    (version_dir / "vector_0.json").write_text('{"id": "commit:abc:0"}')
 
     config_manager = ConfigManager(config_path)
     config = config_manager.load()

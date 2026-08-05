@@ -25,7 +25,9 @@ from pathlib import Path
 import pytest
 
 from code_indexer.cli_watch_helpers import detect_existing_indexes
-from code_indexer.global_repos.alias_manager import AliasManager
+from code_indexer.services.temporal.temporal_server_paths import (
+    server_temporal_index_root,
+)
 
 REPO_ALIAS = "myrepo"
 POINTER_NAMESPACE = "myrepo-temporal-voyage_code_3-2024Q1"
@@ -38,20 +40,19 @@ def _build_sister_only_golden_clone(tmp_path: Path) -> Path:
     index_base = project_root / ".code-indexer" / "index"
     index_base.mkdir(parents=True)
 
+    # Bug #1529: temporal data for a golden repo lives at the FIXED
+    # server-owned root ({golden_repos_dir}/.temporal/{alias}/), not a
+    # .versioned snapshot behind an alias pointer. The behavior under test is
+    # unchanged: detection must find temporal data OUTSIDE the repo tree.
     version_dir = (
-        golden_repos_dir
-        / ".versioned"
-        / POINTER_NAMESPACE
-        / f"v_{FIXTURE_VERSION_TIMESTAMP}"
+        server_temporal_index_root(golden_repos_dir, REPO_ALIAS)
+        / "code-indexer-temporal-voyage_code_3-2024Q1"
     )
     version_dir.mkdir(parents=True)
     # A single committed-row marker file -- temporal_shard_has_committed_rows
     # (temporal_row_existence.py) treats any non-metadata point file in the
     # shard dir as evidence of committed rows.
     (version_dir / "vector_0.json").write_text(json.dumps({"id": "commit:abc:0"}))
-
-    alias_manager = AliasManager(str(golden_repos_dir / "aliases"))
-    alias_manager.create_alias(POINTER_NAMESPACE, str(version_dir))
 
     return project_root
 
