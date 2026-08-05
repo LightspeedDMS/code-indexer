@@ -108,3 +108,32 @@ def test_non_git_command_still_rejected(monkeypatch):
     _install(monkeypatch, _RecordingInvoker())
     with pytest.raises(ValueError):
         git_runner.run_git_command(["ls", "-la"], Path("/repo"))
+
+
+def test_retry_variant_also_delegates_mutations(monkeypatch, no_native_subprocess):
+    # Regression (MR !36 review): run_git_command_with_retry must route through
+    # the same seam -- network mutations (fetch/pull/push) use the retry path, so
+    # a bypass there would leave the most important delegations running locally.
+    inv = _RecordingInvoker(stdout="fetched")
+    _install(monkeypatch, inv)
+    result = git_runner.run_git_command_with_retry(
+        ["git", "fetch", "origin"], Path("/repo")
+    )
+    assert len(inv.calls) == 1
+    assert inv.calls[0][0] == ["git", "fetch", "origin"]
+    assert result.stdout == "fetched"
+
+
+def test_retry_variant_read_stays_native(monkeypatch):
+    inv = _RecordingInvoker()
+    _install(monkeypatch, inv)
+    calls = {"n": 0}
+
+    def _fake_run(cmd, **kwargs):
+        calls["n"] += 1
+        return subprocess.CompletedProcess(cmd, 0, stdout="native", stderr="")
+
+    monkeypatch.setattr(git_runner.subprocess, "run", _fake_run)
+    git_runner.run_git_command_with_retry(["git", "ls-remote", "url"], Path("/repo"))
+    assert inv.calls == []  # read: invoker not consulted even on the retry path
+    assert calls["n"] == 1

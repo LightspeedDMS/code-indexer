@@ -184,27 +184,22 @@ def run_git_command_with_retry(
 
     while attempt <= MAX_RETRIES:
         try:
-            # Get the proper environment with safe.directory configuration
-            env = get_git_environment(cwd)
-
-            # Merge any environment from kwargs if provided
-            if "env" in kwargs:
-                env.update(kwargs["env"])
-                kwargs_copy = kwargs.copy()
-                kwargs_copy.pop("env")
-            else:
-                kwargs_copy = kwargs
-
-            # Execute git command
-            result = subprocess.run(
+            # Execute via run_git_command so the git-invoker delegation seam
+            # (EVO-64616 Phase 2) applies here too: network-touching mutations
+            # (fetch/pull/push) run through the retry path, and delegating a git
+            # command must not depend on which entry point a caller happens to
+            # use. run_git_command builds the safe.directory env, merges any
+            # kwargs env, and raises CalledProcessError on a non-zero exit under
+            # check=True (native AND delegated paths alike), which the retry loop
+            # below catches -- so retry semantics are unchanged.
+            result = run_git_command(
                 cmd,
-                cwd=cwd,
+                cwd,
                 check=check,
                 capture_output=capture_output,
                 text=text,
                 timeout=timeout,
-                env=env,
-                **kwargs_copy,
+                **kwargs,
             )
 
             # Success - return immediately
