@@ -50,6 +50,7 @@ from .auth import (
 )
 from ..services.ci_token_manager import CITokenManager, TokenValidationError
 from ..services.config_service import get_config_service
+from ..utils.bounded_submission_gate import BoundedSubmissionGate
 from code_indexer import __version__ as cidx_version
 from code_indexer.server.logging_utils import format_error_log, get_log_extra
 from code_indexer.server.auto_update.deployment_executor import RESTART_SIGNAL_PATH
@@ -88,6 +89,26 @@ _DISCOVERY_BRANCH_FETCH_MAX_CONCURRENCY = 8
 _DISCOVERY_BRANCH_FETCH_EXECUTOR: Optional[ThreadPoolExecutor] = None
 _DISCOVERY_BRANCH_FETCH_EXECUTOR_LOCK = threading.Lock()
 
+# Story #1491 dual-review round 4: the pool above bounds how many fetches RUN,
+# but a ThreadPoolExecutor's internal work queue is an unbounded SimpleQueue --
+# so a large repo list (or several concurrent requests) could still hand it an
+# unlimited number of PENDING git tasks, growing memory with no ceiling and no
+# signal. This is the admission budget that closes that: at most this many
+# fetches may be outstanding (submitted and unfinished) process-wide, which caps
+# the pool's queue at OUTSTANDING - MAX_CONCURRENCY entries. Excess callers wait
+# in async space, holding no thread and no queue slot.
+#
+# 2x the worker count: enough queued work that a finishing worker always has its
+# next fetch ready (no throughput loss versus today), while keeping the queue a
+# fixed, small number of pending tasks rather than an unbounded backlog.
+_DISCOVERY_BRANCH_FETCH_MAX_OUTSTANDING = 2 * _DISCOVERY_BRANCH_FETCH_MAX_CONCURRENCY
+
+# ONE shared gate is the entire bound, held module-level for exactly the reason
+# the pool is (review item 11): a gate constructed per request would bound a
+# single request and nothing else.
+_DISCOVERY_BRANCH_FETCH_GATE: Optional[BoundedSubmissionGate] = None
+_DISCOVERY_BRANCH_FETCH_GATE_LOCK = threading.Lock()
+
 
 def _get_discovery_branch_fetch_executor() -> ThreadPoolExecutor:
     """Return the process-wide bounded pool for synchronous ls-remote fetches."""
@@ -99,6 +120,17 @@ def _get_discovery_branch_fetch_executor() -> ThreadPoolExecutor:
                 thread_name_prefix="discovery-branch-fetch",
             )
         return _DISCOVERY_BRANCH_FETCH_EXECUTOR
+
+
+def _get_discovery_branch_fetch_gate() -> BoundedSubmissionGate:
+    """Return the process-wide submission budget for ls-remote fetches."""
+    global _DISCOVERY_BRANCH_FETCH_GATE
+    with _DISCOVERY_BRANCH_FETCH_GATE_LOCK:
+        if _DISCOVERY_BRANCH_FETCH_GATE is None:
+            _DISCOVERY_BRANCH_FETCH_GATE = BoundedSubmissionGate(
+                _DISCOVERY_BRANCH_FETCH_MAX_OUTSTANDING
+            )
+        return _DISCOVERY_BRANCH_FETCH_GATE
 
 
 # Self-Monitoring constants (Story #74)
@@ -8775,18 +8807,30 @@ async def fetch_discovery_branches(request: Request):
         # request while K concurrent requests still burst 8 x K git subprocesses.
         executor = _get_discovery_branch_fetch_executor()
 
+        # Round 4: submission itself is budgeted by the process-wide gate added
+        # alongside the pool. Without it, every planned fetch was handed to the
+        # pool immediately and the surplus piled up in its unbounded internal
+        # queue; now at most _DISCOVERY_BRANCH_FETCH_MAX_OUTSTANDING are ever in
+        # the pool at once and the rest wait here -- suspended coroutines only,
+        # no thread parked and no queue slot held.
+        gate = _get_discovery_branch_fetch_gate()
+
         async def _fetch_one(
             clone_url: str, platform: str, credentials: Optional[str]
         ) -> Dict[str, Any]:
-            result = await loop.run_in_executor(
-                executor,
-                functools.partial(
-                    service.fetch_remote_branches,
-                    clone_url=clone_url,
-                    platform=platform,
-                    credentials=credentials,
-                ),
-            )
+            await gate.acquire()
+            try:
+                result = await loop.run_in_executor(
+                    executor,
+                    functools.partial(
+                        service.fetch_remote_branches,
+                        clone_url=clone_url,
+                        platform=platform,
+                        credentials=credentials,
+                    ),
+                )
+            finally:
+                gate.release()
             return {
                 "branches": result.branches,
                 "default_branch": result.default_branch,
