@@ -7,7 +7,10 @@ Provides admin web interface routes for CIDX server administration.
 from code_indexer import __version__ as _cidx_version
 from code_indexer.server.middleware.correlation import get_correlation_id
 
+import asyncio
+import functools
 import html
+from concurrent.futures import ThreadPoolExecutor
 import json
 import logging
 import os
@@ -47,12 +50,91 @@ from .auth import (
 )
 from ..services.ci_token_manager import CITokenManager, TokenValidationError
 from ..services.config_service import get_config_service
+from ..utils.bounded_submission_gate import (
+    BoundedSubmissionGate,
+    SubmissionGateOverloadedError,
+)
 from code_indexer import __version__ as cidx_version
 from code_indexer.server.logging_utils import format_error_log, get_log_extra
 from code_indexer.server.auto_update.deployment_executor import RESTART_SIGNAL_PATH
 from code_indexer.server.storage.database_manager import DatabaseConnectionManager
 
 logger = logging.getLogger(__name__)
+
+# Story #1491 AC3: upper bound on how many synchronous git ls-remote branch
+# fetches fetch_discovery_branches may offload to the executor at once. The
+# story requires the introduced concurrency to be BOUNDED -- a large
+# auto-discovery repo list must never fan out into an unbounded burst of git
+# subprocesses.
+_DISCOVERY_BRANCH_FETCH_MAX_CONCURRENCY = 8
+
+# Story #1491 review item 11: that bound must be PROCESS-WIDE, not per-request.
+# It was originally an asyncio.Semaphore constructed inside
+# fetch_discovery_branches, which bounded a single request's fan-out and nothing
+# else: K concurrent admin discovery requests permitted 8 x K simultaneous git
+# subprocesses -- exactly the burst AC3 exists to prevent (measured: two
+# concurrent requests reached 16).
+#
+# A dedicated pool is the limiter rather than a shared counter, for two specific
+# reasons:
+#   * An asyncio.Semaphore binds to the event loop that first awaits it, so a
+#     module-level one is a cross-loop hazard: a second loop in the same process
+#     (tests, or any loop-per-thread work such as the sync-dispatched handlers
+#     this same story introduced) either raises or shares nothing.
+#   * A threading.Semaphore acquired INSIDE the default executor would bound the
+#     git processes but hold default-executor threads hostage while they waited,
+#     starving every other run_in_executor caller in the process.
+# The pool size IS the bound: excess work queues inside this pool (never dropped,
+# never widened), the shared default executor is untouched, and no asyncio
+# primitive is involved. Created lazily so importing this module starts no
+# threads; never shut down, because it lives exactly as long as the process and
+# holds at most _DISCOVERY_BRANCH_FETCH_MAX_CONCURRENCY idle threads.
+_DISCOVERY_BRANCH_FETCH_EXECUTOR: Optional[ThreadPoolExecutor] = None
+_DISCOVERY_BRANCH_FETCH_EXECUTOR_LOCK = threading.Lock()
+
+# Story #1491 dual-review round 4: the pool above bounds how many fetches RUN,
+# but a ThreadPoolExecutor's internal work queue is an unbounded SimpleQueue --
+# so a large repo list (or several concurrent requests) could still hand it an
+# unlimited number of PENDING git tasks, growing memory with no ceiling and no
+# signal. This is the admission budget that closes that: at most this many
+# fetches may be outstanding (submitted and unfinished) process-wide, which caps
+# the pool's queue at OUTSTANDING - MAX_CONCURRENCY entries. Excess callers wait
+# in async space, holding no thread and no queue slot.
+#
+# 2x the worker count: enough queued work that a finishing worker always has its
+# next fetch ready (no throughput loss versus today), while keeping the queue a
+# fixed, small number of pending tasks rather than an unbounded backlog.
+_DISCOVERY_BRANCH_FETCH_MAX_OUTSTANDING = 2 * _DISCOVERY_BRANCH_FETCH_MAX_CONCURRENCY
+
+# ONE shared gate is the entire bound, held module-level for exactly the reason
+# the pool is (review item 11): a gate constructed per request would bound a
+# single request and nothing else.
+_DISCOVERY_BRANCH_FETCH_GATE: Optional[BoundedSubmissionGate] = None
+_DISCOVERY_BRANCH_FETCH_GATE_LOCK = threading.Lock()
+
+
+def _get_discovery_branch_fetch_executor() -> ThreadPoolExecutor:
+    """Return the process-wide bounded pool for synchronous ls-remote fetches."""
+    global _DISCOVERY_BRANCH_FETCH_EXECUTOR
+    with _DISCOVERY_BRANCH_FETCH_EXECUTOR_LOCK:
+        if _DISCOVERY_BRANCH_FETCH_EXECUTOR is None:
+            _DISCOVERY_BRANCH_FETCH_EXECUTOR = ThreadPoolExecutor(
+                max_workers=_DISCOVERY_BRANCH_FETCH_MAX_CONCURRENCY,
+                thread_name_prefix="discovery-branch-fetch",
+            )
+        return _DISCOVERY_BRANCH_FETCH_EXECUTOR
+
+
+def _get_discovery_branch_fetch_gate() -> BoundedSubmissionGate:
+    """Return the process-wide submission budget for ls-remote fetches."""
+    global _DISCOVERY_BRANCH_FETCH_GATE
+    with _DISCOVERY_BRANCH_FETCH_GATE_LOCK:
+        if _DISCOVERY_BRANCH_FETCH_GATE is None:
+            _DISCOVERY_BRANCH_FETCH_GATE = BoundedSubmissionGate(
+                _DISCOVERY_BRANCH_FETCH_MAX_OUTSTANDING
+            )
+        return _DISCOVERY_BRANCH_FETCH_GATE
+
 
 # Self-Monitoring constants (Story #74)
 SCAN_HISTORY_LIMIT = 50
@@ -8706,43 +8788,170 @@ async def fetch_discovery_branches(request: Request):
         # Get token manager to retrieve stored credentials
         token_manager = _get_token_manager()
 
-        # Build requests and fetch branches
-        results = {}  # type: ignore[var-annotated]
+        # Story #1491 AC3 (report Finding B3): fetch_remote_branches is
+        # SYNCHRONOUS -- subprocess.run(["git","ls-remote",...], timeout=30).
+        # Calling it in a plain sequential loop from this async route froze the
+        # whole event loop for N x 30 s when N remotes were unreachable. Each
+        # call is now offloaded to the default executor, with concurrency
+        # BOUNDED by _DISCOVERY_BRANCH_FETCH_MAX_CONCURRENCY so a large repo
+        # list can never fan out into an unbounded burst of git subprocesses.
+        #
+        # Semantics are deliberately unchanged: credential lookups still run
+        # once per repo in the original order, the per-repo response dicts are
+        # built from the same fields, the missing-clone_url entry still keys on
+        # str(repo), results are inserted in the ORIGINAL request order (so
+        # duplicate clone_urls collapse exactly as before), and an unexpected
+        # exception still propagates to the outer handler as a 500. The 30 s
+        # per-remote timeout lives inside fetch_remote_branches and is
+        # untouched.
+        loop = asyncio.get_running_loop()
+        # Review item 11: the bound is PROCESS-WIDE, enforced by the size of the
+        # shared pool below -- not by a per-request limiter, which bounded one
+        # request while K concurrent requests still burst 8 x K git subprocesses.
+        executor = _get_discovery_branch_fetch_executor()
+
+        # Round 4: submission itself is budgeted by the process-wide gate added
+        # alongside the pool. Without it, every planned fetch was handed to the
+        # pool immediately and the surplus piled up in its unbounded internal
+        # queue; now at most _DISCOVERY_BRANCH_FETCH_MAX_OUTSTANDING are ever in
+        # the pool at once and the rest wait here -- suspended coroutines only,
+        # no thread parked and no queue slot held.
+        gate = _get_discovery_branch_fetch_gate()
+
+        async def _fetch_one(
+            clone_url: str, platform: str, credentials: Optional[str]
+        ) -> Dict[str, Any]:
+            try:
+                await gate.acquire()
+            except SubmissionGateOverloadedError as overloaded:
+                # Story #1491 (review round 7): degrade THIS repository, never
+                # the whole request. Letting the overload propagate discarded
+                # the entire result set -- including every repository that had
+                # already succeeded -- and turned an ordinary large-org
+                # discovery into an HTTP 500. The shape here matches the
+                # existing "Missing clone_url" degradation so the client
+                # handles it through the same per-repo error path.
+                logger.warning(
+                    format_error_log(
+                        "STORE-GENERAL-045",
+                        f"Branch discovery shed load for {clone_url}: {overloaded}",
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                )
+                return {
+                    "branches": [],
+                    "default_branch": None,
+                    "error": "Server busy - branch discovery deferred, please retry",
+                }
+            try:
+                result = await loop.run_in_executor(
+                    executor,
+                    functools.partial(
+                        service.fetch_remote_branches,
+                        clone_url=clone_url,
+                        platform=platform,
+                        credentials=credentials,
+                    ),
+                )
+            finally:
+                gate.release()
+            return {
+                "branches": result.branches,
+                "default_branch": result.default_branch,
+                "error": result.error,
+            }
+
+        # Pass 1: resolve response keys + credentials sequentially on the loop
+        # (cheap local token reads). NO task is created in this pass -- that is
+        # deliberate. token_manager.get_token() is a real credential-store read
+        # that can raise; if tasks were created as we went, a failure on repo N
+        # would leave the tasks for repos 0..N-1 running and never awaited
+        # (unretrieved exceptions, git subprocesses outliving the response).
+        # Planning fully first means an exception here escapes with zero tasks
+        # in flight.
+        # Story #1491 (review item 2): CITokenManager.get_token() performs real
+        # SYNCHRONOUS backend access, so calling it from this async route put
+        # blocking I/O straight back onto the event loop -- the exact defect
+        # class this story exists to remove, and it would have negated the
+        # subprocess offload below on any slow credential store. It is now
+        # offloaded to a worker thread. Each distinct platform is resolved
+        # exactly ONCE per request rather than once per repository, so a
+        # 50-repo GitHub discovery does one token read instead of fifty.
+        requested_platforms = {
+            repo.get("platform", "github") for repo in repos if repo.get("clone_url")
+        }
+        credentials_by_platform: Dict[str, Optional[str]] = {}
+        for platform_name in sorted(requested_platforms):
+            if platform_name not in ("github", "gitlab"):
+                # Unknown platform: same as before -- no credentials attached.
+                credentials_by_platform[platform_name] = None
+                continue
+            token_data = await asyncio.to_thread(token_manager.get_token, platform_name)
+            credentials_by_platform[platform_name] = (
+                token_data.token if token_data else None
+            )
+
+        plan: List[Tuple[str, Optional[Tuple[str, str, Optional[str]]]]] = []
         for repo in repos:
             clone_url = repo.get("clone_url")
             platform = repo.get("platform", "github")
 
             if not clone_url:
-                results[str(repo)] = {
+                plan.append((str(repo), None))
+                continue
+
+            credentials = credentials_by_platform.get(platform)
+            plan.append((clone_url, (clone_url, platform, credentials)))
+
+        # The plan is complete, so task creation below can no longer be
+        # interleaved with anything that raises (a credential-store failure
+        # escapes with zero tasks in flight).
+        planned = plan
+
+        # Pass 2: run the fetches in sequential WINDOWS, each at most
+        # _DISCOVERY_BRANCH_FETCH_MAX_CONCURRENCY wide.
+        #
+        # Story #1491 (review round 7): bounding the fan-out HERE, at the
+        # source, is what makes a large discovery safe. Creating one task per
+        # repository up front and letting them all pile up on the submission
+        # gate meant a 100-repo request -- an ordinary large-org discovery --
+        # queued far more waiters than the gate would hold and was rejected
+        # outright, discarding every repository that had already succeeded.
+        # Windowing means this request never has more outstanding acquires
+        # than the gate's own capacity, so it bounds its own memory AND never
+        # provokes rejection on its own behalf. The per-repo degradation in
+        # _fetch_one remains only as a cross-request safety net.
+        #
+        # Within a window, return_exceptions=True guarantees EVERY task is
+        # awaited, so no sibling is orphaned with an unretrieved exception when
+        # one fetch fails. A genuine failure is then re-raised in ORIGINAL
+        # request order, surfacing to the outer handler exactly as before.
+        results: Dict[str, Dict[str, Any]] = {}
+        window: List[Tuple[str, "asyncio.Future"]] = []
+
+        async def _drain_window() -> None:
+            if not window:
+                return
+            await asyncio.gather(*(task for _, task in window), return_exceptions=True)
+            for window_key, task in window:
+                task_error = task.exception()
+                if task_error is not None:
+                    raise task_error
+                results[window_key] = task.result()
+            window.clear()
+
+        for key, fetch_args in planned:
+            if fetch_args is None:
+                results[key] = {
                     "branches": [],
                     "default_branch": None,
                     "error": "Missing clone_url",
                 }
                 continue
-
-            # Retrieve credentials based on platform
-            credentials = None
-            if platform == "gitlab":
-                token_data = token_manager.get_token("gitlab")
-                if token_data:
-                    credentials = token_data.token
-            elif platform == "github":
-                token_data = token_manager.get_token("github")
-                if token_data:
-                    credentials = token_data.token
-
-            # Fetch branches for this repo with credentials
-            result = service.fetch_remote_branches(
-                clone_url=clone_url,
-                platform=platform,
-                credentials=credentials,
-            )
-
-            results[clone_url] = {
-                "branches": result.branches,
-                "default_branch": result.default_branch,
-                "error": result.error,
-            }
+            window.append((key, asyncio.ensure_future(_fetch_one(*fetch_args))))
+            if len(window) >= _DISCOVERY_BRANCH_FETCH_MAX_CONCURRENCY:
+                await _drain_window()
+        await _drain_window()
 
         return JSONResponse(content=results)
 

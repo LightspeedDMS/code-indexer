@@ -5,7 +5,7 @@ Provides dependency injection for JWT authentication and role-based access contr
 """
 
 from code_indexer.server.middleware.correlation import get_correlation_id
-from typing import Optional, TYPE_CHECKING, Dict, Any
+from typing import Optional, TYPE_CHECKING, Dict, Any, Tuple
 from fastapi import Depends, HTTPException, status, Request, Response
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from functools import wraps
@@ -441,14 +441,24 @@ async def get_mcp_user_from_credentials(request: Request) -> Optional[User]:
 
     # Verify credentials using MCPCredentialManager (AC3-AC5).
     # Story #1491 AC1 (Finding B1, CRITICAL): verify_credential does a
-    # bcrypt hash comparison (100-300ms pure CPU) -- running it directly on
-    # the event loop stalls EVERY concurrent request, not just this one.
-    # Offload to a worker thread via anyio.to_thread.run_sync.
+    # bcrypt hash comparison (100-300ms pure CPU) and user_manager.get_user
+    # does a synchronous user-DB read -- running either directly on the event
+    # loop stalls EVERY concurrent request, not just this one. AC1 names BOTH
+    # as blocking work that must leave the loop, so they share ONE
+    # anyio.to_thread.run_sync boundary here rather than offloading bcrypt and
+    # then immediately reading the DB back on the loop. One boundary (not two)
+    # also halves the thread round-trips on the hottest MCP path.
     import anyio.to_thread
 
-    user_id = await anyio.to_thread.run_sync(
-        mcp_credential_manager.verify_credential, client_id, client_secret
-    )
+    def _verify_credential_and_load_user() -> Tuple[Optional[str], Optional[User]]:
+        verified_user_id = mcp_credential_manager.verify_credential(
+            client_id, client_secret
+        )
+        if not verified_user_id:
+            return None, None
+        return verified_user_id, user_manager.get_user(verified_user_id)
+
+    user_id, user = await anyio.to_thread.run_sync(_verify_credential_and_load_user)
 
     if not user_id:
         # Invalid credentials - return 401 (AC3)
@@ -458,8 +468,6 @@ async def get_mcp_user_from_credentials(request: Request) -> Optional[User]:
             headers={"WWW-Authenticate": _build_www_authenticate_header()},
         )
 
-    # Get User object
-    user = user_manager.get_user(user_id)
     if not user:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,

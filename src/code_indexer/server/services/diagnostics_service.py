@@ -12,10 +12,12 @@ Features caching with category-specific TTLs and persistence to SQLite database.
 """
 
 import asyncio
+import itertools
 import json
 import os
 import re
 import sqlite3
+import threading
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from enum import Enum
@@ -157,7 +159,41 @@ class DiagnosticsService:
         self._cache_ttl = timedelta(minutes=10)
         self._running = False
         self._running_categories: set = set()
-        self.__lock: Optional[asyncio.Lock] = None
+        # Story #1491 AC4: a threading.Lock, NOT an asyncio.Lock.
+        #
+        # The precise reason: both diagnostics entry points are now dispatched
+        # as SYNC Starlette background tasks, and each runs its coroutine on
+        # its OWN private event loop via asyncio.run() inside a Starlette
+        # threadpool worker. Two such runs (run-all and run-category, or two
+        # categories) can therefore be in flight on two different threads with
+        # two different loops. An asyncio.Lock offers ZERO protection across
+        # threads, and being loop-bound it raises outright once contended from
+        # a second loop -- so it is not merely weaker here, it is incorrect.
+        #
+        # Every critical section it guards is a short, purely in-memory dict
+        # write; the synchronous DB persistence is performed OUTSIDE the lock
+        # (see run_all_diagnostics/run_category) so no reader ever blocks
+        # behind disk I/O.
+        # Constructed EAGERLY, never lazily. A lazy `if self.__lock is None:
+        # self.__lock = threading.Lock()` property is itself a race: two
+        # concurrent FIRST callers can both observe None and each construct
+        # their OWN Lock, after which each believes it holds "the" lock while
+        # actually holding a different one -- silently defeating every bit of
+        # synchronisation below.
+        self.__lock: threading.Lock = threading.Lock()
+
+        # Story #1491: the compare-and-set token for get_status()'s
+        # publish-back. Deliberately NOT the cache timestamp: datetime.now()
+        # is not collision-free (a 2,000,000-sample probe observed genuine
+        # duplicates), and a collision makes two DIFFERENT writes share a
+        # token, so the CAS reads "unchanged" and clobbers the newer one -- a
+        # textbook ABA. A monotonic counter cannot repeat a value, so an
+        # unchanged token proves nothing was published in between. Bumped
+        # under self.__lock at every publish site; timestamps remain in use
+        # for TTL expiry, which is what they are actually good for.
+        self._generation_counter = itertools.count(1)
+        self._cache_generation: Dict[DiagnosticCategory, int] = {}
+
         self._backend = storage_backend
 
         # Database path for persistence
@@ -176,14 +212,24 @@ class DiagnosticsService:
         self._load_results_from_db()
 
     @property
-    def _lock(self) -> asyncio.Lock:
-        if self.__lock is None:
-            self.__lock = asyncio.Lock()
+    def _lock(self) -> threading.Lock:
+        """The single, eagerly-constructed shared-state guard.
+
+        Deliberately NOT lazily constructed -- see __init__.
+        """
         return self.__lock
 
     def is_running(self) -> bool:
-        """Check if any diagnostics are currently running."""
-        return self._running or len(self._running_categories) > 0
+        """Check if any diagnostics are currently running.
+
+        Story #1491 AC4: read under the lock. Both flags are written by
+        background runs executing on Starlette threadpool workers, so an
+        unsynchronised read here can observe a torn view across the two
+        (e.g. _running already cleared while _running_categories has not yet
+        been updated). Same discipline as get_status().
+        """
+        with self._lock:
+            return self._running or len(self._running_categories) > 0
 
     def get_status(self) -> Dict[DiagnosticCategory, List[DiagnosticResult]]:
         """
@@ -197,8 +243,26 @@ class DiagnosticsService:
             Dict mapping categories to their diagnostic results
         """
         now = datetime.now()
-        status = {}
+        status: Dict[DiagnosticCategory, List[DiagnosticResult]] = {}
 
+        # Story #1491 AC4: ONE consistent snapshot of both shared dicts, taken
+        # under the same cross-thread lock the write paths take. Reading them
+        # unsynchronised (as this method used to) can observe a half-published
+        # generation -- run_all_diagnostics/run_category publish _cache[category]
+        # and _cache_timestamps[category] as a pair, and a reader interleaving
+        # between the two sees new results stamped with the previous run's time
+        # (or a missing stamp), i.e. a torn read across two dicts. Those runs are
+        # now sync Starlette background tasks on threadpool workers, so this is a
+        # genuine cross-thread race, not a theoretical one.
+        with self._lock:
+            cached_results = dict(self._cache)
+            cached_timestamps = dict(self._cache_timestamps)
+            # Captured in the SAME critical section as the data above, so the
+            # generation observed here is exactly the one that produced this
+            # snapshot -- that is what makes the later compare-and-set sound.
+            cached_generations = dict(self._cache_generation)
+
+        stale_categories: List[DiagnosticCategory] = []
         for category in DiagnosticCategory:
             # Get category-specific TTL
             cache_ttl = (
@@ -209,24 +273,63 @@ class DiagnosticsService:
 
             # Check if we have cached results that are still valid
             if (
-                category in self._cache
-                and category in self._cache_timestamps
-                and now - self._cache_timestamps[category] < cache_ttl
+                category in cached_results
+                and category in cached_timestamps
+                and now - cached_timestamps[category] < cache_ttl
             ):
-                status[category] = self._cache[category]
+                status[category] = cached_results[category]
             else:
-                # Cache is empty or expired - try to load from database
-                loaded_from_db = self._load_category_from_db(category)
+                stale_categories.append(category)
 
-                if loaded_from_db:
-                    # Successfully loaded from DB
-                    status[category] = self._cache[category]
+        for category in stale_categories:
+            # Cache is empty or expired - try to load from database.
+            #
+            # Story #1491 AC4: the database read is deliberately performed with
+            # the lock RELEASED. self._lock is a cross-thread threading.Lock;
+            # holding it across disk I/O would make every concurrent reader and
+            # every in-flight diagnostics run block on that I/O -- exactly the
+            # defect this story removed from the persistence step in
+            # run_all_diagnostics, and it must not reappear on the read side.
+            loaded = self._read_category_from_db(category)
+            if loaded is not None:
+                results, loaded_at = loaded
+            else:
+                # No DB results - generate and cache placeholder results
+                results, loaded_at = self._get_placeholder_results(category), now
+
+            # Story #1491 AC4: COMPARE-AND-SET, never an unconditional write.
+            #
+            # The DB read above deliberately ran with the lock released, so a
+            # concurrent run_all_diagnostics/run_category -- now a genuine
+            # cross-thread possibility, since both are sync Starlette
+            # background tasks on threadpool workers -- may have published
+            # FRESHER results for this category in the meantime. Overwriting
+            # unconditionally would silently discard them (a lost update in
+            # which the newest data loses).
+            #
+            # So: re-acquire, and publish only if this category's timestamp is
+            # still exactly the one observed in the snapshot above. If it
+            # changed, someone published while we were reading -- their value
+            # is newer than our DB snapshot by construction, so we keep theirs
+            # and return it.
+            # The CAS token is the monotonic per-category generation, NOT the
+            # timestamp: wall-clock values genuinely collide, and a collision
+            # would read as "unchanged" and clobber a newer write (ABA).
+            observed_generation = cached_generations.get(category)
+            with self._lock:
+                current_generation = self._cache_generation.get(category)
+                if current_generation == observed_generation:
+                    self._cache[category] = results
+                    self._cache_timestamps[category] = loaded_at
+                    self._cache_generation[category] = next(self._generation_counter)
+                    status[category] = results
                 else:
-                    # No DB results - generate and cache placeholder results
-                    placeholder_results = self._get_placeholder_results(category)
-                    self._cache[category] = placeholder_results
-                    self._cache_timestamps[category] = now
-                    status[category] = placeholder_results
+                    # Someone published while we were reading. Their value is
+                    # newer than our DB snapshot by construction, so keep it.
+                    # .get(..., results) rather than [category]: clear_cache()
+                    # can remove the entry concurrently, and a status read must
+                    # never raise KeyError over it.
+                    status[category] = self._cache.get(category, results)
 
         return status
 
@@ -304,7 +407,7 @@ class DiagnosticsService:
 
         logger = logging.getLogger(__name__)
 
-        async with self._lock:
+        with self._lock:
             self._running = True
         try:
             # Run diagnostics for each category with exception isolation
@@ -337,15 +440,52 @@ class DiagnosticsService:
 
                 # Store results in cache (always executes, even after exception)
                 now = datetime.now()
-                async with self._lock:
+                with self._lock:
                     self._cache[category] = results
                     self._cache_timestamps[category] = now
-                    # Persist to database
-                    self._save_results_to_db(category, results)
+                    # Advance the CAS token so a concurrent get_status() can
+                    # see that this publish happened.
+                    self._cache_generation[category] = next(self._generation_counter)
+                # Story #1491 AC4: persistence is deliberately OUTSIDE the
+                # lock. self._lock is a cross-thread threading.Lock, and this
+                # run executes on a worker thread -- holding it across a
+                # synchronous SQLite write would make any concurrent
+                # status/read path block on disk I/O. The in-memory cache is
+                # already updated above, so a reader never waits on the write.
+                self._save_results_to_db(category, results)
 
         finally:
-            async with self._lock:
+            with self._lock:
                 self._running = False
+
+    def run_all_diagnostics_sync(self) -> None:
+        """Synchronous entry point for the Starlette background task (AC4).
+
+        Story #1491 AC4 (report Finding B4): Starlette AWAITS an async
+        BackgroundTask on the event loop, so registering the
+        ``run_all_diagnostics`` coroutine directly meant its synchronous SQLite
+        writes and per-repo/per-collection filesystem calls froze every other
+        connection for the whole run. Starlette instead runs a SYNC background
+        task in its threadpool, so this plain ``def`` wrapper moves the entire
+        run off the event loop.
+
+        The coroutine itself is unchanged and runs on a private loop owned by
+        this worker thread. That is safe because the shared-state guard is a
+        threading.Lock (see ``__init__``) rather than a loop-bound
+        asyncio.Lock, and every awaitable the run touches (httpx.AsyncClient,
+        asyncio subprocesses) is created inside the run rather than shared
+        across loops.
+        """
+        asyncio.run(self.run_all_diagnostics())
+
+    def run_category_sync(self, category: DiagnosticCategory) -> None:
+        """Synchronous entry point for the per-category background task (AC4).
+
+        Same rationale and the same safety argument as
+        ``run_all_diagnostics_sync``; the story requires both registrations in
+        ``routers/diagnostics.py`` to leave the event loop.
+        """
+        asyncio.run(self.run_category(category))
 
     async def run_category(self, category: DiagnosticCategory) -> None:
         """
@@ -363,16 +503,22 @@ class DiagnosticsService:
             else DEFAULT_CACHE_TTL
         )
 
-        # Check if cache is still valid
+        # Check if cache is still valid.
+        #
+        # Story #1491 AC4: taken as ONE locked snapshot rather than three
+        # separate unsynchronised reads. A concurrent background run publishes
+        # _cache[category] and _cache_timestamps[category] as a pair, so
+        # interleaving between these reads can observe one without the other
+        # and mis-decide whether a re-run is needed. Same discipline as
+        # get_status().
         now = datetime.now()
-        if (
-            category in self._cache
-            and category in self._cache_timestamps
-            and now - self._cache_timestamps[category] < cache_ttl
-        ):
+        with self._lock:
+            cached_at = self._cache_timestamps.get(category)
+            has_results = category in self._cache
+        if has_results and cached_at is not None and now - cached_at < cache_ttl:
             return  # Cache is valid, no need to re-run
 
-        async with self._lock:
+        with self._lock:
             self._running_categories.add(category)
         try:
             # Run category-specific diagnostics
@@ -392,15 +538,18 @@ class DiagnosticsService:
                 results = self._get_placeholder_results(category)
 
             # Store results in cache for this category
-            async with self._lock:
+            with self._lock:
                 self._cache[category] = results
                 self._cache_timestamps[category] = datetime.now()
+                # Advance the CAS token: this publish must be visible to a
+                # concurrent get_status() publish-back check.
+                self._cache_generation[category] = next(self._generation_counter)
 
             # Persist to database
             self._save_results_to_db(category, results)
 
         finally:
-            async with self._lock:
+            with self._lock:
                 self._running_categories.discard(category)
 
     def get_category_status(
@@ -428,7 +577,12 @@ class DiagnosticsService:
         Returns:
             True if category diagnostics are running
         """
-        return category in self._running_categories
+        # Story #1491: read under the lock. _running_categories is mutated by
+        # background runs on Starlette threadpool workers, so an unsynchronised
+        # membership test can observe a partially-updated set. Same discipline
+        # as is_running() and get_status().
+        with self._lock:
+            return category in self._running_categories
 
     async def check_cli_tool(
         self,
@@ -621,12 +775,23 @@ class DiagnosticsService:
         Args:
             category: If provided, clear only this category. Otherwise clear all.
         """
-        if category:
-            self._cache.pop(category, None)
-            self._cache_timestamps.pop(category, None)
-        else:
-            self._cache.clear()
-            self._cache_timestamps.clear()
+        # Story #1491: under the lock, like every other mutation of these
+        # dicts. This was the last unlocked mutator; racing the deliberately
+        # unlocked DB read in get_status() is exactly what made that method's
+        # publish-back able to observe a vanished key.
+        #
+        # The generation map is cleared alongside, so a later publish starts
+        # from "no observed generation" rather than comparing against a token
+        # whose data no longer exists.
+        with self._lock:
+            if category:
+                self._cache.pop(category, None)
+                self._cache_timestamps.pop(category, None)
+                self._cache_generation.pop(category, None)
+            else:
+                self._cache.clear()
+                self._cache_timestamps.clear()
+                self._cache_generation.clear()
 
     def _save_results_to_db(
         self, category: DiagnosticCategory, results: List[DiagnosticResult]
@@ -722,28 +887,33 @@ class DiagnosticsService:
             logger = logging.getLogger(__name__)
             logger.error(f"Failed to load diagnostic results from database: {e}")
 
-    def _load_category_from_db(self, category: DiagnosticCategory) -> bool:
+    def _read_category_from_db(
+        self, category: DiagnosticCategory
+    ) -> Optional[Tuple[List[DiagnosticResult], datetime]]:
         """
-        Load persisted results for a single category from database.
+        Read persisted results for a single category from the database.
 
-        Populates cache with results if found in database.
+        Story #1491 AC4: this is a PURE READ -- it never touches the shared
+        _cache/_cache_timestamps dicts. Publication is the caller's job, done
+        under the shared-state lock, so this method (the only disk I/O on the
+        status path) can safely run with that cross-thread lock released.
 
         Args:
-            category: The diagnostic category to load
+            category: The diagnostic category to read
 
         Returns:
-            True if results were loaded from database, False otherwise
+            (results, run_at) if the category has persisted results, else None
         """
         try:
             if self._backend is not None:
                 result_row = self._backend.load_category_results(category.value)
                 if result_row is None:
-                    return False
+                    return None
                 results_json, run_at = result_row
             else:
                 # Check if database file exists
                 if not Path(self._db_path).exists():
-                    return False
+                    return None
 
                 conn = self._conn_manager.get_connection()
                 cursor = conn.execute(
@@ -753,7 +923,7 @@ class DiagnosticsService:
                 db_row = cursor.fetchone()
 
                 if db_row is None:
-                    return False
+                    return None
 
                 results_json, run_at = db_row
 
@@ -772,19 +942,16 @@ class DiagnosticsService:
                 )
                 results.append(result)
 
-            # Populate cache
-            self._cache[category] = results
-            self._cache_timestamps[category] = datetime.fromisoformat(run_at)
-
-            return True
+            return results, datetime.fromisoformat(run_at)
 
         except Exception as e:
-            # Log error but return False to indicate no results loaded
+            # Log error but report "nothing persisted" so the caller falls back
+            # to placeholder results, exactly as before.
             import logging
 
             logger = logging.getLogger(__name__)
             logger.error(f"Failed to load category {category.value} from database: {e}")
-            return False
+            return None
 
     def _get_token_manager(self) -> CITokenManager:
         """
@@ -1274,7 +1441,35 @@ class DiagnosticsService:
         """
         results = []
 
-        # Run diagnostics with timeout protection
+        # Story #1491 AC4 -- why these two asyncio.wait_for wrappers stay, and
+        # why no preemption mechanism is added at this layer.
+        #
+        # Both wrapped coroutines are today entirely SYNCHRONOUS internally
+        # (check_sqlite_database: SQLite connect + PRAGMA integrity_check;
+        # check_vector_storage: per-repo/per-collection filesystem stats, reads
+        # and HNSW loads -- neither contains a single await). A wait_for around
+        # a coroutine that never yields cannot fire, so these deadlines bound
+        # nothing at present. That is DELIBERATE, not an oversight:
+        #
+        #   * The starvation hazard report Finding B4 identified was this run
+        #     executing ON the event loop. That is fixed at the entry point --
+        #     run_all_diagnostics_sync / run_category_sync are sync Starlette
+        #     background tasks, so the whole run happens on a threadpool worker
+        #     and no other connection waits on it. Nothing is starved by a slow
+        #     check here, so there is nothing for a deadline at THIS layer to
+        #     protect.
+        #   * Making one fire would mean offloading the synchronous body to yet
+        #     another thread purely so the wrapper had something cancellable --
+        #     and cancelling it could not stop the work anyway (Python cannot
+        #     interrupt a thread blocked in a syscall), so it would abandon a
+        #     live worker while reporting a timeout. That is the very
+        #     "wait_for cannot interrupt synchronous work" anti-pattern this
+        #     story documents, not a fix for it.
+        #
+        # They are retained rather than deleted because they become live, correct
+        # protection the moment either check gains genuinely awaitable work
+        # (e.g. an HTTP or async-subprocess probe), which is also why the
+        # asyncio.TimeoutError branches below are kept intact.
         try:
             db_result = await asyncio.wait_for(
                 self.check_sqlite_database(), timeout=DIAGNOSTIC_TIMEOUT_SECONDS
@@ -1290,6 +1485,10 @@ class DiagnosticsService:
             results.append(self._create_db_error_result(f"Unexpected error: {str(e)}"))
 
         try:
+            # Story #1491 AC4: same rationale as the block above -- this deadline
+            # cannot fire while check_vector_storage's body has no await, and is
+            # kept for the day it does. The run itself is already off the event
+            # loop, so a slow scan starves nothing.
             storage_result = await asyncio.wait_for(
                 self.check_vector_storage(), timeout=DIAGNOSTIC_TIMEOUT_SECONDS
             )

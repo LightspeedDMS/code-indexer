@@ -175,20 +175,72 @@ class RegexSearchService:
         else:
             raise RuntimeError("Neither ripgrep nor grep found on system")
 
+    # Story #1491 AC2: PROCESS-WIDE pcre2 probe result plus the lock that makes
+    # the check-then-probe atomic across concurrent requests, so the probe runs
+    # exactly once per process even under parallel load. Whether the installed
+    # ripgrep binary has PCRE2 compiled in cannot change while this process is
+    # alive. Same reasoning as the _grep_fallback_warned class flag above.
+    _pcre2_supported_global: Optional[bool] = None
+    _pcre2_probe_lock = threading.Lock()
+
     def _detect_pcre2_support(self) -> bool:
-        """Detect whether ripgrep has PCRE2 support. Result is cached."""
+        """Detect whether ripgrep has PCRE2 support. Cached process-wide.
+
+        Before this story the cache was per-instance, but a fresh
+        RegexSearchService is constructed for EVERY request
+        (handlers/search.py's _execute_regex_search), so the
+        `rg --pcre2-version` fork+exec ran on every pcre2 request -- on the
+        event loop, per report Finding B2.
+
+        An explicitly set per-instance value still wins, so a caller (or test)
+        that pins the capability keeps overriding the probe entirely.
+
+        STICKY FAILURE (deliberate, documented): a probe that fails -- ripgrep
+        missing from PATH, the probe timing out, or any OSError -- caches False
+        for the REST OF THE PROCESS LIFETIME. If ripgrep is installed or
+        upgraded to a PCRE2-capable build while the server is running, pcre2
+        patterns stay rejected until the process restarts. That is the accepted
+        trade-off for not re-forking a subprocess per request on every request
+        of a deployment that genuinely lacks PCRE2 (the exact per-request
+        fork+exec this cache exists to eliminate). The reset hook, if a caller
+        ever needs to re-probe without a restart, is a single assignment:
+        ``RegexSearchService._pcre2_supported_global = None`` -- which is
+        precisely what TestDetectPcre2Support's autouse fixture does.
+        """
         if self._pcre2_supported is not None:
             return self._pcre2_supported
-        try:
-            result = subprocess.run(
-                ["rg", "--pcre2-version"],
-                capture_output=True,
-                text=True,
-                timeout=_PCRE2_CHECK_TIMEOUT_SEC,
-            )
-            self._pcre2_supported = result.returncode == 0
-        except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
-            self._pcre2_supported = False
+
+        with RegexSearchService._pcre2_probe_lock:
+            if RegexSearchService._pcre2_supported_global is None:
+                try:
+                    result = subprocess.run(
+                        ["rg", "--pcre2-version"],
+                        capture_output=True,
+                        text=True,
+                        timeout=_PCRE2_CHECK_TIMEOUT_SEC,
+                    )
+                    RegexSearchService._pcre2_supported_global = result.returncode == 0
+                except (
+                    FileNotFoundError,
+                    subprocess.TimeoutExpired,
+                    OSError,
+                ) as probe_error:
+                    # A probe that cannot run means we cannot claim PCRE2
+                    # support, so "unsupported" is the correct, safe answer --
+                    # the caller then rejects pcre2 patterns explicitly rather
+                    # than handing ripgrep a flag it may not understand. This
+                    # is a capability answer, not a swallowed error: log it so
+                    # a broken/missing ripgrep is visible. Logged once per
+                    # process, since the result is cached below.
+                    logger.warning(
+                        "Could not probe ripgrep PCRE2 support (%s: %s); "
+                        "treating PCRE2 as unavailable for this process",
+                        type(probe_error).__name__,
+                        probe_error,
+                    )
+                    RegexSearchService._pcre2_supported_global = False
+
+        self._pcre2_supported = RegexSearchService._pcre2_supported_global
         return self._pcre2_supported
 
     async def search(

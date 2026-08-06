@@ -73,12 +73,16 @@ diagnostics_service = DiagnosticsService()
 
 
 @router.get("", response_class=HTMLResponse)
-async def get_diagnostics_page(
+def get_diagnostics_page(
     request: Request,
     current_user: User = None,  # TODO: Add dependency after auth integration
 ) -> HTMLResponse:
     """
     Render the diagnostics page.
+
+    Story #1491 (review item 4): declared SYNC deliberately -- it calls
+    get_status(), whose cold/expired-category SQLite read must not run on the
+    event loop. Nothing here is awaited.
 
     Returns HTML page with:
     - Five category sections
@@ -134,7 +138,7 @@ async def get_diagnostics_page(
     response_class=HTMLResponse,
     dependencies=[Depends(dependencies.require_elevation())],
 )
-async def run_all_diagnostics(
+def run_all_diagnostics(
     request: Request,
     background_tasks: BackgroundTasks,
     current_user: User = None,  # TODO: Add dependency after auth integration
@@ -154,8 +158,11 @@ async def run_all_diagnostics(
         HTML response with diagnostics status partial (starts polling)
     """
     try:
-        # Run diagnostics asynchronously in background
-        background_tasks.add_task(diagnostics_service.run_all_diagnostics)
+        # Story #1491 AC4 (report Finding B4): register the SYNC entry point.
+        # Starlette awaits an async background task ON the event loop, which
+        # froze every other connection for the whole diagnostics run; a sync
+        # background task is dispatched to Starlette's threadpool instead.
+        background_tasks.add_task(diagnostics_service.run_all_diagnostics_sync)
 
         # Get current status (will be empty/not-run initially)
         status = diagnostics_service.get_status()
@@ -181,7 +188,7 @@ async def run_all_diagnostics(
     response_class=HTMLResponse,
     dependencies=[Depends(dependencies.require_elevation())],
 )
-async def run_category_diagnostics(
+def run_category_diagnostics(
     category: str,
     request: Request,
     background_tasks: BackgroundTasks,
@@ -215,8 +222,9 @@ async def run_category_diagnostics(
                 detail=f"Invalid category: {category}. Valid categories: {[c.value for c in DiagnosticCategory]}",
             )
 
-        # Run diagnostics for this category in background
-        background_tasks.add_task(diagnostics_service.run_category, category_enum)
+        # Story #1491 AC4: sync entry point, threadpooled by Starlette (see
+        # the run-all route above for the full rationale).
+        background_tasks.add_task(diagnostics_service.run_category_sync, category_enum)
 
         # Get current status
         status = diagnostics_service.get_status()
@@ -243,12 +251,18 @@ async def run_category_diagnostics(
 
 
 @router.get("/status", response_class=HTMLResponse)
-async def get_diagnostics_status(
+def get_diagnostics_status(
     request: Request,
     current_user: User = None,  # TODO: Add dependency after auth integration
 ) -> Response:
     """
     Get current diagnostics status (HTMX polling endpoint).
+
+    Story #1491 (review item 4): declared SYNC deliberately. get_status()
+    performs a blocking SQLite read for any cold/expired category, and this
+    endpoint is polled every ~2s per open admin page -- running that on the
+    event loop is exactly the defect class this story removes. A plain def
+    route is dispatched to FastAPI's threadpool. Nothing here is awaited.
 
     Returns HTML partial with current status for all categories.
     Includes HX-Stop-Polling header when diagnostics are complete

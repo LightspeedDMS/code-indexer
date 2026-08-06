@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [12.0.0] - 2026-08-06
+
+### Fixed
+
+- Story #1491: server-side synchronous work (bcrypt/JWT verification, regex-search subprocess dispatch, discovery-branch git subprocess calls, diagnostics DB reads, background-diagnostics execution) no longer blocks the shared asyncio event loop -- all now dispatch through worker threads or a dedicated bounded executor. Fixes a `diagnostics_service.get_status()` lost-update race (a stale DB read could clobber a concurrently-published newer result) via a monotonic generation-counter compare-and-set, replacing an earlier `datetime.now()`-based token that could collide. Adds a `BoundedSubmissionGate` bounding concurrent discovery-branch fetches, with graceful per-repo degradation on overload rather than failing the whole request. Fixes a diagnostics lock lazy-initialization race where two concurrent first callers could each construct a separate `threading.Lock`, silently defeating all synchronization.
+
+### Testing
+
+- Story #1491: real concurrent-request test evidence (FastAPI `httpx.AsyncClient` + `asyncio.gather`, not mocks) for every affected code path, including a 7,500-file real trigram-indexed corpus for the regex-search promptness proof and a real never-answering loopback socket for the blocked-remote discovery test.
+
 ## [11.109.0] - 2026-08-04
 
 ### Fixed
