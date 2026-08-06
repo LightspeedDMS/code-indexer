@@ -134,7 +134,17 @@ class TestHNSWNegativeCacheEVO64244(unittest.TestCase):
         self.assertEqual(calls["n"], 1)  # no reload when mtime is unchanged
 
     def test_missing_index_file_does_not_crash_on_hit(self) -> None:
-        """Facet 2: a missing index_file on HIT falls back to the cached entry."""
+        """Facet 2: an un-stat-able index_file on HIT must never crash.
+
+        Bug #1538 changed what happens INSTEAD of crashing. This test
+        originally also asserted the cached entry was SERVED (loader called
+        once) -- i.e. "could not check" was treated as "unchanged". That is a
+        silent failure: it can keep serving a superseded graph indefinitely
+        with no signal, which is the indefinite post-refresh staleness #1538
+        reports. An unverifiable entry is now dropped (with a WARNING) and the
+        loader re-runs. The no-crash property this test exists to protect is
+        unchanged.
+        """
         index_file = Path(self.tmpdir.name) / "does_not_exist.bin"
 
         calls = {"n": 0}
@@ -147,8 +157,8 @@ class TestHNSWNegativeCacheEVO64244(unittest.TestCase):
         idx1, _ = self.cache.get_or_load(self.repo_path, loader, index_file=index_file)
         idx2, _ = self.cache.get_or_load(self.repo_path, loader, index_file=index_file)
         self.assertIs(idx1, real_index)
-        self.assertIs(idx2, real_index)  # served cached, no crash
-        self.assertEqual(calls["n"], 1)
+        self.assertIs(idx2, real_index)  # no crash
+        self.assertEqual(calls["n"], 2)  # unverifiable entry dropped, reloaded
 
 
 if __name__ == "__main__":

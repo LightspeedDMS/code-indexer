@@ -234,20 +234,39 @@ class HNSWIndexCacheConfig:
         )
 
 
-#: Bug #1538: the on-disk identity of an ``hnsw_index.bin`` -- ``(st_mtime_ns,
-#: st_size)``. Nanosecond precision (not the lossy float ``st_mtime``) and the
-#: size together make a same-tick in-place replacement detectable, and match
-#: the ``st_mtime_ns`` convention this codebase's other path-keyed caches
-#: already use (``CollectionMetaCache``, ``ChunkStoreThreadCache``).
-_IndexFileFingerprint = Tuple[int, int]
+#: Bug #1538: the on-disk IDENTITY of an ``hnsw_index.bin`` --
+#: ``(st_mtime_ns, st_size, st_ino, st_dev)``.
+#:
+#: ``st_mtime_ns`` uses nanosecond precision, never the lossy float
+#: ``st_mtime``, matching the ``st_mtime_ns`` convention this codebase's other
+#: path-keyed caches already use (``CollectionMetaCache``,
+#: ``ChunkStoreThreadCache``).
+#:
+#: Time and size ALONE are not an identity, and relying on them would leave
+#: the exact staleness this bug reports reachable through a narrower window: a
+#: refresh may legitimately rebuild a shard to the same item count (same file
+#: size) with different content, and the timestamps can compare equal too (a
+#: coarse server-side mtime granularity, a same-tick rewrite). ``st_ino``
+#: (qualified by ``st_dev``, since inode numbers are only unique within a
+#: filesystem) closes that: EVERY ``hnsw_index.bin`` publish in this codebase
+#: is an atomic rename over the live path
+#: (``BackgroundIndexRebuilder.atomic_swap`` and ``HNSWIndexManager``'s two
+#: ``os.replace`` sites), which always installs a DIFFERENT inode. Detection
+#: is therefore exact rather than probabilistic -- and costs nothing extra,
+#: since all four fields come from the SAME single ``os.stat()`` call. A
+#: content digest would be the alternative, and was rejected: hashing a
+#: multi-megabyte graph on every query-path cache hit is far too expensive for
+#: a check the inode already answers exactly.
+_IndexFileFingerprint = Tuple[int, int, int, int]
 
 
 def _stat_index_fingerprint(index_file: Path) -> Optional[_IndexFileFingerprint]:
     """Return ``index_file``'s identity fingerprint, or None if it cannot be
     stat'd (missing file, OSError).
 
-    Fail-soft by design: a None result disables the freshness check for the
-    entry rather than raising on a query path.
+    A None result means freshness is UNVERIFIABLE for this file right now.
+    Callers must treat that as "cannot confirm unchanged", never as
+    "unchanged" -- see ``_index_file_changed``.
     """
     try:
         stat_result = os.stat(index_file)
@@ -257,7 +276,12 @@ def _stat_index_fingerprint(index_file: Path) -> Optional[_IndexFileFingerprint]
             extra={"correlation_id": get_correlation_id()},
         )
         return None
-    return (stat_result.st_mtime_ns, stat_result.st_size)
+    return (
+        stat_result.st_mtime_ns,
+        stat_result.st_size,
+        stat_result.st_ino,
+        stat_result.st_dev,
+    )
 
 
 @dataclass
@@ -421,17 +445,22 @@ class HNSWIndexCache:
         hnsw_index.bin does not exist yet (repo mid-(re)index) — is never
         cached, so a later query re-runs the loader and picks up the built
         index without waiting for TTL/restart. When index_file is provided,
-        a cache HIT is also invalidated if the on-disk index was rebuilt
-        (newer mtime), since hnswlib has no in-place reload.
+        a cache HIT is also dropped if the on-disk index is no longer the
+        file the entry was loaded from, since hnswlib has no in-place reload.
 
         Args:
             repo_path: Repository path (cache key)
             loader: Function to load index if not cached
                     Returns (hnsw_index, id_mapping)
             index_file: Optional path to hnsw_index.bin. When supplied, its
-                    st_mtime is stored on load and re-checked on every HIT so a
-                    rebuilt index invalidates the stale in-RAM object. Default
-                    None preserves the original behavior (no mtime check).
+                    identity fingerprint — (st_mtime_ns, st_size, st_ino,
+                    st_dev) — is captured BEFORE the load (Bug #1538) and
+                    re-compared on every HIT, so an in-place refresh drops the
+                    superseded in-RAM object. The comparison is INEQUALITY of
+                    that fingerprint, not "mtime is newer", and a check that
+                    cannot be performed at all drops the entry rather than
+                    trusting it (see _index_file_changed). Default None
+                    disables the freshness check entirely.
 
         Returns:
             Tuple of (hnsw_index, id_mapping)
@@ -629,23 +658,51 @@ class HNSWIndexCache:
         is that the file is a DIFFERENT file than the one loaded, in either
         direction.
 
-        Fail-soft, unchanged from before: a None cached_fingerprint (freshness
-        tracking disabled for this entry) or a stat failure right now (missing
-        file, OSError -> None) returns False, so the cached entry is still
-        served rather than crashing a query.
+        An UNVERIFIABLE check fails toward CORRECTNESS, not toward trusting
+        what we hold. Both "this entry carries no fingerprint" and "the file
+        cannot be stat'd right now" mean we cannot confirm the cached graph
+        still matches disk -- so the entry is dropped and a WARNING is
+        emitted. Silently returning False there (the original behavior) is
+        exactly the anti-pattern Messi Rule #13 forbids: it can keep serving a
+        superseded graph indefinitely with no signal that anything is wrong --
+        the same indefinite staleness this bug reports.
+
+        Dropping is safe rather than disruptive: the reload runs the caller's
+        loader, and a loader that genuinely finds no index returns None, which
+        get_or_load already handles explicitly (EVO-64244 Facet 1: never
+        negatively-cached, surfaced to the caller). A missing/unreadable
+        hnsw_index.bin is a real operational problem, and an operator seeing it
+        beats a query quietly answering from data we could not verify.
+
+        Self-correcting: an entry stored with a None fingerprint (its pre-load
+        stat failed) reloads once, re-stats, and from then on carries a real
+        fingerprint -- so this costs at most one extra load, never a loop.
 
         Args:
             index_file: Path to hnsw_index.bin on disk.
             cached_fingerprint: Fingerprint captured for this entry, or None.
 
         Returns:
-            True if the file's current identity differs from the cached one.
+            True if the file's current identity differs from the cached one,
+            or if that could not be verified at all.
         """
         if cached_fingerprint is None:
-            return False
+            logger.warning(
+                f"HNSW cache entry for {index_file} carries no freshness "
+                "fingerprint (its stat failed at load time); dropping it "
+                "rather than serving unverified data",
+                extra={"correlation_id": get_correlation_id()},
+            )
+            return True
         current_fingerprint = _stat_index_fingerprint(index_file)
         if current_fingerprint is None:
-            return False
+            logger.warning(
+                f"Could not stat {index_file} to verify the cached HNSW index "
+                "is current; dropping the cached entry rather than serving "
+                "possibly-stale data",
+                extra={"correlation_id": get_correlation_id()},
+            )
+            return True
         return current_fingerprint != cached_fingerprint
 
     def invalidate(self, repo_path: str) -> None:
