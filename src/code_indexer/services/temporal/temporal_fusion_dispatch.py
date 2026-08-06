@@ -537,10 +537,7 @@ def _query_shards_raw(
         _t0 = _time.time()
         shard_succeeded_this_attempt = False
         # Bug #1529: no resolver, no pin. A temporal shard's physical path is
-        # fixed, so the eviction key is once again a direct
-        # base_path/shard_name construction (Bug #1171's key) and the shard is
-        # read under its own name.
-        _eviction_path = Path(vector_store.base_path) / shard_name
+        # fixed, so the shard is read under its own name.
         _query_coll_name = shard_name
         try:
             result = _query_single_provider(
@@ -587,9 +584,11 @@ def _query_shards_raw(
             #   - gov disabled / RED / pre-first-sample → should_evict returns True → evict
             #   - gov GREEN                        → should_evict returns False → retain
             #
-            # Cache key: str(_eviction_path.resolve()) -- matches Bug #1171
-            # exactly when resolver is None; keyed by the RESOLVED path
-            # (Story #1457 AC8 Step 6 item 5) when a pin was used.
+            # Cache key: Bug #1538 -- composed by the store itself, in
+            # evict_shard_hnsw_entry() below. NEVER hand-built here: search()
+            # stores the entry under a key that also embeds the chunk-layout
+            # token (Story #1458 AC11), so a bare path string silently
+            # matches nothing.
             _hnsw_cache = getattr(vector_store, "hnsw_index_cache", None)
             if _hnsw_cache is not None:
                 _gov = getattr(vector_store, "memory_governor", None)
@@ -608,7 +607,7 @@ def _query_shards_raw(
                         )
                         _should_evict = True  # explicit fail-safe
                 if _should_evict:
-                    _hnsw_cache.invalidate(str(_eviction_path.resolve()))
+                    evict_shard_hnsw_entry(vector_store, shard_name)
                     # Only update governor counters/trim/log when governor is healthy;
                     # a broken governor must not prevent the eviction from completing.
                     if _gov is not None and _gov_healthy:
@@ -632,6 +631,62 @@ def _query_shards_raw(
                 on_shard_complete(shards_attempted, shards_succeeded, cumulative)
 
     return results_by_shard, shards_attempted, shards_succeeded
+
+
+#: A temporal shard name addresses one collection directory directly under the
+#: store's base_path, so it must never carry a path separator or a drive
+#: prefix. Checked explicitly rather than via ``Path``: on POSIX,
+#: ``Path("a\\b").name`` is the whole string and ``Path("C:\\x")`` is not
+#: absolute, so ``Path`` alone would accept both.
+_FORBIDDEN_SHARD_NAME_CHARS = frozenset({"/", "\\", ":"})
+_FORBIDDEN_SHARD_NAMES = frozenset({".", ".."})
+
+
+def evict_shard_hnsw_entry(vector_store: Any, shard_name: str) -> None:
+    """Drop ``shard_name``'s HNSW graph from the shared server index cache.
+
+    Bug #1538: the key MUST come from the store's own
+    ``hnsw_cache_key_for_collection()``. ``search()`` stores the entry under a
+    key that embeds Story #1458 AC11's chunk-layout token (and, for an
+    activated repo, its ``activation_id``), so the bare
+    ``base_path/shard_name`` string this eviction used to pass matched
+    nothing -- making every temporal shard eviction a silent no-op and leaving
+    each worker holding a shard graph the MemoryGovernor believed it had
+    dropped. Under Bug #1529's fixed-path layout, that lingering entry is
+    exactly what a post-refresh read can then serve stale from.
+
+    No-op when the store has no shared cache (the CLI/solo path).
+
+    ``vector_store`` is typed ``Any`` for the same reason every other function
+    in this module types it that way: this dispatch layer is deliberately
+    duck-typed over the store, and importing ``FilesystemVectorStore`` here
+    would add a concrete storage-layer dependency to a service module that
+    currently has none.
+
+    Args:
+        vector_store: The store the shard was read through.
+        shard_name: Temporal shard collection name, relative to the store's
+            ``base_path`` -- the same name the read used. Must be a plain
+            single-segment name.
+
+    Raises:
+        ValueError: If ``shard_name`` is empty, is ``.``/``..``, or contains a
+            path separator or drive-prefix character.
+    """
+    if (
+        not shard_name
+        or shard_name in _FORBIDDEN_SHARD_NAMES
+        or any(char in _FORBIDDEN_SHARD_NAME_CHARS for char in shard_name)
+    ):
+        raise ValueError(
+            "shard_name must be a single non-empty path segment without "
+            f"separators, drive prefix or traversal, got {shard_name!r}"
+        )
+    hnsw_cache = getattr(vector_store, "hnsw_index_cache", None)
+    if hnsw_cache is None:
+        return
+    collection_path = Path(vector_store.base_path) / shard_name
+    hnsw_cache.invalidate(vector_store.hnsw_cache_key_for_collection(collection_path))
 
 
 def _query_single_provider(

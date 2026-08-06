@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [12.2.0] - 2026-08-06
+
+### Fixed
+
+- Bug #1538: on a cluster, temporal queries served stale results indefinitely after a successful golden-repo refresh -- the server's per-worker `HNSWIndexCache` never invalidated once Bug #1529 made temporal data live at a stable, fixed path (the old versioned-snapshot design's path churn had accidentally been providing "free" cache invalidation as a side effect). Fixed by capturing a `(mtime_ns, size, inode, device)` file-identity fingerprint before loading the index rather than after (closing a "load-then-stamp poisoning" race where a refresh landing mid-load could permanently defeat later staleness checks), and by moving the potentially-blocking freshness `stat()` call off the shared cache lock with a per-key in-flight guard (this project's NFS golden-repos mount is `hard` NFSv3, so a blocked `stat()` during an outage must never serialize every other cache consumer behind it). A `stat()` failure now drops the cache entry with a rate-limited warning instead of silently trusting stale data forever.
+
+### Testing
+
+- Bug #1538: real hnswlib/filesystem concurrency tests proving no cache hang under a blocked freshness check, a same-size/same-mtime rebuild is still detected via the inode component, and an unverifiable entry does not thrash (reload+warn) on every subsequent hit.
+
 ## [12.1.0] - 2026-08-06
 
 ### Fixed

@@ -21,11 +21,12 @@ import logging
 import os
 import sys
 import threading
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
 from threading import Lock
-from typing import Any, Callable, Dict, Optional, Tuple
+from typing import Any, Callable, Dict, Optional, Set, Tuple
 from code_indexer.server.logging_utils import format_error_log
 
 logger = logging.getLogger(__name__)
@@ -234,6 +235,81 @@ class HNSWIndexCacheConfig:
         )
 
 
+#: Bug #1538: the on-disk IDENTITY of an ``hnsw_index.bin`` --
+#: ``(st_mtime_ns, st_size, st_ino, st_dev)``.
+#:
+#: ``st_mtime_ns`` uses nanosecond precision, never the lossy float
+#: ``st_mtime``, matching the ``st_mtime_ns`` convention this codebase's other
+#: path-keyed caches already use (``CollectionMetaCache``,
+#: ``ChunkStoreThreadCache``).
+#:
+#: Time and size ALONE are not an identity, and relying on them would leave
+#: the exact staleness this bug reports reachable through a narrower window: a
+#: refresh may legitimately rebuild a shard to the same item count (same file
+#: size) with different content, and the timestamps can compare equal too (a
+#: coarse server-side mtime granularity, a same-tick rewrite). ``st_ino``
+#: (qualified by ``st_dev``, since inode numbers are only unique within a
+#: filesystem) closes that: EVERY ``hnsw_index.bin`` publish in this codebase
+#: is an atomic rename over the live path
+#: (``BackgroundIndexRebuilder.atomic_swap`` and ``HNSWIndexManager``'s two
+#: ``os.replace`` sites), which always installs a DIFFERENT inode. Detection
+#: is therefore exact rather than probabilistic -- and costs nothing extra,
+#: since all four fields come from the SAME single ``os.stat()`` call. A
+#: content digest would be the alternative, and was rejected: hashing a
+#: multi-megabyte graph on every query-path cache hit is far too expensive for
+#: a check the inode already answers exactly.
+_IndexFileFingerprint = Tuple[int, int, int, int]
+
+#: Bug #1538: minimum interval between potentially-blocking freshness stats
+#: for the SAME cache key.
+#:
+#: This bounds how often the CHECK runs. Its PURPOSE is not to define an
+#: acceptable staleness window, but it does have that as a side effect: after a
+#: successful check, a change landing within this interval is served stale
+#: until the next check is due. That window is bounded and small, unlike the
+#: indefinite staleness Bug #1538 reported. It is not a TTL -- entry lifetime
+#: is still governed by ttl_minutes, independently of this.
+#: The golden-repos mount is ``hard`` NFSv3,
+#: where an outage makes ``os.stat()`` block in uninterruptible kernel retry;
+#: without a rate limit, every query for a key would enter that blocking call.
+#: Combined with the per-key in-flight guard (``_freshness_checking``), at most
+#: ONE thread is inside a blocking stat for a given key at a time.
+#:
+#: The cost is that a change is noticed up to this long after it lands, on top
+#: of the NFS client's own attribute-revalidation window -- negligible next to
+#: a refresh cycle, and far smaller than the indefinite staleness Bug #1538
+#: reported. A freshly loaded entry has ``freshness_checked_at=None``, which
+#: always checks on its FIRST hit, so a refresh landing during the load is
+#: still caught immediately rather than waiting out this interval.
+_FRESHNESS_RECHECK_MIN_INTERVAL_SECONDS = 2.0
+
+
+def _stat_index_fingerprint(index_file: Path) -> Optional[_IndexFileFingerprint]:
+    """Return ``index_file``'s identity fingerprint, or None if it cannot be
+    stat'd (missing file, OSError).
+
+    A None result means freshness is UNVERIFIABLE for this file right now.
+    Callers must treat that as "cannot confirm unchanged", never as
+    "unchanged": ``_apply_freshness_verdict`` keeps serving the last verified
+    graph and WARNs once per degradation, rather than silently accepting the
+    entry as current or reloading it on every subsequent hit.
+    """
+    try:
+        stat_result = os.stat(index_file)
+    except OSError as e:
+        logger.debug(
+            f"Could not stat index file {index_file} for freshness tracking: {e}",
+            extra={"correlation_id": get_correlation_id()},
+        )
+        return None
+    return (
+        stat_result.st_mtime_ns,
+        stat_result.st_size,
+        stat_result.st_ino,
+        stat_result.st_dev,
+    )
+
+
 @dataclass
 class HNSWIndexCacheEntry:
     """
@@ -255,10 +331,24 @@ class HNSWIndexCacheEntry:
     last_accessed: datetime = field(default_factory=datetime.now)
     access_count: int = 0
     index_size_bytes: int = 0
-    # EVO-64244 Facet 2: st_mtime of hnsw_index.bin captured at load time.
-    # None when the index_file path was not supplied (mtime check disabled),
-    # letting a later on-disk rebuild invalidate this stale in-RAM entry.
-    index_file_mtime: Optional[float] = None
+    # EVO-64244 Facet 2 / Bug #1538: identity fingerprint of hnsw_index.bin,
+    # captured BEFORE the load that produced this entry (see get_or_load).
+    # None when the index_file path was not supplied, or when it could not be
+    # stat'd at load time. None does NOT disable checking: once the file
+    # becomes stat-able again, _apply_freshness_verdict evicts this entry so
+    # the reload can stamp a real fingerprint (an entry that kept a None
+    # fingerprint could never be verified for as long as it lived).
+    index_file_fingerprint: Optional[_IndexFileFingerprint] = None
+    # Bug #1538: monotonic timestamp of the last COMPLETED freshness check.
+    # None means "never checked since this entry was loaded", which always
+    # makes the next HIT check -- so a refresh that landed during the load is
+    # caught immediately instead of waiting out the rate-limit interval.
+    freshness_checked_at: Optional[float] = None
+    # Bug #1538: True once an UNVERIFIABLE check has been reported for this
+    # entry; reset as soon as a check succeeds. Without this, a persistently
+    # failing stat would emit one WARNING per query instead of one per
+    # degradation.
+    freshness_unverified_reported: bool = False
 
     def record_access(self) -> None:
         """
@@ -360,6 +450,13 @@ class HNSWIndexCache:
         # Allows concurrent loads for DIFFERENT keys while deduplicating SAME-key loads.
         self._loading: Dict[str, threading.Event] = {}
 
+        # Bug #1538: keys with a freshness stat currently in flight. Mirrors
+        # the _loading sentinel idea for the CHECK rather than the load: the
+        # stat runs with NO lock held and can block indefinitely on a hard NFS
+        # mount, so only one thread enters it per key while the others serve
+        # the entry they already have.
+        self._freshness_checking: Set[str] = set()
+
         # Statistics tracking (AC7)
         self._hit_count = 0
         self._miss_count = 0
@@ -394,17 +491,27 @@ class HNSWIndexCache:
         hnsw_index.bin does not exist yet (repo mid-(re)index) — is never
         cached, so a later query re-runs the loader and picks up the built
         index without waiting for TTL/restart. When index_file is provided,
-        a cache HIT is also invalidated if the on-disk index was rebuilt
-        (newer mtime), since hnswlib has no in-place reload.
+        a cache HIT is also dropped if the on-disk index is no longer the
+        file the entry was loaded from, since hnswlib has no in-place reload.
 
         Args:
             repo_path: Repository path (cache key)
             loader: Function to load index if not cached
                     Returns (hnsw_index, id_mapping)
             index_file: Optional path to hnsw_index.bin. When supplied, its
-                    st_mtime is stored on load and re-checked on every HIT so a
-                    rebuilt index invalidates the stale in-RAM object. Default
-                    None preserves the original behavior (no mtime check).
+                    identity fingerprint — (st_mtime_ns, st_size, st_ino,
+                    st_dev) — is captured BEFORE the load (Bug #1538) and
+                    re-compared on later HITs, so an in-place refresh drops the
+                    superseded in-RAM object. The comparison is INEQUALITY of
+                    that fingerprint, never "mtime is newer". The stat runs
+                    OUTSIDE the cache lock and is rate-limited per key
+                    (_FRESHNESS_RECHECK_MIN_INTERVAL_SECONDS), so a stat hung on
+                    a hard NFS mount cannot stall other cache consumers; a
+                    freshly loaded entry is always checked on its first HIT. A
+                    check that cannot be performed serves the last verified
+                    graph and WARNs once per degradation rather than reloading
+                    on every hit (see _apply_freshness_verdict). Default None
+                    disables the freshness check entirely.
 
         Returns:
             Tuple of (hnsw_index, id_mapping)
@@ -425,6 +532,12 @@ class HNSWIndexCache:
         # Failure safety: the finally block always removes the sentinel and signals
         # the Event, ensuring waiters are never permanently blocked even on errors.
         while True:
+            # Bug #1538: set when THIS iteration claimed the freshness check for
+            # this key, carrying the entry AND its index_file together. The stat
+            # then runs after the locked block exits, never inside it -- see
+            # _verify_entry_freshness for why that matters.
+            pending_check: Optional[Tuple[HNSWIndexCacheEntry, Path]] = None
+
             with self._cache_lock:
                 # Check if cached (fast path: entry exists and not expired)
                 if repo_path in self._cache:
@@ -451,21 +564,23 @@ class HNSWIndexCache:
                         del self._cache[repo_path]
                         self._eviction_count += 1
                         # Fall through (no return here)
-                    elif index_file is not None and self._index_file_is_newer(
-                        index_file, entry.index_file_mtime
+                    elif (
+                        index_file is not None
+                        and repo_path not in self._freshness_checking
+                        and self._freshness_check_due(entry)
                     ):
-                        # EVO-64244 Facet 2: the on-disk index was rebuilt after
-                        # this entry was cached (atomic replace bumps mtime).
-                        # hnswlib has no in-place reload, so evict and reload.
-                        logger.debug(
-                            f"On-disk index newer than cached entry for {repo_path}, reloading",
-                            extra={"correlation_id": get_correlation_id()},
-                        )
-                        del self._cache[repo_path]
-                        self._eviction_count += 1
-                        # Fall through (no return here)
+                        # EVO-64244 Facet 2 / Bug #1538: verify the on-disk
+                        # identity, but do the stat OUTSIDE this lock. Claim the
+                        # key so concurrent readers of the SAME key serve their
+                        # entry instead of piling into the same blocking stat.
+                        self._freshness_checking.add(repo_path)
+                        # index_file is narrowed to Path by the condition above;
+                        # carrying it with the entry keeps the call site typed.
+                        pending_check = (entry, index_file)
                     else:
-                        # Cache hit - refresh TTL (AC3)
+                        # Cache hit - refresh TTL (AC3). Reached when the check
+                        # is not yet due, is already in flight on another
+                        # thread, or is disabled (index_file is None).
                         entry.record_access()
                         self._hit_count += 1
                         logger.debug(
@@ -474,18 +589,30 @@ class HNSWIndexCache:
                         )
                         return entry.hnsw_index, entry.id_mapping
 
-                # No ready entry. Check if another thread is already loading this key.
-                if repo_path in self._loading:
-                    # Another thread is loading - become a waiter
-                    event = self._loading[repo_path]
-                    self._miss_count += 1
-                    # Release lock BEFORE waiting - allows other threads to proceed
-                else:
-                    event = threading.Event()
-                    self._loading[repo_path] = event
-                    self._miss_count += 1
-                    # Break out of the with-block to perform I/O without lock
-                    break
+                if pending_check is None:
+                    # No ready entry. Is another thread already loading this key?
+                    if repo_path in self._loading:
+                        # Another thread is loading - become a waiter
+                        event = self._loading[repo_path]
+                        self._miss_count += 1
+                        # Release lock BEFORE waiting - lets other threads proceed
+                    else:
+                        event = threading.Event()
+                        self._loading[repo_path] = event
+                        self._miss_count += 1
+                        # Break out of the with-block to perform I/O without lock
+                        break
+
+            if pending_check is not None:
+                # === NO LOCK HELD: this stat can block on a hung NFS mount ===
+                entry_to_check, index_file_to_check = pending_check
+                verified = self._verify_entry_freshness(
+                    repo_path, index_file_to_check, entry_to_check
+                )
+                if verified is not None:
+                    return verified
+                # Entry was dropped, or replaced mid-stat: re-evaluate.
+                continue
 
             # We are a waiter: block on the per-key Event (NOT on the global lock)
             logger.debug(
@@ -504,6 +631,27 @@ class HNSWIndexCache:
             extra={"correlation_id": get_correlation_id()},
         )
         try:
+            # Bug #1538 (root cause of the indefinite post-refresh staleness):
+            # the fingerprint MUST be captured BEFORE the load, never after.
+            # An in-place refresh that atomically replaces hnsw_index.bin
+            # between the loader's read and the capture would otherwise stamp
+            # the entry with the NEW file's identity while it holds the OLD
+            # graph -- every later HIT then compares equal and serves the
+            # pre-refresh graph forever, with no way to self-heal.
+            #
+            # Capturing pre-load is conservative in the safe direction: if the
+            # file did change during the load, the stored fingerprint is the
+            # superseded one, so the very next read detects the difference and
+            # reloads (one extra load, never a stale answer). If it did not
+            # change, the fingerprint still matches the current file and the
+            # entry is served from RAM exactly as before -- no spurious reload.
+            #
+            # Fail-soft, as before: a missing file / OSError leaves this None,
+            # which simply disables the freshness check for this entry.
+            index_file_fingerprint: Optional[_IndexFileFingerprint] = (
+                _stat_index_fingerprint(index_file) if index_file is not None else None
+            )
+
             hnsw_index, id_mapping = loader()
 
             # EVO-64244 Facet 1: never negatively-cache a missing index.
@@ -532,20 +680,6 @@ class HNSWIndexCache:
                 )
             index_size_bytes += sys.getsizeof(id_mapping)
 
-            # EVO-64244 Facet 2: capture the on-disk index mtime so a later
-            # rebuild (atomic replace of hnsw_index.bin) invalidates this entry
-            # on the next HIT. Guarded: a missing file / OSError leaves it None
-            # (mtime check simply disabled for this entry) rather than crashing.
-            index_file_mtime: Optional[float] = None
-            if index_file is not None:
-                try:
-                    index_file_mtime = os.stat(index_file).st_mtime
-                except OSError as e:
-                    logger.debug(
-                        f"Could not stat index file {index_file} for mtime tracking: {e}",
-                        extra={"correlation_id": get_correlation_id()},
-                    )
-
             # Store result in cache (acquire lock for dict write)
             with self._cache_lock:
                 entry = HNSWIndexCacheEntry(
@@ -554,7 +688,7 @@ class HNSWIndexCache:
                     repo_path=repo_path,
                     ttl_minutes=self.config.ttl_minutes,
                     index_size_bytes=index_size_bytes,
-                    index_file_mtime=index_file_mtime,
+                    index_file_fingerprint=index_file_fingerprint,
                 )
                 entry.record_access()
                 self._cache[repo_path] = entry
@@ -575,33 +709,115 @@ class HNSWIndexCache:
                 self._loading.pop(repo_path, None)
             event.set()  # Wake ALL waiters (outside lock)
 
-    def _index_file_is_newer(
-        self, index_file: Path, cached_mtime: Optional[float]
-    ) -> bool:
-        """Return True if the on-disk index file is newer than the cached entry.
+    def _freshness_check_due(self, entry: HNSWIndexCacheEntry) -> bool:
+        """Return True if this entry's on-disk identity may be re-stat'd now.
 
-        Used by get_or_load (EVO-64244 Facet 2) to detect a rebuilt index and
-        invalidate the stale in-RAM object. A None cached_mtime (entry stored
-        without mtime tracking) or any stat failure (missing file, OSError)
-        returns False so the cached entry is still served rather than crashing.
-
-        Args:
-            index_file: Path to hnsw_index.bin on disk.
-            cached_mtime: st_mtime captured when the entry was loaded, or None.
-
-        Returns:
-            True if the file's current mtime is strictly newer than cached_mtime.
+        Bug #1538: the stat can block indefinitely on a hard NFS mount, so it
+        is rate-limited per key instead of run on every hit. A freshly loaded
+        entry (``freshness_checked_at is None``) is ALWAYS due, so a refresh
+        that landed during the load is caught on the very next read.
         """
-        if cached_mtime is None:
-            return False
+        if entry.freshness_checked_at is None:
+            return True
+        elapsed = time.monotonic() - entry.freshness_checked_at
+        return elapsed >= _FRESHNESS_RECHECK_MIN_INTERVAL_SECONDS
+
+    def _verify_entry_freshness(
+        self,
+        repo_path: str,
+        index_file: Path,
+        entry: HNSWIndexCacheEntry,
+    ) -> Optional[Tuple[Any, Dict[int, str]]]:
+        """Stat ``index_file`` WITHOUT the cache lock, then apply the verdict.
+
+        The caller has already claimed this key in ``_freshness_checking`` and
+        MUST NOT hold ``_cache_lock``. Bug #1538: on the ``hard`` NFSv3
+        golden-repos mount a server outage makes ``os.stat()`` block in
+        uninterruptible kernel retry, so running it under the shared lock would
+        stall every other cache consumer in this worker behind one hung call.
+
+        Returns the ``(hnsw_index, id_mapping)`` to serve, or None if the caller
+        must re-evaluate (entry dropped, or replaced by another thread).
+        """
         try:
-            return os.stat(index_file).st_mtime > cached_mtime
-        except OSError as e:
+            current_fingerprint = _stat_index_fingerprint(index_file)
+            # The verdict runs INSIDE the try on purpose: it is what records
+            # freshness_checked_at, so releasing the claim first would open a
+            # window where a second thread sees neither an in-flight claim nor
+            # a recorded timestamp, and starts another blocking stat -- the
+            # rate limit would not be enforced across the handoff. No deadlock
+            # risk: no lock is held here, and the verdict takes and releases
+            # _cache_lock on its own.
+            return self._apply_freshness_verdict(
+                repo_path, index_file, entry, current_fingerprint
+            )
+        finally:
+            # Release the claim on EVERY path, including an unexpected raise,
+            # so a failure can never wedge this key's checks permanently.
+            with self._cache_lock:
+                self._freshness_checking.discard(repo_path)
+
+    def _apply_freshness_verdict(
+        self,
+        repo_path: str,
+        index_file: Path,
+        entry: HNSWIndexCacheEntry,
+        current_fingerprint: Optional[_IndexFileFingerprint],
+    ) -> Optional[Tuple[Any, Dict[int, str]]]:
+        """Apply a completed freshness check, under the cache lock.
+
+        Comparison is INEQUALITY of the identity fingerprint, never "mtime is
+        strictly newer": a same-tick rewrite, an NFS clock skew or a restored
+        shard all change content without advancing the clock.
+
+        A fingerprint we could not obtain NOW keeps serving the last verified
+        graph (bounded: warn once, retry after the interval). A fingerprint that
+        was never captured AT LOAD drops the entry instead -- the stat works
+        now, so one reload re-stamps it permanently, whereas keeping it would
+        retain an entry that can never be verified for as long as it lives.
+        """
+        with self._cache_lock:
+            if self._cache.get(repo_path) is not entry:
+                return None  # evicted/replaced mid-stat; caller re-evaluates
+            entry.freshness_checked_at = time.monotonic()
+
+            if current_fingerprint is None:
+                if not entry.freshness_unverified_reported:
+                    entry.freshness_unverified_reported = True
+                    logger.warning(
+                        f"Could not stat {index_file} to verify the cached HNSW "
+                        "index is current; serving the last verified graph and "
+                        "retrying later (freshness checking is degraded here)",
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                return self._serve_locked(entry)
+
+            # Succeeded: re-arm reporting so a LATER degradation is not muted.
+            entry.freshness_unverified_reported = False
+
+            if entry.index_file_fingerprint is None:
+                drop_reason = "carries no freshness fingerprint"
+            elif current_fingerprint != entry.index_file_fingerprint:
+                drop_reason = "no longer matches the on-disk index"
+            else:
+                return self._serve_locked(entry)
+
             logger.debug(
-                f"Could not stat index file {index_file} for staleness check: {e}",
+                f"Cached entry for {repo_path} {drop_reason}, reloading",
                 extra={"correlation_id": get_correlation_id()},
             )
-            return False
+            del self._cache[repo_path]
+            self._eviction_count += 1
+            return None
+
+    def _serve_locked(self, entry: HNSWIndexCacheEntry) -> Tuple[Any, Dict[int, str]]:
+        """Record a HIT and return the entry's payload.
+
+        The caller MUST already hold ``_cache_lock``.
+        """
+        entry.record_access()
+        self._hit_count += 1
+        return entry.hnsw_index, entry.id_mapping
 
     def invalidate(self, repo_path: str) -> None:
         """
