@@ -386,6 +386,11 @@ class GoldenRepoManager:
 
         if storage_backend is not None:
             self._sqlite_backend: Any = storage_backend
+            # Bug #1533: remember that the backend came from the DI chain. In
+            # cluster mode that is BackendRegistry.golden_repo_metadata (the
+            # shared PostgreSQL store); the self-constructed one below is
+            # always node-local. See has_injected_metadata_backend().
+            self._metadata_backend_injected = True
             logger.info("GoldenRepoManager using injected storage backend")
         else:
             from code_indexer.server.storage.sqlite_backends import (
@@ -393,6 +398,7 @@ class GoldenRepoManager:
             )
 
             self._sqlite_backend = GoldenRepoMetadataSqliteBackend(db_path)
+            self._metadata_backend_injected = False
         self._sqlite_backend.ensure_table_exists()
         self._load_metadata_from_sqlite()
         self._mcp_registration_service = None
@@ -451,6 +457,21 @@ class GoldenRepoManager:
                     )
             except (json.JSONDecodeError, TypeError, KeyError) as e:
                 logging.warning(f"Could not migrate metadata.json: {e}")
+
+    def has_injected_metadata_backend(self) -> bool:
+        """Whether the golden-repo metadata backend came from the DI chain
+        (Bug #1533).
+
+        False means this manager built its OWN node-local SQLite backend, so
+        golden-repo lookups cannot see repos registered by another cluster
+        node -- `get_actual_repo_path()` then raises GoldenRepoNotFoundError
+        for a repo that genuinely exists. In cluster mode the DI chain injects
+        `BackendRegistry.golden_repo_metadata` (the shared PostgreSQL store),
+        so an un-injected backend there is a wiring defect, not a valid
+        configuration. Callers whose correctness depends on the cluster-wide
+        view must treat False as "I cannot answer".
+        """
+        return self._metadata_backend_injected
 
     def set_mcp_registration_service(self, service) -> None:
         """Set the MCPSelfRegistrationService for Phase 2 lifecycle detection."""

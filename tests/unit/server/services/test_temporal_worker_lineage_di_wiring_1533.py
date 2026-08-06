@@ -52,6 +52,7 @@ from code_indexer.server.repositories.activated_repo_manager import (
 from code_indexer.server.services.temporal_worker import (
     TemporalLineageStoreUnavailableError,
     _resolve_golden_temporal_context,
+    _resolve_lineage_repo_manager,
 )
 from code_indexer.services.temporal.temporal_server_paths import (
     server_temporal_index_root,
@@ -209,12 +210,81 @@ def test_postgres_mode_with_an_unwired_manager_fails_loudly(
     shared_manager, worker_input = diverged_stores
     _install_app_state(monkeypatch, storage_mode="postgres")
 
-    assert shared_manager.uses_shared_metadata_store() is False
+    assert shared_manager.uses_shared_metadata_stores() is False
 
     with pytest.raises(TemporalLineageStoreUnavailableError):
         _resolve_golden_temporal_context(
             worker_input, "job-4", activated_repo_manager=shared_manager
         )
+
+
+def test_postgres_mode_rejects_a_partially_wired_manager(
+    diverged_stores, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A manager can be HALF wired, and half is not wired.
+
+    The lineage lookup depends on TWO independent stores: activation metadata
+    (ActivatedRepoManager's own connection pool) and golden-repo metadata
+    (its .golden_repo_manager's backend). A manager holding the activation
+    pool but whose GoldenRepoManager self-constructed a NODE-LOCAL SQLite
+    backend resolves the lineage correctly and then still raises
+    GoldenRepoNotFoundError on the golden lookup -- the exact second symptom
+    in this bug's report ("Loaded 0 golden repos from SQLite"), silently
+    swallowed by load_golden_temporal_config's fail-open. Checking only the
+    activation pool would let that through.
+    """
+    shared_manager, worker_input = diverged_stores
+    _install_app_state(monkeypatch, storage_mode="postgres")
+
+    # A real pool object is irrelevant here: the predicate asks only whether a
+    # shared store is wired, and this manager's golden half deliberately is
+    # not (its GoldenRepoManager built its own node-local SQLite backend).
+    shared_manager.set_connection_pool(object())
+
+    assert shared_manager.golden_repo_manager.has_injected_metadata_backend() is False
+    assert shared_manager.uses_shared_metadata_stores() is False
+
+    with pytest.raises(TemporalLineageStoreUnavailableError):
+        _resolve_golden_temporal_context(
+            worker_input, "job-partial", activated_repo_manager=shared_manager
+        )
+
+
+def test_postgres_mode_accepts_a_fully_wired_manager(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Both stores wired -> the lookup proceeds.
+
+    Uses a REAL injected metadata backend object (not a stub) so the
+    predicate's composition is proven, not merely asserted.
+    """
+    from code_indexer.server.repositories.golden_repo_manager import GoldenRepoManager
+    from code_indexer.server.storage.sqlite_backends import (
+        GoldenRepoMetadataSqliteBackend,
+    )
+
+    _install_app_state(monkeypatch, storage_mode="postgres")
+    data_dir = tmp_path / "fully-wired" / "data"
+    data_dir.mkdir(parents=True)
+
+    injected_backend = GoldenRepoMetadataSqliteBackend(str(data_dir / "golden.db"))
+    golden_repo_manager = GoldenRepoManager(
+        data_dir=str(data_dir), storage_backend=injected_backend
+    )
+    manager = ActivatedRepoManager(
+        data_dir=str(data_dir), golden_repo_manager=golden_repo_manager
+    )
+    manager.set_connection_pool(object())
+
+    assert manager.uses_shared_metadata_stores() is True
+
+    # Assert at the GUARD, not through the full lookup: once a connection pool
+    # is set, metadata reads take the PostgreSQL branch, so the lookup cannot
+    # be served by this manager's local file store at all. Proving the guard
+    # ADMITS a fully-wired manager is the property under test; the real
+    # PG-backed lookup is proven in
+    # tests/unit/server/storage/postgres/test_temporal_worker_lineage_live_pg_1533.py.
+    assert _resolve_lineage_repo_manager(manager) is manager
 
 
 def test_solo_mode_still_uses_the_node_local_store(

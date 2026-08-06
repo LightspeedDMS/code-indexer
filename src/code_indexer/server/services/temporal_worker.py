@@ -46,43 +46,28 @@ so there is no pointer swap to pin against. It is retained only because
 callers still pass it, and is slated for removal with the Story #1457
 modules. Do NOT reintroduce a resolver here to "use" it.
 
-FIXED TEMPORAL LOCATION (Bug #1529)
------------------------------------
+TEMPORAL LOCATION + LINEAGE STORE (Bug #1529, Bug #1533)
+--------------------------------------------------------
 Temporal data lives at ONE fixed path derived from the GOLDEN alias, outside
-any repo's own cloned tree, so the store that performs the search must be
-rooted there at CONSTRUCTION time -- which is why the golden lineage is
-resolved BEFORE the backend is built. Rooting it at worker_input.repo_path
-(an ACTIVATION's CoW clone) is the defect #1529 was filed for, and this
-worker is the LIVE MCP temporal front door (Story #1400 replaced
-_execute_temporal_query for that path), so leaving it in-repo half-wires the
-primary read path. Only GENUINE ABSENCE of golden lineage yields
-temporal_index_dir=None (the legacy in-repo derivation); every failure --
-lineage lookup, store selection, fixed-root derivation -- propagates and
-fails the job instead of quietly reading the clone. An all-None context is
-exactly what sends the caller to the clone, so it must never be produced by
-an error (finding #2).
+any repo's own cloned tree, so the golden lineage is resolved BEFORE the
+backend is built -- construction time is the only point at which the store
+performing the search can be rooted there. Two rules follow, and both are
+fail-closed:
 
-LINEAGE STORE SELECTION (Bug #1533)
------------------------------------
-Resolving that golden lineage means reading activated-repo metadata, and
-WHICH STORE is read is itself a correctness decision. This worker used to
-construct its own standalone ``ActivatedRepoManager(data_dir=...)``: outside
-the DI chain, so never wired to the shared PostgreSQL backend, so every read
-hit NODE-LOCAL metadata. On a clustered deployment the real activation row
-lives in the shared ``activated_repos`` table and the node-local store is
-empty, so the lookup returned None -- which legitimately means "no golden
-lineage" -- producing the all-None context, reading the activation's CoW
-clone, which (correctly, per #1529) holds no temporal data. Net effect: HTTP
-200, ZERO results, nothing logged as wrong, and invisible on solo/SQLite
-where the node-local store IS the shared store. The same standalone
-manager's ``.golden_repo_manager`` likewise read node-local golden metadata,
-raising GoldenRepoNotFoundError on every temporal query and silently
-degrading embedder selection to the clone's stale config.
+* Only GENUINE ABSENCE of golden lineage yields temporal_index_dir=None (the
+  legacy in-repo derivation). Every failure -- lineage lookup, store
+  selection, fixed-root derivation -- propagates and fails the job. An
+  all-None context is exactly what sends the caller to the activation's own
+  CoW clone, so it must never be produced by an error.
+* The lineage lookup reads the SHARED metadata store or none at all:
+  ``_resolve_lineage_repo_manager`` prefers the injected DI-wired manager and,
+  in postgres/cluster mode, REFUSES to read a node-local store. Both stores
+  must be shared (activation pool AND golden-metadata backend) --
+  ``uses_shared_metadata_stores()``, plural.
 
-``_resolve_lineage_repo_manager`` fixes both: prefer the injected DI-wired
-manager, and in postgres/cluster mode REFUSE to read a node-local store at
-all. "I looked in the wrong store" is not an answer -- it fails loudly, the
-same principle #1529 finding #2 established for a lookup that raises.
+Full rationale, the confirmed cluster symptoms, and the both-doors injection
+requirement: docs/architecture-invariants.md, "Temporal Worker Lineage Store
+Selection (Bug #1533)".
 """
 
 import logging
@@ -136,18 +121,12 @@ def _resolve_golden_repo_alias(
     An is_global repository_alias (ends with '-global') IS its own golden
     alias, resolved without any lookup.
 
-    Bug #1529 finding #2: ABSENCE and FAILURE are NOT the same answer, and
-    ``get_repository`` already distinguishes them -- it returns None when
-    there is no activated-repo record, and raises only when metadata
-    loading/refresh genuinely fails. This returns None ONLY for real absence
-    and lets a failure propagate; laundering the exception into None
-    reintroduces the whole hazard (module docstring).
-
-    Bug #1533: that distinction only means anything if the store being read
-    is the RIGHT one, which is the caller's decision -- a manager reading
-    node-local metadata on a cluster node answers None for a repo that
-    genuinely IS activated, and nothing here can tell that apart from real
-    absence.
+    Bug #1529 finding #2: ABSENCE and FAILURE are NOT the same answer.
+    ``get_repository`` already distinguishes them (None for no record, raises
+    on a genuine metadata failure), so this returns None ONLY for real absence
+    and lets a failure propagate. Bug #1533: that distinction is meaningful
+    only if the store read is the RIGHT one, which is the CALLER's decision
+    (``_resolve_lineage_repo_manager``) -- see the module docstring.
 
     Raises:
         Whatever ``get_repository`` raises (e.g. ActivatedRepoError) when the
@@ -198,10 +177,17 @@ def _resolve_lineage_repo_manager(activated_repo_manager: Optional[Any]) -> Any:
     """Select the manager whose metadata store the lineage lookup may read.
 
     Bug #1533, deliberate ordering: an INJECTED (DI-wired) manager wins, but
-    only after confirming it really reads the shared store on a cluster node;
+    only after confirming it really reads the shared stores on a cluster node;
     otherwise postgres/cluster mode RAISES; otherwise -- solo/SQLite or pure
     CLI, where the node-local store IS the real store -- the legacy
     standalone construction.
+
+    BOTH shared metadata stores are required on a cluster node, which is why
+    the guard calls the PLURAL ``uses_shared_metadata_stores()``: the
+    activation connection pool alone is NOT sufficient, because a manager
+    whose golden_repo_manager still reads node-local SQLite resolves the
+    lineage correctly and then fails the golden lookup with
+    GoldenRepoNotFoundError -- silently degrading embedder selection.
 
     Raises:
         TemporalLineageStoreUnavailableError: cluster mode with no
@@ -212,7 +198,7 @@ def _resolve_lineage_repo_manager(activated_repo_manager: Optional[Any]) -> Any:
     postgres_mode = is_postgres_storage_mode()
 
     if activated_repo_manager is not None:
-        if postgres_mode and not activated_repo_manager.uses_shared_metadata_store():
+        if postgres_mode and not activated_repo_manager.uses_shared_metadata_stores():
             raise TemporalLineageStoreUnavailableError(_UNWIRED_MANAGER_MESSAGE)
         return activated_repo_manager
 

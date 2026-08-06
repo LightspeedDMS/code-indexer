@@ -1,10 +1,9 @@
 """Bug #1533: live-PostgreSQL proof that the temporal lineage lookup reads the
-SHARED store.
+SHARED metadata store.
 
 This is the cluster fact pattern verbatim, against a REAL psycopg connection
-and a REAL ``activated_repos`` table -- no mock of the registry, per this
-project's "faithful DB mocks" lesson (an unfaithful fake can certify a silent
-no-op as passing):
+and REAL tables -- no mock of the registry, per this project's "faithful DB
+mocks" lesson (an unfaithful fake can certify a silent no-op as passing):
 
     PG activated rows: [('e2e1529mine', 'e2e1529', 'admin')]
     node-local sqlite activated_repos: 0
@@ -14,22 +13,44 @@ metadata file is written. The activation's clone DIRECTORY does exist, exactly
 as on a real node with shared storage -- so the ONLY thing distinguishing a
 correct read from the pre-fix one is which metadata store is consulted.
 
-Gated by TEST_POSTGRES_DSN, mirroring
-test_golden_repo_metadata_temporal_options_live_pg_1414.py's
-pg_dsn_for_runner/isolated-table convention exactly (never inventing a new
-one). It skips cleanly where no PostgreSQL is available.
+DESTRUCTION SAFETY (two independent guards)
+-------------------------------------------
+An earlier version of this module ran ``DROP TABLE IF EXISTS activated_repos``
+against whatever ``TEST_POSTGRES_DSN`` pointed at. That is unacceptable: a
+misconfigured runner or a copy-pasted DSN would destroy real activation
+metadata. Note that this project's OTHER live-PG modules (e.g.
+test_migration_runner.py's ``isolated_schema``, which drops
+``schema_migrations``) share that hazard on a fixed, production-shaped table
+name -- they predate this module and are NOT a pattern to copy; the wider
+cleanup is flagged separately rather than done here.
+
+Guard 1 -- the target database must be NAMED like a disposable test database
+(``_DISPOSABLE_DB_NAME_MARKERS``). A DSN pointing anywhere else FAILS loudly
+rather than skipping, so a misconfiguration is visible instead of silently
+tolerated.
+
+Guard 2 -- and the real protection: every test creates its OWN uniquely-named
+schema, creates its tables INSIDE it, reaches them through a ``search_path``
+option on the DSN, and drops ONLY that schema. Nothing in ``public`` is
+created, modified, or dropped, so even a DSN aimed at a shared database cannot
+lose data. ``test_private_schema_isolation_leaves_public_schema_intact`` is the
+standing regression guard for that property.
 """
 
 from __future__ import annotations
 
 import os
+import uuid
 from pathlib import Path
+from typing import Iterator, Optional, Tuple
+from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 import pytest
 
 from code_indexer.server.repositories.activated_repo_manager import (
     ActivatedRepoManager,
 )
+from code_indexer.server.repositories.golden_repo_manager import GoldenRepoManager
 from code_indexer.server.services.temporal_worker import (
     _resolve_golden_temporal_context,
 )
@@ -52,6 +73,14 @@ CLONE_BRANCH = "master"
 POOL_MIN_SIZE = 1
 POOL_MAX_SIZE = 2
 
+# Guard 1: the database NAME must contain one of these, so a DSN aimed at a
+# real/shared database is refused rather than operated on.
+_DISPOSABLE_DB_NAME_MARKERS = ("test", "tmp", "scratch", "sandbox")
+
+_SCHEMA_PREFIX = "cidx_bug1533_"
+_SENTINEL_PREFIX = "cidx_bug1533_sentinel_"
+_SENTINEL_VALUE = "must-survive"
+
 
 class _WorkerInput:
     """Only the attributes the lineage resolver reads."""
@@ -62,14 +91,63 @@ class _WorkerInput:
         self.repo_path = repo_path
 
 
+def _database_name(dsn: str) -> str:
+    """The database name from a URI-form or key=value-form libpq DSN."""
+    if "://" in dsn:
+        return urlparse(dsn).path.lstrip("/")
+    for token in dsn.split():
+        key, _, value = token.partition("=")
+        if key.strip() == "dbname":
+            return value.strip().strip("'\"")
+    return ""
+
+
+def _refuse_unless_disposable(dsn: str) -> None:
+    """FAIL (never silently skip) if the target database is not obviously a
+    disposable test database."""
+    db_name = _database_name(dsn).lower()
+    if not db_name:
+        pytest.fail(
+            "TEST_POSTGRES_DSN does not name a database -- refusing to run "
+            "live-PostgreSQL tests against an unidentified target."
+        )
+    if not any(marker in db_name for marker in _DISPOSABLE_DB_NAME_MARKERS):
+        pytest.fail(
+            f"TEST_POSTGRES_DSN points at database {db_name!r}, whose name "
+            f"does not contain any of {_DISPOSABLE_DB_NAME_MARKERS}. Refusing "
+            "to run: this module creates and drops schemas and must never be "
+            "aimed at a real or shared database. Point TEST_POSTGRES_DSN at a "
+            "disposable database whose name says so."
+        )
+
+
+def _dsn_with_search_path(dsn: str, schema: str) -> str:
+    """The same DSN, resolving unqualified table names to *schema* first.
+
+    Production code issues unqualified SQL (``FROM activated_repos``), so the
+    only way to redirect it into a throwaway schema without editing that code
+    is the connection's own search_path.
+    """
+    option = f"-csearch_path={schema}"
+    if "://" in dsn:
+        parts = urlparse(dsn)
+        query = [(k, v) for k, v in parse_qsl(parts.query) if k != "options"]
+        query.append(("options", option))
+        return urlunparse(parts._replace(query=urlencode(query)))
+    return f"{dsn} options='{option}'"
+
+
 @pytest.fixture(scope="module")
-def pg_dsn_for_lineage():
-    """Module-scoped DSN for the live-PG lineage test. Skips if unavailable."""
+def pg_dsn_for_lineage() -> str:
+    """Module-scoped DSN for the live-PG lineage test. Skips when PostgreSQL is
+    unavailable, but FAILS when it is present and pointed somewhere this module
+    must not touch."""
     if not HAS_PSYCOPG_FOR_LIVE_PG:
         pytest.skip("psycopg not available")
     dsn = os.environ.get("TEST_POSTGRES_DSN", "")
     if not dsn:
         pytest.skip("No PostgreSQL available (set TEST_POSTGRES_DSN to enable)")
+    _refuse_unless_disposable(dsn)
     try:
         import psycopg
 
@@ -81,37 +159,73 @@ def pg_dsn_for_lineage():
 
 
 @pytest.fixture
-def activated_repos_table(pg_dsn_for_lineage):
-    """A real ``activated_repos`` table matching migrations 011 + 039 exactly,
-    created before and dropped after each test for isolation."""
+def isolated_schema_dsn(pg_dsn_for_lineage: str) -> Iterator[str]:
+    """A DSN scoped to a private, uniquely-named schema holding real
+    ``activated_repos`` + ``golden_repos_metadata`` tables.
+
+    Only this schema is dropped, so nothing in ``public`` -- least of all a
+    real ``activated_repos`` -- can be affected.
+    """
     import psycopg
+    from psycopg import sql
+
+    schema_name = f"{_SCHEMA_PREFIX}{uuid.uuid4().hex[:12]}"
+    schema_ident = sql.Identifier(schema_name)
 
     with psycopg.connect(pg_dsn_for_lineage, autocommit=True) as conn:
-        conn.execute("DROP TABLE IF EXISTS activated_repos")
-        conn.execute(
-            """
-            CREATE TABLE activated_repos (
-                id SERIAL PRIMARY KEY,
-                username TEXT NOT NULL,
-                user_alias TEXT NOT NULL,
-                golden_repo_alias TEXT,
-                repo_path TEXT NOT NULL,
-                current_branch TEXT DEFAULT 'main',
-                activated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-                last_accessed TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-                git_committer_email TEXT,
-                ssh_key_used BOOLEAN DEFAULT FALSE,
-                is_composite BOOLEAN DEFAULT FALSE,
-                wiki_enabled BOOLEAN DEFAULT FALSE,
-                metadata_json JSONB,
-                activation_id TEXT,
-                UNIQUE(username, user_alias)
+        conn.execute(sql.SQL("CREATE SCHEMA {}").format(schema_ident))
+    try:
+        scoped_dsn = _dsn_with_search_path(pg_dsn_for_lineage, schema_name)
+        with psycopg.connect(scoped_dsn, autocommit=True) as conn:
+            # Mirrors migrations 011 + 039 (activated_repos) and 001
+            # (golden_repos_metadata), created inside the private schema.
+            conn.execute(
+                sql.SQL(
+                    """
+                    CREATE TABLE {}.activated_repos (
+                        id SERIAL PRIMARY KEY,
+                        username TEXT NOT NULL,
+                        user_alias TEXT NOT NULL,
+                        golden_repo_alias TEXT,
+                        repo_path TEXT NOT NULL,
+                        current_branch TEXT DEFAULT 'main',
+                        activated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+                        last_accessed TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+                        git_committer_email TEXT,
+                        ssh_key_used BOOLEAN DEFAULT FALSE,
+                        is_composite BOOLEAN DEFAULT FALSE,
+                        wiki_enabled BOOLEAN DEFAULT FALSE,
+                        metadata_json JSONB,
+                        activation_id TEXT,
+                        UNIQUE(username, user_alias)
+                    )
+                    """
+                ).format(schema_ident)
             )
-            """
-        )
-    yield pg_dsn_for_lineage
-    with psycopg.connect(pg_dsn_for_lineage, autocommit=True) as conn:
-        conn.execute("DROP TABLE IF EXISTS activated_repos")
+            conn.execute(
+                sql.SQL(
+                    """
+                    CREATE TABLE {}.golden_repos_metadata (
+                        alias                   TEXT        PRIMARY KEY NOT NULL,
+                        repo_url                TEXT        NOT NULL,
+                        default_branch          TEXT        NOT NULL,
+                        clone_path              TEXT        NOT NULL,
+                        created_at              TIMESTAMPTZ NOT NULL,
+                        enable_temporal         BOOLEAN     NOT NULL DEFAULT FALSE,
+                        temporal_options        JSONB,
+                        wiki_enabled            BOOLEAN     DEFAULT FALSE,
+                        category_id             INTEGER,
+                        category_auto_assigned  BOOLEAN     DEFAULT FALSE
+                    )
+                    """
+                ).format(schema_ident)
+            )
+        yield scoped_dsn
+    finally:
+        with psycopg.connect(pg_dsn_for_lineage, autocommit=True) as conn:
+            conn.execute(
+                sql.SQL("DROP SCHEMA IF EXISTS {} CASCADE").format(schema_ident)
+            )
 
 
 def _insert_shared_activation_row(dsn: str, repo_path: Path) -> None:
@@ -129,30 +243,42 @@ def _insert_shared_activation_row(dsn: str, repo_path: Path) -> None:
 
 
 @pytest.fixture
-def cluster_node_managers(activated_repos_table, tmp_path):
+def cluster_node_managers(
+    isolated_schema_dsn: str, tmp_path: Path
+) -> Iterator[Tuple[ActivatedRepoManager, ActivatedRepoManager, Path]]:
     """Two REAL managers over the SAME data dir, differing only in which
-    metadata store they read: one wired to a real psycopg pool (the server's
-    DI-wired instance on a cluster node), one not (what the worker used to
+    metadata stores they read: one FULLY wired to real PostgreSQL (activation
+    pool AND an injected PG golden-metadata backend -- the server's DI-wired
+    instance on a cluster node), one not wired at all (what the worker used to
     construct for itself). The clone directory exists for both.
 
     The pool is closed in ``finally`` so a failure anywhere in the remaining
     setup cannot leak it.
     """
     from code_indexer.server.storage.postgres.connection_pool import ConnectionPool
+    from code_indexer.server.storage.postgres.golden_repo_metadata_backend import (
+        GoldenRepoMetadataPostgresBackend,
+    )
 
     data_dir = tmp_path / "cluster-node" / "data"
-
-    pg_backed = ActivatedRepoManager(data_dir=str(data_dir))
     pool = ConnectionPool(
-        activated_repos_table, min_size=POOL_MIN_SIZE, max_size=POOL_MAX_SIZE
+        isolated_schema_dsn, min_size=POOL_MIN_SIZE, max_size=POOL_MAX_SIZE
     )
     try:
+        pg_backed = ActivatedRepoManager(
+            data_dir=str(data_dir),
+            golden_repo_manager=GoldenRepoManager(
+                data_dir=str(data_dir),
+                storage_backend=GoldenRepoMetadataPostgresBackend(pool),
+            ),
+        )
         pg_backed.set_connection_pool(pool)
+
         node_local = ActivatedRepoManager(data_dir=str(data_dir))
 
         clone_dir = Path(pg_backed.get_activated_repo_path(USERNAME, ACTIVATED_ALIAS))
         clone_dir.mkdir(parents=True, exist_ok=True)
-        _insert_shared_activation_row(activated_repos_table, clone_dir)
+        _insert_shared_activation_row(isolated_schema_dsn, clone_dir)
 
         yield pg_backed, node_local, clone_dir
     finally:
@@ -164,10 +290,12 @@ def test_shared_store_manager_resolves_the_lineage(cluster_node_managers) -> Non
     answer -- and it must yield the golden repo's FIXED temporal root."""
     pg_backed, _node_local, clone_dir = cluster_node_managers
 
-    assert pg_backed.uses_shared_metadata_store() is True
+    assert pg_backed.uses_shared_metadata_stores() is True
 
     ctx = _resolve_golden_temporal_context(
-        _WorkerInput(str(clone_dir)), "job-pg-1533", activated_repo_manager=pg_backed
+        _WorkerInput(str(clone_dir)),
+        "job-pg-1533",
+        activated_repo_manager=pg_backed,
     )
 
     assert ctx.alias == GOLDEN_ALIAS
@@ -186,5 +314,79 @@ def test_node_local_manager_cannot_see_the_shared_row(cluster_node_managers) -> 
     """
     _pg_backed, node_local, _clone_dir = cluster_node_managers
 
-    assert node_local.uses_shared_metadata_store() is False
+    assert node_local.uses_shared_metadata_stores() is False
     assert node_local.get_repository(USERNAME, ACTIVATED_ALIAS, touch=False) is None
+
+
+def _public_activated_repos_oid(dsn: str) -> Optional[str]:
+    """``public.activated_repos``'s OID, or None when it does not exist.
+
+    The OID (not merely existence) is compared so that a drop-and-recreate --
+    which would silently destroy rows while leaving a same-named table -- is
+    also caught.
+    """
+    import psycopg
+
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        row = conn.execute(
+            "SELECT to_regclass('public.activated_repos')::oid::text"
+        ).fetchone()
+    return None if row is None else row[0]
+
+
+def test_private_schema_isolation_leaves_public_schema_intact(
+    pg_dsn_for_lineage: str, request: pytest.FixtureRequest
+) -> None:
+    """Destruction-safety regression guard for THIS module's fixtures.
+
+    Snapshots the state of ``public`` BEFORE the fixtures run (the whole point
+    -- a bare after-the-fact absence check cannot tell a pre-existing table
+    from one created and dropped, nor a dropped-and-recreated one from an
+    untouched one), plants a sentinel table with a row in ``public``, then
+    triggers the full fixture setup via ``getfixturevalue`` and asserts:
+
+    * ``public.activated_repos``'s OID is unchanged (absent stays absent;
+      present stays the SAME table, not a recreated empty one);
+    * the sentinel row is still there.
+
+    The sentinel table is uniquely named and created by this test, so dropping
+    it in ``finally`` destroys nothing but our own scratch object.
+    """
+    import psycopg
+    from psycopg import sql
+
+    sentinel_ident = sql.Identifier(f"{_SENTINEL_PREFIX}{uuid.uuid4().hex[:12]}")
+    oid_before = _public_activated_repos_oid(pg_dsn_for_lineage)
+
+    with psycopg.connect(pg_dsn_for_lineage, autocommit=True) as conn:
+        conn.execute(
+            sql.SQL("CREATE TABLE public.{} (marker TEXT)").format(sentinel_ident)
+        )
+        conn.execute(
+            sql.SQL("INSERT INTO public.{} (marker) VALUES (%s)").format(
+                sentinel_ident
+            ),
+            (_SENTINEL_VALUE,),
+        )
+    try:
+        # Runs the real fixture chain (schema creation, DDL, row insert,
+        # manager construction) against the same database.
+        request.getfixturevalue("cluster_node_managers")
+
+        assert _public_activated_repos_oid(pg_dsn_for_lineage) == oid_before, (
+            "public.activated_repos changed identity while these fixtures ran "
+            "-- they must operate ONLY inside their private schema"
+        )
+        with psycopg.connect(pg_dsn_for_lineage, autocommit=True) as conn:
+            markers = conn.execute(
+                sql.SQL("SELECT marker FROM public.{}").format(sentinel_ident)
+            ).fetchall()
+        assert markers == [(_SENTINEL_VALUE,)], (
+            "a sentinel row in the public schema did not survive the live-PG "
+            "fixtures -- something is writing outside the private schema"
+        )
+    finally:
+        with psycopg.connect(pg_dsn_for_lineage, autocommit=True) as conn:
+            conn.execute(
+                sql.SQL("DROP TABLE IF EXISTS public.{}").format(sentinel_ident)
+            )

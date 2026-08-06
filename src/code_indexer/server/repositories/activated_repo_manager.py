@@ -258,20 +258,30 @@ class ActivatedRepoManager:
             "ActivatedRepoManager: using PostgreSQL connection pool (cluster mode)"
         )
 
-    def uses_shared_metadata_store(self) -> bool:
-        """Whether activation metadata is read from/written to the SHARED
-        (PostgreSQL, cross-node) store rather than this node's own local
-        JSON files (Bug #1533).
+    def uses_shared_metadata_stores(self) -> bool:
+        """Whether BOTH metadata stores this manager exposes are the SHARED
+        (cross-node) ones rather than this node's own local files (Bug #1533).
 
-        False means every read reaches a NODE-LOCAL store. In a clustered
-        deployment that store is empty for repos activated on any other
-        node, and an empty read is indistinguishable from "this repo is not
-        activated" -- so callers whose correctness depends on seeing the
-        real, cluster-wide record (e.g. the temporal worker's golden-repo
-        lineage lookup) must treat False as "I cannot answer", never as a
-        negative answer.
+        Two INDEPENDENT stores are involved, and half wired is not wired:
+
+        1. Activation metadata -- this manager's own PostgreSQL connection
+           pool (``set_connection_pool``). Without it, reads hit node-local
+           JSON files that are empty for repos activated on any other node,
+           and an empty read is indistinguishable from "this repo is not
+           activated".
+        2. Golden-repo metadata -- ``self.golden_repo_manager``'s backend.
+           Without the DI-injected shared backend, a lineage lookup that
+           correctly resolves the golden alias STILL fails on the golden
+           lookup itself with GoldenRepoNotFoundError ("Loaded 0 golden repos
+           from SQLite"), which ``load_golden_temporal_config`` swallows
+           fail-open -- silently degrading temporal embedder selection.
+
+        Callers whose correctness depends on the cluster-wide view must treat
+        False as "I cannot answer", never as a negative answer.
         """
-        return self._pool is not None
+        if self._pool is None:
+            return False
+        return bool(self.golden_repo_manager.has_injected_metadata_backend())
 
     def set_query_tracker(self, query_tracker: Any) -> None:
         """Wire the server's QueryTracker (Story #1458 AC13).
