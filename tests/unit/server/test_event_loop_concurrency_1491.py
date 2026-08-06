@@ -682,6 +682,120 @@ async def test_ac3_branch_discovery_concurrency_bound_is_process_wide(
     assert peak > 1, "no concurrency observed at all -- fetches are sequential"
 
 
+# A realistic org-discovery size, deliberately far above the submission gate's
+# in-flight capacity AND its waiter bound: discovering an organisation with
+# 100+ repositories is this endpoint's ordinary use case, not adversarial load.
+_LARGE_DISCOVERY_REPO_COUNT = 100
+
+# Two concurrent requests of this size exceed a PROCESS-WIDE bound even though
+# neither is individually large -- the case where a shared gate makes requests
+# fail because of each other.
+_CONCURRENT_DISCOVERY_REPO_COUNT = 45
+
+
+def _install_immediate_branch_fetch(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Replace the git subprocess with an immediate success.
+
+    Duration is irrelevant to these tests: they are about ADMISSION -- does
+    every repo get a result at all -- not about latency.
+    """
+    from code_indexer.server.services import remote_branch_service as rbs_module
+
+    def _immediate(
+        service_self: rbs_module.RemoteBranchService,
+        clone_url: str,
+        platform: str = "github",
+        credentials: Optional[str] = None,
+    ) -> rbs_module.BranchFetchResult:
+        return rbs_module.BranchFetchResult(
+            success=True, branches=["main"], default_branch="main", error=None
+        )
+
+    monkeypatch.setattr(
+        rbs_module.RemoteBranchService, "fetch_remote_branches", _immediate
+    )
+
+
+def _discovery_payload(count: int, prefix: str = "") -> Dict[str, object]:
+    """A discovery request body for ``count`` distinct repositories."""
+    return {
+        "repos": [
+            {
+                "clone_url": _UNRESOLVABLE_CLONE_URL_TEMPLATE.format(
+                    index=f"{prefix}{index}"
+                ),
+                "platform": "github",
+            }
+            for index in range(count)
+        ]
+    }
+
+
+@pytest.mark.asyncio
+async def test_ac3_large_repo_set_still_returns_all_results(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A 100-repo discovery must return 200 with every repo accounted for.
+
+    Before this story the endpoint returned 200 for any repo count (just more
+    slowly). An admission bound that REJECTS beyond its capacity turns that
+    into a hard HTTP 500 which discards the ENTIRE result set -- including
+    every repository that already succeeded. That is a functional regression
+    against AC8, and it fires at a repo count real organisations genuinely
+    have.
+    """
+    _install_immediate_branch_fetch(monkeypatch)
+    app = _branch_discovery_app(monkeypatch)
+    payload = _discovery_payload(_LARGE_DISCOVERY_REPO_COUNT)
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url=_TEST_BASE_URL
+    ) as client:
+        resp = await client.post("/api/discovery/branches", json=payload)
+
+    assert resp.status_code == 200, (
+        f"a {_LARGE_DISCOVERY_REPO_COUNT}-repo discovery returned "
+        f"{resp.status_code}; every completed repository's result was discarded"
+    )
+    body = resp.json()
+    assert len(body) == _LARGE_DISCOVERY_REPO_COUNT, (
+        f"only {len(body)} of {_LARGE_DISCOVERY_REPO_COUNT} repos have an entry"
+    )
+
+
+@pytest.mark.asyncio
+async def test_ac3_concurrent_discoveries_do_not_reject_each_other(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Two concurrent mid-sized discoveries must BOTH return 200.
+
+    A process-wide admission bound makes requests fail because of each other:
+    neither 45-repo request is individually large, but together they exceed a
+    shared cap and one is rejected outright. Independent discovery requests
+    must never invalidate one another.
+    """
+    _install_immediate_branch_fetch(monkeypatch)
+    app = _branch_discovery_app(monkeypatch)
+
+    async def _fire(prefix: str) -> httpx.Response:
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url=_TEST_BASE_URL
+        ) as client:
+            return await client.post(
+                "/api/discovery/branches",
+                json=_discovery_payload(_CONCURRENT_DISCOVERY_REPO_COUNT, prefix),
+            )
+
+    first, second = await asyncio.gather(_fire("a"), _fire("b"))
+
+    assert [first.status_code, second.status_code] == [200, 200], (
+        "two concurrent discovery requests rejected each other: got "
+        f"{first.status_code} and {second.status_code}"
+    )
+    assert len(first.json()) == _CONCURRENT_DISCOVERY_REPO_COUNT
+    assert len(second.json()) == _CONCURRENT_DISCOVERY_REPO_COUNT
+
+
 class _OutstandingTaskCounter:
     """Pass-through proxy around the REAL pool, tallying unfinished tasks.
 
@@ -1325,23 +1439,42 @@ def _make_racing_diagnostics_service(
     """
     from code_indexer.server.services.diagnostics_service import DiagnosticsService
 
+    # The category is SEEDED with an already-expired entry, and the racing
+    # publish deliberately reuses that exact timestamp.
+    #
+    # Both details are what make this test discriminating rather than vacuous.
+    # Seeded + expired means get_status() takes the DB-read path while having
+    # observed a REAL timestamp (with no seed, the observed value is None and
+    # any subsequent write trivially differs from it -- so the OLD,
+    # timestamp-based CAS would take the correct branch by coincidence and the
+    # test would pass against the unfixed code). Reusing the same timestamp is
+    # the genuine collision case: to a timestamp token the state reads
+    # "unchanged", so the stale DB snapshot clobbers the newer write; only a
+    # monotonic generation counter can tell the two publishes apart.
+    collision_stamp = datetime.now() - _STALE_SNAPSHOT_AGE
+
     class _RacingService(DiagnosticsService):
         def _read_category_from_db(self, category):  # type: ignore[no-untyped-def]
             if category is not raced_category:
                 return None
             with self._lock:
                 self._cache[category] = _diagnostic_result_with(_NEWER_RUN_MESSAGE)
-                self._cache_timestamps[category] = datetime.now()
+                # SAME wall-clock value the reader observed: the ABA collision.
+                self._cache_timestamps[category] = collision_stamp
                 # Bump the generation exactly as the real publish sites
                 # (run_all_diagnostics / run_category) now do -- the CAS token
                 # is the monotonic generation, not the timestamp, so a
                 # simulation that skipped this would model a publish no
                 # production path performs.
                 self._cache_generation[category] = next(self._generation_counter)
-            stale_at = datetime.now() - _STALE_SNAPSHOT_AGE
-            return _diagnostic_result_with(_STALE_DB_MESSAGE), stale_at
+            return _diagnostic_result_with(_STALE_DB_MESSAGE), collision_stamp
 
-    return _RacingService(db_path=str(db_path))
+    service = _RacingService(db_path=str(db_path))
+    with service._lock:
+        service._cache[raced_category] = _diagnostic_result_with("seeded-and-expired")
+        service._cache_timestamps[raced_category] = collision_stamp
+        service._cache_generation[raced_category] = next(service._generation_counter)
+    return service
 
 
 def test_ac4_get_status_publish_back_does_not_clobber_newer_results(

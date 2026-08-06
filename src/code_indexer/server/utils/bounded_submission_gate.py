@@ -138,6 +138,18 @@ class BoundedSubmissionGate:
             # would otherwise leak, so pass it straight to the next waiter.
             if waiter.done() and not waiter.cancelled():
                 self.release()
+            else:
+                # Cancelled while still QUEUED. Evict our own entry right now
+                # rather than leaving it for some later, unrelated release()
+                # to sweep: until it is gone the queue reports a depth that
+                # includes a waiter who will never consume a slot, so the gate
+                # looks fuller than it is and can reject callers that actually
+                # have capacity available.
+                with self._lock:
+                    for index, (_, queued) in enumerate(self._waiters):
+                        if queued is waiter:
+                            del self._waiters[index]
+                            break
             raise
 
     def release(self) -> None:

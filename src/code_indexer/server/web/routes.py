@@ -50,7 +50,10 @@ from .auth import (
 )
 from ..services.ci_token_manager import CITokenManager, TokenValidationError
 from ..services.config_service import get_config_service
-from ..utils.bounded_submission_gate import BoundedSubmissionGate
+from ..utils.bounded_submission_gate import (
+    BoundedSubmissionGate,
+    SubmissionGateOverloadedError,
+)
 from code_indexer import __version__ as cidx_version
 from code_indexer.server.logging_utils import format_error_log, get_log_extra
 from code_indexer.server.auto_update.deployment_executor import RESTART_SIGNAL_PATH
@@ -8818,7 +8821,28 @@ async def fetch_discovery_branches(request: Request):
         async def _fetch_one(
             clone_url: str, platform: str, credentials: Optional[str]
         ) -> Dict[str, Any]:
-            await gate.acquire()
+            try:
+                await gate.acquire()
+            except SubmissionGateOverloadedError as overloaded:
+                # Story #1491 (review round 7): degrade THIS repository, never
+                # the whole request. Letting the overload propagate discarded
+                # the entire result set -- including every repository that had
+                # already succeeded -- and turned an ordinary large-org
+                # discovery into an HTTP 500. The shape here matches the
+                # existing "Missing clone_url" degradation so the client
+                # handles it through the same per-repo error path.
+                logger.warning(
+                    format_error_log(
+                        "STORE-GENERAL-045",
+                        f"Branch discovery shed load for {clone_url}: {overloaded}",
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                )
+                return {
+                    "branches": [],
+                    "default_branch": None,
+                    "error": "Server busy - branch discovery deferred, please retry",
+                }
             try:
                 result = await loop.run_in_executor(
                     executor,
@@ -8879,44 +8903,55 @@ async def fetch_discovery_branches(request: Request):
             credentials = credentials_by_platform.get(platform)
             plan.append((clone_url, (clone_url, platform, credentials)))
 
-        # Pass 2: the plan is complete, so creating tasks can no longer be
-        # interleaved with anything that raises.
-        planned: List[Tuple[str, Union[Dict[str, Any], "asyncio.Future"]]] = []
-        for key, fetch_args in plan:
-            if fetch_args is None:
-                planned.append(
-                    (
-                        key,
-                        {
-                            "branches": [],
-                            "default_branch": None,
-                            "error": "Missing clone_url",
-                        },
-                    )
-                )
-                continue
-            planned.append((key, asyncio.ensure_future(_fetch_one(*fetch_args))))
+        # The plan is complete, so task creation below can no longer be
+        # interleaved with anything that raises (a credential-store failure
+        # escapes with zero tasks in flight).
+        planned = plan
 
-        # Pass 2: await all in-flight fetches concurrently.
-        # return_exceptions=True is deliberate: it guarantees EVERY task is
-        # awaited to completion, so no sibling is left orphaned with an
-        # unretrieved exception when one fetch fails. The first failure -- in
-        # ORIGINAL request order -- is then re-raised, so a genuine error still
-        # surfaces to the outer except-handler as a 500 exactly as the previous
-        # sequential loop's would have.
-        pending = [entry for _, entry in planned if not isinstance(entry, dict)]
-        if pending:
-            await asyncio.gather(*pending, return_exceptions=True)
-
+        # Pass 2: run the fetches in sequential WINDOWS, each at most
+        # _DISCOVERY_BRANCH_FETCH_MAX_CONCURRENCY wide.
+        #
+        # Story #1491 (review round 7): bounding the fan-out HERE, at the
+        # source, is what makes a large discovery safe. Creating one task per
+        # repository up front and letting them all pile up on the submission
+        # gate meant a 100-repo request -- an ordinary large-org discovery --
+        # queued far more waiters than the gate would hold and was rejected
+        # outright, discarding every repository that had already succeeded.
+        # Windowing means this request never has more outstanding acquires
+        # than the gate's own capacity, so it bounds its own memory AND never
+        # provokes rejection on its own behalf. The per-repo degradation in
+        # _fetch_one remains only as a cross-request safety net.
+        #
+        # Within a window, return_exceptions=True guarantees EVERY task is
+        # awaited, so no sibling is orphaned with an unretrieved exception when
+        # one fetch fails. A genuine failure is then re-raised in ORIGINAL
+        # request order, surfacing to the outer handler exactly as before.
         results: Dict[str, Dict[str, Any]] = {}
-        for key, entry in planned:
-            if isinstance(entry, dict):
-                results[key] = entry
+        window: List[Tuple[str, "asyncio.Future"]] = []
+
+        async def _drain_window() -> None:
+            if not window:
+                return
+            await asyncio.gather(*(task for _, task in window), return_exceptions=True)
+            for window_key, task in window:
+                task_error = task.exception()
+                if task_error is not None:
+                    raise task_error
+                results[window_key] = task.result()
+            window.clear()
+
+        for key, fetch_args in planned:
+            if fetch_args is None:
+                results[key] = {
+                    "branches": [],
+                    "default_branch": None,
+                    "error": "Missing clone_url",
+                }
                 continue
-            fetch_error = entry.exception()
-            if fetch_error is not None:
-                raise fetch_error
-            results[key] = entry.result()
+            window.append((key, asyncio.ensure_future(_fetch_one(*fetch_args))))
+            if len(window) >= _DISCOVERY_BRANCH_FETCH_MAX_CONCURRENCY:
+                await _drain_window()
+        await _drain_window()
 
         return JSONResponse(content=results)
 

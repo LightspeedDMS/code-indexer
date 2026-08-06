@@ -83,6 +83,45 @@ async def test_caller_arriving_at_a_full_queue_is_rejected_not_parked() -> None:
     assert gate.waiter_count == 0
 
 
+_QUEUED_WAITERS = 10
+
+
+@pytest.mark.asyncio
+async def test_cancelled_waiter_is_removed_from_the_queue_immediately() -> None:
+    """A cancelled waiter must leave the queue at once, not lazily.
+
+    If a cancelled waiter's entry lingers until some LATER, unrelated
+    ``release()`` happens to sweep it, the gate keeps looking fuller than it
+    is -- and can reject callers that genuinely have capacity available. The
+    queue depth must therefore drop the moment a waiter is cancelled, with no
+    release in between.
+    """
+    gate = BoundedSubmissionGate(capacity=1, max_waiters=_QUEUED_WAITERS + 5)
+
+    await gate.acquire()  # occupy the only slot
+    waiters = [asyncio.ensure_future(gate.acquire()) for _ in range(_QUEUED_WAITERS)]
+    await asyncio.sleep(0)
+    assert gate.waiter_count == _QUEUED_WAITERS, "waiters did not queue as expected"
+
+    # Cancel ONE waiter. No release() anywhere in this window.
+    waiters[0].cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await waiters[0]
+
+    assert gate.waiter_count == _QUEUED_WAITERS - 1, (
+        f"queue still holds {gate.waiter_count} entries after a cancellation "
+        f"(expected {_QUEUED_WAITERS - 1}) -- the cancelled waiter leaked and "
+        "keeps the gate looking artificially full"
+    )
+
+    # The survivors are unaffected and still receive slots normally.
+    for remaining in waiters[1:]:
+        gate.release()
+        await remaining
+    gate.release()
+    assert gate.waiter_count == 0
+
+
 def test_max_waiters_must_not_be_negative() -> None:
     with pytest.raises(ValueError):
         BoundedSubmissionGate(capacity=1, max_waiters=-1)
