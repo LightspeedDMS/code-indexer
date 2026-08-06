@@ -12,6 +12,7 @@ Features caching with category-specific TTLs and persistence to SQLite database.
 """
 
 import asyncio
+import itertools
 import json
 import os
 import re
@@ -173,7 +174,26 @@ class DiagnosticsService:
         # write; the synchronous DB persistence is performed OUTSIDE the lock
         # (see run_all_diagnostics/run_category) so no reader ever blocks
         # behind disk I/O.
-        self.__lock: Optional[threading.Lock] = None
+        # Constructed EAGERLY, never lazily. A lazy `if self.__lock is None:
+        # self.__lock = threading.Lock()` property is itself a race: two
+        # concurrent FIRST callers can both observe None and each construct
+        # their OWN Lock, after which each believes it holds "the" lock while
+        # actually holding a different one -- silently defeating every bit of
+        # synchronisation below.
+        self.__lock: threading.Lock = threading.Lock()
+
+        # Story #1491: the compare-and-set token for get_status()'s
+        # publish-back. Deliberately NOT the cache timestamp: datetime.now()
+        # is not collision-free (a 2,000,000-sample probe observed genuine
+        # duplicates), and a collision makes two DIFFERENT writes share a
+        # token, so the CAS reads "unchanged" and clobbers the newer one -- a
+        # textbook ABA. A monotonic counter cannot repeat a value, so an
+        # unchanged token proves nothing was published in between. Bumped
+        # under self.__lock at every publish site; timestamps remain in use
+        # for TTL expiry, which is what they are actually good for.
+        self._generation_counter = itertools.count(1)
+        self._cache_generation: Dict[DiagnosticCategory, int] = {}
+
         self._backend = storage_backend
 
         # Database path for persistence
@@ -193,8 +213,10 @@ class DiagnosticsService:
 
     @property
     def _lock(self) -> threading.Lock:
-        if self.__lock is None:
-            self.__lock = threading.Lock()
+        """The single, eagerly-constructed shared-state guard.
+
+        Deliberately NOT lazily constructed -- see __init__.
+        """
         return self.__lock
 
     def is_running(self) -> bool:
@@ -235,6 +257,10 @@ class DiagnosticsService:
         with self._lock:
             cached_results = dict(self._cache)
             cached_timestamps = dict(self._cache_timestamps)
+            # Captured in the SAME critical section as the data above, so the
+            # generation observed here is exactly the one that produced this
+            # snapshot -- that is what makes the later compare-and-set sound.
+            cached_generations = dict(self._cache_generation)
 
         stale_categories: List[DiagnosticCategory] = []
         for category in DiagnosticCategory:
@@ -286,15 +312,24 @@ class DiagnosticsService:
             # changed, someone published while we were reading -- their value
             # is newer than our DB snapshot by construction, so we keep theirs
             # and return it.
-            observed_at = cached_timestamps.get(category)
+            # The CAS token is the monotonic per-category generation, NOT the
+            # timestamp: wall-clock values genuinely collide, and a collision
+            # would read as "unchanged" and clobber a newer write (ABA).
+            observed_generation = cached_generations.get(category)
             with self._lock:
-                current_at = self._cache_timestamps.get(category)
-                if current_at == observed_at:
+                current_generation = self._cache_generation.get(category)
+                if current_generation == observed_generation:
                     self._cache[category] = results
                     self._cache_timestamps[category] = loaded_at
+                    self._cache_generation[category] = next(self._generation_counter)
                     status[category] = results
                 else:
-                    status[category] = self._cache[category]
+                    # Someone published while we were reading. Their value is
+                    # newer than our DB snapshot by construction, so keep it.
+                    # .get(..., results) rather than [category]: clear_cache()
+                    # can remove the entry concurrently, and a status read must
+                    # never raise KeyError over it.
+                    status[category] = self._cache.get(category, results)
 
         return status
 
@@ -408,6 +443,9 @@ class DiagnosticsService:
                 with self._lock:
                     self._cache[category] = results
                     self._cache_timestamps[category] = now
+                    # Advance the CAS token so a concurrent get_status() can
+                    # see that this publish happened.
+                    self._cache_generation[category] = next(self._generation_counter)
                 # Story #1491 AC4: persistence is deliberately OUTSIDE the
                 # lock. self._lock is a cross-thread threading.Lock, and this
                 # run executes on a worker thread -- holding it across a
@@ -503,6 +541,9 @@ class DiagnosticsService:
             with self._lock:
                 self._cache[category] = results
                 self._cache_timestamps[category] = datetime.now()
+                # Advance the CAS token: this publish must be visible to a
+                # concurrent get_status() publish-back check.
+                self._cache_generation[category] = next(self._generation_counter)
 
             # Persist to database
             self._save_results_to_db(category, results)
@@ -536,7 +577,12 @@ class DiagnosticsService:
         Returns:
             True if category diagnostics are running
         """
-        return category in self._running_categories
+        # Story #1491: read under the lock. _running_categories is mutated by
+        # background runs on Starlette threadpool workers, so an unsynchronised
+        # membership test can observe a partially-updated set. Same discipline
+        # as is_running() and get_status().
+        with self._lock:
+            return category in self._running_categories
 
     async def check_cli_tool(
         self,
@@ -729,12 +775,23 @@ class DiagnosticsService:
         Args:
             category: If provided, clear only this category. Otherwise clear all.
         """
-        if category:
-            self._cache.pop(category, None)
-            self._cache_timestamps.pop(category, None)
-        else:
-            self._cache.clear()
-            self._cache_timestamps.clear()
+        # Story #1491: under the lock, like every other mutation of these
+        # dicts. This was the last unlocked mutator; racing the deliberately
+        # unlocked DB read in get_status() is exactly what made that method's
+        # publish-back able to observe a vanished key.
+        #
+        # The generation map is cleared alongside, so a later publish starts
+        # from "no observed generation" rather than comparing against a token
+        # whose data no longer exists.
+        with self._lock:
+            if category:
+                self._cache.pop(category, None)
+                self._cache_timestamps.pop(category, None)
+                self._cache_generation.pop(category, None)
+            else:
+                self._cache.clear()
+                self._cache_timestamps.clear()
+                self._cache_generation.clear()
 
     def _save_results_to_db(
         self, category: DiagnosticCategory, results: List[DiagnosticResult]

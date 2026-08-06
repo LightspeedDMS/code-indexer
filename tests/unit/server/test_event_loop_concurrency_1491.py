@@ -1217,6 +1217,71 @@ def test_ac4_diagnostics_get_status_routes_are_sync_dispatched() -> None:
         )
 
 
+# Concurrency used to hammer the lock property from many threads at once.
+_LOCK_RACE_THREADS = 32
+_LOCK_RACE_BARRIER_TIMEOUT_S = 10.0
+
+
+def test_ac4_lock_property_is_not_lazily_constructed(tmp_path: Path) -> None:
+    """Every caller must receive the SAME lock object, always.
+
+    A lazily-constructed lock (``if self.__lock is None: self.__lock =
+    threading.Lock()``) is itself a race: two concurrent FIRST callers can both
+    observe None and each construct their OWN Lock. Each then believes it holds
+    "the" lock while actually holding a different one -- silently defeating
+    every bit of synchronisation this story added.
+
+    Asserted structurally (the lock must already exist before any access) AND
+    by hammering the property from many threads and requiring exactly one
+    distinct object. Worker completion is verified explicitly so the
+    single-distinct-object assertion can never pass vacuously.
+    """
+    from code_indexer.server.services.diagnostics_service import DiagnosticsService
+
+    service = DiagnosticsService(db_path=str(tmp_path / "lock.db"))
+
+    # Eagerly constructed: a fresh instance must already own its lock, so the
+    # first-caller race window cannot exist at all.
+    assert service._DiagnosticsService__lock is not None, (  # type: ignore[attr-defined]
+        "the lock must be constructed eagerly in __init__, not lazily on "
+        "first access -- lazy construction lets two concurrent first callers "
+        "each build a separate Lock"
+    )
+
+    seen: List[int] = []
+    failures: List[BaseException] = []
+    seen_lock = threading.Lock()
+    barrier = threading.Barrier(_LOCK_RACE_THREADS)
+
+    def _grab() -> None:
+        try:
+            barrier.wait(timeout=_LOCK_RACE_BARRIER_TIMEOUT_S)
+            obtained = service._lock
+            with seen_lock:
+                seen.append(id(obtained))
+        except BaseException as exc:  # recorded, never swallowed
+            with seen_lock:
+                failures.append(exc)
+
+    threads = [threading.Thread(target=_grab) for _ in range(_LOCK_RACE_THREADS)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=_LOCK_RACE_BARRIER_TIMEOUT_S)
+
+    assert not failures, f"worker threads raised: {failures!r}"
+    assert all(not t.is_alive() for t in threads), "a worker thread never finished"
+    assert len(seen) == _LOCK_RACE_THREADS, (
+        f"only {len(seen)} of {_LOCK_RACE_THREADS} workers recorded a lock -- "
+        "the distinctness assertion below would be vacuous"
+    )
+    assert len(set(seen)) == 1, (
+        f"{len(set(seen))} distinct lock objects were handed out to "
+        f"{_LOCK_RACE_THREADS} concurrent callers -- they are not mutually "
+        "excluding each other at all"
+    )
+
+
 # Marker messages distinguishing the two competing writes in the lost-update
 # race test below.
 _STALE_DB_MESSAGE = "stale-from-database"
@@ -1267,6 +1332,12 @@ def _make_racing_diagnostics_service(
             with self._lock:
                 self._cache[category] = _diagnostic_result_with(_NEWER_RUN_MESSAGE)
                 self._cache_timestamps[category] = datetime.now()
+                # Bump the generation exactly as the real publish sites
+                # (run_all_diagnostics / run_category) now do -- the CAS token
+                # is the monotonic generation, not the timestamp, so a
+                # simulation that skipped this would model a publish no
+                # production path performs.
+                self._cache_generation[category] = next(self._generation_counter)
             stale_at = datetime.now() - _STALE_SNAPSHOT_AGE
             return _diagnostic_result_with(_STALE_DB_MESSAGE), stale_at
 

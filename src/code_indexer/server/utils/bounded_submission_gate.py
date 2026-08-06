@@ -49,6 +49,21 @@ from collections import deque
 from typing import Deque, Tuple
 
 
+class SubmissionGateOverloadedError(RuntimeError):
+    """Raised when both the slot budget AND the waiter queue are full.
+
+    This is deliberate backpressure, not an internal error: the caller is being
+    told to shed load rather than being parked in a queue that would otherwise
+    grow without bound.
+    """
+
+
+# Default waiter-queue bound. Beyond this many callers already parked, a new
+# caller is rejected rather than queued -- bounding only concurrent execution
+# while letting the queue grow without limit bounds nothing that matters.
+_DEFAULT_MAX_WAITERS = 64
+
+
 class BoundedSubmissionGate:
     """Cap the number of concurrently outstanding units of work.
 
@@ -62,10 +77,13 @@ class BoundedSubmissionGate:
     after the result was set.
     """
 
-    def __init__(self, capacity: int) -> None:
+    def __init__(self, capacity: int, max_waiters: int = _DEFAULT_MAX_WAITERS) -> None:
         if capacity < 1:
             raise ValueError(f"capacity must be >= 1, got {capacity}")
+        if max_waiters < 0:
+            raise ValueError(f"max_waiters must be >= 0, got {max_waiters}")
         self._capacity = capacity
+        self._max_waiters = max_waiters
         self._lock = threading.Lock()
         self._in_flight = 0
         self._waiters: Deque[
@@ -76,13 +94,40 @@ class BoundedSubmissionGate:
     def capacity(self) -> int:
         return self._capacity
 
+    @property
+    def max_waiters(self) -> int:
+        return self._max_waiters
+
+    @property
+    def waiter_count(self) -> int:
+        """Current queue depth. Exposed so a test can prove the bound holds."""
+        with self._lock:
+            return len(self._waiters)
+
     async def acquire(self) -> None:
-        """Take a slot, waiting in async space if the budget is exhausted."""
+        """Take a slot, or fail fast when the queue is already at its bound.
+
+        The waiter queue is CAPPED. Bounding only the number of concurrently
+        executing units while letting the queue of pending callers grow without
+        limit does not bound anything that matters -- it relocates the
+        unbounded memory growth from the executor's internal queue into this
+        deque. Genuine backpressure means a caller arriving at a full queue is
+        REJECTED immediately rather than parked indefinitely.
+
+        Raises:
+            SubmissionGateOverloadedError: the queue is at ``max_waiters``.
+        """
         loop = asyncio.get_running_loop()
         with self._lock:
             if self._in_flight < self._capacity:
                 self._in_flight += 1
                 return
+            if len(self._waiters) >= self._max_waiters:
+                raise SubmissionGateOverloadedError(
+                    f"submission gate overloaded: {self._in_flight} in flight at "
+                    f"capacity {self._capacity}, and the waiter queue is full at "
+                    f"its bound of {self._max_waiters}"
+                )
             waiter: "asyncio.Future[None]" = loop.create_future()
             self._waiters.append((loop, waiter))
 
