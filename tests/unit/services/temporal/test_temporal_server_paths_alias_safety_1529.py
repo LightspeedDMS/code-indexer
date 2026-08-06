@@ -38,6 +38,20 @@ UNSAFE_ALIASES = [
     "nested/alias",
     "/absolute/alias",
     "/",
+    # Round-4 review (Codex #1): a separator BLACKLIST accepted all of these,
+    # each of which is a real directory name no legitimate alias produces.
+    # Whitespace-only names in particular are near-invisible in any listing.
+    "  ",
+    "a b",
+    "a?b",
+    "a*b",
+    "a\nb",
+    # A dot is legal INSIDE an alias (see the safe cases below -- two of this
+    # codebase's three alias validators accept it), so the boundary the
+    # allowlist actually draws is the FIRST character: no hidden names, no
+    # traversal, no leading separator-ish punctuation.
+    ".hidden",
+    "-leading",
     "trailing/",
     "-global",  # normalizes to the empty string
     "..-global",  # normalizes to ".."

@@ -29,6 +29,8 @@ import logging
 from pathlib import Path
 from typing import List
 
+import pytest
+
 from code_indexer.server.storage.postgres import temporal_child_wiring
 from code_indexer.services.temporal import temporal_server_paths
 from code_indexer.services.temporal.temporal_server_paths import (
@@ -126,22 +128,25 @@ def test_child_wiring_reuses_the_canonical_env_marker() -> None:
     )
 
 
-def test_unresolvable_codebase_in_server_context_warns(tmp_path: Path, caplog) -> None:
-    """Server context + no golden coordinates must be VISIBLE, not silent."""
+def test_unresolvable_codebase_in_server_context_raises(tmp_path: Path) -> None:
+    """Server context + no golden coordinates must FAIL, not fall back.
+
+    Round-4 correction: this used to log a WARNING and return the in-repo
+    path. That made the WRITE side fail OPEN on exactly the failure the READ
+    side (`SemanticQueryManager._resolve_temporal_index_dir`) fails CLOSED on
+    -- so for this one unrecognized-topology case writes would land in-repo
+    while reads looked at the fixed root, silently recreating the
+    staleness/duplication bug class Bug #1529 exists to close. The two sides
+    must make the SAME choice, and failing loudly is the only safe one: no
+    caller can act on data written somewhere nothing will ever read.
+    """
     # Not a golden repo layout: the parent is not "golden-repos" and there is
     # no .versioned/<alias>/v_* chain, so coordinates cannot be resolved.
     codebase_dir = tmp_path / "not-a-golden-repo" / "myrepo"
     codebase_dir.mkdir(parents=True)
 
-    with caplog.at_level(logging.WARNING):
-        resolved = resolve_temporal_index_dir(codebase_dir, env=SERVER_CONTEXT_ENV)
-
-    # Behavior is unchanged -- still the in-repo path. Only the silence is fixed.
-    assert resolved == in_repo_temporal_index_dir(codebase_dir)
-    assert any(record.levelno >= logging.WARNING for record in caplog.records), (
-        "server context was detected but the golden temporal root could not "
-        "be derived, and nothing was logged"
-    )
+    with pytest.raises(ValueError):
+        resolve_temporal_index_dir(codebase_dir, env=SERVER_CONTEXT_ENV)
 
 
 def test_standalone_cli_stays_silent(tmp_path: Path, caplog) -> None:

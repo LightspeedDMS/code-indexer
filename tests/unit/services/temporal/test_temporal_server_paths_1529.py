@@ -28,6 +28,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from code_indexer.services.temporal.temporal_server_paths import (
     CIDX_SERVER_REFRESH_CONTEXT_ENV,
     SERVER_TEMPORAL_ROOT_DIR_NAME,
@@ -205,13 +207,20 @@ def test_seam_is_in_repo_for_standalone_cli(tmp_path: Path, monkeypatch) -> None
     )
 
 
-def test_seam_is_in_repo_for_a_non_golden_repo_even_in_server_context(
+def test_seam_refuses_a_non_golden_repo_in_server_context(
     tmp_path: Path, monkeypatch
 ) -> None:
+    """Server context + unrecognized layout FAILS (round-4 review, MEDIUM).
+
+    This previously asserted the in-repo fallback. That fallback made the
+    write side fail OPEN where the read side fails CLOSED, so writes could
+    land in-repo while reads consulted the fixed root -- the staleness bug
+    class Bug #1529 closes. The no-server-marker test above is the control:
+    without the marker the in-repo path is still returned, unchanged.
+    """
     monkeypatch.setenv(CIDX_SERVER_REFRESH_CONTEXT_ENV, "1")
     codebase_dir = tmp_path / "plain" / "repo"
     codebase_dir.mkdir(parents=True)
 
-    assert resolve_temporal_index_dir(codebase_dir) == (
-        codebase_dir / ".code-indexer" / "index"
-    )
+    with pytest.raises(ValueError):
+        resolve_temporal_index_dir(codebase_dir)

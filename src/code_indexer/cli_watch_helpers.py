@@ -19,13 +19,17 @@ console = Console()
 
 def _any_temporal_collection_exists(index_base: Path, project_root: Path) -> bool:
     """Return True if any temporal collection directory exists under
-    index_base, OR (GitHub Issue #1482 extension) temporal data has
-    relocated to the golden-owned sister location (Story #1457 AC1) for
-    the ONE genuine standalone case where project_root structurally IS a
-    golden repo's own clone. An ordinary standalone repo (the common
-    case) has no such structure -- detect_golden_repo_sister_root()
-    returns None and this falls back to the pre-existing local-scan-only
-    result, unchanged.
+    index_base, OR (GitHub Issue #1482 extension) this repo's temporal data
+    lives at the golden-owned FIXED root outside the clone -- the ONE genuine
+    standalone case where project_root structurally IS a golden repo's own
+    clone. An ordinary standalone repo (the common case) has no such
+    structure: resolve_golden_repo_coordinates() returns None and this falls
+    back to the pre-existing local-scan-only result, unchanged.
+
+    Bug #1529 note: the "sister location" this originally described, and the
+    sister-root detection module it called, are both retired. The fixed root
+    (`{golden_repos_dir}/.temporal/{alias}/`) is the only non-local location
+    consulted today.
     """
     from .services.temporal.temporal_collection_naming import is_temporal_collection
 
@@ -54,7 +58,7 @@ def _any_temporal_collection_exists(index_base: Path, project_root: Path) -> boo
         return status.has_data
     except Exception:
         logger.warning(
-            "_any_temporal_collection_exists: sister-relocated temporal "
+            "_any_temporal_collection_exists: fixed-root temporal "
             "detection failed for %s (isolated, non-fatal); using "
             "local-scan-only result",
             project_root,

@@ -20,7 +20,7 @@ appended again for that repo.
 Fix: when the in-repo scan misses, `_index_source` additionally consults
 `get_temporal_repo_status()` (Story #1457/#1459's existing resolver-based
 sister/in-repo union primitive, already reused by this file's Bug #1461
-salvage item #1 fix, `_sister_temporal_data_exists`) to find the best
+salvage item #1 fix, `_fixed_root_temporal_data_exists`) to find the best
 resolved shard, then reads that shard's `temporal_progress.json` and uses
 `len(completed_commits)` as the SAME "conservative upper bound" fallback
 semantics the legacy `total_commits` field provided. Fails open (returns

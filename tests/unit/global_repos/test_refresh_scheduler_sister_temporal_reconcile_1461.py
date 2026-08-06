@@ -22,7 +22,7 @@ relocation feature.
 Fix: `_detect_existing_indexes` gained an optional `repo_alias` parameter
 (default `None`, preserving byte-identical behavior for every existing
 positional-only caller). When provided and the in-repo scan alone reports
-absent, a new `_sister_temporal_data_exists()` helper additionally consults
+absent, a new `_fixed_root_temporal_data_exists()` helper additionally consults
 `get_temporal_repo_status()` (Story #1457/#1459's existing resolver-based
 union primitive -- sister pointer OR in-repo, real-data-presence only) and
 ORs its `.has_data` result in. This preserves Bug #1390's real-data-presence

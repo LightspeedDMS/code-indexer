@@ -62,6 +62,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from pathlib import Path
 from typing import Mapping, Optional, Tuple, Union
 
@@ -155,15 +156,27 @@ def resolve_golden_repo_coordinates(
     return None
 
 
-#: Path components that are never a legitimate repo alias. The empty string is
-#: included because ``normalize_repo_alias`` can PRODUCE it (alias == "-global").
-_UNSAFE_ALIAS_COMPONENTS = frozenset({"", ".", ".."})
-
-#: Separator characters rejected in an alias. ``\\`` is rejected even though it
-#: is a legal POSIX filename character: allowing it would make one alias denote
-#: a single directory here and a nested path on any non-POSIX consumer -- the
-#: same "two locations for one namespace" divergence this module exists to end.
-_ALIAS_SEPARATOR_CHARS = ("/", "\\", os.sep, os.altsep)
+#: The ONLY shape a temporal-root alias may take. An ALLOWLIST, deliberately:
+#: a blacklist of separators still admitted whitespace-only (``"  "``) and
+#: punctuation (``"a?b"``) aliases, and this module claims to be the single
+#: authority on temporal path safety, so it must define what is legal rather
+#: than chase what is not.
+#:
+#: Deliberately the SAME shape ``web/routes.py``'s established
+#: ``_SAFE_ALIAS_RE`` enforces, rather than a third divergent alias rule. Note
+#: the alias rules in this codebase are NOT uniform: ``models/repos.py``'s
+#: ``validate_alias`` allows only alphanumerics/``-``/``_``, while
+#: ``web/routes.py`` and ``cidx admin repos``' CLI validator BOTH also allow
+#: ``.``. Adopting the strictest of the three here would reject an alias
+#: those two doors accept as legitimate (e.g. ``my-repo_2024.v1``), so this
+#: matches the permissive-but-safe one.
+#:
+#: Requiring an alphanumeric FIRST character is what does the security work:
+#: it rejects ``.``, ``..``, ``""`` (which ``normalize_repo_alias`` can
+#: PRODUCE, for alias == "-global"), leading-dot hidden names, and -- with
+#: the restricted body class -- every separator (``/``, ``\\``, ``os.sep``,
+#: ``os.altsep``) and all whitespace.
+_SAFE_ALIAS_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
 
 def _validate_alias_path_component(bare_alias: str, repo_alias: str) -> None:
@@ -176,17 +189,12 @@ def _validate_alias_path_component(bare_alias: str, repo_alias: str) -> None:
     an alias would map two distinct aliases onto one directory, which is a
     data-mixing bug rather than a fix.
     """
-    if bare_alias in _UNSAFE_ALIAS_COMPONENTS:
+    if not _SAFE_ALIAS_PATTERN.match(bare_alias):
         raise ValueError(
             f"server_temporal_index_root: repo_alias {repo_alias!r} is not a "
-            f"usable directory name (normalizes to {bare_alias!r})"
+            f"usable single path component (normalizes to {bare_alias!r}; "
+            "only letters, digits, '-' and '_' are allowed)"
         )
-    for separator in _ALIAS_SEPARATOR_CHARS:
-        if separator and separator in bare_alias:
-            raise ValueError(
-                f"server_temporal_index_root: repo_alias {repo_alias!r} must be "
-                f"a single path component, but contains {separator!r}"
-            )
 
 
 def server_temporal_index_root(
@@ -246,31 +254,49 @@ def resolve_temporal_index_dir(
     """THE seam: where this process must read/write temporal data.
 
     Server context AND a structurally-recognized golden repo clone -> the
-    fixed sister root outside the repo tree. Anything else (standalone CLI,
-    a user's own repo, an unrecognized layout) -> the ordinary in-repo path,
-    byte-identical to pre-Bug #1529 behavior.
+    fixed root outside the repo tree. NO server context (standalone CLI, a
+    user's own repo) -> the ordinary in-repo path, byte-identical to
+    pre-Bug #1529 behavior.
+
+    Server context WITHOUT a recognized layout is neither: it RAISES. See the
+    comment at the raise for why falling back there is unsafe.
 
     Both the write child and any read-side caller that starts from a
     codebase_dir MUST funnel through this one function, so the two can never
     disagree about the location.
+
+    Raises:
+        ValueError: in server context, when codebase_dir is not a
+            structurally recognized golden repo clone.
     """
     if is_server_refresh_context(env):
-        sister_root = resolve_server_temporal_index_root_for_codebase(codebase_dir)
-        if sister_root is not None:
-            return sister_root
-        # Bug #1529 finding #8: in SERVER context this combination is an
-        # anomaly, not a normal case -- the server side expects the fixed
-        # root, so falling through means writing/reading somewhere it will not
-        # look. Behavior is deliberately unchanged (still the in-repo path);
-        # only the silence is fixed, so the mismatch is discoverable instead
-        # of invisible. Never warned outside server context: that is the
-        # ordinary standalone CLI path and would be noise on every run.
-        logger.warning(
-            "temporal: server context is active but %s is not a recognized "
-            "golden repo layout, so the fixed temporal root could not be "
-            "derived; falling back to the in-repo location, which the server "
-            "read path does not consult",
-            codebase_dir,
+        server_root = resolve_server_temporal_index_root_for_codebase(codebase_dir)
+        if server_root is not None:
+            return server_root
+        # Bug #1529 round-4 review (MEDIUM): this used to log a WARNING and
+        # fall through to the in-repo path. That made the WRITE side fail
+        # OPEN on precisely the failure the READ side
+        # (SemanticQueryManager._resolve_temporal_index_dir) fails CLOSED on
+        # -- so writes would land in-repo while reads consulted the fixed
+        # root, silently recreating the staleness/duplication bug class this
+        # whole fix exists to close. Both sides must make the SAME choice,
+        # and only failing loudly is safe: data written where nothing will
+        # ever read it is worse than a failed refresh.
+        #
+        # Reachability, checked rather than assumed: the server provisions
+        # golden clones ONLY at `{golden_repos_dir}/<alias>` and
+        # `{golden_repos_dir}/.versioned/<alias>/v_*`, both of which
+        # resolve_golden_repo_coordinates recognizes. `_legacy.py`'s
+        # `golden-repos/repos/<alias>` probe (and the same shape in `cidx
+        # global activate`) is a defensive read-side guess at a layout NO
+        # code in this repo creates -- so no live provisioning path reaches
+        # this raise. It guards a genuine anomaly, not a normal topology.
+        raise ValueError(
+            "temporal: server context is active but "
+            f"{codebase_dir} is not a recognized golden repo layout, so the "
+            "fixed temporal root could not be derived. Refusing to fall back "
+            "to the in-repo location, which the server read path never "
+            "consults -- writing there would silently diverge from reads."
         )
     return in_repo_temporal_index_dir(codebase_dir)
 
