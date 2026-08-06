@@ -263,8 +263,13 @@ _IndexFileFingerprint = Tuple[int, int, int, int]
 #: Bug #1538: minimum interval between potentially-blocking freshness stats
 #: for the SAME cache key.
 #:
-#: This bounds how often the CHECK runs -- it is NOT a tolerance for serving
-#: stale data, and it is not a TTL. The golden-repos mount is ``hard`` NFSv3,
+#: This bounds how often the CHECK runs. Its PURPOSE is not to define an
+#: acceptable staleness window, but it does have that as a side effect: after a
+#: successful check, a change landing within this interval is served stale
+#: until the next check is due. That window is bounded and small, unlike the
+#: indefinite staleness Bug #1538 reported. It is not a TTL -- entry lifetime
+#: is still governed by ttl_minutes, independently of this.
+#: The golden-repos mount is ``hard`` NFSv3,
 #: where an outage makes ``os.stat()`` block in uninterruptible kernel retry;
 #: without a rate limit, every query for a key would enter that blocking call.
 #: Combined with the per-key in-flight guard (``_freshness_checking``), at most
@@ -329,7 +334,10 @@ class HNSWIndexCacheEntry:
     # EVO-64244 Facet 2 / Bug #1538: identity fingerprint of hnsw_index.bin,
     # captured BEFORE the load that produced this entry (see get_or_load).
     # None when the index_file path was not supplied, or when it could not be
-    # stat'd, which disables the freshness check for this entry.
+    # stat'd at load time. None does NOT disable checking: once the file
+    # becomes stat-able again, _apply_freshness_verdict evicts this entry so
+    # the reload can stamp a real fingerprint (an entry that kept a None
+    # fingerprint could never be verified for as long as it lived).
     index_file_fingerprint: Optional[_IndexFileFingerprint] = None
     # Bug #1538: monotonic timestamp of the last COMPLETED freshness check.
     # None means "never checked since this entry was loaded", which always
@@ -733,15 +741,21 @@ class HNSWIndexCache:
         """
         try:
             current_fingerprint = _stat_index_fingerprint(index_file)
+            # The verdict runs INSIDE the try on purpose: it is what records
+            # freshness_checked_at, so releasing the claim first would open a
+            # window where a second thread sees neither an in-flight claim nor
+            # a recorded timestamp, and starts another blocking stat -- the
+            # rate limit would not be enforced across the handoff. No deadlock
+            # risk: no lock is held here, and the verdict takes and releases
+            # _cache_lock on its own.
+            return self._apply_freshness_verdict(
+                repo_path, index_file, entry, current_fingerprint
+            )
         finally:
             # Release the claim on EVERY path, including an unexpected raise,
             # so a failure can never wedge this key's checks permanently.
             with self._cache_lock:
                 self._freshness_checking.discard(repo_path)
-
-        return self._apply_freshness_verdict(
-            repo_path, index_file, entry, current_fingerprint
-        )
 
     def _apply_freshness_verdict(
         self,

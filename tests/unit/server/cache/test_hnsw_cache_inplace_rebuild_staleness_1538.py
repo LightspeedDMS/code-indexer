@@ -52,8 +52,11 @@ under this project's mypy configuration.
 
 from __future__ import annotations
 
+import ast
+import inspect
 import logging
 import os
+import textwrap
 import threading
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -365,6 +368,60 @@ def test_freshness_check_does_not_hold_the_cache_lock(
         "shared cache lock, so one hung NFS call stalls every cache consumer "
         "in the worker (Bug #1538)"
     )
+
+
+def test_in_flight_marker_is_released_only_after_the_verdict() -> None:
+    """The per-key claim must outlive the verdict that records the timestamp.
+
+    ``_verify_entry_freshness`` claims the key in ``_freshness_checking``,
+    stats, then calls ``_apply_freshness_verdict`` -- and only that verdict
+    records ``freshness_checked_at``. If the claim is discarded BEFORE the
+    verdict runs, a second thread arriving in that window sees no in-flight
+    marker AND a still-unset timestamp, so it starts another potentially
+    blocking stat: the rate limit is not actually enforced across the handoff.
+
+    This is asserted structurally rather than behaviorally on purpose. The gap
+    is a few statements wide inside one thread with no yield point to hook, so
+    any timing-based reproduction would be inherently flaky. Parsing the real
+    source (the same ``ast`` + ``inspect.getsource`` guard technique used
+    elsewhere in this repo) pins the ordering exactly and cannot go stale.
+    """
+    source = textwrap.dedent(inspect.getsource(HNSWIndexCache._verify_entry_freshness))
+    func_node = ast.parse(source).body[0]
+    assert isinstance(func_node, ast.FunctionDef)
+
+    try_nodes = [n for n in func_node.body if isinstance(n, ast.Try)]
+    assert len(try_nodes) == 1, "expected exactly one try/finally in this method"
+    try_node = try_nodes[0]
+
+    def _calls_verdict(nodes: List[ast.stmt]) -> bool:
+        return any(
+            isinstance(inner, ast.Attribute)
+            and inner.attr == "_apply_freshness_verdict"
+            for node in nodes
+            for inner in ast.walk(node)
+        )
+
+    def _discards_marker(nodes: List[ast.stmt]) -> bool:
+        return any(
+            isinstance(inner, ast.Attribute) and inner.attr == "discard"
+            for node in nodes
+            for inner in ast.walk(node)
+        )
+
+    assert _discards_marker(try_node.finalbody), (
+        "the in-flight claim must still be released in a finally block, so an "
+        "unexpected raise can never wedge this key's checks permanently"
+    )
+    assert _calls_verdict(try_node.body), (
+        "_apply_freshness_verdict is called AFTER the finally that discards the "
+        "in-flight marker -- in that window a second thread sees no claim and no "
+        "recorded timestamp, so it can start another blocking stat and the "
+        "per-key rate limit is not enforced across the handoff (Bug #1538)"
+    )
+    assert not _calls_verdict(
+        [node for node in func_node.body if not isinstance(node, ast.Try)]
+    ), "the verdict must run inside the try, not after the claim is released"
 
 
 def test_unverifiable_freshness_is_bounded(
