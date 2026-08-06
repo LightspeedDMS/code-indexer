@@ -33,6 +33,7 @@ from pathlib import Path
 from typing import Dict, List, Literal, Optional, Set, Tuple
 
 from code_indexer.services.temporal.temporal_collection_naming import (
+    LEGACY_TEMPORAL_COLLECTION,
     parse_physical_temporal_name,
 )
 from code_indexer.services.temporal.temporal_row_existence import (
@@ -92,15 +93,29 @@ _NO_TEMPORAL_DATA = TemporalRepoStatus(
 )
 
 
+#: Reserved namespace key for the BARE pre-Story-#1457 monolith directory
+#: (``code-indexer-temporal``, no embedder/quarter suffix). An empty slug is
+#: unreachable for a real shard -- ``TEMPORAL_COLLECTION_PREFIX`` carries a
+#: trailing hyphen, so any parsed name has at least one slug character -- so
+#: this can never collide with a genuine (embedder_slug, quarter) namespace.
+_BARE_MONOLITH_KEY: Tuple[str, Optional[str]] = ("", None)
+
+
 def _scan_root(
     root: Path, location: TemporalDataLocation
 ) -> Dict[Tuple[str, Optional[str]], Tuple[Path, TemporalDataLocation]]:
-    """Map every parseable temporal shard directly under ``root``.
+    """Map every temporal shard directly under ``root``.
 
     Keyed by (embedder_slug, quarter) so the caller can prefer one root over
-    the other for the same namespace. Never raises: a missing/unreadable root
-    contributes nothing (this is an inspection helper feeding status surfaces,
-    which must stay resilient).
+    the other for the same namespace; the bare legacy monolith takes the
+    reserved ``_BARE_MONOLITH_KEY`` (Bug #1529 item 5 -- the parser cannot
+    see that name, so a parser-only scan missed a real row-bearing monolith
+    entirely). A ROWLESS bare directory still contributes nothing: it is the
+    Bug #1405 shared bookkeeping directory, and row presence remains the
+    discriminator downstream, exactly as for every other shard.
+
+    Never raises: a missing/unreadable root contributes nothing (this is an
+    inspection helper feeding status surfaces, which must stay resilient).
     """
     found: Dict[Tuple[str, Optional[str]], Tuple[Path, TemporalDataLocation]] = {}
     if not root.is_dir():
@@ -120,10 +135,13 @@ def _scan_root(
         try:
             if not entry.is_dir():
                 continue
-        except OSError:
+        except OSError as exc:
+            logger.debug("temporal status: could not stat %s (%s)", entry, exc)
             continue
         parsed = parse_physical_temporal_name(entry.name)
         if parsed is None:
+            if entry.name == LEGACY_TEMPORAL_COLLECTION:
+                found[_BARE_MONOLITH_KEY] = (entry, location)
             continue
         found[parsed] = (entry, location)
     return found
