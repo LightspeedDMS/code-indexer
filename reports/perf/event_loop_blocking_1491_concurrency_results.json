@@ -1,78 +1,78 @@
 {
   "ac1_mcp_auth_bcrypt": {
-    "after_real_dependency_max_probe_latency_s": 0.006705804000375792,
+    "after_real_dependency_max_probe_latency_s": 0.00538477097870782,
     "after_real_dependency_probe_latencies_s": [
-      0.006004030990879983,
-      0.006411954003851861,
-      0.006705804000375792
+      0.004199820978101343,
+      0.004973591974703595,
+      0.00538477097870782
     ],
-    "after_real_dependency_total_wall_s": 0.21458057602285407,
+    "after_real_dependency_total_wall_s": 0.25128728899289854,
     "bcrypt_rounds": 12,
-    "before_on_loop_max_probe_latency_s": 0.20693213198683225,
+    "before_on_loop_max_probe_latency_s": 0.2328188749961555,
     "before_on_loop_probe_latencies_s": [
-      0.20635424999636598,
-      0.20665590598946437,
-      0.20693213198683225
+      0.23205909098032862,
+      0.2324299699976109,
+      0.2328188749961555
     ],
-    "before_on_loop_total_wall_s": 0.2074217830086127,
+    "before_on_loop_total_wall_s": 0.23342171500553377,
     "probe_budget_s": 0.25
   },
   "ac2_regex_search_dispatch": {
     "ac2_min_baseline_stall_s": 0.15,
     "ac2_probe_budget_s": 0.1,
-    "after_sync_dispatch_max_probe_latency_s": 0.004199460003292188,
+    "after_sync_dispatch_max_probe_latency_s": 0.003579987009288743,
     "after_sync_dispatch_probe_latencies_s": [
-      0.00307940601487644,
-      0.0038923940155655146,
-      0.004199460003292188
+      0.0024142650072462857,
+      0.002975392999360338,
+      0.003579987009288743
     ],
-    "after_sync_dispatch_total_wall_s": 1.2336824699887075,
-    "before_async_dispatch_max_probe_latency_s": 0.5313094349985477,
+    "after_sync_dispatch_total_wall_s": 1.4555157430004328,
+    "before_async_dispatch_max_probe_latency_s": 0.49647728199488483,
     "before_async_dispatch_probe_latencies_s": [
-      0.5305217769928277,
-      0.530999262991827,
-      0.5313094349985477
+      0.49481389397988096,
+      0.4957352420024108,
+      0.49647728199488483
     ],
-    "before_async_dispatch_total_wall_s": 1.2621391669963486,
+    "before_async_dispatch_total_wall_s": 1.3128791310009547,
     "corpus_files": 7500,
     "matches": 7500,
     "observed_prefilter_candidates": 7500
   },
   "ac3_branch_discovery": {
-    "measured_max_probe_latency_s": 0.008072104974417016,
+    "measured_max_probe_latency_s": 0.007664114004001021,
     "measured_probe_latencies_s": [
-      0.0069688639778178185,
-      0.007549590984126553,
-      0.008072104974417016
+      0.006519332004245371,
+      0.007300438010133803,
+      0.007664114004001021
     ],
-    "measured_total_wall_s": 0.6037233519891743,
+    "measured_total_wall_s": 0.603161500999704,
     "per_repo_block_s": 0.6,
     "probe_budget_s": 0.25,
     "repo_count": 4,
     "sequential_on_loop_expectation_s": 2.4
   },
   "ac3_real_blocked_remote_loop_starvation": {
-    "max_starvation_gap_s": 0.0023732000030577127,
+    "max_starvation_gap_s": 0.002315779979107896,
     "observation_window_s": 1.5,
     "probe_budget_s": 0.25,
     "probe_count": 15
   },
   "ac4_diagnostics_background_task": {
     "background_block_s": 0.6,
-    "measured_max_probe_latency_s": 0.0070363470003940165,
+    "measured_max_probe_latency_s": 0.006291891011642292,
     "measured_probe_latencies_s": [
-      0.005934248008998111,
-      0.006604858994251117,
-      0.0070363470003940165
+      0.004571633005980402,
+      0.005388699006289244,
+      0.006291891011642292
     ],
     "probe_budget_s": 0.25
   },
   "ac5_research_assistant_poll": {
-    "measured_max_probe_latency_s": 0.006721383979311213,
+    "measured_max_probe_latency_s": 0.00588221600628458,
     "measured_probe_latencies_s": [
-      0.005350994993932545,
-      0.006116800999734551,
-      0.006721383979311213
+      0.005127932003233582,
+      0.005539561010664329,
+      0.00588221600628458
     ],
     "per_boundary_block_s": 0.3,
     "probe_budget_s": 0.25
