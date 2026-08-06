@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [12.1.0] - 2026-08-06
+
+### Fixed
+
+- Bug #1529: a previous fix (#1528) retired the write side of Story #1457's temporal sister-location relocation mechanism but left the read side live, producing a real duplication/staleness hazard -- an activation's CoW clone could physically duplicate a golden repo's temporal quarter-shard tree, and a repo with pre-existing sister-location data could silently diverge from newly-written in-repo data. This recovery retires Story #1457's entire versioned-snapshot/alias-pointer/resolver architecture and replaces it with temporal data living at a stable, fixed path outside the golden repo's own directory tree, derived deterministically from `(golden_repo_alias, embedder_slug, quarter)` -- no versioning, since temporal data is append-only and monotonic by design. All read/write seams (REST, MCP, multi-repo search) resolve through one shared path-derivation function and fail loud rather than silently falling back to the wrong location when the golden lineage is known but resolution fails. Also fixes: an admin temporal reindex operation that was silently deleting real relocated data and forcing a full git-history re-embed (its existence check looked at the wrong root); a symlink-escape gap in alias path sanitization; a legacy-JSON write escape hatch for temporal collections; and a bare-name legacy monolith directory that was invisible to status/reindex-decision logic due to a prefix-matching quirk.
+- HNSW/metadata index publication now uses durable temp-write+fsync+atomic-rename+directory-fsync for the actual production publishers (`BackgroundIndexRebuilder.atomic_swap`, `HNSWIndexManager.save_incremental_update`) -- an earlier pass in this same recovery had hardened this pattern only on a dead code path with zero production callers.
+
+### Testing
+
+- Bug #1529: real filesystem/SQLite concurrent-reader-during-refresh test proving no torn or corrupt read at the fixed temporal path, with a self-consistency oracle that can detect a mis-resolved HNSW label pointing at the wrong point_id (not just membership in the set of ever-written ids).
+
 ## [12.0.0] - 2026-08-06
 
 ### Fixed
