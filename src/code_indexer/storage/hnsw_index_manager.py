@@ -16,6 +16,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 
 from code_indexer.storage.shared.chunk_layout import ChunkLayout
 from code_indexer.utils.file_locking import (
+    fsync_directory,
     nfs_safe_flock,
     nfs_safe_funlock,
     nfs_safe_fsync,
@@ -130,17 +131,6 @@ class HNSWRebuildAllInvalidError(RuntimeError):
     today's lenient bare-return-0 behavior unchanged for the whole
     non-temporal fleet.
     """
-
-
-def _fsync_directory(path: Path) -> None:
-    """Fsync a directory so entries created/replaced within it survive a
-    crash/power-loss (precedent: id_index_manager.py's save_index()).
-    """
-    dir_fd = os.open(str(path), os.O_RDONLY)
-    try:
-        nfs_safe_fsync(dir_fd)
-    finally:
-        os.close(dir_fd)
 
 
 def count_orphan_errors(integrity_result: Dict[str, Any]) -> int:
@@ -508,7 +498,7 @@ class HNSWIndexManager:
             with open(tmp_hnsw_path, "rb") as saved_index_f:
                 nfs_safe_fsync(saved_index_f.fileno())
             os.replace(tmp_hnsw_path, str(index_file))
-            _fsync_directory(collection_path)
+            fsync_directory(collection_path)
         except Exception:
             try:
                 os.unlink(tmp_hnsw_path)
@@ -1130,7 +1120,7 @@ class HNSWIndexManager:
                     cleanup_err,
                 )
             raise
-        _fsync_directory(collection_path)
+        fsync_directory(collection_path)
 
     def _write_stale_flag_durably(self, collection_path: Path, is_stale: bool) -> None:
         """Shared durable writer for mark_stale()/clear_stale() (Bug #1407
@@ -1695,7 +1685,15 @@ class HNSWIndexManager:
         os.close(tmp_hnsw_fd)  # hnswlib opens by path, not fd
         try:
             self._save_hnsw_index(index, tmp_hnsw_path)
+            # Bug #1529: atomic was not enough here either. This is the
+            # incremental publisher a real refresh finalizes through, and a
+            # fixed temporal path is rewritten IN PLACE -- flush the contents
+            # BEFORE publishing them, and the directory AFTER the rename so
+            # the rename itself survives power-loss.
+            with open(tmp_hnsw_path, "rb") as saved_index_f:
+                nfs_safe_fsync(saved_index_f.fileno())
             os.replace(tmp_hnsw_path, str(index_file))
+            fsync_directory(collection_path)
         except Exception:
             try:
                 os.unlink(tmp_hnsw_path)

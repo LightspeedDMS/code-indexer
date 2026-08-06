@@ -154,15 +154,30 @@ class TestBackgroundIndexRebuilderAtomicSwap:
         assert not temp_file.exists()
 
     def test_atomic_swap_is_fast(self, tmp_path: Path):
-        """Test that atomic swap completes in <2ms."""
+        """Test that publishing a 10MB index stays well bounded.
+
+        Bug #1529 made the swap DURABLE, not merely atomic: the source is
+        fsynced before the rename and the directory after it. Flushing 10MB
+        of freshly written pages measured ~100ms locally, so the original
+        rename-only "<2ms" budget encoded a premise that no longer holds.
+
+        Relaxing it is safe because publish latency is not on the query
+        path: `rebuild_with_lock` already holds the rebuild lock across the
+        ENTIRE rebuild (seconds to minutes), and readers never take that
+        lock -- they read the target file, which the rename swaps
+        instantaneously either way. The bound below is a regression guard
+        against something pathological (e.g. a per-byte copy creeping in),
+        not a latency SLA.
+        """
         collection_path = tmp_path / "collection"
         collection_path.mkdir()
 
         rebuilder = BackgroundIndexRebuilder(collection_path)
 
         # Create temp file with realistic size (~10MB)
+        payload = b"x" * (10 * 1024 * 1024)
         temp_file = collection_path / "test_index.bin.tmp"
-        temp_file.write_bytes(b"x" * (10 * 1024 * 1024))
+        temp_file.write_bytes(payload)
 
         target_file = collection_path / "test_index.bin"
 
@@ -171,8 +186,13 @@ class TestBackgroundIndexRebuilderAtomicSwap:
         rebuilder.atomic_swap(temp_file, target_file)
         elapsed_ms = (time.perf_counter() - start_time) * 1000
 
-        # Verify <2ms requirement
-        assert elapsed_ms < 2.0, f"Atomic swap took {elapsed_ms:.2f}ms, expected <2ms"
+        assert elapsed_ms < 2000.0, (
+            f"Durable swap took {elapsed_ms:.2f}ms, expected well under 2000ms"
+        )
+        # The bound is meaningless unless the swap actually published.
+        assert target_file.read_bytes() == payload
+        # A rename moves; it must not leave the source behind.
+        assert not temp_file.exists()
 
 
 class TestBackgroundIndexRebuilderRebuildWithLock:

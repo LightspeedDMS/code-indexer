@@ -713,21 +713,32 @@ class TestHNSWIndexManagerDurableStaleLifecycle:
     """
 
     def test_mark_stale_fsyncs_metadata_file_and_directory(self, tmp_path: Path):
-        """mark_stale must call nfs_safe_fsync on both the tmp metadata file
-        descriptor (before replace) and the collection directory descriptor
-        (after replace) so the flag write is crash-durable."""
+        """mark_stale must flush BOTH the tmp metadata file descriptor
+        (before replace) and the collection directory (after replace) so the
+        flag write is crash-durable.
+
+        Bug #1529: the directory flush now resolves through the shared
+        `fsync_directory` primitive, so the two flushes are asserted
+        separately -- a call count on one symbol can no longer see both, and
+        naming each one is stricter than `count >= 2` anyway.
+        """
         manager = HNSWIndexManager(vector_dim=32)
         vectors = np.random.randn(10, 32).astype(np.float32)
         ids = [f"vec_{i}" for i in range(10)]
         manager.build_index(tmp_path, vectors, ids)
 
-        with patch(
-            "code_indexer.storage.hnsw_index_manager.nfs_safe_fsync"
-        ) as mock_fsync:
+        with (
+            patch(
+                "code_indexer.storage.hnsw_index_manager.nfs_safe_fsync"
+            ) as mock_fsync,
+            patch(
+                "code_indexer.storage.hnsw_index_manager.fsync_directory"
+            ) as mock_fsync_dir,
+        ):
             manager.mark_stale(tmp_path)
 
-        # At least two fsync calls: metadata content + directory.
-        assert mock_fsync.call_count >= 2
+        assert mock_fsync.called, "the metadata content was not flushed"
+        assert mock_fsync_dir.called, "the collection directory was not flushed"
 
     def test_mark_stale_is_still_correct_after_durability_change(self, tmp_path: Path):
         """The durability change must not alter mark_stale's observable
@@ -770,12 +781,20 @@ class TestHNSWIndexManagerClearStale:
         manager.build_index(tmp_path, vectors, ids)
         manager.mark_stale(tmp_path)
 
-        with patch(
-            "code_indexer.storage.hnsw_index_manager.nfs_safe_fsync"
-        ) as mock_fsync:
+        with (
+            patch(
+                "code_indexer.storage.hnsw_index_manager.nfs_safe_fsync"
+            ) as mock_fsync,
+            patch(
+                "code_indexer.storage.hnsw_index_manager.fsync_directory"
+            ) as mock_fsync_dir,
+        ):
             manager.clear_stale(tmp_path)
 
-        assert mock_fsync.call_count >= 2
+        # Bug #1529: the directory flush resolves through the shared
+        # fsync_directory primitive, so each flush is asserted by name.
+        assert mock_fsync.called, "the metadata content was not flushed"
+        assert mock_fsync_dir.called, "the collection directory was not flushed"
 
     def test_clear_stale_noop_when_metadata_missing(self, tmp_path: Path):
         """Mirrors mark_stale's guard: never fabricate {"is_stale": False}

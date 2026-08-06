@@ -30,12 +30,11 @@ become a permanent duplicate HNSW entry.
 """
 
 import logging
-import os
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Set
 
-from code_indexer.utils.file_locking import nfs_safe_fsync
+from code_indexer.utils.file_locking import fsync_directory
 
 from .models import CommitInfo
 from .temporal_collection_naming import get_shard_collection_name
@@ -52,15 +51,6 @@ class StrayDeleteFailedError(RuntimeError):
     surviving stray still on disk (rebuild_from_vectors has no per-point_id
     dedupe, so a stray would become a permanent duplicate HNSW entry).
     """
-
-
-def _fsync_directory(path: Path) -> None:
-    """Fsync a directory so entries removed within it survive a crash."""
-    dir_fd = os.open(str(path), os.O_RDONLY)
-    try:
-        nfs_safe_fsync(dir_fd)
-    finally:
-        os.close(dir_fd)
 
 
 def reconcile_shard(
@@ -162,7 +152,7 @@ def _reconcile_shard_legacy(
                     f"{json_path} in shard {shard_name}: {exc}"
                 ) from exc
         for touched_dir in touched_dirs:
-            _fsync_directory(touched_dir)
+            fsync_directory(touched_dir)
         logger.info(
             "Reconciliation: shard %s -- deleted %d stray point(s)",
             shard_name,
