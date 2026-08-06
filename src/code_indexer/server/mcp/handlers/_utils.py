@@ -323,6 +323,19 @@ def _get_query_tracker():
     return getattr(app_module.app.state, "query_tracker", None)
 
 
+def _get_activated_repo_manager():
+    """Get the DI-wired ActivatedRepoManager from app.state (Bug #1533).
+
+    Returns:
+        The server's own ActivatedRepoManager -- the one wired to the SHARED
+        (PostgreSQL, in cluster mode) metadata backend -- or None if startup
+        has not populated app.state yet. Callers must never substitute a
+        locally-constructed manager: that instance reads node-local metadata,
+        which on a cluster node is empty for repos activated elsewhere.
+    """
+    return getattr(app_module.app.state, "activated_repo_manager", None)
+
+
 def _get_app_refresh_scheduler():
     """Get RefreshScheduler from app.state via global_lifecycle_manager (Story #231).
 

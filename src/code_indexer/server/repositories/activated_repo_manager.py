@@ -254,6 +254,24 @@ class ActivatedRepoManager:
         instead of JSON files, enabling cross-node visibility.
         """
         self._pool = pool
+        self.logger.info(
+            "ActivatedRepoManager: using PostgreSQL connection pool (cluster mode)"
+        )
+
+    def uses_shared_metadata_store(self) -> bool:
+        """Whether activation metadata is read from/written to the SHARED
+        (PostgreSQL, cross-node) store rather than this node's own local
+        JSON files (Bug #1533).
+
+        False means every read reaches a NODE-LOCAL store. In a clustered
+        deployment that store is empty for repos activated on any other
+        node, and an empty read is indistinguishable from "this repo is not
+        activated" -- so callers whose correctness depends on seeing the
+        real, cluster-wide record (e.g. the temporal worker's golden-repo
+        lineage lookup) must treat False as "I cannot answer", never as a
+        negative answer.
+        """
+        return self._pool is not None
 
     def set_query_tracker(self, query_tracker: Any) -> None:
         """Wire the server's QueryTracker (Story #1458 AC13).
@@ -264,9 +282,6 @@ class ActivatedRepoManager:
         trashed clone's consolidated chunks.db is physically purged.
         """
         self._query_tracker = query_tracker
-        self.logger.info(
-            "ActivatedRepoManager: using PostgreSQL connection pool (cluster mode)"
-        )
 
     def set_shared_repos_dir(self, shared_dir: str) -> None:
         """Set NFS shared directory for activated repo clones in cluster mode."""
