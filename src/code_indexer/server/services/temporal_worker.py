@@ -30,7 +30,7 @@ import logging
 import os
 import time
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, NamedTuple, Optional
 
 from code_indexer.server.cache.payload_cache import PayloadCache
 from code_indexer.server.query.semantic_query_manager import (
@@ -60,30 +60,127 @@ def _resolve_golden_repo_alias(
     activated-repo distinction).
 
     An is_global repository_alias (ends with '-global') IS its own golden
-    alias. A regular activated repo's golden alias is looked up via
-    ActivatedRepoManager.get_repository. Fail-open: any lookup failure
-    (repo not found, backend error) returns None, preserving today's
-    clone-config behavior for that query.
+    alias, resolved without any lookup.
+
+    Bug #1529 finding #2: ABSENCE and FAILURE are NOT the same answer, and
+    ``get_repository`` already distinguishes them -- it returns None when
+    there is no activated-repo record, and raises only when metadata
+    loading/refresh genuinely fails. This function therefore returns None
+    ONLY for real absence, and lets a failure propagate. Swallowing the
+    exception into None was enough to reintroduce the entire hazard: None
+    produces an all-None temporal context, which sends the caller to
+    ``reconstruct_temporal_backend(repo_path, ...)`` -- the ACTIVATION'S own
+    CoW clone -- silently serving frozen-at-clone-time data. "I could not
+    determine the lineage" must never be reported as "there is no lineage".
+
+    Raises:
+        Whatever ``get_repository`` raises (e.g. ActivatedRepoError) when the
+        lookup genuinely fails.
     """
     if repository_alias.endswith("-global"):
         return repository_alias
-    try:
-        repo_info = activated_repo_manager.get_repository(
-            username, repository_alias, touch=False
-        )
-    except Exception:
-        logger.warning(
-            "temporal worker: failed to resolve golden_repo_alias for "
-            "activated repo '%s' (user=%s); using clone config as-is",
-            repository_alias,
-            username,
-            exc_info=True,
-        )
-        return None
+    repo_info = activated_repo_manager.get_repository(
+        username, repository_alias, touch=False
+    )
     if not repo_info:
         return None
     golden_alias = repo_info.get("golden_repo_alias")
     return golden_alias if isinstance(golden_alias, str) and golden_alias else None
+
+
+class _GoldenTemporalContext(NamedTuple):
+    """The golden-repo lineage this worker needs BEFORE it builds a backend.
+
+    Bug #1529: `temporal_index_dir` must be known at backend-construction
+    time, because that is the only point at which the store performing the
+    search can be rooted at the fixed, outside-the-repo temporal location.
+    """
+
+    alias: Optional[str]
+    activated_repo_manager: Optional[Any]
+    temporal_index_dir: Optional[Path]
+
+
+def _resolve_golden_temporal_context(
+    worker_input: TemporalWorkerInput, job_id: str
+) -> _GoldenTemporalContext:
+    """Resolve golden alias + the fixed temporal index dir.
+
+    An all-None context (caller keeps the legacy in-repo derivation) is
+    returned ONLY for GENUINE ABSENCE of golden lineage -- a composite repo,
+    or no activated-repo record.
+
+    Bug #1529 finding #2: NOTHING here is fail-open any more. Neither the
+    lineage LOOKUP nor the fixed-root DERIVATION swallows a failure; both
+    propagate and fail the job. An all-None context is exactly what sends the
+    caller on to `reconstruct_temporal_backend(repo_path, ...)` -- the
+    ACTIVATION'S own CoW clone -- silently serving the frozen-at-clone-time
+    duplicate this bug exists to eliminate, so it must never be produced by an
+    error. This seam is the LIVE MCP temporal front door (Story #1400), so a
+    silent local fallback here is the primary read path being wrong.
+
+    The discriminator deliberately is NOT `CIDX_SERVER_REFRESH_CONTEXT`: that
+    marker is injected only into the temporal CHILD SUBPROCESS and is absent
+    from this (server-side) process, so gating on it would be inert.
+
+    Raises:
+        ValueError: when the golden alias is known but its fixed temporal
+            root cannot be derived.
+        Exception: any failure from the lineage lookup itself (e.g.
+            ActivatedRepoError) propagates unchanged.
+    """
+    # Bug #1529 finding #2: NO fail-open wrapper here. A failure in any of
+    # these steps (import, data-dir derivation, manager construction, lineage
+    # lookup) is "I could not determine the lineage", NOT "there is no
+    # lineage" -- and returning an all-None context for it is precisely what
+    # sends the caller to the activation's own CoW clone.
+    from code_indexer.server.repositories.activated_repo_manager import (
+        ActivatedRepoManager,
+    )
+    from code_indexer.services.temporal.temporal_server_paths import (
+        server_temporal_index_root,
+    )
+
+    # Bug #1517: a bare, no-arg ActivatedRepoManager() resolves its OWN
+    # default data_dir purely from Path.home(), never consulting
+    # CIDX_SERVER_DATA_DIR -- the env var this codebase otherwise treats
+    # as the canonical way to locate the server's configured data
+    # directory for a standalone construction outside the normal DI chain
+    # (see ActivatedRepoIndexManager.__init__). On any real deployment
+    # where the server's data dir differs from the OS default, that
+    # mismatch made this worker's internally-constructed
+    # GoldenRepoManager look in the wrong metadata store, so
+    # get_actual_repo_path() raised GoldenRepoNotFoundError for a golden
+    # repo that genuinely exists elsewhere -- and would now ALSO resolve
+    # the wrong temporal location.
+    _env_server_dir = os.environ.get("CIDX_SERVER_DATA_DIR")
+    _worker_data_dir = (
+        str(Path(_env_server_dir) / "data")
+        if _env_server_dir
+        else str(Path.home() / ".cidx-server" / "data")
+    )
+    activated_repo_manager = ActivatedRepoManager(data_dir=_worker_data_dir)
+    golden_repo_alias = _resolve_golden_repo_alias(
+        worker_input.username,
+        worker_input.repository_alias,
+        activated_repo_manager,
+    )
+
+    if not golden_repo_alias:
+        return _GoldenTemporalContext(None, activated_repo_manager, None)
+
+    # Bug #1529 finding #2: deliberately OUTSIDE the fail-open try above. The
+    # alias is known, so the fixed root is the only correct location -- a
+    # failure here must fail the job, never silently degrade to the
+    # activation's own clone.
+    golden_repos_dir = (
+        Path(activated_repo_manager.activated_repos_dir).parent / "golden-repos"
+    )
+    return _GoldenTemporalContext(
+        golden_repo_alias,
+        activated_repo_manager,
+        server_temporal_index_root(golden_repos_dir, golden_repo_alias),
+    )
 
 
 def _build_ctx(worker_input: TemporalWorkerInput) -> Dict[str, Any]:
@@ -195,16 +292,29 @@ def run_temporal_worker(
     accepted (declared, not actively driven -- its PRESENCE alone routes
     this worker through BGM's hard-bound direct-call branch). query_tracker
     (Bug #1482) is a plain forwarded kwarg -- named explicitly, not BGM-
-    injected -- passed by execute_live_temporal_search's submit_job() call
-    so this worker can construct a resolution-scope-safe
-    TemporalShardResolver. Deliberately NOT part of TemporalWorkerInput: it
-    must never enter the dedup signature.
+    injected -- passed by execute_live_temporal_search's submit_job() call.
+    Deliberately NOT part of TemporalWorkerInput: it must never enter the
+    dedup signature.
+
+    query_tracker is CURRENTLY UNUSED (Bug #1529): its only consumer was the
+    TemporalShardResolver this worker used to construct, and that resolver is
+    retired -- a temporal shard's path is now fixed from first creation, so
+    there is no pointer swap to pin against. The parameter is retained only
+    because callers still pass it; it is slated for removal together with the
+    Story #1457 sister-location modules (see CLAUDE.md's Bug #1529 section,
+    "NOT YET DONE"). Do NOT reintroduce a resolver here to "use" it.
 
     Returns:
         {"result_ready": True} on success.
 
     Raises:
-        ValueError: worker_input or job_id is missing.
+        ValueError: worker_input or job_id is missing; or (Bug #1529 finding
+            #2) the golden alias is known but its fixed temporal root cannot
+            be derived -- job-fatal by design, never a silent fallback to the
+            activation's own clone.
+        ActivatedRepoError: (or whatever the lookup raises) the golden-repo
+            lineage lookup itself failed. Propagated deliberately: "I could
+            not determine the lineage" is NOT "there is no lineage".
         TemporalSnapshotPersistenceError: the FINAL snapshot write could not
             be verified by read-back -- job-fatal, BGM records the job
             FAILED with error_code TEMPORAL_SNAPSHOT_PERSISTENCE_FAILED.
@@ -217,8 +327,27 @@ def run_temporal_worker(
         raise ValueError("run_temporal_worker: job_id is required")
 
     ctx = _build_ctx(worker_input)
+
+    # Bug #1529: the golden repo's identity must be resolved BEFORE the
+    # backend is reconstructed. Temporal data lives at ONE fixed path derived
+    # from the golden alias, outside any repo's own cloned tree, so the store
+    # has to be rooted there at construction time -- rooting it at
+    # worker_input.repo_path (an ACTIVATION's CoW clone) is precisely the
+    # defect #1529 was filed for, and this worker is the LIVE MCP temporal
+    # front door (Story #1400 replaced _execute_temporal_query for that
+    # path), so leaving it in-repo would half-wire the primary read path.
+    # NOT fail-open (Bug #1529 finding #2): only GENUINE ABSENCE of golden
+    # lineage yields temporal_index_dir=None and the legacy in-repo
+    # derivation. Any failure -- lookup or fixed-root derivation -- propagates
+    # and fails the job rather than quietly reading the activation's clone.
+    _golden_alias_ctx = _resolve_golden_temporal_context(worker_input, job_id)
+    golden_repo_alias = _golden_alias_ctx.alias
+    _activated_repo_manager = _golden_alias_ctx.activated_repo_manager
+
     config, index_path, vector_store = reconstruct_temporal_backend(
-        Path(worker_input.repo_path), worker_input.repository_alias
+        Path(worker_input.repo_path),
+        worker_input.repository_alias,
+        temporal_index_dir=_golden_alias_ctx.temporal_index_dir,
     )
 
     # Story #1461 salvage item 4 (MCP-path analog of the REST fix in
@@ -227,103 +356,21 @@ def run_temporal_worker(
     # CoW clone's point-in-time config.json snapshot. Entirely fail-open:
     # any resolution failure leaves `config` (and thus behavior) unchanged.
     #
-    # Bug #1482: this try block ALSO constructs a TemporalShardResolver
-    # (mirroring semantic_query_manager.py's now-retired
-    # _execute_temporal_query wiring verbatim -- Story #1400 replaced that
-    # path with this live worker, which never got the equivalent wiring,
-    # so the live MCP temporal front door could only ever read the
-    # in-repo legacy location, empty once Story #1457's AC1 relocation
-    # trigger succeeds). Failure here is likewise entirely fail-open:
-    # resolver stays None and behavior is unchanged (legacy-only
-    # resolution, today's status quo).
-    resolver: Optional[Any] = None
-    try:
-        from code_indexer.server.repositories.activated_repo_manager import (
-            ActivatedRepoManager,
-        )
-
-        # Bug #1517: a bare, no-arg ActivatedRepoManager() resolves its
-        # OWN default data_dir purely from Path.home(), never consulting
-        # CIDX_SERVER_DATA_DIR -- the env var this codebase otherwise
-        # treats as the canonical way to locate the server's configured
-        # data directory for a standalone construction outside the normal
-        # DI chain (see ActivatedRepoIndexManager.__init__). On any real
-        # deployment where the server's data dir differs from the OS
-        # default, that mismatch made this worker's internally-
-        # constructed GoldenRepoManager look in the wrong metadata store,
-        # so get_actual_repo_path() raised GoldenRepoNotFoundError for a
-        # golden repo that genuinely exists elsewhere -- fail-open (caught
-        # below by load_golden_temporal_config), but permanently losing
-        # Story #1461's "use the golden repo's own current config for
-        # embedder selection" correctness fix and logging noise on every
-        # temporal query.
-        _env_server_dir = os.environ.get("CIDX_SERVER_DATA_DIR")
-        _worker_data_dir = (
-            str(Path(_env_server_dir) / "data")
-            if _env_server_dir
-            else str(Path.home() / ".cidx-server" / "data")
-        )
-        _activated_repo_manager = ActivatedRepoManager(data_dir=_worker_data_dir)
-        golden_repo_alias = _resolve_golden_repo_alias(
-            worker_input.username,
-            worker_input.repository_alias,
-            _activated_repo_manager,
-        )
-        if golden_repo_alias:
+    if golden_repo_alias and _activated_repo_manager is not None:
+        try:
             golden_config = load_golden_temporal_config(
                 golden_repo_alias, _activated_repo_manager
             )
             if golden_config is not None:
                 config = config.model_copy(update={"temporal": golden_config.temporal})
-
-        # Gated on BOTH a known golden_repo_alias AND a real query_tracker
-        # (exactly like semantic_query_manager.py:2649-2691) -- without a
-        # tracker, pin() is a silent no-op, so constructing a resolver
-        # anyway would reintroduce the mid-read deletion hazard AC8 Step 6
-        # exists to prevent.
-        if golden_repo_alias and query_tracker is not None:
-            from code_indexer.global_repos.alias_manager import AliasManager
-            from code_indexer.services.temporal.temporal_shard_resolver import (
-                TemporalShardResolver,
+        except Exception:
+            logger.warning(
+                "temporal worker %s: golden-repo temporal config wiring "
+                "failed (isolated, non-fatal); using clone-derived config "
+                "as-is",
+                job_id,
+                exc_info=True,
             )
-
-            golden_repos_dir = (
-                Path(_activated_repo_manager.activated_repos_dir).parent
-                / "golden-repos"
-            )
-            # Golden repo directories are never named with a '-global'
-            # suffix -- that suffix is purely a query-facing alias-
-            # registry convention (an is_global query passes its full
-            # '-global'-suffixed alias as golden_repo_alias). Strip
-            # exactly one trailing '-global' so the resolver's namespace
-            # matches what the relocation trigger actually published
-            # under.
-            normalized_repo_alias = golden_repo_alias.removesuffix("-global")
-            resolver = TemporalShardResolver(
-                alias_manager=AliasManager(str(golden_repos_dir / "aliases")),
-                repo_alias=normalized_repo_alias,
-                sister_root=golden_repos_dir,
-                legacy_index_path=index_path,
-                query_tracker=query_tracker,
-            )
-            # "Disconnected reader" lesson (semantic_query_manager.py
-            # code review CRITICAL #1): a resolver threaded ONLY into
-            # execute_temporal_query_with_fusion's discovery/pin
-            # bookkeeping never reaches the vector_store instance that
-            # actually PERFORMS the search -- _get_collection_path()
-            # would silently fall back to the legacy base_path/
-            # collection_name path even after relocation moved the data.
-            # Attach the resolver to the SAME store instance used for
-            # search, preserving its existing caching/governor wiring.
-            vector_store._temporal_shard_resolver = resolver
-    except Exception:
-        logger.warning(
-            "temporal worker %s: golden-repo temporal config/resolver "
-            "wiring failed (isolated, non-fatal); using clone-derived "
-            "config and legacy-only resolution as-is",
-            job_id,
-            exc_info=True,
-        )
 
     # INITIAL empty snapshot -- written before fusion starts so an early
     # poll (Scenario 14: zero-shard/PENDING) sees a real, empty snapshot
@@ -360,7 +407,6 @@ def run_temporal_worker(
         on_shards_discovered=checkpointer.on_shards_discovered,
         on_shard_complete=checkpointer.on_shard_complete,
         cancel_check=cancel_check,
-        resolver=resolver,
     )
 
     qr_final = _to_dicts(final.results, worker_input.repository_alias)

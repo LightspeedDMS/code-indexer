@@ -22,7 +22,7 @@ relocation feature.
 Fix: `_detect_existing_indexes` gained an optional `repo_alias` parameter
 (default `None`, preserving byte-identical behavior for every existing
 positional-only caller). When provided and the in-repo scan alone reports
-absent, a new `_sister_temporal_data_exists()` helper additionally consults
+absent, a new `_fixed_root_temporal_data_exists()` helper additionally consults
 `get_temporal_repo_status()` (Story #1457/#1459's existing resolver-based
 union primitive -- sister pointer OR in-repo, real-data-presence only) and
 ORs its `.has_data` result in. This preserves Bug #1390's real-data-presence
@@ -42,14 +42,17 @@ case C, which deliberately injects a raising stand-in for
 `get_temporal_repo_status` to prove the contract.
 """
 
+import json
 import logging
 from pathlib import Path
 
 import pytest
 
 from code_indexer.config import ConfigManager
-from code_indexer.global_repos.alias_manager import AliasManager
 from code_indexer.global_repos.cleanup_manager import CleanupManager
+from code_indexer.services.temporal.temporal_server_paths import (
+    server_temporal_index_root,
+)
 from code_indexer.global_repos.global_registry import GlobalRegistry
 from code_indexer.global_repos.query_tracker import QueryTracker
 from code_indexer.global_repos.refresh_scheduler import RefreshScheduler
@@ -141,18 +144,26 @@ def _make_sister_temporal_fixture(
     embedder_slug: str = "voyage_code_3",
     quarter: str = "2024Q1",
 ) -> None:
-    """Build a real sister-location temporal namespace: a version directory
-    with a real hnsw_index.bin marker, published via a real AliasManager
-    pointer file -- mirroring
-    test_temporal_status_1459.py::test_sister_relocated_data_is_detected_as_present_and_queryable.
-    """
-    namespace = f"{repo_name}-temporal-{embedder_slug}-{quarter}"
-    sister_version_dir = golden_repos_dir / ".versioned" / namespace / "v_1700000000"
-    sister_version_dir.mkdir(parents=True)
-    (sister_version_dir / "hnsw_index.bin").write_bytes(b"fake-hnsw")
+    """Build a real temporal shard at the FIXED server-owned root.
 
-    aliases_dir = golden_repos_dir / "aliases"
-    AliasManager(str(aliases_dir)).create_alias(namespace, str(sister_version_dir))
+    Bug #1529: temporal data for a golden repo lives at
+    ``{golden_repos_dir}/.temporal/{alias}/`` -- a fixed, deterministic path --
+    rather than a ``.versioned/`` snapshot published behind an AliasManager
+    pointer. The behavior under test is UNCHANGED: data living OUTSIDE the
+    repo tree must be detected as present, and must therefore prevent the Bug
+    #1406 one-way auto-disable from firing.
+    """
+    shard_dir = (
+        server_temporal_index_root(golden_repos_dir, repo_name)
+        / f"code-indexer-temporal-{embedder_slug}-{quarter}"
+    )
+    shard_dir.mkdir(parents=True)
+    (shard_dir / "hnsw_index.bin").write_bytes(b"fake-hnsw")
+    # A real committed row: detection keys off DATA presence, not merely the
+    # presence of an index file (row-existence-is-not-queryability).
+    (shard_dir / "vector_aaaa1111.json").write_text(
+        json.dumps({"id": "proj:commit:aaaaaaaa:0"})
+    )
 
 
 class TestSisterTemporalDetectionFeedsReconciliation:

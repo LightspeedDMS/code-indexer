@@ -383,7 +383,6 @@ class FilesystemVectorStore:
         skip_staleness_check: bool = False,
         memory_governor: Optional[Any] = None,
         use_chunks_db_for_new_collections: Optional[bool] = None,
-        temporal_shard_resolver: Optional[Any] = None,
         activation_id: Optional[str] = None,
         collection_meta_cache: Optional[Any] = None,
         # chunk_store_cache: typed Any (like hnsw_index_cache/id_index_cache/
@@ -433,12 +432,6 @@ class FilesystemVectorStore:
                 param as True) at every server-side ``cidx index`` spawn
                 site, so server-provisioned collections are CHUNKS_DB by
                 explicit intent rather than a silent env default.
-            temporal_shard_resolver: Story #1457 AC8 -- optional
-                TemporalShardResolver instance. When set, _get_collection_path
-                resolves TEMPORAL collection names through it (dual-mode,
-                per-instance-gated); non-temporal names and the None default
-                (CLI/solo, semantic store, build/index store) are UNCHANGED,
-                direct base_path/collection_name construction.
             activation_id: Story #1458 AC11 -- optional per-clone generation/
                 identity token (a UUID stamped once at activated-repo clone
                 materialization). Embedded into the HNSW/id_index shared
@@ -528,13 +521,6 @@ class FilesystemVectorStore:
         # constructs for its full-rebuild path. None (every existing
         # caller) preserves today's default multi-threaded behavior exactly.
         self._hnsw_num_threads: Optional[int] = hnsw_num_threads
-
-        # Story #1457 AC8: optional TemporalShardResolver, per-instance-gated.
-        # None (default) preserves byte-identical direct construction for
-        # EVERY existing call site; only a store explicitly constructed with
-        # a resolver (the dedicated read-side temporal store, not yet wired
-        # anywhere in production) resolves temporal collection names.
-        self._temporal_shard_resolver: Optional[Any] = temporal_shard_resolver
 
         # Story #540: Path-to-point_ids reverse index for duplicate prevention
         # Structure: {collection_name: PathIndex}
@@ -735,27 +721,12 @@ class FilesystemVectorStore:
         if subdirectory:
             return self.base_path / subdirectory / collection_name
 
-        if self._temporal_shard_resolver is not None:
-            from code_indexer.services.temporal.temporal_shard_resolver import (
-                parse_physical_temporal_name,
-            )
-
-            parsed = parse_physical_temporal_name(collection_name)
-            if parsed is not None:
-                embedder_slug, quarter = parsed
-                # Story #1457 AC8 Step 6: a pin() block in effect for this
-                # namespace MUST be consulted FIRST, without calling
-                # resolve() again, so a concurrent alias swap mid-read
-                # cannot change the path this read actually touches.
-                pinned = self._temporal_shard_resolver.get_pinned(
-                    embedder_slug, quarter
-                )
-                if pinned is not None:
-                    return Path(pinned)
-                resolved = self._temporal_shard_resolver.resolve(embedder_slug, quarter)
-                if resolved is not None:
-                    return Path(resolved.path)
-
+        # Bug #1529: NO resolver indirection. Story #1457's pointer-first
+        # TemporalShardResolver hook is retired -- a temporal shard's physical
+        # path is fixed from first creation, so a collection path is always a
+        # direct, deterministic construction. The store is pointed AT the
+        # right root by its base_path (see temporal_server_paths.py), which is
+        # the only place the temporal location is decided.
         return self.base_path / collection_name
 
     def create_collection(
@@ -845,6 +816,25 @@ class FilesystemVectorStore:
         # server) still governs them.
         if TemporalMetadataStore.is_temporal_collection(collection_name):
             build_as_chunks_db = self._new_collection_layout_explicit is not False
+            if not build_as_chunks_db:
+                # Bug #1529 review item 4: the storage layer cannot tell a
+                # test fabricating pre-#1528 data from a production mistake,
+                # so it must not refuse -- real fleet data is still
+                # SHARDED_JSON until migrated, and the legacy read/migrate
+                # paths have to stay exercisable. But this combination has no
+                # legitimate production caller (the CLI refuses
+                # --new-collection-layout=sharded_json with --index-commits;
+                # the server always requests chunks_db), so an occurrence in
+                # a real deployment log is a five-alarm signal and must not
+                # be silent.
+                self.logger.warning(
+                    "Building TEMPORAL collection %s in the legacy "
+                    "SHARDED_JSON layout because the caller explicitly "
+                    "requested it. Temporal indexing must never write legacy "
+                    "vector_*.json files (Bug #1528) -- if this appears in a "
+                    "server or CLI log, a caller is bypassing that rule.",
+                    collection_name,
+                )
         else:
             build_as_chunks_db = self._use_chunks_db_for_new_collections
         if build_as_chunks_db:

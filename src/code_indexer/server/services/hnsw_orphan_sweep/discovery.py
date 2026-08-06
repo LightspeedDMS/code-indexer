@@ -24,19 +24,16 @@ per-node ownership filter on the candidate set itself.
 
 from __future__ import annotations
 
-import glob
 import logging
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterator, Optional
+from typing import Any, Iterator
 
 from code_indexer.storage.hnsw_index_manager import HNSWIndexManager
 from code_indexer.server.storage.shared.snapshot_paths import is_versioned_snapshot
-from code_indexer.global_repos.alias_manager import AliasManager
-from code_indexer.services.temporal.temporal_shard_resolver import (
-    TemporalShardResolver,
-    TemporalShardSource,
-    parse_physical_temporal_name,
+from code_indexer.services.temporal.temporal_server_paths import (
+    resolve_golden_repo_coordinates,
+    server_temporal_index_root,
 )
 
 logger = logging.getLogger(__name__)
@@ -75,8 +72,31 @@ def iter_index_files_for_repo(repo_root: Path) -> Iterator[Path]:
     Returns:
         Iterator of relative Paths, each pointing at an ``hnsw_index.bin``.
     """
-    index_root = repo_root.joinpath(*_INDEX_ROOT_SEGMENTS)
+    yield from iter_hnsw_collections_under(
+        repo_root.joinpath(*_INDEX_ROOT_SEGMENTS), relative_to=repo_root
+    )
 
+
+def iter_hnsw_collections_under(
+    index_root: Path, *, relative_to: Path
+) -> Iterator[Path]:
+    """Walk an ARBITRARY index root, yielding real HNSW collections.
+
+    Extracted from :func:`iter_index_files_for_repo` by Bug #1529 so the
+    server's fixed temporal index root (``{golden_repos_dir}/.temporal/
+    {alias}/``, which is NOT under any repo's ``.code-indexer/index/``) is
+    swept by the SAME discovery and the SAME in-place repair path as every
+    other collection -- rather than the bespoke sister-pointer/version
+    enumeration Story #1457 needed. Same "hnsw_index.bin + collection_meta.
+    json pair" definition, same ``.versioned/`` skip, same never-raises
+    contract.
+
+    Args:
+        index_root: Directory to walk.
+        relative_to: Base the yielded paths are made relative to (this is
+            what forms the stable cursor key, so it must match whatever the
+            candidate's own root is).
+    """
     try:
         if not index_root.is_dir():
             return
@@ -111,14 +131,14 @@ def iter_index_files_for_repo(repo_root: Path) -> Iterator[Path]:
             continue
 
         try:
-            yield bin_path.relative_to(repo_root)
+            yield bin_path.relative_to(relative_to)
         except ValueError:
-            # Unreachable in practice (bin_path always under repo_root via
-            # rglob), but a discovery generator must never raise.
+            # Unreachable in practice (bin_path always under the walked root
+            # via rglob), but a discovery generator must never raise.
             logger.debug(
-                "iter_index_files_for_repo: %s is not relative to %s; skipping",
+                "iter_hnsw_collections_under: %s is not relative to %s; skipping",
                 bin_path,
-                repo_root,
+                relative_to,
             )
             continue
 
@@ -179,6 +199,51 @@ def _golden_candidates(golden_repo_manager: Any) -> Iterator[SweepCandidate]:
                 repo_root=repo_root,
                 index_relpath=relpath,
                 kind="golden",
+                alias=alias,
+            )
+
+        # Bug #1529: server-context temporal data lives at a FIXED root
+        # outside the repo's own tree, so the walk above cannot see it. Those
+        # shards are ordinary MUTABLE collection directories (no versions, no
+        # alias pointers), so they are swept and repaired IN PLACE exactly
+        # like everything else -- this replaces Story #1457's bespoke
+        # sister-pointer candidate/repair pair entirely.
+        #
+        # Bug #1529 finding #6: the derivation MUST go through
+        # resolve_golden_repo_coordinates, never a bare `repo_root.parent`.
+        # get_actual_repo_path() can legitimately return the VERSIONED form
+        # ({golden_repos_dir}/.versioned/{alias}/v_*/ -- see memory
+        # feedback_versioned_path_trap), whose .parent is
+        # {golden_repos_dir}/.versioned/{alias}; the temporal root computed
+        # from that never exists, so every versioned-topology repo's temporal
+        # shards were silently skipped, voiding Epic #1333's zero-tolerance
+        # orphan guarantee for them. The resolver handles BOTH layouts and
+        # returns identical coordinates for each.
+        coordinates = resolve_golden_repo_coordinates(repo_root)
+        if coordinates is None:
+            # Never a silent skip: an unrecognized layout is a real temporal
+            # sweep coverage hole, and invisibility is what let finding #6
+            # survive review in the first place.
+            logger.warning(
+                "enumerate_sweep_candidates: could not derive the fixed "
+                "temporal index root for golden repo '%s' from %s "
+                "(unrecognized layout); its temporal shards are NOT being "
+                "swept this pass",
+                alias,
+                repo_root,
+            )
+            continue
+
+        golden_repos_dir, bare_alias = coordinates
+        temporal_root = server_temporal_index_root(golden_repos_dir, bare_alias)
+        for relpath in iter_hnsw_collections_under(
+            temporal_root, relative_to=temporal_root
+        ):
+            yield SweepCandidate(
+                sort_key=f"golden_temporal:{alias}:{relpath}",
+                repo_root=temporal_root,
+                index_relpath=relpath,
+                kind="golden_temporal",
                 alias=alias,
             )
 
@@ -256,226 +321,3 @@ def enumerate_sweep_candidates(
     """
     yield from _golden_candidates(golden_repo_manager)
     yield from _activated_candidates(activated_repo_manager)
-
-
-@dataclass(frozen=True)
-class SisterTemporalCandidate:
-    """One published Story #1457 sister-location temporal shard version,
-    discovered via a real ``TemporalShardResolver``.
-
-    ``version_path`` is the CURRENTLY resolved (at discovery time) ``v_*``
-    directory -- an immutable version. Unlike ``SweepCandidate``, this
-    candidate's repair path (``repair_executor.process_sister_temporal_
-    candidate``) must NEVER write in place to ``version_path``; it builds a
-    brand-new version and atomically swaps the alias pointer instead.
-    """
-
-    sort_key: str
-    golden_repos_dir: Path
-    repo_alias: str  # normalized, no "-global" suffix
-    alias: str  # original golden-repo alias (for logging)
-    embedder_slug: str
-    quarter: Optional[str]
-    legacy_index_path: Path
-    version_path: Path
-    pointer_namespace: str
-    kind: str = "sister_temporal"
-
-
-def _enumerate_candidate_embedder_slugs(
-    legacy_index_path: Path, aliases_dir: Path, repo_alias: str
-) -> Iterator[str]:
-    """Yield distinct embedder_slugs discovered from BOTH physical roots for
-    one golden repo: in-repo ``code-indexer-temporal-*`` directories (base-
-    name form) and sister alias pointer files under ``aliases_dir``
-    (alias-prefixed form, ``{repo_alias}-temporal-*.json``).
-
-    This exists purely to discover the SET of candidate embedder_slugs --
-    the resolver itself has no "list all embedder slugs" method. Quarter
-    enumeration for a given embedder_slug is delegated entirely to
-    ``TemporalShardResolver.catalog()`` (the authoritative pointer+in-repo
-    union), never reimplemented here.
-
-    Tolerates OSError on either root independently (logs DEBUG, treats that
-    root as empty) -- never raises.
-    """
-    seen: set = set()
-
-    try:
-        if legacy_index_path.is_dir():
-            for entry in legacy_index_path.iterdir():
-                if not entry.is_dir():
-                    continue
-                parsed = parse_physical_temporal_name(entry.name)
-                if parsed is not None and parsed[0] not in seen:
-                    seen.add(parsed[0])
-                    yield parsed[0]
-    except OSError as exc:
-        logger.debug(
-            "enumerate_sister_temporal_candidates: transient walk error "
-            "under %s (%s); treating in-repo temporal scan as empty",
-            legacy_index_path,
-            exc,
-        )
-
-    try:
-        if aliases_dir.is_dir():
-            prefix = f"{repo_alias}-temporal-"
-            escaped_prefix = glob.escape(prefix)
-            for alias_file in aliases_dir.glob(f"{escaped_prefix}*.json"):
-                stem = alias_file.stem
-                if not stem.startswith(prefix):
-                    continue
-                physical_name = f"code-indexer-temporal-{stem[len(prefix) :]}"
-                parsed = parse_physical_temporal_name(physical_name)
-                if parsed is not None and parsed[0] not in seen:
-                    seen.add(parsed[0])
-                    yield parsed[0]
-    except OSError as exc:
-        logger.debug(
-            "enumerate_sister_temporal_candidates: transient walk error "
-            "under %s (%s); treating sister alias scan as empty",
-            aliases_dir,
-            exc,
-        )
-
-
-def enumerate_sister_temporal_candidates(
-    golden_repo_manager: Any,
-) -> Iterator[SisterTemporalCandidate]:
-    """Enumerate published Story #1457 sister-location temporal shards
-    across all golden repos.
-
-    Sister temporal shards belong ONLY to golden repos (never activated
-    repos -- AC12 rejects "temporal" in activated-repo reindex requests),
-    so this takes only ``golden_repo_manager``. Complementary to (NOT a
-    replacement for) ``enumerate_sweep_candidates``, which covers in-repo
-    ``.code-indexer/index/`` collections for both golden and activated
-    repos -- an ``IN_REPO_LEGACY``-resolved namespace is already covered by
-    that walk and is deliberately excluded here to avoid double-yielding.
-
-    Fail-soft throughout: any resolution/enumeration error for one repo or
-    one (embedder, quarter) namespace is logged at DEBUG and skipped,
-    never aborting the whole generator. ``golden_repo_manager=None`` is a
-    silent no-op (yields nothing).
-
-    Args:
-        golden_repo_manager: Object with ``list_golden_repos()`` and
-            ``get_actual_repo_path(alias)``, or None.
-
-    Returns:
-        Iterator of SisterTemporalCandidate (NOT pre-sorted).
-    """
-    if golden_repo_manager is None:
-        return
-
-    for entry in golden_repo_manager.list_golden_repos():
-        alias = entry.get("alias") or entry.get("alias_name")
-        if not alias:
-            logger.debug(
-                "enumerate_sister_temporal_candidates: golden repo entry "
-                "missing alias: %s",
-                entry,
-            )
-            continue
-        try:
-            repo_root = Path(golden_repo_manager.get_actual_repo_path(alias))
-        except Exception as exc:
-            logger.debug(
-                "enumerate_sister_temporal_candidates: could not resolve "
-                "golden repo '%s' path (%s); skipping (dangling registration)",
-                alias,
-                exc,
-            )
-            continue
-        if not repo_root.exists():
-            logger.debug(
-                "enumerate_sister_temporal_candidates: golden repo '%s' "
-                "root %s does not exist; skipping",
-                alias,
-                repo_root,
-            )
-            continue
-
-        repo_alias = alias.removesuffix("-global")
-        golden_repos_dir = repo_root.parent
-        legacy_index_path = repo_root / ".code-indexer" / "index"
-        aliases_dir = golden_repos_dir / "aliases"
-
-        embedder_slugs = sorted(
-            _enumerate_candidate_embedder_slugs(
-                legacy_index_path, aliases_dir, repo_alias
-            )
-        )
-        if not embedder_slugs:
-            continue
-
-        try:
-            alias_manager = AliasManager(str(aliases_dir))
-            resolver = TemporalShardResolver(
-                alias_manager=alias_manager,
-                repo_alias=repo_alias,
-                sister_root=golden_repos_dir,
-                legacy_index_path=legacy_index_path,
-            )
-        except Exception as exc:
-            logger.debug(
-                "enumerate_sister_temporal_candidates: could not construct "
-                "resolver for golden repo '%s' (%s); skipping",
-                alias,
-                exc,
-            )
-            continue
-
-        for embedder_slug in embedder_slugs:
-            try:
-                quarters = resolver.catalog(embedder_slug)
-            except Exception as exc:
-                logger.debug(
-                    "enumerate_sister_temporal_candidates: catalog() failed "
-                    "for '%s'/%s (%s); skipping",
-                    alias,
-                    embedder_slug,
-                    exc,
-                )
-                continue
-
-            for quarter in quarters:
-                try:
-                    resolved = resolver.resolve(embedder_slug, quarter)
-                except Exception as exc:
-                    logger.debug(
-                        "enumerate_sister_temporal_candidates: resolve() "
-                        "failed for '%s'/%s/%s (%s); skipping",
-                        alias,
-                        embedder_slug,
-                        quarter,
-                        exc,
-                    )
-                    continue
-
-                if resolved is None:
-                    continue
-                if resolved.source != TemporalShardSource.SISTER_POINTER:
-                    # Already covered by the in-repo walk
-                    # (enumerate_sweep_candidates) -- never double-yield.
-                    continue
-                if not resolved.is_queryable:
-                    # Crash-window: committed rows, no HNSW yet. This
-                    # sweep repairs existing-but-broken indexes; it does
-                    # not backfill missing ones.
-                    continue
-
-                yield SisterTemporalCandidate(
-                    sort_key=(
-                        f"sister_temporal:{alias}:{embedder_slug}:{quarter or '_'}"
-                    ),
-                    golden_repos_dir=golden_repos_dir,
-                    repo_alias=repo_alias,
-                    alias=alias,
-                    embedder_slug=embedder_slug,
-                    quarter=quarter,
-                    legacy_index_path=legacy_index_path,
-                    version_path=resolved.path,
-                    pointer_namespace=resolved.pointer_namespace,
-                )

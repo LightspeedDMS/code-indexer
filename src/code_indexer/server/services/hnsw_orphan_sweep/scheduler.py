@@ -30,13 +30,11 @@ from typing import Any, Callable, Dict, Optional
 
 from code_indexer.server.repositories.background_jobs import DuplicateJobError
 from code_indexer.server.services.hnsw_orphan_sweep.discovery import (
-    enumerate_sister_temporal_candidates,
     enumerate_sweep_candidates,
 )
 from code_indexer.server.services.hnsw_orphan_sweep.repair_executor import (
     SweepOutcome,
     process_candidate,
-    process_sister_temporal_candidate,
 )
 
 logger = logging.getLogger(__name__)
@@ -54,21 +52,10 @@ _DISABLED_POLL_SECONDS = 60
 _DEFAULT_TICK_INTERVAL_MINUTES = 7
 _DEFAULT_BATCH_SIZE = 15
 
-# Story #1457 gap fix: HNSWOrphanSweepStateSqliteBackend.record_item_processed
-# (a file outside this sweep's ownership) validates its `outcome` argument
-# against the ORIGINAL Story #1360 vocabulary
-# (clean/repaired/transient_skip/error) and raises ValueError on anything
-# else -- it does not know about the two new sister-temporal outcomes (nor,
-# pre-existing and out of scope here, about CAPABILITY_UNAVAILABLE). Rather
-# than editing that backend, persist these two new outcomes under their
-# closest existing recognized category so the durable cursor/counters stay
-# meaningful without a schema/validation change to a file this sweep does
-# not own. The per-tick `counts` dict (returned to callers) still uses the
-# PRECISE outcome value -- only the durable persistence call is aliased.
-_PERSISTENCE_OUTCOME_ALIASES = {
-    SweepOutcome.SISTER_TEMPORAL_REPAIRED.value: SweepOutcome.REPAIRED.value,
-    SweepOutcome.SISTER_TEMPORAL_REPAIR_FAILED.value: SweepOutcome.ERROR.value,
-}
+# Bug #1529: _PERSISTENCE_OUTCOME_ALIASES existed solely to map the two
+# now-deleted sister-temporal outcomes onto the state backend's original
+# Story #1360 vocabulary. Fixed-path temporal shards produce ordinary
+# in-place outcomes, so no aliasing is needed any more.
 
 # Fail-open default operating-hours window: (0, 0) means "always on" (24x7),
 # matching the pre-#1397 default behavior.
@@ -115,9 +102,6 @@ class HNSWOrphanRepairSweepScheduler:
         background_job_manager: Optional[Any],
         config_service: Any,
         process_fn: Callable[[Any], SweepOutcome] = process_candidate,
-        process_sister_fn: Callable[
-            [Any], SweepOutcome
-        ] = process_sister_temporal_candidate,
         now_fn: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
     ) -> None:
         """
@@ -140,10 +124,6 @@ class HNSWOrphanRepairSweepScheduler:
             process_fn: Injectable per-item processor for golden/activated
                 (in-repo) candidates (defaults to the real
                 ``process_candidate``); tests may inject a spy/fake.
-            process_sister_fn: Injectable per-item processor for Story #1457
-                sister-location temporal candidates (defaults to the real
-                ``process_sister_temporal_candidate``); tests may inject a
-                spy/fake.
             now_fn: Injectable clock hook returning the current time (defaults
                 to the real UTC wall clock). Used by the operating-hours
                 window gate (Story #1397) to determine the current UTC hour;
@@ -155,7 +135,6 @@ class HNSWOrphanRepairSweepScheduler:
         self._background_job_manager = background_job_manager
         self._config_service = config_service
         self._process_fn = process_fn
-        self._process_sister_fn = process_sister_fn
         self._now_fn = now_fn
 
         self._stop_event = threading.Event()
@@ -249,14 +228,10 @@ class HNSWOrphanRepairSweepScheduler:
                 self._golden_repo_manager, self._activated_repo_manager
             )
         )
-        # Story #1457 gap fix: sister-location (immutable .versioned/)
-        # temporal shards are a SEPARATE, additive enumeration -- never
-        # double-yielded with the in-repo walk above (an IN_REPO_LEGACY
-        # resolution is excluded by enumerate_sister_temporal_candidates
-        # itself).
-        all_candidates.extend(
-            enumerate_sister_temporal_candidates(self._golden_repo_manager)
-        )
+        # Bug #1529: no separate sister enumeration. Server-context temporal
+        # shards live at a FIXED, mutable path and are yielded by
+        # enumerate_sweep_candidates above (kind="golden_temporal"), so they
+        # flow through the SAME in-place repair as every other collection.
         candidates = sorted(all_candidates, key=lambda c: c.sort_key)
         pending = [c for c in candidates if cursor is None or c.sort_key > cursor]
         batch = pending[:batch_size]
@@ -269,20 +244,12 @@ class HNSWOrphanRepairSweepScheduler:
             # Bug #1415: must be pre-seeded -- counts[outcome.value] += 1
             # below would KeyError on this outcome otherwise.
             SweepOutcome.CAPABILITY_UNAVAILABLE.value: 0,
-            # Story #1457 gap fix: must be pre-seeded for the same reason.
-            SweepOutcome.SISTER_TEMPORAL_REPAIRED.value: 0,
-            SweepOutcome.SISTER_TEMPORAL_REPAIR_FAILED.value: 0,
         }
 
         for candidate in batch:
             outcome = self._process_one(candidate)
             counts[outcome.value] += 1
-            persisted_outcome = _PERSISTENCE_OUTCOME_ALIASES.get(
-                outcome.value, outcome.value
-            )
-            self._state_backend.record_item_processed(
-                candidate.sort_key, persisted_outcome
-            )
+            self._state_backend.record_item_processed(candidate.sort_key, outcome.value)
 
         # Pass is complete when this tick's batch consumed the ENTIRE
         # pending list -- i.e. no candidate remains whose key is greater
@@ -305,15 +272,12 @@ class HNSWOrphanRepairSweepScheduler:
         processor is loud (logged) but counted as ERROR, never aborting the
         tick (AC2: a failure on one index does not abort the pass).
 
-        Dispatches a Story #1457 sister-location temporal candidate
-        (``kind == "sister_temporal"``) to ``process_sister_fn``; every
-        other (golden/activated in-repo) candidate falls through to
-        ``process_fn`` exactly as before.
+        Bug #1529: there is no longer a second processor. Every candidate --
+        golden, activated, and the fixed-path ``golden_temporal`` shards --
+        is repaired IN PLACE by the same ``process_fn``.
         """
-        is_sister_temporal = getattr(candidate, "kind", None) == "sister_temporal"
-        processor = self._process_sister_fn if is_sister_temporal else self._process_fn
         try:
-            return processor(candidate)
+            return self._process_fn(candidate)
         except Exception:
             logger.error(
                 "HNSWOrphanRepairSweepScheduler: unexpected error processing %s",

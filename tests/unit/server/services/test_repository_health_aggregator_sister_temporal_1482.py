@@ -26,7 +26,9 @@ from pathlib import Path
 
 import pytest
 
-from code_indexer.global_repos.alias_manager import AliasManager
+from code_indexer.services.temporal.temporal_server_paths import (
+    server_temporal_index_root,
+)
 from code_indexer.server.services.repository_health_aggregator import (
     compute_repository_health,
     discover_sister_temporal_collections,
@@ -54,17 +56,16 @@ def _build_sister_only_repo(tmp_path: Path) -> _SisterFixture:
     legacy_index_path = tmp_path / "clone" / ".code-indexer" / "index"
     legacy_index_path.mkdir(parents=True, exist_ok=True)
 
+    # Bug #1529: the shard lives at the FIXED server-owned root, not a
+    # .versioned snapshot behind an alias pointer. The behavior under test is
+    # unchanged: health discovery must find temporal data OUTSIDE the repo tree.
     version_dir = (
-        golden_repos_dir
-        / ".versioned"
-        / POINTER_NAMESPACE
-        / f"v_{FIXTURE_VERSION_TIMESTAMP}"
+        server_temporal_index_root(golden_repos_dir, REPO_ALIAS)
+        / "code-indexer-temporal-voyage_code_3-2024Q1"
     )
     version_dir.mkdir(parents=True)
     (version_dir / "hnsw_index.bin").write_bytes(b"fake-hnsw")
     (version_dir / "collection_meta.json").write_text(json.dumps({"vector_count": 1}))
-    alias_manager = AliasManager(str(golden_repos_dir / "aliases"))
-    alias_manager.create_alias(POINTER_NAMESPACE, str(version_dir))
 
     return _SisterFixture(
         legacy_index_path=legacy_index_path,

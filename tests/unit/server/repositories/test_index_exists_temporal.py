@@ -18,7 +18,9 @@ from pathlib import Path
 from typing import Optional
 from unittest.mock import MagicMock
 
-from code_indexer.global_repos.alias_manager import AliasManager
+from code_indexer.services.temporal.temporal_server_paths import (
+    server_temporal_index_root,
+)
 
 
 def _make_manager_for_path(repo_path: str, golden_repos_dir: Optional[str] = None):
@@ -157,14 +159,15 @@ class TestIndexExistsTemporalSisterLocation:
             index_dir.mkdir(parents=True, exist_ok=True)
 
             golden_repos_dir = Path(tmp) / "golden-repos"
-            pointer_namespace = "test-repo-temporal-voyage_code_3-2024Q1"
+            # Bug #1529: fixed server-owned root, no alias pointer.
             version_dir = (
-                golden_repos_dir / ".versioned" / pointer_namespace / "v_1785164318"
+                server_temporal_index_root(golden_repos_dir, "test-repo")
+                / "code-indexer-temporal-voyage_code_3-2024Q1"
             )
             version_dir.mkdir(parents=True)
             (version_dir / "hnsw_index.bin").write_bytes(b"fake-hnsw")
-            alias_manager = AliasManager(str(golden_repos_dir / "aliases"))
-            alias_manager.create_alias(pointer_namespace, str(version_dir))
+            # A real committed row -- presence of DATA is what is detected.
+            (version_dir / "vector_aaaa1111.json").write_text("{}")
 
             manager = _make_manager_for_path(
                 str(repo_dir), golden_repos_dir=str(golden_repos_dir)

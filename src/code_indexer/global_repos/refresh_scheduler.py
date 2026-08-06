@@ -184,7 +184,7 @@ def _read_max_commits_from_temporal_meta(source_path: Path) -> Optional[int]:
     return None
 
 
-def _read_max_commits_from_sister_temporal(
+def _read_max_commits_from_fixed_temporal_root(
     golden_repos_dir: Path, repo_alias: str, legacy_index_path: Path
 ) -> Optional[int]:
     """Bug #1461 salvage item #6: sister-location fallback for the Bug #642
@@ -3056,13 +3056,13 @@ class RefreshScheduler:
                     )
                 else:
                     # Bug #1461 salvage item #6 (see
-                    # _read_max_commits_from_sister_temporal above): the
+                    # _read_max_commits_from_fixed_temporal_root above): the
                     # in-repo scan found nothing (relocated and/or
                     # reclaimed by Story #1457/#1458) -- consult the
                     # golden-owned sister location before giving up.
                     _golden_repos_dir = getattr(self, "golden_repos_dir", None)
                     if _golden_repos_dir is not None:
-                        _fallback_max = _read_max_commits_from_sister_temporal(
+                        _fallback_max = _read_max_commits_from_fixed_temporal_root(
                             Path(_golden_repos_dir),
                             bare_alias,
                             Path(source_path) / ".code-indexer" / "index",
@@ -3968,7 +3968,7 @@ class RefreshScheduler:
         # #1406's one-way auto-DISABLE downgrade against operator/system
         # intent.
         if not temporal_exists and repo_alias is not None:
-            temporal_exists = self._sister_temporal_data_exists(
+            temporal_exists = self._fixed_root_temporal_data_exists(
                 repo_alias, semantic_index_dir
             )
 
@@ -3982,7 +3982,7 @@ class RefreshScheduler:
             "scip": scip_exists,
         }
 
-    def _sister_temporal_data_exists(
+    def _fixed_root_temporal_data_exists(
         self, repo_alias: str, legacy_index_path: Path
     ) -> bool:
         """Bug #1461 (Epic #1454 Story #1461 salvage item #1): the in-repo-only

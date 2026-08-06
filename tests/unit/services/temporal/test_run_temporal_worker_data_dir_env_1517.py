@@ -56,6 +56,9 @@ from code_indexer.server.services.temporal_snapshot_store import (
     read_temporal_snapshot,
 )
 from code_indexer.server.services.temporal_worker import run_temporal_worker
+from code_indexer.services.temporal.temporal_server_paths import (
+    server_temporal_index_root,
+)
 from code_indexer.services.temporal.temporal_search_service import (
     TemporalSearchResults,
 )
@@ -222,10 +225,13 @@ def _build_split_home_and_server_dir_scenario(
 
     _write_config(clone_dir, "voyage-code-3")  # stale clone: embedder A
     _write_config(golden_dir, "voyage-large-2")  # golden NOW: embedder B
+    # Bug #1529: temporal data lives at ONE fixed path derived from the golden
+    # alias, outside any repo's own cloned tree -- staging it inside the
+    # activation clone now describes a location nothing reads. This test's
+    # assertion (that CIDX_SERVER_DATA_DIR is honored when resolving the
+    # golden repo, so embedder B is selected) is unchanged.
     (
-        clone_dir
-        / ".code-indexer"
-        / "index"
+        server_temporal_index_root(data_dir / "golden-repos", "my-repo")
         / "code-indexer-temporal-voyage_large_2-2024Q1"
     ).mkdir(parents=True)
 
@@ -256,10 +262,11 @@ def _build_global_alias_scenario(
     golden_dir = data_dir / "golden-repos" / "my-repo"
 
     _write_config(golden_dir, "voyage-large-2")
+    # Bug #1529: the fixed, outside-the-repo-tree temporal location (see the
+    # companion test above). The assertion here -- that no
+    # GoldenRepoNotFoundError is logged for a '-global' alias -- is unchanged.
     (
-        golden_dir
-        / ".code-indexer"
-        / "index"
+        server_temporal_index_root(data_dir / "golden-repos", "my-repo")
         / "code-indexer-temporal-voyage_large_2-2024Q1"
     ).mkdir(parents=True)
 

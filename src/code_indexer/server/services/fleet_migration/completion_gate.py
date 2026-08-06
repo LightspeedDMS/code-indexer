@@ -25,9 +25,10 @@ from pathlib import Path
 from typing import Union
 
 from code_indexer.services.temporal.temporal_collection_naming import (
+    LEGACY_TEMPORAL_COLLECTION,
     TEMPORAL_COLLECTION_PREFIX,
 )
-from code_indexer.services.temporal.temporal_shard_resolver import (
+from code_indexer.services.temporal.temporal_collection_naming import (
     parse_physical_temporal_name,
 )
 from code_indexer.storage.shared.collection_migration import (
@@ -140,6 +141,17 @@ def mark_post_consolidation_snapshot_published(index_path: Union[str, Path]) -> 
         os.close(dir_fd)
 
 
+def _has_legacy_rows(collection_dir: Path) -> bool:
+    """True iff any legacy sharded row file remains anywhere under the dir.
+
+    Row presence is the discriminator between a real (if un-migratable)
+    legacy shard and an artifact that nothing can or should consolidate --
+    used for both the metadata-less "empty artifact" case and the bare
+    monolith. Short-circuits on the first match.
+    """
+    return next(collection_dir.rglob("vector_*.json"), None) is not None
+
+
 def repo_temporal_dirs_fully_consolidated(index_path: Union[str, Path]) -> bool:
     """Return True iff EVERY real temporal shard directory under
     ``index_path`` has been fully consolidated to the ``chunks.db`` layout.
@@ -159,12 +171,20 @@ def repo_temporal_dirs_fully_consolidated(index_path: Union[str, Path]) -> bool:
     reopens cleanly) -- never a bare discriminator check, for exactly the
     crash-recovery reason that function documents.
 
-    Skipped, matching ``chunk_migration_cli.enumerate_migration_targets``'s
-    established exclusions rather than inventing new ones here:
-      * the bare ``code-indexer-temporal`` bookkeeping directory (it anchors
-        the shared temporal metadata store and is never a shard);
-      * any temporal-prefixed name that does not parse as a real
-        ``{slug}[-{quarter}]`` physical shard name.
+    Skipped: any temporal-prefixed name that does not parse as a real
+    ``{slug}[-{quarter}]`` physical shard name, matching
+    ``chunk_migration_cli.enumerate_migration_targets``'s established
+    exclusions rather than inventing new ones here.
+
+    The BARE ``code-indexer-temporal`` name is NOT skipped outright (Bug
+    #1529 item 5). It lacks the prefix's trailing hyphen, so it slipped past
+    both the prefix check and the parser -- silently exempting a real,
+    row-bearing pre-Story-#1457 legacy monolith from this gate entirely. It
+    is classified by ROW PRESENCE, exactly like the metadata-less case
+    below: rowless is the Bug #1405 shared bookkeeping directory that
+    anchors the temporal metadata store (skip -- it exists in every
+    temporal-enabled repo, so failing on its presence would make completion
+    permanently unreachable), rows present is unmigrated legacy data (fail).
 
     Args:
         index_path: The repo's ``.code-indexer/index/`` directory.
@@ -181,7 +201,13 @@ def repo_temporal_dirs_fully_consolidated(index_path: Union[str, Path]) -> bool:
         return True
 
     for entry in sorted(index_path.iterdir()):
-        if not entry.is_dir() or not entry.name.startswith(TEMPORAL_COLLECTION_PREFIX):
+        if not entry.is_dir():
+            continue
+        if entry.name == LEGACY_TEMPORAL_COLLECTION:
+            if _has_legacy_rows(entry):
+                return False
+            continue
+        if not entry.name.startswith(TEMPORAL_COLLECTION_PREFIX):
             continue
         if parse_physical_temporal_name(entry.name) is None:
             continue
@@ -199,7 +225,7 @@ def repo_temporal_dirs_fully_consolidated(index_path: Union[str, Path]) -> bool:
             #     That must FAIL this gate loudly: silently reporting the
             #     repo complete would leave real row data unconsolidated
             #     and publish an AC10 snapshot over it.
-            if next(entry.rglob("vector_*.json"), None) is not None:
+            if _has_legacy_rows(entry):
                 return False
             continue
         if not verify_collection_fully_migrated(entry):

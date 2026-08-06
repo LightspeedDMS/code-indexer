@@ -566,7 +566,33 @@ class MultiSearchService:
             # Story #1170: mirror filesystem_backend.py get_vector_store_client()
             # pattern so the temporal path benefits from the same HNSW/ID cache
             # injection that the regular semantic search path already uses.
-            index_dir = repo_path / ".code-indexer" / "index"
+            # Bug #1529: server-context temporal data lives at ONE fixed
+            # root outside the repo's own tree, derived from the golden
+            # alias. repo_id here is ALWAYS a global-repo alias (path
+            # resolution is exclusively via backend_registry.global_repos
+            # -- see _get_repository_path), and server_temporal_index_root
+            # normalizes the query-facing '-global' suffix, so this lands
+            # on exactly the directory the write path targets. Rooting the
+            # STORE here (not just the dispatch index_path) is required:
+            # the store is what actually performs the search.
+            from ...services.temporal.temporal_server_paths import (
+                resolve_golden_repo_coordinates,
+                server_temporal_index_root,
+            )
+
+            # Prefer deriving golden_repos_dir STRUCTURALLY from the repo path
+            # already resolved above -- it handles both on-disk golden-repo
+            # layouts (flat and .versioned/<alias>/v_*), and avoids taking a
+            # second hard dependency on app.state for a value the path itself
+            # already encodes. Falls back to app.state only when the path is
+            # not structurally recognizable.
+            _coordinates = resolve_golden_repo_coordinates(repo_path)
+            _golden_repos_dir = (
+                _coordinates[0]
+                if _coordinates is not None
+                else PathLib(_get_golden_repos_dir())
+            )
+            index_dir = server_temporal_index_root(_golden_repos_dir, repo_id)
             id_index_cache = None
             if self.hnsw_index_cache is not None:
                 from ...server.cache.id_index_cache import get_global_id_index_cache
@@ -581,58 +607,6 @@ class MultiSearchService:
                 id_index_cache=id_index_cache,
                 memory_governor=get_memory_governor(),
             )
-
-            # Bug #1482 extension: construct a TemporalShardResolver so this
-            # fan-out path (like run_temporal_worker and
-            # SemanticQueryManager._execute_temporal_query before it) can
-            # read temporal shards relocated by Story #1457's AC1 trigger to
-            # the golden-owned sister location, not just the in-repo legacy
-            # dir. repo_id here is ALWAYS a global-repo alias (repo path
-            # resolution is exclusively via backend_registry.global_repos --
-            # see _get_repository_path), so the golden alias IS repo_id
-            # itself, minus the query-facing '-global' suffix (mirroring the
-            # normalized_repo_alias convention in temporal_worker.py /
-            # semantic_query_manager.py). Gated on a real query_tracker
-            # (app.state.query_tracker) -- without one, pin() would be a
-            # silent no-op, so constructing a resolver anyway would
-            # reintroduce the mid-read deletion hazard AC8 Step 6 guards
-            # against. Entirely fail-open: any resolution failure leaves
-            # resolver=None, preserving today's legacy-only behavior.
-            resolver: Optional[Any] = None
-            try:
-                from ..app import app as app_module
-
-                query_tracker = getattr(app_module.state, "query_tracker", None)
-                if query_tracker is not None:
-                    from ...global_repos.alias_manager import AliasManager
-                    from ...services.temporal.temporal_shard_resolver import (
-                        TemporalShardResolver,
-                    )
-
-                    golden_repos_dir = PathLib(_get_golden_repos_dir())
-                    normalized_repo_alias = repo_id.removesuffix("-global")
-                    resolver = TemporalShardResolver(
-                        alias_manager=AliasManager(str(golden_repos_dir / "aliases")),
-                        repo_alias=normalized_repo_alias,
-                        sister_root=golden_repos_dir,
-                        legacy_index_path=index_dir,
-                        query_tracker=query_tracker,
-                    )
-                    # "Disconnected reader" lesson (Bug #1482): the resolver
-                    # must also be attached to the vector_store instance
-                    # that actually PERFORMS the search, or
-                    # _get_collection_path() silently falls back to the
-                    # legacy path even after relocation moved the data.
-                    vector_store_client._temporal_shard_resolver = resolver
-            except Exception:
-                logger.warning(
-                    "multi_search: temporal resolver wiring failed for "
-                    "repo %s (isolated, non-fatal); using legacy-only "
-                    "resolution as-is",
-                    repo_id,
-                    exc_info=True,
-                )
-                resolver = None
 
             # Execute temporal query via fusion dispatch (Story #640).
             # NOTE: the shared thread pool (self.thread_executor) is intentionally NOT
@@ -652,7 +626,6 @@ class MultiSearchService:
                 no_embedding_cache_shortcut=request.no_embedding_cache_shortcut,
                 # Story #1291 AC7/AC8: forward explicit embedder override
                 temporal_embedder=request.temporal_embedder,
-                resolver=resolver,
             )
 
             # If no temporal index found, raise to match original behavior

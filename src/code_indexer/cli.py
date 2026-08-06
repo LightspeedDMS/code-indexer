@@ -2914,6 +2914,39 @@ def _install_embedding_stats_writer_for_index() -> None:
         EmbeddingStatsWriter.set_active(NoOpWriter())
 
 
+def reject_sharded_json_for_temporal(
+    *, index_commits: bool, new_collection_layout: Optional[str]
+) -> None:
+    """Refuse `--index-commits` with `--new-collection-layout=sharded_json`.
+
+    Bug #1529 finding #3. Bug #1528's binding rule is that temporal indexing
+    never writes another legacy `vector_*.json` file -- that explosion
+    (487,076 files for one real repo) is why Epic #1454 exists. `sharded_json`
+    defeated it through two independent doors: it SKIPPED the temporal
+    branch's pre-index in-place consolidation, and
+    `FilesystemVectorStore.create_collection` honors an explicit `False` for
+    temporal collections, so brand-new shards were built legacy too.
+
+    This CLI flag is the only production route to that explicit `False` for
+    temporal (the server always passes chunks_db; the daemon refuses legacy
+    shards outright), so refusing the combination here closes both doors.
+
+    Refused rather than silently upgraded to `chunks_db`: an operator who
+    asked for a layout that must not exist should be told, not quietly
+    overridden (Messi #2 -- no silent fallbacks).
+
+    Raises:
+        ValueError: when the two are combined.
+    """
+    if index_commits and new_collection_layout == "sharded_json":
+        raise ValueError(
+            "--new-collection-layout=sharded_json is not supported with "
+            "--index-commits: temporal indexing must never write legacy "
+            "vector_*.json files (Bug #1528). Use chunks_db, or omit the "
+            "flag -- temporal defaults to the consolidated chunks.db layout."
+        )
+
+
 def _resolve_new_collection_layout(choice: Optional[str]) -> Optional[bool]:
     """Story #1488: map the `--new-collection-layout` Click choice to the
     FilesystemVectorStore/BackendFactory `use_chunks_db_for_new_collections`
@@ -3162,6 +3195,20 @@ def index(
     global console
     if progress_json:
         console = Console(stderr=True)
+
+    # Bug #1529 finding #3: refuse an impossible flag combination BEFORE any
+    # indexing work begins, so no legacy temporal shard is ever created.
+    # Sits beside the sibling --diff-context validation below, and after the
+    # `global console` block above (referencing console before that statement
+    # is a SyntaxError).
+    try:
+        reject_sharded_json_for_temporal(
+            index_commits=index_commits,
+            new_collection_layout=new_collection_layout,
+        )
+    except ValueError as exc:
+        console.print(f"❌ {exc}", style="red")
+        sys.exit(1)
 
     # Validate --diff-context flag (must happen before daemon delegation)
     if diff_context is not None and not index_commits:
@@ -3465,7 +3512,22 @@ def index(
                     config_manager._config = config
 
                 # Initialize vector store
-                index_dir = config.codebase_dir / ".code-indexer" / "index"
+                #
+                # Bug #1529: in SERVER context a golden repo's temporal data
+                # must live OUTSIDE its own cloned tree at a fixed,
+                # deterministic path -- otherwise every per-user CoW
+                # activation clone copies the whole temporal history and then
+                # queries that frozen-at-clone-time copy forever. This ONE
+                # seam decides the location for the entire temporal branch
+                # below (clear, migrate, consolidate, index, reconcile), and
+                # the read side derives the identical path from the same
+                # module. Standalone CLI (no server marker) is byte-identical
+                # to before: the in-repo index directory.
+                from .services.temporal.temporal_server_paths import (
+                    resolve_temporal_index_dir,
+                )
+
+                index_dir = resolve_temporal_index_dir(config.codebase_dir)
                 # Bug #1528: thread the requested new-collection layout through
                 # to the temporal store, exactly as the semantic paths already
                 # do. Omitting it here silently discarded every explicit
@@ -3510,35 +3572,40 @@ def index(
                 # otherwise keep growing its legacy tree on every incremental
                 # run. Migrate those shards IN PLACE first, reusing the same
                 # engine `--migrate-chunks-to-sqlite` drives, under the
-                # index-mutation lock already held above. Skipped ONLY for an
-                # explicit `--new-collection-layout=sharded_json` request.
-                if new_collection_layout != "sharded_json":
-                    from .services.chunk_migration_cli import (
-                        consolidate_legacy_temporal_shards,
-                    )
+                # index-mutation lock already held above.
+                #
+                # Bug #1529 finding #3: this is now UNCONDITIONAL. It used to
+                # be skipped for `--new-collection-layout=sharded_json`, which
+                # let a repo with pre-existing legacy shards keep growing its
+                # legacy tree on every incremental run. That combination is
+                # now refused at the top of this command, so the skip could
+                # only ever be dead code that silently reopened Bug #1528.
+                from .services.chunk_migration_cli import (
+                    consolidate_legacy_temporal_shards,
+                )
 
-                    _migrated, _failed = consolidate_legacy_temporal_shards(
-                        index_dir, console=console
+                _migrated, _failed = consolidate_legacy_temporal_shards(
+                    index_dir, console=console
+                )
+                if _failed:
+                    # Fail LOUD: a failed shard is still authoritative in
+                    # its legacy layout, so proceeding would write more
+                    # legacy rows into it.
+                    console.print(
+                        f"❌ {_failed} legacy temporal shard(s) could not "
+                        "be consolidated to chunks.db storage. Refusing to "
+                        "index, because that would keep adding "
+                        "vector_*.json files to them. Fix or remove the "
+                        "reported shard(s) and retry.",
+                        style="red",
                     )
-                    if _failed:
-                        # Fail LOUD: a failed shard is still authoritative in
-                        # its legacy layout, so proceeding would write more
-                        # legacy rows into it.
-                        console.print(
-                            f"❌ {_failed} legacy temporal shard(s) could not "
-                            "be consolidated to chunks.db storage. Refusing to "
-                            "index, because that would keep adding "
-                            "vector_*.json files to them. Fix or remove the "
-                            "reported shard(s) and retry.",
-                            style="red",
-                        )
-                        sys.exit(1)
-                    if _migrated:
-                        console.print(
-                            f"✅ Consolidated {_migrated} legacy temporal "
-                            "shard(s) to chunks.db storage",
-                            style="green",
-                        )
+                    sys.exit(1)
+                if _migrated:
+                    console.print(
+                        f"✅ Consolidated {_migrated} legacy temporal "
+                        "shard(s) to chunks.db storage",
+                        style="green",
+                    )
 
                 # Initialize temporal indexer with provider-aware collection name.
                 # Story #1290 (E2E-discovered bug): the actual collection_name MUST
@@ -5779,18 +5846,20 @@ def query(
         # local-scan value.
         if not _has_temporal:
             try:
-                from code_indexer.services.temporal.temporal_sister_root_detection import (
-                    detect_golden_repo_sister_root,
+                # Bug #1529: same structural golden-repo detection, now from
+                # temporal_server_paths (the single location authority).
+                from code_indexer.services.temporal.temporal_server_paths import (
+                    resolve_golden_repo_coordinates,
                 )
                 from code_indexer.services.temporal.temporal_status import (
                     get_temporal_repo_status,
                 )
 
-                _sister_root = detect_golden_repo_sister_root(config.codebase_dir)
-                if _sister_root is not None:
+                _coords = resolve_golden_repo_coordinates(config.codebase_dir)
+                if _coords is not None:
                     _sister_status = get_temporal_repo_status(
-                        _sister_root.golden_repos_dir,
-                        _sister_root.repo_alias,
+                        _coords[0],
+                        _coords[1],
                         index_dir,
                     )
                     _has_temporal = _sister_status.has_data
@@ -5870,66 +5939,6 @@ def query(
 
             index_dir = config.codebase_dir / ".code-indexer" / "index"
 
-            # Bug #1482 extension: construct a TemporalShardResolver only
-            # when config.codebase_dir structurally IS a golden repo's own
-            # clone (see the existence-gate detection above for the full
-            # rationale) -- entirely inert/None for an ordinary standalone
-            # repo. Standalone CLI has no QueryTracker construct at all, so
-            # the resolver is built without one (pin() is then a
-            # documented true no-op, matching the exact same no-tracker
-            # convention get_temporal_repo_status() already uses).
-            # Attaching to vector_store_client (the "disconnected reader"
-            # lesson) is required -- a resolver threaded only into fusion's
-            # own bookkeeping would not change what _get_collection_path()
-            # resolves on the store instance that actually performs the
-            # search.
-            _cli_temporal_resolver = None
-            try:
-                from code_indexer.services.temporal.temporal_sister_root_detection import (
-                    detect_golden_repo_sister_root,
-                )
-
-                _sister_root = detect_golden_repo_sister_root(config.codebase_dir)
-                if _sister_root is not None:
-                    # Aliased import: `AliasManager` may already be a
-                    # LOCAL name earlier in this same query() function
-                    # scope (the global-repo-handling branch, conditional
-                    # on mode) -- relying on that binding unconditionally
-                    # here would be a latent NameError on other code
-                    # paths, and re-importing under the same name trips
-                    # mypy's redefinition check.
-                    from code_indexer.global_repos.alias_manager import (
-                        AliasManager as _AliasManager,
-                    )
-                    from code_indexer.services.temporal.temporal_shard_resolver import (
-                        TemporalShardResolver,
-                    )
-
-                    _cli_temporal_resolver = TemporalShardResolver(
-                        alias_manager=_AliasManager(
-                            str(_sister_root.golden_repos_dir / "aliases")
-                        ),
-                        repo_alias=_sister_root.repo_alias,
-                        sister_root=_sister_root.golden_repos_dir,
-                        legacy_index_path=index_dir,
-                    )
-                    vector_store_client._temporal_shard_resolver = (
-                        _cli_temporal_resolver
-                    )
-            except Exception:
-                # NOTE: uses logging.getLogger(...) directly -- see the
-                # matching comment on the existence-gate block above for
-                # why the bare `logger` name cannot be used here.
-                import logging as _logging
-
-                _logging.getLogger(__name__).warning(
-                    "cidx query temporal: sister-relocated resolver "
-                    "construction failed (isolated, non-fatal); using "
-                    "legacy-only resolution",
-                    exc_info=True,
-                )
-                _cli_temporal_resolver = None
-
             if not quiet:
                 if time_range != "all":
                     console.print(
@@ -5956,7 +5965,6 @@ def query(
                 author=author,
                 chunk_type=chunk_type,
                 temporal_embedder=temporal_embedder,
-                resolver=_cli_temporal_resolver,
             )
 
             # Story #905: Apply unified rerank funnel to temporal results.
@@ -8283,20 +8291,20 @@ def _status_impl(ctx):
                     _sister_temporal_status = None
                     if not temporal_collections:
                         try:
-                            from .services.temporal.temporal_sister_root_detection import (
-                                detect_golden_repo_sister_root,
+                            from .services.temporal.temporal_server_paths import (
+                                resolve_golden_repo_coordinates,
                             )
                             from .services.temporal.temporal_status import (
                                 get_temporal_repo_status,
                             )
 
-                            _sister_root = detect_golden_repo_sister_root(
+                            _coords = resolve_golden_repo_coordinates(
                                 config.codebase_dir
                             )
-                            if _sister_root is not None:
+                            if _coords is not None:
                                 _sister_temporal_status = get_temporal_repo_status(
-                                    _sister_root.golden_repos_dir,
-                                    _sister_root.repo_alias,
+                                    _coords[0],
+                                    _coords[1],
                                     index_path,
                                 )
                         except Exception as e_sister:

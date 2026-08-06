@@ -19,27 +19,54 @@ fallback, AC11's bootstrap discovery) reuses -- never
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Literal
 
 
-def temporal_shard_has_committed_rows(shard_dir: Path) -> bool:
-    """Return True iff at least one committed row file exists under shard_dir.
+def temporal_shard_has_committed_rows(
+    shard_dir: Path,
+    *,
+    on_error: Literal["treat_absent", "raise"] = "treat_absent",
+) -> bool:
+    """Return True iff at least one committed row exists under shard_dir.
 
-    Side-effect-free (never writes anything) and short-circuits on the
-    FIRST match found -- does not enumerate every row file in a shard that
-    may hold thousands of hash-sharded `vector_*.json` files.
+    Side-effect-free and short-circuits on the first match. Layout-aware:
+    dispatches on ``resolve_chunk_layout`` (the project's sole authority),
+    never a bare ``chunks.db`` existence probe.
 
     Args:
-        shard_dir: Path to a temporal quarter-shard or monolith collection
-            directory (e.g. `.code-indexer/index/code-indexer-temporal-{slug}-{quarter}/`).
+        shard_dir: A temporal quarter-shard or monolith collection directory.
+        on_error: Policy for an UNREADABLE CHUNKS_DB store (corrupt, locked,
+            permission denied), forwarded to ``chunk_store_has_real_data``.
+            ``"treat_absent"`` (default) answers False -- for status/health
+            reporting, which must stay resilient. ``"raise"`` propagates and
+            is REQUIRED for any DESTRUCTIVE caller, where "no data" means
+            "safe to wipe and re-embed" (Bug #1529 finding #5; see
+            ``temporal_reindex_needs_clear``).
 
     Returns:
-        False if shard_dir does not exist or is not a directory, or if it
-        contains zero `vector_*.json` files anywhere in its (4-level
-        hash-sharded) subtree. True on the first row file found.
+        False if shard_dir is not a directory or holds zero rows.
+
+    Raises:
+        Propagates ``chunk_store_has_real_data``'s error when
+        ``on_error="raise"`` and the store is unreadable.
     """
     shard_dir = Path(shard_dir)
     if not shard_dir.is_dir():
         return False
+
+    from code_indexer.storage.shared.chunk_layout import (
+        ChunkLayout,
+        resolve_chunk_layout,
+    )
+
+    if resolve_chunk_layout(shard_dir) is ChunkLayout.CHUNKS_DB:
+        from code_indexer.storage.sqlite_chunk_store import chunk_store_has_real_data
+
+        # on_error is the CALLER's policy, never hardcoded here.
+        return bool(
+            chunk_store_has_real_data(shard_dir / "chunks.db", on_error=on_error)
+        )
+
     for _ in shard_dir.rglob("vector_*.json"):
         return True
     return False
