@@ -215,10 +215,21 @@ def server_temporal_index_root(
     # Defense in depth: the component checks above are the real guard, but
     # containment is the invariant that actually matters, so assert it
     # directly rather than trusting the character blacklist is exhaustive.
-    if resolved.parent != container:
+    #
+    # Resolved on BOTH sides, because the alias checks constrain only the
+    # STRING -- they say nothing about what already exists on disk under that
+    # name. A pre-existing `.temporal/{alias}` SYMLINK pointing anywhere at
+    # all satisfies every character check and every bit of lexical Path
+    # arithmetic (which never touches the filesystem), while the writes it
+    # receives land outside the fixed root entirely. strict=False so a root
+    # that does not exist yet -- the ordinary first-refresh case -- resolves
+    # to itself instead of raising.
+    resolved_container = container.resolve(strict=False)
+    if resolved.resolve(strict=False).parent != resolved_container:
         raise ValueError(
             f"server_temporal_index_root: repo_alias {repo_alias!r} does not "
-            f"resolve directly beneath {container}"
+            f"resolve directly beneath {container} (it may be an existing "
+            f"symlink pointing outside the temporal root)"
         )
 
     return resolved

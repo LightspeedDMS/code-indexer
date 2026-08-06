@@ -65,6 +65,45 @@ def test_safe_alias_still_resolves_beneath_the_temporal_root(alias: str) -> None
     assert resolved.resolve().is_relative_to(container.resolve())
 
 
+def test_existing_symlink_escaping_the_container_is_refused(tmp_path: Path) -> None:
+    """A REAL symlink out of ``.temporal/`` must be refused, not followed.
+
+    The character/component checks only constrain the alias STRING. They say
+    nothing about what already exists on disk under that name, and the
+    containment assertion after them is purely lexical -- ``Path`` arithmetic
+    never consults the filesystem. So an existing
+    ``.temporal/{alias}`` symlink pointing anywhere at all satisfies every
+    check while the writes it receives land outside the fixed root entirely.
+
+    Built with real directories and a real symlink -- the only way to
+    exercise a resolution the lexical check cannot see.
+    """
+    golden_repos_dir = tmp_path / "golden-repos"
+    container = golden_repos_dir / SERVER_TEMPORAL_ROOT_DIR_NAME
+    container.mkdir(parents=True)
+
+    outside = tmp_path / "somewhere-else"
+    outside.mkdir()
+    (container / "escapee").symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(ValueError):
+        server_temporal_index_root(golden_repos_dir, "escapee")
+
+
+def test_real_directory_inside_the_container_is_still_accepted(tmp_path: Path) -> None:
+    """The symlink guard must not reject the ordinary already-created root.
+
+    Every refresh after the first finds ``.temporal/{alias}`` already on
+    disk; refusing that would break temporal indexing outright.
+    """
+    golden_repos_dir = tmp_path / "golden-repos"
+    container = golden_repos_dir / SERVER_TEMPORAL_ROOT_DIR_NAME
+    existing = container / "evolution"
+    existing.mkdir(parents=True)
+
+    assert server_temporal_index_root(golden_repos_dir, "evolution") == existing
+
+
 def test_backslash_is_refused_even_though_posix_allows_it() -> None:
     """A backslash is a legal POSIX filename char but a separator elsewhere.
 

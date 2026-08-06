@@ -816,6 +816,25 @@ class FilesystemVectorStore:
         # server) still governs them.
         if TemporalMetadataStore.is_temporal_collection(collection_name):
             build_as_chunks_db = self._new_collection_layout_explicit is not False
+            if not build_as_chunks_db:
+                # Bug #1529 review item 4: the storage layer cannot tell a
+                # test fabricating pre-#1528 data from a production mistake,
+                # so it must not refuse -- real fleet data is still
+                # SHARDED_JSON until migrated, and the legacy read/migrate
+                # paths have to stay exercisable. But this combination has no
+                # legitimate production caller (the CLI refuses
+                # --new-collection-layout=sharded_json with --index-commits;
+                # the server always requests chunks_db), so an occurrence in
+                # a real deployment log is a five-alarm signal and must not
+                # be silent.
+                self.logger.warning(
+                    "Building TEMPORAL collection %s in the legacy "
+                    "SHARDED_JSON layout because the caller explicitly "
+                    "requested it. Temporal indexing must never write legacy "
+                    "vector_*.json files (Bug #1528) -- if this appears in a "
+                    "server or CLI log, a caller is bypassing that rule.",
+                    collection_name,
+                )
         else:
             build_as_chunks_db = self._use_chunks_db_for_new_collections
         if build_as_chunks_db:
