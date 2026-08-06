@@ -24,8 +24,10 @@ test_migration_runner.py's ``isolated_schema``, which drops
 name -- they predate this module and are NOT a pattern to copy; the wider
 cleanup is flagged separately rather than done here.
 
-Guard 1 -- the target database must be NAMED like a disposable test database
-(``_DISPOSABLE_DB_NAME_MARKERS``). A DSN pointing anywhere else FAILS loudly
+Guard 1 -- the target database's name must FULLY MATCH the disposable format
+``_DISPOSABLE_DB_NAME_REGEX`` (never merely contain a marker: substring
+containment accepted `production_cidx_test` and `cidx_test_prod`, which is the
+weakness Codex's review found). A DSN pointing anywhere else FAILS loudly
 rather than skipping, so a misconfiguration is visible instead of silently
 tolerated.
 
@@ -73,9 +75,16 @@ CLONE_BRANCH = "master"
 POOL_MIN_SIZE = 1
 POOL_MAX_SIZE = 2
 
-# Guard 1: the database NAME must contain one of these, so a DSN aimed at a
-# real/shared database is refused rather than operated on.
-_DISPOSABLE_DB_NAME_MARKERS = ("test", "tmp", "scratch", "sandbox")
+# Guard 1: the database name must FULLY MATCH this disposable format, so a DSN
+# aimed at a real/shared database is refused rather than operated on.
+#
+# A FULL-STRING match, never substring containment. `marker in db_name` accepts
+# production-shaped names that merely contain a marker somewhere --
+# `production_cidx_test`, `cidx_test_prod` and `attestation` all slipped through
+# that check, which is the weakness Codex's review of this module found. The
+# optional suffix is DIGITS ONLY, so no word like "prod" can ride along behind a
+# marker. Matched with re.fullmatch in _refuse_unless_disposable.
+_DISPOSABLE_DB_NAME_REGEX = r"(?:cidx_)?(?:test|tmp|scratch|sandbox)(?:_[0-9]+)?"
 
 _SCHEMA_PREFIX = "cidx_bug1533_"
 _SENTINEL_PREFIX = "cidx_bug1533_sentinel_"
@@ -103,22 +112,78 @@ def _database_name(dsn: str) -> str:
 
 
 def _refuse_unless_disposable(dsn: str) -> None:
-    """FAIL (never silently skip) if the target database is not obviously a
-    disposable test database."""
+    """FAIL (never silently skip) unless the target database's name FULLY
+    matches the disposable format."""
+    import re
+
     db_name = _database_name(dsn).lower()
     if not db_name:
         pytest.fail(
             "TEST_POSTGRES_DSN does not name a database -- refusing to run "
             "live-PostgreSQL tests against an unidentified target."
         )
-    if not any(marker in db_name for marker in _DISPOSABLE_DB_NAME_MARKERS):
+    if re.fullmatch(_DISPOSABLE_DB_NAME_REGEX, db_name) is None:
         pytest.fail(
-            f"TEST_POSTGRES_DSN points at database {db_name!r}, whose name "
-            f"does not contain any of {_DISPOSABLE_DB_NAME_MARKERS}. Refusing "
-            "to run: this module creates and drops schemas and must never be "
-            "aimed at a real or shared database. Point TEST_POSTGRES_DSN at a "
-            "disposable database whose name says so."
+            f"TEST_POSTGRES_DSN points at database {db_name!r}, which does not "
+            f"FULLY match the disposable format {_DISPOSABLE_DB_NAME_REGEX!r} "
+            "(a name merely CONTAINING 'test' is deliberately not enough). "
+            "Refusing to run: this module creates and drops schemas and must "
+            "never be aimed at a real or shared database. Point "
+            "TEST_POSTGRES_DSN at a disposable database, e.g. cidx_test_1533."
         )
+
+
+class TestDisposableDatabaseGuard:
+    """The destruction-safety guard itself, tested WITHOUT any database.
+
+    Runs unconditionally (no TEST_POSTGRES_DSN, no psycopg needed), because a
+    guard exercised only when someone happens to have PostgreSQL wired up is
+    not a guard. Codex's review found the original check was substring
+    containment (``marker in db_name``), which accepts production-shaped names
+    that merely contain "test" anywhere -- ``production_cidx_test`` and
+    ``cidx_test_prod`` both slipped through. The rule is now a FULL-STRING
+    match against an explicit disposable format.
+    """
+
+    # Names that must NEVER be operated on. cidx_server is this project's real
+    # production database name; attestation merely contains "test".
+    REFUSED_NAMES = (
+        "cidx_server",
+        "cidx_production_lookalike",
+        "production_cidx_test",
+        "cidx_test_prod",
+        "cidx_prod",
+        "attestation",
+        "",
+    )
+
+    # The disposable format: optional cidx_ prefix, a disposable marker, and an
+    # optional NUMERIC suffix (digits only, so no word like "prod" rides along).
+    ACCEPTED_NAMES = (
+        "cidx_test_1533",
+        "test",
+        "cidx_tmp",
+        "scratch",
+        "cidx_sandbox_7",
+    )
+
+    @pytest.mark.parametrize("db_name", REFUSED_NAMES)
+    def test_refuses_non_disposable_database_name(self, db_name: str) -> None:
+        with pytest.raises(pytest.fail.Exception) as exc_info:
+            _refuse_unless_disposable(f"postgresql://u@h:5432/{db_name}")
+        assert "Refusing" in str(exc_info.value) or "does not name" in str(
+            exc_info.value
+        )
+
+    @pytest.mark.parametrize("db_name", ACCEPTED_NAMES)
+    def test_accepts_disposable_database_name(self, db_name: str) -> None:
+        _refuse_unless_disposable(f"postgresql://u@h:5432/{db_name}")
+
+    def test_key_value_dsn_form_is_also_guarded(self) -> None:
+        """libpq accepts key=value DSNs too; the guard must not be bypassable
+        by using that form."""
+        with pytest.raises(pytest.fail.Exception):
+            _refuse_unless_disposable("host=h port=5432 dbname=cidx_server")
 
 
 def _dsn_with_search_path(dsn: str, schema: str) -> str:
