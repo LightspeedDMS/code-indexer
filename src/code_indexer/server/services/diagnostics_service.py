@@ -198,8 +198,16 @@ class DiagnosticsService:
         return self.__lock
 
     def is_running(self) -> bool:
-        """Check if any diagnostics are currently running."""
-        return self._running or len(self._running_categories) > 0
+        """Check if any diagnostics are currently running.
+
+        Story #1491 AC4: read under the lock. Both flags are written by
+        background runs executing on Starlette threadpool workers, so an
+        unsynchronised read here can observe a torn view across the two
+        (e.g. _running already cleared while _running_categories has not yet
+        been updated). Same discipline as get_status().
+        """
+        with self._lock:
+            return self._running or len(self._running_categories) > 0
 
     def get_status(self) -> Dict[DiagnosticCategory, List[DiagnosticResult]]:
         """
@@ -263,10 +271,30 @@ class DiagnosticsService:
                 # No DB results - generate and cache placeholder results
                 results, loaded_at = self._get_placeholder_results(category), now
 
+            # Story #1491 AC4: COMPARE-AND-SET, never an unconditional write.
+            #
+            # The DB read above deliberately ran with the lock released, so a
+            # concurrent run_all_diagnostics/run_category -- now a genuine
+            # cross-thread possibility, since both are sync Starlette
+            # background tasks on threadpool workers -- may have published
+            # FRESHER results for this category in the meantime. Overwriting
+            # unconditionally would silently discard them (a lost update in
+            # which the newest data loses).
+            #
+            # So: re-acquire, and publish only if this category's timestamp is
+            # still exactly the one observed in the snapshot above. If it
+            # changed, someone published while we were reading -- their value
+            # is newer than our DB snapshot by construction, so we keep theirs
+            # and return it.
+            observed_at = cached_timestamps.get(category)
             with self._lock:
-                self._cache[category] = results
-                self._cache_timestamps[category] = loaded_at
-            status[category] = results
+                current_at = self._cache_timestamps.get(category)
+                if current_at == observed_at:
+                    self._cache[category] = results
+                    self._cache_timestamps[category] = loaded_at
+                    status[category] = results
+                else:
+                    status[category] = self._cache[category]
 
         return status
 
@@ -437,13 +465,19 @@ class DiagnosticsService:
             else DEFAULT_CACHE_TTL
         )
 
-        # Check if cache is still valid
+        # Check if cache is still valid.
+        #
+        # Story #1491 AC4: taken as ONE locked snapshot rather than three
+        # separate unsynchronised reads. A concurrent background run publishes
+        # _cache[category] and _cache_timestamps[category] as a pair, so
+        # interleaving between these reads can observe one without the other
+        # and mis-decide whether a re-run is needed. Same discipline as
+        # get_status().
         now = datetime.now()
-        if (
-            category in self._cache
-            and category in self._cache_timestamps
-            and now - self._cache_timestamps[category] < cache_ttl
-        ):
+        with self._lock:
+            cached_at = self._cache_timestamps.get(category)
+            has_results = category in self._cache
+        if has_results and cached_at is not None and now - cached_at < cache_ttl:
             return  # Cache is valid, no need to re-run
 
         with self._lock:

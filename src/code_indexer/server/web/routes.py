@@ -8801,6 +8801,28 @@ async def fetch_discovery_branches(request: Request):
         # (unretrieved exceptions, git subprocesses outliving the response).
         # Planning fully first means an exception here escapes with zero tasks
         # in flight.
+        # Story #1491 (review item 2): CITokenManager.get_token() performs real
+        # SYNCHRONOUS backend access, so calling it from this async route put
+        # blocking I/O straight back onto the event loop -- the exact defect
+        # class this story exists to remove, and it would have negated the
+        # subprocess offload below on any slow credential store. It is now
+        # offloaded to a worker thread. Each distinct platform is resolved
+        # exactly ONCE per request rather than once per repository, so a
+        # 50-repo GitHub discovery does one token read instead of fifty.
+        requested_platforms = {
+            repo.get("platform", "github") for repo in repos if repo.get("clone_url")
+        }
+        credentials_by_platform: Dict[str, Optional[str]] = {}
+        for platform_name in sorted(requested_platforms):
+            if platform_name not in ("github", "gitlab"):
+                # Unknown platform: same as before -- no credentials attached.
+                credentials_by_platform[platform_name] = None
+                continue
+            token_data = await asyncio.to_thread(token_manager.get_token, platform_name)
+            credentials_by_platform[platform_name] = (
+                token_data.token if token_data else None
+            )
+
         plan: List[Tuple[str, Optional[Tuple[str, str, Optional[str]]]]] = []
         for repo in repos:
             clone_url = repo.get("clone_url")
@@ -8810,17 +8832,7 @@ async def fetch_discovery_branches(request: Request):
                 plan.append((str(repo), None))
                 continue
 
-            # Retrieve credentials based on platform
-            credentials = None
-            if platform == "gitlab":
-                token_data = token_manager.get_token("gitlab")
-                if token_data:
-                    credentials = token_data.token
-            elif platform == "github":
-                token_data = token_manager.get_token("github")
-                if token_data:
-                    credentials = token_data.token
-
+            credentials = credentials_by_platform.get(platform)
             plan.append((clone_url, (clone_url, platform, credentials)))
 
         # Pass 2: the plan is complete, so creating tasks can no longer be

@@ -73,12 +73,16 @@ diagnostics_service = DiagnosticsService()
 
 
 @router.get("", response_class=HTMLResponse)
-async def get_diagnostics_page(
+def get_diagnostics_page(
     request: Request,
     current_user: User = None,  # TODO: Add dependency after auth integration
 ) -> HTMLResponse:
     """
     Render the diagnostics page.
+
+    Story #1491 (review item 4): declared SYNC deliberately -- it calls
+    get_status(), whose cold/expired-category SQLite read must not run on the
+    event loop. Nothing here is awaited.
 
     Returns HTML page with:
     - Five category sections
@@ -134,7 +138,7 @@ async def get_diagnostics_page(
     response_class=HTMLResponse,
     dependencies=[Depends(dependencies.require_elevation())],
 )
-async def run_all_diagnostics(
+def run_all_diagnostics(
     request: Request,
     background_tasks: BackgroundTasks,
     current_user: User = None,  # TODO: Add dependency after auth integration
@@ -184,7 +188,7 @@ async def run_all_diagnostics(
     response_class=HTMLResponse,
     dependencies=[Depends(dependencies.require_elevation())],
 )
-async def run_category_diagnostics(
+def run_category_diagnostics(
     category: str,
     request: Request,
     background_tasks: BackgroundTasks,
@@ -247,12 +251,18 @@ async def run_category_diagnostics(
 
 
 @router.get("/status", response_class=HTMLResponse)
-async def get_diagnostics_status(
+def get_diagnostics_status(
     request: Request,
     current_user: User = None,  # TODO: Add dependency after auth integration
 ) -> Response:
     """
     Get current diagnostics status (HTMX polling endpoint).
+
+    Story #1491 (review item 4): declared SYNC deliberately. get_status()
+    performs a blocking SQLite read for any cold/expired category, and this
+    endpoint is polled every ~2s per open admin page -- running that on the
+    event loop is exactly the defect class this story removes. A plain def
+    route is dispatched to FastAPI's threadpool. Nothing here is awaited.
 
     Returns HTML partial with current status for all categories.
     Includes HX-Stop-Polling header when diagnostics are complete

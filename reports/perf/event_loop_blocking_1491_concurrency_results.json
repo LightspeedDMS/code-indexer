@@ -1,85 +1,78 @@
 {
   "ac1_mcp_auth_bcrypt": {
-    "after_real_dependency_max_probe_latency_s": 0.008726389991352335,
+    "after_real_dependency_max_probe_latency_s": 0.007336902985116467,
     "after_real_dependency_probe_latencies_s": [
-      0.005978077999316156,
-      0.007651324005564675,
-      0.008726389991352335
+      0.005871620000107214,
+      0.006700917991111055,
+      0.007336902985116467
     ],
-    "after_real_dependency_total_wall_s": 0.23329586698673666,
+    "after_real_dependency_total_wall_s": 0.2369002850027755,
     "bcrypt_rounds": 12,
-    "before_on_loop_max_probe_latency_s": 0.2302413409925066,
+    "before_on_loop_max_probe_latency_s": 0.2226510520267766,
     "before_on_loop_probe_latencies_s": [
-      0.2293304939812515,
-      0.22981744798016734,
-      0.2302413409925066
+      0.22166650200961158,
+      0.2221406320168171,
+      0.2226510520267766
     ],
-    "before_on_loop_total_wall_s": 0.231207506993087,
+    "before_on_loop_total_wall_s": 0.22315574099775404,
     "probe_budget_s": 0.25
   },
   "ac2_regex_search_dispatch": {
-    "ac2_min_baseline_stall_s": 0.2,
-    "ac2_probe_budget_s": 0.05,
-    "after_sync_dispatch_max_probe_latency_s": 0.0037412979872897267,
+    "ac2_min_baseline_stall_s": 0.4,
+    "ac2_probe_budget_s": 0.1,
+    "after_sync_dispatch_max_probe_latency_s": 0.004295232007279992,
     "after_sync_dispatch_probe_latencies_s": [
-      0.002397590986220166,
-      0.003136604995233938,
-      0.0037412979872897267
+      0.0034742699936032295,
+      0.003919834009138867,
+      0.004295232007279992
     ],
-    "after_sync_dispatch_total_wall_s": 1.4167713969945908,
-    "before_async_dispatch_max_probe_latency_s": 0.4890475209977012,
+    "after_sync_dispatch_total_wall_s": 1.1640951050212607,
+    "before_async_dispatch_max_probe_latency_s": 0.4126629270031117,
     "before_async_dispatch_probe_latencies_s": [
-      0.48763356800191104,
-      0.4883716899785213,
-      0.4890475209977012
+      0.41193747898796573,
+      0.4123162850155495,
+      0.4126629270031117
     ],
-    "before_async_dispatch_total_wall_s": 1.3362255670072045,
+    "before_async_dispatch_total_wall_s": 1.1221131639904343,
     "corpus_files": 7500,
     "matches": 7500,
     "observed_prefilter_candidates": 7500
   },
   "ac3_branch_discovery": {
-    "measured_max_probe_latency_s": 0.0070751669991295785,
+    "measured_max_probe_latency_s": 0.007944229990243912,
     "measured_probe_latencies_s": [
-      0.006313708989182487,
-      0.006781135976780206,
-      0.0070751669991295785
+      0.007206539012258872,
+      0.0076313529862090945,
+      0.007944229990243912
     ],
-    "measured_total_wall_s": 0.604342890001135,
+    "measured_total_wall_s": 0.6038666439999361,
     "per_repo_block_s": 0.6,
     "probe_budget_s": 0.25,
     "repo_count": 4,
     "sequential_on_loop_expectation_s": 2.4
   },
   "ac3_real_blocked_remote_loop_starvation": {
-    "max_starvation_gap_s": 0.0018925969838164691,
+    "max_starvation_gap_s": 0.0019241239991970305,
     "observation_window_s": 1.5,
     "probe_budget_s": 0.25,
     "probe_count": 15
   },
-  "ac3_real_unreachable_remote_timeout": {
-    "max_probe_latency_s": 0.0007432130223605782,
-    "probe_budget_s": 0.25,
-    "probe_count": 1,
-    "real_git_timeout_s": 4,
-    "request_wall_s": 4.017433783999877
-  },
   "ac4_diagnostics_background_task": {
     "background_block_s": 0.6,
-    "measured_max_probe_latency_s": 0.007895999995525926,
+    "measured_max_probe_latency_s": 0.007012053014477715,
     "measured_probe_latencies_s": [
-      0.006058355007553473,
-      0.007123170013073832,
-      0.007895999995525926
+      0.005968308018054813,
+      0.0065290050115436316,
+      0.007012053014477715
     ],
     "probe_budget_s": 0.25
   },
   "ac5_research_assistant_poll": {
-    "measured_max_probe_latency_s": 0.006325533002382144,
+    "measured_max_probe_latency_s": 0.006776404974516481,
     "measured_probe_latencies_s": [
-      0.004946025990648195,
-      0.00573409500066191,
-      0.006325533002382144
+      0.005570385983446613,
+      0.006284130999119952,
+      0.006776404974516481
     ],
     "per_boundary_block_s": 0.3,
     "probe_budget_s": 0.25

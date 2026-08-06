@@ -60,7 +60,7 @@ import logging
 import secrets
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import (
     TYPE_CHECKING,
@@ -81,7 +81,11 @@ from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 
 if TYPE_CHECKING:
-    from code_indexer.server.services.diagnostics_service import DiagnosticsService
+    from code_indexer.server.services.diagnostics_service import (
+        DiagnosticCategory,
+        DiagnosticResult,
+        DiagnosticsService,
+    )
 
 logger = logging.getLogger(__name__)
 
@@ -110,7 +114,12 @@ _MIN_PROBE_IMPROVEMENT_RATIO = 4.0
 # AC2 measures against this instead of the shared budget above; it is still more
 # than an order of magnitude above the single-digit-millisecond latencies the
 # offloaded path actually produces.
-_AC2_PROBE_BUDGET_SECONDS = 0.05
+# Raised 0.05 -> 0.1 per dual-review item 9: this project documents test
+# flakiness under concurrent gate load, and the offloaded path measures ~2-5ms,
+# so 0.1s is still an order of magnitude of headroom while removing a needless
+# flake risk. The anti-vacuity floor below scales with this value (4x = the
+# baseline must stall the loop for at least 0.4s before any comparison counts).
+_AC2_PROBE_BUDGET_SECONDS = 0.1
 
 # Anti-vacuity guard for AC2 (review item 2): before trusting ANY before/after
 # comparison, the pre-change baseline must be shown to genuinely stall the loop
@@ -155,32 +164,23 @@ SlowRequest = Callable[[httpx.AsyncClient], Awaitable[httpx.Response]]
 
 
 def _record(key: str, payload: Dict[str, MeasurementValue]) -> None:
-    """Accumulate a measurement and rewrite the perf artifact."""
+    """Accumulate a measurement and REPLACE the perf artifact.
+
+    Deliberately replace-not-merge. An earlier version merged this session's
+    measurements into whatever the file already held, which meant a key written
+    by a test that has since been deleted or renamed survived indefinitely --
+    the artifact then advertised evidence for a test that no longer exists,
+    which reads as fabricated. Writing only what this session actually measured
+    makes the artifact self-consistent by construction: every key in it was
+    produced by a test that ran, in the run that produced the file.
+
+    Consequence worth knowing: running a SUBSET of these tests rewrites the
+    artifact with only that subset. Regenerate by running the whole file.
+    """
     with _MEASUREMENTS_LOCK:
         _MEASUREMENTS[key] = dict(payload)
         _PERF_ARTIFACT.parent.mkdir(parents=True, exist_ok=True)
-        existing: Dict[str, object] = {}
-        if _PERF_ARTIFACT.exists():
-            # A previous run's artifact that is unreadable, corrupt, or not a
-            # JSON object must not fail the test whose real measurement we are
-            # trying to persist, but it must never be silently discarded.
-            try:
-                decoded = json.loads(_PERF_ARTIFACT.read_text())
-                if not isinstance(decoded, dict):
-                    raise ValueError(
-                        f"perf artifact root is {type(decoded).__name__}, not an object"
-                    )
-                existing = decoded
-            except (OSError, ValueError):
-                logger.warning(
-                    "discarding unusable perf artifact %s; rewriting from "
-                    "this session's measurements only",
-                    _PERF_ARTIFACT,
-                    exc_info=True,
-                )
-                existing = {}
-        existing.update(_MEASUREMENTS)
-        _PERF_ARTIFACT.write_text(json.dumps(existing, indent=2, sort_keys=True))
+        _PERF_ARTIFACT.write_text(json.dumps(_MEASUREMENTS, indent=2, sort_keys=True))
 
 
 def _app_with_probe() -> FastAPI:
@@ -873,7 +873,10 @@ async def test_ac3_credential_failure_orphans_no_tasks(
     monkeypatch.setattr(
         routes_module, "_require_admin_session", lambda request: {"username": "admin"}
     )
-    failing_store = _FailingTokenStore(fail_after=2)
+    # Credentials are resolved ONCE per platform before the planning loop, so
+    # the very first read is the one that must fail for this test to exercise
+    # the "planning raised" path at all.
+    failing_store = _FailingTokenStore(fail_after=0)
     monkeypatch.setattr(routes_module, "_get_token_manager", lambda: failing_store)
 
     app = _app_with_probe()
@@ -1054,6 +1057,118 @@ async def test_ac4_diagnostics_background_task_does_not_block_event_loop(
 
     await _await_diagnostics_completion(service)
     assert _comparable_records(service) == baseline_records
+
+
+def test_ac4_diagnostics_get_status_routes_are_sync_dispatched() -> None:
+    """Every diagnostics route calling get_status() must be a plain def.
+
+    ``get_status()`` performs a blocking SQLite read for any cold/expired
+    category. FastAPI runs a plain ``def`` route in its threadpool, so
+    declaring these routes sync IS what keeps that read off the event loop.
+    If one is ever re-declared ``async def``, the exact defect class this
+    story exists to close silently returns -- in the file this story rewrote.
+    """
+    from code_indexer.server.routers import diagnostics as diagnostics_router
+
+    for route_name in (
+        "get_diagnostics_page",
+        "get_diagnostics_status",
+        "run_all_diagnostics",
+        "run_category_diagnostics",
+    ):
+        handler = getattr(diagnostics_router, route_name)
+        assert not asyncio.iscoroutinefunction(handler), (
+            f"{route_name} calls get_status() (blocking SQLite on a cold "
+            "category) and must be a sync def route so FastAPI threadpools it"
+        )
+
+
+# Marker messages distinguishing the two competing writes in the lost-update
+# race test below.
+_STALE_DB_MESSAGE = "stale-from-database"
+_NEWER_RUN_MESSAGE = "newer-from-concurrent-run"
+
+# How far in the past the simulated DB snapshot is stamped. Any duration
+# comfortably older than the competing write works; one hour is unambiguous.
+_STALE_SNAPSHOT_AGE = timedelta(hours=1)
+
+
+def _diagnostic_result_with(message: str) -> List["DiagnosticResult"]:
+    """One WORKING CLI-tools result carrying the given marker message."""
+    from code_indexer.server.services.diagnostics_service import (
+        DiagnosticResult,
+        DiagnosticStatus,
+    )
+
+    return [
+        DiagnosticResult(
+            name="cli-tools",
+            status=DiagnosticStatus.WORKING,
+            message=message,
+            details={},
+        )
+    ]
+
+
+def _make_racing_diagnostics_service(
+    db_path: Path, raced_category: "DiagnosticCategory"
+) -> "DiagnosticsService":
+    """A real DiagnosticsService that lands the lost-update race exactly.
+
+    Its ``_read_category_from_db`` publishes a NEWER generation through the
+    REAL lock -- byte-for-byte the sequence a concurrent background run
+    performs -- and only then returns its own OLDER snapshot. This makes the
+    race deterministic: no sleeps, no thread scheduling assumptions.
+
+    The publish deliberately goes through the same private cache dicts the
+    production write paths use, because that IS the shared state under test;
+    there is no public setter for "a background run just published".
+    """
+    from code_indexer.server.services.diagnostics_service import DiagnosticsService
+
+    class _RacingService(DiagnosticsService):
+        def _read_category_from_db(self, category):  # type: ignore[no-untyped-def]
+            if category is not raced_category:
+                return None
+            with self._lock:
+                self._cache[category] = _diagnostic_result_with(_NEWER_RUN_MESSAGE)
+                self._cache_timestamps[category] = datetime.now()
+            stale_at = datetime.now() - _STALE_SNAPSHOT_AGE
+            return _diagnostic_result_with(_STALE_DB_MESSAGE), stale_at
+
+    return _RacingService(db_path=str(db_path))
+
+
+def test_ac4_get_status_publish_back_does_not_clobber_newer_results(
+    tmp_path: Path,
+) -> None:
+    """get_status()'s publish-back must not overwrite a NEWER concurrent write.
+
+    ``get_status()`` correctly performs its DB read with the lock RELEASED, but
+    then publishes the result back unconditionally. Meanwhile
+    ``run_all_diagnostics`` is now a SYNC Starlette background task on a
+    threadpool worker -- a concurrency this very story introduced -- so it can
+    publish genuinely fresher results for the same category DURING that read
+    window. An unconditional publish-back silently discards them: a classic
+    lost update, in which the freshest data loses.
+    """
+    from code_indexer.server.services.diagnostics_service import DiagnosticCategory
+
+    raced_category = DiagnosticCategory.CLI_TOOLS
+    service = _make_racing_diagnostics_service(tmp_path / "race.db", raced_category)
+
+    status = service.get_status()
+
+    published = [r.message for r in service.get_category_status(raced_category)]
+    assert _NEWER_RUN_MESSAGE in published, (
+        "get_status()'s publish-back clobbered a NEWER concurrent write with "
+        f"its stale DB read (cache now holds {published})"
+    )
+    returned = [r.message for r in status[raced_category]]
+    assert _NEWER_RUN_MESSAGE in returned, (
+        "get_status() returned the stale DB read instead of the newer "
+        f"concurrent results (returned {returned})"
+    )
 
 
 # ===========================================================================

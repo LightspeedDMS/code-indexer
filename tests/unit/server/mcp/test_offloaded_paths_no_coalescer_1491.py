@@ -70,9 +70,20 @@ _OFFLOADED_FUNCTIONS: List[Callable[..., object]] = [
 
 # Whole modules those paths delegate into. Scanned entirely: any reference
 # anywhere in them is reachable from the offloaded work.
+#
+# SCOPE LIMITATION (dual-review item 8, stated explicitly rather than implied):
+# this guard is only as complete as this list. The scan walks the named
+# functions plus these modules -- it does NOT transitively follow calls into
+# arbitrary further modules. A violation introduced in some other helper that
+# an offloaded path happens to call would therefore be invisible to it.
+# `mcp/handlers/_utils.py` is included below precisely because
+# `_execute_regex_search` delegates into it (payload truncation, wiki
+# enrichment, the shared `_mcp_response`), which the earlier revision missed.
+# ANY new delegation target on an offloaded path MUST be added here.
 _OFFLOADED_MODULES = [
     "code_indexer.global_repos.regex_search",
     "code_indexer.global_repos.trigram_index_manager",
+    "code_indexer.server.mcp.handlers._utils",
     "code_indexer.server.services.diagnostics_service",
 ]
 

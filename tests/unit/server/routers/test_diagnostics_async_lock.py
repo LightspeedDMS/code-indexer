@@ -16,6 +16,36 @@ Approach tested:
 import asyncio
 from unittest.mock import MagicMock, patch
 
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def _ensure_ambient_event_loop():
+    """Guarantee an ambient event loop for every test in this module.
+
+    Function-scoped on purpose: each test gets its own fresh loop, and no loop
+    is shared between them.
+
+    These tests drive coroutines through the deprecated
+    ``asyncio.get_event_loop().run_until_complete(...)`` pattern, which needs a
+    loop already installed on the current thread. pytest-asyncio closes and
+    unsets the ambient loop after each async test it runs, so as soon as any
+    async test executes before these, they fail with "There is no current event
+    loop" -- an ordering artifact, not a real defect in the code under test.
+    """
+    try:
+        previous = asyncio.get_event_loop_policy().get_event_loop()
+    except RuntimeError:
+        previous = None
+
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    try:
+        yield loop
+    finally:
+        loop.close()
+        asyncio.set_event_loop(previous)
+
 
 class TestGenerateDescriptionsSyncHelperExists:
     """Verify that a sync helper function exists for the blocking work."""
