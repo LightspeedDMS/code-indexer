@@ -7,6 +7,7 @@ so it is mocked to keep these unit tests dependency-free.
 """
 
 from pathlib import Path
+from typing import Callable
 from unittest.mock import MagicMock, call, patch
 
 from code_indexer.server.services.memory_governor import MemoryBand, MemoryGovernor
@@ -18,18 +19,38 @@ from code_indexer.services.temporal.temporal_fusion_dispatch import _query_shard
 # ---------------------------------------------------------------------------
 
 
+def _real_key_composer(base_path: Path) -> Callable[[Path], str]:
+    """Return the REAL FilesystemVectorStore key composer for ``base_path``.
+
+    Bug #1538: the eviction key is whatever the STORE composes -- it embeds
+    Story #1458 AC11's chunk-layout token, so a hardcoded bare-path
+    expectation encodes the very bug that made every temporal eviction a
+    silent no-op. Both the fake store below and the assertions delegate to
+    the production method so the format lives in exactly one place.
+    """
+    from code_indexer.storage.filesystem_vector_store import FilesystemVectorStore
+
+    store = FilesystemVectorStore(base_path=base_path)
+
+    def compose(collection_path: Path) -> str:
+        return str(store.hnsw_cache_key_for_collection(collection_path))
+
+    return compose
+
+
 def _make_vs(tmp_path: Path, hnsw_cache, governor=None) -> MagicMock:
     vs = MagicMock()
     vs.project_root = tmp_path
     vs.base_path = tmp_path / ".code-indexer" / "index"
     vs.hnsw_index_cache = hnsw_cache
     vs.memory_governor = governor
+    vs.hnsw_cache_key_for_collection.side_effect = _real_key_composer(vs.base_path)
     return vs
 
 
 def _expected_key(base_path: Path, shard: str) -> str:
-    """Bug #1171 proven invalidate key: str((base_path / shard).resolve())."""
-    return str((base_path / shard).resolve())
+    """The key the store itself composes for ``base_path / shard``."""
+    return _real_key_composer(base_path)(base_path / shard)
 
 
 def _run_shards(vs: MagicMock, shards: list) -> None:
