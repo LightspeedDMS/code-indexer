@@ -29,7 +29,12 @@ import time
 from pathlib import Path
 from typing import Callable, Generator
 
-from code_indexer.utils.file_locking import nfs_safe_flock, nfs_safe_funlock
+from code_indexer.utils.file_locking import (
+    fsync_directory,
+    fsync_path,
+    nfs_safe_flock,
+    nfs_safe_funlock,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -105,14 +110,28 @@ class BackgroundIndexRebuilder:
         Note:
             If target_file exists, it will be atomically replaced. The OS
             handles cleanup of the old file once all file handles are closed.
+
+            Bug #1529: atomic is not durable. Every index this method
+            publishes is rewritten IN PLACE at a stable path, so the contents
+            are flushed BEFORE the rename and the containing directory AFTER
+            it. The ordering is the whole point -- an fsync on the wrong side
+            of the rename provides no durability at all.
         """
         # Verify temp file exists
         if not temp_file.exists():
             raise FileNotFoundError(f"Temp file does not exist: {temp_file}")
 
+        # Flush the built index before publishing it. fsync_path handles both
+        # shapes this method serves: a plain file (HNSW, id_index) and a
+        # directory (Tantivy FTS).
+        fsync_path(temp_file)
+
         # Atomic rename (kernel-level atomic operation)
         # This is why queries don't need locks - the rename is instantaneous
         os.rename(temp_file, target_file)
+
+        # Flush the directory entry so the rename itself survives power-loss.
+        fsync_directory(target_file.parent)
 
         logger.debug(f"Atomic swap: {temp_file} → {target_file}")
 

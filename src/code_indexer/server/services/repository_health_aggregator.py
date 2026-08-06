@@ -38,12 +38,11 @@ from code_indexer.services.hnsw_health_service import (
     HNSWHealthService,
     check_health_batch,
 )
-from code_indexer.services.temporal.temporal_shard_resolver import (
-    TemporalShardResolver,
-    TemporalShardSource,
+from code_indexer.services.temporal.temporal_collection_naming import (
+    parse_physical_temporal_name,
 )
-from code_indexer.services.temporal.temporal_status import (
-    _enumerate_candidate_embedder_slugs,
+from code_indexer.services.temporal.temporal_server_paths import (
+    server_temporal_index_root,
 )
 from code_indexer.storage.shared.chunk_layout import ChunkLayout, resolve_chunk_layout
 from code_indexer.storage.sqlite_chunk_store import chunk_store_has_real_data
@@ -232,46 +231,43 @@ def discover_sister_temporal_collections(
     repo_alias: str,
     legacy_index_path: Path,
 ) -> List[Tuple[str, str, Path]]:
-    """Discover temporal collections relocated to the golden-owned sister
-    location (Story #1457 AC1, GitHub Issue #1482 extension).
+    """Discover queryable temporal collections in the FIXED server-owned root.
 
-    discover_health_collections() only ever scans `legacy_index_path`
-    (the repo clone's own `.code-indexer/index/` directory) -- once
-    Story #1457's relocation trigger moves a temporal shard's data to the
-    golden-owned sister location, it vanishes from health discovery
-    entirely (neither healthy nor unhealthy -- just silently absent).
+    Bug #1529: rewritten. ``discover_health_collections()`` only ever scans
+    ``legacy_index_path`` (the repo clone's own ``.code-indexer/index/``), so
+    once server-context temporal indexing writes to the fixed root outside the
+    repo tree, those shards would vanish from health discovery entirely --
+    neither healthy nor unhealthy, just silently absent. This closes that gap
+    by scanning the fixed root directly.
 
-    Routes exclusively through the SAME resolver-aware mechanism Story
-    #1457/#1459 already established (`TemporalShardResolver.catalog()`/
-    `.resolve()`, `temporal_status.py`'s candidate-embedder-slug
-    enumeration helper) -- never a parallel sister-root scan of our own.
+    No resolver, no alias pointers: the location is
+    ``{golden_repos_dir}/.temporal/{alias}/`` by construction (see
+    temporal_server_paths.py, the single location authority).
 
-    Only SISTER_POINTER-resolved, queryable (real ``hnsw_index.bin``)
-    shards are returned here -- a namespace still served from the in-repo
-    legacy location is already covered by discover_health_collections'
-    own local scan, and a namespace with committed rows but no HNSW yet
-    (crash window) has nothing a health check could load.
+    Only QUERYABLE shards (a real ``hnsw_index.bin``) are returned -- a shard
+    with committed rows but no HNSW yet (crash window) has nothing a health
+    check could load. ``legacy_index_path`` is still accepted (and validated)
+    for call-site compatibility; shards there are already covered by
+    ``discover_health_collections()``'s own local scan.
 
     Args:
-        golden_repos_dir: The golden-owned root housing `aliases/` and
-            `.versioned/{namespace}/v_*/` (Story #1457's `sister_root`).
-        repo_alias: The golden repo's BARE alias (no `-global` suffix).
-        legacy_index_path: The repo clone's own `.code-indexer/index/`
-            directory (Story #1457's `legacy_index_path`).
+        golden_repos_dir: The golden-owned root; the fixed temporal root is
+            derived from it.
+        repo_alias: The golden repo's alias (a trailing ``-global`` is
+            normalized away by the path helper).
+        legacy_index_path: The repo clone's own ``.code-indexer/index/``.
 
     Returns:
         List of (collection_name, index_type, hnsw_file_path) tuples --
-        collection_name is the shard's base-name physical form (e.g.
-        "code-indexer-temporal-voyage_code_3-2024Q1"), index_type is
-        always "temporal", sorted by collection_name for deterministic
-        ordering. Empty if no sister-relocated queryable data exists.
+        collection_name is the shard's physical base name (e.g.
+        "code-indexer-temporal-voyage_code_3-2024Q1"), index_type is always
+        "temporal", sorted by collection_name for deterministic ordering.
+        Empty if the fixed root holds no queryable temporal data.
 
     Raises:
         ValueError: If golden_repos_dir/legacy_index_path is None or an
             empty string, or repo_alias is empty.
     """
-    from code_indexer.global_repos.alias_manager import AliasManager
-
     if golden_repos_dir is None or str(golden_repos_dir) == "":
         raise ValueError("golden_repos_dir must not be None or empty")
     if not repo_alias:
@@ -279,35 +275,34 @@ def discover_sister_temporal_collections(
     if legacy_index_path is None or str(legacy_index_path) == "":
         raise ValueError("legacy_index_path must not be None or empty")
 
-    golden_repos_dir = Path(golden_repos_dir)
-    legacy_index_path = Path(legacy_index_path)
-    aliases_dir = golden_repos_dir / "aliases"
-
-    embedder_slugs = _enumerate_candidate_embedder_slugs(
-        legacy_index_path, aliases_dir, repo_alias
-    )
-    if not embedder_slugs:
+    temporal_root = server_temporal_index_root(Path(golden_repos_dir), repo_alias)
+    if not temporal_root.is_dir():
         return []
 
-    resolver = TemporalShardResolver(
-        alias_manager=AliasManager(str(aliases_dir)),
-        repo_alias=repo_alias,
-        sister_root=golden_repos_dir,
-        legacy_index_path=legacy_index_path,
-    )
+    try:
+        entries = list(temporal_root.iterdir())
+    except OSError as exc:
+        logger.warning(
+            "discover_sister_temporal_collections: could not list %s (%s); "
+            "treating as no server-owned temporal collections this call",
+            temporal_root,
+            exc,
+        )
+        return []
 
     discovered: List[Tuple[str, str, Path]] = []
-    for embedder_slug in sorted(embedder_slugs):
-        for quarter in resolver.catalog(embedder_slug):
-            resolved = resolver.resolve(embedder_slug, quarter)
-            if resolved is None:
+    for entry in entries:
+        try:
+            if not entry.is_dir():
                 continue
-            if resolved.source != TemporalShardSource.SISTER_POINTER:
-                continue
-            if not resolved.is_queryable:
-                continue
-            hnsw_file = resolved.path / "hnsw_index.bin"
-            discovered.append((resolved.physical_name, "temporal", hnsw_file))
+        except OSError:
+            continue
+        if parse_physical_temporal_name(entry.name) is None:
+            continue
+        hnsw_file = entry / "hnsw_index.bin"
+        if not hnsw_file.exists():
+            continue
+        discovered.append((entry.name, "temporal", hnsw_file))
 
     discovered.sort(key=lambda t: t[0])
     return discovered

@@ -49,6 +49,9 @@ import pytest
 
 from code_indexer.server.query.semantic_query_manager import SemanticQueryManager
 from code_indexer.server.repositories.golden_repo_manager import GoldenRepo
+from code_indexer.services.temporal.temporal_server_paths import (
+    server_temporal_index_root,
+)
 from code_indexer.services.temporal.temporal_search_service import (
     TemporalSearchResults,
 )
@@ -150,10 +153,17 @@ class TestSemanticQueryManagerHonorsServerDataDirEnvVar:
 
         _write_config(clone_dir, "voyage-code-3")  # stale clone: embedder A
         _write_config(golden_dir, "voyage-large-2")  # golden NOW: embedder B
+        # Bug #1529: temporal data for a golden repo lives at ONE fixed path
+        # outside any repo's own cloned tree, and the read side resolves it
+        # from the golden alias -- never from the activation clone. Staging
+        # the shard inside clone_dir (as this test originally did) now
+        # describes a location nothing reads. This test's actual assertion
+        # (which embedder's collection gets queried, resolved from the
+        # GOLDEN repo's current config rather than the stale clone config)
+        # is unchanged.
+        monkeypatch.setenv("CIDX_SERVER_REFRESH_CONTEXT", "1")
         (
-            clone_dir
-            / ".code-indexer"
-            / "index"
+            server_temporal_index_root(data_dir / "golden-repos", "my-repo")
             / "code-indexer-temporal-voyage_large_2-2024Q1"
         ).mkdir(parents=True)
 

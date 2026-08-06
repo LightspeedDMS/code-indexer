@@ -638,18 +638,6 @@ class IndexingConfig:
     # boundaries and skipped (with a WARNING) at command-build sites.
     temporal_all_branches_enabled: bool = False
 
-    # Story #1457 AC1 (2026-07-24 re-review, Codex finding #4): the
-    # sister-location relocation trigger's safety gate, shipped OFF by
-    # default (mirrors Story #1456's CIDX_CHUNKS_DB_NEW_COLLECTIONS
-    # pattern). This is now the AUTHORITATIVE on/off decision -- read via
-    # get_config_service().get_config(), never raw os.environ, per
-    # CLAUDE.md's "No Environment Variables for Server Settings" rule.
-    # The CIDX_TEMPORAL_SISTER_RELOCATION_ENABLED env var still transports
-    # this parent-resolved value into the temporal child subprocess (same
-    # pattern as CIDX_SERVER_REFRESH_CONTEXT) -- the child process has no
-    # DB access to read this config directly.
-    temporal_sister_relocation_enabled: bool = False
-
     # Story #223 - AC1: Configurable file extensions for indexing.
     # 60 unique extensions with leading dots matching CLI Config.file_extensions defaults.
     indexable_extensions: List[str] = field(

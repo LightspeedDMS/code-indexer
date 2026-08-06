@@ -34,11 +34,19 @@ class FilesystemBackend(VectorStoreBackend):
         memory_governor: Any = None,
         activation_id: Any = None,
         use_chunks_db_for_new_collections: Optional[bool] = None,
+        index_dir: Optional[Path] = None,
     ):
         """Initialize FilesystemBackend.
 
         Args:
             project_root: Root directory of the project being indexed
+            index_dir: Bug #1529 -- optional EXPLICIT index root, overriding
+                the default `project_root/.code-indexer/index`. Used by the
+                temporal read path, whose data deliberately lives at a fixed
+                location OUTSIDE the queried repo's own tree (so an
+                activation's CoW clone never carries it, and every activation
+                reads the golden repo's CURRENT data). None (default -- every
+                other call site) is byte-identical to before.
             hnsw_index_cache: Optional HNSW index cache for server performance (Story #526)
                              Server mode passes this explicitly. None for CLI mode.
             memory_governor: Optional MemoryGovernor for Story #1213 Story 3.
@@ -58,7 +66,13 @@ class FilesystemBackend(VectorStoreBackend):
                 arg both resolve to this param.
         """
         super().__init__(project_root)
-        self.vectors_dir = self.project_root / ".code-indexer" / "index"
+        # Bug #1529: an explicit index_dir wins (temporal's fixed
+        # outside-the-repo location); otherwise the ordinary in-repo default.
+        self.vectors_dir = (
+            Path(index_dir)
+            if index_dir is not None
+            else self.project_root / ".code-indexer" / "index"
+        )
 
         # Story #526: Server passes cache explicitly, CLI leaves it None
         self.hnsw_index_cache = hnsw_index_cache

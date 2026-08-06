@@ -172,7 +172,7 @@ class TestReconcileShardDirectoryFsync:
         _write_partial_commit(vector_store, SHARD_2024Q1, "proj", "aaa111")
 
         with patch(
-            "code_indexer.services.temporal.temporal_reconciliation.nfs_safe_fsync"
+            "code_indexer.services.temporal.temporal_reconciliation.fsync_directory"
         ) as mock_fsync:
             reconcile_shard(vector_store, SHARD_2024Q1, [_commit("aaa111")], MODEL_NAME)
 

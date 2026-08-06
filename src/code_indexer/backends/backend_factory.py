@@ -24,6 +24,7 @@ class BackendFactory:
         memory_governor: Optional[Any] = None,
         activation_id: Optional[str] = None,
         use_chunks_db_for_new_collections: Optional[bool] = None,
+        index_dir: Optional[Path] = None,
     ) -> VectorStoreBackend:
         """Create appropriate backend from configuration.
 
@@ -46,6 +47,11 @@ class BackendFactory:
                 (default SHARDED_JSON), so every existing call site is
                 byte-identical. Set by the CLI `--new-collection-layout`
                 flag and the server's explicit spawn-site child arg.
+            index_dir: Bug #1529 -- optional explicit index root, overriding
+                `project_root/.code-indexer/index`. Used by the temporal read
+                path, whose data lives at a fixed location OUTSIDE the
+                queried repo's own tree. None (default) is byte-identical to
+                before for every other caller.
 
         Returns:
             FilesystemBackend instance
@@ -62,6 +68,7 @@ class BackendFactory:
                 memory_governor=memory_governor,
                 activation_id=activation_id,
                 use_chunks_db_for_new_collections=use_chunks_db_for_new_collections,
+                index_dir=index_dir,
             )
 
         provider = config.vector_store.provider
@@ -74,6 +81,7 @@ class BackendFactory:
                 memory_governor=memory_governor,
                 activation_id=activation_id,
                 use_chunks_db_for_new_collections=use_chunks_db_for_new_collections,
+                index_dir=index_dir,
             )
         else:
             raise ValueError(f"Unsupported vector store provider: {provider}")

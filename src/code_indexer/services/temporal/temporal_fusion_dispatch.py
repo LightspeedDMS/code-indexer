@@ -8,7 +8,6 @@ Used by CLI, server (semantic_query_manager), multi_search_service, and daemon.
 """
 
 import logging
-import time
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -25,12 +24,6 @@ from .temporal_health import (
     filter_healthy_temporal_providers,
     record_temporal_success,
     record_temporal_failure,
-    record_temporal_pin_exhaustion,
-)
-from .temporal_shard_resolver import (
-    TemporalShardPinExhaustedError,
-    TemporalShardSource,
-    parse_physical_temporal_name,
 )
 from ..path_pattern_matcher import parse_exclude_patterns
 
@@ -66,98 +59,6 @@ class TemporalEmbedderUnavailableError(RuntimeError):
     only surface as an opaque AttributeError deep inside query_temporal()
     (Messi #13 anti-silent-failure).
     """
-
-
-class _TemporalFailureAlreadyRecorded(Exception):
-    """Story #1457 AC8 Step 6 (round-41): raised by
-    _execute_pinned_shard_read() when the sister-path retry (or its own
-    nested pin acquisition) also fails, AFTER record_temporal_failure()
-    has already been called once at the point of raising. The dedicated
-    except clause in _query_shards_raw MUST discriminate on this type and
-    skip calling record_temporal_failure() again -- ensuring the failure
-    is recorded EXACTLY once regardless of which code path raised it.
-    """
-
-    def __init__(self, original_exc: BaseException) -> None:
-        super().__init__(str(original_exc))
-        self.original_exc = original_exc
-
-
-class _NotBenignReclamation(Exception):
-    """Internal sentinel (Story #1457 AC8 Step 6, round-29/33): raised
-    when the nested pin resolves to something other than SISTER_POINTER,
-    proving the original failure was NOT the AC14 accepted
-    reclamation-during-read residual. Carries the ORIGINAL exception so
-    the caller can re-raise it unchanged -- never propagates outside this
-    module.
-    """
-
-    def __init__(self, original_exc: BaseException) -> None:
-        super().__init__(str(original_exc))
-        self.original_exc = original_exc
-
-
-def _execute_pinned_shard_read(
-    resolver: Any,
-    embedder_slug: str,
-    quarter: Optional[str],
-    query_fn: Callable[[str], Any],
-) -> Tuple[Any, Path, str]:
-    """Execute query_fn(physical_name) inside a resolution-scope pin, with
-    the AC8 Step 6 sister-retry-on-reclamation nested-pin mechanics.
-
-    Story #1457 round-27/29/33/35/41: closes the AC14 accepted residual --
-    an IN_REPO_LEGACY read failing mid-flight because a DIFFERENT worker
-    process reclaimed the in-repo tree. Detection relies SOLELY on
-    re-resolving via the resolver (a racy in-repo path-existence check is
-    UNRELIABLE under shutil.rmtree's non-atomic children-then-root
-    deletion order): on catching a low-level filesystem/SQLite error for
-    an originally-IN_REPO_LEGACY read, a NESTED resolver.pin() call both
-    re-resolves (detection) and retries (recovery) in ONE call -- exactly
-    one sister-read attempt, never a bare re-call to search() while the
-    original (stale) pin remains active.
-
-    Returns:
-        (result, eviction_path, query_coll_name) from whichever attempt
-        succeeded (the original read, or the sister-path retry).
-
-    Raises:
-        _TemporalFailureAlreadyRecorded: the sister-path retry (or its own
-            nested pin acquisition) also failed -- record_temporal_failure()
-            already called once, at the point raised.
-        Exception: any other exception (including the ORIGINAL exception
-            when the nested pin proves this was NOT the benign residual)
-            propagates un-wrapped -- normal failure handling applies.
-    """
-    with resolver.pin(embedder_slug, quarter) as pinned:
-        try:
-            result = query_fn(pinned.physical_name)
-            return result, pinned.path, pinned.physical_name
-        except (FileNotFoundError, OSError) as original_exc:
-            if pinned.source != TemporalShardSource.IN_REPO_LEGACY:
-                raise
-
-            _t0 = time.time()
-            try:
-                with resolver.pin(embedder_slug, quarter) as nested_pinned:
-                    if nested_pinned.source != TemporalShardSource.SISTER_POINTER:
-                        raise _NotBenignReclamation(original_exc)
-                    result = query_fn(nested_pinned.physical_name)
-                    return result, nested_pinned.path, nested_pinned.physical_name
-            except _NotBenignReclamation as sentinel:
-                raise sentinel.original_exc from sentinel.original_exc
-            except TemporalShardPinExhaustedError as nested_exhausted:
-                record_temporal_failure(
-                    pinned.physical_name, (time.time() - _t0) * 1000
-                )
-                raise _TemporalFailureAlreadyRecorded(
-                    nested_exhausted
-                ) from nested_exhausted
-            except (FileNotFoundError, OSError) as retry_exc:
-                record_temporal_failure(
-                    pinned.physical_name, (time.time() - _t0) * 1000
-                )
-                raise _TemporalFailureAlreadyRecorded(retry_exc) from retry_exc
 
 
 # Story #1213 Story 3: Reduced per-shard overfetch multiplier under YELLOW memory pressure.
@@ -222,14 +123,6 @@ def execute_temporal_query_with_fusion(
     # server-side caller constructs the real fault-injection-aware
     # callable via build_temporal_shard_latency_injector() and passes it.
     maybe_inject_internal_latency: Optional[Callable[[str], None]] = None,
-    # Story #1457 AC8 dispatch consumption contract: optional resolution-
-    # scope resolver, threaded into BOTH discovery
-    # (_discover_provider_shards_with_pruning -> resolve_overlapping_shards,
-    # is_queryable pre-filtered) and the shard loop (_query_shards_raw,
-    # each read wrapped in resolver.pin(...)). None (every current
-    # production caller -- nothing constructs one yet) is byte-identical
-    # to today on both ends.
-    resolver: Optional[Any] = None,
 ) -> Any:
     """Execute a temporal query against EXACTLY ONE embedder's collections.
 
@@ -295,7 +188,6 @@ def execute_temporal_query_with_fusion(
         time_range,
         provider_filter,
         temporal_embedder=temporal_embedder,
-        resolver=resolver,
     )
 
     # Health-gate: filter out unhealthy shards per provider
@@ -399,50 +291,38 @@ def execute_temporal_query_with_fusion(
             )
             precomputed_query_vector = None
 
-    results_by_shard, shards_attempted, shards_succeeded, pin_exhausted_shards = (
-        _query_shards_raw(
-            config,
-            vector_store,
-            shards,
-            query_text,
-            limit * _effective_overfetch_multiplier(vector_store),
-            time_range,
-            file_path_filter,
-            language=language,
-            exclude_language=exclude_language,
-            exclude_path=exclude_path,
-            diff_types=diff_types,
-            author=author,
-            chunk_type=chunk_type,
-            no_embedding_cache_shortcut=no_embedding_cache_shortcut,
-            at_commit_ts=at_commit_ts,
-            precomputed_query_vector=precomputed_query_vector,
-            true_user_limit=limit,
-            display_limit=limit,
-            on_shard_complete=on_shard_complete,
-            cancel_check=cancel_check,
-            maybe_inject_internal_latency=maybe_inject_internal_latency,
-            resolver=resolver,
-        )
+    results_by_shard, shards_attempted, shards_succeeded = _query_shards_raw(
+        config,
+        vector_store,
+        shards,
+        query_text,
+        limit * _effective_overfetch_multiplier(vector_store),
+        time_range,
+        file_path_filter,
+        language=language,
+        exclude_language=exclude_language,
+        exclude_path=exclude_path,
+        diff_types=diff_types,
+        author=author,
+        chunk_type=chunk_type,
+        no_embedding_cache_shortcut=no_embedding_cache_shortcut,
+        at_commit_ts=at_commit_ts,
+        precomputed_query_vector=precomputed_query_vector,
+        true_user_limit=limit,
+        display_limit=limit,
+        on_shard_complete=on_shard_complete,
+        cancel_check=cancel_check,
+        maybe_inject_internal_latency=maybe_inject_internal_latency,
     )
-    # Story #1457 HIGH #6 (2026-07-23 code review): pin exhaustion must
-    # never silently degrade to partial results -- surface it as an
-    # explicit warning on the response, not just a log line.
-    pin_exhaustion_warning: Optional[str] = None
-    if pin_exhausted_shards:
-        pin_exhaustion_warning = (
-            f"{len(pin_exhausted_shards)} shard(s) skipped due to "
-            f"resolution-scope pin exhaustion (lost consecutive "
-            f"resolve/validate races against a concurrent alias swap): "
-            f"{pin_exhausted_shards}"
-        )
+    # Bug #1529: the pin-exhaustion warning is gone with the resolver -- a
+    # shard's path is fixed, so there is no alias swap to lose a race against.
     if not results_by_shard:
         return TemporalSearchResults(
             results=[],
             query=query_text,
             filter_type="time_range" if time_range else "none",
             filter_value=time_range,
-            warning=pin_exhaustion_warning,
+            warning=None,
             shards_total=len(shards),
             shards_attempted=shards_attempted,
             shards_succeeded=shards_succeeded,
@@ -454,7 +334,7 @@ def execute_temporal_query_with_fusion(
         filter_type="time_range" if time_range else "none",
         filter_value=time_range,
         total_found=len(merged),
-        warning=pin_exhaustion_warning,
+        warning=None,
         shards_total=len(shards),
         shards_attempted=shards_attempted,
         shards_succeeded=shards_succeeded,
@@ -496,14 +376,6 @@ def _discover_provider_shards_with_pruning(
     time_range: Optional[Tuple[str, str]],
     provider_filter: Optional[str] = None,
     temporal_embedder: Optional[str] = None,
-    # Story #1457 AC8 dispatch consumption contract items 1-2: optional
-    # resolution-scope resolver. None (every current production caller --
-    # nothing constructs one yet) preserves today's bare iterdir()-based
-    # get_overlapping_shards() discovery exactly. When present, discovery
-    # routes through resolve_overlapping_shards() instead (the pointer-
-    # first union catalog) and excludes any is_queryable=False shard
-    # BEFORE it is ever returned to the caller.
-    resolver: Optional[Any] = None,
 ) -> List[Tuple[str, List[str]]]:
     """Discover the SINGLE resolved embedder's overlapping shards (AC7/AC8/AC9).
 
@@ -565,15 +437,11 @@ def _discover_provider_shards_with_pruning(
     if provider_filter and provider_filter not in resolved_embedder:
         return []
 
-    if resolver is not None:
-        from .temporal_shard_resolver import resolve_overlapping_shards
-
-        resolved_shards = resolve_overlapping_shards(
-            resolver, _sanitize(resolved_embedder), dt_start, dt_end
-        )
-        shards = [r.physical_name for r in resolved_shards if r.is_queryable]
-    else:
-        shards = get_overlapping_shards(resolved_embedder, index_path, dt_start, dt_end)
+    # Bug #1529: shard discovery is a direct scan of index_path again. The
+    # caller is responsible for having rooted index_path at the correct
+    # location (the fixed .temporal/{alias}/ root in server context), so
+    # there is nothing left for a resolver to redirect.
+    shards = get_overlapping_shards(resolved_embedder, index_path, dt_start, dt_end)
     if not shards:
         return []
 
@@ -621,15 +489,7 @@ def _query_shards_raw(
     on_shard_complete: Optional[Callable[[int, int, List[Any]], None]] = None,
     cancel_check: Optional[Callable[[], bool]] = None,
     maybe_inject_internal_latency: Optional[Callable[[str], None]] = None,
-    # Story #1457 AC8 Step 6: optional resolution-scope pin resolver. None
-    # (every current production caller -- AC1/AC2's live discovery-side
-    # wiring does not exist yet) is BYTE-IDENTICAL to today: no pin,
-    # eviction keyed by Path(vector_store.base_path) / shard_name exactly
-    # as Bug #1171 established. When present, each shard whose name parses
-    # as a temporal collection is read inside `with resolver.pin(...)`,
-    # closing the in-flight-temporal-version deletion hazard.
-    resolver: Optional[Any] = None,
-) -> Tuple[Dict[str, list], int, int, List[str]]:
+) -> Tuple[Dict[str, list], int, int]:
     """Query shards SEQUENTIALLY and return raw per-shard result lists (no fusion).
 
     Shards are loaded one at a time to bound peak RAM usage. Returns a dict
@@ -641,18 +501,16 @@ def _query_shards_raw(
         overfetch_limit: Per-shard limit (caller multiplies by OVERFETCH_MULTIPLIER).
 
     Returns:
-        (results_by_shard, shards_attempted, shards_succeeded,
-        pin_exhausted_shards). results_by_shard maps shard display name ->
-        list of TemporalSearchResult (empty dict when all shards return
-        zero results). shards_attempted is a one-based count of loop
-        iterations completed (success OR swallowed exception);
-        shards_succeeded excludes exceptions (a normal empty result still
-        counts as success). pin_exhausted_shards (Story #1457 HIGH #6,
-        2026-07-23 code review) is the list of shard names whose read was
-        skipped due to TemporalShardPinExhaustedError -- an explicit,
-        caller-visible signal (not just a log line) so a fully-successful-
-        looking response can still surface that resolution-scope
-        contention silently dropped a shard.
+        (results_by_shard, shards_attempted, shards_succeeded).
+        results_by_shard maps shard display name -> list of
+        TemporalSearchResult (empty dict when all shards return zero
+        results). shards_attempted is a one-based count of loop iterations
+        completed (success OR swallowed exception); shards_succeeded
+        excludes exceptions (a normal empty result still counts as success).
+
+        Bug #1529: the former 4th element, pin_exhausted_shards, is gone
+        along with the resolver -- a shard's physical path is fixed, so
+        there is no alias swap for a read to lose a race against.
 
     Raises:
         InterruptedError: if cancel_check() returns True before a shard is
@@ -664,7 +522,6 @@ def _query_shards_raw(
     results_by_shard: Dict[str, list] = {}
     shards_attempted = 0
     shards_succeeded = 0
-    pin_exhausted_shards: List[str] = []
     effective_display_limit = (
         display_limit if display_limit is not None else overfetch_limit
     )
@@ -679,97 +536,41 @@ def _query_shards_raw(
             maybe_inject_internal_latency("temporal-shard")
         _t0 = _time.time()
         shard_succeeded_this_attempt = False
-        # Story #1457 AC8 Step 6: defaults preserve today's exact behavior
-        # (Bug #1171 eviction key, bare shard_name bookkeeping) when
-        # resolver is None or shard_name does not parse as temporal.
+        # Bug #1529: no resolver, no pin. A temporal shard's physical path is
+        # fixed, so the eviction key is once again a direct
+        # base_path/shard_name construction (Bug #1171's key) and the shard is
+        # read under its own name.
         _eviction_path = Path(vector_store.base_path) / shard_name
         _query_coll_name = shard_name
-        _pin_parsed = (
-            parse_physical_temporal_name(shard_name) if resolver is not None else None
-        )
         try:
-            if _pin_parsed is not None:
-                assert (
-                    resolver is not None
-                )  # _pin_parsed is only ever set when resolver is present
-                _embedder_slug, _quarter = _pin_parsed
-
-                def _query_fn(coll_name: str) -> Any:
-                    return _query_single_provider(
-                        config,
-                        vector_store,
-                        coll_name,
-                        query_text,
-                        overfetch_limit,
-                        time_range,
-                        file_path_filter,
-                        language=language,
-                        exclude_language=exclude_language,
-                        exclude_path=exclude_path,
-                        diff_types=diff_types,
-                        author=author,
-                        chunk_type=chunk_type,
-                        no_embedding_cache_shortcut=no_embedding_cache_shortcut,
-                        at_commit_ts=at_commit_ts,
-                        precomputed_query_vector=precomputed_query_vector,
-                        true_user_limit=true_user_limit,
-                    )
-
-                # Story #1457 AC8 Step 6: pin-wrapped read, with the
-                # sister-retry-on-reclamation nested-pin mechanics.
-                result, _eviction_path, _query_coll_name = _execute_pinned_shard_read(
-                    resolver, _embedder_slug, _quarter, _query_fn
-                )
-            else:
-                result = _query_single_provider(
-                    config,
-                    vector_store,
-                    _query_coll_name,
-                    query_text,
-                    overfetch_limit,
-                    time_range,
-                    file_path_filter,
-                    language=language,
-                    exclude_language=exclude_language,
-                    exclude_path=exclude_path,
-                    diff_types=diff_types,
-                    author=author,
-                    chunk_type=chunk_type,
-                    no_embedding_cache_shortcut=no_embedding_cache_shortcut,
-                    at_commit_ts=at_commit_ts,
-                    precomputed_query_vector=precomputed_query_vector,
-                    true_user_limit=true_user_limit,
-                )
+            result = _query_single_provider(
+                config,
+                vector_store,
+                _query_coll_name,
+                query_text,
+                overfetch_limit,
+                time_range,
+                file_path_filter,
+                language=language,
+                exclude_language=exclude_language,
+                exclude_path=exclude_path,
+                diff_types=diff_types,
+                author=author,
+                chunk_type=chunk_type,
+                no_embedding_cache_shortcut=no_embedding_cache_shortcut,
+                at_commit_ts=at_commit_ts,
+                precomputed_query_vector=precomputed_query_vector,
+                true_user_limit=true_user_limit,
+            )
             if result.results:
                 results_by_shard[collection_display_name(_query_coll_name)] = (
                     result.results
                 )
             record_temporal_success(_query_coll_name, (_time.time() - _t0) * 1000)
             shard_succeeded_this_attempt = True
-        except TemporalShardPinExhaustedError:
-            # Story #1457 AC8 Step 6: a transient lock-contention event
-            # (lost the bounded resolve/validate race), NOT a provider
-            # failure -- kept OUT of record_temporal_failure's circuit
-            # breaker, per the spec's dedicated exception clause.
-            logger.warning(
-                "[temporal-pin-exhausted] shard %s: lost consecutive "
-                "resolve/validate races against a concurrent alias swap",
-                shard_name,
-            )
-            record_temporal_pin_exhaustion(_query_coll_name)
-            pin_exhausted_shards.append(shard_name)
-        except _TemporalFailureAlreadyRecorded as already_recorded:
-            # Story #1457 AC8 Step 6 (round-41): the sister-path retry (or
-            # its own nested pin acquisition) already failed and
-            # record_temporal_failure() was ALREADY called once, at the
-            # point raised inside _execute_pinned_shard_read -- do NOT
-            # call it again here (that would double-record the failure).
-            logger.warning(
-                "Temporal shard query failed for %s (sister-retry-on-"
-                "reclamation also failed): %s",
-                shard_name,
-                already_recorded.original_exc,
-            )
+        # Bug #1529: the TemporalShardPinExhaustedError and
+        # _TemporalFailureAlreadyRecorded clauses are GONE -- both were
+        # reachable only through the retired resolver pin/nested-pin path.
         except Exception as e:
             record_temporal_failure(_query_coll_name, (_time.time() - _t0) * 1000)
             logger.warning("Temporal shard query failed for %s: %s", shard_name, e)
@@ -830,7 +631,7 @@ def _query_shards_raw(
                 cumulative = _fuse_and_order(results_by_shard, effective_display_limit)
                 on_shard_complete(shards_attempted, shards_succeeded, cumulative)
 
-    return results_by_shard, shards_attempted, shards_succeeded, pin_exhausted_shards
+    return results_by_shard, shards_attempted, shards_succeeded
 
 
 def _query_single_provider(

@@ -41,27 +41,14 @@ import os
 import tempfile
 from enum import Enum
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterator, Optional
+from typing import Any, Callable, Optional
 
-from code_indexer.global_repos.alias_manager import AliasManager
-from code_indexer.services.temporal.temporal_consolidated_build import (
-    build_fresh_consolidated_temporal_version,
-)
-from code_indexer.services.temporal.temporal_shard_publisher import (
-    publish_temporal_shard_version,
-)
-from code_indexer.services.temporal.temporal_shard_resolver import (
-    TemporalShardResolver,
-    TemporalShardSource,
-)
 from code_indexer.storage.background_index_rebuilder import BackgroundIndexRebuilder
 from code_indexer.storage.hnsw_index_manager import (
     HNSWIndexManager,
     count_orphan_errors,
 )
-from code_indexer.storage.sqlite_chunk_store import ChunkStore
 from code_indexer.server.services.hnsw_orphan_sweep.discovery import (
-    SisterTemporalCandidate,
     SweepCandidate,
 )
 from code_indexer.server.services.hnswlib_capability_check import (
@@ -91,14 +78,11 @@ class SweepOutcome(str, Enum):
     # from TRANSIENT_SKIP -- this condition will NOT resolve on its own on
     # a later tick (unlike a genuinely transient filesystem race).
     CAPABILITY_UNAVAILABLE = "capability_unavailable"
-    # Story #1457 gap fix: a sister-location (immutable .versioned/)
-    # temporal shard had orphans and was successfully repaired by building
-    # a brand-new version and atomically swapping the alias pointer (never
-    # an in-place os.replace -- the old version must stay immutable).
-    SISTER_TEMPORAL_REPAIRED = "sister_temporal_repaired"
-    # The rebuild+publish sequence for a sister-location temporal shard
-    # failed (logged ERROR) -- fail-soft per item, never raised.
-    SISTER_TEMPORAL_REPAIR_FAILED = "sister_temporal_repair_failed"
+    # Bug #1529: the SISTER_TEMPORAL_REPAIRED/_REPAIR_FAILED outcomes are
+    # GONE. Server-context temporal shards now live at a FIXED, mutable path
+    # ({golden_repos_dir}/.temporal/{alias}/), so they are discovered and
+    # repaired IN PLACE by process_candidate() like every other collection --
+    # there is no immutable version to rebuild and no alias pointer to swap.
 
 
 def _default_cache_invalidator(collection_path: str) -> None:
@@ -320,194 +304,5 @@ def process_candidate(
     if outcome == SweepOutcome.REPAIRED:
         invalidate(str(collection_path))
         logger.info("hnsw_orphan_sweep: repaired orphans for %s", collection_path)
-
-    return outcome
-
-
-def _sister_temporal_lock_free_check(
-    candidate: SisterTemporalCandidate,
-) -> Optional[SweepOutcome]:
-    """Capability guard + lock-free check_integrity() for a sister-location
-    temporal shard.
-
-    Returns CAPABILITY_UNAVAILABLE/TRANSIENT_SKIP/CLEAN when no repair is
-    needed (or possible right now), or None when orphans were found and a
-    repair should proceed.
-    """
-    capability_ok, _capability_message = check_hnswlib_capability()
-    if not capability_ok:
-        logger.warning(
-            "hnsw_orphan_sweep: installed hnswlib lacks check_integrity()/"
-            "repair_orphans() -- skipping sister temporal orphan check for "
-            "%s (degraded capability, Bug #1415)",
-            candidate.version_path,
-        )
-        return SweepOutcome.CAPABILITY_UNAVAILABLE
-
-    manager = _resolve_collection_context(candidate.version_path)
-    if manager is None:
-        return SweepOutcome.TRANSIENT_SKIP
-
-    try:
-        index = manager.load_index(candidate.version_path)
-    except _TRANSIENT_LOAD_ERRORS:
-        return SweepOutcome.TRANSIENT_SKIP
-    if index is None:
-        return SweepOutcome.TRANSIENT_SKIP
-
-    try:
-        integrity = index.check_integrity()
-    except _TRANSIENT_LOAD_ERRORS:
-        return SweepOutcome.TRANSIENT_SKIP
-
-    if count_orphan_errors(integrity) == 0:
-        return SweepOutcome.CLEAN
-
-    return None
-
-
-def _read_sister_version_vector_dim(version_path: Path) -> Optional[int]:
-    """Read vector_dim from a sister version's collection_meta.json.
-    Returns None (logged) on any missing/malformed value -- never raises."""
-    meta_path = version_path / "collection_meta.json"
-    try:
-        with open(meta_path) as f:
-            meta = json.load(f)
-        return int(meta["vector_dim"])
-    except (OSError, ValueError, KeyError, TypeError) as exc:
-        logger.error(
-            "hnsw_orphan_sweep: could not read vector_dim from %s for "
-            "sister temporal repair: %s",
-            meta_path,
-            exc,
-            exc_info=True,
-        )
-        return None
-
-
-def _read_sister_chunk_records(
-    version_path: Path, vector_dim: int
-) -> Iterator[Dict[str, Any]]:
-    """Stream every record from a sister version's (immutable) chunks.db.
-
-    Story #1494 AC3 (Finding C7): yields records lazily instead of
-    materializing the entire collection into a list -- combined with
-    Finding A1, a single repaired collection used to be simultaneously the
-    biggest GIL scan and the biggest decode loop in the server process. The
-    store connection is opened and closed entirely within this generator's
-    own lifetime (closed in `finally`, which CPython runs when the
-    generator is exhausted, `.close()`d, or garbage-collected), so it stays
-    open for exactly as long as the caller is iterating -- never longer,
-    never shorter.
-    """
-    store = ChunkStore(
-        version_path / "chunks.db", expected_dim=vector_dim, immutable=True
-    )
-    try:
-        yield from store.stream_all()
-    finally:
-        store.close()
-
-
-def _repair_sister_temporal_shard(
-    candidate: SisterTemporalCandidate,
-) -> "tuple[SweepOutcome, Optional[Path]]":
-    """Immutable-aware repair: builds a BRAND-NEW version from the current
-    chunks.db data and atomically swaps the alias pointer -- NEVER an
-    in-place os.replace on the old (possibly still-pinned-by-other-readers)
-    version. Fail-soft: any exception is logged and reported as
-    SISTER_TEMPORAL_REPAIR_FAILED, never raised.
-    """
-    try:
-        alias_manager = AliasManager(str(candidate.golden_repos_dir / "aliases"))
-        resolver = TemporalShardResolver(
-            alias_manager=alias_manager,
-            repo_alias=candidate.repo_alias,
-            sister_root=candidate.golden_repos_dir,
-            legacy_index_path=candidate.legacy_index_path,
-        )
-
-        # query_tracker=None on this resolver makes pin() a documented,
-        # forward-compatible no-op (plain resolve(), no refcount) -- still
-        # the correct mechanism to use here per Story #1457 AC8.
-        with resolver.pin(candidate.embedder_slug, candidate.quarter) as resolved:
-            if (
-                resolved is None
-                or resolved.source != TemporalShardSource.SISTER_POINTER
-            ):
-                # Pointer vanished/moved between discovery and repair --
-                # a legitimate race, not an error.
-                return SweepOutcome.TRANSIENT_SKIP, None
-
-            vector_dim = _read_sister_version_vector_dim(resolved.path)
-            if vector_dim is None:
-                return SweepOutcome.SISTER_TEMPORAL_REPAIR_FAILED, None
-
-            records = _read_sister_chunk_records(resolved.path, vector_dim)
-
-            new_version_path = build_fresh_consolidated_temporal_version(
-                candidate.golden_repos_dir,
-                resolved.pointer_namespace,
-                [records],
-                vector_dim,
-                embedder_slug=candidate.embedder_slug,
-            )
-            publish_temporal_shard_version(
-                alias_manager, resolved.pointer_namespace, new_version_path
-            )
-            return SweepOutcome.SISTER_TEMPORAL_REPAIRED, new_version_path
-    except Exception:
-        logger.error(
-            "hnsw_orphan_sweep: sister temporal repair failed for %s",
-            candidate.pointer_namespace,
-            exc_info=True,
-        )
-        return SweepOutcome.SISTER_TEMPORAL_REPAIR_FAILED, None
-
-
-def process_sister_temporal_candidate(
-    candidate: SisterTemporalCandidate,
-    *,
-    cache_invalidator: Optional[Callable[[str], None]] = None,
-) -> SweepOutcome:
-    """Check (and immutably repair, if needed) one Story #1457 sister-
-    location temporal shard.
-
-    Unlike ``process_candidate`` (in-place ``os.replace`` repair of a
-    mutable in-repo collection), a sister-location version is an IMMUTABLE
-    ``.versioned/{ns}/v_*`` directory -- other readers may be pinned to it
-    (``TemporalShardResolver.pin``). Orphans are repaired by building a
-    BRAND-NEW version from the same chunks.db data and atomically swapping
-    the alias pointer -- the old, broken version directory is never
-    written to or deleted.
-
-    Args:
-        candidate: A SisterTemporalCandidate produced by
-            ``enumerate_sister_temporal_candidates``.
-        cache_invalidator: Optional callable(collection_path_str) invoked
-            after a successful repair with the NEW version's path. Defaults
-            to invalidating the real server-side HNSWIndexCache singleton.
-
-    Returns:
-        SweepOutcome describing what happened.
-    """
-    invalidate = cache_invalidator or _default_cache_invalidator
-
-    precheck = _sister_temporal_lock_free_check(candidate)
-    if precheck is not None:
-        return precheck
-
-    outcome, new_version_path = _repair_sister_temporal_shard(candidate)
-    if (
-        outcome == SweepOutcome.SISTER_TEMPORAL_REPAIRED
-        and new_version_path is not None
-    ):
-        invalidate(str(new_version_path))
-        logger.info(
-            "hnsw_orphan_sweep: repaired sister temporal orphans for %s "
-            "(new version %s)",
-            candidate.pointer_namespace,
-            new_version_path,
-        )
 
     return outcome

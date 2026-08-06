@@ -41,6 +41,9 @@ from code_indexer.server.query.semantic_query_manager import (
     load_golden_temporal_config,
 )
 from code_indexer.server.repositories.golden_repo_manager import GoldenRepo
+from code_indexer.services.temporal.temporal_server_paths import (
+    server_temporal_index_root,
+)
 from code_indexer.services.temporal.temporal_search_service import (
     TemporalSearchResults,
 )
@@ -150,11 +153,16 @@ class TestExecuteTemporalQueryEmbedderSelection:
         _write_config(golden_dir, "voyage-large-2")  # golden NOW: embedder B
 
         # A real quarter shard directory for embedder B only -- proves
-        # discovery picked B (an A-only clone would find nothing).
+        # discovery picked B (an A-only location would find nothing).
+        #
+        # Bug #1529: with a golden_repo_alias supplied, temporal data is read
+        # from ONE fixed path derived from that alias, outside any repo's own
+        # cloned tree -- never from the activation clone (whose copy was a
+        # frozen-at-clone-time duplicate). The embedder-selection assertion
+        # below is unchanged; only the staging location moves to where the
+        # read side now actually looks.
         (
-            clone_dir
-            / ".code-indexer"
-            / "index"
+            server_temporal_index_root(data_dir / "golden-repos", "my-repo")
             / "code-indexer-temporal-voyage_large_2-2024Q1"
         ).mkdir(parents=True)
 

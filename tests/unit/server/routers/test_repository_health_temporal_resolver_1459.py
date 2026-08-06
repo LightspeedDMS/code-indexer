@@ -25,7 +25,9 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from code_indexer.global_repos.alias_manager import AliasManager
+from code_indexer.services.temporal.temporal_server_paths import (
+    server_temporal_index_root,
+)
 from code_indexer.server.auth.dependencies import get_current_user_hybrid
 from code_indexer.server.auth.user_manager import User, UserRole
 from code_indexer.server.routers import repository_health
@@ -188,17 +190,19 @@ class TestGoldenRepoBranchTemporalDetection:
         # Local index dir exists but is empty -- no local temporal copy.
         (clone_path / ".code-indexer" / "index").mkdir(parents=True)
 
+        # Bug #1529: temporal data lives at the FIXED server-owned root
+        # ({golden_repos_dir}/.temporal/{alias}/), not a .versioned
+        # snapshot behind an alias pointer. The behavior under test is
+        # unchanged: status must detect data OUTSIDE the repo tree.
         sister_version_dir = (
-            golden_repos_dir
-            / ".versioned"
-            / "myrepo-temporal-voyage_code_3-2024Q1"
-            / "v_1700000000"
+            server_temporal_index_root(golden_repos_dir, "myrepo")
+            / "code-indexer-temporal-voyage_code_3-2024Q1"
         )
         sister_version_dir.mkdir(parents=True)
         (sister_version_dir / "hnsw_index.bin").write_bytes(b"fake-hnsw")
-        AliasManager(str(golden_repos_dir / "aliases")).create_alias(
-            "myrepo-temporal-voyage_code_3-2024Q1", str(sister_version_dir)
-        )
+        # A real committed row: status keys off DATA presence, not merely
+        # the presence of an index file.
+        (sister_version_dir / "vector_aaaa1111.json").write_text("{}")
 
         golden_manager = _FakeGoldenRepoManager(clone_path, known_alias="myrepo")
         activated_manager = _FakeActivatedRepoManager(
@@ -230,17 +234,19 @@ class TestActivatedRepoBranchTemporalDetection:
         golden_repos_dir = golden_layout["golden_repos_dir"]
         (clone_path / ".code-indexer" / "index").mkdir(parents=True)
 
+        # Bug #1529: temporal data lives at the FIXED server-owned root
+        # ({golden_repos_dir}/.temporal/{alias}/), not a .versioned
+        # snapshot behind an alias pointer. The behavior under test is
+        # unchanged: status must detect data OUTSIDE the repo tree.
         sister_version_dir = (
-            golden_repos_dir
-            / ".versioned"
-            / "backing-golden-temporal-voyage_code_3-2024Q1"
-            / "v_1700000001"
+            server_temporal_index_root(golden_repos_dir, "backing-golden")
+            / "code-indexer-temporal-voyage_code_3-2024Q1"
         )
         sister_version_dir.mkdir(parents=True)
         (sister_version_dir / "hnsw_index.bin").write_bytes(b"fake-hnsw")
-        AliasManager(str(golden_repos_dir / "aliases")).create_alias(
-            "backing-golden-temporal-voyage_code_3-2024Q1", str(sister_version_dir)
-        )
+        # A real committed row: status keys off DATA presence, not merely
+        # the presence of an index file.
+        (sister_version_dir / "vector_aaaa1111.json").write_text("{}")
 
         golden_manager = _FakeGoldenRepoManager(clone_path, known_alias="__none__")
         activated_manager = _FakeActivatedRepoManager(

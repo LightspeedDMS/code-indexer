@@ -31,6 +31,9 @@ from code_indexer.server.repositories.activated_repo_manager import (
     ActivatedRepoManager,
 )
 from code_indexer.server.repositories.golden_repo_manager import GoldenRepo
+from code_indexer.services.temporal.temporal_server_paths import (
+    server_temporal_index_root,
+)
 from code_indexer.server.services.temporal_snapshot_store import (
     read_temporal_snapshot,
 )
@@ -231,10 +234,13 @@ class TestRunTemporalWorkerUsesGoldenConfig:
 
         _write_config(clone_dir, "voyage-code-3")  # stale clone: embedder A
         _write_config(golden_dir, "voyage-large-2")  # golden NOW: embedder B
+        # Bug #1529: temporal data lives at ONE fixed path derived from the
+        # golden alias, outside any repo's own cloned tree -- the activation
+        # clone is no longer read. This test's assertion (embedder selection
+        # from the GOLDEN repo's current config, not the stale clone's) is
+        # unchanged.
         (
-            clone_dir
-            / ".code-indexer"
-            / "index"
+            server_temporal_index_root(data_dir / "golden-repos", "my-repo")
             / "code-indexer-temporal-voyage_large_2-2024Q1"
         ).mkdir(parents=True)
 

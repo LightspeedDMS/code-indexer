@@ -56,15 +56,10 @@ import logging
 import os
 from typing import Any, Dict, Optional
 
-from code_indexer.server.services.temporal_reader_capability import (
-    MIN_DUAL_LAYOUT_READER_VERSION,
-    all_serving_nodes_reader_capable,
-)
 from code_indexer.server.storage.postgres.connection_pool import ConnectionPool
 from code_indexer.server.storage.postgres.temporal_metadata_backend import (
     make_postgres_temporal_metadata_factory,
 )
-from code_indexer.server.services.config_service import get_config_service
 from code_indexer.server.utils.config_manager import ServerConfig, ServerConfigManager
 from code_indexer.storage.temporal_metadata_backend_registry import (
     TEMPORAL_PG_BOOTSTRAP_DIR_ENV,
@@ -85,18 +80,18 @@ _TEMPORAL_CHILD_POOL_TIMEOUT_SECONDS = 30.0
 #: "this child was spawned by the server" (as opposed to a genuine
 #: standalone `cidx index` with no server process at all). Distinct from
 #: TEMPORAL_PG_BOOTSTRAP_DIR_ENV, which remains postgres-only.
-CIDX_SERVER_REFRESH_CONTEXT_ENV = "CIDX_SERVER_REFRESH_CONTEXT"
+# Bug #1529 finding #11: re-exported from the canonical, dependency-free
+# definition rather than re-declared here. Two independent literals for one
+# wire protocol drift silently the moment either is edited, and the failure
+# mode is temporal data going to a location the reader disagrees with. The
+# import direction is deliberate and must not be inverted: server -> services
+# only, since the reverse would drag the server/psycopg import chain into the
+# standalone CLI's temporal path (the Bug #1468 import-budget regression).
+from code_indexer.services.temporal.temporal_server_paths import (  # noqa: E402
+    CIDX_SERVER_REFRESH_CONTEXT_ENV,
+)
 
-#: Story #1457 AC1 safety gate (2026-07-23 code review; canonical home
-#: moved here 2026-07-24 re-review, Codex finding #4): the CHILD process
-#: (temporal_relocation_trigger.py) has no DB access, so it can only ever
-#: READ this env var. The PARENT (this function, running in the live
-#: server process) is the AUTHORITATIVE source -- it resolves the on/off
-#: decision from the config service (never raw os.environ, per CLAUDE.md's
-#: "No Environment Variables for Server Settings" rule) and transports the
-#: resolved value into the child's environment, exactly like
-#: CIDX_SERVER_REFRESH_CONTEXT_ENV above.
-CIDX_TEMPORAL_SISTER_RELOCATION_ENABLED_ENV = "CIDX_TEMPORAL_SISTER_RELOCATION_ENABLED"
+__all__ = ["CIDX_SERVER_REFRESH_CONTEXT_ENV"]
 
 
 def build_temporal_child_env(
@@ -123,19 +118,14 @@ def build_temporal_child_env(
         A NEW dict (base_env or os.environ, copied) with
         CIDX_SERVER_REFRESH_CONTEXT set to "1" unconditionally,
         CIDX_TEMPORAL_PG_BOOTSTRAP_DIR set to server_config.server_dir
-        additionally when server_config.storage_mode == "postgres", and
-        CIDX_TEMPORAL_SISTER_RELOCATION_ENABLED set to "1" when the config
-        service reports the AC1 safety gate enabled (2026-07-24 re-review,
-        Codex finding #4) AND all_serving_nodes_reader_capable() confirms
-        every node currently serving this fleet reports a server_version
-        at or above the release that first shipped the dual-layout
-        chunks.db resolver and the sister-location temporal shard
-        resolver (Story #1461 salvage item #3) -- omitted (not just "0")
-        when disabled/unreadable/incapable, matching the gate's own
-        default-OFF, fail-safe philosophy. Solo deployments are trivially
-        always capable (see all_serving_nodes_reader_capable's own
-        docstring); a partial-rollout cluster fleet withholds
-        sister-location publication until every node has upgraded.
+        additionally when server_config.storage_mode == "postgres".
+
+        Bug #1529: CIDX_TEMPORAL_SISTER_RELOCATION_ENABLED and its
+        fleet-reader-capability gate are GONE, along with the
+        sister-location publish path they governed. Server-context temporal
+        data now goes straight to its fixed root (see
+        services/temporal/temporal_server_paths.py), gated by nothing beyond
+        CIDX_SERVER_REFRESH_CONTEXT itself.
     """
     merged: Dict[str, str] = (
         dict(base_env) if base_env is not None else dict(os.environ)
@@ -143,57 +133,6 @@ def build_temporal_child_env(
     merged[CIDX_SERVER_REFRESH_CONTEXT_ENV] = "1"
     if server_config is not None and server_config.storage_mode == "postgres":
         merged[TEMPORAL_PG_BOOTSTRAP_DIR_ENV] = server_config.server_dir
-
-    # 2026-07-24 round-4 re-review (Codex): unconditionally clear any
-    # inherited/stale value FIRST, before resolving config -- base_env or
-    # os.environ may already carry "1" from a prior enabled run or an
-    # operator's ambient shell. Without this, a disabled config or a
-    # config-read exception would leave that stale value in place,
-    # letting inherited env state silently act as a fallback authority
-    # (the opposite of this gate's claimed fail-safe direction). Only the
-    # config-resolved value below may set this key back.
-    merged.pop(CIDX_TEMPORAL_SISTER_RELOCATION_ENABLED_ENV, None)
-
-    try:
-        sister_relocation_enabled = (
-            get_config_service()
-            .get_config()
-            .indexing_config.temporal_sister_relocation_enabled
-        )
-    except Exception as exc:
-        logger.warning(
-            "build_temporal_child_env: failed to read "
-            "temporal_sister_relocation_enabled from config service "
-            "(non-fatal, gate stays disabled): %s: %s",
-            type(exc).__name__,
-            exc,
-        )
-        sister_relocation_enabled = False
-
-    if sister_relocation_enabled:
-        # Story #1461 salvage item #3: the operator toggle alone is not
-        # enough -- during a rolling deploy a partial-rollout fleet could
-        # have a just-upgraded node publish sister-location temporal data
-        # (Story #1457 AC6) that an old, not-yet-upgraded node cannot
-        # resolve/read. AND the toggle with a fleet-wide reader-capability
-        # check, resolved fresh on every call so it self-heals the moment
-        # the last node in the fleet finishes upgrading.
-        _storage_mode_for_capability = (
-            server_config.storage_mode if server_config is not None else ""
-        )
-        if all_serving_nodes_reader_capable(
-            MIN_DUAL_LAYOUT_READER_VERSION, _storage_mode_for_capability
-        ):
-            merged[CIDX_TEMPORAL_SISTER_RELOCATION_ENABLED_ENV] = "1"
-        else:
-            logger.warning(
-                "build_temporal_child_env: temporal_sister_relocation_enabled "
-                "is on but not every serving node reports a reader-capable "
-                "server_version (>= %s) -- withholding sister-location "
-                "publication for this child to protect a partial-rollout "
-                "fleet from an older node reading data it cannot parse.",
-                MIN_DUAL_LAYOUT_READER_VERSION,
-            )
 
     return merged
 

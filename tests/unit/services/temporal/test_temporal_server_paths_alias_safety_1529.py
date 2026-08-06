@@ -1,0 +1,129 @@
+"""Bug #1529 review finding #4: the temporal root's repo_alias is unsanitized.
+
+``server_temporal_index_root()`` appends ``repo_alias`` directly beneath
+``{golden_repos_dir}/.temporal/`` after stripping at most one trailing
+``-global`` suffix. Nothing rejects a separator, a ``..`` segment, or an
+absolute path -- so an alias carrying any of those escapes the container the
+whole fixed-path design is defined in terms of. Since this one function is
+"the ONE place the physical location is decided" for BOTH the read and write
+sides, an escape here silently relocates real temporal data (write side) or
+reads from outside the root entirely (read side).
+
+The alias must be a single safe path component, and the resolved path must
+provably stay beneath ``.temporal``.
+
+Real path arithmetic only -- nothing mocked.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+
+from code_indexer.services.temporal.temporal_server_paths import (
+    SERVER_TEMPORAL_ROOT_DIR_NAME,
+    server_temporal_index_root,
+)
+
+GOLDEN_REPOS_DIR = Path("/srv/cidx/data/golden-repos")
+
+#: Every one of these must be REFUSED. Each is a genuinely different escape
+#: shape, not a restatement of one rule.
+UNSAFE_ALIASES = [
+    "..",
+    ".",
+    "../evolution",
+    "evolution/../..",
+    "nested/alias",
+    "/absolute/alias",
+    "/",
+    # Round-4 review (Codex #1): a separator BLACKLIST accepted all of these,
+    # each of which is a real directory name no legitimate alias produces.
+    # Whitespace-only names in particular are near-invisible in any listing.
+    "  ",
+    "a b",
+    "a?b",
+    "a*b",
+    "a\nb",
+    # A dot is legal INSIDE an alias (see the safe cases below -- two of this
+    # codebase's three alias validators accept it), so the boundary the
+    # allowlist actually draws is the FIRST character: no hidden names, no
+    # traversal, no leading separator-ish punctuation.
+    ".hidden",
+    "-leading",
+    "trailing/",
+    "-global",  # normalizes to the empty string
+    "..-global",  # normalizes to ".."
+]
+
+
+@pytest.mark.parametrize("alias", UNSAFE_ALIASES)
+def test_unsafe_alias_is_refused(alias: str) -> None:
+    with pytest.raises(ValueError):
+        server_temporal_index_root(GOLDEN_REPOS_DIR, alias)
+
+
+@pytest.mark.parametrize(
+    "alias",
+    ["evolution", "evolution-global", "my-repo_2024.v1", "a"],
+)
+def test_safe_alias_still_resolves_beneath_the_temporal_root(alias: str) -> None:
+    """Legitimate aliases must be UNAFFECTED -- this is a guard, not a rename."""
+    resolved = server_temporal_index_root(GOLDEN_REPOS_DIR, alias)
+
+    container = GOLDEN_REPOS_DIR / SERVER_TEMPORAL_ROOT_DIR_NAME
+    # Proves containment structurally, not by string prefix (which "/a/../b"
+    # would satisfy while pointing elsewhere).
+    assert resolved.parent == container
+    assert resolved.resolve().is_relative_to(container.resolve())
+
+
+def test_existing_symlink_escaping_the_container_is_refused(tmp_path: Path) -> None:
+    """A REAL symlink out of ``.temporal/`` must be refused, not followed.
+
+    The character/component checks only constrain the alias STRING. They say
+    nothing about what already exists on disk under that name, and the
+    containment assertion after them is purely lexical -- ``Path`` arithmetic
+    never consults the filesystem. So an existing
+    ``.temporal/{alias}`` symlink pointing anywhere at all satisfies every
+    check while the writes it receives land outside the fixed root entirely.
+
+    Built with real directories and a real symlink -- the only way to
+    exercise a resolution the lexical check cannot see.
+    """
+    golden_repos_dir = tmp_path / "golden-repos"
+    container = golden_repos_dir / SERVER_TEMPORAL_ROOT_DIR_NAME
+    container.mkdir(parents=True)
+
+    outside = tmp_path / "somewhere-else"
+    outside.mkdir()
+    (container / "escapee").symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(ValueError):
+        server_temporal_index_root(golden_repos_dir, "escapee")
+
+
+def test_real_directory_inside_the_container_is_still_accepted(tmp_path: Path) -> None:
+    """The symlink guard must not reject the ordinary already-created root.
+
+    Every refresh after the first finds ``.temporal/{alias}`` already on
+    disk; refusing that would break temporal indexing outright.
+    """
+    golden_repos_dir = tmp_path / "golden-repos"
+    container = golden_repos_dir / SERVER_TEMPORAL_ROOT_DIR_NAME
+    existing = container / "evolution"
+    existing.mkdir(parents=True)
+
+    assert server_temporal_index_root(golden_repos_dir, "evolution") == existing
+
+
+def test_backslash_is_refused_even_though_posix_allows_it() -> None:
+    """A backslash is a legal POSIX filename char but a separator elsewhere.
+
+    Allowing it means the same alias denotes one directory on the server and a
+    nested path on any other consumer -- exactly the kind of two-locations
+    divergence Bug #1529 exists to eliminate.
+    """
+    with pytest.raises(ValueError):
+        server_temporal_index_root(GOLDEN_REPOS_DIR, "evo\\lution")

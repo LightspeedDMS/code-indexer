@@ -21,7 +21,16 @@ import threading
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Any, TYPE_CHECKING, cast
+from typing import (
+    Callable,
+    Dict,
+    List,
+    Literal,
+    Optional,
+    Any,
+    TYPE_CHECKING,
+    cast,
+)
 
 if TYPE_CHECKING:
     from code_indexer.server.models.golden_repo_branch_models import (
@@ -92,7 +101,11 @@ def _collection_has_real_chunk_data(coll_dir: Path) -> bool:
 _MAX_VERSION_ID_COLLISION_RETRIES = 100
 
 
-def _temporal_vectors_exist_for_repo(index_dir: Path) -> bool:
+def _temporal_vectors_exist_for_repo(
+    index_dir: Path,
+    *,
+    on_error: Literal["treat_absent", "raise"] = "treat_absent",
+) -> bool:
     """Layout-agnostic replacement for the confirmed Bug/AC5 non-recursive
     glob (Story #1457 AC5).
 
@@ -108,22 +121,77 @@ def _temporal_vectors_exist_for_repo(index_dir: Path) -> bool:
     index_dir, returning True on the FIRST embedder/quarter with any
     committed row.
 
-    NOTE (honest scope disclosure): this checks the IN-REPO legacy layout
-    only. The story's full AC5 spec additionally wants a pointer-first
-    check against the AC8 resolver's sister-location union
-    (`resolver.catalog(embedder_slug)` per configured embedder) before
-    falling back to this legacy scan -- deferred until AC2's dedicated
-    temporal store is actually wired into production (there is currently
-    no sister-location data for any golden repo to consult).
+    NOTE: this checks the IN-REPO root only. It is deliberately name-glob
+    based rather than parser based, which is exactly why it is still needed
+    alongside ``get_temporal_repo_status``: the glob also matches the BARE
+    pre-Story-#1457 monolith name (``code-indexer-temporal``, no
+    embedder/quarter suffix), which ``parse_physical_temporal_name`` returns
+    None for -- so the status helper cannot see that shape at all. See
+    ``temporal_reindex_needs_clear``, which composes the two for that reason.
+
+    ``on_error`` is forwarded to the shared row-existence predicate; a
+    DESTRUCTIVE caller must pass ``"raise"`` so an unreadable store is never
+    silently reported as "no data".
     """
     if not index_dir.is_dir():
         return False
     for coll_dir in index_dir.glob("code-indexer-temporal*"):
         if not coll_dir.is_dir():
             continue
-        if temporal_shard_has_committed_rows(coll_dir):
+        if temporal_shard_has_committed_rows(coll_dir, on_error=on_error):
             return True
     return False
+
+
+def temporal_reindex_needs_clear(
+    golden_repos_dir: Path,
+    alias: str,
+    in_repo_index_dir: Path,
+) -> bool:
+    """Does an explicit temporal add-index/reindex have to pass ``--clear``?
+
+    ``--clear`` DELETES the existing temporal shards, forcing a full re-embed
+    of the entire git history (real, unbounded embedding spend). It is
+    legitimate ONLY when there is genuinely no temporal data anywhere. Bug
+    #945 established that intent; Bug #1529 broke it, because the decision
+    still consulted the IN-REPO index directory alone after server-context
+    temporal data moved to the fixed ``{golden_repos_dir}/.temporal/{alias}/``
+    root -- making the answer permanently "no data" and so permanently
+    destructive on the first admin reindex of any relocated repo.
+
+    Both physical roots are therefore consulted, via two DELIBERATELY
+    different mechanisms because neither alone is sufficient:
+
+      1. ``_temporal_vectors_exist_for_repo`` (in-repo, name-glob) -- the only
+         one that can see the bare legacy monolith name.
+      2. ``get_temporal_repo_status`` (both roots, parser-based) -- the only
+         one that can see the fixed server root.
+
+    Both run with ``on_error="raise"``: for THIS decision "no data" authorizes
+    destruction, so a corrupt/locked/unreadable store must fail loud rather
+    than be silently read as "nothing here, safe to wipe" (finding #5).
+
+    Returns:
+        True only when no temporal data was found in either root.
+
+    Raises:
+        Propagates the underlying store-read error when a shard exists but
+        cannot be read -- the caller must abort rather than wipe.
+    """
+    from code_indexer.services.temporal.temporal_status import (
+        get_temporal_repo_status,
+    )
+
+    if _temporal_vectors_exist_for_repo(Path(in_repo_index_dir), on_error="raise"):
+        return False
+
+    status = get_temporal_repo_status(
+        Path(golden_repos_dir),
+        alias,
+        Path(in_repo_index_dir),
+        on_error="raise",
+    )
+    return not status.has_data
 
 
 def _make_hnsw_orphan_event_logger(alias: str):
@@ -3863,19 +3931,25 @@ class GoldenRepoManager:
 
                     elif index_type == "temporal":
                         # Story #480: Use Popen + line reader for real-time progress
-                        # Bug #945: Only use --clear when no vector_*.json files exist.
-                        # Vectors are expensive (embedding API). HNSW is cheap to rebuild.
-                        # If vectors exist, omit --clear so rebuild_from_vectors is used.
-                        # Story #1457 AC5: the original inline check here was a
-                        # NON-RECURSIVE glob against each collection dir, which can
-                        # NEVER match the real 4-level hash-sharded vector_*.json
-                        # layout -- always forcing --clear. Fixed via the shared,
-                        # layout-agnostic row-existence helper.
+                        # Bug #945: only use --clear when there is genuinely no
+                        # temporal data. Vectors are expensive (embedding API);
+                        # HNSW is cheap to rebuild. If data exists, omit --clear
+                        # so rebuild_from_vectors is used instead of a full
+                        # re-embed of the entire git history.
+                        # Bug #1529: this decision MUST consult both physical
+                        # roots. It previously checked only the in-repo index
+                        # directory, which is permanently empty once temporal
+                        # data lives at {golden_repos_dir}/.temporal/{alias}/ --
+                        # so --clear was always appended and the real shards were
+                        # destroyed on the first admin reindex.
                         _index_dir = Path(repo_path) / ".code-indexer" / "index"
-                        _temporal_vectors_exist = _temporal_vectors_exist_for_repo(
-                            _index_dir
+                        _clear_flags = (
+                            ["--clear"]
+                            if temporal_reindex_needs_clear(
+                                Path(self.golden_repos_dir), alias, _index_dir
+                            )
+                            else []
                         )
-                        _clear_flags = [] if _temporal_vectors_exist else ["--clear"]
                         # Story #1488: server states the new-collection layout
                         # explicitly (CHUNKS_DB), not the CLI SHARDED_JSON
                         # default. This temporal reindex/add-index path can
