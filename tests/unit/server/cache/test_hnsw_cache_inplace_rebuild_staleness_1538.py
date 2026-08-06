@@ -4,51 +4,65 @@ Bug #1529 made every temporal shard live at a FIXED path, so a refresh now
 rewrites ``hnsw_index.bin`` IN PLACE instead of publishing a brand-new
 ``v_{timestamp}`` directory. The path no longer changes, so the cache key no
 longer changes either -- the freshness guarantee has to come from the file
-itself. ``HNSWIndexCache.get_or_load(..., index_file=...)`` already compares
-the on-disk stamp against the one recorded at load time, but three holes made
-that guard miss exactly the case a live cluster hits:
+itself. ``HNSWIndexCache.get_or_load(..., index_file=...)`` compares the
+on-disk identity against the one recorded at load time. Five properties make
+that safe, each pinned by a test below:
 
 1. **Load-then-stamp poisoning (the indefinite-staleness root cause).** The
-   stamp used to be captured AFTER ``loader()`` returned. A refresh that
-   replaced the file in that window produced an entry holding the OLD graph
-   stamped with the NEW file's identity, so every later HIT compared equal
-   and served the pre-refresh graph FOREVER -- it could not self-heal, which
-   is precisely what #1538 measured (~58% stale, still ~58% twelve minutes
-   after the refresh reported success).
+   stamp must be captured BEFORE ``loader()`` runs. A refresh replacing the
+   file in that window would otherwise produce an entry holding the OLD graph
+   stamped with the NEW file's identity, so every later HIT compares equal and
+   serves the pre-refresh graph FOREVER -- exactly what #1538 measured (~58%
+   stale, unchanged twelve minutes after the refresh reported success).
 
-2. **Strictly-newer comparison.** ``>`` cannot see a replacement whose stamp
-   is equal-or-older -- a same-tick rewrite, an NFS server clock skew, or a
-   restored/rolled-back shard. File IDENTITY changing is the invariant, not
-   time moving forward.
+2. **Identity, not "newer".** ``>`` cannot see a replacement whose stamp is
+   equal-or-older -- a same-tick rewrite, an NFS clock skew, a restored shard.
 
-3. **Size and mtime are not an identity.** A refresh can rebuild a shard to
-   the SAME item count (same file size) with different content; if the
-   timestamp also compares equal, a size+mtime stamp matches and the stale
-   entry survives indefinitely. Every ``hnsw_index.bin`` publish here is an
-   atomic rename, so the inode is the exact signal that closes this.
+3. **Size and mtime are not an identity.** A refresh can rebuild a shard to the
+   same item count (same size) with different content; if the timestamp also
+   compares equal, a size+mtime stamp matches and the stale entry survives.
+   Every ``hnsw_index.bin`` publish here is an atomic rename, so the inode is
+   the exact signal that closes this.
 
-Real hnswlib indexes, real ``os.replace``, real filesystem. The "refresh
-landed mid-load" race is reproduced DETERMINISTICALLY by a loader closure
-that performs the real rebuild itself between reading the file and returning
--- no sleeps, no mocking of the cache's own logic.
+4. **The check must not hold the cache lock.** The golden-repos mount is
+   ``hard`` NFSv3, where an outage makes ``os.stat()`` block in uninterruptible
+   kernel retry rather than fail. Running that under the shared ``_cache_lock``
+   would let one blocked stat stall every other cache consumer in the worker.
 
-Typing note: the loaded index object is annotated ``Any`` throughout, the
-same convention ``HNSWIndexCacheEntry.hnsw_index`` itself uses -- ``hnswlib``
-is a C extension with no type stubs, so ``hnswlib.Index`` is not a usable
-annotation under this project's mypy configuration.
+5. **An unverifiable check must be BOUNDED.** If ``stat()`` keeps failing while
+   the loader keeps succeeding, dropping the entry on every hit thrashes
+   forever (a reload and a WARNING per query, indefinitely).
+
+Real hnswlib indexes, real ``os.replace``, real filesystem, real threads. The
+"refresh landed mid-load" race is reproduced DETERMINISTICALLY by a loader
+closure that performs the real rebuild itself between reading the file and
+returning -- no sleeps, no mocking of the cache's own logic.
+
+Where a test needs ``os.stat()`` to block or fail on demand (properties 4 and
+5), it substitutes the module-level ``_stat_index_fingerprint`` helper -- the
+single OS I/O boundary, not the cache logic under test. The only faithful
+alternative would be a genuinely hung NFS server, which a unit test cannot
+provision; the cache's own decision-making is exercised for real throughout.
+
+Typing note: the loaded index object is annotated ``Any`` throughout, the same
+convention ``HNSWIndexCacheEntry.hnsw_index`` itself uses -- ``hnswlib`` is a C
+extension with no type stubs, so ``hnswlib.Index`` is not a usable annotation
+under this project's mypy configuration.
 """
 
 from __future__ import annotations
 
 import logging
 import os
+import threading
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import hnswlib
 import numpy as np
 import pytest
 
+from code_indexer.server.cache import hnsw_index_cache
 from code_indexer.server.cache.hnsw_index_cache import (
     HNSWIndexCache,
     HNSWIndexCacheConfig,
@@ -75,11 +89,19 @@ BACKDATE_SECONDS = 3600
 BASE_SEED = 1538
 REBUILD_SEED = 24601
 
+#: Generous bounds for the concurrency test: long enough that a slow machine
+#: never trips them, short enough that a genuine deadlock fails fast.
+LOCK_CONTENTION_TIMEOUT_SECONDS = 5.0
+THREAD_JOIN_TIMEOUT_SECONDS = 30.0
+
+#: How many HITs the bounded-unverifiable test drives while stat() stays broken.
+UNVERIFIABLE_HIT_COUNT = 5
+
 
 def _write_index(index_file: Path, item_count: int, seed: int = BASE_SEED) -> None:
     """Build ``item_count`` items and publish them the way the real
-    HNSWIndexManager does: write a temp file, then atomically rename over
-    the live path (``BackgroundIndexRebuilder.atomic_swap``'s sequence).
+    HNSWIndexManager does: write a temp file, then atomically rename over the
+    live path (``BackgroundIndexRebuilder.atomic_swap``'s sequence).
 
     ``seed`` chooses the vector content, so two calls with the same
     ``item_count`` and different seeds yield same-sized, different-content
@@ -109,13 +131,21 @@ def _load_from_disk(index_file: Path) -> Any:
     return index
 
 
-@pytest.fixture
-def shard(tmp_path: Path) -> Tuple[HNSWIndexCache, Path, Path]:
-    """A real cache plus a real on-disk index in its pre-refresh state."""
-    collection_dir = tmp_path / "code-indexer-temporal-voyage_code_3-2026Q3"
+def _make_shard(parent: Path, name: str) -> Tuple[Path, Path]:
+    """Create a real collection directory holding a real pre-refresh index."""
+    collection_dir = parent / name
     collection_dir.mkdir()
     index_file = collection_dir / "hnsw_index.bin"
     _write_index(index_file, PRE_REFRESH_ITEMS)
+    return collection_dir, index_file
+
+
+@pytest.fixture
+def shard(tmp_path: Path) -> Tuple[HNSWIndexCache, Path, Path]:
+    """A real cache plus a real on-disk index in its pre-refresh state."""
+    collection_dir, index_file = _make_shard(
+        tmp_path, "code-indexer-temporal-voyage_code_3-2026Q3"
+    )
     cache = HNSWIndexCache(HNSWIndexCacheConfig(ttl_minutes=CACHE_TTL_MINUTES))
     return cache, collection_dir, index_file
 
@@ -261,50 +291,134 @@ def test_same_size_same_mtime_rebuild_is_detected(
     )
 
 
-def test_unverifiable_freshness_never_serves_the_cached_graph(
-    shard: Tuple[HNSWIndexCache, Path, Path],
-    caplog: pytest.LogCaptureFixture,
+def test_freshness_check_does_not_hold_the_cache_lock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """ "Could not check" must never be silently treated as "unchanged".
+    """A blocked freshness stat must not stall the whole cache.
 
-    A stat failure means freshness is UNVERIFIABLE. Serving the cached entry
-    anyway is a silent failure (Messi Rule #13): it can keep returning a
-    superseded graph indefinitely with no signal that anything is wrong. The
-    cache must fail toward correctness -- drop the entry -- and say so.
+    The golden-repos mount is ``hard`` NFSv3: during a server outage
+    ``os.stat()`` blocks in uninterruptible kernel retry instead of failing.
+    If that ran under the shared ``_cache_lock``, one blocked stat would
+    serialize every other cache consumer in the worker behind it -- a real
+    availability regression introduced by the freshness mechanism itself.
+
+    Two independent collections, two threads: while the first key's stat is
+    blocked, the second key must still be served.
     """
-    cache, collection_dir, index_file = shard
+    cache = HNSWIndexCache(HNSWIndexCacheConfig(ttl_minutes=CACHE_TTL_MINUTES))
+    blocked_dir, blocked_file = _make_shard(tmp_path, "collection-blocked")
+    other_dir, other_file = _make_shard(tmp_path, "collection-other")
 
-    first, _ = cache.get_or_load(
-        str(collection_dir),
-        lambda: (_load_from_disk(index_file), {}),
-        index_file=index_file,
-    )
-    assert first.get_current_count() == PRE_REFRESH_ITEMS
-    assert cache.get_stats().cached_repositories == 1
+    def blocked_loader() -> Tuple[Any, Dict[int, str]]:
+        return _load_from_disk(blocked_file), {}
 
-    # The file becomes un-stat-able (deleted here; operationally an NFS blip
-    # or a permission change produces the same OSError).
-    index_file.unlink()
+    def other_loader() -> Tuple[Any, Dict[int, str]]:
+        return _load_from_disk(other_file), {}
 
-    with caplog.at_level(logging.WARNING):
-        served, id_mapping = cache.get_or_load(
-            str(collection_dir),
-            lambda: (_load_from_disk(index_file) if index_file.exists() else None, {}),
-            index_file=index_file,
+    # Populate both entries while stat still behaves normally.
+    cache.get_or_load(str(blocked_dir), blocked_loader, index_file=blocked_file)
+    cache.get_or_load(str(other_dir), other_loader, index_file=other_file)
+
+    real_stat = hnsw_index_cache._stat_index_fingerprint
+    inside_stat = threading.Event()
+    release_stat = threading.Event()
+
+    def hanging_stat(index_file: Path) -> Optional[Tuple[int, int, int, int]]:
+        """Stand in for a stat blocked on a hung hard-NFS mount."""
+        if Path(index_file) == blocked_file:
+            inside_stat.set()
+            assert release_stat.wait(timeout=THREAD_JOIN_TIMEOUT_SECONDS)
+        # real_stat is read off the module, so it is typed Any; bind it to a
+        # declared local rather than widening this function's return type.
+        fingerprint: Optional[Tuple[int, int, int, int]] = real_stat(index_file)
+        return fingerprint
+
+    monkeypatch.setattr(hnsw_index_cache, "_stat_index_fingerprint", hanging_stat)
+
+    def read_blocked() -> None:
+        cache.get_or_load(str(blocked_dir), blocked_loader, index_file=blocked_file)
+
+    other_served = threading.Event()
+
+    def read_other() -> None:
+        cache.get_or_load(str(other_dir), other_loader, index_file=other_file)
+        other_served.set()
+
+    blocked_thread = threading.Thread(target=read_blocked)
+    blocked_thread.start()
+    try:
+        assert inside_stat.wait(timeout=THREAD_JOIN_TIMEOUT_SECONDS), (
+            "the blocked key's freshness stat never ran"
         )
 
-    # get_or_load's documented contract for a loader that finds no index:
-    # return it directly and never store an entry (EVO-64244 Facet 1).
-    assert served is None, (
-        "cache served a graph while freshness was unverifiable -- an "
-        "unverifiable entry must be dropped, not silently trusted (Bug #1538)"
+        other_thread = threading.Thread(target=read_other)
+        other_thread.start()
+        served_in_time = other_served.wait(timeout=LOCK_CONTENTION_TIMEOUT_SECONDS)
+    finally:
+        release_stat.set()
+        blocked_thread.join(timeout=THREAD_JOIN_TIMEOUT_SECONDS)
+        other_thread.join(timeout=THREAD_JOIN_TIMEOUT_SECONDS)
+
+    assert served_in_time, (
+        "a second collection could not be served while another key's freshness "
+        "stat was blocked -- the potentially-blocking stat is running under the "
+        "shared cache lock, so one hung NFS call stalls every cache consumer "
+        "in the worker (Bug #1538)"
     )
-    assert id_mapping == {}
-    assert cache.get_stats().cached_repositories == 0, (
-        "the unverifiable entry must be dropped from the cache"
+
+
+def test_unverifiable_freshness_is_bounded(
+    shard: Tuple[HNSWIndexCache, Path, Path],
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A permanently-failing stat must not thrash on every hit.
+
+    With a broken stat and a WORKING loader, dropping the entry each time
+    reloads and warns on every single query for as long as the stat stays
+    broken -- unbounded, and it never settles. The degraded state itself has
+    to be bounded: back off from re-attempting, and say so ONCE rather than
+    once per hit.
+
+    Dropping also cannot produce fresher data here: if the file is genuinely
+    unreachable the loader cannot read it either, so thrashing buys nothing.
+    """
+    cache, collection_dir, index_file = shard
+    load_calls: List[str] = []
+
+    def counting_loader() -> Tuple[Any, Dict[int, str]]:
+        load_calls.append("load")
+        return _load_from_disk(index_file), {}
+
+    first, _ = cache.get_or_load(
+        str(collection_dir), counting_loader, index_file=index_file
     )
-    assert any(record.levelno >= logging.WARNING for record in caplog.records), (
-        "an unverifiable freshness check must be observable, not silent"
+    assert load_calls == ["load"]
+
+    # From here on the freshness check can never succeed, while the loader
+    # would still succeed every time.
+    def failing_stat(index_file: Path) -> Optional[Tuple[int, int, int, int]]:
+        return None
+
+    monkeypatch.setattr(hnsw_index_cache, "_stat_index_fingerprint", failing_stat)
+
+    with caplog.at_level(logging.WARNING):
+        for _ in range(UNVERIFIABLE_HIT_COUNT):
+            served, _ = cache.get_or_load(
+                str(collection_dir), counting_loader, index_file=index_file
+            )
+            assert served is not None
+
+    warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
+    assert len(load_calls) < 1 + UNVERIFIABLE_HIT_COUNT, (
+        f"loader ran {len(load_calls)} times across {UNVERIFIABLE_HIT_COUNT} "
+        "hits with a permanently-failing stat -- the degraded state re-attempts "
+        "on every hit instead of backing off (Bug #1538)"
+    )
+    assert len(warnings) == 1, (
+        f"emitted {len(warnings)} warnings across {UNVERIFIABLE_HIT_COUNT} "
+        "hits -- an unverifiable entry must be reported once per degradation, "
+        "not once per query (Bug #1538)"
     )
 
 

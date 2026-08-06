@@ -136,14 +136,17 @@ class TestHNSWNegativeCacheEVO64244(unittest.TestCase):
     def test_missing_index_file_does_not_crash_on_hit(self) -> None:
         """Facet 2: an un-stat-able index_file on HIT must never crash.
 
-        Bug #1538 changed what happens INSTEAD of crashing. This test
-        originally also asserted the cached entry was SERVED (loader called
-        once) -- i.e. "could not check" was treated as "unchanged". That is a
-        silent failure: it can keep serving a superseded graph indefinitely
-        with no signal, which is the indefinite post-refresh staleness #1538
-        reports. An unverifiable entry is now dropped (with a WARNING) and the
-        loader re-runs. The no-crash property this test exists to protect is
-        unchanged.
+        Bug #1538 kept this behavior but made it OBSERVABLE and BOUNDED rather
+        than silent. When the freshness stat cannot be performed, the entry is
+        still served -- but a WARNING is emitted once per degradation and the
+        stat is not retried until the rate-limit interval elapses.
+
+        Dropping the entry instead was tried and rejected: with a broken stat
+        and a working loader it reloaded on EVERY hit for as long as the stat
+        stayed broken (6 loads across 5 hits), and it cannot produce fresher
+        data anyway -- a file that cannot be stat'd cannot be read by the
+        loader either. See test_unverifiable_freshness_is_bounded in
+        test_hnsw_cache_inplace_rebuild_staleness_1538.py.
         """
         index_file = Path(self.tmpdir.name) / "does_not_exist.bin"
 
@@ -157,8 +160,8 @@ class TestHNSWNegativeCacheEVO64244(unittest.TestCase):
         idx1, _ = self.cache.get_or_load(self.repo_path, loader, index_file=index_file)
         idx2, _ = self.cache.get_or_load(self.repo_path, loader, index_file=index_file)
         self.assertIs(idx1, real_index)
-        self.assertIs(idx2, real_index)  # no crash
-        self.assertEqual(calls["n"], 2)  # unverifiable entry dropped, reloaded
+        self.assertIs(idx2, real_index)  # served cached, no crash
+        self.assertEqual(calls["n"], 1)  # bounded: no reload while unverifiable
 
 
 if __name__ == "__main__":
