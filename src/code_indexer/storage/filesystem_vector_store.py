@@ -693,6 +693,30 @@ class FilesystemVectorStore:
             key = f"{key}:{self.activation_id}"
         return key
 
+    def hnsw_cache_key_for_collection(self, collection_path: Path) -> str:
+        """Return the EXACT shared-cache key ``search()`` stores this
+        collection's HNSW entry under.
+
+        Bug #1538: an external invalidation call site that hand-builds a bare
+        path string composes a DIFFERENT key than ``search()`` does (the key
+        embeds Story #1458 AC11's chunk-layout token and, for an activated
+        repo, its ``activation_id``), so its ``invalidate()`` is a silent
+        no-op. Every such caller must go through this method instead of
+        reconstructing the format.
+
+        The layout token is resolved FRESH from disk here -- deliberately not
+        from ``_is_chunks_db_collection()``'s in-session build intent, which
+        can diverge from the committed on-disk discriminator ``search()``
+        actually keyed against (the same reasoning ``rebuild_hnsw_filtered()``
+        documents at its own two ``invalidate()`` calls).
+        """
+        from code_indexer.storage.shared.chunk_layout import resolve_chunk_layout
+
+        return self._activation_scoped_cache_key(
+            str(Path(collection_path).resolve()),
+            chunk_layout_token=resolve_chunk_layout(collection_path).value,
+        )
+
     def _get_collection_path(
         self, collection_name: str, subdirectory: Optional[str] = None
     ) -> Path:

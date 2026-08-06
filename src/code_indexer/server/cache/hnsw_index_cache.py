@@ -234,6 +234,32 @@ class HNSWIndexCacheConfig:
         )
 
 
+#: Bug #1538: the on-disk identity of an ``hnsw_index.bin`` -- ``(st_mtime_ns,
+#: st_size)``. Nanosecond precision (not the lossy float ``st_mtime``) and the
+#: size together make a same-tick in-place replacement detectable, and match
+#: the ``st_mtime_ns`` convention this codebase's other path-keyed caches
+#: already use (``CollectionMetaCache``, ``ChunkStoreThreadCache``).
+_IndexFileFingerprint = Tuple[int, int]
+
+
+def _stat_index_fingerprint(index_file: Path) -> Optional[_IndexFileFingerprint]:
+    """Return ``index_file``'s identity fingerprint, or None if it cannot be
+    stat'd (missing file, OSError).
+
+    Fail-soft by design: a None result disables the freshness check for the
+    entry rather than raising on a query path.
+    """
+    try:
+        stat_result = os.stat(index_file)
+    except OSError as e:
+        logger.debug(
+            f"Could not stat index file {index_file} for freshness tracking: {e}",
+            extra={"correlation_id": get_correlation_id()},
+        )
+        return None
+    return (stat_result.st_mtime_ns, stat_result.st_size)
+
+
 @dataclass
 class HNSWIndexCacheEntry:
     """
@@ -255,10 +281,11 @@ class HNSWIndexCacheEntry:
     last_accessed: datetime = field(default_factory=datetime.now)
     access_count: int = 0
     index_size_bytes: int = 0
-    # EVO-64244 Facet 2: st_mtime of hnsw_index.bin captured at load time.
-    # None when the index_file path was not supplied (mtime check disabled),
-    # letting a later on-disk rebuild invalidate this stale in-RAM entry.
-    index_file_mtime: Optional[float] = None
+    # EVO-64244 Facet 2 / Bug #1538: identity fingerprint of hnsw_index.bin,
+    # captured BEFORE the load that produced this entry (see get_or_load).
+    # None when the index_file path was not supplied, or when it could not be
+    # stat'd, which disables the freshness check for this entry.
+    index_file_fingerprint: Optional[_IndexFileFingerprint] = None
 
     def record_access(self) -> None:
         """
@@ -451,14 +478,15 @@ class HNSWIndexCache:
                         del self._cache[repo_path]
                         self._eviction_count += 1
                         # Fall through (no return here)
-                    elif index_file is not None and self._index_file_is_newer(
-                        index_file, entry.index_file_mtime
+                    elif index_file is not None and self._index_file_changed(
+                        index_file, entry.index_file_fingerprint
                     ):
-                        # EVO-64244 Facet 2: the on-disk index was rebuilt after
-                        # this entry was cached (atomic replace bumps mtime).
-                        # hnswlib has no in-place reload, so evict and reload.
+                        # EVO-64244 Facet 2 / Bug #1538: the on-disk index is no
+                        # longer the file this entry was loaded from (an in-place
+                        # refresh atomically replaced it). hnswlib has no
+                        # in-place reload, so evict and reload.
                         logger.debug(
-                            f"On-disk index newer than cached entry for {repo_path}, reloading",
+                            f"On-disk index differs from cached entry for {repo_path}, reloading",
                             extra={"correlation_id": get_correlation_id()},
                         )
                         del self._cache[repo_path]
@@ -504,6 +532,27 @@ class HNSWIndexCache:
             extra={"correlation_id": get_correlation_id()},
         )
         try:
+            # Bug #1538 (root cause of the indefinite post-refresh staleness):
+            # the fingerprint MUST be captured BEFORE the load, never after.
+            # An in-place refresh that atomically replaces hnsw_index.bin
+            # between the loader's read and the capture would otherwise stamp
+            # the entry with the NEW file's identity while it holds the OLD
+            # graph -- every later HIT then compares equal and serves the
+            # pre-refresh graph forever, with no way to self-heal.
+            #
+            # Capturing pre-load is conservative in the safe direction: if the
+            # file did change during the load, the stored fingerprint is the
+            # superseded one, so the very next read detects the difference and
+            # reloads (one extra load, never a stale answer). If it did not
+            # change, the fingerprint still matches the current file and the
+            # entry is served from RAM exactly as before -- no spurious reload.
+            #
+            # Fail-soft, as before: a missing file / OSError leaves this None,
+            # which simply disables the freshness check for this entry.
+            index_file_fingerprint: Optional[_IndexFileFingerprint] = (
+                _stat_index_fingerprint(index_file) if index_file is not None else None
+            )
+
             hnsw_index, id_mapping = loader()
 
             # EVO-64244 Facet 1: never negatively-cache a missing index.
@@ -532,20 +581,6 @@ class HNSWIndexCache:
                 )
             index_size_bytes += sys.getsizeof(id_mapping)
 
-            # EVO-64244 Facet 2: capture the on-disk index mtime so a later
-            # rebuild (atomic replace of hnsw_index.bin) invalidates this entry
-            # on the next HIT. Guarded: a missing file / OSError leaves it None
-            # (mtime check simply disabled for this entry) rather than crashing.
-            index_file_mtime: Optional[float] = None
-            if index_file is not None:
-                try:
-                    index_file_mtime = os.stat(index_file).st_mtime
-                except OSError as e:
-                    logger.debug(
-                        f"Could not stat index file {index_file} for mtime tracking: {e}",
-                        extra={"correlation_id": get_correlation_id()},
-                    )
-
             # Store result in cache (acquire lock for dict write)
             with self._cache_lock:
                 entry = HNSWIndexCacheEntry(
@@ -554,7 +589,7 @@ class HNSWIndexCache:
                     repo_path=repo_path,
                     ttl_minutes=self.config.ttl_minutes,
                     index_size_bytes=index_size_bytes,
-                    index_file_mtime=index_file_mtime,
+                    index_file_fingerprint=index_file_fingerprint,
                 )
                 entry.record_access()
                 self._cache[repo_path] = entry
@@ -575,33 +610,43 @@ class HNSWIndexCache:
                 self._loading.pop(repo_path, None)
             event.set()  # Wake ALL waiters (outside lock)
 
-    def _index_file_is_newer(
-        self, index_file: Path, cached_mtime: Optional[float]
+    def _index_file_changed(
+        self,
+        index_file: Path,
+        cached_fingerprint: Optional[_IndexFileFingerprint],
     ) -> bool:
-        """Return True if the on-disk index file is newer than the cached entry.
+        """Return True if the on-disk index file is no longer the one this
+        cached entry was loaded from.
 
-        Used by get_or_load (EVO-64244 Facet 2) to detect a rebuilt index and
-        invalidate the stale in-RAM object. A None cached_mtime (entry stored
-        without mtime tracking) or any stat failure (missing file, OSError)
-        returns False so the cached entry is still served rather than crashing.
+        Used by get_or_load (EVO-64244 Facet 2 / Bug #1538) to detect an
+        in-place rebuild and drop the superseded in-RAM object.
+
+        Bug #1538: the comparison is INEQUALITY of the identity fingerprint,
+        deliberately NOT "mtime is strictly newer". A rebuilt shard is not
+        guaranteed to carry a larger timestamp -- a same-tick rewrite, an NFS
+        server clock skew, or a restored/rolled-back shard all produce an
+        equal-or-older mtime while the content genuinely differs. What matters
+        is that the file is a DIFFERENT file than the one loaded, in either
+        direction.
+
+        Fail-soft, unchanged from before: a None cached_fingerprint (freshness
+        tracking disabled for this entry) or a stat failure right now (missing
+        file, OSError -> None) returns False, so the cached entry is still
+        served rather than crashing a query.
 
         Args:
             index_file: Path to hnsw_index.bin on disk.
-            cached_mtime: st_mtime captured when the entry was loaded, or None.
+            cached_fingerprint: Fingerprint captured for this entry, or None.
 
         Returns:
-            True if the file's current mtime is strictly newer than cached_mtime.
+            True if the file's current identity differs from the cached one.
         """
-        if cached_mtime is None:
+        if cached_fingerprint is None:
             return False
-        try:
-            return os.stat(index_file).st_mtime > cached_mtime
-        except OSError as e:
-            logger.debug(
-                f"Could not stat index file {index_file} for staleness check: {e}",
-                extra={"correlation_id": get_correlation_id()},
-            )
+        current_fingerprint = _stat_index_fingerprint(index_file)
+        if current_fingerprint is None:
             return False
+        return current_fingerprint != cached_fingerprint
 
     def invalidate(self, repo_path: str) -> None:
         """
