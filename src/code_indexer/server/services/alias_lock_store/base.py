@@ -222,7 +222,9 @@ class AliasLockStore(Protocol):
         """Diagnostic-only heartbeat; never used for ownership decisions.
 
         Raises:
-            AliasLockOwnershipLostError: under the same conditions as
-                `release()`.
+            AliasLockOwnershipLostError: only when the exact-token UPDATE
+                affects zero rows. A connection-level or other database
+                failure propagates as its own underlying exception type,
+                unwrapped, and leaves the connection untouched.
         """
         ...

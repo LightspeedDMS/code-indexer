@@ -345,7 +345,14 @@ class SqliteAliasLockStore:
                 )
             handle._released = True
 
-            conn = _require_live_connection(handle)
+            try:
+                conn = _require_live_connection(handle)
+            except Exception:
+                try:
+                    handle._connection.close()
+                except Exception:
+                    pass
+                raise
             try:
                 try:
                     conn.execute(

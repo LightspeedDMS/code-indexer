@@ -384,6 +384,40 @@ class TestOwnershipLossViaSeveredConnection:
             store.renew(handle)
 
 
+class TestReleasePreflightFailure:
+    def test_release_closes_connection_when_liveness_probe_is_denied(self, tmp_path):
+        """A non-closed-database probe error must not wedge the held lock."""
+        store = _make_store(tmp_path, busy_timeout_seconds=_SHORT_BUSY_TIMEOUT_SECONDS)
+        handle = store.try_acquire("my-alias", operation="op")
+        assert handle is not None
+
+        def deny_select(*_args):
+            return sqlite3.SQLITE_DENY
+
+        handle._connection.set_authorizer(deny_select)
+        try:
+            with pytest.raises(sqlite3.DatabaseError, match="not authorized"):
+                store.release(handle)
+
+            assert handle._released is True
+            with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+                handle._connection.execute("SELECT 1")
+            with pytest.raises(AliasLockOwnershipLostError):
+                store.release(handle)
+
+            for _ in range(3):
+                competitor = store.try_acquire("my-alias", operation="op")
+                try:
+                    assert competitor is not None, (
+                        "a preflight failure must not leave the SQLite lock held"
+                    )
+                finally:
+                    if competitor is not None:
+                        store.release(competitor)
+        finally:
+            handle._connection.close()
+
+
 class TestOwnershipLossViaSeveredFileDescriptor:
     """Fix #4: the ownership-loss detection in the previous class relies
     on an EXPLICIT ``.close()`` call, which raises `sqlite3
