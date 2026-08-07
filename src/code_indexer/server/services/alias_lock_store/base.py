@@ -62,6 +62,7 @@ Post-review corrections (see the issue's Phase 1 rework for full detail):
 
 from __future__ import annotations
 
+import threading
 from dataclasses import dataclass, field
 from typing import Any, Optional, Protocol
 
@@ -96,13 +97,36 @@ class AliasLockHandle:
     _connection: Any = field(repr=False)
     _store: Optional["AliasLockStore"] = field(default=None, repr=False, compare=False)
     _released: bool = field(default=False, repr=False, compare=False)
+    _release_lock: threading.RLock = field(
+        default_factory=threading.RLock, repr=False, compare=False
+    )
 
     def __enter__(self) -> "AliasLockHandle":
         """Escalated by round-3 review (F2's vacuum-pinning cost makes a
         leaked open transaction worse than an ordinary leaked
         connection): `with handle:` releases the lock on exit, so
         Phase 2's real call sites don't each need to hand-roll their
-        own try/finally around acquire/release."""
+        own try/finally around acquire/release.
+
+        Round-4 review fix (Finding #4): raises loudly if this handle
+        was ALREADY released before entry -- without this check,
+        `store.try_acquire(...); store.release(handle); with handle:
+        mutate_filesystem()` would silently run the body with NO LOCK
+        HELD AT ALL, since `__exit__` (correctly, per Finding #2) no
+        -ops on an already-released handle. Entering a dead handle must
+        never look like entering a live one. The check runs under the
+        same `_release_lock` as `__exit__`/`release()` for consistent,
+        synchronized visibility of `_released`.
+        """
+        with self._release_lock:
+            if self._released:
+                raise RuntimeError(
+                    f"AliasLockHandle.__enter__ called for "
+                    f"lock_key={self.lock_key!r} but this handle was already "
+                    f"released -- entering `with handle:` on an "
+                    f"already-released handle would silently run its body "
+                    f"with NO LOCK HELD AT ALL."
+                )
         return self
 
     def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
@@ -113,12 +137,12 @@ class AliasLockHandle:
         - If `release()` was ALREADY called explicitly on this handle
           before the `with` block ended (both backends' `release()`
           set `_released = True` as their very first action, success
-          or failure), this is a clean no-op -- calling release() a
-          SECOND time here would raise AliasLockOwnershipLostError
-          (the connection is already closed) and, if the `with` body
-          itself had raised, that cleanup error would MASK the body's
-          real exception. Codex reproduced exactly this double-release
-          failure mode.
+          or failure, under the SAME `_release_lock` used here), this
+          is a clean no-op -- calling release() a SECOND time here
+          would raise AliasLockOwnershipLostError (the connection is
+          already closed) and, if the `with` body itself had raised,
+          that cleanup error would MASK the body's real exception.
+          Codex reproduced exactly this double-release failure mode.
         - If `_store` is unset (a handle built manually, never via
           `try_acquire()`), this raises loudly (`RuntimeError`) rather
           than silently doing nothing -- a `with handle:` that cannot
@@ -131,18 +155,28 @@ class AliasLockHandle:
           `__context__` (verified empirically -- no manual chaining
           code needed here); the caller can still recover it via
           `exc.__context__`.
+
+        Round-4 review fix (Finding #5): the check-then-call sequence
+        is now performed under `self._release_lock` (a per-handle
+        `RLock`, reentrant so this same call into `store.release(self)`
+        -- which acquires the SAME lock again for its own atomic
+        check-and-set -- never deadlocks). This closes the
+        Codex-reproduced race where two threads could both observe
+        `_released is False` and both attempt a real release.
         """
-        if self._released:
-            return
-        if self._store is None:
-            raise RuntimeError(
-                f"AliasLockHandle.__exit__ called for lock_key={self.lock_key!r} "
-                f"but no _store reference is set -- this handle was not "
-                f"constructed by AliasLockStore.try_acquire(), so `with "
-                f"handle:` cannot release anything. Construct handles only "
-                f"via try_acquire()."
-            )
-        self._store.release(self)
+        with self._release_lock:
+            if self._released:
+                return
+            if self._store is None:
+                raise RuntimeError(
+                    f"AliasLockHandle.__exit__ called for "
+                    f"lock_key={self.lock_key!r} but no _store reference is "
+                    f"set -- this handle was not constructed by "
+                    f"AliasLockStore.try_acquire(), so `with handle:` cannot "
+                    f"release anything. Construct handles only via "
+                    f"try_acquire()."
+                )
+            self._store.release(self)
 
 
 class AliasLockStore(Protocol):

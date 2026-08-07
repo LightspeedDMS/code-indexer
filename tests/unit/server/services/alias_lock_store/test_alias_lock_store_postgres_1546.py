@@ -295,21 +295,32 @@ class TestContextManagerProtocol:
             if new_handle is not None:
                 store.release(new_handle)
 
-    def test_with_block_after_explicit_release_is_a_clean_no_op(
-        self, store, unique_key
-    ):
-        """Round-4 review fix: an explicit release() before the `with`
-        block ends must NOT be followed by a second, doomed release
-        attempt in __exit__ -- that would raise AliasLockOwnershipLostError
-        (the connection is already closed) and, if the body itself had
-        raised, would MASK the body's real exception. Codex reproduced
-        this exact double-release failure mode."""
+    def test_with_block_entry_raises_when_already_released(self, store, unique_key):
+        """Round-5 review fix (Finding #4): entering `with handle:` on a
+        handle ALREADY released before entry must raise loudly, never
+        silently run the body with no lock actually held."""
         handle = store.try_acquire(unique_key, operation="op")
         assert handle is not None
         store.release(handle)
 
+        with pytest.raises(RuntimeError):
+            with handle:
+                pass  # must never reach here
+
+    def test_with_block_body_release_then_exit_is_a_clean_no_op(
+        self, store, unique_key
+    ):
+        """The LEGITIMATE no-op case round-4's fix targeted: entering a
+        still-LIVE handle, calling release() explicitly INSIDE the
+        body, then exiting normally -- __exit__ must see
+        _released=True (set by the body's own release() call) and skip
+        cleanly rather than attempting a doomed second release."""
+        handle = store.try_acquire(unique_key, operation="op")
+        assert handle is not None
+
         with handle:
-            pass  # __exit__ must see _released=True and no-op cleanly
+            store.release(handle)  # legitimate early release from inside the body
+        # __exit__ must have no-op'd cleanly -- no exception escaped.
 
     def test_with_block_raises_loudly_when_store_is_unset(self, store, unique_key):
         """Round-4 review fix: a handle with no `_store` reference (never

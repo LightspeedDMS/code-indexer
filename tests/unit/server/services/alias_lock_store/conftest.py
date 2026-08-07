@@ -56,6 +56,7 @@ def _item_belongs_here(item: pytest.Item) -> bool:
     return item.path.resolve().parent == _THIS_DIR
 
 
+@pytest.hookimpl(trylast=True)
 def pytest_collection_modifyitems(
     session: pytest.Session, config: pytest.Config, items: list
 ) -> None:
@@ -67,7 +68,20 @@ def pytest_collection_modifyitems(
     as opposed to a much broader sweep (e.g. server-fast-automation.sh's
     full `tests/unit/server/` run) that happens to sweep these tests up
     among hundreds of unrelated ones, where the existing skip-based
-    tolerance for missing TEST_POSTGRES_DSN must be preserved."""
+    tolerance for missing TEST_POSTGRES_DSN must be preserved.
+
+    Round-5 review fix (Codex found, Opus verified the exact root
+    cause): `@pytest.hookimpl(trylast=True)` is REQUIRED. Without it,
+    this hook could run BEFORE pytest's own `-k`/`-m` keyword
+    -deselection hook has modified `items`, so it inspected the
+    PRE-filter collected list rather than the actual post-deselection
+    selected set -- reproduced empirically: `pytest tests/unit/server/
+    -k alias_lock` (a broad path with a narrowing keyword filter)
+    silently skipped all PostgreSQL tests instead of failing loud, even
+    though the FINAL selected set (after `-k`) was 100% within this
+    directory. `trylast=True` ensures this hook observes `items` only
+    after deselection has already run.
+    """
     config.stash[_EXPLICIT_SCOPE_KEY] = bool(items) and all(
         _item_belongs_here(item) for item in items
     )

@@ -321,39 +321,53 @@ class PostgresAliasLockStore:
         zero-rows-affected case passes through this normalization
         unchanged -- it is not itself a connection failure.
         """
-        # Round-4 review fix: mark the handle released FIRST, before any
-        # real work, regardless of what happens next -- this is what
-        # lets AliasLockHandle.__exit__ detect and skip a redundant
-        # second release() call rather than double-releasing.
-        handle._released = True
-
-        conn = _require_live_connection(handle)
-        try:
-            try:
-                cursor = conn.execute(
-                    _RELEASE_SQL, (handle.lock_key, handle.owner_token)
+        # Round-4 review fix (Finding #5): atomic check-and-set of
+        # _released under the handle's own RLock -- closes the
+        # Codex-reproduced race where two concurrent release() calls on
+        # the SAME handle could both pass a bare "if not _released"
+        # check before either set it. Holding the lock for the REST of
+        # this method too serializes the real DB work per-handle, which
+        # is deliberate and cheap (a single alias's DELETE/COMMIT is
+        # fast) -- simpler and deadlock-free than trying to release the
+        # lock mid-method, and reentrant-safe against __exit__ calling
+        # into this same method while already holding the same lock.
+        with handle._release_lock:
+            if handle._released:
+                raise AliasLockOwnershipLostError(
+                    f"release() called again for lock_key={handle.lock_key!r} "
+                    f"owner_token={handle.owner_token!r} -- already released "
+                    f"(possibly by a concurrent caller) -- ownership already "
+                    f"lost"
                 )
-                if cursor.rowcount == 0:
-                    conn.rollback()
-                    raise AliasLockOwnershipLostError(
-                        f"release() found zero rows for "
-                        f"lock_key={handle.lock_key!r} "
-                        f"owner_token={handle.owner_token!r} -- ownership "
-                        f"already lost"
+            handle._released = True
+
+            conn = _require_live_connection(handle)
+            try:
+                try:
+                    cursor = conn.execute(
+                        _RELEASE_SQL, (handle.lock_key, handle.owner_token)
                     )
-                conn.commit()
-            except AliasLockOwnershipLostError:
-                raise
-            except Exception as exc:
-                if _is_dead_connection_error(exc):
-                    raise AliasLockOwnershipLostError(
-                        f"lock_key={handle.lock_key!r} "
-                        f"owner_token={handle.owner_token!r}: release() "
-                        f"failed -- connection is no longer usable"
-                    ) from exc
-                raise
-        finally:
-            conn.close()
+                    if cursor.rowcount == 0:
+                        conn.rollback()
+                        raise AliasLockOwnershipLostError(
+                            f"release() found zero rows for "
+                            f"lock_key={handle.lock_key!r} "
+                            f"owner_token={handle.owner_token!r} -- ownership "
+                            f"already lost"
+                        )
+                    conn.commit()
+                except AliasLockOwnershipLostError:
+                    raise
+                except Exception as exc:
+                    if _is_dead_connection_error(exc):
+                        raise AliasLockOwnershipLostError(
+                            f"lock_key={handle.lock_key!r} "
+                            f"owner_token={handle.owner_token!r}: release() "
+                            f"failed -- connection is no longer usable"
+                        ) from exc
+                    raise
+            finally:
+                conn.close()
 
     def renew(self, handle: AliasLockHandle) -> None:
         """Diagnostic-only heartbeat: exact-token UPDATE of
@@ -391,10 +405,25 @@ class PostgresAliasLockStore:
         the explicit zero-rows-affected check below still raises
         AliasLockOwnershipLostError.
         """
-        conn = _require_live_connection(handle)
-        cursor = conn.execute(_RENEW_SQL, (handle.lock_key, handle.owner_token))
+        # Round-5 review fix (Opus, extends Finding #5's RLock to
+        # renew(), applied here for consistency with the SQLite
+        # backend): without this lock, a concurrent release() on a
+        # different thread could close this exact connection between
+        # _require_live_connection's check and the UPDATE below --
+        # renew() must never touch the connection outside this
+        # synchronized region.
+        with handle._release_lock:
+            if handle._released:
+                raise AliasLockOwnershipLostError(
+                    f"renew() called for lock_key={handle.lock_key!r} "
+                    f"owner_token={handle.owner_token!r} but the lock was "
+                    f"already released -- ownership already lost"
+                )
+            conn = _require_live_connection(handle)
+            cursor = conn.execute(_RENEW_SQL, (handle.lock_key, handle.owner_token))
+            rowcount = cursor.rowcount
 
-        if cursor.rowcount == 0:
+        if rowcount == 0:
             # Wrong token: the UPDATE executed cleanly but matched zero
             # rows. Do NOT rollback, do NOT close -- the real lock (this
             # connection's actual open transaction) must remain held.

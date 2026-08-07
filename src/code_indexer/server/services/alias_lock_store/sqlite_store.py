@@ -150,12 +150,32 @@ def _open_and_begin_immediate(
     sequence, is a genuine operational failure: the connection is always
     closed before propagating, and only the specific busy/locked
     OperationalError is ever translated into a "not acquired" `None`.
+
+    Round-5 review fix (Opus, NEW CRITICAL): `check_same_thread=False`
+    is REQUIRED here. The realistic Phase 2 call-site shape is
+    acquire-on-one-thread, release/renew-on-a-different-thread
+    (background workers, schedulers, job queues all use threads) --
+    without this flag, Python's sqlite3 module raises
+    `ProgrammingError: SQLite objects created in a thread can only be
+    used in that same thread` on the very first cross-thread
+    `release()`/`renew()` call. That error was previously misclassified
+    as ownership-lost AND raised BEFORE the connection could be closed,
+    permanently wedging the alias (unrecoverable short of a server
+    restart, since this design deliberately has no reaper/TTL).
+    Reproduced empirically. Safe to disable here because
+    `AliasLockHandle._release_lock` (an RLock) already serializes all
+    release()/renew() access to a handle's connection across threads --
+    exactly the "additional locking applied by the application" the
+    sqlite3 docs require when disabling this check.
     """
     # isolation_level=None -> autocommit off, so we control BEGIN/COMMIT
     # explicitly (needed for BEGIN IMMEDIATE, which Python's implicit
     # "deferred" transaction start does not give us).
     conn = sqlite3.connect(
-        str(db_path), timeout=busy_timeout_seconds, isolation_level=None
+        str(db_path),
+        timeout=busy_timeout_seconds,
+        isolation_level=None,
+        check_same_thread=False,
     )
     try:
         busy_timeout_ms = int(busy_timeout_seconds * _MILLISECONDS_PER_SECOND)
@@ -180,15 +200,23 @@ def _validate_non_empty_str(value: str, name: str) -> str:
     return value
 
 
+_CLOSED_CONNECTION_MESSAGE_SUBSTRING = "cannot operate on a closed database"
+
+
 def _require_live_connection(handle) -> sqlite3.Connection:
     """Raise a loud AliasLockOwnershipLostError if the handle's connection
-    is no longer usable -- either explicitly closed (real crash, or a
-    test simulating one: raises sqlite3.ProgrammingError) or otherwise
-    broken (Fix #4: sqlite3.Error broadly, e.g. a disk I/O error from a
-    severed underlying file descriptor -- empirically reproduced by
-    closing the connection's raw OS file descriptor out from under the
-    still-open Python sqlite3.Connection object) instead of letting a
-    raw sqlite3 exception leak through."""
+    was EXPLICITLY closed (real crash, or a test simulating one) --
+    otherwise let any other sqlite3.Error propagate as itself.
+
+    Round-5 review fix (Opus): narrowed from a blanket `except
+    sqlite3.Error` to a message-text check for the SPECIFIC "closed
+    database" case. The broad version previously misclassified a
+    cross-thread-misuse ProgrammingError as ownership-lost (now fixed
+    at the source via `check_same_thread=False`, but this narrowing is
+    the defense-in-depth Opus asked for regardless): a genuinely
+    non-fatal or unrelated sqlite3.Error must never be silently folded
+    into the ownership-loss signal.
+    """
     from .base import AliasLockOwnershipLostError
 
     if handle is None:
@@ -198,10 +226,12 @@ def _require_live_connection(handle) -> sqlite3.Connection:
     try:
         conn.execute("SELECT 1")
     except sqlite3.Error as exc:
-        raise AliasLockOwnershipLostError(
-            f"lock_key={handle.lock_key!r} owner_token={handle.owner_token!r}: "
-            f"underlying connection is closed -- ownership already lost"
-        ) from exc
+        if _CLOSED_CONNECTION_MESSAGE_SUBSTRING in str(exc).lower():
+            raise AliasLockOwnershipLostError(
+                f"lock_key={handle.lock_key!r} owner_token={handle.owner_token!r}: "
+                f"underlying connection is closed -- ownership already lost"
+            ) from exc
+        raise
     return conn
 
 
@@ -295,39 +325,53 @@ class SqliteAliasLockStore:
         """
         from .base import AliasLockOwnershipLostError
 
-        # Round-4 review fix: mark the handle released FIRST, before any
-        # real work, regardless of what happens next -- this is what
-        # lets AliasLockHandle.__exit__ detect and skip a redundant
-        # second release() call rather than double-releasing.
-        handle._released = True
-
-        conn = _require_live_connection(handle)
-        try:
-            try:
-                conn.execute(
-                    "DELETE FROM golden_repo_alias_locks "
-                    "WHERE lock_key = ? AND owner_token = ?",
-                    (handle.lock_key, handle.owner_token),
-                )
-                if _rows_changed(conn) == 0:
-                    conn.execute("ROLLBACK")
-                    raise AliasLockOwnershipLostError(
-                        f"release() found zero rows for "
-                        f"lock_key={handle.lock_key!r} "
-                        f"owner_token={handle.owner_token!r} -- ownership "
-                        f"already lost"
-                    )
-                conn.execute("COMMIT")
-            except AliasLockOwnershipLostError:
-                raise
-            except sqlite3.Error as exc:
+        # Round-4 review fix (Finding #5): atomic check-and-set of
+        # _released under the handle's own RLock -- closes the
+        # Codex-reproduced race where two concurrent release() calls on
+        # the SAME handle could both pass a bare "if not _released"
+        # check before either set it. Holding the lock for the REST of
+        # this method too serializes the real DB work per-handle, which
+        # is deliberate and cheap (a single alias's DELETE/COMMIT is
+        # fast) -- simpler and deadlock-free than trying to release the
+        # lock mid-method, and reentrant-safe against __exit__ calling
+        # into this same method while already holding the same lock.
+        with handle._release_lock:
+            if handle._released:
                 raise AliasLockOwnershipLostError(
-                    f"lock_key={handle.lock_key!r} "
-                    f"owner_token={handle.owner_token!r}: release() failed "
-                    f"-- connection is no longer usable"
-                ) from exc
-        finally:
-            conn.close()
+                    f"release() called again for lock_key={handle.lock_key!r} "
+                    f"owner_token={handle.owner_token!r} -- already released "
+                    f"(possibly by a concurrent caller) -- ownership already "
+                    f"lost"
+                )
+            handle._released = True
+
+            conn = _require_live_connection(handle)
+            try:
+                try:
+                    conn.execute(
+                        "DELETE FROM golden_repo_alias_locks "
+                        "WHERE lock_key = ? AND owner_token = ?",
+                        (handle.lock_key, handle.owner_token),
+                    )
+                    if _rows_changed(conn) == 0:
+                        conn.execute("ROLLBACK")
+                        raise AliasLockOwnershipLostError(
+                            f"release() found zero rows for "
+                            f"lock_key={handle.lock_key!r} "
+                            f"owner_token={handle.owner_token!r} -- ownership "
+                            f"already lost"
+                        )
+                    conn.execute("COMMIT")
+                except AliasLockOwnershipLostError:
+                    raise
+                except sqlite3.Error as exc:
+                    raise AliasLockOwnershipLostError(
+                        f"lock_key={handle.lock_key!r} "
+                        f"owner_token={handle.owner_token!r}: release() "
+                        f"failed -- connection is no longer usable"
+                    ) from exc
+            finally:
+                conn.close()
 
     def renew(self, handle) -> None:
         """Diagnostic-only heartbeat: exact-token UPDATE of
@@ -368,14 +412,27 @@ class SqliteAliasLockStore:
         """
         from .base import AliasLockOwnershipLostError
 
-        conn = _require_live_connection(handle)
-        conn.execute(
-            "UPDATE golden_repo_alias_locks "
-            "SET last_renewed_at = CURRENT_TIMESTAMP "
-            "WHERE lock_key = ? AND owner_token = ?",
-            (handle.lock_key, handle.owner_token),
-        )
-        rows_changed = _rows_changed(conn)
+        # Round-5 review fix (Opus, extends Finding #5's RLock to
+        # renew()): without this lock, a concurrent release() on a
+        # different thread could close this exact connection between
+        # _require_live_connection's check and the UPDATE below --
+        # renew() must never touch the connection outside this
+        # synchronized region.
+        with handle._release_lock:
+            if handle._released:
+                raise AliasLockOwnershipLostError(
+                    f"renew() called for lock_key={handle.lock_key!r} "
+                    f"owner_token={handle.owner_token!r} but the lock was "
+                    f"already released -- ownership already lost"
+                )
+            conn = _require_live_connection(handle)
+            conn.execute(
+                "UPDATE golden_repo_alias_locks "
+                "SET last_renewed_at = CURRENT_TIMESTAMP "
+                "WHERE lock_key = ? AND owner_token = ?",
+                (handle.lock_key, handle.owner_token),
+            )
+            rows_changed = _rows_changed(conn)
 
         if rows_changed == 0:
             # Wrong token: the UPDATE executed cleanly but matched zero

@@ -10,7 +10,9 @@ from __future__ import annotations
 
 import glob
 import os
+import queue
 import sqlite3
+import threading
 import time
 from pathlib import Path
 
@@ -200,20 +202,37 @@ class TestContextManagerProtocol:
             if new_handle is not None:
                 store.release(new_handle)
 
-    def test_with_block_after_explicit_release_is_a_clean_no_op(self, tmp_path):
-        """Round-4 review fix: an explicit release() before the `with`
-        block ends must NOT be followed by a second, doomed release
-        attempt in __exit__ -- that would raise AliasLockOwnershipLostError
-        (the connection is already closed) and, if the body itself had
-        raised, would MASK the body's real exception. Codex reproduced
-        this exact double-release failure mode."""
+    def test_with_block_entry_raises_when_already_released(self, tmp_path):
+        """Round-5 review fix (Finding #4): entering `with handle:` on a
+        handle ALREADY released before entry must raise loudly, never
+        silently run the body with no lock actually held.
+        `store.try_acquire(...); store.release(handle); with handle:
+        mutate_filesystem()` must never look like a safe, lock-protected
+        operation."""
         store = _make_store(tmp_path)
         handle = store.try_acquire("my-alias", operation="op")
         assert handle is not None
         store.release(handle)
 
+        with pytest.raises(RuntimeError):
+            with handle:
+                pass  # must never reach here
+
+    def test_with_block_body_release_then_exit_is_a_clean_no_op(self, tmp_path):
+        """The LEGITIMATE no-op case round-4's fix targeted: entering a
+        still-LIVE handle, calling release() explicitly INSIDE the
+        body, then exiting normally -- __exit__ must see
+        _released=True (set by the body's own release() call) and skip
+        cleanly rather than attempting a doomed second release that
+        would raise AliasLockOwnershipLostError and mask nothing (the
+        body itself raised no exception here)."""
+        store = _make_store(tmp_path)
+        handle = store.try_acquire("my-alias", operation="op")
+        assert handle is not None
+
         with handle:
-            pass  # __exit__ must see _released=True and no-op cleanly
+            store.release(handle)  # legitimate early release from inside the body
+        # __exit__ must have no-op'd cleanly -- no exception escaped.
 
     def test_with_block_raises_loudly_when_store_is_unset(self, tmp_path):
         """Round-4 review fix: a handle with no `_store` reference (never
@@ -512,3 +531,88 @@ class TestCrashRecovery:
             pass
         finally:
             store.release(new_handle)
+
+
+def _run_on_thread_and_collect_outcome(action, timeout_seconds: float):
+    """Run `action()` (a zero-arg callable) on a background thread and
+    return either "ok" (action returned normally) or the exception it
+    raised -- extracted so the cross-thread tests below stay under the
+    per-method line budget. Fails loudly if the thread never finishes
+    or never reports any outcome at all."""
+    result_queue: "queue.Queue" = queue.Queue()
+
+    def worker() -> None:
+        try:
+            action()
+            result_queue.put("ok")
+        except Exception as exc:  # noqa: BLE001
+            result_queue.put(exc)
+
+    thread = threading.Thread(target=worker)
+    thread.start()
+    thread.join(timeout=timeout_seconds)
+    if thread.is_alive():
+        raise AssertionError("cross-thread worker never finished")
+    try:
+        return result_queue.get_nowait()
+    except queue.Empty as exc:
+        raise AssertionError("cross-thread worker reported no outcome at all") from exc
+
+
+class TestCrossThreadAcquireAndRelease:
+    """Round-5 review NEW CRITICAL fix (Opus): the realistic Phase 2
+    call-site shape is acquire-on-one-thread, release/renew-on-a
+    -different-thread (background workers, schedulers, job queues all
+    use threads). Without `check_same_thread=False` this used to
+    permanently wedge the alias -- reproduced empirically before this
+    fix: the cross-thread release() raised a misclassified
+    AliasLockOwnershipLostError BEFORE conn.close() could run, leaving
+    the BEGIN IMMEDIATE transaction open forever with no
+    reaper/TTL/recovery mechanism able to free it."""
+
+    def test_release_on_a_different_thread_than_acquire_succeeds(self, tmp_path):
+        store = _make_store(tmp_path)
+        handle = store.try_acquire("cross-thread-alias", operation="op")
+        assert handle is not None
+        new_handle = None
+        try:
+            outcome = _run_on_thread_and_collect_outcome(
+                lambda: store.release(handle), _GENEROUS_BUSY_TIMEOUT_SECONDS
+            )
+            assert outcome == "ok", (
+                f"cross-thread release() must succeed cleanly, got: {outcome!r}"
+            )
+
+            new_handle = store.try_acquire("cross-thread-alias", operation="op")
+            assert new_handle is not None, (
+                "cross-thread release() must have actually freed the lock "
+                "-- the alias must never be permanently wedged"
+            )
+        finally:
+            if new_handle is not None:
+                store.release(new_handle)
+            elif not handle._released:
+                store.release(handle)
+
+    def test_renew_on_a_different_thread_than_acquire_succeeds(self, tmp_path):
+        store = _make_store(tmp_path, busy_timeout_seconds=_SHORT_BUSY_TIMEOUT_SECONDS)
+        handle = store.try_acquire("cross-thread-renew-alias", operation="op")
+        assert handle is not None
+        competitor = None
+        try:
+            outcome = _run_on_thread_and_collect_outcome(
+                lambda: store.renew(handle), _GENEROUS_BUSY_TIMEOUT_SECONDS
+            )
+            assert outcome == "ok", (
+                f"cross-thread renew() must succeed cleanly, got: {outcome!r}"
+            )
+
+            competitor = store.try_acquire("cross-thread-renew-alias", operation="op")
+            assert competitor is None, (
+                "cross-thread renew() must never release the lock"
+            )
+        finally:
+            if competitor is not None:
+                store.release(competitor)
+            if not handle._released:
+                store.release(handle)
