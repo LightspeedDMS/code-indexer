@@ -321,6 +321,12 @@ class PostgresAliasLockStore:
         zero-rows-affected case passes through this normalization
         unchanged -- it is not itself a connection failure.
         """
+        # Round-4 review fix: mark the handle released FIRST, before any
+        # real work, regardless of what happens next -- this is what
+        # lets AliasLockHandle.__exit__ detect and skip a redundant
+        # second release() call rather than double-releasing.
+        handle._released = True
+
         conn = _require_live_connection(handle)
         try:
             try:

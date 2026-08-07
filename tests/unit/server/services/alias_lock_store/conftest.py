@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import os
 import uuid
+from pathlib import Path
 
 import pytest
 
@@ -28,14 +29,58 @@ _POSTGRES_TEST_MODULE_NAMES = (
     "test_alias_lock_store_postgres_concurrency_1546",
 )
 
+# This conftest.py's own resolved directory -- the precise, path
+# -boundary-aware comparison root for "does this collected item belong
+# to the alias_lock_store suite" (see `_item_belongs_here` below).
+_THIS_DIR = Path(__file__).resolve().parent
+
+# Round-4 review fix: the original implementation pattern-matched the
+# raw CLI argument text for the substring "postgres", which Codex
+# proved bypassable -- `pytest tests/unit/server/services/
+# alias_lock_store/` (the whole directory, no "postgres" substring
+# anywhere in the invocation) still collected and silently skipped all
+# 21 PostgreSQL tests. Collected-item-based detection (via
+# pytest_collection_modifyitems below) cannot be bypassed this way: it
+# looks at what pytest ACTUALLY gathered, not how the invocation was
+# spelled. The computed flag lives on pytest's own per-session
+# `config.stash` (never a bare module-level dict) so it is not
+# unsynchronized shared mutable state.
+_EXPLICIT_SCOPE_KEY: "pytest.StashKey[bool]" = pytest.StashKey()
+
+
+def _item_belongs_here(item: pytest.Item) -> bool:
+    """Precise, path-boundary-aware check: True only if `item`'s test
+    file lives DIRECTLY in this exact directory (never a mere substring
+    match on nodeid, which could false-positive on an unrelated sibling
+    directory such as a hypothetical `alias_lock_store_backup/`)."""
+    return item.path.resolve().parent == _THIS_DIR
+
+
+def pytest_collection_modifyitems(
+    session: pytest.Session, config: pytest.Config, items: list
+) -> None:
+    """Round-4 review fix: decide "explicit" scope from the ACTUAL
+    collected item list rather than CLI argument text. "Explicit" means
+    every single collected item in this run belongs to this
+    alias_lock_store directory (a file-specific, directory-specific, or
+    -k-filtered selection that resolves ENTIRELY within this feature) --
+    as opposed to a much broader sweep (e.g. server-fast-automation.sh's
+    full `tests/unit/server/` run) that happens to sweep these tests up
+    among hundreds of unrelated ones, where the existing skip-based
+    tolerance for missing TEST_POSTGRES_DSN must be preserved."""
+    config.stash[_EXPLICIT_SCOPE_KEY] = bool(items) and all(
+        _item_belongs_here(item) for item in items
+    )
+
 
 @pytest.hookimpl(tryfirst=True)
 def pytest_runtest_setup(item: pytest.Item) -> None:
-    """Round-3 review, low-cost fix: fail LOUDLY, not silently skip, when
-    a PostgreSQL alias-lock-store test is EXPLICITLY selected on the
-    command line but TEST_POSTGRES_DSN is unset. Without this, the
-    critical Fix #1 (indefinite-block) regression gate had zero
-    default-running proof -- another developer or CI could get an
+    """Round-3 review, low-cost fix (narrowed in round-4 per Codex's
+    finding): fail LOUDLY, not silently skip, when a PostgreSQL
+    alias-lock-store test is EXPLICITLY selected (per the collected-item
+    -based flag computed above) but TEST_POSTGRES_DSN is unset. Without
+    this, the critical Fix #1 (indefinite-block) regression gate had
+    zero default-running proof -- another developer or CI could get an
     all-green run of this exact suite without ever exercising the
     PostgreSQL path. `tryfirst=True` ensures this runs before pytest's
     own skip-marker evaluation. When NOT explicitly selected (e.g. a
@@ -52,19 +97,20 @@ def pytest_runtest_setup(item: pytest.Item) -> None:
     if module_name not in _POSTGRES_TEST_MODULE_NAMES:
         return
 
-    invocation_args = " ".join(item.config.invocation_params.args).lower()
-    explicitly_selected = "postgres" in invocation_args
-    if not explicitly_selected:
+    if not item.config.stash.get(_EXPLICIT_SCOPE_KEY, False):
         return
 
     pytest.fail(
-        "TEST_POSTGRES_DSN is not set, but PostgreSQL alias-lock-store "
-        "tests were explicitly selected on the command line (invocation "
-        f"args: {invocation_args!r}). Set TEST_POSTGRES_DSN to a real "
-        "PostgreSQL instance to run this suite for real -- it covers "
-        "Fix #1 (indefinite-block regression), the most severe finding "
-        "in Issue #1546's Phase 1 rework. Silently skipping an "
-        "explicitly-requested test suite is not acceptable here.",
+        "TEST_POSTGRES_DSN is not set, but this test run's ENTIRE "
+        "collected scope is the alias_lock_store PostgreSQL/SQLite "
+        "suite (no unrelated tests were swept in) -- that counts as an "
+        "explicit request to run these PostgreSQL tests, whether "
+        "selected by file, by directory, or by -k. Set "
+        "TEST_POSTGRES_DSN to a real PostgreSQL instance to run this "
+        "suite for real -- it covers Fix #1 (indefinite-block "
+        "regression), the most severe finding in Issue #1546's Phase 1 "
+        "rework. Silently skipping an explicitly-requested test suite "
+        "is not acceptable here.",
         pytrace=False,
     )
 

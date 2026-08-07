@@ -95,6 +95,7 @@ class AliasLockHandle:
     operation: str
     _connection: Any = field(repr=False)
     _store: Optional["AliasLockStore"] = field(default=None, repr=False, compare=False)
+    _released: bool = field(default=False, repr=False, compare=False)
 
     def __enter__(self) -> "AliasLockHandle":
         """Escalated by round-3 review (F2's vacuum-pinning cost makes a
@@ -105,13 +106,43 @@ class AliasLockHandle:
         return self
 
     def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
-        """Calls `store.release(self)` if this handle was constructed
-        with a `_store` reference (both backends' `try_acquire()` do
-        this). Never suppresses the original exception from the `with`
-        block body (implicit `None` return); a failure from release()
-        itself propagates as-is."""
-        if self._store is not None:
-            self._store.release(self)
+        """Round-4 review fix (Codex): calls `store.release(self)`
+        exactly once per handle, and never silently does nothing when
+        the handle cannot actually be released.
+
+        - If `release()` was ALREADY called explicitly on this handle
+          before the `with` block ended (both backends' `release()`
+          set `_released = True` as their very first action, success
+          or failure), this is a clean no-op -- calling release() a
+          SECOND time here would raise AliasLockOwnershipLostError
+          (the connection is already closed) and, if the `with` body
+          itself had raised, that cleanup error would MASK the body's
+          real exception. Codex reproduced exactly this double-release
+          failure mode.
+        - If `_store` is unset (a handle built manually, never via
+          `try_acquire()`), this raises loudly (`RuntimeError`) rather
+          than silently doing nothing -- a `with handle:` that cannot
+          possibly release anything must never pretend it succeeded
+          (this project's anti-silent-failure standard).
+        - Otherwise, `store.release(self)` runs normally. If the `with`
+          body already raised AND `release()` also raises, Python's
+          own `with`-statement machinery automatically chains the
+          body's original exception onto the new one via
+          `__context__` (verified empirically -- no manual chaining
+          code needed here); the caller can still recover it via
+          `exc.__context__`.
+        """
+        if self._released:
+            return
+        if self._store is None:
+            raise RuntimeError(
+                f"AliasLockHandle.__exit__ called for lock_key={self.lock_key!r} "
+                f"but no _store reference is set -- this handle was not "
+                f"constructed by AliasLockStore.try_acquire(), so `with "
+                f"handle:` cannot release anything. Construct handles only "
+                f"via try_acquire()."
+            )
+        self._store.release(self)
 
 
 class AliasLockStore(Protocol):

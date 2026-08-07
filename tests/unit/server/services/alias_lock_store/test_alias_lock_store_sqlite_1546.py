@@ -200,6 +200,68 @@ class TestContextManagerProtocol:
             if new_handle is not None:
                 store.release(new_handle)
 
+    def test_with_block_after_explicit_release_is_a_clean_no_op(self, tmp_path):
+        """Round-4 review fix: an explicit release() before the `with`
+        block ends must NOT be followed by a second, doomed release
+        attempt in __exit__ -- that would raise AliasLockOwnershipLostError
+        (the connection is already closed) and, if the body itself had
+        raised, would MASK the body's real exception. Codex reproduced
+        this exact double-release failure mode."""
+        store = _make_store(tmp_path)
+        handle = store.try_acquire("my-alias", operation="op")
+        assert handle is not None
+        store.release(handle)
+
+        with handle:
+            pass  # __exit__ must see _released=True and no-op cleanly
+
+    def test_with_block_raises_loudly_when_store_is_unset(self, tmp_path):
+        """Round-4 review fix: a handle with no `_store` reference (never
+        constructed by try_acquire()) must raise loudly on `with
+        handle:` exit rather than silently doing nothing -- this
+        project's anti-silent-failure standard."""
+        store = _make_store(tmp_path)
+        handle = store.try_acquire("my-alias", operation="op")
+        assert handle is not None
+        try:
+            handle._store = None  # simulate a handle built without try_acquire()
+            with pytest.raises(RuntimeError):
+                with handle:
+                    pass
+        finally:
+            store.release(handle)
+
+    def test_with_block_cleanup_failure_chains_the_original_body_exception(
+        self, tmp_path
+    ):
+        """Round-4 review fix: if the `with` body raises AND the cleanup
+        release() ALSO fails (a genuine severed-connection scenario, not
+        a double-release), the cleanup exception must chain the body's
+        original exception via `__context__` rather than silently
+        replacing it -- Python's own with-statement machinery does this
+        automatically, but this proves it holds for THIS __exit__."""
+        store = _make_store(tmp_path)
+        handle = store.try_acquire("my-alias", operation="op")
+        assert handle is not None
+
+        class _BodyError(Exception):
+            pass
+
+        with pytest.raises(AliasLockOwnershipLostError) as exc_info:
+            with handle:
+                handle._connection.close()  # sever it -- cleanup's release() will fail
+                raise _BodyError("body raised before cleanup also failed")
+
+        chain = []
+        current = exc_info.value.__context__
+        while current is not None and current not in chain:
+            chain.append(current)
+            current = current.__context__
+        assert any(isinstance(exc, _BodyError) for exc in chain), (
+            "the cleanup exception must chain the body's original exception "
+            f"somewhere in __context__, got chain={chain!r}"
+        )
+
 
 class TestOwnershipLossViaWrongToken:
     """Zero-rows-affected DELETE/UPDATE path: forcing a token mismatch on

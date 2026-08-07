@@ -295,6 +295,67 @@ class TestContextManagerProtocol:
             if new_handle is not None:
                 store.release(new_handle)
 
+    def test_with_block_after_explicit_release_is_a_clean_no_op(
+        self, store, unique_key
+    ):
+        """Round-4 review fix: an explicit release() before the `with`
+        block ends must NOT be followed by a second, doomed release
+        attempt in __exit__ -- that would raise AliasLockOwnershipLostError
+        (the connection is already closed) and, if the body itself had
+        raised, would MASK the body's real exception. Codex reproduced
+        this exact double-release failure mode."""
+        handle = store.try_acquire(unique_key, operation="op")
+        assert handle is not None
+        store.release(handle)
+
+        with handle:
+            pass  # __exit__ must see _released=True and no-op cleanly
+
+    def test_with_block_raises_loudly_when_store_is_unset(self, store, unique_key):
+        """Round-4 review fix: a handle with no `_store` reference (never
+        constructed by try_acquire()) must raise loudly on `with
+        handle:` exit rather than silently doing nothing -- this
+        project's anti-silent-failure standard."""
+        handle = store.try_acquire(unique_key, operation="op")
+        assert handle is not None
+        try:
+            handle._store = None  # simulate a handle built without try_acquire()
+            with pytest.raises(RuntimeError):
+                with handle:
+                    pass
+        finally:
+            store.release(handle)
+
+    def test_with_block_cleanup_failure_chains_the_original_body_exception(
+        self, store, unique_key
+    ):
+        """Round-4 review fix: if the `with` body raises AND the cleanup
+        release() ALSO fails (a genuine severed-connection scenario, not
+        a double-release), the cleanup exception must chain the body's
+        original exception via `__context__` rather than silently
+        replacing it -- Python's own with-statement machinery does this
+        automatically, but this proves it holds for THIS __exit__."""
+        handle = store.try_acquire(unique_key, operation="op")
+        assert handle is not None
+
+        class _BodyError(Exception):
+            pass
+
+        with pytest.raises(AliasLockOwnershipLostError) as exc_info:
+            with handle:
+                handle._connection.close()  # sever it -- cleanup's release() will fail
+                raise _BodyError("body raised before cleanup also failed")
+
+        chain = []
+        current = exc_info.value.__context__
+        while current is not None and current not in chain:
+            chain.append(current)
+            current = current.__context__
+        assert any(isinstance(exc, _BodyError) for exc in chain), (
+            "the cleanup exception must chain the body's original exception "
+            f"somewhere in __context__, got chain={chain!r}"
+        )
+
 
 class TestOwnershipLossViaWrongToken:
     """Zero-rows-affected DELETE path: forcing a token mismatch on the
@@ -559,6 +620,23 @@ class TestRenewNeverTouchesConnectionOnNonFatalError:
     empirically showing "idle in transaction (aborted)") -- but that is
     NOT the same as the connection being closed, and our own code must
     never be the one to close it.
+
+    Round-4 review finding: the poison-based test below cannot honestly
+    prove "the underlying lock stays held" -- PostgreSQL's OWN
+    transaction-abort mechanism releases the acquire's row lock the
+    instant ANY genuine server-side SQL error occurs (empirically
+    confirmed via `pg_locks` going from non-empty to EMPTY immediately
+    after such an error, with zero renew() call involved at all).
+    Asserting "competitor is None" there would test PostgreSQL's own
+    semantics, not this store's code. `test_renew_client_side_error_
+    does_not_release_the_real_lock` below reaches a genuinely
+    CLIENT-SIDE failure instead -- one that never touches the server
+    or the real transaction at all, via plain data mutation (the same
+    technique the "wrong-token" tests elsewhere in this suite already
+    use): `handle.owner_token` set to a plain object psycopg cannot
+    adapt to a SQL parameter. This keeps the transaction status
+    `INTRANS` (never `INERROR`), so a REAL competing `try_acquire()`
+    against the REAL database can honestly prove the lock stayed held.
     """
 
     def test_renew_propagates_non_fatal_error_without_closing_the_connection(
@@ -603,6 +681,45 @@ class TestRenewNeverTouchesConnectionOnNonFatalError:
                 conn.rollback()
             finally:
                 conn.close()
+
+    def test_renew_client_side_error_does_not_release_the_real_lock(
+        self, store, unique_key
+    ):
+        """See class docstring: proves the lock stays held using a
+        genuinely CLIENT-SIDE error (unadaptable owner_token) that
+        never reaches the server."""
+        import psycopg.pq
+
+        handle = store.try_acquire(unique_key, operation="op")
+        assert handle is not None
+        conn = handle._connection
+        real_owner_token = handle.owner_token
+
+        class _UnadaptableToken:
+            pass
+
+        try:
+            handle.owner_token = _UnadaptableToken()
+            try:
+                with pytest.raises(Exception) as exc_info:
+                    store.renew(handle)
+                assert not isinstance(exc_info.value, AliasLockOwnershipLostError)
+                assert (
+                    conn.info.transaction_status == psycopg.pq.TransactionStatus.INTRANS
+                ), "a client-side error must leave the real transaction untouched"
+            finally:
+                handle.owner_token = real_owner_token
+
+            assert not conn.closed, "renew() must never close on a non-fatal error"
+
+            competitor = store.try_acquire(unique_key, operation="op")
+            try:
+                assert competitor is None, "the real underlying lock must still be held"
+            finally:
+                if competitor is not None:
+                    store.release(competitor)
+        finally:
+            store.release(handle)
 
 
 class TestCrashRecovery:
