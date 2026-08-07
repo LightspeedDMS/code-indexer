@@ -236,6 +236,13 @@ def _execute_temporal_via_live_dispatch_rest(
         # temporal query back onto the legacy in-repo scan, which is empty
         # once relocation succeeds.
         query_tracker=getattr(app.state, "query_tracker", None),
+        # Bug #1533: thread the server's DI-wired ActivatedRepoManager so the
+        # worker resolves golden lineage from the SHARED (PostgreSQL in
+        # cluster mode) metadata store instead of a node-local read that
+        # cannot see an activation made on another node. Wired at BOTH doors
+        # deliberately -- the query_tracker kwarg above was the confirmed
+        # Bug #1482 gap precisely because only the MCP door had it.
+        activated_repo_manager=getattr(app.state, "activated_repo_manager", None),
     )
 
     status_field = dispatch_result.get("status")

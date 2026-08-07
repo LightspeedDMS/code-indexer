@@ -242,10 +242,8 @@ def resolve_backend_registry_attr(
     backend = None
     postgres_mode_without_backend = False
 
-    app_module = sys.modules.get("code_indexer.server.app")
-    _app = getattr(app_module, "app", None) if app_module is not None else None
-    _app_state = getattr(_app, "state", None)
-    if _app_state and getattr(_app_state, "storage_mode", None) == "postgres":
+    _app_state = _running_server_app_state()
+    if _app_state is not None and is_postgres_storage_mode():
         _br = getattr(_app_state, "backend_registry", None)
         if _br is not None:
             backend = getattr(_br, attr_name)
@@ -257,6 +255,34 @@ def resolve_backend_registry_attr(
                 caller_name or "resolve_backend_registry_attr",
             )
     return backend, postgres_mode_without_backend
+
+
+def _running_server_app_state() -> Optional[Any]:
+    """The running server's ``app.state``, or None outside a server process.
+
+    Looked up via ``sys.modules.get()`` -- a pure dict lookup -- never an
+    ``import``, which would trigger a fresh (expensive: FastAPI app + all
+    routers + DB pools) import in a pure CLI process. See
+    :func:`resolve_backend_registry_attr` for the full rationale.
+    """
+    app_module = sys.modules.get("code_indexer.server.app")
+    _app = getattr(app_module, "app", None) if app_module is not None else None
+    return getattr(_app, "state", None)
+
+
+def is_postgres_storage_mode() -> bool:
+    """Whether this process is a server running in postgres/cluster mode.
+
+    THE single authority for the ``app.state.storage_mode == "postgres"``
+    probe (Bug #1533): callers outside this module must use this instead of
+    reimplementing the ``sys.modules`` app.state introspection. Returns
+    False outside a server process (pure CLI, no app.state) and in
+    solo/SQLite mode.
+    """
+    _app_state = _running_server_app_state()
+    if _app_state is None:
+        return False
+    return bool(getattr(_app_state, "storage_mode", None) == "postgres")
 
 
 def resolve_backend_registry_state(caller_name: str = "") -> Tuple[Optional[Any], bool]:

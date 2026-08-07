@@ -432,6 +432,14 @@ class SSHKeysBackend(Protocol):
 class GoldenRepoMetadataBackend(Protocol):
     """Protocol for golden repository metadata storage."""
 
+    # Bug #1533: every implementation must state which kind of store it is --
+    # True for the SHARED, cross-node store (PostgreSQL), False for a
+    # NODE-LOCAL one (SQLite). Callers whose correctness depends on the
+    # cluster-wide view check this and must refuse to read a node-local store;
+    # they compare with `is True`, so an implementation that omits the
+    # declaration is treated as node-local rather than silently trusted.
+    is_shared_backend: bool
+
     def ensure_table_exists(self) -> None: ...
 
     def add_repo(

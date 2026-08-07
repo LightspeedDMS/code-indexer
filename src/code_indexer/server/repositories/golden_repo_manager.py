@@ -452,6 +452,30 @@ class GoldenRepoManager:
             except (json.JSONDecodeError, TypeError, KeyError) as e:
                 logging.warning(f"Could not migrate metadata.json: {e}")
 
+    def has_shared_metadata_backend(self) -> bool:
+        """Whether golden-repo metadata reads reach the SHARED, cross-node
+        store (Bug #1533).
+
+        Asks the CURRENT backend what it IS (`is_shared_backend`), not whether
+        something was injected at construction. Those are different questions:
+        an accidentally-injected node-local SQLite backend is still node-local,
+        and treating it as shared is precisely the bug class this guard
+        exists to close.
+
+        False means golden-repo lookups cannot see repos registered by another
+        cluster node -- `get_actual_repo_path()` then raises
+        GoldenRepoNotFoundError for a repo that genuinely exists. Callers whose
+        correctness depends on the cluster-wide view must treat False as "I
+        cannot answer".
+
+        Compared with ``is True``, never ``bool(...)``: truthiness coercion is
+        satisfied by ANY truthy value, so a MagicMock (which fabricates every
+        attribute on demand) or a duck-typed substitute would pass as shared
+        without ever declaring the marker deliberately. Only an explicit
+        ``is_shared_backend = True`` counts.
+        """
+        return getattr(self._sqlite_backend, "is_shared_backend", False) is True
+
     def set_mcp_registration_service(self, service) -> None:
         """Set the MCPSelfRegistrationService for Phase 2 lifecycle detection."""
         self._mcp_registration_service = service

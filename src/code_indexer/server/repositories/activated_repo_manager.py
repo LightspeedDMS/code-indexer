@@ -254,6 +254,45 @@ class ActivatedRepoManager:
         instead of JSON files, enabling cross-node visibility.
         """
         self._pool = pool
+        self.logger.info(
+            "ActivatedRepoManager: using PostgreSQL connection pool (cluster mode)"
+        )
+
+    def uses_shared_metadata_stores(self) -> bool:
+        """Whether BOTH metadata stores this manager exposes are the SHARED
+        (cross-node) ones rather than this node's own local files (Bug #1533).
+
+        Two INDEPENDENT stores are involved, and half wired is not wired:
+
+        1. Activation metadata -- this manager's own PostgreSQL connection
+           pool (``set_connection_pool``). Without it, reads hit node-local
+           JSON files that are empty for repos activated on any other node,
+           and an empty read is indistinguishable from "this repo is not
+           activated".
+        2. Golden-repo metadata -- ``self.golden_repo_manager``'s backend,
+           which must BE the shared one (``has_shared_metadata_backend()``),
+           not merely something that was injected. Without it, a lineage
+           lookup that correctly resolves the golden alias STILL fails on the
+           golden lookup with GoldenRepoNotFoundError ("Loaded 0 golden repos
+           from SQLite"), which ``load_golden_temporal_config`` swallows
+           fail-open -- silently degrading temporal embedder selection.
+
+        Both halves check CAPABILITY, never mere presence: a pool object that
+        cannot hand out connections, or a node-local SQLite backend that
+        happened to be injected, would each let a miswired cluster node read
+        node-local state -- the exact bug class this guard exists to close.
+
+        Callers whose correctness depends on the cluster-wide view must treat
+        False as "I cannot answer", never as a negative answer.
+        """
+        # `callable`, not `hasattr`: a pool exposing `connection` as a plain
+        # (non-callable) attribute cannot hand out connections, so presence
+        # alone does not establish the capability being checked for.
+        if self._pool is None:
+            return False
+        if not callable(getattr(self._pool, "connection", None)):
+            return False
+        return self.golden_repo_manager.has_shared_metadata_backend() is True
 
     def set_query_tracker(self, query_tracker: Any) -> None:
         """Wire the server's QueryTracker (Story #1458 AC13).
@@ -264,9 +303,6 @@ class ActivatedRepoManager:
         trashed clone's consolidated chunks.db is physically purged.
         """
         self._query_tracker = query_tracker
-        self.logger.info(
-            "ActivatedRepoManager: using PostgreSQL connection pool (cluster mode)"
-        )
 
     def set_shared_repos_dir(self, shared_dir: str) -> None:
         """Set NFS shared directory for activated repo clones in cluster mode."""
