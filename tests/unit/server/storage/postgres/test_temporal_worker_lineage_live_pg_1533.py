@@ -15,33 +15,26 @@ correct read from the pre-fix one is which metadata store is consulted.
 
 DESTRUCTION SAFETY (two independent guards)
 -------------------------------------------
-An earlier version of this module ran ``DROP TABLE IF EXISTS activated_repos``
-against whatever ``TEST_POSTGRES_DSN`` pointed at. That is unacceptable: a
-misconfigured runner or a copy-pasted DSN would destroy real activation
-metadata. Note that this project's OTHER live-PG modules (e.g.
-test_migration_runner.py's ``isolated_schema``, which drops
-``schema_migrations``) share that hazard on a fixed, production-shaped table
-name -- they predate this module and are NOT a pattern to copy; the wider
-cleanup is flagged separately rather than done here.
+An earlier version ran ``DROP TABLE IF EXISTS activated_repos`` against
+whatever ``TEST_POSTGRES_DSN`` pointed at -- a misconfigured runner or
+copy-pasted DSN would have destroyed real activation metadata. Other live-PG
+modules here (e.g. test_migration_runner.py's ``isolated_schema``, dropping
+``schema_migrations``) still do this; that cleanup is flagged separately.
 
-Guard 1 -- the target database's name must FULLY MATCH the disposable format
-``_DISPOSABLE_DB_NAME_REGEX`` (never merely contain a marker: substring
-containment accepted `production_cidx_test` and `cidx_test_prod`). The name is
+Guard 1 -- the database name must FULLY MATCH ``_DISPOSABLE_DB_NAME_REGEX``,
 taken from libpq's OWN resolution (``conninfo_to_dict``) and re-confirmed
-against the server's ``SELECT current_database()`` before any DDL runs -- never
-re-parsed out of the DSN string, because a later ``dbname=`` overrides the URI
-path, so `postgresql://u@h/cidx_test?dbname=cidx_server` reads as disposable
-while actually connecting to the real database. A DSN pointing anywhere else
-FAILS loudly
-rather than skipping, so a misconfiguration is visible instead of silently
-tolerated.
+against ``SELECT current_database()`` before any DDL. Both details were real
+bypasses: substring containment accepted `production_cidx_test`, and
+re-parsing the DSN missed that a later ``dbname=`` overrides the URI path
+(`postgresql://u@h/cidx_test?dbname=cidx_server` reads disposable, connects to
+the real database). Anything else FAILS loudly rather than skipping.
 
-Guard 2 -- and the real protection: every test creates its OWN uniquely-named
-schema, creates its tables INSIDE it, reaches them through a ``search_path``
-option on the DSN, and drops ONLY that schema. Nothing in ``public`` is
-created, modified, or dropped, so even a DSN aimed at a shared database cannot
-lose data. ``test_private_schema_isolation_leaves_public_schema_intact`` is the
-standing regression guard for that property.
+Guard 2 -- the real protection: each test creates its OWN uniquely-named
+schema, puts its tables inside it via a ``search_path`` DSN option, and drops
+ONLY that schema; nothing in ``public`` is created, modified or dropped, proven
+read-only by ``test_private_schema_isolation_leaves_public_schema_intact``.
+(Older live-PG modules here still drop fixed production-shaped tables -- an
+outstanding hazard, never a pattern to copy.)
 """
 
 from __future__ import annotations

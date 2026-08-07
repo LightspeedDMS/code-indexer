@@ -41,6 +41,12 @@ class GoldenRepoMetadataPostgresBackend:
     All mutations use explicit transactions via the connection pool.
     """
 
+    # Bug #1533: the SHARED, cross-node store. Counterpart of
+    # GoldenRepoMetadataSqliteBackend.is_shared_backend (False) -- callers
+    # that must see the cluster-wide view check this rather than assuming an
+    # injected backend is necessarily the shared one.
+    is_shared_backend = True
+
     def __init__(self, pool: ConnectionPool) -> None:
         """
         Initialize with a shared connection pool.

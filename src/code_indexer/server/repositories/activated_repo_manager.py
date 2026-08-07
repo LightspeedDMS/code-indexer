@@ -269,19 +269,25 @@ class ActivatedRepoManager:
            JSON files that are empty for repos activated on any other node,
            and an empty read is indistinguishable from "this repo is not
            activated".
-        2. Golden-repo metadata -- ``self.golden_repo_manager``'s backend.
-           Without the DI-injected shared backend, a lineage lookup that
-           correctly resolves the golden alias STILL fails on the golden
-           lookup itself with GoldenRepoNotFoundError ("Loaded 0 golden repos
+        2. Golden-repo metadata -- ``self.golden_repo_manager``'s backend,
+           which must BE the shared one (``has_shared_metadata_backend()``),
+           not merely something that was injected. Without it, a lineage
+           lookup that correctly resolves the golden alias STILL fails on the
+           golden lookup with GoldenRepoNotFoundError ("Loaded 0 golden repos
            from SQLite"), which ``load_golden_temporal_config`` swallows
            fail-open -- silently degrading temporal embedder selection.
+
+        Both halves check CAPABILITY, never mere presence: a pool object that
+        cannot hand out connections, or a node-local SQLite backend that
+        happened to be injected, would each let a miswired cluster node read
+        node-local state -- the exact bug class this guard exists to close.
 
         Callers whose correctness depends on the cluster-wide view must treat
         False as "I cannot answer", never as a negative answer.
         """
-        if self._pool is None:
+        if self._pool is None or not hasattr(self._pool, "connection"):
             return False
-        return bool(self.golden_repo_manager.has_injected_metadata_backend())
+        return bool(self.golden_repo_manager.has_shared_metadata_backend())
 
     def set_query_tracker(self, query_tracker: Any) -> None:
         """Wire the server's QueryTracker (Story #1458 AC13).

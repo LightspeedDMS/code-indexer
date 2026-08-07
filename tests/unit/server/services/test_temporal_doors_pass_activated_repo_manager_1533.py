@@ -35,16 +35,21 @@ from code_indexer.server.services.temporal_live_dispatch import (
 KWARG_NAME = "activated_repo_manager"
 DISPATCH_CALL = "execute_live_temporal_search"
 
-# Expressions that genuinely resolve to the server's DI-wired manager, as
-# GROUPS of substrings that must ALL appear in the unparsed argument. The MCP
-# door calls the _utils accessor; the REST door uses
-# `getattr(app.state, 'activated_repo_manager', None)` -- whose unparsed form
-# contains no dotted `app.state.activated_repo_manager`, which is why a single
-# literal string does not work here. Anything else (notably a bare None) is a
-# wiring gap.
-DI_ACCESSORS = (
-    ("_get_activated_repo_manager",),
-    ("app.state", "activated_repo_manager"),
+# The EXACT accessor expressions that have been reviewed and accepted, matched
+# whole against ast.unparse output -- not by substring, so any new or altered
+# form fails this guard and has to be looked at deliberately.
+#
+# HONEST LIMIT (Codex round 4): the REST form is Optional BY CONSTRUCTION --
+# `getattr(..., None)` can evaluate to None at runtime if startup never set
+# app.state, and no static check can see that. This guard therefore proves
+# "the door passes a vetted accessor", NOT "the value is never None". The
+# closed loop for that case is the worker itself, which raises
+# TemporalLineageStoreUnavailableError in cluster mode rather than reading
+# node-local state -- see test_temporal_worker_lineage_di_wiring_1533.py::
+# test_postgres_mode_without_an_injected_manager_fails_loudly.
+VETTED_ACCESSOR_EXPRESSIONS = (
+    "_utils._get_activated_repo_manager()",
+    "getattr(app.state, 'activated_repo_manager', None)",
 )
 
 DOOR_FILES = {
@@ -124,20 +129,18 @@ def test_door_passes_activated_repo_manager(door_label: str, rel_path: str) -> N
             "see the activation and makes the temporal query return zero "
             "results (Bug #1533; same failure shape as Bug #1482's REST gap)."
         )
-        # The VALUE must resolve to the server's DI-wired manager. Presence
-        # alone is not enough: `activated_repo_manager=None` would type-check,
-        # satisfy a name-only guard, and still leave the worker on a
-        # node-local read (or, in cluster mode, fail the job outright).
+        # The VALUE must be one of the reviewed accessor expressions, matched
+        # WHOLE. Presence alone is not enough (`activated_repo_manager=None`
+        # would satisfy a name-only guard), and substring matching is not
+        # enough either -- it would accept any expression that merely mentions
+        # the right words. An exact allowlist forces a human look at any new
+        # form.
         value = keywords[KWARG_NAME]
-        assert value and value != "None", (
-            f"{door_label}: {KWARG_NAME} is passed as a literal None, which "
-            "is exactly the wiring gap this guard exists to catch."
-        )
-        assert any(
-            all(part in value for part in accessor) for accessor in DI_ACCESSORS
-        ), (
-            f"{door_label}: {KWARG_NAME}={value} does not reference the "
-            f"DI-wired manager. Expected one of {DI_ACCESSORS}."
+        assert value in VETTED_ACCESSOR_EXPRESSIONS, (
+            f"{door_label}: {KWARG_NAME}={value} is not one of the reviewed "
+            f"DI accessors {VETTED_ACCESSOR_EXPRESSIONS}. A literal None, a "
+            "locally-constructed manager, or any new accessor shape must be "
+            "reviewed deliberately rather than silently accepted."
         )
 
 

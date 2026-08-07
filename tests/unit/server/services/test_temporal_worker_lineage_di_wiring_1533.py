@@ -241,7 +241,7 @@ def test_postgres_mode_rejects_a_partially_wired_manager(
     # not (its GoldenRepoManager built its own node-local SQLite backend).
     shared_manager.set_connection_pool(object())
 
-    assert shared_manager.golden_repo_manager.has_injected_metadata_backend() is False
+    assert shared_manager.golden_repo_manager.has_shared_metadata_backend() is False
     assert shared_manager.uses_shared_metadata_stores() is False
 
     with pytest.raises(TemporalLineageStoreUnavailableError):
@@ -250,31 +250,89 @@ def test_postgres_mode_rejects_a_partially_wired_manager(
         )
 
 
-def test_postgres_mode_accepts_a_fully_wired_manager(
+class _StubPool:
+    """Minimal stand-in exposing the one capability the predicate looks for.
+
+    A bare ``object()`` is NOT a connection pool, and accepting one is the
+    same "presence is not capability" mistake as accepting any injected
+    backend -- so the predicate checks for ``.connection`` and this stub has
+    it. Real pooling is exercised by the live-PG module.
+    """
+
+    def connection(self):  # pragma: no cover - never called by these tests
+        raise NotImplementedError
+
+
+def _make_manager_with_backend(data_dir: Path, backend) -> ActivatedRepoManager:
+    """A real ActivatedRepoManager whose GoldenRepoManager holds *backend*."""
+    from code_indexer.server.repositories.golden_repo_manager import GoldenRepoManager
+
+    data_dir.mkdir(parents=True, exist_ok=True)
+    manager = ActivatedRepoManager(
+        data_dir=str(data_dir),
+        golden_repo_manager=GoldenRepoManager(
+            data_dir=str(data_dir), storage_backend=backend
+        ),
+    )
+    manager.set_connection_pool(_StubPool())
+    return manager
+
+
+def test_postgres_mode_rejects_an_injected_sqlite_backend(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Both stores wired -> the lookup proceeds.
+    """INJECTED is not the same as SHARED.
 
-    Uses a REAL injected metadata backend object (not a stub) so the
-    predicate's composition is proven, not merely asserted.
+    A cluster manager whose golden-metadata backend is a node-local SQLite
+    one -- however it got there -- reads node-local state, which is the exact
+    bug class this guard exists to close. Accepting it merely because
+    something was injected would let a miswired cluster node through.
     """
-    from code_indexer.server.repositories.golden_repo_manager import GoldenRepoManager
     from code_indexer.server.storage.sqlite_backends import (
         GoldenRepoMetadataSqliteBackend,
     )
 
     _install_app_state(monkeypatch, storage_mode="postgres")
-    data_dir = tmp_path / "fully-wired" / "data"
-    data_dir.mkdir(parents=True)
+    data_dir = tmp_path / "sqlite-injected" / "data"
+    backend = GoldenRepoMetadataSqliteBackend(str(tmp_path / "golden.db"))
+    manager = _make_manager_with_backend(data_dir, backend)
 
-    injected_backend = GoldenRepoMetadataSqliteBackend(str(data_dir / "golden.db"))
-    golden_repo_manager = GoldenRepoManager(
-        data_dir=str(data_dir), storage_backend=injected_backend
+    assert manager.uses_shared_metadata_stores() is False
+
+    with pytest.raises(TemporalLineageStoreUnavailableError):
+        _resolve_lineage_repo_manager(manager)
+
+
+def test_postgres_mode_accepts_genuinely_shared_stores(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A REAL PostgreSQL-backed metadata store is accepted.
+
+    Uses the actual GoldenRepoMetadataPostgresBackend class (constructing it
+    opens no connection), so the predicate's type/capability check is
+    genuinely exercised rather than asserted against a hand-made stub.
+    """
+    from code_indexer.server.storage.postgres.golden_repo_metadata_backend import (
+        GoldenRepoMetadataPostgresBackend,
     )
-    manager = ActivatedRepoManager(
-        data_dir=str(data_dir), golden_repo_manager=golden_repo_manager
+    from code_indexer.server.storage.sqlite_backends import (
+        GoldenRepoMetadataSqliteBackend,
     )
-    manager.set_connection_pool(object())
+
+    _install_app_state(monkeypatch, storage_mode="postgres")
+    data_dir = tmp_path / "shared-stores" / "data"
+
+    # Built with the SQLite backend because GoldenRepoManager.__init__ reads
+    # the backend (list_repos) and a PostgreSQL one needs a live pool for
+    # that. The real PG backend is then installed directly -- which also pins
+    # the intended design: the predicate must ask the CURRENT backend what it
+    # is, never trust a "something was injected" flag captured at __init__.
+    manager = _make_manager_with_backend(
+        data_dir, GoldenRepoMetadataSqliteBackend(str(tmp_path / "golden.db"))
+    )
+    manager.golden_repo_manager._sqlite_backend = GoldenRepoMetadataPostgresBackend(
+        _StubPool()
+    )
 
     assert manager.uses_shared_metadata_stores() is True
 

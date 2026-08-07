@@ -1755,6 +1755,13 @@ class GoldenRepoMetadataSqliteBackend:
     eliminating race conditions from concurrent access.
     """
 
+    # Bug #1533: NODE-LOCAL storage. On a cluster node this store cannot see
+    # repos registered by any other node, so callers whose correctness depends
+    # on the cluster-wide view must refuse to read it. Declared explicitly so
+    # they can ask what this backend IS, rather than inferring "shared" from
+    # the fact that some backend was injected.
+    is_shared_backend = False
+
     def __init__(self, db_path: str) -> None:
         """
         Initialize the backend.
