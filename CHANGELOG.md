@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [12.4.0] - 2026-08-07
+
+### Added
+
+- Story #1546 (Phase 1): `AliasLockStore` -- a DB-backed alias-lock abstraction for both SQLite (solo) and PostgreSQL (cluster), replacing the file-based `WriteLockManager` that went through 9 rounds of recurring TOCTOU races (see closed Bugs #1537/#1540). The lock is a session-held database transaction rather than an expiring TTL-based lease -- a crash or connection death causes automatic rollback, so the design has no heartbeat, no TTL, and no stale-lock reaper anywhere. Six rounds of dual adversarial review (Codex + Opus) found and closed, in order: an indefinite-blocking bug in PostgreSQL's acquire path (the original `INSERT ... ON CONFLICT DO NOTHING` waited on an uncommitted conflicting row instead of returning promptly); a SQLite whole-file writer-lock false-negative on unrelated aliases (fixed via one dedicated lock file per alias); a bug where broad exception handling in `renew()` incorrectly closed the connection and released a live lock; a missing context-manager protocol; a PostgreSQL vacuum-pinning concern from the long-held write transaction (mitigated via `idle_in_transaction_session_timeout`); a test-selection gate bypass via `-k` keyword filtering; and a critical cross-thread SQLite wedge (a missing `check_same_thread=False`) that would have made a lock permanently unrecoverable in the exact threading pattern real call sites use.
+
+This is a standalone abstraction only -- no production call site is rewired yet; that is Phase 2, tracked separately along with several acceptance criteria recorded during this review (a bounded PostgreSQL lock-connection pool, `renew()`'s lock scope across a potentially-unbounded network call, unreadable observability columns, and a couple of smaller hardening items).
+
+### Testing
+
+- Story #1546 (Phase 1): real SQLite and PostgreSQL concurrency tests (real threads, real processes, real fault injection -- severed connections, killed processes, SQLite authorizer-callback and interrupt-based faults, server-side disconnects) proving no two acquisitions of the same lock key ever overlap, crash recovery requires no TTL wait, and a definitive ownership-loss signal is distinguishable from a transient failure on both backends.
+
 ## [12.3.0] - 2026-08-07
 
 ### Fixed
