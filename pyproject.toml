@@ -50,11 +50,15 @@ dependencies = [
     "zstandard>=0.25.0",
     # Custom hnswlib fork (Story #54) — PyPI version lacks check_integrity().
     # Also carries repair_orphans() (Story #1358 / Epic #1333) — deterministic
-    # HNSW orphan repair, and GIL-released save_index()/load_index()
-    # (Bug #1437) — native HNSW shard load/save no longer blocks all Python
-    # threads for the call's duration. Pinned to same commit as
-    # third_party/hnswlib submodule. Requires gcc/g++ at install time.
-    "hnswlib @ git+https://github.com/LightspeedDMS/hnswlib.git@e03aa2364732e47cf58909133f5d85b8fae31e70",
+    # HNSW orphan repair, GIL-released save_index()/load_index() (Bug #1437),
+    # and GIL-released init_index/resize_index/check_integrity/repair_orphans/
+    # get_ids_list/get_items/mark_deleted/BFIndex save_index/load_index
+    # (Story #1490 / Epic #1489 Finding A1) — native HNSW shard load/save and
+    # these remaining bindings no longer block all Python threads for the
+    # call's duration. Pinned to same commit as third_party/hnswlib submodule
+    # and EXPECTED_HNSWLIB_FORK_COMMIT (hnsw_index_manager.py). Requires
+    # gcc/g++ at install time.
+    "hnswlib @ git+https://github.com/LightspeedDMS/hnswlib.git@8155cfc9d02a5a46528a3faab697555952ed40c6",
     "regex>=2023.0.0",
     "rpyc>=6.0.0",
     "authlib>=1.6.5",
