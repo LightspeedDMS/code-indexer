@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [12.5.0] - 2026-08-07
+
+### Fixed
+
+- Epic #1489 / Story #1490: `pyproject.toml`'s hnswlib dependency pin still referenced the pre-Story-#1490 fork commit (the Bug #1437 `save_index`/`load_index` GIL-release fix only) instead of the post-Story-#1490 commit that also releases the GIL in `init_index`, `resize_index`, `check_integrity`, `repair_orphans`, `get_ids_list`, `get_items`, `mark_deleted`, and `BFIndex`'s `save_index`/`load_index` -- meaning a fresh install, CI run, or new deployment would have silently built the pre-fix binary and gotten none of Story #1490's GIL releases, despite the story itself being merged and `EXPECTED_HNSWLIB_FORK_COMMIT`/the `third_party/hnswlib` submodule both already pointing at the correct commit. Found during a completeness audit of Epic #1489 (Finding A1, rated SEVERE in the source report) before closing it. The pin now matches the submodule and the runtime capability-check constant.
+
 ## [12.4.0] - 2026-08-07
 
 ### Added
