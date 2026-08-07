@@ -26,8 +26,13 @@ cleanup is flagged separately rather than done here.
 
 Guard 1 -- the target database's name must FULLY MATCH the disposable format
 ``_DISPOSABLE_DB_NAME_REGEX`` (never merely contain a marker: substring
-containment accepted `production_cidx_test` and `cidx_test_prod`, which is the
-weakness Codex's review found). A DSN pointing anywhere else FAILS loudly
+containment accepted `production_cidx_test` and `cidx_test_prod`). The name is
+taken from libpq's OWN resolution (``conninfo_to_dict``) and re-confirmed
+against the server's ``SELECT current_database()`` before any DDL runs -- never
+re-parsed out of the DSN string, because a later ``dbname=`` overrides the URI
+path, so `postgresql://u@h/cidx_test?dbname=cidx_server` reads as disposable
+while actually connecting to the real database. A DSN pointing anywhere else
+FAILS loudly
 rather than skipping, so a misconfiguration is visible instead of silently
 tolerated.
 
@@ -87,8 +92,6 @@ POOL_MAX_SIZE = 2
 _DISPOSABLE_DB_NAME_REGEX = r"(?:cidx_)?(?:test|tmp|scratch|sandbox)(?:_[0-9]+)?"
 
 _SCHEMA_PREFIX = "cidx_bug1533_"
-_SENTINEL_PREFIX = "cidx_bug1533_sentinel_"
-_SENTINEL_VALUE = "must-survive"
 
 
 class _WorkerInput:
@@ -100,28 +103,45 @@ class _WorkerInput:
         self.repo_path = repo_path
 
 
-def _database_name(dsn: str) -> str:
-    """The database name from a URI-form or key=value-form libpq DSN."""
-    if "://" in dsn:
-        return urlparse(dsn).path.lstrip("/")
-    for token in dsn.split():
-        key, _, value = token.partition("=")
-        if key.strip() == "dbname":
-            return value.strip().strip("'\"")
-    return ""
+def _resolved_database_name(dsn: str) -> Optional[str]:
+    """The database libpq will ACTUALLY connect to, or None if the DSN names
+    none.
+
+    Asks libpq's own parser rather than re-parsing the string. A static
+    re-parse is not the point of truth and was genuinely bypassable: libpq
+    lets a later ``dbname=`` override the URI path, so
+    ``postgresql://u@h/cidx_test?dbname=cidx_server`` reads as disposable but
+    connects to ``cidx_server``. Both bypass shapes are covered by
+    TestDisposableDatabaseGuard.BYPASS_DSNS.
+    """
+    from psycopg.conninfo import conninfo_to_dict
+
+    try:
+        params = conninfo_to_dict(dsn)
+    except Exception as exc:
+        pytest.fail(
+            f"TEST_POSTGRES_DSN could not be parsed by libpq ({exc}) -- "
+            "refusing to run live-PostgreSQL tests against a DSN whose "
+            "target cannot be determined."
+        )
+    dbname = params.get("dbname")
+    return str(dbname) if dbname else None
 
 
 def _refuse_unless_disposable(dsn: str) -> None:
-    """FAIL (never silently skip) unless the target database's name FULLY
-    matches the disposable format."""
+    """FAIL (never silently skip) unless the database libpq RESOLVES from this
+    DSN fully matches the disposable format."""
     import re
 
-    db_name = _database_name(dsn).lower()
-    if not db_name:
+    resolved = _resolved_database_name(dsn)
+    if not resolved:
         pytest.fail(
-            "TEST_POSTGRES_DSN does not name a database -- refusing to run "
-            "live-PostgreSQL tests against an unidentified target."
+            "TEST_POSTGRES_DSN names no database, so the connection would "
+            "inherit PGDATABASE or a service-file default that this guard "
+            "cannot inspect -- refusing to run. Name the disposable database "
+            "explicitly, e.g. cidx_test_1533."
         )
+    db_name = resolved.lower()
     if re.fullmatch(_DISPOSABLE_DB_NAME_REGEX, db_name) is None:
         pytest.fail(
             f"TEST_POSTGRES_DSN points at database {db_name!r}, which does not "
@@ -171,9 +191,10 @@ class TestDisposableDatabaseGuard:
     def test_refuses_non_disposable_database_name(self, db_name: str) -> None:
         with pytest.raises(pytest.fail.Exception) as exc_info:
             _refuse_unless_disposable(f"postgresql://u@h:5432/{db_name}")
-        assert "Refusing" in str(exc_info.value) or "does not name" in str(
-            exc_info.value
-        )
+        # Matched case-insensitively on "refus" so the assertion pins the
+        # REASON (the guard tripped) rather than exact prose -- the
+        # no-database path and the bad-format path word it differently.
+        assert "refus" in str(exc_info.value).lower()
 
     @pytest.mark.parametrize("db_name", ACCEPTED_NAMES)
     def test_accepts_disposable_database_name(self, db_name: str) -> None:
@@ -184,6 +205,24 @@ class TestDisposableDatabaseGuard:
         by using that form."""
         with pytest.raises(pytest.fail.Exception):
             _refuse_unless_disposable("host=h port=5432 dbname=cidx_server")
+
+    # DSNs whose libpq-RESOLVED database is not disposable, even though a
+    # naive re-parse of the string sees a disposable-looking name. libpq lets
+    # a later `dbname=` override the URI path, and a DSN naming no database at
+    # all silently inherits PGDATABASE/the service file -- so the connection
+    # would land somewhere the guard never inspected.
+    BYPASS_DSNS = (
+        "postgresql://u@h:5432/cidx_test?dbname=cidx_server",
+        "host=h dbname=cidx_test dbname=cidx_server",
+        "host=h user=u",
+    )
+
+    @pytest.mark.parametrize("dsn", BYPASS_DSNS)
+    def test_refuses_dsn_whose_libpq_resolved_dbname_is_not_disposable(
+        self, dsn: str
+    ) -> None:
+        with pytest.raises(pytest.fail.Exception):
+            _refuse_unless_disposable(dsn)
 
 
 def _dsn_with_search_path(dsn: str, schema: str) -> str:
@@ -212,14 +251,49 @@ def pg_dsn_for_lineage() -> str:
     dsn = os.environ.get("TEST_POSTGRES_DSN", "")
     if not dsn:
         pytest.skip("No PostgreSQL available (set TEST_POSTGRES_DSN to enable)")
+    # The name guard runs BEFORE any connection attempt, so a DSN aimed
+    # somewhere forbidden can never be contacted, let alone skipped past.
     _refuse_unless_disposable(dsn)
-    try:
-        import psycopg
 
+    import psycopg
+
+    # Only a genuinely unreachable server is a legitimate skip. An auth
+    # failure, a missing database or a malformed DSN is MISCONFIGURATION and
+    # must fail loudly -- skipping those silently turns a broken setup into a
+    # green run.
+    connection_unavailable_markers = (
+        "connection refused",
+        "could not connect",
+        "no such file or directory",
+        "is the server running",
+        "timeout expired",
+    )
+    try:
         with psycopg.connect(dsn) as conn:
-            conn.execute("SELECT 1")
+            row = conn.execute("SELECT current_database()").fetchone()
+    except psycopg.OperationalError as exc:
+        if any(m in str(exc).lower() for m in connection_unavailable_markers):
+            pytest.skip(f"PostgreSQL not reachable: {exc}")
+        pytest.fail(
+            f"PostgreSQL is reachable but the connection failed ({exc}). "
+            "That is a misconfiguration, not an absent server -- refusing to "
+            "skip past it."
+        )
     except Exception as exc:
-        pytest.skip(f"Cannot connect to PostgreSQL: {exc}")
+        pytest.fail(f"TEST_POSTGRES_DSN is misconfigured ({exc}) -- refusing to skip.")
+
+    # Point of truth: the SERVER's own answer, checked before any DDL runs.
+    # libpq resolution is what actually decides the target, so validate what
+    # we are genuinely connected to -- not what the DSN string looked like.
+    connected_db = row[0] if row else None
+    if not connected_db:
+        pytest.fail("PostgreSQL did not report current_database() -- refusing to run.")
+    if connected_db != _resolved_database_name(dsn):
+        pytest.fail(
+            f"Connected to database {connected_db!r}, which is not the "
+            f"{_resolved_database_name(dsn)!r} this DSN resolved to -- refusing to run."
+        )
+    _refuse_unless_disposable(f"dbname={connected_db}")
     return dsn
 
 
@@ -383,20 +457,25 @@ def test_node_local_manager_cannot_see_the_shared_row(cluster_node_managers) -> 
     assert node_local.get_repository(USERNAME, ACTIVATED_ALIAS, touch=False) is None
 
 
-def _public_activated_repos_oid(dsn: str) -> Optional[str]:
-    """``public.activated_repos``'s OID, or None when it does not exist.
+def _public_schema_table_identities(dsn: str) -> list:
+    """Every table in ``public``, as (name, OID) pairs.
 
-    The OID (not merely existence) is compared so that a drop-and-recreate --
-    which would silently destroy rows while leaving a same-named table -- is
-    also caught.
+    The OID, not merely the name, so a drop-and-recreate -- which would
+    silently destroy rows while leaving a same-named table behind -- is caught
+    just as a plain create or drop is. ``relkind IN ('r', 'p')`` covers
+    ordinary AND partitioned tables. Read-only: this inspects catalogs and
+    writes nothing.
     """
     import psycopg
 
     with psycopg.connect(dsn, autocommit=True) as conn:
-        row = conn.execute(
-            "SELECT to_regclass('public.activated_repos')::oid::text"
-        ).fetchone()
-    return None if row is None else row[0]
+        rows = conn.execute(
+            "SELECT c.relname, c.oid::text FROM pg_class c "
+            "JOIN pg_namespace n ON n.oid = c.relnamespace "
+            "WHERE n.nspname = 'public' AND c.relkind IN ('r', 'p') "
+            "ORDER BY c.relname"
+        ).fetchall()
+    return list(rows)
 
 
 def test_private_schema_isolation_leaves_public_schema_intact(
@@ -404,54 +483,23 @@ def test_private_schema_isolation_leaves_public_schema_intact(
 ) -> None:
     """Destruction-safety regression guard for THIS module's fixtures.
 
-    Snapshots the state of ``public`` BEFORE the fixtures run (the whole point
-    -- a bare after-the-fact absence check cannot tell a pre-existing table
-    from one created and dropped, nor a dropped-and-recreated one from an
-    untouched one), plants a sentinel table with a row in ``public``, then
-    triggers the full fixture setup via ``getfixturevalue`` and asserts:
+    Compares the FULL identity of the ``public`` schema (every table with its
+    OID) before and after the real fixture chain runs, which catches a create,
+    a drop, and a drop-and-recreate alike.
 
-    * ``public.activated_repos``'s OID is unchanged (absent stays absent;
-      present stays the SAME table, not a recreated empty one);
-    * the sentinel row is still there.
-
-    The sentinel table is uniquely named and created by this test, so dropping
-    it in ``finally`` destroys nothing but our own scratch object.
+    Deliberately READ-ONLY. An earlier version planted a sentinel table in
+    ``public`` to prove rows survived; that contradicted this module's own
+    "nothing in public is created, modified or dropped" claim and could leak
+    the table if the insert raised before its try block. Comparing catalog
+    identity proves the same property without writing anything.
     """
-    import psycopg
-    from psycopg import sql
+    before = _public_schema_table_identities(pg_dsn_for_lineage)
 
-    sentinel_ident = sql.Identifier(f"{_SENTINEL_PREFIX}{uuid.uuid4().hex[:12]}")
-    oid_before = _public_activated_repos_oid(pg_dsn_for_lineage)
+    # Runs the real fixture chain (schema creation, DDL, row insert, manager
+    # construction) against the same database.
+    request.getfixturevalue("cluster_node_managers")
 
-    with psycopg.connect(pg_dsn_for_lineage, autocommit=True) as conn:
-        conn.execute(
-            sql.SQL("CREATE TABLE public.{} (marker TEXT)").format(sentinel_ident)
-        )
-        conn.execute(
-            sql.SQL("INSERT INTO public.{} (marker) VALUES (%s)").format(
-                sentinel_ident
-            ),
-            (_SENTINEL_VALUE,),
-        )
-    try:
-        # Runs the real fixture chain (schema creation, DDL, row insert,
-        # manager construction) against the same database.
-        request.getfixturevalue("cluster_node_managers")
-
-        assert _public_activated_repos_oid(pg_dsn_for_lineage) == oid_before, (
-            "public.activated_repos changed identity while these fixtures ran "
-            "-- they must operate ONLY inside their private schema"
-        )
-        with psycopg.connect(pg_dsn_for_lineage, autocommit=True) as conn:
-            markers = conn.execute(
-                sql.SQL("SELECT marker FROM public.{}").format(sentinel_ident)
-            ).fetchall()
-        assert markers == [(_SENTINEL_VALUE,)], (
-            "a sentinel row in the public schema did not survive the live-PG "
-            "fixtures -- something is writing outside the private schema"
-        )
-    finally:
-        with psycopg.connect(pg_dsn_for_lineage, autocommit=True) as conn:
-            conn.execute(
-                sql.SQL("DROP TABLE IF EXISTS public.{}").format(sentinel_ident)
-            )
+    assert _public_schema_table_identities(pg_dsn_for_lineage) == before, (
+        "the public schema changed while these fixtures ran -- they must "
+        "operate ONLY inside their private schema"
+    )

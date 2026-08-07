@@ -35,6 +35,18 @@ from code_indexer.server.services.temporal_live_dispatch import (
 KWARG_NAME = "activated_repo_manager"
 DISPATCH_CALL = "execute_live_temporal_search"
 
+# Expressions that genuinely resolve to the server's DI-wired manager, as
+# GROUPS of substrings that must ALL appear in the unparsed argument. The MCP
+# door calls the _utils accessor; the REST door uses
+# `getattr(app.state, 'activated_repo_manager', None)` -- whose unparsed form
+# contains no dotted `app.state.activated_repo_manager`, which is why a single
+# literal string does not work here. Anything else (notably a bare None) is a
+# wiring gap.
+DI_ACCESSORS = (
+    ("_get_activated_repo_manager",),
+    ("app.state", "activated_repo_manager"),
+)
+
 DOOR_FILES = {
     "MCP (mcp/handlers/search.py)": "src/code_indexer/server/mcp/handlers/search.py",
     "REST (routers/inline_query.py)": "src/code_indexer/server/routers/inline_query.py",
@@ -61,11 +73,16 @@ def _repo_root() -> Path:
     return Path(__file__).resolve().parents[4]
 
 
-def _dispatch_call_keywords(source_path: Path) -> List[List[str]]:
-    """Every execute_live_temporal_search(...) call's kwarg names, from the
-    REAL parsed source of a production door."""
+def _dispatch_call_keywords(source_path: Path) -> List[Dict[str, str]]:
+    """Every execute_live_temporal_search(...) call's kwargs, from the REAL
+    parsed source of a production door, as {name: unparsed value expression}.
+
+    The VALUE matters, not just the name: `activated_repo_manager=None` would
+    satisfy a presence-only check while leaving the worker to fall back to a
+    node-local manager.
+    """
     tree = ast.parse(source_path.read_text())
-    calls: List[List[str]] = []
+    calls: List[Dict[str, str]] = []
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
             continue
@@ -76,7 +93,13 @@ def _dispatch_call_keywords(source_path: Path) -> List[List[str]]:
             else (func.id if isinstance(func, ast.Name) else None)
         )
         if name == DISPATCH_CALL:
-            calls.append([kw.arg for kw in node.keywords if kw.arg is not None])
+            calls.append(
+                {
+                    kw.arg: ast.unparse(kw.value)
+                    for kw in node.keywords
+                    if kw.arg is not None
+                }
+            )
     return calls
 
 
@@ -100,6 +123,21 @@ def test_door_passes_activated_repo_manager(door_label: str, rel_path: str) -> N
             "node-local ActivatedRepoManager, which on a cluster node cannot "
             "see the activation and makes the temporal query return zero "
             "results (Bug #1533; same failure shape as Bug #1482's REST gap)."
+        )
+        # The VALUE must resolve to the server's DI-wired manager. Presence
+        # alone is not enough: `activated_repo_manager=None` would type-check,
+        # satisfy a name-only guard, and still leave the worker on a
+        # node-local read (or, in cluster mode, fail the job outright).
+        value = keywords[KWARG_NAME]
+        assert value and value != "None", (
+            f"{door_label}: {KWARG_NAME} is passed as a literal None, which "
+            "is exactly the wiring gap this guard exists to catch."
+        )
+        assert any(
+            all(part in value for part in accessor) for accessor in DI_ACCESSORS
+        ), (
+            f"{door_label}: {KWARG_NAME}={value} does not reference the "
+            f"DI-wired manager. Expected one of {DI_ACCESSORS}."
         )
 
 
