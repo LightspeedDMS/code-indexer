@@ -40,9 +40,33 @@ _MULTIPROCESS_NUM_PROCESSES = 2
 _MULTIPROCESS_JOIN_TIMEOUT_SECONDS = 30
 _MULTIPROCESS_TERMINATE_JOIN_TIMEOUT_SECONDS = 5
 
+# Fix #6: bounded, SHORT busy_timeout so a barrier-synchronized race on a
+# FRESH key resolves to genuine, prompt contention (None) rather than
+# every loser blocking (bounded, but still slowly) until the winner
+# releases.
+_SHORT_BUSY_TIMEOUT_SECONDS = 0.05
+_BARRIER_PROMPT_DEADLINE_SECONDS = 3.0
+
 
 def _make_store(tmp_path: Path, **kwargs) -> SqliteAliasLockStore:
-    return SqliteAliasLockStore(tmp_path / "alias_locks.db", **kwargs)
+    """Fix #2: the store now takes a lock DIRECTORY (one dedicated file
+    per alias underneath it), never a single shared file path."""
+    return SqliteAliasLockStore(tmp_path / "alias_locks", **kwargs)
+
+
+def _start_join_and_verify_terminated(
+    threads: List[threading.Thread], join_timeout_seconds: float
+) -> None:
+    """Shared thread-lifecycle boilerplate: start every thread, join each
+    with a bounded timeout, and assert every one actually terminated --
+    extracted so individual tests below stay under the per-method line
+    budget and to avoid the same three-line pattern repeating."""
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=join_timeout_seconds)
+    for t in threads:
+        assert not t.is_alive(), "worker thread failed to terminate within timeout"
 
 
 def _run_racing_worker(
@@ -142,12 +166,7 @@ class TestLinearizabilityThreads:
         threads = [
             threading.Thread(target=worker, args=(i,)) for i in range(num_threads)
         ]
-        for t in threads:
-            t.start()
-        for t in threads:
-            t.join(timeout=_THREAD_JOIN_TIMEOUT_SECONDS)
-        for t in threads:
-            assert not t.is_alive(), "worker thread failed to terminate within timeout"
+        _start_join_and_verify_terminated(threads, _THREAD_JOIN_TIMEOUT_SECONDS)
 
         assert not errors, f"worker thread(s) raised: {errors!r}"
         assert len(events) == num_threads * acquisitions_per_thread
@@ -158,9 +177,10 @@ class TestLinearizabilityThreads:
     ):
         """Sanity companion to the same-key test: racing on DIFFERENT keys
         must not deadlock or spuriously fail -- every thread's single
-        acquisition on its own key eventually succeeds despite SQLite's
-        whole-file serialization (see the module docstring in
-        sqlite_store.py)."""
+        acquisition on its own key succeeds. Since Fix #2 gives each key
+        its OWN dedicated file, these no longer contend with each other
+        at the SQLite file-lock level at all (unlike the retired shared
+        -file design's whole-file serialization)."""
         store = _make_store(
             tmp_path, busy_timeout_seconds=_GENEROUS_BUSY_TIMEOUT_SECONDS
         )
@@ -192,31 +212,32 @@ class TestLinearizabilityThreads:
         threads = [
             threading.Thread(target=worker, args=(i,)) for i in range(num_threads)
         ]
-        for t in threads:
-            t.start()
-        for t in threads:
-            t.join(timeout=_THREAD_JOIN_TIMEOUT_SECONDS)
-        for t in threads:
-            assert not t.is_alive(), "worker thread failed to terminate within timeout"
+        _start_join_and_verify_terminated(threads, _THREAD_JOIN_TIMEOUT_SECONDS)
 
         assert not errors, f"worker thread(s) raised: {errors!r}"
         assert all(results), f"not all threads succeeded: {results}"
 
 
 def _acquire_hold_release_shared_clock(
-    db_path: str, lock_key: str, hold_seconds: float, out
+    lock_dir: str, lock_key: str, hold_seconds: float, out
 ) -> None:
     """Module-level (picklable) target for multiprocessing.Process. Uses
     time.time() (a wall clock shared across processes on the same host,
     unlike time.monotonic()) so overlap can be checked directly across
-    process boundaries."""
+    process boundaries. `SqliteAliasLockStore` holds no persistent
+    connection/resource of its own beyond the per-lock connection
+    try_acquire() opens (see sqlite_store.py's __init__ -- it only
+    validates the timeout and mkdir's the lock directory), so there is
+    nothing to close on the store object itself; the finally below
+    already closes the ONE real connection this call opens, via
+    release()."""
     import time as _time
 
     from code_indexer.server.services.alias_lock_store.sqlite_store import (
         SqliteAliasLockStore as _Store,
     )
 
-    store = _Store(db_path, busy_timeout_seconds=_GENEROUS_BUSY_TIMEOUT_SECONDS)
+    store = _Store(lock_dir, busy_timeout_seconds=_GENEROUS_BUSY_TIMEOUT_SECONDS)
     for _ in range(_MAX_ATTEMPTS_PER_WORKER):
         handle = store.try_acquire(lock_key, operation="op")
         if handle is not None:
@@ -234,7 +255,7 @@ def _acquire_hold_release_shared_clock(
     )
 
 
-def _run_multiprocess_trial(db_path: str, lock_key: str, events) -> List:
+def _run_multiprocess_trial(lock_dir: str, lock_key: str, events) -> List:
     """Spawn _MULTIPROCESS_NUM_PROCESSES real OS processes racing for
     lock_key, join them with a bounded timeout, and terminate (never
     leak) any process that fails to finish in time."""
@@ -243,7 +264,7 @@ def _run_multiprocess_trial(db_path: str, lock_key: str, events) -> List:
     procs = [
         multiprocessing.Process(
             target=_acquire_hold_release_shared_clock,
-            args=(db_path, lock_key, _HOLD_SLEEP_SECONDS, events),
+            args=(lock_dir, lock_key, _HOLD_SLEEP_SECONDS, events),
         )
         for _ in range(_MULTIPROCESS_NUM_PROCESSES)
     ]
@@ -263,23 +284,26 @@ def _run_multiprocess_trial(db_path: str, lock_key: str, events) -> List:
 class TestMultiProcessContention:
     def test_two_processes_racing_same_key_shared_clock_never_overlap(self, tmp_path):
         """Real OS processes (not just threads) racing for the same
-        lock_key via the SAME dedicated alias_locks.db file, proving the
-        mutual-exclusion guarantee holds across process boundaries -- the
-        realistic contention scenario for a multi-worker uvicorn
-        deployment against SQLite storage. Overlap is checked directly
-        via a shared wall clock recorded through a multiprocessing
-        Manager list. Every process is joined with a bounded timeout and
-        explicitly terminated (never left running) if it somehow hangs."""
+        lock_key via the SAME dedicated per-alias file under the shared
+        lock directory, proving the mutual-exclusion guarantee holds
+        across process boundaries -- the realistic contention scenario
+        for a multi-worker uvicorn deployment against SQLite storage.
+        Overlap is checked directly via a shared wall clock recorded
+        through a multiprocessing Manager list. Every process is joined
+        with a bounded timeout and explicitly terminated (never left
+        running) if it somehow hangs. `SqliteAliasLockStore(lock_dir)`
+        below holds no persistent resource (see the docstring above) --
+        it exists only to pre-create the lock directory."""
         import multiprocessing
 
-        db_path = str(tmp_path / "alias_locks.db")
+        lock_dir = str(tmp_path / "alias_locks")
         lock_key = "cross-process-alias"
-        SqliteAliasLockStore(db_path)  # pre-create schema
+        SqliteAliasLockStore(lock_dir)  # pre-create the directory
 
         with multiprocessing.Manager() as manager:
             for _ in range(_MULTIPROCESS_NUM_TRIALS):
                 events = manager.list()
-                procs = _run_multiprocess_trial(db_path, lock_key, events)
+                procs = _run_multiprocess_trial(lock_dir, lock_key, events)
 
                 for p in procs:
                     assert not p.is_alive(), "subprocess failed to terminate"
@@ -293,3 +317,135 @@ class TestMultiProcessContention:
                 assert s2 >= e1, (
                     f"cross-process overlap detected: [{s1}, {e1}] and [{s2}, {e2}]"
                 )
+
+
+def _run_barrier_race_worker(
+    store: SqliteAliasLockStore,
+    lock_key: str,
+    idx: int,
+    start_barrier: threading.Barrier,
+    hold_barrier: threading.Barrier,
+    barrier_timeout_seconds: float,
+    results: List[bool],
+    results_lock: threading.Lock,
+) -> None:
+    """One thread's single simultaneous try_acquire() attempt.
+
+    Mirrors the PostgreSQL concurrency test's two-barrier design exactly
+    (see that module's docstring for the full rationale): `start_barrier`
+    releases every thread's ONE try_acquire() call at the same instant;
+    `hold_barrier` then makes every thread wait until every thread has
+    recorded its result BEFORE the winner is allowed to release, so a
+    released lock can never be re-acquired by a still-waiting loser
+    mid-race. Cleanup stays entirely inside this thread -- only a plain
+    win/loss bool crosses the thread boundary, never the handle itself.
+    """
+    start_barrier.wait(timeout=barrier_timeout_seconds)
+    acquired = store.try_acquire(lock_key, operation="op")
+    try:
+        won = acquired is not None
+        with results_lock:
+            results[idx] = won
+
+        hold_barrier.wait(timeout=barrier_timeout_seconds)
+    finally:
+        if acquired is not None:
+            store.release(acquired)
+
+
+def _drain_and_verify_barrier_threads(
+    threads: List[threading.Thread],
+    was_alive_at_deadline: List[bool],
+    generous_timeout_seconds: float,
+) -> None:
+    """Every thread's OWN hold_barrier.wait() is bounded by
+    generous_timeout_seconds, so a further join with that same bound is
+    guaranteed to fully drain every thread before any assertion runs --
+    no non-daemon thread can outlive the calling test regardless of
+    assertion outcome."""
+    for t in threads:
+        t.join(timeout=generous_timeout_seconds)
+    for t in threads:
+        assert not t.is_alive(), (
+            "worker thread failed to terminate even after the extended drain window"
+        )
+    for alive_at_deadline in was_alive_at_deadline:
+        assert not alive_at_deadline, (
+            "a losing attempt in the barrier-synchronized race BLOCKED "
+            "past the prompt-resolution deadline instead of resolving "
+            "promptly -- contention must resolve to None, never an "
+            "indefinite wait"
+        )
+
+
+def _assert_exactly_one_winner(
+    won_flags: List[bool], results_lock: threading.Lock, num_threads: int
+) -> None:
+    with results_lock:
+        current_won_flags = list(won_flags)
+    winners = sum(1 for won in current_won_flags if won)
+    losers = num_threads - winners
+    assert winners == 1, f"expected exactly one winner, got {winners}"
+    assert losers == num_threads - 1, (
+        "expected the remaining threads to genuinely observe contention "
+        "(a loss), not block-then-succeed"
+    )
+
+
+class TestConcurrencyContentionIsGenuine:
+    """Fix #6: a purely-serializing (i.e. BLOCKING, bounded only by a
+    generous busy_timeout) implementation could still trivially satisfy
+    "no overlapping intervals" if every loser simply waits out its
+    busy_timeout and then succeeds later, one at a time -- never
+    resolving PROMPTLY to a clean None. This test closes that gap
+    directly: it synchronizes N threads on a barrier so they all call
+    try_acquire() on the SAME fresh key at the same instant (using a
+    SHORT busy_timeout so genuine contention resolves quickly), then
+    asserts BOTH that (a) every thread resolves PROMPTLY, and (b)
+    exactly one of them wins while the rest genuinely observe contention
+    (a loss) rather than blocking-then-succeeding.
+    """
+
+    def test_barrier_synchronized_race_yields_one_winner_and_prompt_losers(
+        self, tmp_path
+    ):
+        store = _make_store(tmp_path, busy_timeout_seconds=_SHORT_BUSY_TIMEOUT_SECONDS)
+        lock_key = "fresh-barrier-race-alias"
+        num_threads = _LINEARIZABILITY_NUM_THREADS
+        start_barrier = threading.Barrier(num_threads)
+        hold_barrier = threading.Barrier(num_threads)
+        results_lock = threading.Lock()
+        won_flags: List[bool] = [False] * num_threads
+        errors: List[Exception] = []
+
+        def worker(idx: int) -> None:
+            try:
+                _run_barrier_race_worker(
+                    store,
+                    lock_key,
+                    idx,
+                    start_barrier,
+                    hold_barrier,
+                    _GENEROUS_BUSY_TIMEOUT_SECONDS,
+                    won_flags,
+                    results_lock,
+                )
+            except Exception as exc:  # noqa: BLE001
+                with results_lock:
+                    errors.append(exc)
+
+        threads = [
+            threading.Thread(target=worker, args=(i,)) for i in range(num_threads)
+        ]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=_BARRIER_PROMPT_DEADLINE_SECONDS)
+        was_alive_at_deadline = [t.is_alive() for t in threads]
+
+        _drain_and_verify_barrier_threads(
+            threads, was_alive_at_deadline, _GENEROUS_BUSY_TIMEOUT_SECONDS
+        )
+
+        assert not errors, f"worker thread(s) raised: {errors!r}"
+        _assert_exactly_one_winner(won_flags, results_lock, num_threads)

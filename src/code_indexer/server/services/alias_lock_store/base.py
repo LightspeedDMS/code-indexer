@@ -33,6 +33,31 @@ This module defines the shared vocabulary (`AliasLockHandle`, the ownership
 loss exception, and the `AliasLockStore` protocol) both backends implement.
 Concrete backends: `sqlite_store.SqliteAliasLockStore`,
 `postgres_store.PostgresAliasLockStore`.
+
+Post-review corrections (see the issue's Phase 1 rework for full detail):
+
+    - PostgreSQL's acquire INSERT is bounded by an explicit
+      ``lock_timeout`` (default 0.5s, configurable): without it, a
+      contended acquire blocked for as long as the holder kept the lock
+      (proven empirically to hang 8+ seconds) instead of returning
+      `None` promptly. A `psycopg.errors.LockNotAvailable` from that
+      bound is translated to a clean `None`.
+    - SQLite uses one DEDICATED file PER ALIAS (never a single shared
+      file): SQLite has no row-level locking, so a shared file made
+      acquiring alias A falsely block/report contention on a
+      completely unrelated alias B.
+    - `renew()` on BOTH backends is diagnostic-only in the strictest
+      sense: a wrong-token renew() raises `AliasLockOwnershipLostError`
+      WITHOUT rolling back or closing the connection -- the real held
+      transaction (whatever it is) stays open. Only `release()` can end
+      the lock's lifecycle.
+    - Both backends normalize a genuine "connection is actually dead"
+      failure (not just an already-explicitly-closed connection) to
+      `AliasLockOwnershipLostError` during `release()`/`renew()` --
+      e.g. PostgreSQL's `psycopg.OperationalError` (a server-side
+      `pg_terminate_backend` leaves `conn.closed` False locally during
+      the failing call itself), or SQLite's `sqlite3.Error` (a severed
+      underlying file descriptor).
 """
 
 from __future__ import annotations
