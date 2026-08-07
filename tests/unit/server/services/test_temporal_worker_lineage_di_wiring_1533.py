@@ -345,6 +345,100 @@ def test_postgres_mode_accepts_genuinely_shared_stores(
     assert _resolve_lineage_repo_manager(manager) is manager
 
 
+def _manager_with_backend(tmp_path: Path, backend) -> ActivatedRepoManager:
+    """A real manager whose golden backend is *backend* and whose pool is the
+    capable `_StubPool`. The backend is installed after construction because
+    GoldenRepoManager.__init__ reads it (see the swap rationale above)."""
+    from code_indexer.server.repositories.golden_repo_manager import GoldenRepoManager
+    from code_indexer.server.storage.sqlite_backends import (
+        GoldenRepoMetadataSqliteBackend,
+    )
+
+    data_dir = tmp_path / "strictness" / "data"
+    data_dir.mkdir(parents=True, exist_ok=True)
+    manager = ActivatedRepoManager(
+        data_dir=str(data_dir),
+        golden_repo_manager=GoldenRepoManager(
+            data_dir=str(data_dir),
+            storage_backend=GoldenRepoMetadataSqliteBackend(
+                str(data_dir / "golden.db")
+            ),
+        ),
+    )
+    manager.golden_repo_manager._sqlite_backend = backend
+    manager.set_connection_pool(_StubPool())
+    return manager
+
+
+class TestSharedBackendMarkerStrictness:
+    """The shared-store marker must be checked EXACTLY, not for truthiness.
+
+    Codex round 5: `bool(getattr(backend, "is_shared_backend", False))` is
+    satisfied by ANY truthy value, so a MagicMock -- which fabricates every
+    attribute on demand -- passes as "shared" although it never declared the
+    marker deliberately. Only the literal True is a deliberate declaration.
+    """
+
+    def test_magicmock_backend_is_not_accepted_as_shared(self, tmp_path: Path) -> None:
+        from unittest.mock import MagicMock
+
+        manager = _manager_with_backend(tmp_path, MagicMock())
+
+        assert manager.golden_repo_manager.has_shared_metadata_backend() is False
+        assert manager.uses_shared_metadata_stores() is False
+
+    def test_truthy_non_true_marker_is_not_accepted_as_shared(
+        self, tmp_path: Path
+    ) -> None:
+        class _DuckTypedBackend:
+            is_shared_backend = "yes"  # truthy, but never declared True
+
+        manager = _manager_with_backend(tmp_path, _DuckTypedBackend())
+
+        assert manager.golden_repo_manager.has_shared_metadata_backend() is False
+        assert manager.uses_shared_metadata_stores() is False
+
+
+class TestPoolCapabilityAndMarkerDeclaration:
+    """Presence is not capability, and every backend must declare the marker."""
+
+    def test_pool_with_non_callable_connection_is_rejected(
+        self, tmp_path: Path
+    ) -> None:
+        """`hasattr` is presence only: a pool whose `connection` is a plain
+        attribute cannot hand out connections."""
+        from code_indexer.server.storage.postgres.golden_repo_metadata_backend import (
+            GoldenRepoMetadataPostgresBackend,
+        )
+
+        class _PoolWithNonCallableConnection:
+            connection = "not-callable"
+
+        manager = _manager_with_backend(
+            tmp_path, GoldenRepoMetadataPostgresBackend(_StubPool())
+        )
+        manager.set_connection_pool(_PoolWithNonCallableConnection())
+
+        assert manager.uses_shared_metadata_stores() is False
+
+    def test_protocol_and_both_backends_declare_the_marker(self) -> None:
+        """A future backend must be forced to state which kind it is, rather
+        than silently defaulting into either answer."""
+        from code_indexer.server.storage.protocols import GoldenRepoMetadataBackend
+        from code_indexer.server.storage.postgres.golden_repo_metadata_backend import (
+            GoldenRepoMetadataPostgresBackend,
+        )
+        from code_indexer.server.storage.sqlite_backends import (
+            GoldenRepoMetadataSqliteBackend,
+        )
+
+        assert "is_shared_backend" in getattr(
+            GoldenRepoMetadataBackend, "__annotations__", {}
+        ), "the Protocol itself must declare is_shared_backend"
+        assert GoldenRepoMetadataPostgresBackend.is_shared_backend is True
+        assert GoldenRepoMetadataSqliteBackend.is_shared_backend is False
+
+
 def test_solo_mode_still_uses_the_node_local_store(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

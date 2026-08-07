@@ -467,8 +467,14 @@ class GoldenRepoManager:
         GoldenRepoNotFoundError for a repo that genuinely exists. Callers whose
         correctness depends on the cluster-wide view must treat False as "I
         cannot answer".
+
+        Compared with ``is True``, never ``bool(...)``: truthiness coercion is
+        satisfied by ANY truthy value, so a MagicMock (which fabricates every
+        attribute on demand) or a duck-typed substitute would pass as shared
+        without ever declaring the marker deliberately. Only an explicit
+        ``is_shared_backend = True`` counts.
         """
-        return bool(getattr(self._sqlite_backend, "is_shared_backend", False))
+        return getattr(self._sqlite_backend, "is_shared_backend", False) is True
 
     def set_mcp_registration_service(self, service) -> None:
         """Set the MCPSelfRegistrationService for Phase 2 lifecycle detection."""

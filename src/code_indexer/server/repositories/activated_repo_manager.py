@@ -285,9 +285,14 @@ class ActivatedRepoManager:
         Callers whose correctness depends on the cluster-wide view must treat
         False as "I cannot answer", never as a negative answer.
         """
-        if self._pool is None or not hasattr(self._pool, "connection"):
+        # `callable`, not `hasattr`: a pool exposing `connection` as a plain
+        # (non-callable) attribute cannot hand out connections, so presence
+        # alone does not establish the capability being checked for.
+        if self._pool is None:
             return False
-        return bool(self.golden_repo_manager.has_shared_metadata_backend())
+        if not callable(getattr(self._pool, "connection", None)):
+            return False
+        return self.golden_repo_manager.has_shared_metadata_backend() is True
 
     def set_query_tracker(self, query_tracker: Any) -> None:
         """Wire the server's QueryTracker (Story #1458 AC13).
