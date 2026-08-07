@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import glob
 import os
+import sqlite3
 import time
 from pathlib import Path
 
@@ -25,6 +26,9 @@ from code_indexer.server.services.alias_lock_store.sqlite_store import (
 _SHORT_BUSY_TIMEOUT_SECONDS = 0.2
 _GENEROUS_BUSY_TIMEOUT_SECONDS = 5.0
 _CRASH_RECOVERY_MAX_SECONDS = 1.0
+_SPILL_CACHE_SIZE_PAGES = 1
+_SPILL_ROW_VALUE_SIZE_BYTES = 5000
+_SPILL_ROW_COUNT = 3000
 
 
 def _make_store(tmp_path: Path, **kwargs) -> SqliteAliasLockStore:
@@ -153,6 +157,50 @@ class TestAcquireReleaseCycle:
             store.release(handle_a)
 
 
+class TestContextManagerProtocol:
+    """Escalated by round-3 review: F2's vacuum-pinning cost means a
+    missed `finally` doesn't just leak a connection -- it leaks an OPEN
+    WRITE TRANSACTION pinning vacuum indefinitely. `with handle:` now
+    releases the lock on exit, so Phase 2's ~8 real call sites don't
+    each need to hand-roll their own try/finally."""
+
+    def test_with_block_releases_the_lock_on_normal_exit(self, tmp_path):
+        store = _make_store(tmp_path)
+        handle = store.try_acquire("my-alias", operation="op")
+        assert handle is not None
+        with handle:
+            competitor = store.try_acquire("my-alias", operation="op")
+            assert competitor is None, "lock must still be held inside the with block"
+
+        new_handle = store.try_acquire("my-alias", operation="op")
+        try:
+            assert new_handle is not None, "with block exit must have released the lock"
+        finally:
+            if new_handle is not None:
+                store.release(new_handle)
+
+    def test_with_block_releases_the_lock_even_on_exception(self, tmp_path):
+        store = _make_store(tmp_path)
+        handle = store.try_acquire("my-alias", operation="op")
+        assert handle is not None
+
+        class _ProbeError(Exception):
+            pass
+
+        with pytest.raises(_ProbeError):
+            with handle:
+                raise _ProbeError("body raised -- must still release on exit")
+
+        new_handle = store.try_acquire("my-alias", operation="op")
+        try:
+            assert new_handle is not None, (
+                "with block must release the lock even when its body raises"
+            )
+        finally:
+            if new_handle is not None:
+                store.release(new_handle)
+
+
 class TestOwnershipLossViaWrongToken:
     """Zero-rows-affected DELETE/UPDATE path: forcing a token mismatch on
     the SAME still-open connection must raise, never silently succeed.
@@ -265,8 +313,14 @@ class TestOwnershipLossViaSeveredFileDescriptor:
     attribute to pre-check at all, and the resulting exception on the
     next statement that actually touches disk is `sqlite3
     .OperationalError` (a different exception class), never
-    `ProgrammingError`. Both release() and renew() must normalize this
-    the same way -- never leak the raw sqlite3 exception."""
+    `ProgrammingError`. release() -- which always closes the connection
+    in its own terminal `finally` regardless of outcome -- still
+    normalizes this to AliasLockOwnershipLostError. renew() does NOT
+    (see F1, TestRenewPropagatesGenuineErrorsWithoutReleasing below):
+    round-1 tried to normalize this the same way for renew() too, but
+    doing so required calling conn.close() to detect/report it, which
+    is itself what released the lock -- exactly the regression Fix F1
+    exists to prevent."""
 
     def test_release_after_severed_file_descriptor_raises_ownership_lost(
         self, tmp_path
@@ -280,31 +334,66 @@ class TestOwnershipLossViaSeveredFileDescriptor:
         with pytest.raises(AliasLockOwnershipLostError):
             store.release(handle)
 
-    def test_renew_after_severed_file_descriptor_raises_ownership_lost(self, tmp_path):
-        store = _make_store(tmp_path)
+
+class TestRenewPropagatesGenuineErrorsWithoutReleasing:
+    """Fix F1 (round-3 review, CRITICAL): renew() must NEVER call
+    conn.close()/rollback() on any path, including a genuine
+    statement-execution failure -- doing so (round-1's Fix #4) IS what
+    silently released the lock through renew()'s error path while the
+    real holder was still running. A genuine disk I/O error propagates
+    as the RAW sqlite3.OperationalError (never wrapped into
+    AliasLockOwnershipLostError, since renew() no longer attempts any
+    classification at all), and -- the actually load-bearing assertion
+    -- the lock must still be held afterward: a competing acquire must
+    still fail."""
+
+    def test_renew_propagates_the_raw_error_and_leaves_the_lock_held(self, tmp_path):
+        store = _make_store(tmp_path, busy_timeout_seconds=_SHORT_BUSY_TIMEOUT_SECONDS)
         handle = store.try_acquire("my-alias", operation="op")
         assert handle is not None
+        try:
+            # renew() deliberately never commits (sqlite_store.py's
+            # design), so a plain UPDATE is otherwise served entirely
+            # from in-memory transaction state and never touches disk
+            # -- severing the fd alone (as release()'s variant does)
+            # would never manifest here. Force an early dirty-page
+            # spill to the WAL file, WITHIN this same still-open
+            # transaction, via a tiny page cache plus enough large
+            # scratch rows to overflow it -- empirically proven to
+            # make a SUBSEQUENT statement on this connection genuinely
+            # touch disk.
+            conn = handle._connection
+            conn.execute(f"PRAGMA cache_size={_SPILL_CACHE_SIZE_PAGES}")
+            conn.execute("CREATE TABLE filler(x)")
+            big_value = "x" * _SPILL_ROW_VALUE_SIZE_BYTES
+            for _ in range(_SPILL_ROW_COUNT):
+                conn.execute("INSERT INTO filler VALUES (?)", (big_value,))
 
-        # renew() deliberately never commits (sqlite_store.py's design),
-        # so a plain UPDATE is otherwise served entirely from in-memory
-        # transaction state and never touches disk -- severing the fd
-        # alone (as the release() variant above does) would never
-        # manifest here. Force an early dirty-page spill to the WAL
-        # file, WITHIN this same still-open transaction, via a tiny
-        # page cache plus enough large scratch rows to overflow it --
-        # empirically proven to make a SUBSEQUENT statement on this
-        # connection genuinely touch disk.
-        conn = handle._connection
-        conn.execute("PRAGMA cache_size=1")
-        conn.execute("CREATE TABLE filler(x)")
-        big_value = "x" * 5000
-        for _ in range(3000):
-            conn.execute("INSERT INTO filler VALUES (?)", (big_value,))
+            _sever_raw_file_descriptor(conn)
 
-        _sever_raw_file_descriptor(conn)
+            with pytest.raises(sqlite3.OperationalError):
+                store.renew(handle)
 
-        with pytest.raises(AliasLockOwnershipLostError):
-            store.renew(handle)
+            # F1's load-bearing assertion: the failed renew() must NOT
+            # have touched the connection -- the original transaction
+            # (and therefore the lock) must still be held.
+            competitor = store.try_acquire("my-alias", operation="op")
+            try:
+                assert competitor is None, (
+                    "renew() must NEVER release the lock on a genuine "
+                    "statement-execution error -- F1 regression"
+                )
+            finally:
+                if competitor is not None:
+                    store.release(competitor)
+        finally:
+            # The connection is unusable after a disk I/O error, but it
+            # was never explicitly closed by renew() (that's the whole
+            # point of this test) -- close it directly here as test
+            # cleanup only, never via store.release() (which would
+            # itself hit the same severed fd and could mask what this
+            # test is proving).
+            handle._connection.close()
 
 
 class TestCrashRecovery:

@@ -18,6 +18,37 @@ DDL of its own.
 psycopg is imported lazily (see connection_pool.py's Bug #1468 precedent)
 so importing this module never forces psycopg to load for callers that
 never construct a PostgresAliasLockStore.
+
+Fix F2 (round-3 review) -- KNOWN COST, read before touching this module:
+
+    This design holds a REAL, OPEN PostgreSQL write transaction (the
+    acquire path performs an actual INSERT) for however long the
+    caller holds the lock -- legitimately HOURS per this codebase's own
+    Bug #1218 indexing-path invariant. A held open transaction pins
+    `GetOldestXmin` for the ENTIRE DATABASE, not just this table --
+    meaning VACUUM cannot reclaim dead tuples ANYWHERE in the cluster
+    (including hot-churn tables like jobs/payload_cache/node_metrics)
+    for that whole duration. This is a real, accepted operational cost
+    of the "lock IS a held transaction" design (see base.py's module
+    docstring), not an oversight.
+
+    Mitigated (not eliminated) here: `SET idle_in_transaction_session_
+    timeout = 0` is issued on the lock connection in try_acquire() so
+    that an operator setting this value CLUSTER-WIDE (a normal, likely
+    response to the very vacuum bloat this design causes) can never
+    silently kill an in-flight golden-repo lock out from under its
+    holder.
+
+    A session-scoped `pg_try_advisory_lock` (no held transaction, no
+    snapshot -- true prior art, as cited in the issue itself for
+    `MigrationRunner`'s own advisory lock) would eliminate the vacuum
+    -pinning cost entirely rather than merely mitigate it, at the cost
+    of a bigger redesign (advisory locks carry no payload of their own,
+    so lock_key/owner_token/operation/timestamps would need a separate,
+    non-transactional bookkeeping table). That redesign was explicitly
+    scoped OUT of this rework round -- see Issue #1546's round-3 review
+    for the tradeoff discussion -- and remains the stronger fix if this
+    cost proves unacceptable in production.
 """
 
 from __future__ import annotations
@@ -39,6 +70,7 @@ from .base import AliasLockHandle, AliasLockOwnershipLostError
 # timeout elapses, which we translate to a clean `None` (genuine
 # contention), never an indefinite wait.
 _DEFAULT_ACQUIRE_LOCK_TIMEOUT_SECONDS = 0.5
+_DEFAULT_CONNECT_TIMEOUT_SECONDS = 5
 _MILLISECONDS_PER_SECOND = 1000
 _MIN_LOCK_TIMEOUT_MS = 1
 
@@ -67,20 +99,24 @@ def _validate_non_empty_str(value: str, name: str) -> str:
     return value
 
 
-def _validate_acquire_lock_timeout_seconds(value: float) -> float:
+def _validate_positive_finite_seconds(value: float, name: str) -> float:
     if not isinstance(value, (int, float)) or isinstance(value, bool):
-        raise ValueError(
-            f"acquire_lock_timeout_seconds must be a number, got {value!r}"
-        )
+        raise ValueError(f"{name} must be a number, got {value!r}")
     if value != value or value in (float("inf"), float("-inf")):  # NaN/inf check
-        raise ValueError(f"acquire_lock_timeout_seconds must be finite, got {value!r}")
+        raise ValueError(f"{name} must be finite, got {value!r}")
     if value <= 0:
+        raise ValueError(f"{name} must be > 0, got {value!r}")
+    return float(value)
+
+
+def _validate_acquire_lock_timeout_seconds(value: float) -> float:
+    if isinstance(value, (int, float)) and not isinstance(value, bool) and value <= 0:
         raise ValueError(
             f"acquire_lock_timeout_seconds must be > 0 (a value of 0 disables "
             f"PostgreSQL's lock_timeout entirely, reintroducing indefinite "
             f"blocking), got {value!r}"
         )
-    return float(value)
+    return _validate_positive_finite_seconds(value, "acquire_lock_timeout_seconds")
 
 
 def _lock_timeout_milliseconds(acquire_lock_timeout_seconds: float) -> int:
@@ -92,13 +128,19 @@ def _lock_timeout_milliseconds(acquire_lock_timeout_seconds: float) -> int:
     return max(ms, _MIN_LOCK_TIMEOUT_MS)
 
 
-def _connect(dsn: str) -> Any:
+def _connect(dsn: str, connect_timeout_seconds: float) -> Any:
     """Lazily import psycopg and open one dedicated connection.
 
     Autocommit is deliberately left False (psycopg's default): every
     statement after connect() participates in one open transaction until
     an explicit commit()/rollback(), which is exactly the session-held
     -lock mechanism this module implements.
+
+    `connect_timeout_seconds` is bounded (round-3 review, low-cost
+    fix): without it, connection ESTABLISHMENT itself (e.g. against a
+    partitioned network or an unresponsive server) could hang
+    indefinitely before ever reaching the already-bounded
+    `lock_timeout` logic in `try_acquire()`.
 
     Return type is deliberately `Any` (not `psycopg.Connection[...]`):
     psycopg is imported lazily here (Bug #1468 discipline), so mypy
@@ -107,7 +149,7 @@ def _connect(dsn: str) -> Any:
     """
     import psycopg
 
-    return psycopg.connect(dsn)
+    return psycopg.connect(dsn, connect_timeout=int(connect_timeout_seconds))
 
 
 def _execute_acquire_insert(
@@ -185,6 +227,7 @@ class PostgresAliasLockStore:
         dsn: str,
         *,
         acquire_lock_timeout_seconds: float = _DEFAULT_ACQUIRE_LOCK_TIMEOUT_SECONDS,
+        connect_timeout_seconds: float = _DEFAULT_CONNECT_TIMEOUT_SECONDS,
     ) -> None:
         """
         Args:
@@ -194,10 +237,18 @@ class PostgresAliasLockStore:
                 try_acquire() waits for the conflicting row's lock before
                 giving up and returning None (Fix #1). Must be > 0 --
                 never indefinite.
+            connect_timeout_seconds: Bound on connection ESTABLISHMENT
+                itself (round-3 review, low-cost fix) -- without it, a
+                partitioned network or unresponsive server could hang
+                try_acquire() before it even reaches the lock_timeout
+                logic below. Must be > 0.
         """
         self._dsn = _validate_non_empty_str(dsn, "dsn")
         self._acquire_lock_timeout_seconds = _validate_acquire_lock_timeout_seconds(
             acquire_lock_timeout_seconds
+        )
+        self._connect_timeout_seconds = _validate_positive_finite_seconds(
+            connect_timeout_seconds, "connect_timeout_seconds"
         )
 
     def try_acquire(
@@ -210,7 +261,7 @@ class PostgresAliasLockStore:
         operation = _validate_non_empty_str(operation, "operation")
         owner_token = owner_token or str(uuid.uuid4())
 
-        conn = _connect(self._dsn)
+        conn = _connect(self._dsn, self._connect_timeout_seconds)
         try:
             lock_timeout_ms = _lock_timeout_milliseconds(
                 self._acquire_lock_timeout_seconds
@@ -221,6 +272,18 @@ class PostgresAliasLockStore:
             # long-held transaction and no later statement needs a
             # different value.
             conn.execute(f"SET lock_timeout = '{lock_timeout_ms}ms'")
+            # Fix F2 (round-3 review, minimum required fix): this
+            # connection intentionally holds a real open write
+            # transaction for however long the caller holds the lock --
+            # legitimately hours (Bug #1218 invariant) -- which pins
+            # GetOldestXmin for the WHOLE DATABASE, blocking VACUUM
+            # everywhere (not just this table) for that whole duration.
+            # See the module docstring for the full cost/tradeoff.
+            # idle_in_transaction_session_timeout is explicitly disabled
+            # HERE so that an operator setting it cluster-wide (a normal
+            # response to the very bloat this design causes) can never
+            # silently kill an in-flight golden-repo lock.
+            conn.execute("SET idle_in_transaction_session_timeout = 0")
 
             row = _execute_acquire_insert(conn, lock_key, owner_token, operation)
             if row is not None:
@@ -232,6 +295,7 @@ class PostgresAliasLockStore:
                     owner_token=owner_token,
                     operation=operation,
                     _connection=conn,
+                    _store=self,
                 )
 
             # Not acquired -- either genuine contention (LockNotAvailable)
@@ -300,24 +364,29 @@ class PostgresAliasLockStore:
         -only and must NEVER be capable of releasing the lock on a
         caller's mistake; only release() ends the lock's lifecycle.
 
-        Fix #4: a genuine execution failure (e.g. a server-side
-        disconnect) during the UPDATE itself IS normalized to
-        AliasLockOwnershipLostError and DOES close the connection --
-        that failure means the connection/transaction is no longer
-        trustworthy at all, which is a different situation from a
-        cleanly-executed UPDATE that simply matched zero rows.
+        Fix F1 (round-3 review, CRITICAL correction of round-1's Fix #4):
+        renew() NEVER calls conn.close()/rollback() on ANY path,
+        including a genuine statement-execution failure. Round-1's
+        classifier (`isinstance(exc, psycopg.OperationalError)`) was
+        both the wrong tool (pattern-matching an exception TYPE rather
+        than checking connection state) and too broad in the dangerous
+        direction: `QueryCanceled`, `DiskFull`, `DeadlockDetected`,
+        `SerializationFailure`, and `LockNotAvailable` all subclass
+        `OperationalError` and would incorrectly trigger close+release
+        on a perfectly healthy connection, while
+        `IdleInTransactionSessionTimeout` (a genuine connection-dead
+        signal) does NOT subclass it and would be missed entirely. If
+        the connection is genuinely dead, the lock is already gone by
+        construction (a crash rolls the transaction back
+        automatically) -- closing it here would add nothing. If it is
+        not genuinely dead, closing it is the defect. The statement's
+        exception (if any) therefore propagates AS ITSELF, unwrapped,
+        with the connection left completely untouched either way; only
+        the explicit zero-rows-affected check below still raises
+        AliasLockOwnershipLostError.
         """
         conn = _require_live_connection(handle)
-        try:
-            cursor = conn.execute(_RENEW_SQL, (handle.lock_key, handle.owner_token))
-        except Exception as exc:
-            if _is_dead_connection_error(exc):
-                conn.close()
-                raise AliasLockOwnershipLostError(
-                    f"lock_key={handle.lock_key!r} owner_token={handle.owner_token!r}: "
-                    f"renew() statement failed -- connection is no longer usable"
-                ) from exc
-            raise
+        cursor = conn.execute(_RENEW_SQL, (handle.lock_key, handle.owner_token))
 
         if cursor.rowcount == 0:
             # Wrong token: the UPDATE executed cleanly but matched zero

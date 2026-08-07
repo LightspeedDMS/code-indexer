@@ -19,10 +19,20 @@
 -- lock_key is the canonical key: bare alias (one trailing "-global"
 -- suffix stripped, per the Bug #1373/#1390 convention) for golden-repo
 -- operations, or an opaque string for non-golden keys (e.g. "cidx-meta").
+--
+-- owner_token is deliberately NOT UNIQUE (round-3 review, Issue #1546):
+-- a UNIQUE constraint here would make an owner_token collision --
+-- however improbable with UUID4 -- cause a competing
+-- INSERT ... ON CONFLICT (lock_key) to also contend on the unique
+-- index entry for a DIFFERENT lock_key's uncommitted row, misreporting
+-- an entirely unrelated lock as contended. lock_key alone is the
+-- correct and sufficient uniqueness boundary for this table; ownership
+-- verification is always by exact (lock_key, owner_token) pair in the
+-- WHERE clause of release()/renew(), never by owner_token alone.
 
 CREATE TABLE IF NOT EXISTS golden_repo_alias_locks (
     lock_key         TEXT PRIMARY KEY,
-    owner_token      TEXT NOT NULL UNIQUE,
+    owner_token      TEXT NOT NULL,
     operation        TEXT NOT NULL,
     acquired_at      TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     last_renewed_at  TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP

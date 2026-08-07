@@ -94,6 +94,24 @@ class AliasLockHandle:
     owner_token: str
     operation: str
     _connection: Any = field(repr=False)
+    _store: Optional["AliasLockStore"] = field(default=None, repr=False, compare=False)
+
+    def __enter__(self) -> "AliasLockHandle":
+        """Escalated by round-3 review (F2's vacuum-pinning cost makes a
+        leaked open transaction worse than an ordinary leaked
+        connection): `with handle:` releases the lock on exit, so
+        Phase 2's real call sites don't each need to hand-roll their
+        own try/finally around acquire/release."""
+        return self
+
+    def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+        """Calls `store.release(self)` if this handle was constructed
+        with a `_store` reference (both backends' `try_acquire()` do
+        this). Never suppresses the original exception from the `with`
+        block body (implicit `None` return); a failure from release()
+        itself propagates as-is."""
+        if self._store is not None:
+            self._store.release(self)
 
 
 class AliasLockStore(Protocol):

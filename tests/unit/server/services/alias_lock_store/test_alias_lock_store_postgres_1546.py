@@ -254,6 +254,48 @@ class TestAcquireReleaseCycle:
             store.release(handle_a)
 
 
+class TestContextManagerProtocol:
+    """Escalated by round-3 review: F2's vacuum-pinning cost means a
+    missed `finally` doesn't just leak a connection -- it leaks an OPEN
+    WRITE TRANSACTION pinning vacuum indefinitely. `with handle:` now
+    releases the lock on exit, so Phase 2's ~8 real call sites don't
+    each need to hand-roll their own try/finally."""
+
+    def test_with_block_releases_the_lock_on_normal_exit(self, store, unique_key):
+        handle = store.try_acquire(unique_key, operation="op")
+        assert handle is not None
+        with handle:
+            competitor = store.try_acquire(unique_key, operation="op")
+            assert competitor is None, "lock must still be held inside the with block"
+
+        new_handle = store.try_acquire(unique_key, operation="op")
+        try:
+            assert new_handle is not None, "with block exit must have released the lock"
+        finally:
+            if new_handle is not None:
+                store.release(new_handle)
+
+    def test_with_block_releases_the_lock_even_on_exception(self, store, unique_key):
+        handle = store.try_acquire(unique_key, operation="op")
+        assert handle is not None
+
+        class _ProbeError(Exception):
+            pass
+
+        with pytest.raises(_ProbeError):
+            with handle:
+                raise _ProbeError("body raised -- must still release on exit")
+
+        new_handle = store.try_acquire(unique_key, operation="op")
+        try:
+            assert new_handle is not None, (
+                "with block must release the lock even when its body raises"
+            )
+        finally:
+            if new_handle is not None:
+                store.release(new_handle)
+
+
 class TestOwnershipLossViaWrongToken:
     """Zero-rows-affected DELETE path: forcing a token mismatch on the
     SAME still-open connection must raise, never silently succeed.
@@ -459,19 +501,108 @@ class TestOwnershipLossViaServerSideDisconnect:
             if not handle._connection.closed:
                 handle._connection.close()
 
-    def test_renew_after_server_side_disconnect_raises_ownership_lost(
+    @staticmethod
+    def _poll_until_renew_fails(store, handle, deadline_seconds: float) -> Exception:
+        """Poll renew() while it keeps silently succeeding (the
+        server-side termination has not taken effect on this
+        connection YET), and return the FIRST exception it raises.
+        Unlike `_poll_for_ownership_lost`, this does not assert a
+        specific exception type -- F1 means renew() no longer
+        classifies/normalizes any error at all."""
+        deadline = time.monotonic() + deadline_seconds
+        while time.monotonic() < deadline:
+            try:
+                store.renew(handle)
+            except Exception as exc:  # noqa: BLE001
+                return exc
+            time.sleep(_CRASH_RECOVERY_POLL_SLEEP_SECONDS)
+        raise AssertionError(
+            f"renew() never raised after a server-side disconnect within "
+            f"{deadline_seconds}s"
+        )
+
+    def test_renew_after_server_side_disconnect_propagates_the_raw_error(
         self, store, unique_key, pg_dsn
     ):
+        """Fix F1: renew() no longer classifies/normalizes ANY error --
+        once the server-side disconnect actually takes effect, renew()
+        must propagate the raw driver exception (e.g.
+        psycopg.OperationalError/AdminShutdown) rather than wrapping it
+        into AliasLockOwnershipLostError."""
         handle = store.try_acquire(unique_key, operation="op")
         assert handle is not None
         try:
             self._terminate_backend_server_side(pg_dsn, handle)
-            self._poll_for_ownership_lost(
-                lambda: store.renew(handle), _GENEROUS_ACQUIRE_TIMEOUT_SECONDS
+            raised = self._poll_until_renew_fails(
+                store, handle, _GENEROUS_ACQUIRE_TIMEOUT_SECONDS
+            )
+            assert not isinstance(raised, AliasLockOwnershipLostError), (
+                f"renew() must propagate the raw error, not wrap it: {raised!r}"
             )
         finally:
             if not handle._connection.closed:
                 handle._connection.close()
+
+
+class TestRenewNeverTouchesConnectionOnNonFatalError:
+    """Fix F1 (round-3 review, CRITICAL): this is the discriminating
+    proof Opus's review demanded -- a perfectly NON-FATAL SQL error
+    (querying a nonexistent table) on an otherwise-healthy connection
+    must never cause renew() to touch the connection. Round-1's Fix #4
+    classifier (`isinstance(exc, psycopg.OperationalError)`) would have
+    misclassified several genuinely non-fatal PostgreSQL error classes
+    this way (QueryCanceled, DiskFull, DeadlockDetected,
+    SerializationFailure, LockNotAvailable all subclass
+    OperationalError). PostgreSQL itself puts the session into an
+    "aborted transaction" state on ANY error (a normal, well-known
+    PostgreSQL behavior, confirmed here via `pg_stat_activity.state`
+    empirically showing "idle in transaction (aborted)") -- but that is
+    NOT the same as the connection being closed, and our own code must
+    never be the one to close it.
+    """
+
+    def test_renew_propagates_non_fatal_error_without_closing_the_connection(
+        self, store, unique_key
+    ):
+        handle = store.try_acquire(unique_key, operation="op")
+        assert handle is not None
+        conn = handle._connection
+        try:
+            # Poison the transaction with a genuinely non-fatal SQL
+            # error -- PostgreSQL aborts the CURRENT transaction on any
+            # error, but this must not touch conn.closed at all.
+            try:
+                conn.execute("SELECT 1 FROM this_table_does_not_exist_1546_f1_poison")
+            except Exception:
+                pass  # expected -- poisons the transaction
+
+            assert not conn.closed, (
+                "the poison error itself must not close the connection "
+                "-- test setup invariant"
+            )
+
+            with pytest.raises(Exception) as exc_info:
+                store.renew(handle)
+
+            assert not conn.closed, (
+                "renew() must NEVER close the connection on a non-fatal "
+                "error -- F1 regression"
+            )
+            assert not isinstance(exc_info.value, AliasLockOwnershipLostError), (
+                "renew() must propagate the RAW error rather than "
+                f"wrapping it: {exc_info.value!r}"
+            )
+        finally:
+            # The connection is stuck in an aborted-transaction state at
+            # this point (inherent PostgreSQL semantics -- ANY error
+            # aborts the current transaction); roll back explicitly
+            # here ONLY as test cleanup, never inside production
+            # renew()/release() code. Nested finally guarantees close()
+            # runs even if rollback() itself raises.
+            try:
+                conn.rollback()
+            finally:
+                conn.close()
 
 
 class TestCrashRecovery:

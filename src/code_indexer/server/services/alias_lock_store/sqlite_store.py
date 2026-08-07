@@ -72,12 +72,19 @@ _LOCK_CONTENTION_MESSAGE_SUBSTRINGS = (
 _SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS golden_repo_alias_locks (
     lock_key         TEXT PRIMARY KEY,
-    owner_token      TEXT NOT NULL UNIQUE,
+    owner_token      TEXT NOT NULL,
     operation        TEXT NOT NULL,
     acquired_at      TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     last_renewed_at  TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 )
 """
+# owner_token is deliberately NOT UNIQUE (round-3 review, Issue #1546,
+# matching migration 043's schema for cross-backend consistency): a
+# UNIQUE constraint here was already a no-op for this per-alias
+# -dedicated-file design (each file holds at most one row, keyed by
+# lock_key), but PostgreSQL's SHARED-table design made the same
+# constraint a real cross-key false-negative hazard -- keeping both
+# schemas aligned avoids a future schema-drift trap.
 
 
 def _rows_changed(conn: sqlite3.Connection) -> int:
@@ -254,6 +261,7 @@ class SqliteAliasLockStore:
                     owner_token=owner_token,
                     operation=operation,
                     _connection=conn,
+                    _store=self,
                 )
 
             # Someone else already holds lock_key (extremely unlikely
@@ -331,31 +339,37 @@ class SqliteAliasLockStore:
         -only and must NEVER be capable of releasing the lock on a
         caller's mistake; only release() ends the lock's lifecycle.
 
-        Fix #4: a genuine execution failure (e.g. a disk I/O error from
-        a severed file descriptor) during the UPDATE or its row-count
-        check IS normalized to AliasLockOwnershipLostError and DOES
-        close the connection -- that failure means the
-        connection/transaction is no longer trustworthy at all, which
-        is a different situation from a cleanly-executed UPDATE that
-        simply matched zero rows.
+        Fix F1 (round-3 review, CRITICAL correction of round-1's Fix #4):
+        renew() NEVER calls conn.close()/rollback() on ANY path,
+        including a genuine statement-execution failure. Round-1's
+        broad except-sqlite3.Error-then-close()-then-raise was itself
+        the bug it was meant to fix: closing a connection IS what
+        releases the underlying SQLite writer lock, so a perfectly
+        non-fatal error on a still-healthy connection (reproduced
+        live: sqlite3.OperationalError: no such table, on a connection
+        with no actual problem) silently released an actively-held
+        lock while the real holder kept running -- exactly the
+        "successor takes over while the original holder is still
+        active" hazard this whole story exists to eliminate. If the
+        connection is genuinely dead, the lock is already gone by
+        construction (a crash rolls the transaction back
+        automatically) -- closing it here would add nothing. If it is
+        not genuinely dead, closing it is the defect. The statement's
+        exception (if any) therefore propagates AS ITSELF, unwrapped,
+        with the connection left completely untouched either way; only
+        the explicit zero-rows-affected check below still raises
+        AliasLockOwnershipLostError.
         """
         from .base import AliasLockOwnershipLostError
 
         conn = _require_live_connection(handle)
-        try:
-            conn.execute(
-                "UPDATE golden_repo_alias_locks "
-                "SET last_renewed_at = CURRENT_TIMESTAMP "
-                "WHERE lock_key = ? AND owner_token = ?",
-                (handle.lock_key, handle.owner_token),
-            )
-            rows_changed = _rows_changed(conn)
-        except sqlite3.Error as exc:
-            conn.close()
-            raise AliasLockOwnershipLostError(
-                f"lock_key={handle.lock_key!r} owner_token={handle.owner_token!r}: "
-                f"renew() statement failed -- connection is no longer usable"
-            ) from exc
+        conn.execute(
+            "UPDATE golden_repo_alias_locks "
+            "SET last_renewed_at = CURRENT_TIMESTAMP "
+            "WHERE lock_key = ? AND owner_token = ?",
+            (handle.lock_key, handle.owner_token),
+        )
+        rows_changed = _rows_changed(conn)
 
         if rows_changed == 0:
             # Wrong token: the UPDATE executed cleanly but matched zero
