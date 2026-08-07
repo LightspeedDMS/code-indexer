@@ -2,6 +2,7 @@
 
 ## Safety Rules (prevent recurring mistakes)
 - [feedback_never_reindex_evolution.md](feedback_never_reindex_evolution.md) - NEVER full-re-index evolution (hours + a TON of embedder tokens/money); repairs must keep worktree bit-identical, temporal stays OFF, restore from provided copies
+- [feedback_verify_zero_json_chunks_on_indexing.md](feedback_verify_zero_json_chunks_on_indexing.md) - Before any chunk-storage/temporal work is done, verify zero vector_*.json files created on all 3 environments (local/staging-solo/staging-cluster) — Bug #1528: epic-critical consolidation was silently inert by default
 - [feedback_never_touch_other_repos.md](feedback_never_touch_other_repos.md) - NEVER modify files outside the assigned working directory — other clones have their own agents
 - [feedback_admin_password_sacred.md](feedback_admin_password_sacred.md) - NEVER leave admin password changed; always restore admin/admin via DB bypass
 - [feedback_port_config_locked.md](feedback_port_config_locked.md) - NEVER change port config for cidx-server/HAProxy/firewall — causes 503s
@@ -13,6 +14,7 @@
 - [feedback_own_all_repo_changes.md](feedback_own_all_repo_changes.md) - NEVER revert other subagents' changes — own ALL changes found in repo
 - [feedback_parallel_agents_shared_tree_no_broad_git_ops.md](feedback_parallel_agents_shared_tree_no_broad_git_ops.md) - When N agents edit the same uncommitted tree in parallel, each prompt must explicitly forbid git checkout/restore/reset/clean/stash outside its own file list
 - [feedback_no_rogue_agents.md](feedback_no_rogue_agents.md) - Never frame unexpected repo state as "rogue/sabotaging agents" — default explanation is user changed it
+- [project_own_local_dev_cidx_server.md](project_own_local_dev_cidx_server.md) - I own the local machine's cidx-server.service and its checkout — must track development, no auto-update, keep healthy; never treat it as unrelated/out-of-scope
 - [feedback_sole_developer_own_all_code.md](feedback_sole_developer_own_all_code.md) - I am the SOLE developer of this repo across all sessions — never call any code/bug/failing test "not ours"; own it all, distinguish only "this-diff vs earlier-session"
 - [feedback_cluster_aware_state_only.md](feedback_cluster_aware_state_only.md) - NEVER use module-level dicts or per-node RAM for cross-request state — use PayloadCache (app.state.payload_cache) or shared DB; HAProxy affinity is not a substitute
 - [feedback_bootstrap_changes_need_installer_and_autoupdater.md](feedback_bootstrap_changes_need_installer_and_autoupdater.md) - Any bootstrap/systemd/env/PATH change MUST be automated in BOTH installer (fresh installs) AND auto-updater (idempotent self-heal) — template-only fixes leave already-deployed hosts broken forever
