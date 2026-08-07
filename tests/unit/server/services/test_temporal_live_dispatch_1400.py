@@ -124,8 +124,9 @@ def _make_instant_worker(
 ):
     """A fast fake worker matching run_temporal_worker's exact call
     contract (worker_input, payload_cache, job_id, progress_callback=None,
-    cancel_check=None) -- writes a real, verified terminal snapshot
-    immediately via the REAL store_temporal_snapshot, then returns."""
+    cancel_check=None, query_tracker=None, activated_repo_manager=None) --
+    writes a real, verified terminal snapshot immediately via the REAL
+    store_temporal_snapshot, then returns."""
 
     def _worker(
         worker_input,
@@ -134,6 +135,9 @@ def _make_instant_worker(
         progress_callback=None,
         cancel_check=None,
         query_tracker=None,
+        # Bug #1533: the dispatch layer forwards the DI-wired
+        # ActivatedRepoManager as a worker kwarg, just like query_tracker.
+        activated_repo_manager=None,
     ):
         store_temporal_snapshot(
             payload_cache,
@@ -166,6 +170,7 @@ def _make_slow_worker(payload_cache: PayloadCache, delay_seconds: float):
         progress_callback=None,
         cancel_check=None,
         query_tracker=None,
+        activated_repo_manager=None,
     ):
         time.sleep(delay_seconds)
         store_temporal_snapshot(
@@ -625,6 +630,7 @@ class TestQueryTrackerForwarding:
             progress_callback=None,
             cancel_check=None,
             query_tracker=None,
+            activated_repo_manager=None,
         ):
             captured_kwargs["query_tracker"] = query_tracker
             store_temporal_snapshot(

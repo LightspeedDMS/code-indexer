@@ -1381,6 +1381,14 @@ def _execute_temporal_via_live_dispatch(
         # and consult the golden-owned sister location Story #1457's
         # relocation trigger may have moved shard data to.
         query_tracker=_get_query_tracker(),
+        # Bug #1533: thread the server's DI-wired ActivatedRepoManager so the
+        # worker resolves golden lineage from the SHARED (PostgreSQL in
+        # cluster mode) metadata store. Omitting this sends the worker back to
+        # a node-local read, which on a cluster node cannot see an activation
+        # made on another node -- HTTP 200 with zero temporal results.
+        # Reached through the already-imported `_utils` module (the same
+        # access pattern as `_utils.app_module` above).
+        activated_repo_manager=_utils._get_activated_repo_manager(),
     )
 
     status = dispatch_result.get("status")

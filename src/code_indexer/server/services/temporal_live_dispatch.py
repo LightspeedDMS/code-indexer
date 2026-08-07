@@ -95,6 +95,7 @@ def execute_live_temporal_search(
     worker_fn: Callable[..., Dict[str, Any]] = run_temporal_worker,
     config_service: Optional[Any] = None,
     query_tracker: Optional[Any] = None,
+    activated_repo_manager: Optional[Any] = None,
 ) -> Dict[str, Any]:
     """Core protocol-agnostic async-hybrid temporal dispatch.
 
@@ -114,6 +115,16 @@ def execute_live_temporal_search(
             TemporalShardResolver and consult the golden-owned sister
             location. None (default) preserves today's legacy-only
             resolution behavior exactly.
+        activated_repo_manager: Bug #1533 -- the caller's DI-wired
+            ActivatedRepoManager (app.state.activated_repo_manager),
+            forwarded into the worker's kwargs the same way query_tracker
+            is, and likewise never into TemporalWorkerInput/the dedup
+            signature. The worker needs it to resolve golden lineage from
+            the SHARED metadata store; a manager it constructs itself reads
+            node-local metadata, which is empty on a cluster node and
+            silently yields zero temporal results. In postgres/cluster mode
+            the worker RAISES rather than degrade, so a door that omits
+            this kwarg fails loudly instead of quietly answering nothing.
 
     Returns:
         A dict with at least "status" ("completed"|"waiting"|"failed"|
@@ -146,6 +157,10 @@ def execute_live_temporal_search(
         # "duplicate". Correct dedup granularity (full query signature) is
         # already enforced above by TemporalDedupCache; the BGM-level gate
         # is the wrong tool for this job type.
+        #
+        # query_tracker (Bug #1482) and activated_repo_manager (Bug #1533)
+        # are forwarded as plain worker kwargs -- BGM passes them through by
+        # name to run_temporal_worker.
         new_job_id: str = background_job_manager.submit_job(
             TEMPORAL_OPERATION_TYPE,
             worker_fn,
@@ -155,6 +170,7 @@ def execute_live_temporal_search(
             worker_input=worker_input,
             payload_cache=payload_cache,
             query_tracker=query_tracker,
+            activated_repo_manager=activated_repo_manager,
         )
         return new_job_id
 

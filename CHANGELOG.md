@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [12.3.0] - 2026-08-07
+
+### Fixed
+
+- Bug #1533: on a cluster, activated-repo temporal queries returned zero results because `temporal_worker`'s lineage lookup constructed its own node-local `ActivatedRepoManager` instead of using the DI-injected manager backed by shared PostgreSQL metadata (the same read-side half-wiring pattern as Bug #1529, discovered while E2E-verifying it). In postgres/cluster mode with no injected manager, now raises `TemporalLineageStoreUnavailableError` loudly instead of silently reading stale or absent node-local state; both MCP and REST front doors now pass the DI-wired manager (AST-guarded per call site). Also closes a real gap where `uses_shared_metadata_stores()` accepted any injected backend regardless of actual type -- a locally-constructed SQLite backend could pass as "shared" in postgres mode -- by requiring an explicit `is_shared_backend` capability marker, now declared on the `GoldenRepoMetadataBackend` Protocol itself rather than left to each concrete backend's discretion.
+
+### Testing
+
+- Bug #1533: real live-PostgreSQL test isolation hardened across three findings -- a strict `re.fullmatch` disposable-database-name guard (a substring check let names like `production_cidx_test` slip through), validation of the database libpq actually resolves via `conninfo_to_dict()` cross-checked against a live `SELECT current_database()` (a hand-parsed DSN string could be bypassed by a `?dbname=` override), and a read-only public-schema table-identity comparison replacing an earlier sentinel-table approach that risked leaking state on failure.
+
 ## [12.2.0] - 2026-08-06
 
 ### Fixed
