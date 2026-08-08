@@ -7777,7 +7777,7 @@ def status(ctx):
         display_uninitialized_status(project_root)
 
 
-def _status_impl(ctx):
+def _status_impl(ctx, *, force_docker=None):
     """Show status of services and index.
 
     \b
@@ -8441,7 +8441,11 @@ def _status_impl(ctx):
                                     if state == "idle"
                                     else ("🔄" if state == "building" else "⚠️")
                                 )
-                                temporal_status = f"{state_icon} {state.title()}"
+                                temporal_status = (
+                                    "✅ Available"
+                                    if state == "idle"
+                                    else f"{state_icon} {state.title()}"
+                                )
                                 temporal_details = (
                                     f"Provider: {coll_name}\n"
                                     f"{total_commits} commits | {files_processed:,} files changed | {vector_count:,} vectors\n"
@@ -8455,12 +8459,13 @@ def _status_impl(ctx):
                                 )
                             except Exception as e_coll:
                                 logger.warning(
-                                    f"Failed to read temporal collection {coll_name}: {e_coll}"
+                                    f"Failed to check temporal index status for "
+                                    f"collection {coll_name}: {e_coll}"
                                 )
                                 table.add_row(
                                     "Temporal Index",
                                     "⚠️ Error",
-                                    f"{coll_name}: {str(e_coll)[:80]}",
+                                    f"Failed to read {coll_name}: {str(e_coll)[:80]}",
                                 )
                 except Exception as e:
                     # Don't fail status command if temporal check fails, but log the error
@@ -11426,6 +11431,62 @@ def server_status(ctx, verbose: bool, server_dir: Optional[str]):
     except Exception as e:
         console.print(f"❌ Error checking server status: {str(e)}", style="red")
         sys.exit(1)
+
+
+@server_group.command("temporal-migrate-legacy")
+@click.option("--alias", "repo_alias", default=None, help="Migrate only this alias")
+@click.option(
+    "--cleanup",
+    is_flag=True,
+    help="Delete each legacy shard only after verification succeeds",
+)
+@click.pass_context
+def server_temporal_migrate_legacy(ctx, repo_alias: Optional[str], cleanup: bool):
+    """Relocate legacy temporal shards into fixed server-owned storage."""
+    try:
+        from .server.repositories.golden_repo_manager import get_golden_repo_manager
+        from .server.services.temporal_legacy_migration.discovery import (
+            discover_candidates,
+        )
+        from .server.services.temporal_legacy_migration.mover import (
+            migrate_temporal_shards,
+        )
+        from .storage.temporal_metadata_backend_registry import (
+            get_temporal_metadata_backend_factory,
+        )
+
+        manager = get_golden_repo_manager()
+        candidates = list(discover_candidates(manager))
+        if repo_alias is not None:
+            candidates = [item for item in candidates if item.alias == repo_alias]
+            if not candidates:
+                raise click.ClickException(
+                    f"golden repository alias not found: {repo_alias}"
+                )
+        backend_factory = get_temporal_metadata_backend_factory()
+        total_published = total_deleted = 0
+        for candidate in candidates:
+            result = migrate_temporal_shards(
+                candidate.legacy_root,
+                candidate.fixed_root,
+                relocation_enabled=True,
+                cleanup_authorized=cleanup,
+                metadata_backend_factory=backend_factory,
+            )
+            total_published += result.published
+            total_deleted += result.deleted
+            console.print(
+                f"{candidate.alias}: published={result.published}, "
+                f"already_complete={result.already_complete}, "
+                f"deleted={result.deleted}"
+            )
+        console.print(
+            f"Migration complete: published={total_published}, deleted={total_deleted}"
+        )
+    except click.ClickException:
+        raise
+    except Exception as exc:
+        raise click.ClickException(f"temporal migration failed: {exc}") from exc
 
 
 @server_group.command("restart")

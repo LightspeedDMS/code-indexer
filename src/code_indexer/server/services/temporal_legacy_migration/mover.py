@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -52,6 +53,12 @@ def _publish(source: Path, target: Path) -> None:
         shutil.copytree(source, staging)
         _fsync_tree(staging)
         verify_shard_copy(source, staging)
+        pause_marker = os.environ.get("CIDX_MIGRATION_PAUSE_BEFORE_TEMPORAL_PUBLISH")
+        if pause_marker:
+            marker = Path(pause_marker)
+            marker.touch()
+            while marker.exists():
+                time.sleep(0.02)
         if target.exists():
             if _has_data(target):
                 raise FileExistsError(f"fixed temporal shard is non-empty: {target}")
