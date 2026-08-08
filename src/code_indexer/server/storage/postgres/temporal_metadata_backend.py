@@ -21,6 +21,7 @@ from the collection path by TemporalMetadataStore, see temporal_metadata_store.p
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 from datetime import datetime
 from pathlib import Path
@@ -28,6 +29,7 @@ from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 from code_indexer.storage.temporal_metadata_store import (
     COLLECTION_KEY_LENGTH,
+    canonical_content_digest_rows,
     generate_hash_prefix,
 )
 
@@ -293,6 +295,94 @@ class TemporalMetadataPostgresBackend:
                 (self._collection_key,),
             ).fetchone()
         return row[0] if row else 0
+
+    def content_digest(self) -> str:
+        """Deterministic sha256 digest of every row this scope holds.
+
+        Issue #1548 round-4 exploit fix: mirrors
+        ``TemporalMetadataSqliteBackend.content_digest`` exactly (same
+        selected columns, same ordering, same JSON encoding) so a legacy
+        SQLite scope and a fixed-root PostgreSQL scope holding the SAME
+        rows always produce the SAME digest, regardless of which concrete
+        backend either side happens to use. See the SQLite implementation's
+        docstring for why ``created_at``/``format_version`` are excluded.
+        """
+        with self._pool.connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT hash_prefix, point_id, commit_hash, file_path, chunk_index
+                FROM temporal_metadata
+                WHERE collection_key = %s
+                ORDER BY hash_prefix, point_id, commit_hash, file_path, chunk_index
+                """,
+                (self._collection_key,),
+            ).fetchall()
+        # Issue #1548 round-5 secondary finding 4: re-sort in Python with a
+        # NULL-order-neutral key, independent of PostgreSQL's own NULL-last
+        # ORDER BY default -- see canonical_content_digest_rows()'s
+        # docstring for why the bare ORDER BY above alone cannot guarantee
+        # agreement with the SQLite backend's digest for the SAME rows.
+        rows = canonical_content_digest_rows(rows)
+        encoded = json.dumps(
+            [list(row) for row in rows],
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        )
+        return hashlib.sha256(encoded.encode()).hexdigest()
+
+    def copy_collection_scope(
+        self,
+        target_collection_path: Path,
+        *,
+        pre_commit_check: Optional[Callable[[], None]] = None,
+    ) -> None:
+        """Additively re-key rows; retain the source key for compatibility.
+
+        Issue #1548 round-10 Finding 1: ``pre_commit_check`` (if given) is
+        invoked immediately before this transaction's own ``conn.
+        commit()`` -- the narrowest achievable window between "rows
+        written" and "durably committed". Raising here, before the
+        commit, triggers ``psycopg``'s own automatic rollback-on-exception
+        for a connection borrowed via ``pool.connection()`` as a context
+        manager -- no explicit ``conn.rollback()`` is needed; the
+        exception propagates unchanged and the write is never committed.
+        """
+        target_key = hashlib.sha256(str(target_collection_path).encode()).hexdigest()[
+            : len(self._collection_key)
+        ]
+        with self._pool.connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO temporal_metadata
+                    (collection_key, hash_prefix, point_id, commit_hash,
+                     file_path, chunk_index, created_at, format_version)
+                SELECT %s, hash_prefix, point_id, commit_hash, file_path,
+                       chunk_index, created_at, format_version
+                FROM temporal_metadata
+                WHERE collection_key = %s
+                ON CONFLICT (collection_key, hash_prefix) DO UPDATE SET
+                    point_id = EXCLUDED.point_id,
+                    commit_hash = EXCLUDED.commit_hash,
+                    file_path = EXCLUDED.file_path,
+                    chunk_index = EXCLUDED.chunk_index,
+                    created_at = EXCLUDED.created_at,
+                    format_version = EXCLUDED.format_version
+                """,
+                (target_key, self._collection_key),
+            )
+            if pre_commit_check is not None:
+                pre_commit_check()
+            conn.commit()
+
+    def delete_collection_scope(self) -> None:
+        """Delete this collection key; callers provide the authorization gate."""
+        with self._pool.connection() as conn:
+            conn.execute(
+                "DELETE FROM temporal_metadata WHERE collection_key = %s",
+                (self._collection_key,),
+            )
+            conn.commit()
 
 
 def make_postgres_temporal_metadata_factory(

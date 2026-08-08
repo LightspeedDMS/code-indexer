@@ -1100,6 +1100,27 @@ class FleetMigrationConfig:
 
 
 @dataclass
+class TemporalLegacyMigrationConfig:
+    """
+    Configuration for relocating legacy in-repo temporal shards into the
+    fixed server-owned storage root (Bug #1529) (Issue #1548).
+
+    Deliberately a SEPARATE config section from FleetMigrationConfig
+    (chunks.db sharded-JSON consolidation) -- the two are independent
+    destructive operations with unrelated semantics, and folding this
+    into that unrelated section made both harder to reason about and
+    easy to confuse in the Web UI. Both flags default to False (explicit
+    operator opt-in required, mirroring FleetMigrationConfig.enabled):
+    ``relocation_enabled`` gates the non-destructive copy/publish step;
+    ``cleanup_authorized`` independently gates the destructive legacy
+    deletion step.
+    """
+
+    relocation_enabled: bool = False
+    cleanup_authorized: bool = False
+
+
+@dataclass
 class XRayConfig:
     """
     Configuration for X-Ray precision AST-aware code search (Story #977).
@@ -1584,6 +1605,9 @@ class ServerConfig:
     # Story #1458 (Epic #1454) - Fleet migration scheduler configuration
     fleet_migration_config: Optional[FleetMigrationConfig] = None
 
+    # Issue #1548 - Legacy in-repo temporal shard relocation configuration
+    temporal_legacy_migration_config: Optional[TemporalLegacyMigrationConfig] = None
+
     # Story #977 - X-Ray precision AST-aware code search configuration (runtime, not bootstrap)
     xray_config: Optional[XRayConfig] = None
 
@@ -1879,6 +1903,11 @@ class ServerConfig:
         # Story #1458 (Epic #1454) - Initialize fleet migration scheduler config
         if self.fleet_migration_config is None:
             self.fleet_migration_config = FleetMigrationConfig()
+        # Issue #1548 - Initialize legacy temporal migration config (the
+        # dict-to-dataclass conversion for a DB-persisted raw dict already
+        # exists further below, mirroring fleet_migration_config's pattern)
+        if self.temporal_legacy_migration_config is None:
+            self.temporal_legacy_migration_config = TemporalLegacyMigrationConfig()
         # Story #977 - Initialize X-Ray config
         if self.xray_config is None:
             self.xray_config = XRayConfig()
@@ -2624,6 +2653,21 @@ class ServerConfigManager:
             _fm_allowed = {f.name for f in fields(FleetMigrationConfig)}
             config_dict["fleet_migration_config"] = FleetMigrationConfig(
                 **{k: v for k, v in _fm_dict.items() if k in _fm_allowed}
+            )
+
+        # Issue #1548: Convert temporal_legacy_migration_config dict to
+        # TemporalLegacyMigrationConfig. Same rationale as
+        # fleet_migration_config above -- unknown keys filtered for
+        # rolling-upgrade safety.
+        if "temporal_legacy_migration_config" in config_dict and isinstance(
+            config_dict["temporal_legacy_migration_config"], dict
+        ):
+            _tlm_dict = config_dict["temporal_legacy_migration_config"]
+            _tlm_allowed = {f.name for f in fields(TemporalLegacyMigrationConfig)}
+            config_dict["temporal_legacy_migration_config"] = (
+                TemporalLegacyMigrationConfig(
+                    **{k: v for k, v in _tlm_dict.items() if k in _tlm_allowed}
+                )
             )
 
         # Story #977: Convert xray_config dict to XRayConfig

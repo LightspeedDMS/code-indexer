@@ -102,6 +102,22 @@ def _fleet_migration_settings(config: ServerConfig) -> Dict[str, Any]:
     }
 
 
+def _temporal_legacy_migration_settings(config: ServerConfig) -> Dict[str, Any]:
+    """Return temporal_legacy_migration settings dict from ServerConfig
+    (Issue #1548).
+
+    Deliberately its own config section -- see
+    TemporalLegacyMigrationConfig's docstring for why it must never be
+    folded back into the unrelated fleet_migration section.
+    """
+    tlm = config.temporal_legacy_migration_config
+    assert tlm is not None  # Guaranteed by ServerConfig.__post_init__
+    return {
+        "relocation_enabled": tlm.relocation_enabled,
+        "cleanup_authorized": tlm.cleanup_authorized,
+    }
+
+
 def _search_timeouts_settings(config: ServerConfig) -> Dict[str, Any]:
     """Return search_timeouts settings dict from ServerConfig (Issue #1398).
 
@@ -1027,6 +1043,9 @@ class ConfigService:
         # Story #1458 (Epic #1454) - Fleet migration Web UI configuration
         elif category == "fleet_migration":
             self._update_fleet_migration_setting(config, key, value)
+        # Issue #1548 - Legacy temporal shard relocation Web UI configuration
+        elif category == "temporal_legacy_migration":
+            self._update_temporal_legacy_migration_setting(config, key, value)
         # Issue #1398 - Query & search timeouts Web UI configuration
         elif category == "search_timeouts":
             self._update_search_timeouts_setting(config, key, value)
@@ -2494,6 +2513,25 @@ class ConfigService:
             fm.canary_gate_enabled = _parse_bool(value)
         else:
             raise ValueError(f"Unknown fleet_migration setting: {key}")
+
+    def _update_temporal_legacy_migration_setting(
+        self, config: ServerConfig, key: str, value: Any
+    ) -> None:
+        """Update a temporal_legacy_migration setting (Issue #1548).
+
+        Both fields are booleans coerced via the shared `_parse_bool`
+        helper, mirroring `_update_fleet_migration_setting`'s `enabled`
+        coercion -- the Web UI submits an explicit "true"/"false" string
+        (boolean <select>, not a checkbox).
+        """
+        tlm = config.temporal_legacy_migration_config
+        assert tlm is not None  # Guaranteed by ServerConfig.__post_init__
+        if key == "relocation_enabled":
+            tlm.relocation_enabled = _parse_bool(value)
+        elif key == "cleanup_authorized":
+            tlm.cleanup_authorized = _parse_bool(value)
+        else:
+            raise ValueError(f"Unknown temporal_legacy_migration setting: {key}")
 
     def _update_hnsw_orphan_sweep_setting(
         self, config: ServerConfig, key: str, value: Any

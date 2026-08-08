@@ -90,7 +90,12 @@ class RefreshSchedulerProtocol(Protocol):
     # Story #932 follow-up: ttl_seconds removed — the real RefreshScheduler.acquire_write_lock
     # delegates to WriteLockManager which owns TTL internally; the kwarg was never forwarded.
 
-    def release_write_lock(self, alias: str, owner_name: str) -> None: ...
+    def release_write_lock(
+        self,
+        alias: str,
+        owner_name: str,
+        owner_token: Optional[str] = None,
+    ) -> None: ...
 
     def is_write_locked(self, alias: str) -> bool: ...
 
