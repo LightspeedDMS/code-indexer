@@ -429,7 +429,9 @@ def _read_marker_digest(marker_path: Path) -> Optional[str]:
         return None
 
 
-def _cleanup_orphaned_staging_dirs(target_parent: Path) -> int:
+def _cleanup_orphaned_staging_dirs(
+    target_parent: Path, lock_lost_check: Optional[LockLossCheck] = None
+) -> int:
     """Remove staging directories orphaned by a crash before publish.
 
     Blocker 8/review-round-3 blocker 3: a crash between ``shutil.
@@ -445,6 +447,13 @@ def _cleanup_orphaned_staging_dirs(target_parent: Path) -> int:
     ``MigrationResult.failed``. The caller folds the return value into the
     pass's failure count so an operator can actually see that disk space
     is being leaked, rather than the pass looking clean.
+
+    Issue #1548 round-9: checked (non-raising, via ``is_lost()``) before
+    EACH individual ``shutil.rmtree`` -- this sweep can iterate many
+    orphaned directories, so a lock lost partway through must stop
+    deleting the remainder rather than run to completion regardless. An
+    entry left in place this way is NOT counted as a failure: leaving an
+    orphan for a later pass to retry is a safe deferral, not an error.
     """
     if not target_parent.is_dir():
         return 0
@@ -462,6 +471,14 @@ def _cleanup_orphaned_staging_dirs(target_parent: Path) -> int:
             continue
         if not entry.name.startswith(".") or _STAGING_INFIX not in entry.name:
             continue
+        if lock_lost_check is not None and lock_lost_check.is_lost():
+            logger.error(
+                "temporal legacy migration: write lock may have been "
+                "lost -- leaving orphaned staging directory %s (and any "
+                "remaining ones) in place rather than deleting it",
+                entry,
+            )
+            break
         logger.warning("removing orphaned migration staging directory: %s", entry)
         try:
             shutil.rmtree(entry)
@@ -511,8 +528,22 @@ def _publish(
             os.close(fd)
         logger.info("published legacy temporal shard %s -> %s", source, target)
     finally:
+        # Issue #1548 round-9: this scratch directory belongs solely to
+        # THIS call's own (possibly incomplete) publish attempt -- if the
+        # lock may have been lost, leave it for a later pass's
+        # ``_cleanup_orphaned_staging_dirs`` sweep rather than deleting it
+        # here. Never raises from a `finally` block (which could mask an
+        # in-flight exception); it simply defers the cleanup.
         if staging.exists():
-            shutil.rmtree(staging)
+            if lock_lost_check is not None and lock_lost_check.is_lost():
+                logger.warning(
+                    "temporal legacy migration: write lock may have been "
+                    "lost -- leaving staging directory %s in place for a "
+                    "later orphan sweep instead of deleting it now",
+                    staging,
+                )
+            else:
+                shutil.rmtree(staging)
 
 
 def _classify_existing_target(source: Path, target: Path) -> str:
@@ -829,10 +860,12 @@ def _copy_metadata_scope_if_safe(
     *,
     relocation_enabled: bool,
     withhold: bool,
+    lock_lost_check: Optional[LockLossCheck] = None,
 ) -> bool:
     """Attempt the metadata-scope copy. Returns True iff it was attempted
     and failed (Blocker 6). Skips entirely (returns False, no attempt) when
-    relocation is disabled or ``withhold`` is True.
+    relocation is disabled, ``withhold`` is True, or the write lock may
+    have been lost.
 
     Review-round-3 blocker 2: ``withhold`` must be True whenever this pass
     detected EITHER a shard collision OR a shard FAILURE (not collision
@@ -841,6 +874,11 @@ def _copy_metadata_scope_if_safe(
     would let ``INSERT OR REPLACE`` silently overwrite rows belonging to
     whatever independently produced the collision, or rows this pass never
     actually got to verify because the shard copy itself blew up.
+
+    Issue #1548 round-9: a lock-loss skip is treated exactly like
+    ``withhold`` -- a refused attempt, never counted as a failure. This
+    closes the "metadata copying must check lock-loss before proceeding"
+    completeness gap Codex's ninth-round review identified as missing.
     """
     if not relocation_enabled:
         return False
@@ -849,6 +887,14 @@ def _copy_metadata_scope_if_safe(
             "temporal legacy migration: withholding metadata scope copy "
             "%s -> %s because at least one shard collision or failure was "
             "detected this pass",
+            legacy_meta_path,
+            fixed_meta_path,
+        )
+        return False
+    if lock_lost_check is not None and lock_lost_check.is_lost():
+        logger.error(
+            "temporal legacy migration: write lock may have been lost -- "
+            "refusing to copy metadata scope %s -> %s",
             legacy_meta_path,
             fixed_meta_path,
         )
@@ -1051,7 +1097,10 @@ def _collect_shard_provenance_digests(
 
 
 def _mark_repo_relocation_complete(
-    fixed_root: Path, legacy_root: Path, shard_digests: Dict[str, str]
+    fixed_root: Path,
+    legacy_root: Path,
+    shard_digests: Dict[str, str],
+    lock_lost_check: Optional[LockLossCheck] = None,
 ) -> None:
     """Durably record, as a content-bound JSON record, that THIS pass
     observed a non-empty legacy shard list for this repo and verified
@@ -1075,6 +1124,14 @@ def _mark_repo_relocation_complete(
     Fails closed: refuses to write (logs an error and returns) if
     *shard_digests* is empty -- this function must only ever be called
     with a genuinely non-empty, provenance-derived manifest.
+
+    Issue #1548 round-9: ALSO refuses to write (logs an error and
+    returns, checked via non-raising ``is_lost()`` immediately before the
+    durable write) if the write lock may have been lost -- this record's
+    existence can later authorize deleting the shared temporal-metadata
+    scope (see ``_repo_relocation_previously_completed``), so writing it
+    under a lost lock must itself be refused, not merely the deletions it
+    later enables.
     """
     if not shard_digests:
         logger.error(
@@ -1088,6 +1145,13 @@ def _mark_repo_relocation_complete(
     record["legacy_root"] = str(legacy_root)
     record["shards"] = shard_digests
     record["recorded_at"] = time.time()
+    if lock_lost_check is not None and lock_lost_check.is_lost():
+        logger.error(
+            "temporal legacy migration: write lock may have been lost -- "
+            "refusing to write repo-level relocation record under %s",
+            fixed_root,
+        )
+        return
     _write_relocation_record_atomic(fixed_root, record)
 
 
@@ -1206,6 +1270,7 @@ def _sync_metadata_scope(
         metadata_backend_factory,
         relocation_enabled=relocation_enabled,
         withhold=withhold_copy,
+        lock_lost_check=lock_lost_check,
     )
     if copy_failed:
         return True
@@ -1406,13 +1471,23 @@ def _trash_dir_is_safe_to_discard(entry: Path, fixed_root: Path) -> bool:
         return False
 
 
-def _cleanup_orphaned_trash_dirs(legacy_root: Path, fixed_root: Path) -> int:
+def _cleanup_orphaned_trash_dirs(
+    legacy_root: Path,
+    fixed_root: Path,
+    lock_lost_check: Optional[LockLossCheck] = None,
+) -> int:
     """Remove trash directories orphaned by a crash between the atomic
     rename in ``_delete_source_atomically`` and its subsequent
     ``shutil.rmtree`` -- but ONLY those positively confirmed safe to
     discard (``_trash_dir_is_safe_to_discard``). An orphaned trash
     directory whose corresponding target cannot be reconfirmed complete
     is left in place with a WARNING rather than blindly removed.
+
+    Issue #1548 round-9: checked (non-raising, via ``is_lost()``) after
+    the safety check but immediately before EACH individual
+    ``shutil.rmtree`` -- the same completeness-gap fix applied to
+    ``_cleanup_orphaned_staging_dirs``. An entry left in place this way is
+    NOT counted as a failure.
     """
     if not legacy_root.is_dir():
         return 0
@@ -1438,6 +1513,14 @@ def _cleanup_orphaned_trash_dirs(legacy_root: Path, fixed_root: Path) -> int:
                 entry,
             )
             continue
+        if lock_lost_check is not None and lock_lost_check.is_lost():
+            logger.error(
+                "temporal legacy migration: write lock may have been "
+                "lost -- leaving orphaned trash directory %s (and any "
+                "remaining ones) in place rather than deleting it",
+                entry,
+            )
+            break
         logger.warning("removing orphaned migration trash directory: %s", entry)
         try:
             shutil.rmtree(entry)
@@ -1501,8 +1584,12 @@ def migrate_temporal_shards(
     if not legacy_root.is_dir():
         return MigrationResult()
 
-    staging_sweep_failures = _cleanup_orphaned_staging_dirs(fixed_root)
-    trash_sweep_failures = _cleanup_orphaned_trash_dirs(legacy_root, fixed_root)
+    staging_sweep_failures = _cleanup_orphaned_staging_dirs(
+        fixed_root, lock_lost_check=lock_lost_check
+    )
+    trash_sweep_failures = _cleanup_orphaned_trash_dirs(
+        legacy_root, fixed_root, lock_lost_check=lock_lost_check
+    )
     shards = _discover_shards(legacy_root)
     counts = _run_shard_pass(
         shards,
@@ -1516,6 +1603,31 @@ def migrate_temporal_shards(
     )
     counts["failed"] += staging_sweep_failures + trash_sweep_failures
 
+    # Issue #1548 round-9: a structural "don't even attempt the next
+    # phase" check -- once the shard pass above has observed lock loss
+    # (whether it was already lost at entry, or was lost partway through
+    # this pass), the caller must NEVER proceed into the metadata-scope
+    # sync phase (relocation-record write + copy/delete) at all. This is
+    # deliberately IN ADDITION to (not a replacement for) the individual
+    # per-operation guards inside ``_mark_repo_relocation_complete`` and
+    # ``_sync_metadata_scope`` below -- this check closes the case where
+    # the lock is lost strictly BETWEEN the shard pass finishing and this
+    # point, which no per-operation guard downstream can retroactively
+    # cover for the DECISION to enter the phase at all.
+    if lock_lost_check is not None and lock_lost_check.is_lost():
+        logger.error(
+            "temporal legacy migration: write lock may have been lost -- "
+            "refusing to proceed into the metadata-scope sync phase for %s",
+            legacy_root,
+        )
+        return MigrationResult(
+            published=counts["published"],
+            already_complete=counts["already_complete"],
+            deleted=counts["deleted"],
+            collisions=counts["collision"],
+            failed=counts["failed"],
+        )
+
     # Blocker 5: an empty shard list must never vacuously satisfy "all
     # legacy shards gone" -- a repo with literally zero temporal shards has
     # nothing to have relocated, so its metadata scope (if any) must never
@@ -1528,7 +1640,9 @@ def migrate_temporal_shards(
     non_vacuous_all_gone = bool(shards) and all(not shard.exists() for shard in shards)
     if non_vacuous_all_gone:
         shard_digests = _collect_shard_provenance_digests(fixed_root, shards)
-        _mark_repo_relocation_complete(fixed_root, legacy_root, shard_digests)
+        _mark_repo_relocation_complete(
+            fixed_root, legacy_root, shard_digests, lock_lost_check=lock_lost_check
+        )
     all_legacy_shards_gone = non_vacuous_all_gone or (
         not shards and _repo_relocation_previously_completed(fixed_root, legacy_root)
     )
