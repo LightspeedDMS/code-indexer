@@ -22,19 +22,33 @@ class _FakeWriteLockManager:
         self.acquire_calls: List[str] = []
         self.release_calls: List[str] = []
 
-    def acquire(self, alias, *, owner_name, ttl_seconds=_FAKE_DEFAULT_TTL_SECONDS):
+    def acquire(
+        self,
+        alias,
+        *,
+        owner_name,
+        ttl_seconds=_FAKE_DEFAULT_TTL_SECONDS,
+        owner_token=None,
+    ):
         self.acquire_calls.append(alias)
         if alias in self.locked:
             return False
         self.locked.add(alias)
         return True
 
-    def release(self, alias, *, owner_name):
+    def release(self, alias, *, owner_name, owner_token=None):
         self.release_calls.append(alias)
         self.locked.discard(alias)
         return True
 
-    def renew(self, alias, *, owner_name, ttl_seconds=_FAKE_DEFAULT_TTL_SECONDS):
+    def renew(
+        self,
+        alias,
+        *,
+        owner_name,
+        ttl_seconds=_FAKE_DEFAULT_TTL_SECONDS,
+        owner_token=None,
+    ):
         return alias in self.locked
 
 
@@ -52,8 +66,10 @@ class _FakeRefreshScheduler:
         if alias in self._refresh_in_progress_aliases:
             raise DuplicateJobError("global_repo_refresh", alias, "job-1")
 
-    def release_write_lock(self, alias, *, owner_name):
-        self.write_lock_manager.release(alias, owner_name=owner_name)
+    def release_write_lock(self, alias, *, owner_name, owner_token=None):
+        self.write_lock_manager.release(
+            alias, owner_name=owner_name, owner_token=owner_token
+        )
 
 
 class _FakeConfigService:

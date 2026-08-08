@@ -11480,13 +11480,16 @@ def _migrate_one_cli_candidate(
     )
 
     try:
-        with guarded_by_refresh_lock(refresh_scheduler, candidate.alias):
+        with guarded_by_refresh_lock(
+            refresh_scheduler, candidate.alias
+        ) as lock_loss_signal:
             return migrate_temporal_shards(
                 candidate.legacy_root,
                 candidate.fixed_root,
                 relocation_enabled=True,
                 cleanup_authorized=cleanup_authorized,
                 metadata_backend_factory=backend_factory,
+                lock_lost_check=lock_loss_signal,
             )
     except (WriteLockHeldError, RefreshInProgressError) as exc:
         console.print(f"{candidate.alias}: skipped this pass ({exc})", style="yellow")

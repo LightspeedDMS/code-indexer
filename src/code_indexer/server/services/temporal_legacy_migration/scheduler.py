@@ -146,13 +146,16 @@ class TemporalLegacyMigrationScheduler:
         candidate, logged as a WARNING.
         """
         try:
-            with guarded_by_refresh_lock(self._refresh_scheduler, candidate.alias):
+            with guarded_by_refresh_lock(
+                self._refresh_scheduler, candidate.alias
+            ) as lock_loss_signal:
                 return migrate_temporal_shards(
                     candidate.legacy_root,
                     candidate.fixed_root,
                     relocation_enabled=relocation_enabled,
                     cleanup_authorized=cleanup_authorized,
                     metadata_backend_factory=metadata_backend_factory,
+                    lock_lost_check=lock_loss_signal,
                 )
         except (WriteLockHeldError, RefreshInProgressError) as exc:
             logger.warning(
