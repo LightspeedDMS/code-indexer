@@ -144,6 +144,76 @@ def _structural_manifest(root: Path) -> dict[str, str]:
     return manifest
 
 
+def logical_point_ids(root: Path) -> set[str]:
+    """Return the full set of logical point-record IDs found under *root*.
+
+    Issue #1548 round-5 exploit 1 fix: ``mover.py``'s HNSW structural-
+    completeness gate previously only checked "the index file loads and
+    is non-empty" (``index.get_current_count() > 0``) -- never that the
+    index actually covers EVERY logical point record present at *root*.
+    Codex reproduced a shard with 2 logical vector records but an HNSW
+    index built from only 1 of them, which still passed the old check.
+    This function exposes the same logical-record enumeration
+    ``manifest_digest()`` already uses (``_manifest``) so a caller can
+    compare it against the HNSW index's own ``id_mapping`` (written by
+    ``HNSWIndexManager._update_metadata`` at build time) and refuse
+    "already_complete" on any mismatch.
+    """
+    return set(_manifest(root).keys())
+
+
+def hnsw_id_mapping_point_ids(target: Path) -> Optional[set[str]]:
+    """Read *target*'s ``collection_meta.json`` and return the point IDs
+    the HNSW index's ``id_mapping`` claims to cover, or ``None`` on any
+    absent/malformed shape (including a non-string value anywhere in the
+    mapping, which invalidates the whole mapping rather than being
+    silently dropped).
+
+    Issue #1548 round-5 exploit 1 fix: ``HNSWIndexManager._update_metadata``
+    writes ``hnsw_index.id_mapping`` (label -> point_id) at build time --
+    the ONLY authoritative record of which logical points a published
+    ``hnsw_index.bin`` actually indexes.
+    """
+    meta_path = target / "collection_meta.json"
+    try:
+        with meta_path.open(encoding="utf-8") as stream:
+            data = json.load(stream)
+    except (OSError, ValueError, UnicodeDecodeError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    hnsw_meta = data.get("hnsw_index")
+    if not isinstance(hnsw_meta, dict):
+        return None
+    id_mapping = hnsw_meta.get("id_mapping")
+    if not isinstance(id_mapping, dict):
+        return None
+    values = list(id_mapping.values())
+    if not all(isinstance(value, str) for value in values):
+        return None
+    return set(values)
+
+
+def hnsw_index_covers_all_logical_points(target: Path) -> bool:
+    """True iff the HNSW index's ``id_mapping`` covers EXACTLY the set of
+    logical point records present at *target*.
+
+    Issue #1548 round-5 exploit 1 fix: Codex reproduced a shard with 2
+    logical vector records but an HNSW index built from only 1 of them --
+    the pre-fix completeness check only verified "loads and is non-empty",
+    which that incomplete index still satisfied. Any mismatch (missing
+    points, extra points, or an unreadable mapping) fails closed.
+    """
+    mapped_ids = hnsw_id_mapping_point_ids(target)
+    if mapped_ids is None:
+        return False
+    try:
+        expected_ids = logical_point_ids(target)
+    except Exception:
+        return False
+    return mapped_ids == expected_ids
+
+
 def peek_one_vector_dimension(root: Path) -> Optional[int]:
     """Return the vector dimension of one real point record under *root*,
     or ``None`` if no record can be found.

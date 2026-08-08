@@ -18,7 +18,10 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
 
-from .temporal_metadata_store import generate_hash_prefix
+from .temporal_metadata_store import (
+    canonical_content_digest_rows,
+    generate_hash_prefix,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -417,6 +420,12 @@ class TemporalMetadataSqliteBackend:
             ).fetchall()
         finally:
             conn.close()
+        # Issue #1548 round-5 secondary finding 4: re-sort in Python with a
+        # NULL-order-neutral key, independent of SQLite's own NULL-first
+        # ORDER BY default -- see canonical_content_digest_rows()'s
+        # docstring for why the bare ORDER BY above is not sufficient on
+        # its own for cross-backend digest agreement.
+        rows = canonical_content_digest_rows(rows)
         encoded = json.dumps(rows, sort_keys=True, separators=(",", ":"), default=str)
         return hashlib.sha256(encoded.encode()).hexdigest()
 

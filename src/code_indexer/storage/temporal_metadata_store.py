@@ -37,7 +37,7 @@ import hashlib
 import logging
 import re
 from pathlib import Path
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 
 from .shared.chunk_layout import ChunkLayout, resolve_chunk_layout
 from .temporal_metadata_backend_registry import get_temporal_metadata_backend_factory
@@ -70,6 +70,41 @@ def generate_hash_prefix(point_id: str) -> str:
         16-character SHA256 hash prefix
     """
     return hashlib.sha256(point_id.encode()).hexdigest()[:HASH_PREFIX_LENGTH]
+
+
+def canonical_content_digest_rows(
+    rows: Sequence[Tuple[Any, ...]],
+) -> List[Tuple[Any, ...]]:
+    """Sort ``content_digest()`` row tuples into a NULL-order-neutral
+    canonical order, shared by every backend's ``content_digest()``.
+
+    Issue #1548 round-5 secondary finding 4: both
+    ``TemporalMetadataSqliteBackend.content_digest()`` and
+    ``TemporalMetadataPostgresBackend.content_digest()`` previously relied
+    on a bare SQL ``ORDER BY`` over columns that can be NULL (e.g.
+    ``commit_hash``, ``file_path``). SQLite sorts NULL FIRST in an
+    ascending ``ORDER BY``; PostgreSQL sorts NULL LAST by default. Two
+    backends holding IDENTICAL logical rows -- at least one of which has a
+    NULL in an ordered column -- could therefore disagree on row order and
+    produce DIFFERENT digests for the exact same data, defeating
+    ``mover.py``'s cross-backend content-digest comparison
+    (``_metadata_scope_relocation_verified``).
+
+    This re-sorts in Python, AFTER fetching, with a key that compares
+    ``(value is None, value)`` per column: the boolean flag is compared
+    FIRST, so a NULL always sorts consistently -- after every non-null
+    value in that column -- on EITHER backend, and the underlying value is
+    only ever compared against another value of the same nullness (never
+    None against a real value, which would raise ``TypeError`` in Python
+    3). Applying this in Python, independent of either database engine's
+    own default, is what makes the resulting order -- and therefore the
+    digest -- backend-independent by construction rather than by
+    coincidence of two engines' NULL-ordering defaults happening to agree.
+    """
+    return sorted(
+        rows,
+        key=lambda row: tuple((value is None, value) for value in row),
+    )
 
 
 class TemporalFormatError(Exception):

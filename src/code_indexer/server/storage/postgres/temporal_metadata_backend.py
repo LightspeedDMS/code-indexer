@@ -29,6 +29,7 @@ from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 from code_indexer.storage.temporal_metadata_store import (
     COLLECTION_KEY_LENGTH,
+    canonical_content_digest_rows,
     generate_hash_prefix,
 )
 
@@ -316,6 +317,12 @@ class TemporalMetadataPostgresBackend:
                 """,
                 (self._collection_key,),
             ).fetchall()
+        # Issue #1548 round-5 secondary finding 4: re-sort in Python with a
+        # NULL-order-neutral key, independent of PostgreSQL's own NULL-last
+        # ORDER BY default -- see canonical_content_digest_rows()'s
+        # docstring for why the bare ORDER BY above alone cannot guarantee
+        # agreement with the SQLite backend's digest for the SAME rows.
+        rows = canonical_content_digest_rows(rows)
         encoded = json.dumps(
             [list(row) for row in rows],
             sort_keys=True,
