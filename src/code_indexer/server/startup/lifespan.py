@@ -2115,6 +2115,7 @@ def make_lifespan(
             temporal_legacy_migration_scheduler = TemporalLegacyMigrationScheduler(
                 golden_repo_manager=golden_repo_manager,
                 config_service=get_config_service(),
+                refresh_scheduler=refresh_scheduler,
                 background_job_manager=background_job_manager,
             )
             temporal_legacy_migration_scheduler.start()
