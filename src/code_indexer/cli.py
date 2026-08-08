@@ -7777,7 +7777,7 @@ def status(ctx):
         display_uninitialized_status(project_root)
 
 
-def _status_impl(ctx, *, force_docker=None):
+def _status_impl(ctx):
     """Show status of services and index.
 
     \b
@@ -8441,11 +8441,7 @@ def _status_impl(ctx, *, force_docker=None):
                                     if state == "idle"
                                     else ("🔄" if state == "building" else "⚠️")
                                 )
-                                temporal_status = (
-                                    "✅ Available"
-                                    if state == "idle"
-                                    else f"{state_icon} {state.title()}"
-                                )
+                                temporal_status = f"{state_icon} {state.title()}"
                                 temporal_details = (
                                     f"Provider: {coll_name}\n"
                                     f"{total_commits} commits | {files_processed:,} files changed | {vector_count:,} vectors\n"
@@ -8459,13 +8455,12 @@ def _status_impl(ctx, *, force_docker=None):
                                 )
                             except Exception as e_coll:
                                 logger.warning(
-                                    f"Failed to check temporal index status for "
-                                    f"collection {coll_name}: {e_coll}"
+                                    f"Failed to read temporal collection {coll_name}: {e_coll}"
                                 )
                                 table.add_row(
                                     "Temporal Index",
                                     "⚠️ Error",
-                                    f"Failed to read {coll_name}: {str(e_coll)[:80]}",
+                                    f"{coll_name}: {str(e_coll)[:80]}",
                                 )
                 except Exception as e:
                     # Don't fail status command if temporal check fails, but log the error
@@ -11433,6 +11428,71 @@ def server_status(ctx, verbose: bool, server_dir: Optional[str]):
         sys.exit(1)
 
 
+def _resolve_temporal_legacy_migration_settings():
+    """Read temporal_legacy_migration_config via ConfigService (Issue #1548
+    blocker 6). Raises loudly if the config section is unavailable --
+    ServerConfig.__post_init__ guarantees it is always populated in
+    practice, so this is a defensive invariant check, not a normal path.
+    """
+    from .server.services.config_service import get_config_service
+
+    settings = get_config_service().get_config().temporal_legacy_migration_config
+    if settings is None:
+        raise click.ClickException("temporal_legacy_migration_config is unavailable")
+    return settings
+
+
+def _resolve_temporal_legacy_migration_candidates(repo_alias: Optional[str]):
+    from .server.repositories.golden_repo_manager import get_golden_repo_manager
+    from .server.services.temporal_legacy_migration.discovery import (
+        discover_candidates,
+    )
+
+    manager = get_golden_repo_manager()
+    candidates = list(discover_candidates(manager))
+    if repo_alias is not None:
+        candidates = [item for item in candidates if item.alias == repo_alias]
+        if not candidates:
+            raise click.ClickException(
+                f"golden repository alias not found: {repo_alias}"
+            )
+    return candidates
+
+
+def _run_temporal_legacy_migration_candidates(candidates, *, cleanup_authorized: bool):
+    from .server.services.temporal_legacy_migration.mover import (
+        migrate_temporal_shards,
+    )
+    from .storage.temporal_metadata_backend_registry import (
+        get_temporal_metadata_backend_factory,
+    )
+
+    # get_temporal_metadata_backend_factory() returns None by design in
+    # solo/CLI context (see that module's own docstring); mover.py's
+    # _sync_metadata_scope already no-ops on a None factory, so passing it
+    # straight through is correct and requires no special-casing here.
+    backend_factory = get_temporal_metadata_backend_factory()
+    total_published = total_deleted = 0
+    for candidate in candidates:
+        result = migrate_temporal_shards(
+            candidate.legacy_root,
+            candidate.fixed_root,
+            relocation_enabled=True,
+            cleanup_authorized=cleanup_authorized,
+            metadata_backend_factory=backend_factory,
+        )
+        total_published += result.published
+        total_deleted += result.deleted
+        console.print(
+            f"{candidate.alias}: published={result.published}, "
+            f"already_complete={result.already_complete}, "
+            f"deleted={result.deleted}"
+        )
+    console.print(
+        f"Migration complete: published={total_published}, deleted={total_deleted}"
+    )
+
+
 @server_group.command("temporal-migrate-legacy")
 @click.option("--alias", "repo_alias", default=None, help="Migrate only this alias")
 @click.option(
@@ -11442,46 +11502,35 @@ def server_status(ctx, verbose: bool, server_dir: Optional[str]):
 )
 @click.pass_context
 def server_temporal_migrate_legacy(ctx, repo_alias: Optional[str], cleanup: bool):
-    """Relocate legacy temporal shards into fixed server-owned storage."""
-    try:
-        from .server.repositories.golden_repo_manager import get_golden_repo_manager
-        from .server.services.temporal_legacy_migration.discovery import (
-            discover_candidates,
-        )
-        from .server.services.temporal_legacy_migration.mover import (
-            migrate_temporal_shards,
-        )
-        from .storage.temporal_metadata_backend_registry import (
-            get_temporal_metadata_backend_factory,
-        )
+    """Relocate legacy temporal shards into fixed server-owned storage.
 
-        manager = get_golden_repo_manager()
-        candidates = list(discover_candidates(manager))
-        if repo_alias is not None:
-            candidates = [item for item in candidates if item.alias == repo_alias]
-            if not candidates:
-                raise click.ClickException(
-                    f"golden repository alias not found: {repo_alias}"
-                )
-        backend_factory = get_temporal_metadata_backend_factory()
-        total_published = total_deleted = 0
-        for candidate in candidates:
-            result = migrate_temporal_shards(
-                candidate.legacy_root,
-                candidate.fixed_root,
-                relocation_enabled=True,
-                cleanup_authorized=cleanup,
-                metadata_backend_factory=backend_factory,
-            )
-            total_published += result.published
-            total_deleted += result.deleted
+    Issue #1548 blocker 6: respects the two independent, Web-UI-gated
+    temporal_legacy_migration_config flags (relocation_enabled /
+    cleanup_authorized) -- this command NEVER proceeds against operator
+    intent just because it was invoked.
+    """
+    try:
+        settings = _resolve_temporal_legacy_migration_settings()
+        if not settings.relocation_enabled:
             console.print(
-                f"{candidate.alias}: published={result.published}, "
-                f"already_complete={result.already_complete}, "
-                f"deleted={result.deleted}"
+                "Temporal legacy migration is disabled "
+                "(temporal_legacy_migration_config.relocation_enabled is "
+                "False in the Web UI Config Screen) -- doing nothing.",
+                style="yellow",
             )
-        console.print(
-            f"Migration complete: published={total_published}, deleted={total_deleted}"
+            return
+        cleanup_authorized = cleanup and settings.cleanup_authorized
+        if cleanup and not settings.cleanup_authorized:
+            console.print(
+                "--cleanup was requested but "
+                "temporal_legacy_migration_config.cleanup_authorized is "
+                "False in the Web UI Config Screen -- legacy shards will "
+                "be published but NOT deleted.",
+                style="yellow",
+            )
+        candidates = _resolve_temporal_legacy_migration_candidates(repo_alias)
+        _run_temporal_legacy_migration_candidates(
+            candidates, cleanup_authorized=cleanup_authorized
         )
     except click.ClickException:
         raise
