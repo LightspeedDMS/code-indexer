@@ -46,6 +46,13 @@ class TemporalMetadataSqliteBackend:
 
     METADATA_DB_NAME = "temporal_metadata.db"
 
+    # Bug #484 pattern (see save_metadata/save_metadata_batch below): make
+    # concurrent writers wait rather than immediately raising
+    # "database is locked". Named here for copy_collection_scope's re-key
+    # write, which uses the identical value the rest of this class already
+    # hardcodes inline.
+    _BUSY_TIMEOUT_MS = 30000
+
     def __init__(self, collection_path: Path):
         """Initialize temporal metadata store.
 
@@ -380,16 +387,50 @@ class TemporalMetadataSqliteBackend:
             conn.close()
 
     def copy_collection_scope(self, target_collection_path: Path) -> None:
-        """Copy the live SQLite database using SQLite's consistent backup API."""
-        target_collection_path.mkdir(parents=True, exist_ok=True)
-        destination = sqlite3.connect(target_collection_path / self.METADATA_DB_NAME)
-        source = sqlite3.connect(self.db_path)
+        """Copy every metadata row into a fresh store at the target path.
+
+        Issue #1548 blocker 3: this is a genuine row-level re-key, not a
+        whole-file ``backup()`` clone. The destination schema is created
+        through the normal ``TemporalMetadataSqliteBackend(target_
+        collection_path)`` constructor (idempotent CREATE TABLE IF NOT
+        EXISTS) and each row is written via ``INSERT OR REPLACE``, so a
+        repeated copy for a resumed migration pass never depends on the
+        destination file's prior on-disk state. The source database is
+        never mutated or deleted by this method.
+        """
+        source_conn = sqlite3.connect(self.db_path)
         try:
-            source.backup(destination)
-            destination.commit()
+            rows = source_conn.execute(
+                """
+                SELECT hash_prefix, point_id, commit_hash, file_path,
+                       chunk_index, created_at, format_version
+                FROM temporal_metadata
+                """
+            ).fetchall()
         finally:
-            source.close()
-            destination.close()
+            source_conn.close()
+        if not rows:
+            # An empty source must never have the side effect of creating a
+            # destination database file -- the constructor below would
+            # otherwise create one unconditionally.
+            return
+
+        destination = TemporalMetadataSqliteBackend(target_collection_path)
+        dest_conn = sqlite3.connect(destination.db_path)
+        try:
+            dest_conn.execute("PRAGMA journal_mode=WAL")
+            dest_conn.execute(f"PRAGMA busy_timeout={self._BUSY_TIMEOUT_MS}")
+            dest_conn.executemany(
+                """
+                INSERT OR REPLACE INTO temporal_metadata
+                (hash_prefix, point_id, commit_hash, file_path, chunk_index, created_at, format_version)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                rows,
+            )
+            dest_conn.commit()
+        finally:
+            dest_conn.close()
 
     def delete_collection_scope(self) -> None:
         """Remove this shard's SQLite metadata database."""
