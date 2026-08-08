@@ -142,6 +142,36 @@ _HNSW_INDEX_FILENAME = "hnsw_index.bin"
 _COLLECTION_META_FILENAME = "collection_meta.json"
 
 
+class LockLossCheck(Protocol):
+    """Minimal structural surface this module needs from a caller's
+    write-lock-loss signal (``locking.LockLossSignal`` in production).
+
+    Typed here (rather than importing ``locking.py``, a server-startup-
+    heavy module) so callers get real structural type checking instead of
+    a bare ``Any`` -- mirrors ``TemporalMetadataScopeBackend`` immediately
+    below, this module's existing pattern for decoupled backend typing.
+    """
+
+    def is_lost(self) -> bool: ...
+
+    def raise_if_lost(self) -> None: ...
+
+
+def _abort_if_lock_lost(lock_lost_check: Optional[LockLossCheck]) -> None:
+    """Raise if the caller's write-lock heartbeat signalled the lock may
+    no longer be held (Issue #1548 round-8, Issue 1).
+
+    Checked immediately before every destructive filesystem/metadata
+    operation in this module -- a renewal failure must abort BEFORE
+    acting, never merely be logged while destructive work proceeds
+    regardless. A ``None`` check (the default for every caller outside
+    the guarded production path, e.g. tests exercising this module
+    directly) is a no-op.
+    """
+    if lock_lost_check is not None:
+        lock_lost_check.raise_if_lost()
+
+
 class TemporalMetadataScopeBackend(Protocol):
     """Minimal surface this module needs from a temporal metadata backend.
 
@@ -447,6 +477,7 @@ def _publish(
     source: Path,
     target: Path,
     pre_publish_hook: Optional[Callable[[], None]],
+    lock_lost_check: Optional[LockLossCheck] = None,
 ) -> None:
     target.parent.mkdir(parents=True, exist_ok=True)
     staging = target.parent / f".{target.name}{_STAGING_INFIX}{uuid.uuid4().hex}"
@@ -462,6 +493,11 @@ def _publish(
         _fsync_tree(staging)
         if pre_publish_hook is not None:
             pre_publish_hook()
+        # Issue #1548 round-8, Issue 1: the write lock may have been lost
+        # since this pass began -- check immediately before the first
+        # destructive mutation below (clearing a stray target / the
+        # publish rename itself).
+        _abort_if_lock_lost(lock_lost_check)
         if target.exists():
             # Caller only reaches _publish() when target has already been
             # confirmed to hold no verified data -- clear any stray/partial
@@ -544,6 +580,7 @@ def _verify_and_delete_source(
     target: Path,
     pre_delete_hook: Optional[Callable[[], None]],
     post_rename_hook: Optional[Callable[[], None]] = None,
+    lock_lost_check: Optional[LockLossCheck] = None,
 ) -> None:
     """Check-verify-recheck-delete sequence for one shard's legacy source.
 
@@ -598,7 +635,13 @@ def _verify_and_delete_source(
     # against after the rename, so a target SWAPPED during that window is
     # caught even though a swapped-in shard can be independently valid.
     expected_target_digest = manifest_digest(target)
-    _delete_source_atomically(source, target, expected_target_digest, post_rename_hook)
+    _delete_source_atomically(
+        source,
+        target,
+        expected_target_digest,
+        post_rename_hook,
+        lock_lost_check=lock_lost_check,
+    )
     logger.info("deleted verified legacy temporal shard %s", source)
 
 
@@ -611,6 +654,7 @@ def _process_one_shard(
     pre_publish_hook: Optional[Callable[[], None]],
     pre_delete_hook: Optional[Callable[[], None]] = None,
     post_rename_hook: Optional[Callable[[], None]] = None,
+    lock_lost_check: Optional[LockLossCheck] = None,
 ) -> str:
     """Migrate/verify/cleanup one shard. Returns one of: "published",
     "already_complete", "collision", "skipped", "deleted" (deleted implies
@@ -622,7 +666,7 @@ def _process_one_shard(
         if outcome == "collision":
             return "collision"
     elif relocation_enabled:
-        _publish(source, target, pre_publish_hook)
+        _publish(source, target, pre_publish_hook, lock_lost_check=lock_lost_check)
         outcome = "published"
     else:
         return "skipped"
@@ -646,7 +690,13 @@ def _process_one_shard(
                 f"incomplete or corrupt) -- refusing to authorize legacy "
                 f"source deletion"
             )
-        _verify_and_delete_source(source, target, pre_delete_hook, post_rename_hook)
+        _verify_and_delete_source(
+            source,
+            target,
+            pre_delete_hook,
+            post_rename_hook,
+            lock_lost_check=lock_lost_check,
+        )
     return outcome
 
 
@@ -659,6 +709,7 @@ def _run_shard_pass(
     pre_publish_hook: Optional[Callable[[], None]],
     pre_delete_hook: Optional[Callable[[], None]] = None,
     post_rename_hook: Optional[Callable[[], None]] = None,
+    lock_lost_check: Optional[LockLossCheck] = None,
 ) -> Dict[str, int]:
     """Process every shard, isolating per-shard failures (Blocker 8)."""
     counts = {
@@ -668,7 +719,22 @@ def _run_shard_pass(
         "collision": 0,
         "failed": 0,
     }
-    for source in shards:
+    for index, source in enumerate(shards):
+        # Issue #1548 round-8, Issue 1: once the write lock may have been
+        # lost, abort the CURRENT shard AND every subsequent one in this
+        # run without attempting any further destructive work -- a
+        # renewal failure must stop the pass, not merely fail one shard
+        # while the loop keeps going.
+        if lock_lost_check is not None and lock_lost_check.is_lost():
+            remaining = len(shards) - index
+            counts["failed"] += remaining
+            logger.error(
+                "temporal legacy migration: write lock may have been "
+                "lost -- aborting %d remaining shard(s) for this repo "
+                "without attempting any further destructive work",
+                remaining,
+            )
+            break
         target = fixed_root / source.name
         try:
             outcome = _process_one_shard(
@@ -679,6 +745,7 @@ def _run_shard_pass(
                 pre_publish_hook=pre_publish_hook,
                 pre_delete_hook=pre_delete_hook,
                 post_rename_hook=post_rename_hook,
+                lock_lost_check=lock_lost_check,
             )
         except Exception:
             counts["failed"] += 1
@@ -812,6 +879,7 @@ def _delete_metadata_scope_if_safe(
     *,
     cleanup_authorized: bool,
     all_legacy_shards_gone: bool,
+    lock_lost_check: Optional[LockLossCheck] = None,
 ) -> bool:
     """Attempt the metadata-scope deletion. Returns True iff it was
     attempted and failed (Blocker 6). Withheld (returns False, no attempt)
@@ -829,6 +897,11 @@ def _delete_metadata_scope_if_safe(
     ):
         return False
     try:
+        # Issue #1548 round-8, Issue 1: check immediately before this
+        # destructive metadata deletion -- a lock-loss here is treated
+        # exactly like any other failure of this call (caught below,
+        # counted as failed, never silently proceeding).
+        _abort_if_lock_lost(lock_lost_check)
         metadata_backend_factory(legacy_meta_path).delete_collection_scope()
         logger.info("deleted legacy temporal metadata scope %s", legacy_meta_path)
         return False
@@ -1107,6 +1180,7 @@ def _sync_metadata_scope(
     cleanup_authorized: bool,
     all_legacy_shards_gone: bool,
     withhold_copy: bool,
+    lock_lost_check: Optional[LockLossCheck] = None,
 ) -> bool:
     """Copy/delete the repo-level shared temporal-metadata bookkeeping scope.
 
@@ -1142,6 +1216,7 @@ def _sync_metadata_scope(
         metadata_backend_factory,
         cleanup_authorized=cleanup_authorized,
         all_legacy_shards_gone=all_legacy_shards_gone,
+        lock_lost_check=lock_lost_check,
     )
 
 
@@ -1177,6 +1252,7 @@ def _delete_source_atomically(
     target: Path,
     expected_target_digest: str,
     post_rename_hook: Optional[Callable[[], None]] = None,
+    lock_lost_check: Optional[LockLossCheck] = None,
 ) -> None:
     """Atomically rename *source* to a private trash path, re-verify
     *target* once more, then delete the trash -- or, on re-verification
@@ -1216,6 +1292,10 @@ def _delete_source_atomically(
     trash_path = (
         source.parent / f".{source.name}{_PENDING_DELETE_INFIX}{uuid.uuid4().hex}"
     )
+    # Issue #1548 round-8, Issue 1: check immediately before the
+    # rename-to-trash -- the first of this function's two destructive
+    # steps.
+    _abort_if_lock_lost(lock_lost_check)
     os.rename(source, trash_path)
     if post_rename_hook is not None:
         post_rename_hook()
@@ -1234,6 +1314,9 @@ def _delete_source_atomically(
             f"the atomic rename to trash -- source restored to its "
             f"original location, treating this migration attempt as failed"
         )
+    # Issue #1548 round-8, Issue 1: check again immediately before the
+    # final destructive delete of the trashed source.
+    _abort_if_lock_lost(lock_lost_check)
     shutil.rmtree(trash_path)
 
 
@@ -1378,6 +1461,7 @@ def migrate_temporal_shards(
     pre_publish_hook: Optional[Callable[[], None]] = None,
     pre_delete_hook: Optional[Callable[[], None]] = None,
     post_rename_hook: Optional[Callable[[], None]] = None,
+    lock_lost_check: Optional[LockLossCheck] = None,
 ) -> MigrationResult:
     """Relocate every legacy shard for one repo without destroying data
     that has not been positively verified as safely migrated.
@@ -1399,6 +1483,16 @@ def migrate_temporal_shards(
             source is renamed to its private trash path, before the final
             target re-verification (Issue #1548 round-6 exploit 2 -- see
             ``_delete_source_atomically``).
+        lock_lost_check: Issue #1548 round-8 fix (Issue 1) -- checked
+            immediately before every destructive operation in this
+            module (via ``_abort_if_lock_lost``); when it reports the
+            caller's write-lock heartbeat has failed, the CURRENT and any
+            SUBSEQUENT shard/metadata destructive step in this pass is
+            aborted rather than proceeding without exclusive ownership of
+            the repo. Production passes
+            ``locking.guarded_by_refresh_lock``'s yielded
+            ``LockLossSignal``; `None` (the default, e.g. tests
+            exercising this module directly) disables the check entirely.
 
     Per-shard failures are isolated (Blocker 8). Caller MUST hold the
     repo's write lock (``locking.guarded_by_refresh_lock``) -- this
@@ -1418,6 +1512,7 @@ def migrate_temporal_shards(
         pre_publish_hook=pre_publish_hook,
         pre_delete_hook=pre_delete_hook,
         post_rename_hook=post_rename_hook,
+        lock_lost_check=lock_lost_check,
     )
     counts["failed"] += staging_sweep_failures + trash_sweep_failures
 
@@ -1445,6 +1540,7 @@ def migrate_temporal_shards(
         cleanup_authorized=cleanup_authorized,
         all_legacy_shards_gone=all_legacy_shards_gone,
         withhold_copy=counts["collision"] > 0 or counts["failed"] > 0,
+        lock_lost_check=lock_lost_check,
     )
     if metadata_failed:
         counts["failed"] += 1
