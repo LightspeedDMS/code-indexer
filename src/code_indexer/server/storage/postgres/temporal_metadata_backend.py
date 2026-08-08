@@ -331,8 +331,23 @@ class TemporalMetadataPostgresBackend:
         )
         return hashlib.sha256(encoded.encode()).hexdigest()
 
-    def copy_collection_scope(self, target_collection_path: Path) -> None:
-        """Additively re-key rows; retain the source key for compatibility."""
+    def copy_collection_scope(
+        self,
+        target_collection_path: Path,
+        *,
+        pre_commit_check: Optional[Callable[[], None]] = None,
+    ) -> None:
+        """Additively re-key rows; retain the source key for compatibility.
+
+        Issue #1548 round-10 Finding 1: ``pre_commit_check`` (if given) is
+        invoked immediately before this transaction's own ``conn.
+        commit()`` -- the narrowest achievable window between "rows
+        written" and "durably committed". Raising here, before the
+        commit, triggers ``psycopg``'s own automatic rollback-on-exception
+        for a connection borrowed via ``pool.connection()`` as a context
+        manager -- no explicit ``conn.rollback()`` is needed; the
+        exception propagates unchanged and the write is never committed.
+        """
         target_key = hashlib.sha256(str(target_collection_path).encode()).hexdigest()[
             : len(self._collection_key)
         ]
@@ -356,6 +371,8 @@ class TemporalMetadataPostgresBackend:
                 """,
                 (target_key, self._collection_key),
             )
+            if pre_commit_check is not None:
+                pre_commit_check()
             conn.commit()
 
     def delete_collection_scope(self) -> None:

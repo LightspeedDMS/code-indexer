@@ -182,7 +182,12 @@ class TemporalMetadataScopeBackend(Protocol):
     instead of a bare ``object`` + ``# type: ignore``.
     """
 
-    def copy_collection_scope(self, target_collection_path: Path) -> None: ...
+    def copy_collection_scope(
+        self,
+        target_collection_path: Path,
+        *,
+        pre_commit_check: Optional[Callable[[], None]] = None,
+    ) -> None: ...
 
     def delete_collection_scope(self) -> None: ...
 
@@ -853,6 +858,30 @@ def _metadata_scope_relocation_verified(
     return True
 
 
+def _make_pre_commit_lock_check(
+    lock_lost_check: Optional[LockLossCheck],
+) -> Optional[Callable[[], None]]:
+    """Build a narrow, commit-point lock-loss check callback for a
+    backend's ``pre_commit_check`` hook (Issue #1548 round-10, Finding 1).
+
+    ``None`` when there is no lock-loss signal to check -- mirrors every
+    other ``None``-is-a-no-op convention in this module. The returned
+    callable is passed straight through to
+    ``TemporalMetadataScopeBackend.copy_collection_scope``'s
+    ``pre_commit_check`` parameter, which the backend invokes immediately
+    before its own commit, inside the same transaction -- so a lock lost
+    DURING the copy (not just before it started) still aborts before the
+    write becomes durable.
+    """
+    if lock_lost_check is None:
+        return None
+
+    def _check() -> None:
+        lock_lost_check.raise_if_lost()
+
+    return _check
+
+
 def _copy_metadata_scope_if_safe(
     legacy_meta_path: Path,
     fixed_meta_path: Path,
@@ -879,6 +908,20 @@ def _copy_metadata_scope_if_safe(
     ``withhold`` -- a refused attempt, never counted as a failure. This
     closes the "metadata copying must check lock-loss before proceeding"
     completeness gap Codex's ninth-round review identified as missing.
+
+    Issue #1548 round-10, Finding 1: checking ``is_lost()`` ONCE before
+    this call starts is not enough -- the backend's own transaction
+    (SQLite ``executemany`` / PostgreSQL ``INSERT ... ON CONFLICT``) can
+    take real time for a large scope. A ``pre_commit_check`` built from
+    the SAME ``lock_lost_check`` is threaded into ``copy_collection_
+    scope`` so the backend itself rechecks immediately before its commit
+    and rolls back instead of committing if the lock was lost DURING the
+    write. If that recheck fires, this function classifies it exactly
+    like the entry-level check above -- a refused, non-failure deferral,
+    determined by re-consulting ``lock_lost_check.is_lost()`` after the
+    exception rather than by matching an exception type (any exception
+    the backend raises after a genuine lock loss is treated the same
+    way, regardless of its concrete type).
     """
     if not relocation_enabled:
         return False
@@ -901,7 +944,8 @@ def _copy_metadata_scope_if_safe(
         return False
     try:
         metadata_backend_factory(legacy_meta_path).copy_collection_scope(
-            fixed_meta_path
+            fixed_meta_path,
+            pre_commit_check=_make_pre_commit_lock_check(lock_lost_check),
         )
         logger.info(
             "copied temporal metadata scope %s -> %s",
@@ -910,6 +954,15 @@ def _copy_metadata_scope_if_safe(
         )
         return False
     except Exception:
+        if lock_lost_check is not None and lock_lost_check.is_lost():
+            logger.error(
+                "temporal legacy migration: write lock was lost DURING "
+                "the metadata scope copy %s -> %s -- transaction rolled "
+                "back, not counted as a failure",
+                legacy_meta_path,
+                fixed_meta_path,
+            )
+            return False
         logger.exception(
             "failed to copy temporal metadata scope %s -> %s",
             legacy_meta_path,
@@ -1027,7 +1080,11 @@ def _read_relocation_record(fixed_root: Path) -> Dict[str, Any]:
     return data if isinstance(data, dict) else {}
 
 
-def _write_relocation_record_atomic(fixed_root: Path, record: Dict[str, Any]) -> None:
+def _write_relocation_record_atomic(
+    fixed_root: Path,
+    record: Dict[str, Any],
+    lock_lost_check: Optional[LockLossCheck] = None,
+) -> bool:
     """Durably persist *record* as JSON: temp-file write, fsync, atomic
     ``os.replace``, then fsync the parent directory.
 
@@ -1038,6 +1095,27 @@ def _write_relocation_record_atomic(fixed_root: Path, record: Dict[str, Any]) ->
     record carries and how ``_repo_relocation_previously_completed``
     cross-validates it against real, currently-present shard data, never
     from the write mechanism alone.
+
+    Issue #1548 round-10, Finding 2: this write is several syscalls
+    (mkdir, write, fsync, replace, fsync), not one atomic operation. The
+    caller's entry-level lock-loss check (in ``_mark_repo_relocation_
+    complete``) only proves the lock was healthy BEFORE this sequence
+    started -- a lock lost DURING it could otherwise still complete the
+    ``os.replace()`` and overwrite a newer owner's relocation record.
+    This function therefore rechecks immediately before that call --
+    the true point of no return -- and aborts BEFORE performing the
+    replace (cleaning up the temp file exactly like every other failure
+    path) if the lock may have been lost. Classified exactly like every
+    other lock-loss abort in this module: not a failure, since nothing
+    was mutated.
+
+    Issue #1548 round-10, Finding 3: returns ``True`` iff a write was
+    attempted and genuinely FAILED via ``OSError`` -- this used to be
+    silently swallowed (logged, then returned as if nothing happened),
+    letting a caller report an apparently-successful migration despite
+    the record never being durably written. ``False`` covers both a
+    genuine success and a lock-loss-triggered withholding (a deliberate,
+    safe deferral, not a failure).
     """
     tmp: Optional[Path] = None
     try:
@@ -1050,6 +1128,15 @@ def _write_relocation_record_atomic(fixed_root: Path, record: Dict[str, Any]) ->
         tmp.write_text(json.dumps(record, sort_keys=True))
         with tmp.open("rb") as stream:
             os.fsync(stream.fileno())
+        if lock_lost_check is not None and lock_lost_check.is_lost():
+            logger.error(
+                "temporal legacy migration: write lock may have been "
+                "lost DURING the relocation-record write sequence for "
+                "%s -- aborting before the atomic replace, refusing to "
+                "write the record",
+                fixed_root,
+            )
+            return False
         os.replace(tmp, target)
         tmp = None
         fd = os.open(fixed_root, os.O_RDONLY)
@@ -1057,11 +1144,13 @@ def _write_relocation_record_atomic(fixed_root: Path, record: Dict[str, Any]) ->
             os.fsync(fd)
         finally:
             os.close(fd)
+        return False
     except OSError:
         logger.exception(
             "failed to durably persist repo-level relocation record under %s",
             fixed_root,
         )
+        return True
     finally:
         if tmp is not None and tmp.exists():
             try:
@@ -1101,10 +1190,19 @@ def _mark_repo_relocation_complete(
     legacy_root: Path,
     shard_digests: Dict[str, str],
     lock_lost_check: Optional[LockLossCheck] = None,
-) -> None:
+) -> bool:
     """Durably record, as a content-bound JSON record, that THIS pass
     observed a non-empty legacy shard list for this repo and verified
     every one of them gone.
+
+    Issue #1548 round-10, Finding 3: returns ``True`` iff the write was
+    attempted and genuinely FAILED (a real ``OSError`` inside
+    ``_write_relocation_record_atomic``) -- folded by the caller
+    (``migrate_temporal_shards``) into ``MigrationResult.failed``.
+    ``False`` covers the empty-manifest refusal, the lock-loss refusals
+    (both the entry-level one below and the narrower mid-write one
+    inside ``_write_relocation_record_atomic``), and genuine success --
+    none of those are failures.
 
     Issue #1548 round-4 exploit 2 fix: the previous implementation wrote a
     bare sentinel (a timestamp string, no digest, no repo identity, no
@@ -1140,7 +1238,7 @@ def _mark_repo_relocation_complete(
             "caller bug, not a legitimate migration state",
             fixed_root,
         )
-        return
+        return False
     record = _read_relocation_record(fixed_root)
     record["legacy_root"] = str(legacy_root)
     record["shards"] = shard_digests
@@ -1151,8 +1249,10 @@ def _mark_repo_relocation_complete(
             "refusing to write repo-level relocation record under %s",
             fixed_root,
         )
-        return
-    _write_relocation_record_atomic(fixed_root, record)
+        return False
+    return _write_relocation_record_atomic(
+        fixed_root, record, lock_lost_check=lock_lost_check
+    )
 
 
 def _repo_relocation_previously_completed(fixed_root: Path, legacy_root: Path) -> bool:
@@ -1640,9 +1740,16 @@ def migrate_temporal_shards(
     non_vacuous_all_gone = bool(shards) and all(not shard.exists() for shard in shards)
     if non_vacuous_all_gone:
         shard_digests = _collect_shard_provenance_digests(fixed_root, shards)
-        _mark_repo_relocation_complete(
+        # Issue #1548 round-10, Finding 3: a real OSError while durably
+        # persisting this record must be counted as a failure -- an
+        # operator watching MigrationResult.failed must be able to see
+        # it, not a clean-looking zero despite the record never actually
+        # being written.
+        relocation_record_failed = _mark_repo_relocation_complete(
             fixed_root, legacy_root, shard_digests, lock_lost_check=lock_lost_check
         )
+        if relocation_record_failed:
+            counts["failed"] += 1
     all_legacy_shards_gone = non_vacuous_all_gone or (
         not shards and _repo_relocation_previously_completed(fixed_root, legacy_root)
     )

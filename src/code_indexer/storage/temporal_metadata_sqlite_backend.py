@@ -16,7 +16,7 @@ import sqlite3
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Callable, Dict, List, Optional, Set, Tuple
 
 from .temporal_metadata_store import (
     canonical_content_digest_rows,
@@ -429,7 +429,12 @@ class TemporalMetadataSqliteBackend:
         encoded = json.dumps(rows, sort_keys=True, separators=(",", ":"), default=str)
         return hashlib.sha256(encoded.encode()).hexdigest()
 
-    def copy_collection_scope(self, target_collection_path: Path) -> None:
+    def copy_collection_scope(
+        self,
+        target_collection_path: Path,
+        *,
+        pre_commit_check: Optional[Callable[[], None]] = None,
+    ) -> None:
         """Copy every metadata row into a fresh store at the target path.
 
         Issue #1548 blocker 3: this is a genuine row-level re-key, not a
@@ -440,6 +445,16 @@ class TemporalMetadataSqliteBackend:
         repeated copy for a resumed migration pass never depends on the
         destination file's prior on-disk state. The source database is
         never mutated or deleted by this method.
+
+        Issue #1548 round-10 Finding 1: ``pre_commit_check`` (if given) is
+        invoked immediately before this transaction's own ``commit()`` --
+        the narrowest achievable window between "rows written" and
+        "durably committed". A large scope's ``executemany`` can take
+        real time, so checking only ONCE before this method is even
+        called (mover.py's entry-level gate) is not enough -- a lock lost
+        DURING the write must still prevent the commit. If the check
+        raises, the transaction is rolled back (never committed) and the
+        exception propagates unchanged.
         """
         source_conn = sqlite3.connect(self.db_path)
         try:
@@ -471,7 +486,12 @@ class TemporalMetadataSqliteBackend:
                 """,
                 rows,
             )
+            if pre_commit_check is not None:
+                pre_commit_check()
             dest_conn.commit()
+        except Exception:
+            dest_conn.rollback()
+            raise
         finally:
             dest_conn.close()
 
