@@ -379,6 +379,8 @@ _VALID_CONFIG_SECTIONS = (
     "hnsw_orphan_sweep",
     # Story #1458 (Epic #1454) - Fleet migration scheduler configuration
     "fleet_migration",
+    # Issue #1548 - Legacy temporal shard relocation configuration
+    "temporal_legacy_migration",
     # Issue #1398 - Query & search timeouts configuration
     "search_timeouts",
     # Story #977 - X-Ray precision AST-aware code search configuration
@@ -6488,6 +6490,8 @@ def _get_current_config() -> dict:
         HNSWOrphanRepairSweepConfig,
         # Story #1458 (Epic #1454) - Fleet migration scheduler configuration
         FleetMigrationConfig,
+        # Issue #1548 - Legacy temporal shard relocation configuration
+        TemporalLegacyMigrationConfig,
         # Issue #1398 - Query & search timeouts configuration
         SearchTimeoutsConfig,
         # Story #1418 Phase 3 - Embedding & reranker call tracking config
@@ -6719,6 +6723,10 @@ def _get_current_config() -> dict:
         # Story #1458 (Epic #1454): Fleet migration scheduler configuration
         "fleet_migration": settings.get(
             "fleet_migration", asdict(FleetMigrationConfig())
+        ),
+        # Issue #1548: Legacy temporal shard relocation configuration
+        "temporal_legacy_migration": settings.get(
+            "temporal_legacy_migration", asdict(TemporalLegacyMigrationConfig())
         ),
         # Issue #1398: Query & search timeouts configuration
         "search_timeouts": settings.get(
@@ -7624,6 +7632,12 @@ def _validate_config_section(section: str, data: dict) -> Optional[str]:
                     return "Tick Interval Minutes must be at least 1"
             except (ValueError, TypeError):
                 return "Tick Interval Minutes must be a valid number"
+
+    elif section == "temporal_legacy_migration":
+        # Issue #1548: both fields are booleans (Yes/No <select>) -- no
+        # numeric range validation needed, mirroring how fleet_migration's
+        # own boolean fields (enabled, canary_gate_enabled) require none.
+        pass
 
     elif section == "search_timeouts":
         # Issue #1398: Query & search timeouts configuration validation.

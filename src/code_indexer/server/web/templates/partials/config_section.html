@@ -957,6 +957,70 @@ function saveLlmCredsConfig() {
     </article>
 </details>
 
+<!-- Temporal Legacy Migration Settings Section (Issue #1548) -->
+<details class="config-section" id="section-temporal-legacy-migration">
+    <summary>
+        <h2>Temporal Legacy Migration</h2>
+    </summary>
+    <p class="section-description">
+        Configures relocation of legacy in-repo temporal shards into the fixed
+        server-owned storage root. Copy/publish and destructive legacy cleanup
+        are INDEPENDENT gates, both disabled by default -- cleanup only ever
+        removes a legacy shard after its migrated copy has been read back and
+        verified field-for-field identical. Separate from Fleet Migration
+        above (an unrelated chunks.db consolidation mechanism).
+    </p>
+    <article>
+        <!-- Display Mode -->
+        <div id="display-temporal-legacy-migration">
+            <table class="config-table">
+                <tr>
+                    <td class="config-label">Relocation Enabled</td>
+                    <td class="config-value">{{ 'Yes' if config.temporal_legacy_migration.relocation_enabled else 'No' }}</td>
+                    <td class="config-description">Whether legacy shards are copied/published to the fixed storage root (default: No)</td>
+                </tr>
+                <tr>
+                    <td class="config-label">Cleanup Authorized</td>
+                    <td class="config-value">{{ 'Yes' if config.temporal_legacy_migration.cleanup_authorized else 'No' }}</td>
+                    <td class="config-description">Whether a legacy shard may be deleted after its copy is verified (default: No)</td>
+                </tr>
+            </table>
+            <div class="form-actions">
+                <button class="outline small" onclick="toggleEditMode('temporal-legacy-migration')">Edit</button>
+            </div>
+        </div>
+        <!-- Edit Mode -->
+        <form id="edit-form-temporal-legacy-migration" method="post" action="/admin/config/temporal_legacy_migration" style="display: none;">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            {% if validation_errors.temporal_legacy_migration %}
+            <div class="validation-error">{{ validation_errors.temporal_legacy_migration }}</div>
+            {% endif %}
+            <div class="form-grid">
+                <label for="temporal-legacy-migration-relocation-enabled">
+                    Relocation Enabled
+                    <select id="temporal-legacy-migration-relocation-enabled" name="relocation_enabled">
+                        <option value="true" {% if config.temporal_legacy_migration.relocation_enabled %}selected{% endif %}>Yes</option>
+                        <option value="false" {% if not config.temporal_legacy_migration.relocation_enabled %}selected{% endif %}>No</option>
+                    </select>
+                    <small>Turn copy/publish of legacy temporal shards to the fixed storage root on or off.</small>
+                </label>
+                <label for="temporal-legacy-migration-cleanup-authorized">
+                    Cleanup Authorized
+                    <select id="temporal-legacy-migration-cleanup-authorized" name="cleanup_authorized">
+                        <option value="true" {% if config.temporal_legacy_migration.cleanup_authorized %}selected{% endif %}>Yes</option>
+                        <option value="false" {% if not config.temporal_legacy_migration.cleanup_authorized %}selected{% endif %}>No</option>
+                    </select>
+                    <small>Authorize deletion of a legacy shard -- ONLY after its migrated copy is read-back verified identical.</small>
+                </label>
+            </div>
+            <div class="form-actions">
+                <button type="submit" class="primary">Save</button>
+                <button type="button" class="secondary" onclick="cancelEdit('temporal-legacy-migration')">Cancel</button>
+            </div>
+        </form>
+    </article>
+</details>
+
 <!-- Query & Search Timeouts Settings Section (Issue #1398) -->
 <details class="config-section" id="section-search-timeouts">
     <summary>
