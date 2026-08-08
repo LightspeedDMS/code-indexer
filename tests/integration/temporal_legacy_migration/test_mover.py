@@ -79,9 +79,16 @@ def test_diverging_fixed_shard_is_a_collision_and_neither_side_is_touched(
     assert legacy_record["payload"]["source"] == "legacy"
 
 
-def test_matching_fixed_shard_is_already_complete_and_cleanup_deletes_legacy(
+def test_coincidentally_matching_fixed_shard_with_no_provenance_is_a_collision(
     tmp_path: Path,
 ):
+    """Issue #1548 review finding 1: coincidentally matching content at the
+    fixed root -- created independently of this migration mechanism, so it
+    carries no provenance marker -- must be treated exactly like diverging
+    content: a collision. "New shard wins" is unconditional; a byte-for-byte
+    match is never, by itself, proof that the fixed-root copy is safe to
+    treat as "our own prior verified work". Both sides survive untouched.
+    """
     legacy = tmp_path / "legacy"
     fixed = tmp_path / "fixed"
     legacy_shard = legacy / "code-indexer-temporal-e-2026Q1"
@@ -92,11 +99,11 @@ def test_matching_fixed_shard_is_already_complete_and_cleanup_deletes_legacy(
     result = migrate_temporal_shards(
         legacy, fixed, relocation_enabled=False, cleanup_authorized=True
     )
-    assert result.already_complete == 1
-    assert result.collisions == 0
-    assert result.deleted == 1
+    assert result.already_complete == 0
+    assert result.collisions == 1
+    assert result.deleted == 0
     assert result.failed == 0
-    assert not legacy_shard.exists()
+    assert legacy_shard.exists(), "legacy copy must survive an unproven match"
     assert (fixed_shard / "vector_p1.json").exists()
 
 
@@ -368,3 +375,119 @@ def test_pre_publish_hook_runs_before_atomic_rename(tmp_path: Path):
     assert result.published == 1
     assert result.failed == 0
     assert observed == [False], "hook must run before the target is published"
+
+
+def test_genuine_two_pass_migration_converges_via_provenance_digest(tmp_path: Path):
+    """Issue #1548 review finding 1: a LEGITIMATE multi-pass migration (this
+    migration mechanism itself relocates now, cleanup authorized on a later
+    call) must still converge -- the content-bound provenance marker written
+    by ``_publish()`` is what distinguishes this from the coincidental-match
+    collision case above.
+    """
+    legacy = tmp_path / "legacy"
+    fixed = tmp_path / "fixed"
+    shard = legacy / "code-indexer-temporal-e-2026Q1"
+    _write_vector_shard(shard, "p1", "legacy")
+
+    first = migrate_temporal_shards(legacy, fixed, relocation_enabled=True)
+    assert first.published == 1
+    assert first.failed == 0
+    assert shard.exists(), "cleanup was not authorized yet"
+
+    second = migrate_temporal_shards(
+        legacy, fixed, relocation_enabled=True, cleanup_authorized=True
+    )
+    assert second.already_complete == 1
+    assert second.collisions == 0
+    assert second.deleted == 1
+    assert second.failed == 0
+    assert not shard.exists()
+    assert (fixed / shard.name / "vector_p1.json").exists()
+
+
+def test_forged_sentinel_marker_with_no_matching_digest_is_still_a_collision(
+    tmp_path: Path,
+):
+    """A bare marker FILE (no digest content, or a digest that does not
+    match) must never be sufficient to authorize "already_complete" --
+    provenance is content-bound, not presence-bound. This closes the
+    forgery gap a plain sentinel-file marker would have left open.
+    """
+    legacy = tmp_path / "legacy"
+    fixed = tmp_path / "fixed"
+    legacy_shard = legacy / "code-indexer-temporal-e-2026Q1"
+    fixed_shard = fixed / legacy_shard.name
+    _write_vector_shard(legacy_shard, "p1", "same")
+    _write_vector_shard(fixed_shard, "p1", "same")
+    # Plant a marker file with an unrelated/garbage digest value.
+    (fixed_shard / ".legacy-migration-provenance").write_text("not-a-real-digest")
+
+    result = migrate_temporal_shards(
+        legacy, fixed, relocation_enabled=False, cleanup_authorized=True
+    )
+    assert result.already_complete == 0
+    assert result.collisions == 1
+    assert result.deleted == 0
+    assert legacy_shard.exists()
+
+
+def test_metadata_cleanup_refuses_when_repo_has_zero_shards_and_never_relocated(
+    tmp_path: Path,
+):
+    """Issue #1548 review finding 5: a legacy root with literally zero
+    temporal shards vacuously satisfies "all shards gone" -- that alone
+    must never authorize deleting a metadata scope that was never actually
+    relocated (relocation_enabled=False means the copy step never even ran).
+    """
+    legacy = tmp_path / "legacy"
+    fixed = tmp_path / "fixed"
+    meta_dir = legacy / LEGACY_TEMPORAL_COLLECTION
+    backend = TemporalMetadataSqliteBackend(meta_dir)
+    backend.save_metadata("p1", {"commit_hash": "abc", "path": "f.py"})
+    legacy.mkdir(parents=True, exist_ok=True)
+
+    result = migrate_temporal_shards(
+        legacy,
+        fixed,
+        relocation_enabled=False,
+        cleanup_authorized=True,
+        metadata_backend_factory=lambda path: TemporalMetadataSqliteBackend(path),
+    )
+
+    assert result.failed == 0
+    assert (meta_dir / TemporalMetadataSqliteBackend.METADATA_DB_NAME).exists(), (
+        "metadata must survive -- it was never relocated to the fixed root"
+    )
+
+
+def test_shard_collision_withholds_metadata_scope_copy(tmp_path: Path):
+    """Issue #1548 review finding 2: when a shard collision is detected,
+    the shared per-repo metadata scope must NOT be copied at all this pass
+    -- an ``INSERT OR REPLACE`` re-key could otherwise silently overwrite
+    rows belonging to whatever independently produced the colliding data.
+    """
+    legacy = tmp_path / "legacy"
+    fixed = tmp_path / "fixed"
+    legacy_shard = legacy / "code-indexer-temporal-e-2026Q1"
+    fixed_shard = fixed / legacy_shard.name
+    _write_vector_shard(legacy_shard, "p1", "legacy")
+    _write_vector_shard(fixed_shard, "p1", "diverged")
+    meta_dir = legacy / LEGACY_TEMPORAL_COLLECTION
+    backend = TemporalMetadataSqliteBackend(meta_dir)
+    backend.save_metadata("p1", {"commit_hash": "abc", "path": "f.py"})
+
+    result = migrate_temporal_shards(
+        legacy,
+        fixed,
+        relocation_enabled=True,
+        metadata_backend_factory=lambda path: TemporalMetadataSqliteBackend(path),
+    )
+
+    assert result.collisions == 1
+    assert result.failed == 0
+    fixed_meta_db = (
+        fixed
+        / LEGACY_TEMPORAL_COLLECTION
+        / (TemporalMetadataSqliteBackend.METADATA_DB_NAME)
+    )
+    assert not fixed_meta_db.exists(), "metadata copy must be withheld on collision"

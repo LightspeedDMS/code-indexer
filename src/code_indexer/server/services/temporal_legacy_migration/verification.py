@@ -73,3 +73,19 @@ def verify_shard_copy(source: Path, published: Path) -> None:
         raise VerificationError(
             f"temporal shard verification failed: {source} != {published}"
         )
+
+
+def manifest_digest(root: Path) -> str:
+    """Hash of *root*'s full field-for-field manifest.
+
+    Used by ``mover.py`` to write a content-bound provenance marker: unlike
+    a bare sentinel file (which any independent process could coincidentally
+    or accidentally create), a digest that must match the CURRENT legacy
+    source's own manifest digest cannot be satisfied by data that merely
+    happens to occupy the same path -- it can only be satisfied by data that
+    is field-for-field identical to what was actually verified and
+    published.
+    """
+    manifest = _manifest(root)
+    encoded = json.dumps(manifest, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(encoded.encode()).hexdigest()
