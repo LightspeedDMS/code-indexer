@@ -56,3 +56,36 @@ def test_copy_collection_scope_of_empty_source_is_a_safe_no_op(tmp_path: Path):
     backend.copy_collection_scope(target)
 
     assert not (target / "temporal_metadata.db").exists()
+
+
+def test_content_digest_matches_between_identical_scopes_and_differs_on_divergence(
+    tmp_path: Path,
+):
+    """Issue #1548 round-4 exploit 2 fix: ``content_digest()`` is the
+    genuine, content-bound proof ``mover.py`` compares between a legacy
+    and a fixed-root metadata scope before authorizing deletion --
+    replacing a count-only check that unrelated non-empty data could
+    satisfy. Two scopes holding field-for-field identical rows (via a
+    real ``copy_collection_scope`` re-key) must digest equal; unrelated
+    data must digest different, even with the same row COUNT.
+    """
+    source = tmp_path / "source"
+    copied = tmp_path / "copied"
+    unrelated = tmp_path / "unrelated"
+    backend = TemporalMetadataSqliteBackend(source)
+    backend.save_metadata("point-1", {"commit_hash": "abc", "path": "f.py"})
+    backend.save_metadata("point-2", {"commit_hash": "def", "path": "g.py"})
+
+    backend.copy_collection_scope(copied)
+    copied_backend = TemporalMetadataSqliteBackend(copied)
+    assert copied_backend.content_digest() == backend.content_digest()
+
+    unrelated_backend = TemporalMetadataSqliteBackend(unrelated)
+    unrelated_backend.save_metadata(
+        "unrelated-1", {"commit_hash": "xyz", "path": "u.py"}
+    )
+    unrelated_backend.save_metadata(
+        "unrelated-2", {"commit_hash": "uvw", "path": "v.py"}
+    )
+    assert unrelated_backend.count_entries() == backend.count_entries()
+    assert unrelated_backend.content_digest() != backend.content_digest()

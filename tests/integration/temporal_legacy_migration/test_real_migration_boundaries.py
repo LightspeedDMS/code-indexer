@@ -81,9 +81,17 @@ def test_crash_restart_after_staging_before_publish(tmp_path: Path) -> None:
     # A genuinely complete shard (every real temporal shard has these) --
     # required for the resumed pass's already_complete classification,
     # which is now also gated on structural completeness (Issue #1548
-    # third-round exploit fix), not merely a matching digest.
+    # third/fourth-round exploit fixes), not merely a matching digest.
+    # The HNSW index must be REAL and loadable (round-4 fix): a fake
+    # placeholder byte string is now correctly rejected.
     (shard / "collection_meta.json").write_text('{"name":"q1"}')
-    (shard / "hnsw_index.bin").write_bytes(b"hnsw-data")
+    import numpy as np
+
+    from code_indexer.storage.hnsw_index_manager import HNSWIndexManager
+
+    HNSWIndexManager(vector_dim=2, space="cosine").build_index(
+        shard, np.array([[1.0, 2.0]], dtype=np.float32), ["p1"]
+    )
     marker = tmp_path / "pause.marker"
     child_script = tmp_path / "child_migrate.py"
     _write_pause_before_publish_child_script(child_script, marker, legacy, fixed)

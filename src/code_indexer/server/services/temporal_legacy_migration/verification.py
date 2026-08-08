@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 from code_indexer.storage.shared.chunk_layout import ChunkLayout, resolve_chunk_layout
 from code_indexer.storage.sqlite_chunk_store import (
@@ -112,15 +112,81 @@ def _structural_manifest(root: Path) -> dict[str, str]:
     genuine) can satisfy both the source-side and target-side equality
     checks in ``mover._classify_existing_target`` unless the target
     genuinely mirrors the source's full file tree.
+
+    Issue #1548 round-4 exploit fix: ALSO refuses to trust (raises
+    ``VerificationError``) a tree containing any symlink, anywhere.
+    ``Path.is_file()``/``.exists()`` resolve THROUGH a symlink to its
+    target -- a reproduced exploit planted ``hnsw_index.bin`` and
+    ``collection_meta.json`` at the fixed-root target as symlinks pointing
+    back into the legacy SOURCE directory, so this function (before this
+    fix) happily hashed the source's own bytes and produced a digest that
+    trivially "matched" the source, even though the target held no
+    independent data of its own -- its files would go dangling the moment
+    the legacy source was deleted. ``Path.is_symlink()`` uses
+    ``os.lstat()`` and never follows, so this check cannot be fooled the
+    same way.
     """
+    if root.is_symlink():
+        raise VerificationError(
+            f"provenance check refuses to trust a symlinked root: {root}"
+        )
     manifest: dict[str, str] = {}
     for path in sorted(root.rglob("*")):
+        if path.is_symlink():
+            raise VerificationError(
+                f"provenance check refuses to trust a tree containing a symlink: {path}"
+            )
         if not path.is_file():
             continue
         if path.name == PROVENANCE_MARKER_NAME:
             continue
         manifest[str(path.relative_to(root))] = _file_digest(path)
     return manifest
+
+
+def peek_one_vector_dimension(root: Path) -> Optional[int]:
+    """Return the vector dimension of one real point record under *root*,
+    or ``None`` if no record can be found.
+
+    Issue #1548 round-4 exploit fix: used by ``mover.py``'s structural
+    completeness gate to attempt a genuine ``hnswlib`` load of
+    ``hnsw_index.bin`` without requiring external, repo-specific dimension
+    configuration -- the dimension is read straight from the shard's own
+    committed data, the same data the HNSW index is supposed to index.
+    Read-only and side-effect-free by construction: never creates a
+    ``chunks.db`` file, and returns ``None`` (rather than raising) on any
+    layout/parse ambiguity so a caller doing safety-gated inspection can
+    treat "cannot determine" as "not verifiably valid" without crashing.
+    """
+    layout = resolve_chunk_layout(root)
+    record: Optional[dict[str, Any]] = None
+    if layout is ChunkLayout.CHUNKS_DB:
+        db_path = root / "chunks.db"
+        if not chunk_store_has_real_data(db_path, on_error="treat_absent"):
+            return None
+        store = open_chunk_store_for_path(db_path, str(root), read_only=True)
+        try:
+            point_ids = sorted(store.all_point_ids())
+            if not point_ids:
+                return None
+            record = store.read(point_ids[0])
+        finally:
+            store.close()
+    else:
+        candidates = sorted(root.rglob("vector_*.json"))
+        if not candidates:
+            return None
+        try:
+            with candidates[0].open(encoding="utf-8") as stream:
+                record = json.load(stream)
+        except (OSError, ValueError):
+            return None
+    if not isinstance(record, dict):
+        return None
+    vector = record.get("vector")
+    if not isinstance(vector, list) or not vector:
+        return None
+    return len(vector)
 
 
 def verify_shard_copy(source: Path, published: Path) -> None:

@@ -9,6 +9,8 @@ server modes.
 Satisfies the TemporalMetadataBackend Protocol (temporal_metadata_backend.py).
 """
 
+import hashlib
+import json
 import logging
 import sqlite3
 import time
@@ -385,6 +387,38 @@ class TemporalMetadataSqliteBackend:
             return row[0] if row else 0
         finally:
             conn.close()
+
+    def content_digest(self) -> str:
+        """Deterministic sha256 digest of every row this scope holds.
+
+        Issue #1548 round-4 exploit fix: this is the genuine, content-bound
+        proof ``mover.py`` compares between a legacy and a fixed-root
+        metadata scope before authorizing legacy deletion -- unlike
+        ``count_entries() > 0`` alone (which a forged repo-level marker plus
+        unrelated, coincidentally non-empty rows at the fixed root could
+        satisfy without ANY real relocation ever having occurred), two
+        scopes can only produce the same digest if they hold field-for-field
+        identical rows. Deliberately excludes ``created_at`` (a write-time
+        timestamp, not migrated content) and ``format_version`` (schema
+        metadata, not row content) from the encoded payload -- only fields
+        that describe the actual relocated data are covered. ``hash_prefix``
+        is this table's PRIMARY KEY (unique), but the ORDER BY covers every
+        selected column regardless, so the row order is fully deterministic
+        even if that uniqueness invariant were ever relaxed.
+        """
+        conn = sqlite3.connect(self.db_path)
+        try:
+            rows = conn.execute(
+                """
+                SELECT hash_prefix, point_id, commit_hash, file_path, chunk_index
+                FROM temporal_metadata
+                ORDER BY hash_prefix, point_id, commit_hash, file_path, chunk_index
+                """
+            ).fetchall()
+        finally:
+            conn.close()
+        encoded = json.dumps(rows, sort_keys=True, separators=(",", ":"), default=str)
+        return hashlib.sha256(encoded.encode()).hexdigest()
 
     def copy_collection_scope(self, target_collection_path: Path) -> None:
         """Copy every metadata row into a fresh store at the target path.

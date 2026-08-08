@@ -1,6 +1,8 @@
 import json
 from pathlib import Path
 
+import numpy as np
+
 from code_indexer.server.services.temporal_legacy_migration.mover import (
     migrate_temporal_shards,
 )
@@ -11,10 +13,21 @@ from code_indexer.server.services.temporal_legacy_migration.verification import 
 from code_indexer.services.temporal.temporal_collection_naming import (
     LEGACY_TEMPORAL_COLLECTION,
 )
+from code_indexer.storage.hnsw_index_manager import HNSWIndexManager
 from code_indexer.storage.sqlite_chunk_store import ChunkStore
 from code_indexer.storage.temporal_metadata_sqlite_backend import (
     TemporalMetadataSqliteBackend,
 )
+
+
+def _write_real_hnsw_index(shard_dir: Path, point_id: str, vector: list) -> None:
+    """Issue #1548 round-4 fix: ``_target_is_structurally_complete`` now
+    attempts a genuine ``hnswlib`` load, so test fixtures claiming to be
+    a "complete" shard must carry a real, loadable index -- not a fake
+    placeholder byte string.
+    """
+    manager = HNSWIndexManager(vector_dim=len(vector), space="cosine")
+    manager.build_index(shard_dir, np.array([vector], dtype=np.float32), [point_id])
 
 
 def test_empty_fixed_root_is_published_atomically_and_second_run_is_noop(
@@ -26,8 +39,8 @@ def test_empty_fixed_root_is_published_atomically_and_second_run_is_noop(
     shard.mkdir(parents=True)
     (shard / "chunks.db").write_bytes(b"sqlite-data")
     (shard / "collection_meta.json").write_text('{"name":"q1"}')
-    (shard / "hnsw_index.bin").write_bytes(b"hnsw-data")
     (shard / "vector_p1.json").write_text(json.dumps({"id": "p1", "vector": [1.0]}))
+    _write_real_hnsw_index(shard, "p1", [1.0])
 
     first = migrate_temporal_shards(legacy, fixed, relocation_enabled=True)
     assert first.published == 1
@@ -51,7 +64,7 @@ def _write_vector_shard(
     (shard_dir / f"vector_{point_id}.json").write_text(json.dumps(record))
     if complete:
         (shard_dir / "collection_meta.json").write_text('{"name":"q1"}')
-        (shard_dir / "hnsw_index.bin").write_bytes(b"hnsw-data")
+        _write_real_hnsw_index(shard_dir, point_id, [1.0])
 
 
 def test_diverging_fixed_shard_is_a_collision_and_neither_side_is_touched(
