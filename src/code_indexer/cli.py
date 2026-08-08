@@ -11428,6 +11428,201 @@ def server_status(ctx, verbose: bool, server_dir: Optional[str]):
         sys.exit(1)
 
 
+def _resolve_temporal_legacy_migration_settings():
+    """Read temporal_legacy_migration_config via ConfigService (Issue #1548
+    blocker 6). Raises loudly if the config section is unavailable --
+    ServerConfig.__post_init__ guarantees it is always populated in
+    practice, so this is a defensive invariant check, not a normal path.
+    """
+    from .server.services.config_service import get_config_service
+
+    settings = get_config_service().get_config().temporal_legacy_migration_config
+    if settings is None:
+        raise click.ClickException("temporal_legacy_migration_config is unavailable")
+    return settings
+
+
+def _resolve_temporal_legacy_migration_candidates(manager, repo_alias: Optional[str]):
+    from .server.services.temporal_legacy_migration.discovery import (
+        discover_candidates,
+    )
+
+    candidates = list(discover_candidates(manager))
+    if repo_alias is not None:
+        candidates = [item for item in candidates if item.alias == repo_alias]
+        if not candidates:
+            raise click.ClickException(
+                f"golden repository alias not found: {repo_alias}"
+            )
+    return candidates
+
+
+def _migrate_one_cli_candidate(
+    candidate, *, cleanup_authorized: bool, refresh_scheduler, backend_factory
+):
+    """Migrate one candidate under the refresh-safe write lock.
+
+    Issue #1548 review finding 3: the CLI previously called
+    ``migrate_temporal_shards`` with NO locking at all -- only the
+    scheduler's ``run_once`` path was guarded. Mirrors
+    ``scheduler.py``'s ``_migrate_one_candidate`` exactly: acquire the
+    lock, migrate, and on ``WriteLockHeldError``/``RefreshInProgressError``
+    skip this candidate for this pass (never raise) rather than corrupt
+    data by racing a live refresh.
+    """
+    from .server.services.temporal_legacy_migration.locking import (
+        RefreshInProgressError,
+        WriteLockHeldError,
+        guarded_by_refresh_lock,
+    )
+    from .server.services.temporal_legacy_migration.mover import (
+        migrate_temporal_shards,
+    )
+
+    try:
+        with guarded_by_refresh_lock(
+            refresh_scheduler, candidate.alias
+        ) as lock_loss_signal:
+            return migrate_temporal_shards(
+                candidate.legacy_root,
+                candidate.fixed_root,
+                relocation_enabled=True,
+                cleanup_authorized=cleanup_authorized,
+                metadata_backend_factory=backend_factory,
+                lock_lost_check=lock_loss_signal,
+            )
+    except (WriteLockHeldError, RefreshInProgressError) as exc:
+        console.print(f"{candidate.alias}: skipped this pass ({exc})", style="yellow")
+        return None
+
+
+def _run_temporal_legacy_migration_candidates(
+    candidates, *, cleanup_authorized: bool, refresh_scheduler
+):
+    from .storage.temporal_metadata_backend_registry import (
+        get_temporal_metadata_backend_factory,
+    )
+
+    if refresh_scheduler is None:
+        raise click.ClickException(
+            "temporal legacy migration requires a wired RefreshScheduler "
+            "(golden_repo_manager._refresh_scheduler is None) -- the "
+            "server must be fully started before this command can run"
+        )
+
+    # get_temporal_metadata_backend_factory() returns None by design in
+    # solo/CLI context (see that module's own docstring); mover.py's
+    # _sync_metadata_scope already no-ops on a None factory, so passing it
+    # straight through is correct and requires no special-casing here.
+    backend_factory = get_temporal_metadata_backend_factory()
+    totals = {
+        "published": 0,
+        "deleted": 0,
+        "collisions": 0,
+        "failed": 0,
+        "lock_skipped": 0,
+    }
+    for candidate in candidates:
+        result = _migrate_one_cli_candidate(
+            candidate,
+            cleanup_authorized=cleanup_authorized,
+            refresh_scheduler=refresh_scheduler,
+            backend_factory=backend_factory,
+        )
+        if result is None:
+            # Issue #1548 third-round review blocker 5: a lock-held/
+            # refresh-in-progress skip must be VISIBLE in the run's
+            # totals and reflected in the exit code -- a candidate that
+            # could not be processed this pass must never look identical
+            # to a fully clean run.
+            totals["lock_skipped"] += 1
+            continue
+        totals["published"] += result.published
+        totals["deleted"] += result.deleted
+        totals["collisions"] += result.collisions
+        totals["failed"] += result.failed
+        style = "red" if result.failed else ("yellow" if result.collisions else None)
+        console.print(
+            f"{candidate.alias}: published={result.published}, "
+            f"already_complete={result.already_complete}, "
+            f"deleted={result.deleted}, collisions={result.collisions}, "
+            f"failed={result.failed}",
+            style=style,
+        )
+    console.print(
+        f"Migration complete: published={totals['published']}, "
+        f"deleted={totals['deleted']}, collisions={totals['collisions']}, "
+        f"failed={totals['failed']}, lock_skipped={totals['lock_skipped']}"
+    )
+    if totals["failed"]:
+        raise click.ClickException(
+            f"{totals['failed']} temporal shard migration failure(s) occurred"
+        )
+    if totals["collisions"] or totals["lock_skipped"]:
+        # Blocker 5: an unresolved collision (deferred to manual review)
+        # or a lock-skipped candidate (never even attempted this pass)
+        # are both "this run did not fully succeed" outcomes -- a
+        # non-zero exit distinguishes them from a genuinely clean run,
+        # even though neither is a hard per-shard failure.
+        raise click.ClickException(
+            f"{totals['collisions']} unresolved collision(s) and "
+            f"{totals['lock_skipped']} lock-skipped candidate(s) remain -- "
+            "rerun after resolving lock conflicts, or review collisions "
+            "manually"
+        )
+
+
+@server_group.command("temporal-migrate-legacy")
+@click.option("--alias", "repo_alias", default=None, help="Migrate only this alias")
+@click.option(
+    "--cleanup",
+    is_flag=True,
+    help="Delete each legacy shard only after verification succeeds",
+)
+@click.pass_context
+def server_temporal_migrate_legacy(ctx, repo_alias: Optional[str], cleanup: bool):
+    """Relocate legacy temporal shards into fixed server-owned storage.
+
+    Issue #1548 blocker 6: respects the two independent, Web-UI-gated
+    temporal_legacy_migration_config flags (relocation_enabled /
+    cleanup_authorized) -- this command NEVER proceeds against operator
+    intent just because it was invoked.
+    """
+    try:
+        settings = _resolve_temporal_legacy_migration_settings()
+        if not settings.relocation_enabled:
+            console.print(
+                "Temporal legacy migration is disabled "
+                "(temporal_legacy_migration_config.relocation_enabled is "
+                "False in the Web UI Config Screen) -- doing nothing.",
+                style="yellow",
+            )
+            return
+        cleanup_authorized = cleanup and settings.cleanup_authorized
+        if cleanup and not settings.cleanup_authorized:
+            console.print(
+                "--cleanup was requested but "
+                "temporal_legacy_migration_config.cleanup_authorized is "
+                "False in the Web UI Config Screen -- legacy shards will "
+                "be published but NOT deleted.",
+                style="yellow",
+            )
+        from .server.repositories.golden_repo_manager import get_golden_repo_manager
+
+        manager = get_golden_repo_manager()
+        refresh_scheduler = manager._refresh_scheduler
+        candidates = _resolve_temporal_legacy_migration_candidates(manager, repo_alias)
+        _run_temporal_legacy_migration_candidates(
+            candidates,
+            cleanup_authorized=cleanup_authorized,
+            refresh_scheduler=refresh_scheduler,
+        )
+    except click.ClickException:
+        raise
+    except Exception as exc:
+        raise click.ClickException(f"temporal migration failed: {exc}") from exc
+
+
 @server_group.command("restart")
 @click.option(
     "--server-dir",

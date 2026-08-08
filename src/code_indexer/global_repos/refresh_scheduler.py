@@ -1119,7 +1119,10 @@ class RefreshScheduler:
         return self.write_lock_manager.acquire(alias, owner_name=owner_name)
 
     def release_write_lock(
-        self, alias: str, owner_name: str = "refresh_scheduler"
+        self,
+        alias: str,
+        owner_name: str = "refresh_scheduler",
+        owner_token: Optional[str] = None,
     ) -> None:
         """
         Release the write lock for a repo alias.
@@ -1130,8 +1133,14 @@ class RefreshScheduler:
             alias: Repo alias without -global suffix (e.g., "cidx-meta")
             owner_name: Must match the owner name used when acquiring the lock.
                         Defaults to "refresh_scheduler".
+            owner_token: Issue #1548 round-8 fix -- forwarded to
+                ``WriteLockManager.release()`` unchanged. `None` (the
+                default) preserves byte-identical behavior for every
+                existing caller that does not pass this argument.
         """
-        result = self.write_lock_manager.release(alias, owner_name=owner_name)
+        result = self.write_lock_manager.release(
+            alias, owner_name=owner_name, owner_token=owner_token
+        )
         if not result:
             logger.warning(
                 f"Attempted to release write lock for '{alias}' but owner mismatch"

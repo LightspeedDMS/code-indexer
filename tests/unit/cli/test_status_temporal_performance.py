@@ -123,7 +123,7 @@ def test_temporal_status_performance_with_large_index(
                 ctx.obj = {"config_manager": config_manager}
 
                 start_time = time.time()
-                _status_impl(ctx, force_docker=False)
+                _status_impl(ctx)
                 elapsed_ms = (time.time() - start_time) * 1000
 
                 # Performance requirement: <500ms even with 13K+ files
@@ -188,7 +188,7 @@ def test_temporal_status_fallback_when_du_unavailable(
                     ctx.obj = {"config_manager": config_manager}
 
                     # Should not raise, should fallback to iteration
-                    _status_impl(ctx, force_docker=False)
+                    _status_impl(ctx)
 
                     # Verify temporal row was added (functional correctness)
                     add_row_calls = mock_table.add_row.call_args_list

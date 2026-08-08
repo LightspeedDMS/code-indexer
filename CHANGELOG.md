@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [12.6.0] - 2026-08-08
+
+### Fixed
+
+- Bug #1548: server-context temporal (git-history) index data indexed before Bug #1529's fixed-root path (`{golden_repos_dir}/.temporal/{alias}/`) existed was stuck at its legacy in-repo location with no migration path. Added `temporal_legacy_migration` (discovery, verification, mover, scheduler) to relocate it. Ten rounds of TDD-implement plus independent Codex adversarial review closed real, reproduced data-loss exploits along the way: a completeness check that followed symlinks and could be tricked into deleting a legacy shard whose target was a dangling symlink; an HNSW completeness check that trusted `collection_meta.json`'s attacker-writable `id_mapping` instead of the actual binary's own stored IDs; a TOCTOU window between the final pre-deletion verification and the actual delete; a forgeable provenance marker that authorized deletion without ever actually verifying the same data was relocated; a write-lock with no renewal/heartbeat that could be lost during a legitimately long-running migration while destructive work continued; lock ownership keyed on a shared name rather than a unique per-acquisition token, allowing one instance to "renew" a different instance's lock; incomplete lock-loss guarding across some mutation sites (orphaned-staging/trash cleanup, metadata-scope copy, relocation-record writes); and lock-loss occurring mid-operation during a slow database commit or multi-syscall record write, not just before the operation started. An independent Opus materiality review confirmed the final round closes the core safety property (this migration cannot destroy or corrupt real production data under any realistic normal-operation condition) and that the one remaining Codex finding from that round (a hypothetical stale-metadata overwrite on crash-resume) is not reachable in practice.
+
 ## [12.5.0] - 2026-08-07
 
 ### Fixed

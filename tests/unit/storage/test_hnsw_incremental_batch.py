@@ -11,6 +11,13 @@ import numpy as np
 
 from src.code_indexer.storage.filesystem_vector_store import FilesystemVectorStore
 
+# test_incremental_hnsw_update_vs_full_rebuild constants (Issue #1548 review
+# finding 8).
+_INITIAL_VECTOR_COUNT = 1000
+_INCREMENTAL_VECTOR_COUNT = 10
+_VECTOR_DIMENSION = 1536
+_TIMING_TRIAL_COUNT = 3
+
 
 class TestHNSWIncrementalBatch:
     """Test suite for HNSW incremental batch updates."""
@@ -22,7 +29,7 @@ class TestHNSWIncrementalBatch:
         points = []
         for i in range(num_points):
             point_id = f"test_point_{start_id + i}"
-            vector = np.random.rand(1536).tolist()
+            vector = np.random.rand(_VECTOR_DIMENSION).tolist()
             points.append(
                 {
                     "id": point_id,
@@ -37,6 +44,58 @@ class TestHNSWIncrementalBatch:
                 }
             )
         return points
+
+    def _measure_full_and_incremental_hnsw_times(self, tmp_path, trial: int):
+        """One full trial for test_incremental_hnsw_update_vs_full_rebuild:
+        build a fresh collection with _INITIAL_VECTOR_COUNT vectors, time
+        its full rebuild, then append _INCREMENTAL_VECTOR_COUNT vectors and
+        time the incremental update. Returns (full_rebuild_time,
+        incremental_time, incremental_result).
+        """
+        store = FilesystemVectorStore(
+            tmp_path / f"trial{trial}",
+            project_root=tmp_path / f"trial{trial}",
+            use_chunks_db_for_new_collections=False,
+        )
+        collection_name = "test_collection"
+        store.create_collection(collection_name, vector_size=_VECTOR_DIMENSION)
+
+        initial_points = self.create_test_points(_INITIAL_VECTOR_COUNT)
+        store.begin_indexing(collection_name)
+        initial_upsert_result = store.upsert_points(collection_name, initial_points)
+        assert initial_upsert_result == {
+            "status": "ok",
+            "count": _INITIAL_VECTOR_COUNT,
+        }
+
+        start_time = time.time()
+        result = store.end_indexing(collection_name)
+        full_rebuild_time = time.time() - start_time
+        assert result["status"] == "ok"
+        assert result["vectors_indexed"] == _INITIAL_VECTOR_COUNT
+
+        store.begin_indexing(collection_name)
+        incremental_points = self.create_test_points(
+            _INCREMENTAL_VECTOR_COUNT, start_id=_INITIAL_VECTOR_COUNT
+        )
+        incremental_upsert_result = store.upsert_points(
+            collection_name, incremental_points
+        )
+        assert incremental_upsert_result == {
+            "status": "ok",
+            "count": _INCREMENTAL_VECTOR_COUNT,
+        }
+
+        start_time = time.time()
+        result = store.end_indexing(collection_name)
+        incremental_time = time.time() - start_time
+        assert result["status"] == "ok"
+        assert (
+            result["vectors_indexed"]
+            == _INITIAL_VECTOR_COUNT + _INCREMENTAL_VECTOR_COUNT
+        )
+
+        return full_rebuild_time, incremental_time, result
 
     # === AC1: Track Changed Vectors During Indexing Session ===
 
@@ -171,7 +230,7 @@ class TestHNSWIncrementalBatch:
         temporal_points = [
             {
                 "id": f"temporal_vec_{i}",
-                "vector": np.random.rand(1536).tolist(),
+                "vector": np.random.rand(_VECTOR_DIMENSION).tolist(),
                 "payload": {
                     "commit_hash": f"abc123{i}",
                     "timestamp": 1234567890 + i,
@@ -191,49 +250,35 @@ class TestHNSWIncrementalBatch:
 
     # === AC2: Incremental HNSW Update at End of Indexing Cycle ===
 
-    def test_incremental_hnsw_update_vs_full_rebuild(self, tmp_path):
-        """Test incremental update is faster than full rebuild."""
-        # Setup
-        store = FilesystemVectorStore(
-            tmp_path, project_root=tmp_path, use_chunks_db_for_new_collections=False
-        )
-        collection_name = "test_collection"
-        store.create_collection(collection_name, vector_size=1536)
+    def test_incremental_hnsw_update_uses_incremental_mode_consistently(self, tmp_path):
+        """Verify incremental HNSW update mode is used, not correctness of
+        its wall-clock speed.
 
-        # Create large initial index (1000 vectors)
-        initial_points = self.create_test_points(1000)
-        store.begin_indexing(collection_name)
-        store.upsert_points(collection_name, initial_points)
+        Issue #1548 third-round review finding 8: the previous version of
+        this test asserted ``min(full_times) < min(incremental_times) *
+        threshold`` -- combining the two MINIMUMS independently across
+        trials is statistically unsound (it can hide a regression: the
+        fastest incremental trial could be compared against a full-rebuild
+        trial that happened to run under unrelated host contention) and
+        raw wall-clock speed was already proven unreliable in this exact
+        test across two earlier rounds of threshold tuning (see git
+        history). The ACTUAL concern this speed comparison was a rough
+        proxy for -- Story #1490's GIL release / event-loop non-blocking
+        behavior -- is correctly and directly tested elsewhere, via
+        ``test_hnsw_gil_release_1490.py``'s concurrent-recorder-thread
+        methodology, which does not depend on wall-clock timing at all.
+        This test now asserts only the genuinely meaningful, deterministic
+        invariant: incremental mode is actually selected (never silently
+        degrading into a full rebuild) across every trial.
+        """
+        hnsw_update_modes = []
+        for trial in range(_TIMING_TRIAL_COUNT):
+            _full_t, _incremental_t, result = (
+                self._measure_full_and_incremental_hnsw_times(tmp_path, trial)
+            )
+            hnsw_update_modes.append(result.get("hnsw_update"))
 
-        # Time the initial full rebuild
-        start_time = time.time()
-        result = store.end_indexing(collection_name)
-        full_rebuild_time = time.time() - start_time
-
-        assert result["status"] == "ok"
-        assert result["vectors_indexed"] == 1000
-
-        # Now make incremental changes (10 new vectors)
-        store.begin_indexing(collection_name)
-        incremental_points = self.create_test_points(10, start_id=1000)
-        store.upsert_points(collection_name, incremental_points)
-
-        # Time the incremental update
-        start_time = time.time()
-        result = store.end_indexing(collection_name)
-        incremental_time = time.time() - start_time
-
-        assert result["status"] == "ok"
-        assert result["vectors_indexed"] == 1010
-
-        # Incremental should be notably faster (at least 2x)
-        # Note: In real scenarios with 10K vectors, this would be 5-10x
-        assert incremental_time < full_rebuild_time / 2, (
-            f"Incremental ({incremental_time:.2f}s) should be faster than full rebuild ({full_rebuild_time:.2f}s)"
-        )
-
-        # Verify incremental mode was used
-        assert result.get("hnsw_update") == "incremental"
+        assert hnsw_update_modes == ["incremental"] * _TIMING_TRIAL_COUNT
 
     def test_temporal_collection_incremental_hnsw(self, tmp_path):
         """Test that temporal collection uses incremental HNSW updates."""
