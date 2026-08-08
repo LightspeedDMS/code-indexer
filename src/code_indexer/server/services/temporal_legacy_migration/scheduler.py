@@ -77,8 +77,21 @@ class TemporalLegacyMigrationScheduler:
         Returns a summary dict (stored as the BackgroundJobManager job's
         result -- Blocker 9: this scheduler's own caller previously
         discarded the per-candidate MigrationResult entirely).
+
+        Blocker 4: the config gate is enforced HERE, not only in ``_loop``'s
+        pre-check before calling ``trigger_now()`` -- any other direct
+        caller of ``run_once()`` (the CLI, a test, a future admin trigger)
+        must not be able to bypass operator intent by skipping that outer
+        wrapper. When both gates are off, discovery and write-lock
+        acquisition are skipped entirely -- there is nothing to migrate.
         """
         settings = self._resolve_settings()
+        if not settings.relocation_enabled and not settings.cleanup_authorized:
+            logger.debug(
+                "temporal legacy migration: both relocation_enabled and "
+                "cleanup_authorized are False -- skipping this pass entirely"
+            )
+            return {**_result_as_dict(MigrationResult()), "per_repo": {}}
         metadata_backend_factory = get_temporal_metadata_backend_factory()
 
         totals = MigrationResult()

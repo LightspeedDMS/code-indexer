@@ -131,6 +131,40 @@ def test_run_once_skips_repo_with_refresh_in_progress(tmp_path: Path):
     assert result["per_repo"] == {}
 
 
+def test_run_once_is_a_noop_when_both_gates_disabled_even_called_directly(
+    tmp_path: Path,
+):
+    """Issue #1548 review finding 4: run_once() must enforce the config
+    gate ITSELF, not rely solely on _loop()'s pre-check before calling
+    trigger_now() -- a direct caller (CLI, test, future admin trigger)
+    bypasses that outer wrapper entirely.
+    """
+    repo = tmp_path / "repo"
+    (repo / ".code-indexer" / "index").mkdir(parents=True)
+    _write_shard(
+        repo / ".code-indexer" / "index",
+        "code-indexer-temporal-e-2026Q1",
+        "p1",
+    )
+    manager = _FakeGoldenRepoManager({"demo": repo})
+    settings = TemporalLegacyMigrationConfig()  # both gates default False
+    refresh_scheduler = _FakeRefreshScheduler()
+    scheduler = TemporalLegacyMigrationScheduler(
+        golden_repo_manager=manager,
+        config_service=_FakeConfigService(settings),
+        refresh_scheduler=refresh_scheduler,
+    )
+
+    result = scheduler.run_once()
+
+    assert result["published"] == 0
+    assert result["failed"] == 0
+    assert result["per_repo"] == {}
+    # No candidate was ever discovered/processed -- the write lock was
+    # never even touched.
+    assert refresh_scheduler.write_lock_manager.acquire_calls == []
+
+
 def test_constructor_requires_refresh_scheduler():
     with pytest.raises(ValueError):
         TemporalLegacyMigrationScheduler(
