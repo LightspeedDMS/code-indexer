@@ -227,8 +227,8 @@ class TestHNSWIncrementalBatch:
         assert result["vectors_indexed"] == 1010
 
         # Incremental must be faster; the exact ratio is host-load dependent.
-        assert incremental_time < full_rebuild_time, (
-            f"Incremental ({incremental_time:.2f}s) should be faster than "
+        assert incremental_time < full_rebuild_time / 2, (
+            f"Incremental ({incremental_time:.2f}s) should be much faster than "
             f"full rebuild ({full_rebuild_time:.2f}s)"
         )
 
