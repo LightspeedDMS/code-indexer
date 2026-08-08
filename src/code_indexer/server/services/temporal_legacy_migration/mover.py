@@ -40,6 +40,33 @@ Production closes this via the caller-held write lock
 (``locking.guarded_by_refresh_lock``), which excludes every LEGITIMATE
 writer; it does not exclude an illegitimate actor with independent
 filesystem access, outside this module's threat model.
+
+Round-6 fixes (sixth adversarial review round), both critical:
+
+1. HNSW completeness (``verification.hnsw_index_covers_all_logical_points``)
+   previously trusted ``collection_meta.json``'s ``id_mapping`` field --
+   attacker-writable metadata -- as proof of which point ids an HNSW index
+   covers. It now requires the caller to pass the REAL label set loaded
+   from the actual ``hnsw_index.bin`` binary (``index.get_ids_list()``);
+   ``id_mapping`` is used only to translate those real labels into names,
+   never to invent which ones exist.
+2. The delete sequence (``_verify_and_delete_source`` /
+   ``_delete_source_atomically``) now re-verifies the TARGET's own
+   structural completeness immediately before AND immediately after the
+   atomic rename-to-trash -- not just the source's symlink state. On a
+   post-rename failure, the source is RESTORED from trash (a genuine
+   recovery path) rather than left permanently deleted against a
+   corrupted target.
+
+Round-6 residual TOCTOU risk (still not claimed fully closed, narrowed
+further): the window that matters is now strictly between the post-rename
+target re-verification and the final ``shutil.rmtree(trash_path)`` -- an
+external actor would need to corrupt the target in that specific gap to
+still cause data loss, since anything before it is now caught and
+recovered. As with round-5, production relies on the caller-held write
+lock to exclude every legitimate writer; an illegitimate actor with
+independent, concurrent filesystem access remains outside this module's
+threat model and has not been eliminated, only narrowed.
 """
 
 from __future__ import annotations
@@ -252,9 +279,22 @@ def _collection_meta_is_valid(target: Path) -> bool:
 
 
 def _hnsw_index_structurally_valid(target: Path) -> bool:
-    """Non-empty, hnswlib-loadable, and (round-5 exploit 1 fix) its
-    ``id_mapping`` covers EVERY logical point record present -- "loadable
-    and non-empty" alone let an incomplete index pass. Never raises.
+    """Non-empty, hnswlib-loadable, and its ACTUAL contents (never
+    ``collection_meta.json``'s ``id_mapping`` alone) cover EVERY logical
+    point record present. Never raises.
+
+    Issue #1548 round-6 exploit fix (CRITICAL): the round-5 fix asked
+    "does ``id_mapping`` claim to cover every logical point" -- but
+    ``id_mapping`` is JSON metadata, not the actual content of
+    ``hnsw_index.bin``. Codex reproduced forging ``id_mapping`` to claim 2
+    point ids while the REAL, loaded binary held exactly 1 element
+    (``get_current_count() == 1``, ``get_ids_list() == [0]``); the old
+    check still passed, since it read the ids straight out of the JSON
+    metadata rather than the binary. This now loads the real index and
+    passes its OWN ``get_ids_list()`` -- the ground truth of what is
+    actually stored -- into ``hnsw_index_covers_all_logical_points``,
+    which uses ``id_mapping`` only to translate those REAL labels into
+    point-id names, never to invent which labels exist.
     """
     hnsw_path = target / _HNSW_INDEX_FILENAME
     try:
@@ -279,10 +319,11 @@ def _hnsw_index_structurally_valid(target: Path) -> bool:
         index = manager.load_index(target)
         if index is None or index.get_current_count() <= 0:
             return False
+        actual_label_ids = set(index.get_ids_list())
     except Exception:
         logger.exception("hnsw_index.bin at %s failed to load", target)
         return False
-    return hnsw_index_covers_all_logical_points(target)
+    return hnsw_index_covers_all_logical_points(target, actual_label_ids)
 
 
 def _target_is_structurally_complete(target: Path) -> bool:
@@ -467,19 +508,24 @@ def _verify_and_delete_source(
     source: Path,
     target: Path,
     pre_delete_hook: Optional[Callable[[], None]],
+    post_rename_hook: Optional[Callable[[], None]] = None,
 ) -> None:
-    """The full check-verify-recheck-delete sequence for one shard's
-    legacy source, isolated from ``_process_one_shard`` for readability.
+    """Check-verify-recheck-delete sequence for one shard's legacy source.
 
-    Issue #1548 round-5 exploit 2 fix (TOCTOU): (1) initial symlink check,
-    (2) ``verify_shard_copy``, (3) ``pre_delete_hook`` (test-only seam),
-    (4) a SECOND symlink check -- AFTER verify_shard_copy, immediately
-    before the delete -- closing the exact window Codex's round-5 repro
-    targeted (a symlink swapped into the target DURING
-    ``verify_shard_copy``, which the round-4 "check only before verify"
-    recheck could not observe), (5) the delete goes through
-    ``_delete_source_atomically`` (atomic rename to a private trash path,
-    then delete) rather than a direct ``shutil.rmtree(source)``.
+    Round-5 exploit 2 fix (TOCTOU): symlink check, ``verify_shard_copy``,
+    ``pre_delete_hook`` (test seam), a SECOND symlink check immediately
+    before delete -- closes a symlink swapped in DURING
+    ``verify_shard_copy``.
+
+    Round-6 exploit 2 fix (CRITICAL): round-5 protected only the SOURCE.
+    It never re-verified the TARGET itself, so a concurrent actor
+    mutating the target (e.g. zeroing ``hnsw_index.bin``) after this point
+    went uncaught. Target completeness is now re-checked here immediately
+    before the point of no return, and ``_delete_source_atomically``
+    re-checks it ONE MORE time right after the source is renamed to trash
+    -- the narrowest achievable window -- restoring the source on failure
+    instead of leaving it permanently gone against a corrupted target.
+    ``post_rename_hook`` is a test-only seam firing in that exact window.
     """
     if _contains_symlink(source) or _contains_symlink(target):
         raise VerificationError(
@@ -502,7 +548,17 @@ def _verify_and_delete_source(
             f"symlink appeared in {source} or {target} during "
             f"verification -- aborting before any destructive action"
         )
-    _delete_source_atomically(source)
+    # Round-6 exploit 2 fix: the target -- not just the source -- must be
+    # re-proven structurally complete immediately before the point of no
+    # return. A digest match only compares logical point records; it says
+    # nothing about whether the target's HNSW/metadata are still intact.
+    if not _target_is_structurally_complete(target):
+        raise VerificationError(
+            f"refusing to delete legacy temporal shard {source}: target "
+            f"{target} is not structurally complete immediately before "
+            f"deletion"
+        )
+    _delete_source_atomically(source, target, post_rename_hook)
     logger.info("deleted verified legacy temporal shard %s", source)
 
 
@@ -514,6 +570,7 @@ def _process_one_shard(
     cleanup_authorized: bool,
     pre_publish_hook: Optional[Callable[[], None]],
     pre_delete_hook: Optional[Callable[[], None]] = None,
+    post_rename_hook: Optional[Callable[[], None]] = None,
 ) -> str:
     """Migrate/verify/cleanup one shard. Returns one of: "published",
     "already_complete", "collision", "skipped", "deleted" (deleted implies
@@ -549,7 +606,7 @@ def _process_one_shard(
                 f"incomplete or corrupt) -- refusing to authorize legacy "
                 f"source deletion"
             )
-        _verify_and_delete_source(source, target, pre_delete_hook)
+        _verify_and_delete_source(source, target, pre_delete_hook, post_rename_hook)
     return outcome
 
 
@@ -561,6 +618,7 @@ def _run_shard_pass(
     cleanup_authorized: bool,
     pre_publish_hook: Optional[Callable[[], None]],
     pre_delete_hook: Optional[Callable[[], None]] = None,
+    post_rename_hook: Optional[Callable[[], None]] = None,
 ) -> Dict[str, int]:
     """Process every shard, isolating per-shard failures (Blocker 8)."""
     counts = {
@@ -580,6 +638,7 @@ def _run_shard_pass(
                 cleanup_authorized=cleanup_authorized,
                 pre_publish_hook=pre_publish_hook,
                 pre_delete_hook=pre_delete_hook,
+                post_rename_hook=post_rename_hook,
             )
         except Exception:
             counts["failed"] += 1
@@ -1054,51 +1113,98 @@ def _discover_shards(legacy_root: Path) -> List[Path]:
     )
 
 
-def _delete_source_atomically(source: Path) -> None:
-    """Atomically rename *source* to a private, unguessable trash path,
-    then delete the trash directory.
+def _delete_source_atomically(
+    source: Path,
+    target: Path,
+    post_rename_hook: Optional[Callable[[], None]] = None,
+) -> None:
+    """Atomically rename *source* to a private trash path, re-verify
+    *target* once more, then delete the trash -- or, on re-verification
+    failure, RESTORE *source* from trash and raise (never left ambiguous).
 
-    Issue #1548 round-5 exploit 2 fix (TOCTOU): a direct
-    ``shutil.rmtree(source)`` walks the tree file-by-file over a
-    WELL-KNOWN path -- an external actor that knows this path can, in
-    principle, interleave arbitrarily during that walk. This instead
-    performs a SINGLE atomic ``os.rename`` to an unpredictable, uuid4-
-    suffixed path under the SAME parent (same filesystem, so the rename
-    is a single syscall with no intermediate window) -- nothing else can
-    observe or interfere with an in-between state. Only the deletion of
-    that now-private path happens afterward, via a normal
-    ``shutil.rmtree`` -- safe, because nothing else can name this path.
+    Round-5 exploit 2 fix (TOCTOU): a single atomic ``os.rename`` to an
+    unpredictable uuid4-suffixed path (same filesystem, one syscall)
+    replaces a direct ``shutil.rmtree(source)`` over a well-known path.
 
-    Does NOT, by itself, prove the completeness decision made BEFORE this
-    function runs was not stale -- see ``_verify_and_delete_source``'s own
-    post-verify symlink recheck for that half of the fix, and this
-    module's docstring for the documented residual risk.
-
-    Fails loud and LEAVES the data in the private trash location,
-    undeleted, if a symlink is found immediately after the rename --
-    never silently proceeds, never renames it back (that would reopen
-    the window this function exists to close).
+    Round-6 exploit 2 fix (CRITICAL): round-5 protected only the SOURCE --
+    a concurrent TARGET mutation (e.g. ``hnsw_index.bin`` zeroed) in the
+    same window went uncaught. Immediately after the rename, with no other
+    I/O in between, *target* is re-verified complete and *trash_path*
+    re-checked for symlinks. Either failing renames *source* BACK from
+    trash and raises -- a genuine recovery path, not merely a loud
+    failure -- so the caller's outer handling counts this as a failed
+    migration attempt, never a partial state. ``post_rename_hook`` is a
+    test-only seam firing in exactly this window.
     """
     trash_path = (
         source.parent / f".{source.name}{_PENDING_DELETE_INFIX}{uuid.uuid4().hex}"
     )
     os.rename(source, trash_path)
-    if _contains_symlink(trash_path):
+    if post_rename_hook is not None:
+        post_rename_hook()
+    if _contains_symlink(trash_path) or not _target_is_structurally_complete(target):
+        os.rename(trash_path, source)
         raise VerificationError(
-            f"refusing to delete legacy temporal shard contents renamed to "
-            f"{trash_path}: a symlink was detected immediately after the "
-            f"atomic rename -- data left in place for manual inspection"
+            f"refusing to delete legacy temporal shard {source}: target "
+            f"{target} was found corrupted/incomplete (or a symlink "
+            f"appeared in the trashed source) immediately after the "
+            f"atomic rename to trash -- source restored to its original "
+            f"location, treating this migration attempt as failed"
         )
     shutil.rmtree(trash_path)
 
 
-def _cleanup_orphaned_trash_dirs(legacy_root: Path) -> int:
+def _original_shard_name_from_trash(entry_name: str) -> Optional[str]:
+    """Recover the original shard directory name from a trash entry name
+    of the form ``.{name}{_PENDING_DELETE_INFIX}{uuid}``, or ``None`` if
+    *entry_name* does not match that shape.
+    """
+    if not entry_name.startswith("."):
+        return None
+    without_dot = entry_name[1:]
+    idx = without_dot.find(_PENDING_DELETE_INFIX)
+    if idx <= 0:
+        return None
+    return without_dot[:idx]
+
+
+def _trash_dir_is_safe_to_discard(entry: Path, fixed_root: Path) -> bool:
+    """True iff *entry* -- a leftover trash directory -- can be positively
+    confirmed safe to discard: its corresponding fixed-root target is
+    independently re-verified structurally complete via the SAME
+    completeness gate that authorized deletion in the first place.
+
+    Issue #1548 round-6 finding fix: the previous implementation deleted
+    every orphaned trash directory unconditionally, discarding the ONE
+    surviving copy of a shard's legacy data if anything about its
+    corresponding migration attempt went wrong (e.g. exploit 2's failure
+    path, or any other crash before the shard was ever confirmed safely
+    migrated). Never assumes "leftover = safe" -- an unparseable name or
+    a target that fails re-verification is left in place.
+    """
+    name = _original_shard_name_from_trash(entry.name)
+    if name is None:
+        return False
+    target = fixed_root / name
+    try:
+        return _target_is_structurally_complete(target)
+    except Exception:
+        logger.exception(
+            "failed to verify %s while deciding whether orphaned trash %s "
+            "is safe to discard -- treating as unsafe (fail closed)",
+            target,
+            entry,
+        )
+        return False
+
+
+def _cleanup_orphaned_trash_dirs(legacy_root: Path, fixed_root: Path) -> int:
     """Remove trash directories orphaned by a crash between the atomic
     rename in ``_delete_source_atomically`` and its subsequent
-    ``shutil.rmtree``. Mirrors ``_cleanup_orphaned_staging_dirs``: safe to
-    sweep unconditionally under the caller's write lock -- a directory in
-    this state was already renamed out of the live path by a prior pass
-    that completed every verification step first.
+    ``shutil.rmtree`` -- but ONLY those positively confirmed safe to
+    discard (``_trash_dir_is_safe_to_discard``). An orphaned trash
+    directory whose corresponding target cannot be reconfirmed complete
+    is left in place with a WARNING rather than blindly removed.
     """
     if not legacy_root.is_dir():
         return 0
@@ -1115,6 +1221,14 @@ def _cleanup_orphaned_trash_dirs(legacy_root: Path) -> int:
         if not entry.is_dir():
             continue
         if not entry.name.startswith(".") or _PENDING_DELETE_INFIX not in entry.name:
+            continue
+        if not _trash_dir_is_safe_to_discard(entry, fixed_root):
+            logger.warning(
+                "leaving orphaned migration trash directory in place -- "
+                "could not positively confirm its corresponding target is "
+                "safely migrated: %s",
+                entry,
+            )
             continue
         logger.warning("removing orphaned migration trash directory: %s", entry)
         try:
@@ -1138,6 +1252,7 @@ def migrate_temporal_shards(
     ] = None,
     pre_publish_hook: Optional[Callable[[], None]] = None,
     pre_delete_hook: Optional[Callable[[], None]] = None,
+    post_rename_hook: Optional[Callable[[], None]] = None,
 ) -> MigrationResult:
     """Relocate every legacy shard for one repo without destroying data
     that has not been positively verified as safely migrated.
@@ -1155,6 +1270,10 @@ def migrate_temporal_shards(
         pre_delete_hook: Test-only seam fired immediately before the final
             post-verify symlink recheck and destructive delete (Issue
             #1548 round-5 exploit 2 -- see ``_verify_and_delete_source``).
+        post_rename_hook: Test-only seam fired immediately after the
+            source is renamed to its private trash path, before the final
+            target re-verification (Issue #1548 round-6 exploit 2 -- see
+            ``_delete_source_atomically``).
 
     Per-shard failures are isolated (Blocker 8). Caller MUST hold the
     repo's write lock (``locking.guarded_by_refresh_lock``) -- this
@@ -1164,7 +1283,7 @@ def migrate_temporal_shards(
         return MigrationResult()
 
     staging_sweep_failures = _cleanup_orphaned_staging_dirs(fixed_root)
-    trash_sweep_failures = _cleanup_orphaned_trash_dirs(legacy_root)
+    trash_sweep_failures = _cleanup_orphaned_trash_dirs(legacy_root, fixed_root)
     shards = _discover_shards(legacy_root)
     counts = _run_shard_pass(
         shards,
@@ -1173,6 +1292,7 @@ def migrate_temporal_shards(
         cleanup_authorized=cleanup_authorized,
         pre_publish_hook=pre_publish_hook,
         pre_delete_hook=pre_delete_hook,
+        post_rename_hook=post_rename_hook,
     )
     counts["failed"] += staging_sweep_failures + trash_sweep_failures
 
