@@ -3,6 +3,11 @@ from pathlib import Path
 from code_indexer.server.services.temporal_legacy_migration.mover import (
     migrate_temporal_shards,
 )
+from code_indexer.server.services.temporal_legacy_migration.verification import (
+    VerificationError,
+    verify_shard_copy,
+)
+from code_indexer.storage.sqlite_chunk_store import ChunkStore
 
 
 def test_empty_fixed_root_is_published_atomically_and_second_run_is_noop(
@@ -63,3 +68,86 @@ def test_cleanup_never_happens_without_explicit_authorization(tmp_path: Path):
     )
     assert result.deleted == 0
     assert shard.exists()
+
+
+def test_verifier_detects_field_corruption_after_copy(tmp_path: Path):
+    source = tmp_path / "source"
+    target = tmp_path / "target"
+    source.mkdir()
+    target.mkdir()
+    record = {"id": "p1", "vector": [1.0], "payload": {"text": "source"}}
+    import json
+
+    (source / "vector_p1.json").write_text(json.dumps(record))
+    (target / "vector_p1.json").write_text(
+        json.dumps({**record, "payload": {"text": "corrupt"}})
+    )
+    try:
+        verify_shard_copy(source, target)
+    except VerificationError:
+        pass
+    else:
+        raise AssertionError("field corruption must fail verification")
+
+
+def test_metadata_scope_is_copied_on_publish_and_deleted_only_on_cleanup(
+    tmp_path: Path,
+):
+    class RealScopeBackend:
+        def __init__(self):
+            self.copied = []
+            self.deleted = 0
+
+        def copy_collection_scope(self, target_collection_path: Path) -> None:
+            self.copied.append(target_collection_path)
+
+        def delete_collection_scope(self) -> None:
+            self.deleted += 1
+
+    legacy = tmp_path / "legacy"
+    fixed = tmp_path / "fixed"
+    shard = legacy / "code-indexer-temporal-e-2026Q1"
+    shard.mkdir(parents=True)
+    (shard / "vector_p1.json").write_text('{"id":"p1","vector":[1]}')
+    backend = RealScopeBackend()
+    migrate_temporal_shards(
+        legacy,
+        fixed,
+        relocation_enabled=True,
+        metadata_backend_factory=lambda _: backend,
+    )
+    assert backend.copied == [fixed / shard.name]
+    assert backend.deleted == 0
+    migrate_temporal_shards(
+        legacy,
+        fixed,
+        cleanup_authorized=True,
+        metadata_backend_factory=lambda _: backend,
+    )
+    assert backend.deleted == 1
+
+
+def test_verifier_compares_real_chunks_db_records(tmp_path: Path):
+    source = tmp_path / "source"
+    target = tmp_path / "target"
+    source.mkdir()
+    target.mkdir()
+    for root in (source, target):
+        (root / "collection_meta.json").write_text('{"chunks_db":{"version":1}}')
+        store = ChunkStore(root / "chunks.db")
+        store.write_batch(
+            [{"id": "p1", "vector": [1.0, 2.0], "payload": {"text": "ok"}}]
+        )
+        store.close()
+    verify_shard_copy(source, target)
+    target_store = ChunkStore(target / "chunks.db")
+    target_store.write_batch(
+        [{"id": "p1", "vector": [1.0, 2.0], "payload": {"text": "bad"}}]
+    )
+    target_store.close()
+    try:
+        verify_shard_copy(source, target)
+    except VerificationError:
+        pass
+    else:
+        raise AssertionError("chunk record corruption must fail verification")

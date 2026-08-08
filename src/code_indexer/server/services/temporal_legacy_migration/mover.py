@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
-import hashlib
 import os
 import shutil
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Callable, Optional
+
+from .verification import verify_shard_copy
 
 
 _SHARD_PREFIX = "code-indexer-temporal-"
@@ -19,23 +21,6 @@ class MigrationResult:
     already_complete: int = 0
     deleted: int = 0
     collisions: int = 0
-
-
-def _fingerprint(root: Path) -> tuple[tuple[str, str], ...]:
-    """Return a deterministic content fingerprint, rejecting symlinks."""
-    entries: list[tuple[str, str]] = []
-    for path in sorted(root.rglob("*")):
-        relative = path.relative_to(root).as_posix()
-        if path.is_symlink():
-            raise ValueError(f"temporal migration refuses symlink: {path}")
-        if path.is_dir():
-            entries.append((relative, "<directory>"))
-            continue
-        if not path.is_file():
-            raise ValueError(f"temporal migration refuses special file: {path}")
-        digest = hashlib.sha256(path.read_bytes()).hexdigest()
-        entries.append((relative, digest))
-    return tuple(entries)
 
 
 def _fsync_tree(root: Path) -> None:
@@ -66,10 +51,7 @@ def _publish(source: Path, target: Path) -> None:
     try:
         shutil.copytree(source, staging)
         _fsync_tree(staging)
-        source_fingerprint = _fingerprint(source)
-        target_fingerprint = _fingerprint(staging)
-        if source_fingerprint != target_fingerprint:
-            raise IOError(f"temporal shard verification failed: {source}")
+        verify_shard_copy(source, staging)
         if target.exists():
             if _has_data(target):
                 raise FileExistsError(f"fixed temporal shard is non-empty: {target}")
@@ -91,6 +73,7 @@ def migrate_temporal_shards(
     *,
     relocation_enabled: bool = False,
     cleanup_authorized: bool = False,
+    metadata_backend_factory: Optional[Callable[[Path], object]] = None,
 ) -> MigrationResult:
     """Relocate every legacy shard without changing the legacy source.
 
@@ -111,8 +94,12 @@ def migrate_temporal_shards(
             already_complete += 1
         elif relocation_enabled:
             _publish(source, target)
+            if metadata_backend_factory is not None:
+                metadata_backend_factory(source).copy_collection_scope(target)  # type: ignore[attr-defined]
             published += 1
         if target.is_dir() and _has_data(target) and cleanup_authorized:
             shutil.rmtree(source)
+            if metadata_backend_factory is not None:
+                metadata_backend_factory(source).delete_collection_scope()  # type: ignore[attr-defined]
             deleted += 1
     return MigrationResult(published, already_complete, deleted, collisions)

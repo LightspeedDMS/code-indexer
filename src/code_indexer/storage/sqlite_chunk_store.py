@@ -751,7 +751,7 @@ def _resolve_immutable_predicate():
 
 
 def open_chunk_store_for_path(
-    db_path: Union[str, Path], collection_path: str
+    db_path: Union[str, Path], collection_path: str, *, read_only: bool = False
 ) -> ChunkStore:
     """Open a :class:`ChunkStore`, deciding mutable vs. immutable via the
     EXISTING ``is_immutable_versioned_snapshot()`` predicate applied to
@@ -766,7 +766,7 @@ def open_chunk_store_for_path(
             ``.versioned/{alias}/v_<ts>/{collection}`` snapshot path).
     """
     predicate = _resolve_immutable_predicate()
-    immutable = predicate(collection_path)
+    immutable = read_only or predicate(collection_path)
     return ChunkStore(db_path, immutable=immutable)
 
 
