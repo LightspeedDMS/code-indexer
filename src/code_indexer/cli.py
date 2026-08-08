@@ -11512,7 +11512,13 @@ def _run_temporal_legacy_migration_candidates(
     # _sync_metadata_scope already no-ops on a None factory, so passing it
     # straight through is correct and requires no special-casing here.
     backend_factory = get_temporal_metadata_backend_factory()
-    totals = {"published": 0, "deleted": 0, "collisions": 0, "failed": 0}
+    totals = {
+        "published": 0,
+        "deleted": 0,
+        "collisions": 0,
+        "failed": 0,
+        "lock_skipped": 0,
+    }
     for candidate in candidates:
         result = _migrate_one_cli_candidate(
             candidate,
@@ -11521,6 +11527,12 @@ def _run_temporal_legacy_migration_candidates(
             backend_factory=backend_factory,
         )
         if result is None:
+            # Issue #1548 third-round review blocker 5: a lock-held/
+            # refresh-in-progress skip must be VISIBLE in the run's
+            # totals and reflected in the exit code -- a candidate that
+            # could not be processed this pass must never look identical
+            # to a fully clean run.
+            totals["lock_skipped"] += 1
             continue
         totals["published"] += result.published
         totals["deleted"] += result.deleted
@@ -11537,11 +11549,23 @@ def _run_temporal_legacy_migration_candidates(
     console.print(
         f"Migration complete: published={totals['published']}, "
         f"deleted={totals['deleted']}, collisions={totals['collisions']}, "
-        f"failed={totals['failed']}"
+        f"failed={totals['failed']}, lock_skipped={totals['lock_skipped']}"
     )
     if totals["failed"]:
         raise click.ClickException(
             f"{totals['failed']} temporal shard migration failure(s) occurred"
+        )
+    if totals["collisions"] or totals["lock_skipped"]:
+        # Blocker 5: an unresolved collision (deferred to manual review)
+        # or a lock-skipped candidate (never even attempted this pass)
+        # are both "this run did not fully succeed" outcomes -- a
+        # non-zero exit distinguishes them from a genuinely clean run,
+        # even though neither is a hard per-shard failure.
+        raise click.ClickException(
+            f"{totals['collisions']} unresolved collision(s) and "
+            f"{totals['lock_skipped']} lock-skipped candidate(s) remain -- "
+            "rerun after resolving lock conflicts, or review collisions "
+            "manually"
         )
 
 

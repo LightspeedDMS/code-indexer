@@ -17,7 +17,6 @@ _INITIAL_VECTOR_COUNT = 1000
 _INCREMENTAL_VECTOR_COUNT = 10
 _VECTOR_DIMENSION = 1536
 _TIMING_TRIAL_COUNT = 3
-_INCREMENTAL_SPEEDUP_THRESHOLD = 0.75
 
 
 class TestHNSWIncrementalBatch:
@@ -251,53 +250,34 @@ class TestHNSWIncrementalBatch:
 
     # === AC2: Incremental HNSW Update at End of Indexing Cycle ===
 
-    def test_incremental_hnsw_update_vs_full_rebuild(self, tmp_path):
-        """Test incremental update is faster than full rebuild.
+    def test_incremental_hnsw_update_uses_incremental_mode_consistently(self, tmp_path):
+        """Verify incremental HNSW update mode is used, not correctness of
+        its wall-clock speed.
 
-        Issue #1548 review finding 8: a single-shot wall-clock measurement
-        proved genuinely unreliable regardless of ratio threshold -- fresh
-        evidence this session showed a strict /2 bound failing 10/18 runs,
-        and a loosened 0.75 bound still failing 3/20 runs in isolation plus
-        one sample reaching ratio 0.99 when run immediately after 55 other
-        tests in this same file (heavy host contention). No fixed ratio on
-        a SINGLE sample can be both meaningful and stable under variable
-        host load. Fixed by taking the MINIMUM across _TIMING_TRIAL_COUNT
-        independent trials (fresh collection each time) for each phase:
-        the underlying work per phase is deterministic, so only transient
-        scheduling noise varies between trials, and the minimum cancels
-        that noise out far more reliably than any single-shot threshold
-        tuning could.
+        Issue #1548 third-round review finding 8: the previous version of
+        this test asserted ``min(full_times) < min(incremental_times) *
+        threshold`` -- combining the two MINIMUMS independently across
+        trials is statistically unsound (it can hide a regression: the
+        fastest incremental trial could be compared against a full-rebuild
+        trial that happened to run under unrelated host contention) and
+        raw wall-clock speed was already proven unreliable in this exact
+        test across two earlier rounds of threshold tuning (see git
+        history). The ACTUAL concern this speed comparison was a rough
+        proxy for -- Story #1490's GIL release / event-loop non-blocking
+        behavior -- is correctly and directly tested elsewhere, via
+        ``test_hnsw_gil_release_1490.py``'s concurrent-recorder-thread
+        methodology, which does not depend on wall-clock timing at all.
+        This test now asserts only the genuinely meaningful, deterministic
+        invariant: incremental mode is actually selected (never silently
+        degrading into a full rebuild) across every trial.
         """
-        full_times = []
-        incremental_times = []
         hnsw_update_modes = []
         for trial in range(_TIMING_TRIAL_COUNT):
-            full_t, incremental_t, result = (
+            _full_t, _incremental_t, result = (
                 self._measure_full_and_incremental_hnsw_times(tmp_path, trial)
             )
-            full_times.append(full_t)
-            incremental_times.append(incremental_t)
             hnsw_update_modes.append(result.get("hnsw_update"))
 
-        full_rebuild_time = min(full_times)
-        incremental_time = min(incremental_times)
-
-        # Incremental must be meaningfully faster; _INCREMENTAL_SPEEDUP_
-        # THRESHOLD catches a real regression where the incremental path
-        # silently degrades into a full rebuild (ratio ~1.0), mirroring
-        # the loose ratio-style bound test_path_pattern_performance.py
-        # already uses for the same host-load-dependent-timing reason
-        # ("within 2x") -- but applied to the min-of-N rather than a
-        # single sample.
-        assert incremental_time < full_rebuild_time * _INCREMENTAL_SPEEDUP_THRESHOLD, (
-            f"Incremental ({incremental_time:.2f}s, min of "
-            f"{_TIMING_TRIAL_COUNT}) should be meaningfully faster than "
-            f"full rebuild ({full_rebuild_time:.2f}s, min of "
-            f"{_TIMING_TRIAL_COUNT}); full_times={full_times}, "
-            f"incremental_times={incremental_times}"
-        )
-
-        # Verify incremental mode was used consistently across ALL trials.
         assert hnsw_update_modes == ["incremental"] * _TIMING_TRIAL_COUNT
 
     def test_temporal_collection_incremental_hnsw(self, tmp_path):

@@ -42,10 +42,16 @@ def test_empty_fixed_root_is_published_atomically_and_second_run_is_noop(
     assert shard.exists()
 
 
-def _write_vector_shard(shard_dir: Path, point_id: str, source: str) -> None:
+def _write_vector_shard(
+    shard_dir: Path, point_id: str, source: str, *, complete: bool = True
+) -> None:
+    """Default: a complete shard (meta+hnsw). ``complete=False``: bare records only."""
     shard_dir.mkdir(parents=True, exist_ok=True)
     record = {"id": point_id, "vector": [1.0], "payload": {"source": source}}
     (shard_dir / f"vector_{point_id}.json").write_text(json.dumps(record))
+    if complete:
+        (shard_dir / "collection_meta.json").write_text('{"name":"q1"}')
+        (shard_dir / "hnsw_index.bin").write_bytes(b"hnsw-data")
 
 
 def test_diverging_fixed_shard_is_a_collision_and_neither_side_is_touched(

@@ -1,24 +1,36 @@
 """Crash-safe per-shard relocation for legacy temporal indexes.
 
-Issue #1548 review blockers 1/2/3/7/8/9. Locked collision policy: "new
-shard wins". If the fixed-root shard ALREADY holds real, verified data --
-whether that data matches or diverges from the legacy source -- the
-fixed-root copy is authoritative and is NEVER overwritten, and its legacy
-counterpart is ALSO left untouched (never deleted) in this same pass. The
-divergence-or-coincidental-match is counted as a collision and resolution
-is deferred to a later, separate manual/cleanup pass.
+Issue #1548 review blockers 1/2/3/7/8/9 (plus a third-round critical exploit
+fix and blockers 2/3/4/5 from the follow-up review). Locked collision
+policy: "new shard wins". If the fixed-root shard ALREADY holds real,
+verified data -- whether that data matches or diverges from the legacy
+source -- the fixed-root copy is authoritative and is NEVER overwritten,
+and its legacy counterpart is ALSO left untouched (never deleted) in this
+same pass. The divergence-or-coincidental-match is counted as a collision
+and resolution is deferred to a later, separate manual/cleanup pass.
 
 The one exception: if the fixed-root data was itself placed there by THIS
 migration mechanism in a prior pass, it is legitimately "already
 complete" -- a genuine multi-pass migration (relocate now, clean up
 later) must still be able to converge. Proof of that provenance is a
-CONTENT-BOUND digest marker (see ``_PROVENANCE_MARKER_NAME`` below), never
-a bare sentinel file: a sentinel alone could be coincidentally or
+CONTENT-BOUND digest marker (see ``verification.PROVENANCE_MARKER_NAME``),
+never a bare sentinel file: a sentinel alone could be coincidentally or
 accidentally present at the target path without this migration having put
 it there, which would falsely authorize treating foreign data as "our own
 prior work". A legacy shard is deleted ONLY after its own migrated copy
 has been read back and field-for-field verified identical to the legacy
 source -- "something exists at the target path" is never sufficient.
+
+Third-round critical exploit fix: a digest match alone was proven
+exploitable when the digest covered only logical point records (see
+``verification.manifest_digest``'s docstring) -- an incomplete target
+(missing ``hnsw_index.bin``/``collection_meta.json``) could still satisfy
+a forged/stale marker whose digest was computed the old, records-only
+way. ``manifest_digest`` now also covers the full file tree, closing that
+gap structurally; ``_target_is_structurally_complete`` below is kept as an
+INDEPENDENT, direct completeness check on top of the digest comparison --
+"already_complete" must never be granted to a target that is not, on its
+own terms, a real, queryable shard.
 """
 
 from __future__ import annotations
@@ -26,6 +38,7 @@ from __future__ import annotations
 import logging
 import os
 import shutil
+import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -38,7 +51,7 @@ from code_indexer.services.temporal.temporal_row_existence import (
     temporal_shard_has_committed_rows,
 )
 
-from .verification import manifest_digest, verify_shard_copy
+from .verification import PROVENANCE_MARKER_NAME, manifest_digest, verify_shard_copy
 
 logger = logging.getLogger(__name__)
 
@@ -56,13 +69,32 @@ _STAGING_INFIX = ".staging-"
 # name happens to exist". This is what makes the marker unforgeable by an
 # unrelated process that merely creates a same-named file.
 #
-# Safe by construction against verify_shard_copy()/manifest_digest(): their
-# manifest builders (verification.py's _json_manifest/_chunks_manifest)
-# enumerate ONLY "vector_*.json" files and a "chunks.db" SQLite store --
-# never a generic directory listing/diff -- so this marker file is
-# structurally invisible to every manifest computation and can never be
-# mistaken for a data record or corrupt a digest.
-_PROVENANCE_MARKER_NAME = ".legacy-migration-provenance"
+# Safe by construction against verify_shard_copy()/manifest_digest(): the
+# logical-record manifest builders (verification.py's
+# _json_manifest/_chunks_manifest) enumerate ONLY "vector_*.json" files and
+# a "chunks.db" SQLite store, and the structural manifest builder
+# explicitly excludes this exact filename -- so this marker file can never
+# be mistaken for a data record or corrupt a digest, including its own.
+_PROVENANCE_MARKER_NAME = PROVENANCE_MARKER_NAME
+
+# Third-round review, blocker 4: a repo-level (not per-shard) durable proof
+# that this migration mechanism previously observed and fully relocated
+# every legacy shard it discovered for this repo, written under
+# fixed_root (server-owned, outlives legacy shard deletion). This is what
+# lets metadata-scope cleanup converge in a LATER pass that sees zero
+# legacy shard directories -- either because none ever existed (never
+# touched, permanently keep) or because they were all genuinely migrated
+# and deleted already (safe to finish cleaning up). See
+# ``_repo_relocation_previously_completed`` for how the ambiguity between
+# those two cases is resolved.
+_REPO_RELOCATION_COMPLETE_MARKER_NAME = ".legacy-migration-repo-complete"
+
+# Bar this codebase already uses elsewhere (temporal_status.py's
+# ``is_queryable``) for "this shard has a working HNSW index" -- reused
+# here as one of the direct completeness checks, rather than inventing a
+# second definition of "queryable".
+_HNSW_INDEX_FILENAME = "hnsw_index.bin"
+_COLLECTION_META_FILENAME = "collection_meta.json"
 
 
 class TemporalMetadataScopeBackend(Protocol):
@@ -124,6 +156,26 @@ def _has_verified_data(path: Path) -> bool:
     return bool(temporal_shard_has_committed_rows(path, on_error="raise"))
 
 
+def _target_is_structurally_complete(target: Path) -> bool:
+    """Direct, independent proof that *target* is a real, complete,
+    queryable shard -- not merely "a digest happened to match".
+
+    Third-round critical exploit fix: kept deliberately independent of
+    ``manifest_digest``'s now-expanded structural coverage. Requires:
+    ``collection_meta.json`` present (the shard's own metadata file must
+    exist), ``hnsw_index.bin`` present (this codebase's established
+    "queryable" bar -- see ``temporal_status.py``'s ``is_queryable``), and
+    real committed rows (``_has_verified_data``). A target missing any of
+    these is never eligible for "already_complete", regardless of what any
+    marker file claims.
+    """
+    return (
+        (target / _COLLECTION_META_FILENAME).is_file()
+        and (target / _HNSW_INDEX_FILENAME).is_file()
+        and _has_verified_data(target)
+    )
+
+
 def _read_marker_digest(marker_path: Path) -> Optional[str]:
     if not marker_path.is_file():
         return None
@@ -134,20 +186,25 @@ def _read_marker_digest(marker_path: Path) -> Optional[str]:
         return None
 
 
-def _cleanup_orphaned_staging_dirs(target_parent: Path) -> None:
+def _cleanup_orphaned_staging_dirs(target_parent: Path) -> int:
     """Remove staging directories orphaned by a crash before publish.
 
-    Blocker 8: a crash between ``shutil.copytree`` and the atomic rename
-    into place leaves a ``.{name}.staging-{uuid}`` directory permanently
-    orphaned -- nothing previously looked for it on a later run. Safe to
-    sweep unconditionally here because the caller (scheduler/CLI) holds the
-    repo's write lock for the whole pass, so no other process can be
-    concurrently writing a staging directory for this same target_parent.
-    Any failure (listing the directory, or removing one entry) is logged
-    (ERROR) and skipped -- never allowed to abort the migration pass.
+    Blocker 8/review-round-3 blocker 3: a crash between ``shutil.
+    copytree`` and the atomic rename into place leaves a
+    ``.{name}.staging-{uuid}`` directory permanently orphaned -- nothing
+    previously looked for it on a later run. Safe to sweep unconditionally
+    here because the caller (scheduler/CLI) holds the repo's write lock
+    for the whole pass, so no other process can be concurrently writing a
+    staging directory for this same target_parent.
+
+    Returns the number of entries that failed to list/remove -- these were
+    previously logged (ERROR) and silently dropped, never surfaced in
+    ``MigrationResult.failed``. The caller folds the return value into the
+    pass's failure count so an operator can actually see that disk space
+    is being leaked, rather than the pass looking clean.
     """
     if not target_parent.is_dir():
-        return
+        return 0
     try:
         entries = list(target_parent.iterdir())
     except OSError:
@@ -155,7 +212,8 @@ def _cleanup_orphaned_staging_dirs(target_parent: Path) -> None:
             "failed to list %s while sweeping orphaned staging directories",
             target_parent,
         )
-        return
+        return 1
+    failures = 0
     for entry in entries:
         if not entry.is_dir():
             continue
@@ -168,6 +226,8 @@ def _cleanup_orphaned_staging_dirs(target_parent: Path) -> None:
             logger.exception(
                 "failed to remove orphaned migration staging directory: %s", entry
             )
+            failures += 1
+    return failures
 
 
 def _publish(
@@ -210,30 +270,43 @@ def _classify_existing_target(source: Path, target: Path) -> str:
     """Return "already_complete" or "collision" for a target that already
     holds verified data (Blocker 1's "new shard wins" policy).
 
-    "already_complete" requires content-bound proof: a provenance marker
-    at *target* whose recorded digest equals BOTH the current legacy
-    source's manifest digest AND the target's own current manifest digest
-    -- i.e. neither side has changed since a verified publish by THIS
-    migration mechanism. Anything short of that (no marker, a stale
-    marker, or content that has since diverged on either side) is a
-    collision, even when the content happens to match byte-for-byte --
-    a coincidental match is not proof of provenance.
+    "already_complete" requires BOTH:
+      1. Content-bound digest proof: a provenance marker at *target* whose
+         recorded digest equals BOTH the current legacy source's manifest
+         digest AND the target's own current manifest digest -- i.e.
+         neither side has changed since a verified publish by THIS
+         migration mechanism, and (since ``manifest_digest`` now covers
+         the full file tree, not just logical records) the target
+         genuinely mirrors the source's complete directory structure.
+      2. A direct, independent completeness proof
+         (``_target_is_structurally_complete``) -- the target must be a
+         real, queryable shard on its own terms, never trusted purely
+         because a digest comparison happened to agree.
+
+    Anything short of both (no marker, a stale marker, content that has
+    since diverged on either side, or a target that is not itself
+    structurally complete) is a collision, even when point-record content
+    happens to match byte-for-byte -- a coincidental match is not proof of
+    provenance.
     """
     marker_digest = _read_marker_digest(target / _PROVENANCE_MARKER_NAME)
     verified_prior_publish = (
         marker_digest is not None
         and marker_digest == manifest_digest(source)
         and marker_digest == manifest_digest(target)
+        and _target_is_structurally_complete(target)
     )
     if verified_prior_publish:
         return "already_complete"
     logger.warning(
         "temporal shard collision: fixed root %s already holds data that "
         "is not verifiably a prior publish of this migration mechanism "
-        "(marker_digest=%s) -- destination wins, both sides left "
-        "untouched pending a later, separate cleanup pass",
+        "(marker_digest=%s, structurally_complete=%s) -- destination "
+        "wins, both sides left untouched pending a later, separate "
+        "cleanup pass",
         target,
         marker_digest,
+        _target_is_structurally_complete(target),
     )
     return "collision"
 
@@ -346,21 +419,27 @@ def _copy_metadata_scope_if_safe(
     metadata_backend_factory: Callable[[Path], TemporalMetadataScopeBackend],
     *,
     relocation_enabled: bool,
-    any_collision: bool,
+    withhold: bool,
 ) -> bool:
     """Attempt the metadata-scope copy. Returns True iff it was attempted
     and failed (Blocker 6). Skips entirely (returns False, no attempt) when
-    relocation is disabled or a shard collision was detected this pass
-    (Blocker 2 -- copying would let ``INSERT OR REPLACE`` silently overwrite
-    rows belonging to whatever independently produced the collision).
+    relocation is disabled or ``withhold`` is True.
+
+    Review-round-3 blocker 2: ``withhold`` must be True whenever this pass
+    detected EITHER a shard collision OR a shard FAILURE (not collision
+    alone) -- a failed shard copy is just as untrustworthy a signal as a
+    collision: proceeding to copy the shared metadata scope in either case
+    would let ``INSERT OR REPLACE`` silently overwrite rows belonging to
+    whatever independently produced the collision, or rows this pass never
+    actually got to verify because the shard copy itself blew up.
     """
     if not relocation_enabled:
         return False
-    if any_collision:
+    if withhold:
         logger.warning(
             "temporal legacy migration: withholding metadata scope copy "
-            "%s -> %s because at least one shard collision was detected "
-            "this pass",
+            "%s -> %s because at least one shard collision or failure was "
+            "detected this pass",
             legacy_meta_path,
             fixed_meta_path,
         )
@@ -422,6 +501,34 @@ def _delete_metadata_scope_if_safe(
         return True
 
 
+def _mark_repo_relocation_complete(fixed_root: Path) -> None:
+    """Durably record that THIS pass observed a non-empty legacy shard list
+    for this repo and verified every one of them gone.
+
+    Review-round-3 blocker 4: written under ``fixed_root`` (server-owned,
+    outlives legacy shard deletion) so a LATER pass that sees zero legacy
+    shard directories can distinguish "genuinely fully migrated already"
+    from "never had any shards, permanently keep the metadata scope" --
+    see ``_repo_relocation_previously_completed``.
+    """
+    try:
+        fixed_root.mkdir(parents=True, exist_ok=True)
+        (fixed_root / _REPO_RELOCATION_COMPLETE_MARKER_NAME).write_text(
+            str(time.time())
+        )
+    except OSError:
+        logger.exception(
+            "failed to persist repo-level relocation-complete marker under %s "
+            "-- a later pass with zero remaining legacy shards will not be "
+            "able to treat this repo as fully migrated from this signal alone",
+            fixed_root,
+        )
+
+
+def _repo_relocation_previously_completed(fixed_root: Path) -> bool:
+    return (fixed_root / _REPO_RELOCATION_COMPLETE_MARKER_NAME).is_file()
+
+
 def _sync_metadata_scope(
     legacy_root: Path,
     fixed_root: Path,
@@ -430,7 +537,7 @@ def _sync_metadata_scope(
     relocation_enabled: bool,
     cleanup_authorized: bool,
     all_legacy_shards_gone: bool,
-    any_collision: bool,
+    withhold_copy: bool,
 ) -> bool:
     """Copy/delete the repo-level shared temporal-metadata bookkeeping scope.
 
@@ -455,7 +562,7 @@ def _sync_metadata_scope(
         fixed_meta_path,
         metadata_backend_factory,
         relocation_enabled=relocation_enabled,
-        any_collision=any_collision,
+        withhold=withhold_copy,
     )
     if copy_failed:
         return True
@@ -515,7 +622,7 @@ def migrate_temporal_shards(
     if not legacy_root.is_dir():
         return MigrationResult()
 
-    _cleanup_orphaned_staging_dirs(fixed_root)
+    staging_sweep_failures = _cleanup_orphaned_staging_dirs(fixed_root)
     shards = _discover_shards(legacy_root)
     counts = _run_shard_pass(
         shards,
@@ -524,13 +631,22 @@ def migrate_temporal_shards(
         cleanup_authorized=cleanup_authorized,
         pre_publish_hook=pre_publish_hook,
     )
+    counts["failed"] += staging_sweep_failures
 
     # Blocker 5: an empty shard list must never vacuously satisfy "all
     # legacy shards gone" -- a repo with literally zero temporal shards has
     # nothing to have relocated, so its metadata scope (if any) must never
-    # be treated as "cleanup complete" on that basis alone.
-    all_legacy_shards_gone = bool(shards) and all(
-        not shard.exists() for shard in shards
+    # be treated as "cleanup complete" on that basis alone. Review-round-3
+    # blocker 4: the ONE legitimate exception is a repo whose shards WERE
+    # discovered and fully relocated in an earlier pass (durably recorded
+    # via ``_mark_repo_relocation_complete``) and have since disappeared
+    # from ``legacy_root`` entirely -- that repo's metadata cleanup must
+    # still be able to converge on a later pass that sees zero shards.
+    non_vacuous_all_gone = bool(shards) and all(not shard.exists() for shard in shards)
+    if non_vacuous_all_gone:
+        _mark_repo_relocation_complete(fixed_root)
+    all_legacy_shards_gone = non_vacuous_all_gone or (
+        not shards and _repo_relocation_previously_completed(fixed_root)
     )
     metadata_failed = _sync_metadata_scope(
         legacy_root,
@@ -539,7 +655,7 @@ def migrate_temporal_shards(
         relocation_enabled=relocation_enabled,
         cleanup_authorized=cleanup_authorized,
         all_legacy_shards_gone=all_legacy_shards_gone,
-        any_collision=counts["collision"] > 0,
+        withhold_copy=counts["collision"] > 0 or counts["failed"] > 0,
     )
     if metadata_failed:
         counts["failed"] += 1

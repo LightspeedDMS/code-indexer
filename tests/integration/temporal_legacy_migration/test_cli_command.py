@@ -170,7 +170,10 @@ def test_server_temporal_migrate_legacy_output_reports_collisions_and_failures(
         result = CliRunner().invoke(
             cli, ["server", "temporal-migrate-legacy", "--alias", "demo"]
         )
-        assert result.exit_code == 0, result.output
+        assert result.exit_code != 0, (
+            "an unresolved collision must not exit 0 -- it would look "
+            f"identical to a clean run otherwise: {result.output}"
+        )
         assert "collisions=1" in result.output
         assert "failed=0" in result.output
         assert shard.exists(), "legacy copy must survive a collision"
@@ -183,7 +186,9 @@ def test_server_temporal_migrate_legacy_skips_repo_when_write_lock_held(
 ) -> None:
     """Issue #1548 review finding 3: the CLI must honor the repo's
     refresh-safe write lock -- a repo whose lock is already held by another
-    writer is skipped this pass, never raced.
+    writer is skipped this pass, never raced. Third-round review blocker 5:
+    the skip must be counted and reflected in a non-zero exit code, never
+    silently dropped from the totals.
     """
     data_dir = tmp_path / "server-data"
     shard = _register_demo_repo(data_dir)
@@ -203,8 +208,12 @@ def test_server_temporal_migrate_legacy_skips_repo_when_write_lock_held(
         result = CliRunner().invoke(
             cli, ["server", "temporal-migrate-legacy", "--alias", "demo"]
         )
-        assert result.exit_code == 0, result.output
+        assert result.exit_code != 0, (
+            "a lock-skipped candidate must not exit 0 -- it would look "
+            f"identical to a clean run otherwise: {result.output}"
+        )
         assert "skipped" in result.output.lower()
+        assert "lock_skipped=1" in result.output
         target = data_dir / "golden-repos" / ".temporal" / "demo" / shard.name
         assert not target.exists(), "a locked repo must never be migrated"
         assert shard.exists()

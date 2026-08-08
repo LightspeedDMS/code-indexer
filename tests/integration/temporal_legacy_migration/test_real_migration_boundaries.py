@@ -78,6 +78,12 @@ def test_crash_restart_after_staging_before_publish(tmp_path: Path) -> None:
     (shard / "vector_p1.json").write_text(
         json.dumps({"id": "p1", "vector": [1.0, 2.0], "payload": {"x": 1}})
     )
+    # A genuinely complete shard (every real temporal shard has these) --
+    # required for the resumed pass's already_complete classification,
+    # which is now also gated on structural completeness (Issue #1548
+    # third-round exploit fix), not merely a matching digest.
+    (shard / "collection_meta.json").write_text('{"name":"q1"}')
+    (shard / "hnsw_index.bin").write_bytes(b"hnsw-data")
     marker = tmp_path / "pause.marker"
     child_script = tmp_path / "child_migrate.py"
     _write_pause_before_publish_child_script(child_script, marker, legacy, fixed)
