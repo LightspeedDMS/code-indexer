@@ -354,6 +354,41 @@ def _target_is_structurally_complete(target: Path) -> bool:
     )
 
 
+def _content_matches_expected_source(expected_source: Path, target: Path) -> bool:
+    """True iff *target*'s content is field-for-field identical to
+    *expected_source* -- a trusted source of truth (the just-trashed
+    legacy source, or a surviving orphan trash directory).
+
+    Issue #1548 round-7 exploit fix: ``_target_is_structurally_complete``
+    proves the target LOOKS like a real, complete shard -- right files
+    present, HNSW genuinely loadable, id set matching its OWN records --
+    but says nothing about whether that data is the SAME data
+    *expected_source* holds. Codex reproduced replacing the target with a
+    DIFFERENT, fully valid, structurally-complete shard (same shape,
+    different vector content) at both the post-rename recovery check and
+    the orphan-trash-cleanup revalidation, and both accepted it. This
+    reuses ``verify_shard_copy`` -- the SAME fresh, independent,
+    field-for-field record comparison the pre-delete verification already
+    relies on -- rather than reimplementing content comparison a second
+    time. Never raises: any mismatch or unexpected failure is treated as
+    "does not match" (fail closed), since this gates a destructive
+    decision.
+    """
+    try:
+        verify_shard_copy(expected_source, target)
+        return True
+    except VerificationError:
+        return False
+    except Exception:
+        logger.exception(
+            "failed to compare content of %s against %s -- treating as "
+            "not matching (fail closed)",
+            expected_source,
+            target,
+        )
+        return False
+
+
 def _read_marker_digest(marker_path: Path) -> Optional[str]:
     if not marker_path.is_file():
         return None
@@ -558,7 +593,12 @@ def _verify_and_delete_source(
             f"{target} is not structurally complete immediately before "
             f"deletion"
         )
-    _delete_source_atomically(source, target, post_rename_hook)
+    # Round-7 exploit fix: snapshot the target's digest RIGHT NOW, while it
+    # is still trusted -- this is what _delete_source_atomically compares
+    # against after the rename, so a target SWAPPED during that window is
+    # caught even though a swapped-in shard can be independently valid.
+    expected_target_digest = manifest_digest(target)
+    _delete_source_atomically(source, target, expected_target_digest, post_rename_hook)
     logger.info("deleted verified legacy temporal shard %s", source)
 
 
@@ -1113,9 +1153,29 @@ def _discover_shards(legacy_root: Path) -> List[Path]:
     )
 
 
+def _target_digest_still_matches(target: Path, expected_digest: str) -> bool:
+    """True iff *target*'s CURRENT ``manifest_digest`` equals
+    *expected_digest* -- a snapshot the caller captured earlier, while
+    *target* was still trusted (immediately after its own verification
+    succeeded). Never raises: any recomputation failure (missing files,
+    a symlink, a corrupt tree) is treated as "does not match" (fail
+    closed), since this gates a destructive decision.
+    """
+    try:
+        return manifest_digest(target) == expected_digest
+    except Exception:
+        logger.exception(
+            "failed to recompute manifest digest for %s -- treating as "
+            "not matching the expected pre-rename snapshot (fail closed)",
+            target,
+        )
+        return False
+
+
 def _delete_source_atomically(
     source: Path,
     target: Path,
+    expected_target_digest: str,
     post_rename_hook: Optional[Callable[[], None]] = None,
 ) -> None:
     """Atomically rename *source* to a private trash path, re-verify
@@ -1135,6 +1195,23 @@ def _delete_source_atomically(
     failure -- so the caller's outer handling counts this as a failed
     migration attempt, never a partial state. ``post_rename_hook`` is a
     test-only seam firing in exactly this window.
+
+    Round-7 exploit fix (CRITICAL): structural completeness alone proves
+    the target LOOKS like a real shard, not that it still holds the SAME
+    data it held at verification time. Codex reproduced swapping the
+    target for a DIFFERENT, fully valid, structurally-complete shard in
+    this exact window, which the round-6 check alone accepted. ``target``
+    is now ALSO re-verified against *expected_target_digest* -- a
+    ``manifest_digest(target)`` snapshot the caller captured immediately
+    before the rename, while the target was still trusted -- via
+    ``_target_digest_still_matches``. Deliberately NOT a comparison
+    against the just-trashed source: the source is legitimately allowed
+    to be mutated after its own verification already succeeded (a
+    documented, intentional no-op for deletion purposes -- see
+    ``_verify_and_delete_source``'s round-6 fix), so comparing against it
+    here would wrongly reject that harmless case. Any digest divergence
+    is treated exactly like a structural failure -- restore and raise,
+    never delete.
     """
     trash_path = (
         source.parent / f".{source.name}{_PENDING_DELETE_INFIX}{uuid.uuid4().hex}"
@@ -1142,16 +1219,51 @@ def _delete_source_atomically(
     os.rename(source, trash_path)
     if post_rename_hook is not None:
         post_rename_hook()
-    if _contains_symlink(trash_path) or not _target_is_structurally_complete(target):
-        os.rename(trash_path, source)
+    target_unsafe = (
+        _contains_symlink(trash_path)
+        or not _target_is_structurally_complete(target)
+        or not _target_digest_still_matches(target, expected_target_digest)
+    )
+    if target_unsafe:
+        _restore_source_from_trash(trash_path, source)
         raise VerificationError(
             f"refusing to delete legacy temporal shard {source}: target "
-            f"{target} was found corrupted/incomplete (or a symlink "
-            f"appeared in the trashed source) immediately after the "
-            f"atomic rename to trash -- source restored to its original "
-            f"location, treating this migration attempt as failed"
+            f"{target} was found corrupted/incomplete, its content no "
+            f"longer matches its pre-deletion verified snapshot, or a "
+            f"symlink appeared in the trashed source immediately after "
+            f"the atomic rename to trash -- source restored to its "
+            f"original location, treating this migration attempt as failed"
         )
     shutil.rmtree(trash_path)
+
+
+def _restore_source_from_trash(trash_path: Path, source: Path) -> None:
+    """Restore *source* from *trash_path*, durably.
+
+    Issue #1548 round-7 hardening: explicitly verifies *source* is vacant
+    before the restore rename -- an ``os.rename`` onto an occupied,
+    non-empty directory already fails loudly with ``OSError``, but this
+    makes the check explicit and gives an actionable error instead of a
+    raw errno -- and fsyncs the parent directory after a successful
+    restore, since an atomic rename is not a DURABLE one on its own
+    (matching this module's ``_publish``/``_write_relocation_record_atomic``
+    fsync-after-rename convention).
+    """
+    if os.path.lexists(source):
+        # lexists (not exists) so a dangling symlink at *source* -- which
+        # exists() would report as False -- is still correctly detected
+        # as an occupant, never silently replaced.
+        raise VerificationError(
+            f"cannot restore legacy temporal shard from trash: {source} "
+            f"is unexpectedly occupied -- trashed data left at {trash_path} "
+            f"pending manual recovery"
+        )
+    os.rename(trash_path, source)
+    fd = os.open(source.parent, os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
 
 
 def _original_shard_name_from_trash(entry_name: str) -> Optional[str]:
@@ -1181,13 +1293,26 @@ def _trash_dir_is_safe_to_discard(entry: Path, fixed_root: Path) -> bool:
     path, or any other crash before the shard was ever confirmed safely
     migrated). Never assumes "leftover = safe" -- an unparseable name or
     a target that fails re-verification is left in place.
+
+    Issue #1548 round-7 exploit fix (CRITICAL): structural completeness
+    alone proved only that SOME real, complete shard sits at the target
+    path -- not that it is the SAME shard as *entry*'s own trashed data.
+    Codex reproduced replacing the target with a different, fully valid,
+    structurally-complete shard, which the round-6 check alone accepted
+    as grounds to discard the genuinely-surviving trash. Discarding now
+    ALSO requires ``_content_matches_expected_source(entry, target)`` --
+    a fresh, independent, field-for-field comparison between the trash
+    and the target -- so a content-divergent target can never authorize
+    discarding this trash directory.
     """
     name = _original_shard_name_from_trash(entry.name)
     if name is None:
         return False
     target = fixed_root / name
     try:
-        return _target_is_structurally_complete(target)
+        return _target_is_structurally_complete(
+            target
+        ) and _content_matches_expected_source(entry, target)
     except Exception:
         logger.exception(
             "failed to verify %s while deciding whether orphaned trash %s "
