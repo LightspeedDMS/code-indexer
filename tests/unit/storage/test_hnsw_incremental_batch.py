@@ -11,6 +11,14 @@ import numpy as np
 
 from src.code_indexer.storage.filesystem_vector_store import FilesystemVectorStore
 
+# test_incremental_hnsw_update_vs_full_rebuild constants (Issue #1548 review
+# finding 8).
+_INITIAL_VECTOR_COUNT = 1000
+_INCREMENTAL_VECTOR_COUNT = 10
+_VECTOR_DIMENSION = 1536
+_TIMING_TRIAL_COUNT = 3
+_INCREMENTAL_SPEEDUP_THRESHOLD = 0.75
+
 
 class TestHNSWIncrementalBatch:
     """Test suite for HNSW incremental batch updates."""
@@ -22,7 +30,7 @@ class TestHNSWIncrementalBatch:
         points = []
         for i in range(num_points):
             point_id = f"test_point_{start_id + i}"
-            vector = np.random.rand(1536).tolist()
+            vector = np.random.rand(_VECTOR_DIMENSION).tolist()
             points.append(
                 {
                     "id": point_id,
@@ -37,6 +45,58 @@ class TestHNSWIncrementalBatch:
                 }
             )
         return points
+
+    def _measure_full_and_incremental_hnsw_times(self, tmp_path, trial: int):
+        """One full trial for test_incremental_hnsw_update_vs_full_rebuild:
+        build a fresh collection with _INITIAL_VECTOR_COUNT vectors, time
+        its full rebuild, then append _INCREMENTAL_VECTOR_COUNT vectors and
+        time the incremental update. Returns (full_rebuild_time,
+        incremental_time, incremental_result).
+        """
+        store = FilesystemVectorStore(
+            tmp_path / f"trial{trial}",
+            project_root=tmp_path / f"trial{trial}",
+            use_chunks_db_for_new_collections=False,
+        )
+        collection_name = "test_collection"
+        store.create_collection(collection_name, vector_size=_VECTOR_DIMENSION)
+
+        initial_points = self.create_test_points(_INITIAL_VECTOR_COUNT)
+        store.begin_indexing(collection_name)
+        initial_upsert_result = store.upsert_points(collection_name, initial_points)
+        assert initial_upsert_result == {
+            "status": "ok",
+            "count": _INITIAL_VECTOR_COUNT,
+        }
+
+        start_time = time.time()
+        result = store.end_indexing(collection_name)
+        full_rebuild_time = time.time() - start_time
+        assert result["status"] == "ok"
+        assert result["vectors_indexed"] == _INITIAL_VECTOR_COUNT
+
+        store.begin_indexing(collection_name)
+        incremental_points = self.create_test_points(
+            _INCREMENTAL_VECTOR_COUNT, start_id=_INITIAL_VECTOR_COUNT
+        )
+        incremental_upsert_result = store.upsert_points(
+            collection_name, incremental_points
+        )
+        assert incremental_upsert_result == {
+            "status": "ok",
+            "count": _INCREMENTAL_VECTOR_COUNT,
+        }
+
+        start_time = time.time()
+        result = store.end_indexing(collection_name)
+        incremental_time = time.time() - start_time
+        assert result["status"] == "ok"
+        assert (
+            result["vectors_indexed"]
+            == _INITIAL_VECTOR_COUNT + _INCREMENTAL_VECTOR_COUNT
+        )
+
+        return full_rebuild_time, incremental_time, result
 
     # === AC1: Track Changed Vectors During Indexing Session ===
 
@@ -171,7 +231,7 @@ class TestHNSWIncrementalBatch:
         temporal_points = [
             {
                 "id": f"temporal_vec_{i}",
-                "vector": np.random.rand(1536).tolist(),
+                "vector": np.random.rand(_VECTOR_DIMENSION).tolist(),
                 "payload": {
                     "commit_hash": f"abc123{i}",
                     "timestamp": 1234567890 + i,
@@ -192,48 +252,53 @@ class TestHNSWIncrementalBatch:
     # === AC2: Incremental HNSW Update at End of Indexing Cycle ===
 
     def test_incremental_hnsw_update_vs_full_rebuild(self, tmp_path):
-        """Test incremental update is faster than full rebuild."""
-        # Setup
-        store = FilesystemVectorStore(
-            tmp_path, project_root=tmp_path, use_chunks_db_for_new_collections=False
+        """Test incremental update is faster than full rebuild.
+
+        Issue #1548 review finding 8: a single-shot wall-clock measurement
+        proved genuinely unreliable regardless of ratio threshold -- fresh
+        evidence this session showed a strict /2 bound failing 10/18 runs,
+        and a loosened 0.75 bound still failing 3/20 runs in isolation plus
+        one sample reaching ratio 0.99 when run immediately after 55 other
+        tests in this same file (heavy host contention). No fixed ratio on
+        a SINGLE sample can be both meaningful and stable under variable
+        host load. Fixed by taking the MINIMUM across _TIMING_TRIAL_COUNT
+        independent trials (fresh collection each time) for each phase:
+        the underlying work per phase is deterministic, so only transient
+        scheduling noise varies between trials, and the minimum cancels
+        that noise out far more reliably than any single-shot threshold
+        tuning could.
+        """
+        full_times = []
+        incremental_times = []
+        hnsw_update_modes = []
+        for trial in range(_TIMING_TRIAL_COUNT):
+            full_t, incremental_t, result = (
+                self._measure_full_and_incremental_hnsw_times(tmp_path, trial)
+            )
+            full_times.append(full_t)
+            incremental_times.append(incremental_t)
+            hnsw_update_modes.append(result.get("hnsw_update"))
+
+        full_rebuild_time = min(full_times)
+        incremental_time = min(incremental_times)
+
+        # Incremental must be meaningfully faster; _INCREMENTAL_SPEEDUP_
+        # THRESHOLD catches a real regression where the incremental path
+        # silently degrades into a full rebuild (ratio ~1.0), mirroring
+        # the loose ratio-style bound test_path_pattern_performance.py
+        # already uses for the same host-load-dependent-timing reason
+        # ("within 2x") -- but applied to the min-of-N rather than a
+        # single sample.
+        assert incremental_time < full_rebuild_time * _INCREMENTAL_SPEEDUP_THRESHOLD, (
+            f"Incremental ({incremental_time:.2f}s, min of "
+            f"{_TIMING_TRIAL_COUNT}) should be meaningfully faster than "
+            f"full rebuild ({full_rebuild_time:.2f}s, min of "
+            f"{_TIMING_TRIAL_COUNT}); full_times={full_times}, "
+            f"incremental_times={incremental_times}"
         )
-        collection_name = "test_collection"
-        store.create_collection(collection_name, vector_size=1536)
 
-        # Create large initial index (1000 vectors)
-        initial_points = self.create_test_points(1000)
-        store.begin_indexing(collection_name)
-        store.upsert_points(collection_name, initial_points)
-
-        # Time the initial full rebuild
-        start_time = time.time()
-        result = store.end_indexing(collection_name)
-        full_rebuild_time = time.time() - start_time
-
-        assert result["status"] == "ok"
-        assert result["vectors_indexed"] == 1000
-
-        # Now make incremental changes (10 new vectors)
-        store.begin_indexing(collection_name)
-        incremental_points = self.create_test_points(10, start_id=1000)
-        store.upsert_points(collection_name, incremental_points)
-
-        # Time the incremental update
-        start_time = time.time()
-        result = store.end_indexing(collection_name)
-        incremental_time = time.time() - start_time
-
-        assert result["status"] == "ok"
-        assert result["vectors_indexed"] == 1010
-
-        # Incremental must be faster; the exact ratio is host-load dependent.
-        assert incremental_time < full_rebuild_time / 2, (
-            f"Incremental ({incremental_time:.2f}s) should be much faster than "
-            f"full rebuild ({full_rebuild_time:.2f}s)"
-        )
-
-        # Verify incremental mode was used
-        assert result.get("hnsw_update") == "incremental"
+        # Verify incremental mode was used consistently across ALL trials.
+        assert hnsw_update_modes == ["incremental"] * _TIMING_TRIAL_COUNT
 
     def test_temporal_collection_incremental_hnsw(self, tmp_path):
         """Test that temporal collection uses incremental HNSW updates."""
