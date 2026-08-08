@@ -24,6 +24,7 @@ import logging
 import os
 import socket
 import threading
+import uuid
 from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
@@ -181,6 +182,102 @@ class WriteLockManager:
             return False
 
         logger.debug(f"Write lock released: alias={alias!r} owner={owner_name!r}")
+        return True
+
+    def renew(
+        self,
+        alias: str,
+        owner_name: str,
+        ttl_seconds: int = DEFAULT_LOCK_TTL_SECONDS,
+    ) -> bool:
+        """
+        Extend the lease of a lock currently held by ``owner_name``.
+
+        Issue #1548 round-7 fix: gives a legitimately long-running holder
+        (e.g. temporal-legacy-migration) a heartbeat mechanism instead of
+        depending solely on a long-but-finite TTL. See ``_renew_locked``
+        for the actual read-validate-write sequence, protected by the same
+        per-alias intra-process lock ``acquire()`` uses -- the CROSS-process
+        race against another process's ``acquire()``/``release()`` is an
+        accepted, pre-existing residual of this lock's file-based design
+        (same as ``release()``), not newly introduced here.
+
+        Returns:
+            True if the lease was renewed, False on a missing lock file,
+            an owner mismatch, or unreadable content.
+
+        Raises:
+            ValueError: alias/owner_name is blank, or ttl_seconds is not a
+                positive integer.
+        """
+        if not isinstance(alias, str) or not alias.strip():
+            raise ValueError("alias must be a non-blank string")
+        if not isinstance(owner_name, str) or not owner_name.strip():
+            raise ValueError("owner_name must be a non-blank string")
+        if not isinstance(ttl_seconds, int) or ttl_seconds <= 0:
+            raise ValueError("ttl_seconds must be a positive integer")
+
+        with self._get_intra_lock(alias):
+            return self._renew_locked(alias, owner_name, ttl_seconds)
+
+    def _renew_locked(self, alias: str, owner_name: str, ttl_seconds: int) -> bool:
+        """Read-validate-write body of ``renew()``, called under the
+        per-alias intra-process lock. Split out to keep ``renew()`` short.
+        """
+        lock_file = self._lock_file(alias)
+        if not lock_file.exists():
+            logger.warning(
+                f"Cannot renew write lock for {alias!r}: no lock file present"
+            )
+            return False
+
+        try:
+            content = json.loads(lock_file.read_text())
+        except (json.JSONDecodeError, OSError) as e:
+            logger.warning(f"Cannot renew write lock for {alias!r}: {e}")
+            return False
+        if not isinstance(content, dict):
+            logger.warning(
+                f"Cannot renew write lock for {alias!r}: lock file "
+                f"content is not a JSON object"
+            )
+            return False
+
+        recorded_owner = content.get("owner")
+        if not recorded_owner or recorded_owner != owner_name:
+            logger.warning(
+                f"Write lock renewal refused for {alias!r}: "
+                f"caller={owner_name!r} but lock owned by {recorded_owner!r}"
+            )
+            return False
+
+        content["acquired_at"] = datetime.now(timezone.utc).isoformat()
+        content["ttl_seconds"] = ttl_seconds
+        return self._write_renewed_lock_content(alias, lock_file, content)
+
+    def _write_renewed_lock_content(
+        self, alias: str, lock_file: Path, content: Dict
+    ) -> bool:
+        """Atomically persist *content* over *lock_file* (uuid4-suffixed
+        temp file + ``os.replace`` -- never a bare ``write_text()``,
+        matching this codebase's other durable-metadata-write conventions
+        and collision-free across concurrent renewals of DIFFERENT
+        aliases).
+        """
+        tmp_path = lock_file.with_name(f"{lock_file.name}.tmp-{uuid.uuid4().hex}")
+        try:
+            tmp_path.write_text(json.dumps(content))
+            os.replace(tmp_path, lock_file)
+        except OSError as e:
+            logger.warning(f"Could not renew lock file for {alias!r}: {e}")
+            try:
+                tmp_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+            return False
+        logger.debug(
+            f"Write lock renewed: alias={alias!r} owner={content.get('owner')!r}"
+        )
         return True
 
     def is_locked(self, alias: str) -> bool:

@@ -13,13 +13,16 @@ from code_indexer.server.services.temporal_legacy_migration.scheduler import (
 from code_indexer.server.utils.config_manager import TemporalLegacyMigrationConfig
 
 
+_FAKE_DEFAULT_TTL_SECONDS = 3600
+
+
 class _FakeWriteLockManager:
     def __init__(self):
         self.locked = set()
         self.acquire_calls: List[str] = []
         self.release_calls: List[str] = []
 
-    def acquire(self, alias, *, owner_name):
+    def acquire(self, alias, *, owner_name, ttl_seconds=_FAKE_DEFAULT_TTL_SECONDS):
         self.acquire_calls.append(alias)
         if alias in self.locked:
             return False
@@ -30,6 +33,9 @@ class _FakeWriteLockManager:
         self.release_calls.append(alias)
         self.locked.discard(alias)
         return True
+
+    def renew(self, alias, *, owner_name, ttl_seconds=_FAKE_DEFAULT_TTL_SECONDS):
+        return alias in self.locked
 
 
 class _FakeRefreshScheduler:
