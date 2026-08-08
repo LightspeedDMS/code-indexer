@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import logging
 import threading
+import uuid
 from contextlib import contextmanager
 from typing import Any, Iterator
 
@@ -52,6 +53,52 @@ class RefreshInProgressError(RuntimeError):
     """Raised when a refresh job is already active for this alias."""
 
 
+class LockLostError(RuntimeError):
+    """Raised by ``LockLossSignal.raise_if_lost()`` when a background
+    heartbeat renewal has failed (or raised) and the lock may no longer be
+    held.
+
+    Issue #1548 round-8 fix (Issue 1): previously a renewal failure was
+    only logged -- the guarded migration body kept running and kept
+    performing destructive filesystem/metadata work regardless. Codex
+    reproduced this concretely: forcing three consecutive renewal
+    failures still let the destructive migration body run to completion.
+    Callers doing destructive work under ``guarded_by_refresh_lock`` MUST
+    check the yielded ``LockLossSignal`` immediately before every
+    destructive step (see ``mover.py``'s ``_abort_if_lock_lost``) and
+    treat this exception exactly like any other hard failure.
+    """
+
+
+class LockLossSignal:
+    """Thread-safe flag set by the background heartbeat when a renewal
+    attempt fails or raises, signalling that the write lock this signal
+    guards may no longer be held.
+
+    Yielded by ``guarded_by_refresh_lock`` so the guarded body can check
+    it (via ``is_lost()``/``raise_if_lost()``) immediately before every
+    destructive operation, rather than continuing to act on data it may
+    no longer have exclusive ownership of.
+    """
+
+    def __init__(self) -> None:
+        self._event = threading.Event()
+
+    def mark_lost(self) -> None:
+        self._event.set()
+
+    def is_lost(self) -> bool:
+        return self._event.is_set()
+
+    def raise_if_lost(self) -> None:
+        if self._event.is_set():
+            raise LockLostError(
+                "write lock renewal failed -- the lock may no longer be "
+                "held by this process; aborting before performing further "
+                "destructive work"
+            )
+
+
 @contextmanager
 def guarded_by_refresh_lock(
     # Typed Any (not RefreshScheduler) deliberately: importing
@@ -62,7 +109,7 @@ def guarded_by_refresh_lock(
     # and a lightweight fake exposing that same surface in tests.
     refresh_scheduler: Any,
     bare_alias: str,
-) -> Iterator[None]:
+) -> Iterator[LockLossSignal]:
     """Acquire the repo's write lock and verify no refresh is in flight.
 
     Acquires ``refresh_scheduler.write_lock_manager`` immediately, then
@@ -72,6 +119,12 @@ def guarded_by_refresh_lock(
     does not hold the write lock, so the lock alone cannot close the
     already-running-refresh TOCTOU gap). The lock is released in ``finally``
     on every path (success, incomplete, or exception).
+
+    Yields a ``LockLossSignal`` (Issue #1548 round-8, Issue 1) that the
+    guarded body MUST check immediately before every destructive
+    operation -- set by the background heartbeat if a renewal fails or
+    raises, since continuing destructive work while the lock may no
+    longer be held is exactly the hazard this guard exists to prevent.
 
     Raises:
         ValueError: refresh_scheduler is None, or bare_alias is not a
@@ -86,10 +139,19 @@ def guarded_by_refresh_lock(
         raise ValueError("bare_alias must be a non-blank string")
 
     heartbeat_join_timeout_seconds = 5.0
+    # Issue #1548 round-8 fix (Issue 2): a unique per-acquisition token --
+    # owner_name alone is shared by every migration pass, so it cannot
+    # distinguish THIS acquisition from a later one taken by a different
+    # process/pass under the same owner_name after this lock's TTL
+    # expired. Passed to every acquire()/renew()/release() call below so
+    # WriteLockManager can refuse a renewal/release that is no longer
+    # this acquisition's to make.
+    owner_token = uuid.uuid4().hex
     lock_acquired = refresh_scheduler.write_lock_manager.acquire(
         bare_alias,
         owner_name=MIGRATION_OWNER_NAME,
         ttl_seconds=TEMPORAL_LEGACY_MIGRATION_LOCK_TTL_SECONDS,
+        owner_token=owner_token,
     )
     if not lock_acquired:
         raise WriteLockHeldError(
@@ -112,52 +174,85 @@ def guarded_by_refresh_lock(
         # already-refused early-return paths above), stopped/joined
         # before the lock is released below.
         stop_heartbeat = threading.Event()
+        lock_loss_signal = LockLossSignal()
         heartbeat_thread = threading.Thread(
             target=_renew_lock_periodically,
-            args=(refresh_scheduler.write_lock_manager, bare_alias, stop_heartbeat),
+            args=(
+                refresh_scheduler.write_lock_manager,
+                bare_alias,
+                stop_heartbeat,
+                owner_token,
+                lock_loss_signal,
+            ),
             name=f"temporal-legacy-migration-lock-heartbeat-{bare_alias}",
             daemon=True,
         )
         heartbeat_thread.start()
         try:
-            yield
+            yield lock_loss_signal
         finally:
             stop_heartbeat.set()
             heartbeat_thread.join(timeout=heartbeat_join_timeout_seconds)
     finally:
         refresh_scheduler.release_write_lock(
-            bare_alias, owner_name=MIGRATION_OWNER_NAME
+            bare_alias, owner_name=MIGRATION_OWNER_NAME, owner_token=owner_token
         )
         logger.info("temporal legacy migration: write lock released for %s", bare_alias)
 
 
 def _renew_lock_periodically(
-    write_lock_manager: Any, bare_alias: str, stop_event: threading.Event
+    write_lock_manager: Any,
+    bare_alias: str,
+    stop_event: threading.Event,
+    owner_token: str,
+    lock_loss_signal: LockLossSignal,
 ) -> None:
     """Background heartbeat: periodically renew *bare_alias*'s lock lease
     for as long as ``stop_event`` is unset, so a migration pass running
     even longer than ``TEMPORAL_LEGACY_MIGRATION_LOCK_TTL_SECONDS`` never
-    depends solely on the TTL alone to keep its lock. Never raises out of
-    this thread -- a single missed/failed renewal is logged and retried
-    on the next tick, matching this codebase's fail-soft scheduler
-    conventions elsewhere.
+    depends solely on the TTL alone to keep its lock.
+
+    Issue #1548 round-8 fix (Issue 1): a renewal that returns ``False`` or
+    raises now marks *lock_loss_signal* -- the guarded body checks this
+    before every destructive operation and aborts rather than continuing
+    to act on data it may no longer have exclusive ownership of. Never
+    raises out of this thread itself.
+
+    Issue #1548 round-8 fix (Issue 3): ``stop_event`` is re-checked
+    immediately before each renewal call -- as close together as
+    achievable -- to shrink (never fully eliminate, since the renewal
+    call itself may still block on I/O) the window between "should this
+    heartbeat still be running" and "does it actually attempt a write".
+    The matching, load-bearing half of this fix is inside
+    ``WriteLockManager._write_renewed_lock_content``, which re-verifies
+    the lock's CURRENT on-disk state immediately before its own atomic
+    write -- that is what actually closes the race for a renewal already
+    blocked past this check.
     """
     while not stop_event.wait(_HEARTBEAT_INTERVAL_SECONDS):
+        if stop_event.is_set():
+            return
         try:
             renewed = write_lock_manager.renew(
                 bare_alias,
                 owner_name=MIGRATION_OWNER_NAME,
                 ttl_seconds=TEMPORAL_LEGACY_MIGRATION_LOCK_TTL_SECONDS,
+                owner_token=owner_token,
             )
             if not renewed:
-                logger.warning(
+                logger.error(
                     "temporal legacy migration: lock renewal for %s did "
                     "not succeed -- lock may no longer be held by this "
-                    "process",
+                    "process; flagging lock as lost so any destructive "
+                    "work aborts",
                     bare_alias,
                 )
+                lock_loss_signal.mark_lost()
         except Exception:
             logger.exception(
-                "temporal legacy migration: lock renewal heartbeat failed for %s",
+                "temporal legacy migration: lock renewal heartbeat failed "
+                "for %s -- flagging lock as lost so any destructive work "
+                "aborts",
                 bare_alias,
             )
+            lock_loss_signal.mark_lost()

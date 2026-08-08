@@ -13,6 +13,7 @@ from code_indexer.server.services.temporal_legacy_migration import (
 from code_indexer.server.services.temporal_legacy_migration.locking import (
     MIGRATION_OWNER_NAME,
     TEMPORAL_LEGACY_MIGRATION_LOCK_TTL_SECONDS,
+    LockLostError,
     RefreshInProgressError,
     WriteLockHeldError,
     guarded_by_refresh_lock,
@@ -44,8 +45,9 @@ class _FakeWriteLockManager:
         self.acquire_calls = []
         self.release_calls = []
         self.renew_calls = []
+        self._force_renew_failure = False
 
-    def acquire(self, alias, *, owner_name, ttl_seconds=3600):
+    def acquire(self, alias, *, owner_name, ttl_seconds=3600, owner_token=None):
         with self._state_lock:
             self.acquire_calls.append((alias, owner_name, ttl_seconds))
             if alias in self.locked:
@@ -53,16 +55,27 @@ class _FakeWriteLockManager:
             self.locked.add(alias)
             return True
 
-    def release(self, alias, *, owner_name):
+    def release(self, alias, *, owner_name, owner_token=None):
         with self._state_lock:
             self.release_calls.append((alias, owner_name))
             self.locked.discard(alias)
             return True
 
-    def renew(self, alias, *, owner_name, ttl_seconds=3600):
+    def renew(self, alias, *, owner_name, ttl_seconds=3600, owner_token=None):
         with self._state_lock:
             self.renew_calls.append((alias, owner_name, ttl_seconds))
+            if self._force_renew_failure:
+                return False
             return alias in self.locked
+
+    def force_renew_to_fail(self):
+        """Test-only seam (Issue #1548 round-8, Issue 1): make every
+        subsequent ``renew()`` call report failure regardless of lock
+        state, reproducing Codex's exact scenario -- repeated renewal
+        failures.
+        """
+        with self._state_lock:
+            self._force_renew_failure = True
 
     def add_lock(self, alias):
         """Test-only seam: seed the fake as already holding *alias*'s
@@ -99,8 +112,10 @@ class _FakeRefreshScheduler:
         if self._refresh_in_progress:
             raise DuplicateJobError("global_repo_refresh", alias, "job-123")
 
-    def release_write_lock(self, alias, *, owner_name):
-        released = self.write_lock_manager.release(alias, owner_name=owner_name)
+    def release_write_lock(self, alias, *, owner_name, owner_token=None):
+        released = self.write_lock_manager.release(
+            alias, owner_name=owner_name, owner_token=owner_token
+        )
         assert released, f"release_write_lock: owner mismatch for {alias!r}"
 
 
@@ -206,3 +221,47 @@ def test_guard_stops_heartbeat_renewal_after_the_body_exits(monkeypatch):
     assert len(scheduler.write_lock_manager.snapshot_renew_calls()) == count_at_exit, (
         "heartbeat renewal must stop firing once the guarded body has exited"
     )
+
+
+# ---------------------------------------------------------------------------
+# Issue #1548 round-8 fix, Issue 1 -- a renewal failure must not be
+# silently logged while the guarded destructive body keeps running.
+#
+# Codex reproduced this as a NORMAL bug (not an exotic attack): forcing
+# renew() to return False repeatedly still let the destructive migration
+# body run to completion, because the failure was only logged. The fix
+# marks a ``LockLossSignal`` (yielded by ``guarded_by_refresh_lock``) so
+# the guarded body can check it before every destructive step and abort.
+# ---------------------------------------------------------------------------
+
+_LOCK_LOSS_POLL_TIMEOUT_SECONDS = 2.0
+
+
+def test_guard_marks_lock_lost_when_renewal_repeatedly_fails(monkeypatch):
+    monkeypatch.setattr(
+        locking_mod, "_HEARTBEAT_INTERVAL_SECONDS", _TEST_HEARTBEAT_INTERVAL_SECONDS
+    )
+    scheduler = _FakeRefreshScheduler()
+
+    with guarded_by_refresh_lock(scheduler, "demo") as lock_loss_signal:
+        assert not lock_loss_signal.is_lost()
+        # Codex's exact repro: force renew() to report failure repeatedly.
+        scheduler.write_lock_manager.force_renew_to_fail()
+
+        deadline = time.time() + _LOCK_LOSS_POLL_TIMEOUT_SECONDS
+        while not lock_loss_signal.is_lost() and time.time() < deadline:
+            time.sleep(_TEST_HEARTBEAT_INTERVAL_SECONDS)
+
+        assert lock_loss_signal.is_lost(), (
+            "expected the heartbeat's repeated renewal failures to mark the lock lost"
+        )
+        # A guarded destructive body checking the signal (exactly like
+        # mover.py's _abort_if_lock_lost) must see it abort, never proceed
+        # as if renewal were still succeeding.
+        with pytest.raises(LockLostError):
+            lock_loss_signal.raise_if_lost()
+        # At least one renewal attempt must have actually been made and
+        # reported failure -- the fix marks the lock lost on the very
+        # FIRST failed renewal (stricter than merely "eventually"), so
+        # the poll loop above exits after exactly one attempt.
+        assert len(scheduler.write_lock_manager.snapshot_renew_calls()) >= 1
