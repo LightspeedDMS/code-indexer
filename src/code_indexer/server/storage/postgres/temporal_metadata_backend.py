@@ -294,6 +294,42 @@ class TemporalMetadataPostgresBackend:
             ).fetchone()
         return row[0] if row else 0
 
+    def copy_collection_scope(self, target_collection_path: Path) -> None:
+        """Additively re-key rows; retain the source key for compatibility."""
+        target_key = hashlib.sha256(str(target_collection_path).encode()).hexdigest()[
+            : len(self._collection_key)
+        ]
+        with self._pool.connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO temporal_metadata
+                    (collection_key, hash_prefix, point_id, commit_hash,
+                     file_path, chunk_index, created_at, format_version)
+                SELECT %s, hash_prefix, point_id, commit_hash, file_path,
+                       chunk_index, created_at, format_version
+                FROM temporal_metadata
+                WHERE collection_key = %s
+                ON CONFLICT (collection_key, hash_prefix) DO UPDATE SET
+                    point_id = EXCLUDED.point_id,
+                    commit_hash = EXCLUDED.commit_hash,
+                    file_path = EXCLUDED.file_path,
+                    chunk_index = EXCLUDED.chunk_index,
+                    created_at = EXCLUDED.created_at,
+                    format_version = EXCLUDED.format_version
+                """,
+                (target_key, self._collection_key),
+            )
+            conn.commit()
+
+    def delete_collection_scope(self) -> None:
+        """Delete this collection key; callers provide the authorization gate."""
+        with self._pool.connection() as conn:
+            conn.execute(
+                "DELETE FROM temporal_metadata WHERE collection_key = %s",
+                (self._collection_key,),
+            )
+            conn.commit()
+
 
 def make_postgres_temporal_metadata_factory(
     pool: Any,

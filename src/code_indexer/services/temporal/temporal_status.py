@@ -86,6 +86,7 @@ class TemporalRepoStatus:
     is_queryable: bool
     resolved_path: Optional[Path]
     resolved_source: Optional[TemporalDataLocation]
+    legacy_data_stranded: bool = False
 
 
 _NO_TEMPORAL_DATA = TemporalRepoStatus(
@@ -213,6 +214,18 @@ def get_temporal_repo_status(
     Raises:
         Propagates the underlying store-read error when ``on_error="raise"``.
     """
+    legacy_candidates = _scan_root(
+        Path(legacy_index_path), TemporalDataLocation.IN_REPO
+    )
+    fixed_candidates = _scan_root(
+        server_temporal_index_root(Path(golden_repos_dir), repo_alias),
+        TemporalDataLocation.FIXED_SERVER_ROOT,
+    )
+    stranded = any(
+        key not in fixed_candidates
+        and temporal_shard_has_committed_rows(path, on_error=on_error)
+        for key, (path, _) in legacy_candidates.items()
+    )
     shards = _discover_shards(
         Path(golden_repos_dir),
         repo_alias,
@@ -220,7 +233,13 @@ def get_temporal_repo_status(
         on_error=on_error,
     )
     if not shards:
-        return _NO_TEMPORAL_DATA
+        return TemporalRepoStatus(
+            has_data=False,
+            is_queryable=False,
+            resolved_path=None,
+            resolved_source=None,
+            legacy_data_stranded=stranded,
+        )
 
     best_queryable: Optional[Tuple[Path, TemporalDataLocation]] = None
     best_any: Optional[Tuple[Path, TemporalDataLocation]] = None
@@ -237,6 +256,7 @@ def get_temporal_repo_status(
         is_queryable=best_queryable is not None,
         resolved_path=chosen[0] if chosen else None,
         resolved_source=chosen[1] if chosen else None,
+        legacy_data_stranded=stranded,
     )
 
 

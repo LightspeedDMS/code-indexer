@@ -99,6 +99,8 @@ def _fleet_migration_settings(config: ServerConfig) -> Dict[str, Any]:
         "enabled": fm.enabled,
         "tick_interval_minutes": fm.tick_interval_minutes,
         "canary_gate_enabled": fm.canary_gate_enabled,
+        "temporal_legacy_relocation_enabled": fm.temporal_legacy_relocation_enabled,
+        "temporal_legacy_cleanup_authorized": fm.temporal_legacy_cleanup_authorized,
     }
 
 
@@ -2492,6 +2494,10 @@ class ConfigService:
             fm.tick_interval_minutes = int(value)
         elif key == "canary_gate_enabled":
             fm.canary_gate_enabled = _parse_bool(value)
+        elif key == "temporal_legacy_relocation_enabled":
+            fm.temporal_legacy_relocation_enabled = _parse_bool(value)
+        elif key == "temporal_legacy_cleanup_authorized":
+            fm.temporal_legacy_cleanup_authorized = _parse_bool(value)
         else:
             raise ValueError(f"Unknown fleet_migration setting: {key}")
 

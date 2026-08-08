@@ -2069,6 +2069,7 @@ def make_lifespan(
         # migration_setting) before it ever consolidates/deletes real
         # on-disk chunk data for any golden repo.
         fleet_migration_scheduler = None
+        temporal_legacy_migration_scheduler = None
         logger.info(
             "Server startup: Initializing fleet migration scheduler",
             extra={"correlation_id": get_correlation_id()},
@@ -2101,6 +2102,29 @@ def make_lifespan(
                     f"Failed to initialize fleet migration scheduler: {e}",
                     extra={"correlation_id": get_correlation_id()},
                 )
+            )
+
+        # Issue #1548: legacy temporal relocation is independently gated by
+        # config flags and must never prevent server startup.
+        try:
+            from code_indexer.server.services.temporal_legacy_migration.scheduler import (
+                TemporalLegacyMigrationScheduler,
+            )
+            from code_indexer.server.services.config_service import get_config_service
+
+            temporal_legacy_migration_scheduler = TemporalLegacyMigrationScheduler(
+                golden_repo_manager=golden_repo_manager,
+                config_service=get_config_service(),
+            )
+            temporal_legacy_migration_scheduler.start()
+            app.state.temporal_legacy_migration_scheduler = (
+                temporal_legacy_migration_scheduler
+            )
+        except Exception as e:
+            logger.warning(
+                "Temporal legacy migration scheduler unavailable; startup continues: %s",
+                e,
+                exc_info=True,
             )
 
         # Startup: Initialize in-process embedding-stats writer (Story #1418
@@ -4797,6 +4821,23 @@ def make_lifespan(
                         exc_info=True,
                         extra={"correlation_id": get_correlation_id()},
                     )
+                )
+
+        temporal_legacy_scheduler_state = getattr(
+            app.state, "temporal_legacy_migration_scheduler", None
+        )
+        if temporal_legacy_scheduler_state is not None:
+            try:
+                temporal_legacy_scheduler_state.stop()
+                logger.info(
+                    "Temporal legacy migration scheduler stopped",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            except Exception as e:
+                logger.error(
+                    "Error stopping temporal legacy migration scheduler: %s",
+                    e,
+                    exc_info=True,
                 )
 
         # Shutdown: Stop research cleanup scheduler (Bug #1085)

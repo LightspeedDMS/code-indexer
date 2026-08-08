@@ -1098,6 +1098,11 @@ class FleetMigrationConfig:
     # repos before anything notices.
     canary_gate_enabled: bool = False
 
+    # Issue #1548: copy/publish and destructive cleanup are independent
+    # rollout gates. Both are off by default.
+    temporal_legacy_relocation_enabled: bool = False
+    temporal_legacy_cleanup_authorized: bool = False
+
 
 @dataclass
 class XRayConfig:

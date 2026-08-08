@@ -378,3 +378,19 @@ class TemporalMetadataSqliteBackend:
             return row[0] if row else 0
         finally:
             conn.close()
+
+    def copy_collection_scope(self, target_collection_path: Path) -> None:
+        """Copy the live SQLite database using SQLite's consistent backup API."""
+        target_collection_path.mkdir(parents=True, exist_ok=True)
+        destination = sqlite3.connect(target_collection_path / self.METADATA_DB_NAME)
+        source = sqlite3.connect(self.db_path)
+        try:
+            source.backup(destination)
+            destination.commit()
+        finally:
+            source.close()
+            destination.close()
+
+    def delete_collection_scope(self) -> None:
+        """Remove this shard's SQLite metadata database."""
+        self.db_path.unlink(missing_ok=True)
