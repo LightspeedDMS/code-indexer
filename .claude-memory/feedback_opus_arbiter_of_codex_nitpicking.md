@@ -1,0 +1,22 @@
+---
+name: feedback-opus-arbiter-of-codex-nitpicking
+description: "When Codex rejects a fix repeatedly across many rounds, dispatch an Opus review to judge which findings are material vs nitpicking BEFORE auto-escalating another round"
+metadata:
+  type: feedback
+  originSessionId: bf453024-c658-4c98-bc2d-eebbb3ac44f3
+  modified: 2026-08-08T17:17:51.339Z
+---
+
+The user has a standing instruction: when Codex code review keeps rejecting a fix across multiple rounds, do NOT just auto-dispatch another implementation round on every REJECT. Instead, get an independent Opus review of Codex's findings specifically to judge what's material (a real, in-scope risk worth fixing) versus what's nitpicking/diminishing-returns/out-of-scope-for-the-actual-risk.
+
+**Why**: During Bug #1548 (temporal legacy-data migration, real production data at risk), I ran 10 consecutive rounds of tdd-engineer-fixes-then-Codex-rejects without ever invoking this check. Each Codex REJECT triggered an immediate new fix round from me, purely reactively, never independently asking "is this finding actually material, or is Codex escalating scrutiny past the point of diminishing returns for what's genuinely at stake?" The user was rightly furious: this is expensive, slow, and exactly the failure mode they'd already told me to guard against. Related but distinct from [[feedback_dual_review_claude_and_codex]] (which is about running Claude+Codex review IN PARALLEL at the initial gate) — this memory is about USING Opus AFTER a Codex rejection, as an arbiter/filter, before committing to another expensive fix round.
+
+**How to apply**:
+- After 2-3 rounds of Codex REJECT on the same fix (or sooner if a finding smells like nitpicking — e.g. an increasingly narrow syscall-level race, a residual explicitly already accepted in an earlier round, or scope creep beyond the original bug), dispatch an Opus review of the SAME diff/findings with an explicit question: "which of these findings are material production risks vs acceptable/narrow/out-of-scope residuals — should we fix this or ship as-is?"
+- Only proceed to another tdd-engineer fix round for findings Opus confirms are material. Do not auto-escalate on Codex's verdict alone once the cycle has run more than 2-3 rounds.
+- This does not mean ignoring Codex — Codex has a strong track record of finding REAL exploits in this exact bug (reproduced data loss multiple times). The point is adding a second, independent judgment specifically on MATERIALITY, not on correctness of the finding itself.
+- If Opus and Codex disagree on materiality, that disagreement itself is useful signal to bring to the user rather than silently picking one side.
+
+**Concrete example the user flagged as bullshit-nitpicking, in real time, and Opus confirmed with a full retrospective**: rounds 9-10's "lock lost during a slow database commit" finding (metadata-scope copy transaction, relocation-record write) — Codex reproduced a scenario where the lock's heartbeat renewal fails WHILE a database commit is in flight, and the commit still completes. The user's reaction: "slow commit -> bullshit." Opus's retrospective (dispatched after the fact) agreed explicitly: the heartbeat only ticks every 15 minutes, so the failure window is a sub-second commit inside a rare-renewal-failure event — and even unfixed, the fenced operation was additive/non-destructive (every genuinely destructive path already had its guard since round 8). Opus's verdict: "classic diminishing-returns scrutiny... rounds 1-6 were worth every cycle; this was not."
+
+**Second concrete example, caught BEFORE a fix round was wasted**: the same review cycle immediately surfaced an 11th-round candidate — a Codex "High" finding that a crash between shard-deletion and marker-write could let a metadata copy overwrite newer fixed-root rows with stale legacy data. Instead of auto-dispatching a fix, an Opus arbiter review was run FIRST. Opus traced the actual schema (`hash_prefix = sha256(point_id)`, a content-derived primary key) and found the claimed "overwrite" could only ever touch two columns already excluded from the system's own content digest (`created_at`, `format_version`) — real data was never at risk — and separately found zero production call sites ever delete these rows, so the "stale data resurrected" framing was unreachable. Opus explicitly called this "a category error: rates hypothetical severity without checking the key is derived from the value." This is the exact use case this memory recommends: catch it BEFORE spending a round, not after.
