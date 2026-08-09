@@ -1809,11 +1809,17 @@ class QueryEmbeddingCacheBackend(Protocol):
         embedding: bytes,
         created_at: float,
         last_used: float,
-    ) -> None:
+    ) -> bool:
         """Insert or update the embedding row.
 
         On conflict (cache_key, provider, model, dimension) the existing row
         is updated (embedding + last_used).
+
+        Bug #1536: fails open (never raises) and reports success/failure via
+        the return value — True on success, False on failure — so callers
+        (QueryEmbeddingCache.record_miss_or_shadow) can count persistent
+        write failures instead of that condition being indistinguishable
+        from success.
 
         Args:
             cache_key: SHA-256 hex string of the (normalized) query text.
@@ -1823,6 +1829,9 @@ class QueryEmbeddingCacheBackend(Protocol):
             embedding: Float32 LE bytes blob.
             created_at: Epoch seconds (first write).
             last_used: Epoch seconds (most recent use).
+
+        Returns:
+            True on success, False on failure (never raises).
         """
         ...
 

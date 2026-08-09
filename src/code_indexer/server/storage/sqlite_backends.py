@@ -7617,8 +7617,23 @@ class QueryEmbeddingCacheSqliteBackend:
         embedding: bytes,
         created_at: float,
         last_used: float,
-    ) -> None:
-        """Insert or update the embedding row (upserts on composite PK conflict)."""
+    ) -> bool:
+        """Insert or update the embedding row (upserts on composite PK conflict).
+
+        Bug #1536: fails open at the backend layer (mirrors
+        QueryEmbeddingCachePostgresBackend's already-fail-open upsert()) —
+        a write failure (e.g. an OperationalError from the 30s busy-timeout
+        expiring under writer contention on this dedicated db file) is
+        logged as a WARNING and reported via a `False` return, never raised.
+        The caller (QueryEmbeddingCache.record_miss_or_shadow) uses the
+        return value to count persistent failures
+        (write_failures_since_start()) rather than relying solely on an
+        exception, since a future/alternate backend implementation might
+        fail open the same way this Postgres sibling already does.
+
+        Returns:
+            True on success, False on failure (never raises).
+        """
 
         def operation(conn: Any) -> None:
             conn.execute(
@@ -7641,7 +7656,16 @@ class QueryEmbeddingCacheSqliteBackend:
                 ),
             )
 
-        self._conn_manager.execute_atomic(operation)
+        try:
+            self._conn_manager.execute_atomic(operation)
+            return True
+        except Exception as exc:  # noqa: BLE001 -- fail-open, never raise
+            logger.warning(
+                "QueryEmbeddingCacheSqliteBackend: upsert failed: %s",
+                exc,
+                exc_info=True,
+            )
+            return False
 
     def touch_last_used(
         self,
