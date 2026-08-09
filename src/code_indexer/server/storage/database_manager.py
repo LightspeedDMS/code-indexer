@@ -1909,14 +1909,30 @@ class DatabaseConnectionManager:
             Any exception raised by the operation (after rollback).
         """
         conn = self.get_connection()
-        conn.execute("BEGIN EXCLUSIVE")
-        try:
-            result = operation(conn)
-            conn.commit()
-            return result
-        except Exception:
-            conn.rollback()
-            raise
+        # Bug #1532: hold self._lock for the entire BEGIN..COMMIT/ROLLBACK
+        # duration.  close_all() already holds this SAME (reentrant) lock
+        # while it closes every tracked connection, so this guarantees
+        # close_all() can never call sqlite3.Connection.close() on a
+        # connection while another thread is mid-transaction on it --
+        # closing a connection out from under an in-flight statement on
+        # another thread is unsafe at the C/SQLite layer (connections are
+        # created with check_same_thread=False, which permits but does not
+        # make safe cross-thread use concurrent with a close()).  This was
+        # the confirmed root cause of Issue #1532's intermittent SIGSEGV:
+        # close_all() (via a backend's close(), from migrate_ssh_keys)
+        # racing SQLiteLogHandler._writer_loop's execute_atomic() call on
+        # the same DatabaseConnectionManager instance.  self._lock is
+        # already an RLock (Bug #731), so this is safe to nest with
+        # get_connection()'s own brief `with self._lock:` section above.
+        with self._lock:
+            conn.execute("BEGIN EXCLUSIVE")
+            try:
+                result = operation(conn)
+                conn.commit()
+                return result
+            except Exception:
+                conn.rollback()
+                raise
 
     def close_all(self) -> None:
         """
