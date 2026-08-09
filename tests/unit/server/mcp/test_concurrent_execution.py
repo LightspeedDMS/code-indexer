@@ -275,30 +275,72 @@ class TestConcurrentExecutionNoRaceConditions:
 # once before any thread is spawned.
 
 
-def _fake_search_repository_path_stub(self, repo_path, search_request, **_kwargs):
-    """External-dependency stand-in: derives its result from repo_path so
-    cross-thread state mixing would be detectable rather than masked.
+class _ConcurrencyTracker:
+    """Thread-safe counter proving genuine concurrent overlap inside the
+    stubbed external dependency below (Bug #1543 Codex review finding: a
+    stub that returns immediately cannot distinguish real parallel
+    execution from a serialized implementation -- both would satisfy the
+    same result/error-count assertions). Uses ``threading.Lock`` from the
+    module-level ``import threading`` at the top of this file (line 15).
     """
-    from pathlib import Path
-    from code_indexer.server.models.api_models import (
-        SemanticSearchResponse,
-        SearchResultItem,
-    )
 
-    return SemanticSearchResponse(
-        query=search_request.query,
-        results=[
-            SearchResultItem(
-                score=0.9,
-                file_path=f"{Path(repo_path).name}.py",
-                line_start=1,
-                line_end=1,
-                content="",
-                language=None,
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._active = 0
+        self.peak_active = 0
+
+    def enter(self):
+        with self._lock:
+            self._active += 1
+            self.peak_active = max(self.peak_active, self._active)
+
+    def exit(self):
+        with self._lock:
+            self._active -= 1
+
+
+# Widens the window during which multiple worker threads are genuinely inside the
+# stub simultaneously, forcing real overlap rather than hoping the OS scheduler
+# happens to interleave 10 near-instant calls.
+_STUB_OVERLAP_WINDOW_SECONDS = 0.05
+
+
+def _make_search_repository_path_stub(tracker: _ConcurrencyTracker):
+    """Build the external-dependency stub, wired to record overlap on
+    ``tracker`` via .enter()/.exit(). Derives its result from repo_path so
+    cross-thread state mixing would be detectable rather than masked. Uses
+    ``time.sleep`` from the module-level ``import time`` at the top of this
+    file (line 14).
+    """
+
+    def _stub(self, repo_path, search_request, **_kwargs):
+        from pathlib import Path
+        from code_indexer.server.models.api_models import (
+            SemanticSearchResponse,
+            SearchResultItem,
+        )
+
+        tracker.enter()
+        try:
+            time.sleep(_STUB_OVERLAP_WINDOW_SECONDS)
+            return SemanticSearchResponse(
+                query=search_request.query,
+                results=[
+                    SearchResultItem(
+                        score=0.9,
+                        file_path=f"{Path(repo_path).name}.py",
+                        line_start=1,
+                        line_end=1,
+                        content="",
+                        language=None,
+                    )
+                ],
+                total=1,
             )
-        ],
-        total=1,
-    )
+        finally:
+            tracker.exit()
+
+    return _stub
 
 
 class _FakeGlobalReposForMultiSearch:
@@ -385,6 +427,7 @@ class TestMultiSearchServiceConcurrentExecution:
 
         config = MultiSearchConfig(max_workers=5, query_timeout_seconds=30)
         service = MultiSearchService(config)
+        tracker = _ConcurrencyTracker()
 
         try:
             with (
@@ -403,7 +446,7 @@ class TestMultiSearchServiceConcurrentExecution:
                 patch.object(
                     SemanticSearchService,
                     "search_repository_path",
-                    _fake_search_repository_path_stub,
+                    _make_search_repository_path_stub(tracker),
                 ),
             ):
                 results, errors = _run_concurrent_search_requests(service, num_requests)
@@ -416,3 +459,9 @@ class TestMultiSearchServiceConcurrentExecution:
             assert response.results[f"repo{request_id}"][0]["file_path"] == (
                 f"repo{request_id}.py"
             )
+        assert tracker.peak_active > 1, (
+            f"Expected genuinely overlapping concurrent calls into the stubbed "
+            f"external dependency, but peak simultaneous calls was "
+            f"{tracker.peak_active} -- a serialized implementation would also "
+            f"satisfy the assertions above without this check."
+        )
