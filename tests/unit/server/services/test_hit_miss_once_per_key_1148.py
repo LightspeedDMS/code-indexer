@@ -298,7 +298,9 @@ class TestAC2DirectCoalescerWarmHits:
         behind a ``threading.Event`` so every other same-key thread's
         inflight-registry check happens while the owner is still registered
         -- making them provably-real joiners, not a scheduling accident.
-        Returns the list of EmbeddingCacheMetadata results (one per thread).
+        Returns the list of (vec, EmbeddingCacheMetadata) results (one per
+        thread) so callers can verify BOTH the metadata role/outcome AND the
+        actual vector value every caller (owner and every joiner) received.
         """
         lookup_started = threading.Event()
         release = threading.Event()
@@ -312,14 +314,14 @@ class TestAC2DirectCoalescerWarmHits:
         monkeypatch.setattr(cache, "lookup", _delayed_lookup)
 
         barrier = threading.Barrier(_K_CONCURRENT)
-        metas: list = []
+        outcomes: list = []
         lock = threading.Lock()
 
         def _one() -> None:
             barrier.wait()
-            _vec, meta = coalescer.submit(text)
+            vec, meta = coalescer.submit(text)
             with lock:
-                metas.append(meta)
+                outcomes.append((vec, meta))
 
         threads = [
             threading.Thread(target=_one, daemon=True) for _ in range(_K_CONCURRENT)
@@ -337,7 +339,7 @@ class TestAC2DirectCoalescerWarmHits:
 
         for t in threads:
             t.join(timeout=_JOIN_TIMEOUT)
-        return metas
+        return outcomes
 
     def test_k_concurrent_warm_records_k_hits(self, monkeypatch):
         """K forced-concurrent WARM direct submits -> 1 owner + (K-1) joiners,
@@ -350,8 +352,11 @@ class TestAC2DirectCoalescerWarmHits:
         )
         cache = governed_call.get_query_embedding_cache()
 
-        metas = self._run_k_warm_forced_concurrent(monkeypatch, coalescer, cache, text)
-        assert len(metas) == _K_CONCURRENT
+        outcomes = self._run_k_warm_forced_concurrent(
+            monkeypatch, coalescer, cache, text
+        )
+        assert len(outcomes) == _K_CONCURRENT
+        metas = [m for (_vec, m) in outcomes]
 
         owners = [m for m in metas if m.role == "warm_hit"]
         joiners = [m for m in metas if m.role == "joiner"]
@@ -364,6 +369,20 @@ class TestAC2DirectCoalescerWarmHits:
             f"joiners, got {len(joiners)} (roles={[m.role for m in metas]})"
         )
         assert all(m.outcome == "hit" for m in metas)
+
+        # Codex review finding (Bug #1531): the metadata/role/hit-count
+        # assertions above prove single-flight COORDINATION, but say nothing
+        # about the DATA every caller actually received. A broken Future
+        # result (None, corrupted, or the wrong vector) would still pass all
+        # of the above. Assert every one of the K concurrent callers
+        # (the owner AND every joiner) received the EXACT expected cached
+        # vector -- not just "no exception".
+        for i, (vec, meta) in enumerate(outcomes):
+            assert vec == pytest.approx(CACHED_VEC, abs=1e-4), (
+                f"AC2 (coalescer, forced concurrent): caller {i} (role="
+                f"{meta.role!r}) must receive the exact cached vector "
+                f"{CACHED_VEC}, got {vec!r}"
+            )
 
         snap = metrics.snapshot()["on"]
         assert snap["hits"] == 1, (
