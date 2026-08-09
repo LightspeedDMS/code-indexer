@@ -254,6 +254,7 @@ class BackgroundJobManager:
         storage_backend: Optional[Any] = None,
         node_id: Optional[str] = None,
         cluster_mode: bool = False,
+        is_primary_instance: bool = True,
     ):
         """Initialize enhanced background job manager.
 
@@ -346,6 +347,12 @@ class BackgroundJobManager:
         # are left PENDING in PG for cross-pod claiming instead of dispatched to
         # this pod's local pool. False = legacy single-pod behavior (solo/CLI).
         self._cluster_mode: bool = cluster_mode
+
+        # Bug #1549: True (default) when this process confirmed it is the
+        # sole live instance for this data directory. False disables the
+        # unscoped SQLite-flavored orphan-cleanup sweeps below, which would
+        # otherwise mark another live instance's just-created jobs failed.
+        self._is_primary_instance: bool = is_primary_instance
 
         # Bug #1153: Cancel-handler registry keyed by operation_type.
         # Handlers are callables that signal cooperative cancellation to the
@@ -1367,13 +1374,32 @@ class BackgroundJobManager:
 
         now = datetime.now(timezone.utc)
 
-        with self._lock:
-            for job in list(self.jobs.values()):
-                if job.status in (JobStatus.RUNNING, JobStatus.PENDING):
-                    job.status = JobStatus.FAILED
-                    job.completed_at = now
-                    job.error = error
-                    count += 1
+        # Bug #1549 Finding 2a: this in-memory marking must be governed by
+        # the same primary-instance decision as the DB-level sweep below --
+        # a non-primary worker's own self.jobs dict can hold OTHER live
+        # workers'/nodes' running/pending jobs (loaded via list_jobs() at
+        # construction time, see _load_jobs_sqlite), so marking them FAILED
+        # here would misreport a live job as failed regardless of what the
+        # shared DB says. Default is_primary_instance=True preserves
+        # existing behavior for every pre-#1549 caller.
+        if self._is_primary_instance:
+            with self._lock:
+                for job in list(self.jobs.values()):
+                    if job.status in (JobStatus.RUNNING, JobStatus.PENDING):
+                        job.status = JobStatus.FAILED
+                        job.completed_at = now
+                        job.error = error
+                        count += 1
+        else:
+            # Finding 2b: routine under `uvicorn --workers N` (exactly one
+            # worker acquires the lock; the rest correctly skip on EVERY
+            # multi-worker startup) -- demoted to DEBUG per the Bug #1535
+            # precedent so this doesn't break the post-E2E log-audit gate.
+            logging.debug(
+                "fail_orphaned_jobs: skipping in-memory orphan marking -- "
+                "this process could not confirm it is the primary server "
+                "instance (Bug #1549)"
+            )
 
         # Story #1400 CRITICAL 3: the unscoped sweep below (no node filter)
         # is only safe for solo/SQLite (single process -- every
@@ -1394,6 +1420,19 @@ class BackgroundJobManager:
                 "fail_orphaned_jobs: skipping unscoped PostgreSQL sweep "
                 "(Story #1400 CRITICAL 3) -- node-scoped cleanup runs via "
                 "JobTracker.cleanup_orphaned_jobs_on_startup(node_id) instead"
+            )
+        elif self._sqlite_backend is not None and not self._is_primary_instance:
+            # Bug #1549: this sweep is unscoped (no time/process filter) --
+            # skip it when this process could not confirm it is the
+            # primary server instance, mirroring the guard applied to the
+            # constructor-time sweep in _load_jobs_sqlite(). Finding 2b:
+            # routine under `uvicorn --workers N` -- demoted to DEBUG per
+            # the Bug #1535 precedent so this doesn't break the post-E2E
+            # log-audit gate.
+            logging.debug(
+                "fail_orphaned_jobs: skipping unscoped SQLite sweep -- this "
+                "process could not confirm it is the primary server "
+                "instance (Bug #1549)"
             )
         elif self._sqlite_backend is not None:
             try:
@@ -2593,12 +2632,30 @@ class BackgroundJobManager:
         try:
             # Story #723: Clean up orphaned jobs on server startup
             # This must happen BEFORE loading jobs into memory to ensure
-            # the in-memory state reflects the cleaned-up database state
-            orphan_count = self._sqlite_backend.cleanup_orphaned_jobs_on_startup()
-            if orphan_count > 0:
-                logging.info(
-                    f"Cleaned up {orphan_count} orphaned jobs on server startup"
+            # the in-memory state reflects the cleaned-up database state.
+            # Bug #1549: skip this unscoped sweep when this process could
+            # not confirm it is the primary instance -- see
+            # JobTracker._should_skip_unscoped_orphan_sweep for the same
+            # guard applied to the sibling JobTracker sweep.
+            _backend_type_name = type(self._sqlite_backend).__name__
+            if (
+                _backend_type_name != "BackgroundJobsPostgresBackend"
+                and not self._is_primary_instance
+            ):
+                # Finding 2b: routine under `uvicorn --workers N` -- demoted
+                # to DEBUG per the Bug #1535 precedent so this doesn't break
+                # the post-E2E log-audit gate.
+                logging.debug(
+                    "BackgroundJobManager: skipping unscoped SQLite "
+                    "orphan-cleanup sweep -- this process could not confirm "
+                    "it is the primary server instance (Bug #1549)"
                 )
+            else:
+                orphan_count = self._sqlite_backend.cleanup_orphaned_jobs_on_startup()
+                if orphan_count > 0:
+                    logging.info(
+                        f"Cleaned up {orphan_count} orphaned jobs on server startup"
+                    )
 
             # Story #267 Component 6: Startup cleanup of old completed/failed jobs
             # Story #400 - AC5: Use DataRetentionConfig.background_jobs_retention_hours
