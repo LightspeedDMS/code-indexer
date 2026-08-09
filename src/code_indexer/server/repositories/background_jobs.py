@@ -43,6 +43,51 @@ if TYPE_CHECKING:
     from code_indexer.server.services.job_tracker import JobTracker
 
 
+# Bug #1535: operation_types whose callers deliberately, by design, never
+# pass repo_alias to submit_job. For these operation_types, a missing
+# repo_alias is expected happy-path behavior on EVERY successful call, not
+# a signal of a caller bug -- log it at DEBUG so it stays discoverable
+# without flooding the WARNING channel the mandatory post-E2E log-audit
+# gate relies on. Every OTHER operation_type keeps the original WARNING
+# (AC5's intent: a missing repo_alias there usually does indicate a real
+# bug). Known intentional shapes, confirmed at each call site:
+#   - "temporal_query" (Story #1400's temporal_live_dispatch.py `_submit`
+#     closure): BGM's register_job_if_no_conflict per-(operation_type,
+#     repo_alias) uniqueness gate is the wrong dedup tool for temporal
+#     queries -- correct dedup granularity is the full query signature,
+#     enforced separately by TemporalDedupCache.
+#   - "xray_search_batch" (xray_batch.py): "no per-repo dedup; concurrent
+#     batches allowed" -- an explicit design comment at the call site.
+#   - "query_analytics_export" (inline_admin_ops.py's
+#     trigger_query_analytics_export): a global, cross-repo export job
+#     with no single owning repo_alias.
+_OPERATIONS_WITHOUT_REPO_ALIAS_BY_DESIGN = frozenset(
+    {"temporal_query", "xray_search_batch", "query_analytics_export"}
+)
+
+# Bug #1535: the "{platform}_discovery" family (web/routes.py's
+# discovery_start, CLAUDE.md's "Auto-Discovery Background Job Pattern")
+# constructs operation_type dynamically per platform and always submits
+# with repo_alias=None ("Manual dedup: repo_alias=None bypasses BGM atomic
+# DB gate" -- the discovery job is deliberately not repo-scoped for BGM's
+# dedup gate). A suffix match, not a fixed platform set, so a future
+# platform added to _resolve_provider is covered automatically.
+_OPERATION_SUFFIXES_WITHOUT_REPO_ALIAS_BY_DESIGN = ("_discovery",)
+
+
+def _operation_omits_repo_alias_by_design(operation_type: str) -> bool:
+    """Bug #1535: True when `operation_type` is a known, intentional,
+    permanent repo_alias=None omission (exact match or suffix-pattern
+    match), so submit_job should log the omission at DEBUG rather than
+    WARNING."""
+    if operation_type in _OPERATIONS_WITHOUT_REPO_ALIAS_BY_DESIGN:
+        return True
+    return any(
+        operation_type.endswith(suffix)
+        for suffix in _OPERATION_SUFFIXES_WITHOUT_REPO_ALIAS_BY_DESIGN
+    )
+
+
 class JobStatus(str, Enum):
     """Job status enumeration."""
 
@@ -646,10 +691,20 @@ class BackgroundJobManager:
 
         # AC5: Validate repo_alias to prevent "unknown" values
         if repo_alias is None:
-            logging.warning(
-                f"Job submitted without repo_alias for operation '{operation_type}' "
-                f"by user '{submitter_username}'. Consider providing repo_alias."
-            )
+            # Bug #1535: some operation_types (e.g. "temporal_query") omit
+            # repo_alias by design on EVERY call -- that is happy-path, not
+            # a caller mistake, so it must not flood the WARNING channel.
+            if _operation_omits_repo_alias_by_design(operation_type):
+                logging.debug(
+                    f"Job submitted without repo_alias for operation '{operation_type}' "
+                    f"by user '{submitter_username}' (expected -- this operation_type "
+                    f"never supplies repo_alias by design)."
+                )
+            else:
+                logging.warning(
+                    f"Job submitted without repo_alias for operation '{operation_type}' "
+                    f"by user '{submitter_username}'. Consider providing repo_alias."
+                )
         elif repo_alias.lower() == "unknown":
             logging.warning(
                 f"Job submitted with repo_alias='unknown' for operation '{operation_type}' "

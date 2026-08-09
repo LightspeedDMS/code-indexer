@@ -346,17 +346,21 @@ LOG_AUDIT_ALLOWLIST: List[str] = [
     # correctly -- not a service defect.
     "Temporal embedder 'not-a-configured-embedder' has no indexed collections",
     "Temporal index not available for repository, returning empty results repository_alias=temporal-dual-embedder-1292",
-    # Story #1400 (test_19_temporal_live_wiring_1400.py): execute_live_temporal_search
-    # deliberately omits repo_alias from submit_job for lane="temporal" jobs.
-    # BGM's register_job_if_no_conflict gate is a per-(operation_type, repo_alias)
-    # uniqueness constraint; passing repository_alias would incorrectly reject a
-    # SECOND, entirely different temporal query (different query_text/filters)
-    # against the same repo as a "duplicate". Correct dedup granularity (the full
-    # query signature) is already enforced at the TemporalDedupCache layer above
-    # submit_job -- this WARNING is submit_job's own pre-existing, generic
-    # "no repo_alias" notice firing as an EXPECTED side effect of that correct
-    # design choice, not a defect.
-    "Job submitted without repo_alias for operation 'temporal_query'",
+    # NOTE (Bug #1535, Codex follow-up on commit 650665a9): the allowlist entry
+    # that used to live here -- "Job submitted without repo_alias for operation
+    # 'temporal_query'" (added for Story #1400's execute_live_temporal_search,
+    # which deliberately omits repo_alias from submit_job for lane="temporal"
+    # jobs) -- was REMOVED, not merely left in place as harmless slack. Bug
+    # #1535 demoted that exact message to DEBUG for "temporal_query" (and the
+    # other confirmed-intentional operation_types) in
+    # background_jobs.py's submit_job, so it can no longer appear as a
+    # WARNING/ERROR entry query_logs_via_mcp would ever see. Leaving a
+    # now-unreachable allowlist string in place would silently mask a REAL
+    # regression if a future change ever reintroduced this WARNING for
+    # "temporal_query" (e.g. someone editing
+    # _OPERATIONS_WITHOUT_REPO_ALIAS_BY_DESIGN without updating this file) --
+    # the gate would keep passing instead of catching it. Removing it restores
+    # the gate's ability to catch that regression.
     # Issue #1445 (Bug #1421, temporal_snapshot_store.py:211-219): the temporal
     # worker checkpoints while a query is in flight, so read_temporal_snapshot()
     # can legitimately observe a concurrent checkpoint rewrite mid-reassembly
