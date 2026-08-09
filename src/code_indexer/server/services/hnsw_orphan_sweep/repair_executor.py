@@ -28,15 +28,16 @@ interlock the issue's "Concurrency interlock" section requires:
     serves from), reaching the SAME global singleton via
     ``code_indexer.server.cache.get_global_cache()``.
 
-    That eviction does NOT currently land -- see issue #1542 and
-    ``_default_cache_invalidator``'s docstring. This bullet previously cited
-    ``FilesystemVectorStore``'s own
-    ``self.hnsw_index_cache.invalidate(str(collection_path))`` as proof the
-    bare-path key here was right; that citation is stale. FSV composes the key
-    via ``hnsw_cache_key_for_collection()``, which embeds Story #1458 AC11's
-    chunk-layout token, so the two keys do not match. A running server still
-    picks the repair up on its next read, via Bug #1538's on-disk identity
-    fingerprint rather than via this eviction.
+    Bug #1542: this eviction used to hand-build a bare resolved-path key,
+    which never matched the key ``FilesystemVectorStore.search()`` actually
+    stores under (Story #1458 AC11's chunk-layout token). Fixed by routing
+    through ``hnsw_cache_key_for_collection_path()`` (the module-level
+    sibling of FSV's ``hnsw_cache_key_for_collection()``, usable here because
+    the sweep has no live FSV instance for the collection it just repaired)
+    -- see ``_default_cache_invalidator``. A running server would still have
+    picked the repair up on its next read regardless, via Bug #1538's on-disk
+    identity fingerprint; this fix restores the IMMEDIATE eviction the
+    function was always meant to provide.
 """
 
 from __future__ import annotations
@@ -95,29 +96,32 @@ def _default_cache_invalidator(collection_path: str) -> None:
     """Best-effort invalidation of the server-side HNSWIndexCache singleton.
 
     Lazily imported so this module has no hard dependency on the cache
-    singleton being initialized (e.g. under CLI/solo or unit tests that
-    inject their own ``cache_invalidator``).
+    singleton (or on ``FilesystemVectorStore``'s heavier import chain) being
+    initialized (e.g. under CLI/solo or unit tests that inject their own
+    ``cache_invalidator``).
 
-    WARNING -- THIS INVALIDATION IS CURRENTLY A NO-OP. See issue #1542.
-    ``FilesystemVectorStore.search()`` stores the entry under a key that also
-    embeds Story #1458 AC11's chunk-layout token (and an activated repo's
-    ``activation_id``), so a bare ``collection_path`` matches nothing. The
-    correct key comes from
-    ``FilesystemVectorStore.hnsw_cache_key_for_collection()``, now the single
-    authority for composing it; fixing this call site needs the activation
-    lineage the sweep does not currently carry, which is why #1542 tracks it
-    separately.
-
-    The consequence today is bounded, not a correctness bug: Bug #1538 made
-    each cache entry carry an on-disk identity fingerprint that is re-verified
-    on every HIT, and a repair rewrites ``hnsw_index.bin`` via an atomic rename
-    (new inode), so the next read reloads regardless. What is lost is only the
-    IMMEDIACY this function is meant to provide.
+    Bug #1542: a bare ``collection_path`` does NOT match the key
+    ``FilesystemVectorStore.search()`` stores the entry under -- that key
+    also embeds Story #1458 AC11's chunk-layout token (and, for an activated
+    repo, its ``activation_id``). This composes the SAME key via
+    ``hnsw_cache_key_for_collection_path()``, the module-level sibling of
+    ``FilesystemVectorStore.hnsw_cache_key_for_collection()`` usable here
+    because the sweep has no live FSV instance for the collection it just
+    repaired -- only its resolved path. ``activation_id`` is intentionally
+    omitted: the sweep does not currently carry activation lineage, so an
+    activated-repo collection's eviction still falls back to Bug #1538's
+    on-disk identity fingerprint on the next read rather than landing
+    immediately, exactly as it already did before this fix for every
+    collection.
     """
     try:
         from code_indexer.server.cache import get_global_cache
+        from code_indexer.storage.filesystem_vector_store import (
+            hnsw_cache_key_for_collection_path,
+        )
 
-        get_global_cache().invalidate(collection_path)
+        canonical_key = hnsw_cache_key_for_collection_path(collection_path)
+        get_global_cache().invalidate(canonical_key)
     except Exception as exc:  # noqa: BLE001 -- best-effort, never block a repair
         logger.warning(
             "hnsw_orphan_sweep: could not invalidate HNSWIndexCache for %s: %s",
@@ -324,12 +328,11 @@ def process_candidate(
         return SweepOutcome.TRANSIENT_SKIP
 
     if outcome == SweepOutcome.REPAIRED:
-        # NOTE: this call currently matches NO cache entry -- the key
-        # search() stores under also embeds Story #1458 AC11's chunk-layout
-        # token, so a bare path evicts nothing. Tracked in issue #1542; see
-        # _default_cache_invalidator's docstring for why it is bounded rather
-        # than a correctness bug (Bug #1538's identity fingerprint makes the
-        # next read reload anyway).
+        # Bug #1542: the DEFAULT invalidator (see _default_cache_invalidator)
+        # re-derives the canonical, chunk-layout-token-bearing cache key from
+        # this bare path before evicting -- passing the bare path itself here
+        # keeps injected test callables (which record "which candidate was
+        # flagged") receiving the plain collection path, unchanged.
         invalidate(str(collection_path))
         logger.info("hnsw_orphan_sweep: repaired orphans for %s", collection_path)
 

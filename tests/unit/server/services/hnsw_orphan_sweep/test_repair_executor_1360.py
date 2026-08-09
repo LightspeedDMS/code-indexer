@@ -24,7 +24,9 @@ Concurrency interlock (issue section "Concurrency interlock"):
 import json
 from pathlib import Path
 from typing import List
+from unittest.mock import MagicMock
 
+from code_indexer.server.cache.hnsw_index_cache import HNSWIndexCacheEntry
 from code_indexer.storage.hnsw_index_manager import HNSWIndexManager
 from code_indexer.server.services.hnsw_orphan_sweep.discovery import SweepCandidate
 from code_indexer.server.services.hnsw_orphan_sweep.repair_executor import (
@@ -175,6 +177,56 @@ class TestProcessCandidateRepairsAC5Fixture:
         process_candidate(candidate)
 
         assert (collection_path / ".index_rebuild.lock").exists()
+
+
+class TestProcessCandidateDefaultInvalidatorUsesCanonicalKey:
+    """Bug #1542: the DEFAULT cache invalidator (used when no
+    ``cache_invalidator`` is injected) must evict the SAME cache entry
+    ``FilesystemVectorStore.search()`` stores under -- composed via
+    ``hnsw_cache_key_for_collection()`` (Bug #1538's single authority), not a
+    bare resolved path. A bare-path ``get_global_cache().invalidate()`` call
+    matches nothing because Story #1458 AC11 made the real key embed a
+    chunk-layout token."""
+
+    def test_default_invalidator_evicts_the_real_search_cache_entry(
+        self, tmp_path: Path
+    ) -> None:
+        from code_indexer.server.cache import get_global_cache, reset_global_cache
+        from code_indexer.storage.filesystem_vector_store import (
+            FilesystemVectorStore,
+        )
+
+        reset_global_cache()
+        try:
+            repo_root = tmp_path / "repo"
+            collection_path = repo_root / ".code-indexer" / "index" / "voyage-code-3"
+            _plant_prebroken_fixture(collection_path)
+
+            # Seed the REAL global cache under the EXACT key search() uses --
+            # the single authority for that key, per Bug #1538.
+            store = FilesystemVectorStore(base_path=repo_root)
+            canonical_key = store.hnsw_cache_key_for_collection(collection_path)
+            cache = get_global_cache()
+            with cache._cache_lock:
+                cache._cache[canonical_key] = MagicMock(
+                    spec=HNSWIndexCacheEntry,
+                    repo_path=canonical_key,
+                    is_expired=lambda: False,
+                )
+
+            candidate = _make_candidate(
+                repo_root, ".code-indexer/index/voyage-code-3/hnsw_index.bin"
+            )
+            outcome = process_candidate(candidate)
+
+            assert outcome == SweepOutcome.REPAIRED
+            assert canonical_key not in cache._cache, (
+                "repaired collection's cache entry was NOT evicted -- the "
+                "default invalidator composed a key that does not match "
+                "the one search() actually stores under"
+            )
+        finally:
+            reset_global_cache()
 
 
 class TestProcessCandidateTransientSkips:
