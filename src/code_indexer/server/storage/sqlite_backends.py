@@ -1880,18 +1880,21 @@ class GoldenRepoMetadataSqliteBackend:
 
             # Bug #1539: per-golden-alias cidx-meta backup conflict-
             # resolution failure quarantine tracking (see
-            # record_cidx_meta_conflict_failure() below). Unlike
-            # refresh_integrity_quarantine_state above (a bare
-            # consecutive counter), this table also stores the last
-            # failure's normalized fingerprint so the SAME underlying
-            # conflict can be distinguished from a genuinely different
-            # one across separate, independent sync() attempts.
+            # record_cidx_meta_conflict_failure() below). This table
+            # stores the last failure's upstream target commit SHA --
+            # NOT freeform error text (Codex round-3 review found text
+            # fingerprinting fundamentally fragile: both false-positive
+            # collisions and false-negative misses across attempts) --
+            # so the SAME underlying rebase target can be distinguished
+            # from a genuinely different one across separate,
+            # independent sync() attempts, and automatically resets the
+            # moment the world changes (new commits land upstream).
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS cidx_meta_conflict_quarantine_state (
                     golden_alias TEXT PRIMARY KEY NOT NULL,
                     consecutive_failure_count INTEGER NOT NULL DEFAULT 0,
-                    last_fingerprint TEXT,
+                    last_target_sha TEXT,
                     last_detail TEXT,
                     first_failed_at TEXT,
                     last_failed_at TEXT,
@@ -1903,28 +1906,29 @@ class GoldenRepoMetadataSqliteBackend:
         self._conn_manager.execute_atomic(operation)
 
     def record_cidx_meta_conflict_failure(
-        self, golden_alias: str, fingerprint: str, detail: str
+        self, golden_alias: str, target_sha: str, detail: str
     ) -> int:
         """
         Record one cidx-meta backup conflict-resolution failure for a
         golden repo (Bug #1539). Unlike ``record_refresh_integrity_failure``
         (which always increments), this INCREMENTS only when
-        ``fingerprint`` matches the previously stored fingerprint for
-        ``golden_alias`` -- a genuinely different failure shape resets the
-        count to 1 with the new fingerprint, since it is not the same
-        stuck condition and must not inherit an unrelated prior tally.
+        ``target_sha`` matches the previously stored target SHA for
+        ``golden_alias`` -- a different upstream target (new commits
+        landed, or history changed) resets the count to 1, since it is
+        not the same stuck condition and must not inherit an unrelated
+        prior tally.
 
         Returns:
             The consecutive-failure count after recording this one.
 
         Raises:
-            ValueError: golden_alias, fingerprint, or detail is
+            ValueError: golden_alias, target_sha, or detail is
                 empty/blank (including whitespace-only).
         """
         if not golden_alias or not golden_alias.strip():
             raise ValueError("golden_alias must be a non-empty string")
-        if not fingerprint or not fingerprint.strip():
-            raise ValueError("fingerprint must be a non-empty string")
+        if not target_sha or not target_sha.strip():
+            raise ValueError("target_sha must be a non-empty string")
         if not detail or not detail.strip():
             raise ValueError("detail must be a non-empty string")
 
@@ -1932,27 +1936,27 @@ class GoldenRepoMetadataSqliteBackend:
 
         def operation(conn):
             row = conn.execute(
-                "SELECT consecutive_failure_count, last_fingerprint "
+                "SELECT consecutive_failure_count, last_target_sha "
                 "FROM cidx_meta_conflict_quarantine_state WHERE golden_alias = ?",
                 (golden_alias,),
             ).fetchone()
             if row is None:
                 conn.execute(
                     "INSERT INTO cidx_meta_conflict_quarantine_state "
-                    "(golden_alias, consecutive_failure_count, last_fingerprint, "
+                    "(golden_alias, consecutive_failure_count, last_target_sha, "
                     "last_detail, first_failed_at, last_failed_at, updated_at) "
                     "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                    (golden_alias, 1, fingerprint, detail, now, now, now),
+                    (golden_alias, 1, target_sha, detail, now, now, now),
                 )
                 return 1
 
-            new_count = row[0] + 1 if row[1] == fingerprint else 1
+            new_count = row[0] + 1 if row[1] == target_sha else 1
             conn.execute(
                 "UPDATE cidx_meta_conflict_quarantine_state "
-                "SET consecutive_failure_count = ?, last_fingerprint = ?, "
+                "SET consecutive_failure_count = ?, last_target_sha = ?, "
                 "last_detail = ?, last_failed_at = ?, updated_at = ? "
                 "WHERE golden_alias = ?",
-                (new_count, fingerprint, detail, now, now, golden_alias),
+                (new_count, target_sha, detail, now, now, golden_alias),
             )
             return new_count
 
@@ -1997,7 +2001,7 @@ class GoldenRepoMetadataSqliteBackend:
 
         conn = self._conn_manager.get_connection()
         row = conn.execute(
-            "SELECT golden_alias, consecutive_failure_count, last_fingerprint, "
+            "SELECT golden_alias, consecutive_failure_count, last_target_sha, "
             "last_detail, first_failed_at, last_failed_at "
             "FROM cidx_meta_conflict_quarantine_state WHERE golden_alias = ?",
             (golden_alias,),
@@ -2007,7 +2011,7 @@ class GoldenRepoMetadataSqliteBackend:
         return {
             "golden_alias": row[0],
             "consecutive_failure_count": row[1],
-            "last_fingerprint": row[2],
+            "last_target_sha": row[2],
             "last_detail": row[3],
             "first_failed_at": row[4],
             "last_failed_at": row[5],

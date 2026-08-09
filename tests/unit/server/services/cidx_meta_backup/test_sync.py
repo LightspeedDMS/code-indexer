@@ -339,9 +339,11 @@ def test_rebase_continue_fails_without_editor_env_bug1500(tmp_path, monkeypatch)
 
 # ---------------------------------------------------------------------------
 # Bug #1539: sync() raises a typed, data-carrying exception on an unresolved
-# conflict, and exposes a pure fingerprint helper -- the actual retry/
-# quarantine DECISION lives in RefreshScheduler (persisted, cross-process),
-# not here. See tests/unit/global_repos/test_refresh_scheduler_cidx_meta_conflict_quarantine_1539.py
+# conflict, and this module exposes a pure resolve_upstream_target_sha()
+# helper -- the actual retry/quarantine DECISION (keyed on that SHA, never
+# on freeform error text) lives in RefreshScheduler (persisted,
+# cross-process). See
+# tests/unit/global_repos/test_refresh_scheduler_cidx_meta_conflict_quarantine_1539.py
 # for that mechanism.
 # ---------------------------------------------------------------------------
 
@@ -387,53 +389,44 @@ def test_unresolved_conflict_raises_typed_error_with_data_1539(tmp_path):
     assert isinstance(exc, RuntimeError)
 
 
-def test_fingerprint_normalizes_only_rebase_position_marker_1539():
-    """Bug #1539 (Codex finding 1, false negative): the SAME underlying
-    conflict recurring across scheduled ticks has a GROWING git rebase
-    progress marker "(N/M)" in its failure text (more unpushed commits pile
-    up each failed attempt) -- the fingerprint must recognize these as the
-    SAME shape.
+def test_resolve_upstream_target_sha_matches_real_rev_parse_1539(tmp_path):
+    """Bug #1539 (Codex round-3 SHA-based redesign): resolve_upstream_target_sha
+    returns the SAME commit SHA a direct `git rev-parse origin/{branch}`
+    would -- this is the stable identity RefreshScheduler keys quarantine
+    on, replacing the rejected text-fingerprint approach entirely.
     """
     from code_indexer.server.services.cidx_meta_backup.sync import (
-        conflict_failure_fingerprint,
+        resolve_upstream_target_sha,
     )
 
-    detail_a = "Rebasing (2/18)\nerror: could not apply abc123... msg"
-    detail_b = "Rebasing (3/20)\nerror: could not apply abc123... msg"
+    repo, remote = _bootstrap_repo(tmp_path)
 
-    assert conflict_failure_fingerprint(["shared.txt"], detail_a) == (
-        conflict_failure_fingerprint(["shared.txt"], detail_b)
-    )
+    resolved = resolve_upstream_target_sha(str(repo), "master")
+
+    expected = _git(["rev-parse", "origin/master"], repo)
+    assert resolved == expected
 
 
-def test_fingerprint_distinguishes_different_non_digit_content_1539():
-    """Bug #1539 (Codex finding 1, false positive): two failures whose
-    non-rebase-position digits differ in substance (e.g. different line
-    numbers or different commit SHAs) must NOT be folded into the same
-    fingerprint just because a blanket digit-strip would have erased the
-    distinction -- only the "(N/M)" marker is normalized.
-    """
+def test_resolve_upstream_target_sha_none_on_fetch_failure_1539(tmp_path):
+    """A fetch failure (unreachable remote) must return None, never raise
+    -- the caller treats None as "cannot determine, proceed with sync()"."""
     from code_indexer.server.services.cidx_meta_backup.sync import (
-        conflict_failure_fingerprint,
+        resolve_upstream_target_sha,
     )
 
-    detail_line_10 = "Rebasing (2/18)\nerror: failed parsing line 10"
-    detail_line_20 = "Rebasing (2/18)\nerror: failed parsing line 20"
+    repo, _remote = _bootstrap_repo(tmp_path)
+    _git(["remote", "set-url", "origin", "file:///definitely/missing/repo.git"], repo)
 
-    assert conflict_failure_fingerprint(
-        ["shared.txt"], detail_line_10
-    ) != conflict_failure_fingerprint(["shared.txt"], detail_line_20)
+    assert resolve_upstream_target_sha(str(repo), "master") is None
 
 
-def test_fingerprint_distinguishes_different_conflict_files_1539():
-    """A genuinely different set of conflicted files must not be mistaken
-    for the same failure shape even with identical detail text."""
+def test_resolve_upstream_target_sha_none_on_missing_branch_1539(tmp_path):
+    """A branch that does not exist on the remote must return None (the
+    rev-parse step fails), never raise."""
     from code_indexer.server.services.cidx_meta_backup.sync import (
-        conflict_failure_fingerprint,
+        resolve_upstream_target_sha,
     )
 
-    detail = "Rebasing (2/18)\nerror: could not apply abc123"
+    repo, _remote = _bootstrap_repo(tmp_path)
 
-    assert conflict_failure_fingerprint(
-        ["shared.txt"], detail
-    ) != conflict_failure_fingerprint(["other.txt"], detail)
+    assert resolve_upstream_target_sha(str(repo), "no-such-branch") is None

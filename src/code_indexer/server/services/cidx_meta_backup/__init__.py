@@ -8,7 +8,7 @@ from .sync import (
     CidxMetaBackupSync,
     ConflictResolutionFailedError,
     SyncResult,
-    conflict_failure_fingerprint,
+    resolve_upstream_target_sha,
 )
 
 __all__ = [
@@ -18,7 +18,7 @@ __all__ = [
     "ConflictResolutionFailedError",
     "ResolverResult",
     "SyncResult",
-    "conflict_failure_fingerprint",
+    "resolve_upstream_target_sha",
     "detect_default_branch",
     "get_cidx_meta_path",
 ]

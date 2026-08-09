@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import re
 import subprocess
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -13,39 +12,81 @@ from code_indexer.server.git.git_subprocess_env import build_non_interactive_git
 
 from .conflict_resolver import ClaudeConflictResolver
 
-# Bug #1539: git's own rebase-progress banner ("Rebasing (2/18)") grows on
-# every failed attempt, because a failed conflict resolution aborts the
-# rebase but leaves the local unpushed auto-commit in place -- the NEXT
-# attempt has one more commit to replay, so the position (and total)
-# climbs every cycle even though the underlying conflict is identical.
-# Only THIS marker is normalized; every other digit in the failure text
-# (SHAs, line numbers) is left untouched so genuinely different failures
-# are never folded into the same fingerprint.
-_REBASE_POSITION_PATTERN = re.compile(r"\(\d+/\d+\)")
 
+def resolve_upstream_target_sha(cidx_meta_path: str, branch: str) -> Optional[str]:
+    """Resolve the current ``origin/{branch}`` commit SHA, or ``None`` on failure.
 
-def conflict_failure_fingerprint(conflict_files: List[str], detail: str) -> str:
-    """Normalize a conflict-resolution failure into a stable "shape" key.
+    Bug #1539 (Codex round-3 redesign): quarantine now keys off THIS stable
+    commit identity instead of parsing freeform git/LLM error text into a
+    "fingerprint" -- that approach was proven fragile both ways (different
+    genuine failures collapsing to the same text shape, and the SAME
+    failure's varying rebase-position text failing to match across
+    attempts). A commit SHA has no such ambiguity: it changes if and only
+    if new commits land on the remote branch or its history is rewritten.
 
-    Used by callers (e.g. RefreshScheduler's Bug #1539 quarantine
-    bookkeeping) to recognize when the SAME underlying conflict has failed
-    repeatedly across separate, independent ``sync()`` calls -- this
-    module itself makes no retry/quarantine decisions; it only exposes a
-    fingerprint callers can persist and compare.
+    Always fetches first so this reflects genuinely fresh remote state --
+    the same fetch `sync()` itself performs, so a caller resolving this
+    BEFORE calling `sync()` sees the identical target `sync()` will rebase
+    onto. Returns ``None`` on any failure -- a fetch/rev-parse failure
+    (including *branch* not being a valid ref -- git itself rejects
+    malformed ref syntax via `rev-parse`'s exit code, so no separate
+    format validation is needed here) or an OS-level subprocess failure
+    (missing git executable, unreadable cwd). Callers must treat ``None``
+    as "cannot determine, do not attempt any quarantine decision" and
+    simply proceed with `sync()`, which will surface the underlying git
+    failure itself through its own fetch step.
+
+    Raises:
+        ValueError: cidx_meta_path or branch is not a non-empty string.
     """
-    normalized_detail = _REBASE_POSITION_PATTERN.sub("(#/#)", detail)
-    return "|".join(sorted(conflict_files)) + "::" + normalized_detail
+    if not isinstance(cidx_meta_path, str) or not cidx_meta_path.strip():
+        raise ValueError("cidx_meta_path must be a non-empty string")
+    if not isinstance(branch, str) or not branch.strip():
+        raise ValueError("branch must be a non-empty string")
+
+    try:
+        env = build_non_interactive_git_env()
+        fetch_result = subprocess.run(
+            ["git", "fetch", "origin"],
+            cwd=cidx_meta_path,
+            capture_output=True,
+            text=True,
+            env=env,
+            check=False,
+        )
+        if fetch_result.returncode != 0:
+            return None
+
+        rev_parse_result = subprocess.run(
+            ["git", "rev-parse", f"origin/{branch}"],
+            cwd=cidx_meta_path,
+            capture_output=True,
+            text=True,
+            env=env,
+            check=False,
+        )
+        if rev_parse_result.returncode != 0:
+            return None
+    except OSError:
+        # Missing git executable, unreadable cwd, or another OS-level
+        # subprocess failure -- treated identically to a git-level
+        # failure: "cannot determine", never raised to the caller.
+        return None
+
+    sha = rev_parse_result.stdout.strip()
+    return sha or None
 
 
 class ConflictResolutionFailedError(RuntimeError):
     """Raised when a rebase conflict could not be resolved.
 
-    Carries the conflicted file list and raw failure detail so a caller
-    can compute ``conflict_failure_fingerprint()`` and track repeated
-    occurrences in durable, cross-process storage (Bug #1539) -- this
-    class intentionally carries data only; it does not decide retry vs.
-    quarantine policy itself. Subclasses RuntimeError so any existing
-    ``except RuntimeError`` handling upstream keeps working unchanged.
+    Carries the conflicted file list and raw failure detail purely for
+    diagnostics/logging -- Bug #1539's quarantine mechanism no longer
+    derives its key from this data (see `resolve_upstream_target_sha`
+    above); the caller (RefreshScheduler) resolves the target SHA
+    independently, before ever calling `sync()`. Subclasses RuntimeError
+    so any existing ``except RuntimeError`` handling upstream keeps
+    working unchanged.
     """
 
     def __init__(self, message: str, *, conflict_files: List[str], detail: str) -> None:
@@ -121,12 +162,12 @@ class CidxMetaBackupSync:
     ) -> None:
         """Raise ConflictResolutionFailedError carrying the failure data.
 
-        Bug #1539: this method used to make an in-process retry/escalate
-        decision itself; it no longer does. It only raises a typed
-        exception so the caller (RefreshScheduler) can persist a
-        cross-process, cross-node consecutive-failure count via
-        golden_repo_metadata (the SAME dual-backend store Bug #1506 uses)
-        and decide, on a LATER cycle, whether to skip retrying.
+        Bug #1539: this method does not decide retry-vs-quarantine policy
+        itself -- it only raises a typed exception carrying the conflicted
+        files and raw detail so the caller (RefreshScheduler) can log
+        diagnostics. The actual quarantine decision is keyed on the
+        upstream target SHA (see `resolve_upstream_target_sha`), resolved
+        by the caller independently BEFORE `sync()` is ever invoked.
         """
         raise ConflictResolutionFailedError(
             "conflict resolution failed: " + detail,
@@ -142,6 +183,13 @@ class CidxMetaBackupSync:
         could not be resolved) on any unrecoverable failure; returns
         normally when the rebase needed no action or completed (with or
         without conflicts) successfully.
+
+        Both `--abort` calls below are best-effort cleanup performed only
+        AFTER the failure that will be raised has already been
+        determined -- their own exit code is pre-existing, deliberately
+        unchecked (Story #926): raising a SECOND error about a failed
+        cleanup would mask the original, more actionable failure this
+        method is already about to surface.
         """
         rebase_result = self._git("rebase", f"origin/{self.branch}", check=False)
         if rebase_result.returncode == 0:
