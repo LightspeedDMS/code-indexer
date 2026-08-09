@@ -775,12 +775,14 @@ class JobTracker:
                 )
                 return False
 
-        conn = self._conn_manager.get_connection()
-        cursor = conn.execute(
-            "SELECT cancelled FROM background_jobs WHERE job_id = ?",
-            (job_id,),
-        )
-        row = cursor.fetchone()
+        # Bug #1532 follow-up: route the raw connection through
+        # guarded_connection() so close_all() cannot close it mid-read.
+        with self._conn_manager.guarded_connection() as conn:
+            cursor = conn.execute(
+                "SELECT cancelled FROM background_jobs WHERE job_id = ?",
+                (job_id,),
+            )
+            row = cursor.fetchone()
         if row is None:
             return False
         return bool(row[0])
@@ -848,7 +850,6 @@ class JobTracker:
         Updates seen_ids in-place for each accepted row to prevent intra-query
         duplicates. Caller is responsible for pre-validating limit > 0.
         """
-        conn = self._conn_manager.get_connection()
         where_parts: List[str] = []
         params: List[Any] = []
 
@@ -869,8 +870,14 @@ class JobTracker:
             f"{where_clause} ORDER BY created_at DESC LIMIT ?"
         )
         params.append(limit)
+        # Bug #1532 follow-up: route the raw connection through
+        # guarded_connection() so close_all() cannot close it mid-read.
+        # Only the actual DB access needs the lock; fetchall() materializes
+        # the rows into plain Python data before the lock is released.
+        with self._conn_manager.guarded_connection() as conn:
+            fetched = conn.execute(sql, params).fetchall()
         rows: List[Dict[str, Any]] = []
-        for row in conn.execute(sql, params).fetchall():
+        for row in fetched:
             job = _row_to_tracked_job(row)
             if job.job_id not in seen_ids:
                 seen_ids.add(job.job_id)
@@ -998,11 +1005,11 @@ class JobTracker:
         )
         params.append(limit)
 
-        conn = self._conn_manager.get_connection()
-        cursor = conn.execute(sql, params)
-        return [
-            _tracked_job_to_dict(_row_to_tracked_job(row)) for row in cursor.fetchall()
-        ]
+        # Bug #1532 follow-up: route the raw connection through
+        # guarded_connection() so close_all() cannot close it mid-read.
+        with self._conn_manager.guarded_connection() as conn:
+            fetched = conn.execute(sql, params).fetchall()
+        return [_tracked_job_to_dict(_row_to_tracked_job(row)) for row in fetched]
 
     def check_operation_conflict(
         self,
@@ -1447,14 +1454,16 @@ class JobTracker:
             )
             return result
 
-        conn = self._conn_manager.get_connection()
-        cursor = conn.execute(
-            "SELECT job_id FROM background_jobs "
-            "WHERE operation_type = ? AND repo_alias = ? "
-            "AND status IN ('pending', 'running') LIMIT 1",
-            (operation_type, repo_alias),
-        )
-        row = cursor.fetchone()
+        # Bug #1532 follow-up: route the raw connection through
+        # guarded_connection() so close_all() cannot close it mid-read.
+        with self._conn_manager.guarded_connection() as conn:
+            cursor = conn.execute(
+                "SELECT job_id FROM background_jobs "
+                "WHERE operation_type = ? AND repo_alias = ? "
+                "AND status IN ('pending', 'running') LIMIT 1",
+                (operation_type, repo_alias),
+            )
+            row = cursor.fetchone()
         return row[0] if row is not None else None
 
     def _insert_job(self, job: TrackedJob) -> None:
@@ -1580,12 +1589,14 @@ class JobTracker:
                 return None
             return _dict_to_tracked_job(d)
 
-        conn = self._conn_manager.get_connection()
-        cursor = conn.execute(
-            f"SELECT {_SELECT_COLUMNS} FROM background_jobs WHERE job_id = ?",
-            (job_id,),
-        )
-        row = cursor.fetchone()
+        # Bug #1532 follow-up: route the raw connection through
+        # guarded_connection() so close_all() cannot close it mid-read.
+        with self._conn_manager.guarded_connection() as conn:
+            cursor = conn.execute(
+                f"SELECT {_SELECT_COLUMNS} FROM background_jobs WHERE job_id = ?",
+                (job_id,),
+            )
+            row = cursor.fetchone()
         if row is None:
             return None
         return _row_to_tracked_job(row)

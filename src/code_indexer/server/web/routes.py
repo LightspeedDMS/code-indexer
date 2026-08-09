@@ -11416,37 +11416,41 @@ def _load_self_monitoring_data(
     issues = []
 
     try:
-        conn = DatabaseConnectionManager.get_instance(str(db_path)).get_connection()
-        cursor = conn.cursor()
-        cursor.row_factory = sqlite3.Row
+        # Bug #1532 follow-up: route the raw connection through
+        # guarded_connection() so close_all() cannot close it mid-read.
+        with DatabaseConnectionManager.get_instance(
+            str(db_path)
+        ).guarded_connection() as conn:
+            cursor = conn.cursor()
+            cursor.row_factory = sqlite3.Row
 
-        # Load scans (most recent first)
-        cursor.execute(
-            """
-            SELECT scan_id, started_at, completed_at, status,
-                   log_id_start, log_id_end, issues_created, error_message
-            FROM self_monitoring_scans
-            ORDER BY started_at DESC
-            LIMIT ?
-            """,
-            (SCAN_HISTORY_LIMIT,),
-        )
-        scans = [dict(row) for row in cursor.fetchall()]
+            # Load scans (most recent first)
+            cursor.execute(
+                """
+                SELECT scan_id, started_at, completed_at, status,
+                       log_id_start, log_id_end, issues_created, error_message
+                FROM self_monitoring_scans
+                ORDER BY started_at DESC
+                LIMIT ?
+                """,
+                (SCAN_HISTORY_LIMIT,),
+            )
+            scans = [dict(row) for row in cursor.fetchall()]
+
+            # Load issues (most recent first)
+            cursor.execute(
+                """
+                SELECT id, scan_id, github_issue_number, github_issue_url,
+                       classification, title, fingerprint,
+                       source_log_ids, source_files, created_at
+                FROM self_monitoring_issues
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                (ISSUES_HISTORY_LIMIT,),
+            )
+            issues = [dict(row) for row in cursor.fetchall()]
         _add_scan_duration(scans)
-
-        # Load issues (most recent first)
-        cursor.execute(
-            """
-            SELECT id, scan_id, github_issue_number, github_issue_url,
-                   classification, title, fingerprint,
-                   source_log_ids, source_files, created_at
-            FROM self_monitoring_issues
-            ORDER BY created_at DESC
-            LIMIT ?
-            """,
-            (ISSUES_HISTORY_LIMIT,),
-        )
-        issues = [dict(row) for row in cursor.fetchall()]
     except Exception as e:
         logger.error(
             format_error_log(
@@ -11508,17 +11512,21 @@ def _get_last_scan_time(
             return None
 
     try:
-        conn = DatabaseConnectionManager.get_instance(str(db_path)).get_connection()
-        cursor = conn.cursor()
-        cursor.row_factory = sqlite3.Row
-        cursor.execute("""
-            SELECT started_at
-            FROM self_monitoring_scans
-            ORDER BY started_at DESC
-            LIMIT 1
-            """)
-        row = cursor.fetchone()
-        return row["started_at"] if row else None
+        # Bug #1532 follow-up: route the raw connection through
+        # guarded_connection() so close_all() cannot close it mid-read.
+        with DatabaseConnectionManager.get_instance(
+            str(db_path)
+        ).guarded_connection() as conn:
+            cursor = conn.cursor()
+            cursor.row_factory = sqlite3.Row
+            cursor.execute("""
+                SELECT started_at
+                FROM self_monitoring_scans
+                ORDER BY started_at DESC
+                LIMIT 1
+                """)
+            row = cursor.fetchone()
+            return row["started_at"] if row else None
     except Exception as e:
         logger.error(
             format_error_log(
@@ -11595,15 +11603,19 @@ def _get_scan_status(
             return "Idle"
 
     try:
-        conn = DatabaseConnectionManager.get_instance(str(db_path)).get_connection()
-        cursor = conn.cursor()
-        cursor.execute("""
-            SELECT COUNT(*)
-            FROM self_monitoring_scans
-            WHERE completed_at IS NULL
-            """)
-        count = cursor.fetchone()[0]
-        return "Running..." if count > 0 else "Idle"
+        # Bug #1532 follow-up: route the raw connection through
+        # guarded_connection() so close_all() cannot close it mid-read.
+        with DatabaseConnectionManager.get_instance(
+            str(db_path)
+        ).guarded_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT COUNT(*)
+                FROM self_monitoring_scans
+                WHERE completed_at IS NULL
+                """)
+            count = cursor.fetchone()[0]
+            return "Running..." if count > 0 else "Idle"
     except Exception as e:
         logger.error(
             format_error_log(

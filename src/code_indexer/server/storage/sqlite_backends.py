@@ -1056,14 +1056,16 @@ class SyncJobsSqliteBackend:
 
     def list_jobs(self) -> list:
         """List all sync jobs."""
-        conn = self._conn_manager.get_connection()
-        cursor = conn.execute(
-            """SELECT job_id, username, user_alias, job_type, status, created_at,
-                      started_at, completed_at, repository_url, progress, error_message,
-                      phases, phase_weights, current_phase, progress_history,
-                      recovery_checkpoint, analytics_data FROM sync_jobs"""
-        )
-        return [self._row_to_dict(row) for row in cursor.fetchall()]
+        # Bug #1532 follow-up: route the raw connection through
+        # guarded_connection() so close_all() cannot close it mid-read.
+        with self._conn_manager.guarded_connection() as conn:
+            fetched = conn.execute(
+                """SELECT job_id, username, user_alias, job_type, status, created_at,
+                          started_at, completed_at, repository_url, progress, error_message,
+                          phases, phase_weights, current_phase, progress_history,
+                          recovery_checkpoint, analytics_data FROM sync_jobs"""
+            ).fetchall()
+        return [self._row_to_dict(row) for row in fetched]
 
     def delete_job(self, job_id: str) -> bool:
         """Delete a job by ID."""
