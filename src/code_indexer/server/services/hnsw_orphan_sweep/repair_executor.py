@@ -432,5 +432,12 @@ def process_candidate(
 # attribute lives), so a wrapper decorated with
 # `@functools.wraps(process_candidate)` inherits it automatically. Callers
 # MUST check `getattr(fn, "supports_activated_repo_manager", False)`
-# instead of identity; see scheduler.py's `_process_one()`.
+# instead of identity; see scheduler.py's `_process_one()`. Note:
+# `functools.partial` does NOT propagate this marker (a `partial` object
+# has no `__dict__` copy from the wrapped callable at all) -- any future
+# `functools.partial`-based wrapper around `process_candidate` must set
+# `supports_activated_repo_manager = True` explicitly to preserve
+# `activation_id` wiring. (`functools.wraps`/`functools.lru_cache` applied
+# directly to this function DO propagate it, via `update_wrapper`'s
+# `__dict__` copy -- verified empirically, not merely assumed.)
 process_candidate.supports_activated_repo_manager = True  # type: ignore[attr-defined]
