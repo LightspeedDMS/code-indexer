@@ -335,3 +335,110 @@ def test_rebase_continue_fails_without_editor_env_bug1500(tmp_path, monkeypatch)
     verify = tmp_path / "verify-bug1500"
     _clone_repo(remote, verify)
     assert (verify / "shared.txt").read_text() == "resolved\n"
+
+
+# ---------------------------------------------------------------------------
+# Bug #1539: repeated identical-shape conflict-resolution failures must stop
+# retrying instead of holding /health degraded forever.
+# ---------------------------------------------------------------------------
+
+MAX_RETRY_ATTEMPTS_1539 = 6
+
+
+def _make_shared_txt_conflict(tmp_path: Path):
+    repo, remote = _bootstrap_repo(tmp_path)
+    divergent = tmp_path / "divergent"
+    _clone_repo(remote, divergent)
+    _commit_file(divergent, "shared.txt", "remote version\n", "remote: shared")
+    _git(["push", "origin", "master"], divergent)
+    _commit_file(repo, "shared.txt", "local version\n", "local: shared")
+    return repo, remote, divergent
+
+
+def _run_sync_until_stopped(repo: Path, resolver, max_attempts: int):
+    """Call sync() repeatedly; return (plain_failure_count, structural_error)."""
+    from code_indexer.server.services.cidx_meta_backup.sync import (
+        CidxMetaBackupSync,
+        StructurallyUnresolvableConflictError,
+    )
+
+    plain_runtime_failures = 0
+    structural_error = None
+    for _ in range(max_attempts):
+        try:
+            CidxMetaBackupSync(str(repo), "master", resolver).sync()
+        except StructurallyUnresolvableConflictError as exc:
+            structural_error = exc
+            break
+        except RuntimeError:
+            plain_runtime_failures += 1
+        # Each failed attempt runs `git rebase --abort`, so the working tree
+        # is clean again but the local commit is still un-rebased onto the
+        # (unchanged) remote -- the next sync() call reaches the identical
+        # conflict again, reproducing "fresh attempt each time" from the bug.
+    return plain_runtime_failures, structural_error
+
+
+def _never_resolving_resolver(cidx_meta_path, conflict_files, branch):
+    return SimpleNamespace(success=False, error="LLM could not resolve conflict")
+
+
+def test_repeated_identical_conflict_failure_stops_retrying_1539(tmp_path):
+    """Bug #1539: N consecutive sync() attempts that fail with the SAME
+    conflict "shape" (same conflicted files, same resolver-error text) must
+    eventually surface a clear, distinct "structurally unresolvable, stopping
+    retries" signal instead of raising the same generic RuntimeError forever.
+
+    This reproduces the production symptom: every scheduled global_repo_refresh
+    of cidx-meta-global fails with "conflict resolution failed: ..." on a fresh
+    attempt each time (never actually a stuck job), holding /health degraded
+    permanently with no forward progress and no actionable signal.
+    """
+    repo, _remote, _divergent = _make_shared_txt_conflict(tmp_path)
+    resolver = SimpleNamespace(resolve=_never_resolving_resolver)
+
+    plain_failures, structural_error = _run_sync_until_stopped(
+        repo, resolver, MAX_RETRY_ATTEMPTS_1539
+    )
+
+    assert structural_error is not None, (
+        "Expected sync() to stop retrying and raise "
+        "StructurallyUnresolvableConflictError after repeated identical "
+        "conflict-resolution failures, but it kept raising plain "
+        f"RuntimeError across all attempts ({plain_failures} failures)"
+    )
+    # At least one plain RuntimeError must have been raised first -- a
+    # single failure must NOT immediately trip the breaker.
+    assert plain_failures >= 1
+
+
+def test_different_conflict_shape_does_not_trip_breaker_1539(tmp_path):
+    """Bug #1539: a genuinely DIFFERENT failure shape (different conflicted
+    files / different resolver error) must not be confused with a previously
+    tracked failure and must not immediately trip the breaker on its very
+    first occurrence.
+    """
+    from code_indexer.server.services.cidx_meta_backup.sync import (
+        StructurallyUnresolvableConflictError,
+    )
+    import pytest
+    from code_indexer.server.services.cidx_meta_backup.sync import CidxMetaBackupSync
+
+    repo, _remote, divergent = _make_shared_txt_conflict(tmp_path)
+    resolver = SimpleNamespace(resolve=_never_resolving_resolver)
+
+    # Trip the "shared.txt" failure shape once (below threshold), then abort
+    # and move on to a distinct conflict.
+    _run_sync_until_stopped(repo, resolver, max_attempts=1)
+
+    _commit_file(divergent, "other.txt", "remote other\n", "remote: other")
+    _git(["push", "origin", "master"], divergent)
+    _commit_file(repo, "other.txt", "local other\n", "local: other")
+
+    def _different_conflict_resolver(cidx_meta_path, conflict_files, branch):
+        return SimpleNamespace(success=False, error="different failure")
+
+    resolver2 = SimpleNamespace(resolve=_different_conflict_resolver)
+    with pytest.raises(RuntimeError) as exc_info:
+        CidxMetaBackupSync(str(repo), "master", resolver2).sync()
+    assert not isinstance(exc_info.value, StructurallyUnresolvableConflictError)
