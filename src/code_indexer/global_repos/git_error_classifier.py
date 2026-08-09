@@ -73,6 +73,14 @@ PERMANENT_PATTERNS: List[str] = [
     # remote name -- any remote pointing at a non-repository path
     # produces the identical structural failure, and is equally
     # permanent regardless of the remote's name.
+    # Note: this phrase is also produced when a local file:// remote's
+    # .git is transiently hidden (e.g. NFS hiccup). This is intentionally
+    # still classified PERMANENT rather than TRANSIENT, because in this
+    # codebase PERMANENT still retries (longer backoff) but skips
+    # re-clone escalation -- which is the safer behavior for a
+    # possibly-transient local path (re-cloning could destroy a good
+    # clone if the source is only temporarily unavailable). See Bug
+    # #1534 round-3 review.
     "does not appear to be a git repository",
 ]
 
