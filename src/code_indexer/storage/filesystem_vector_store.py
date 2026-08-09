@@ -77,6 +77,38 @@ class ScrollDataIntegrityError(RuntimeError):
 _SCROLL_CURSOR_PREFIX = "__cidx_scroll_v1__:"
 
 
+def hnsw_cache_key_for_collection_path(
+    collection_path: Union[str, Path], *, activation_id: Optional[str] = None
+) -> str:
+    """Module-level equivalent of ``FilesystemVectorStore
+    .hnsw_cache_key_for_collection()`` -- the single authority for composing
+    the shared HNSW/id_index cache key, usable by callers that only have a
+    bare ``collection_path`` (and, for an activated-repo collection, its
+    ``activation_id``) with no live store instance to hand.
+
+    Bug #1542: the HNSW fleet orphan-repair sweep (``repair_executor.py``)
+    invalidates the server-side cache after a successful repair but has no
+    ``FilesystemVectorStore`` instance for the collection it just repaired --
+    only a resolved ``collection_path``. Hand-building a bare-path key there
+    (as it previously did) composes a DIFFERENT key than ``search()`` stores
+    under (Story #1458 AC11's chunk-layout token, and this token), so the
+    invalidation silently matches nothing -- the same defect class Bug #1538
+    fixed for the temporal dispatch's post-shard eviction. Every such
+    external caller MUST go through this function (or the instance method
+    below, which delegates to it) rather than reconstructing the format.
+
+    The layout token is resolved FRESH from disk here -- see
+    ``hnsw_cache_key_for_collection()``'s docstring for why.
+    """
+    from code_indexer.storage.shared.chunk_layout import resolve_chunk_layout
+
+    key = str(Path(collection_path).resolve())
+    key = f"{key}:{resolve_chunk_layout(collection_path).value}"
+    if activation_id is not None:
+        key = f"{key}:{activation_id}"
+    return key
+
+
 # Story #1110 (S6 Chunk B): module-level lazy references so tests can patch them
 # at `code_indexer.storage.filesystem_vector_store.*`.  Both are server-only; the
 # CLI path never enters the `if parallel_executor is not None` branch with these
