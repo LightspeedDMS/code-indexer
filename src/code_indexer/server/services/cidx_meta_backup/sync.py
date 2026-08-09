@@ -13,6 +13,12 @@ from code_indexer.server.git.git_subprocess_env import build_non_interactive_git
 from .conflict_resolver import ClaudeConflictResolver
 
 
+# Bug #1539 (Codex round-4 finding 2): bound both git subprocess calls so a
+# hung `git fetch` (dead/unreachable remote that accepts the TCP connection
+# but never responds) cannot hang the whole scheduler cycle indefinitely.
+_GIT_SUBPROCESS_TIMEOUT_SECONDS = 60
+
+
 def resolve_upstream_target_sha(cidx_meta_path: str, branch: str) -> Optional[str]:
     """Resolve the current ``origin/{branch}`` commit SHA, or ``None`` on failure.
 
@@ -27,22 +33,22 @@ def resolve_upstream_target_sha(cidx_meta_path: str, branch: str) -> Optional[st
     Always fetches first so this reflects genuinely fresh remote state --
     the same fetch `sync()` itself performs, so a caller resolving this
     BEFORE calling `sync()` sees the identical target `sync()` will rebase
-    onto. Returns ``None`` on any failure -- a fetch/rev-parse failure
-    (including *branch* not being a valid ref -- git itself rejects
-    malformed ref syntax via `rev-parse`'s exit code, so no separate
-    format validation is needed here) or an OS-level subprocess failure
-    (missing git executable, unreadable cwd). Callers must treat ``None``
-    as "cannot determine, do not attempt any quarantine decision" and
-    simply proceed with `sync()`, which will surface the underlying git
-    failure itself through its own fetch step.
-
-    Raises:
-        ValueError: cidx_meta_path or branch is not a non-empty string.
+    onto. Never raises -- returns ``None`` on ANY failure: invalid inputs,
+    a fetch/rev-parse failure (including *branch* not being a valid ref --
+    git itself rejects malformed ref syntax via `rev-parse`'s exit code,
+    so no separate format validation is needed), a subprocess that exceeds
+    `_GIT_SUBPROCESS_TIMEOUT_SECONDS` (Bug #1539 Codex round-4 finding 2 --
+    a hung fetch must never hang the whole scheduler cycle), or an
+    OS/encoding-level subprocess failure (missing git executable,
+    unreadable cwd, non-UTF-8 output). Callers must treat ``None`` as
+    "cannot determine, do not attempt any quarantine decision" and simply
+    proceed with `sync()`, which will surface the underlying git failure
+    itself through its own fetch step.
     """
     if not isinstance(cidx_meta_path, str) or not cidx_meta_path.strip():
-        raise ValueError("cidx_meta_path must be a non-empty string")
+        return None
     if not isinstance(branch, str) or not branch.strip():
-        raise ValueError("branch must be a non-empty string")
+        return None
 
     try:
         env = build_non_interactive_git_env()
@@ -53,6 +59,7 @@ def resolve_upstream_target_sha(cidx_meta_path: str, branch: str) -> Optional[st
             text=True,
             env=env,
             check=False,
+            timeout=_GIT_SUBPROCESS_TIMEOUT_SECONDS,
         )
         if fetch_result.returncode != 0:
             return None
@@ -64,13 +71,17 @@ def resolve_upstream_target_sha(cidx_meta_path: str, branch: str) -> Optional[st
             text=True,
             env=env,
             check=False,
+            timeout=_GIT_SUBPROCESS_TIMEOUT_SECONDS,
         )
         if rev_parse_result.returncode != 0:
             return None
-    except OSError:
-        # Missing git executable, unreadable cwd, or another OS-level
-        # subprocess failure -- treated identically to a git-level
-        # failure: "cannot determine", never raised to the caller.
+    except (subprocess.SubprocessError, OSError, UnicodeError):
+        # subprocess.SubprocessError covers TimeoutExpired and
+        # CalledProcessError; OSError covers a missing git executable or
+        # unreadable cwd; UnicodeError covers non-UTF-8 subprocess output
+        # (text=True decodes with the default codec). All treated
+        # identically to a git-level failure: "cannot determine", never
+        # raised to the caller.
         return None
 
     sha = rev_parse_result.stdout.strip()

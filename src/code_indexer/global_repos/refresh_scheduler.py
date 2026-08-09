@@ -104,6 +104,14 @@ _REFRESH_INTEGRITY_QUARANTINE_THRESHOLD = 3
 # failure modes.
 _CIDX_META_CONFLICT_QUARANTINE_THRESHOLD = 3
 
+# Bug #1539 (Codex round-4 finding 3): bounded retry count for
+# _reset_cidx_meta_conflict_quarantine's write -- a single transient
+# failure should not need to wait for a whole extra scheduled cycle to
+# clear a resolved condition. See that method's docstring for the full
+# rationale and the "next cycle retries anyway" self-healing property
+# this bound is layered on top of.
+_RESET_QUARANTINE_MAX_ATTEMPTS = 2
+
 # Bug #1506 4th-pass review Item 1: WriteLockManager.acquire()'s default TTL
 # is 3600s (1 hour). _held_write_lock_for_publish() holds this lock for the
 # ENTIRE index -> integrity-gate -> snapshot -> swap-alias publish sequence,
@@ -3022,18 +3030,46 @@ class RefreshScheduler:
         """Clear any prior Bug #1539 quarantine state on a successful
         sync(). Silent no-op with no shared backend available; backend
         resolution runs inside the try so a resolver failure can never
-        abort an otherwise-successful sync."""
-        try:
-            backend = self._resolve_cidx_meta_conflict_backend_or_none()
-            if backend is None:
+        abort an otherwise-successful sync.
+
+        Bug #1539 (Codex round-4 finding 3): retries the write up to
+        `_RESET_QUARANTINE_MAX_ATTEMPTS` times -- a bare single-attempt
+        write left a genuine (if narrow) staleness window: a transient
+        write failure after a successful sync would leave the PRIOR
+        (sub-threshold) failure count on disk, which a later genuinely
+        new failure against the SAME target SHA would then inherit and
+        increment from, reaching the quarantine threshold faster than
+        the number of failures that actually happened this time. If
+        every attempt here still fails, this is logged loudly (ERROR,
+        never silently swallowed) rather than solved by an unbounded
+        retry loop -- the design is already self-healing beyond that
+        point: `_perform_cidx_meta_backup_sync` calls this method
+        unconditionally on EVERY successful or no-op sync outcome (never
+        gated on whether a LATER cycle's skip-check would fire), so a
+        stale sub-threshold row keeps getting a fresh reset attempt on
+        every normal scheduled cycle until one succeeds. The skip-check
+        only ever blocks calling sync() once the count for the SAME
+        target SHA reaches the threshold -- decoupling "did we skip"
+        from "did we just succeed, so try to clear now".
+        """
+        last_exc: Optional[Exception] = None
+        for _attempt in range(_RESET_QUARANTINE_MAX_ATTEMPTS):
+            try:
+                backend = self._resolve_cidx_meta_conflict_backend_or_none()
+                if backend is None:
+                    return
+                backend.reset_cidx_meta_conflict_failure(alias_name)
                 return
-            backend.reset_cidx_meta_conflict_failure(alias_name)
-        except Exception as reset_exc:
-            logger.error(
-                f"Bug #1539: failed to reset cidx-meta conflict "
-                f"quarantine state for {alias_name} (non-fatal): "
-                f"{type(reset_exc).__name__}: {reset_exc}"
-            )
+            except Exception as reset_exc:
+                last_exc = reset_exc
+
+        logger.error(
+            f"Bug #1539: failed to reset cidx-meta conflict quarantine "
+            f"state for {alias_name} after {_RESET_QUARANTINE_MAX_ATTEMPTS} "
+            f"attempts (non-fatal -- the next successful/no-op sync cycle "
+            f"will retry automatically): "
+            f"{type(last_exc).__name__}: {last_exc}"
+        )
 
     def _perform_cidx_meta_backup_sync(
         self,

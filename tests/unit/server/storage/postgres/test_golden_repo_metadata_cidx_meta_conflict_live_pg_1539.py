@@ -46,15 +46,61 @@ _DISPOSABLE_DB_NAME_REGEX = r"(?:cidx_)?(?:test|tmp|scratch|sandbox)(?:_[0-9]+)?
 
 
 def _require_disposable_database(dsn: str) -> None:
+    """Bug #1539 (Codex round-4 finding 4): an unsafe/unparseable DSN must
+    FAIL the test (pytest.fail), never skip -- a skip lets the suite
+    report green with zero safety validation ever having run, matching
+    the established convention in
+    test_temporal_worker_lineage_live_pg_1533.py. "PostgreSQL not
+    configured at all" (missing TEST_POSTGRES_DSN, handled by the
+    fixture BEFORE this function is ever called) remains a legitimate
+    skip -- only "a DSN IS present but fails this safety check" fails.
+    """
     match = re.search(r"/([^/?]+)(?:\?.*)?$", dsn)
     db_name = match.group(1) if match else ""
     if re.fullmatch(_DISPOSABLE_DB_NAME_REGEX, db_name) is None:
-        pytest.skip(
+        pytest.fail(
             f"TEST_POSTGRES_DSN database name {db_name!r} does not FULLY "
             f"match the disposable format {_DISPOSABLE_DB_NAME_REGEX!r} "
             f"-- refusing to run live-PG schema-creation tests against a "
             f"database that might not be disposable"
         )
+
+
+class TestDisposableDatabaseGuard:
+    """The destruction-safety guard itself, tested WITHOUT any database
+    (Bug #1539 Codex round-4 finding 4) -- runs unconditionally so the
+    guard is exercised on every test run, not only when someone happens
+    to have PostgreSQL wired up. Mirrors
+    test_temporal_worker_lineage_live_pg_1533.py's own
+    TestDisposableDatabaseGuard class."""
+
+    REFUSED_NAMES = (
+        "cidx_server",
+        "production_cidx_test",
+        "cidx_test_prod",
+        "cidx_prod",
+        "attestation",
+        "",
+    )
+
+    ACCEPTED_NAMES = (
+        "cidx_test_1539",
+        "test",
+        "cidx_tmp",
+        "scratch",
+        "cidx_sandbox_7",
+    )
+
+    @pytest.mark.parametrize("db_name", REFUSED_NAMES)
+    def test_refuses_non_disposable_database_name(self, db_name: str) -> None:
+        with pytest.raises(pytest.fail.Exception):
+            _require_disposable_database(f"postgresql://u@h:5432/{db_name}")
+
+    @pytest.mark.parametrize("db_name", ACCEPTED_NAMES)
+    def test_accepts_disposable_database_name(self, db_name: str) -> None:
+        _require_disposable_database(
+            f"postgresql://u@h:5432/{db_name}"
+        )  # must not raise
 
 
 @pytest.fixture(scope="module")

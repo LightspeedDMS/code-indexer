@@ -33,6 +33,24 @@
 -- refresh naturally alternates try/reset). This table's increment is
 -- target-SHA-CONDITIONAL: a different upstream target resets the count
 -- to 1 instead of inheriting an unrelated prior tally.
+--
+-- Backward-compatibility verification (Bug #1539 Codex round-4 finding
+-- 1): this migration -- and specifically the `last_target_sha` column
+-- name, renamed once already during review from an earlier
+-- `last_fingerprint` -- has NEVER been merged to `development` or
+-- deployed to any environment. Confirmed via `git fetch origin
+-- development`: that branch's migrations/sql/ directory only goes up
+-- to 043_golden_repo_alias_locks.sql. A plain `CREATE TABLE IF NOT
+-- EXISTS` is therefore safe here -- there is no already-deployed table
+-- with a different column name for this migration's `IF NOT EXISTS`
+-- no-op to silently leave stale. Had this migration already shipped
+-- with `last_fingerprint`, the correct fix would instead have been a
+-- NEW migration adding `last_target_sha` via `ALTER TABLE ... ADD
+-- COLUMN IF NOT EXISTS` (backfilling from `last_fingerprint` if
+-- present, keeping the old column until a later cleanup migration),
+-- never editing an already-shipped `CREATE TABLE` in place -- per this
+-- project's absolute "Database Migrations Must Be Backward Compatible"
+-- rule (rolling restarts share schema between old and new nodes).
 
 CREATE TABLE IF NOT EXISTS cidx_meta_conflict_quarantine_state (
     golden_alias                TEXT PRIMARY KEY,

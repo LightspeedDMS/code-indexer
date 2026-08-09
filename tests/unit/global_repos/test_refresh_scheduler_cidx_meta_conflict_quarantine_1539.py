@@ -38,6 +38,7 @@ from code_indexer.global_repos.cleanup_manager import CleanupManager
 from code_indexer.global_repos.query_tracker import QueryTracker
 from code_indexer.global_repos.refresh_scheduler import (
     _CIDX_META_CONFLICT_QUARANTINE_THRESHOLD,
+    _RESET_QUARANTINE_MAX_ATTEMPTS,
     RefreshScheduler,
 )
 from code_indexer.server.services.cidx_meta_backup.sync import (
@@ -371,3 +372,85 @@ def test_cluster_mode_no_backend_skip_result_proceeds_not_quarantines(tmp_path):
         )
         sched._record_cidx_meta_conflict_failure("cidx-meta-global", "deadbeef", exc)
         sched._reset_cidx_meta_conflict_quarantine("cidx-meta-global")
+
+
+# ---------------------------------------------------------------------------
+# 5. Reset-write retry semantics (Bug #1539 Codex round-4 finding 3): a
+#    reset-write failure must not leave quarantine stale forever -- it is
+#    retried within the bounded attempt count, and even if every attempt
+#    fails this cycle, a later successful cycle still retries and clears
+#    it, decoupled from whether the skip-check would have fired.
+# ---------------------------------------------------------------------------
+
+
+class _FlakyResetBackend:
+    """Wraps a real backend, injecting a fixed number of failures into
+    reset_cidx_meta_conflict_failure before delegating to the real
+    implementation. All other methods pass through unchanged via
+    __getattr__ -- only the reset write path is under test here."""
+
+    def __init__(self, real_backend, fail_count: int):
+        self._real = real_backend
+        self._remaining_failures = fail_count
+        self.reset_call_count = 0
+
+    def reset_cidx_meta_conflict_failure(self, alias_name):
+        self.reset_call_count += 1
+        if self._remaining_failures > 0:
+            self._remaining_failures -= 1
+            raise RuntimeError("simulated transient reset failure")
+        return self._real.reset_cidx_meta_conflict_failure(alias_name)
+
+    def __getattr__(self, name):
+        return getattr(self._real, name)
+
+
+def test_reset_quarantine_retries_transient_failure_within_bound(tmp_path):
+    """(3a) A single transient reset-write failure is absorbed by the
+    bounded in-call retry -- one `_reset_cidx_meta_conflict_quarantine`
+    call still clears the state even though the FIRST write attempt
+    failed."""
+    sched, real_backend = _make_scheduler_with_real_backend(tmp_path)
+    real_backend.record_cidx_meta_conflict_failure("cidx-meta-global", "sha-a", "d1")
+
+    flaky = _FlakyResetBackend(real_backend, fail_count=1)
+    sched.golden_repo_metadata = flaky
+
+    sched._reset_cidx_meta_conflict_quarantine("cidx-meta-global")
+
+    assert flaky.reset_call_count == 2  # first attempt failed, retry succeeded
+    assert real_backend.get_cidx_meta_conflict_failure_state("cidx-meta-global") is None
+
+
+def test_reset_quarantine_failure_retried_on_next_cycle(tmp_path):
+    """(3b) When EVERY bounded attempt fails this cycle, the stale
+    quarantined row remains (nothing silently lost) -- but a LATER call
+    (simulating the next scheduled cycle, once the backend recovers)
+    still succeeds and clears it. This is what "decouple did we skip
+    from did we just succeed" means in practice: the reset is retried
+    on every normal cycle, never permanently abandoned after one
+    failed attempt."""
+    sched, real_backend = _make_scheduler_with_real_backend(tmp_path)
+    real_backend.record_cidx_meta_conflict_failure("cidx-meta-global", "sha-a", "d1")
+
+    always_fails = _FlakyResetBackend(
+        real_backend, fail_count=_RESET_QUARANTINE_MAX_ATTEMPTS
+    )
+    sched.golden_repo_metadata = always_fails
+    sched._reset_cidx_meta_conflict_quarantine("cidx-meta-global")
+
+    # All bounded attempts failed this cycle -- state still present, and
+    # the failure was NOT silently swallowed (both attempts were made).
+    assert always_fails.reset_call_count == _RESET_QUARANTINE_MAX_ATTEMPTS
+    assert (
+        real_backend.get_cidx_meta_conflict_failure_state("cidx-meta-global")
+        is not None
+    )
+
+    # Next cycle: the backend now works again -- a fresh reset attempt
+    # (as _perform_cidx_meta_backup_sync would make on any subsequent
+    # successful/no-op sync) clears the stale state.
+    sched.golden_repo_metadata = real_backend
+    sched._reset_cidx_meta_conflict_quarantine("cidx-meta-global")
+
+    assert real_backend.get_cidx_meta_conflict_failure_state("cidx-meta-global") is None
