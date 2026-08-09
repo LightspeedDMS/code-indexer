@@ -148,6 +148,26 @@ def _scan_root(
     return found
 
 
+def list_temporal_shard_dirs_under_fixed_root(temporal_index_dir: Path) -> List[Path]:
+    """Every temporal shard directory found directly under the FIXED
+    server-owned temporal root (see ``server_temporal_index_root``), sorted
+    by directory name for a deterministic order.
+
+    Bug #1547: used by the live temporal dedup signature to fingerprint
+    every shard's ``hnsw_index.bin`` identity, so a repo refresh changes the
+    dedup signature instead of silently re-serving a pre-refresh snapshot.
+    Reuses ``_scan_root`` (never reimplements shard-name parsing) and
+    intentionally scans ONLY the fixed root, never the legacy in-repo
+    location -- Bug #1528 routes every CURRENT temporal write through the
+    fixed root, so this is sufficient for the freshness-fingerprint use case
+    without needing a repo's clone path. Inherits ``_scan_root``'s fail-open
+    contract: a missing/unreadable root contributes an empty list rather
+    than raising.
+    """
+    found = _scan_root(Path(temporal_index_dir), TemporalDataLocation.FIXED_SERVER_ROOT)
+    return sorted((path for path, _location in found.values()), key=lambda p: p.name)
+
+
 def _discover_shards(
     golden_repos_dir: Path,
     repo_alias: str,

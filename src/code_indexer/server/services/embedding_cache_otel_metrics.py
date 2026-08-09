@@ -40,6 +40,11 @@ Instrument enumeration (post-cutover source for each)
                                                   COUNT). NOT event-sourced --
                                                   cache state, not a decision
                                                   event.
+  cidx.cache.embedding.write_failures         -- Bug #1536: write_failures_fn()
+                                                  (QueryEmbeddingCache.
+                                                  write_failures_since_start()).
+                                                  Cheap, NOT event-sourced --
+                                                  same class as total_entries.
   cidx.cache.embedding.hit_rate                -- WindowedCacheMetrics.overall.hit_rate
   cidx.cache.embedding.provider_calls           -- WindowedCacheMetrics.overall.provider_embed_calls
   cidx.cache.embedding.hits                     -- WindowedCacheMetrics.overall.hits   (was Counter)
@@ -84,6 +89,7 @@ logger = logging.getLogger(__name__)
 # Metric names (cidx.cache.embedding.* namespace, matching the retiring
 # module's naming convention exactly for the instruments that carry over).
 _METRIC_TOTAL_ENTRIES = "cidx.cache.embedding.total_entries"
+_METRIC_WRITE_FAILURES = "cidx.cache.embedding.write_failures"
 _METRIC_HIT_RATE = "cidx.cache.embedding.hit_rate"
 _METRIC_PROVIDER_CALLS = "cidx.cache.embedding.provider_calls"
 _METRIC_HITS = "cidx.cache.embedding.hits"
@@ -116,6 +122,12 @@ class EmbeddingCacheOtelMetrics:
             ``SearchEmbedEventBackend.get_windowed_metrics``. Fail-open: any
             exception is caught HERE and treated as an empty result so a
             transient backend error never raises out of an OTEL callback.
+        write_failures_fn: Bug #1536 -- zero-arg callable returning
+            ``QueryEmbeddingCache.write_failures_since_start()``. Cheap, NOT
+            event-sourced, same pattern as ``total_entries_fn``. ``None``
+            (the default) is a documented backward-compat no-op: the gauge
+            still registers but always reads 0, so pre-#1536 construction
+            sites are unaffected.
         window_seconds: Rolling window width for every windowed gauge.
             Defaults to 24h (matches the dashboard default).
     """
@@ -126,11 +138,13 @@ class EmbeddingCacheOtelMetrics:
         *,
         total_entries_fn: Callable[[], int],
         windowed_metrics_fn: Callable[[float, float], WindowedCacheMetricsResult],
+        write_failures_fn: Optional[Callable[[], int]] = None,
         window_seconds: float = DEFAULT_OTEL_CACHE_WINDOW_SECONDS,
     ) -> None:
         self._meter = meter
         self._total_entries_fn = total_entries_fn
         self._windowed_metrics_fn = windowed_metrics_fn
+        self._write_failures_fn: Callable[[], int] = write_failures_fn or (lambda: 0)
         self._window_seconds = window_seconds
         self._register()
 
@@ -189,6 +203,20 @@ class EmbeddingCacheOtelMetrics:
                 _METRIC_TOTAL_ENTRIES,
                 "Current number of entries in the query-embedding cache",
                 self._total_entries_fn,
+            )
+
+            # Bug #1536: write_failures -- UNCHANGED-source pattern (cheap
+            # in-process counter, independent of windowed_metrics_fn), NOT
+            # event-sourced -- same class as total_entries above. Makes a
+            # persistent record_miss_or_shadow write failure observable
+            # (rising gauge across scrapes) instead of only a buried
+            # per-event WARNING log line.
+            _single_value_gauge(
+                _METRIC_WRITE_FAILURES,
+                "Count of query-embedding cache write (upsert) failures "
+                "since process start (Bug #1536) -- a rising value indicates "
+                "a persistent backend write problem",
+                self._write_failures_fn,
             )
 
             _single_value_gauge(

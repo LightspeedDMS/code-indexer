@@ -4296,6 +4296,16 @@ def make_lifespan(
                 if _wired_cache is not None
                 else (lambda: 0)
             )
+            # Bug #1536: write_failures_fn -- same wired-cache-or-zero pattern
+            # as total_entries_fn above. Makes a persistent
+            # record_miss_or_shadow write failure (backend upsert() raised
+            # or returned False) observable via a rising OTEL gauge instead
+            # of only a buried per-event WARNING log line.
+            _write_failures_fn = (
+                _wired_cache.write_failures_since_start
+                if _wired_cache is not None
+                else (lambda: 0)
+            )
 
             def _windowed_metrics_fn(from_ts: float, to_ts: float) -> Any:
                 _see_writer = get_search_embed_event_writer()
@@ -4316,6 +4326,7 @@ def make_lifespan(
                 _cache_otel_meter,
                 total_entries_fn=_total_entries_fn,
                 windowed_metrics_fn=_windowed_metrics_fn,
+                write_failures_fn=_write_failures_fn,
             )
             logger.info(
                 "EmbeddingCacheOtelMetrics built and wired "

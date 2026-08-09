@@ -243,15 +243,17 @@ class LogScanner:
                 FINGERPRINT_RETENTION_DAYS
             )
         else:
-            conn = self._conn_manager.get_connection()
-            cursor = conn.execute(
-                "SELECT fingerprint, classification, error_codes, title, created_at "
-                "FROM self_monitoring_issues "
-                "WHERE datetime(created_at) >= datetime('now', '-' || ? || ' days') "
-                "ORDER BY created_at DESC",
-                (FINGERPRINT_RETENTION_DAYS,),
-            )
-            fingerprints = cursor.fetchall()
+            # Bug #1532 follow-up: route the raw connection through
+            # guarded_connection() so close_all() cannot close it mid-read.
+            with self._conn_manager.guarded_connection() as conn:
+                cursor = conn.execute(
+                    "SELECT fingerprint, classification, error_codes, title, created_at "
+                    "FROM self_monitoring_issues "
+                    "WHERE datetime(created_at) >= datetime('now', '-' || ? || ' days') "
+                    "ORDER BY created_at DESC",
+                    (FINGERPRINT_RETENTION_DAYS,),
+                )
+                fingerprints = cursor.fetchall()
 
         if fingerprints:
             lines.append(
@@ -347,17 +349,19 @@ class LogScanner:
             )
             return int(result)
 
-        conn = self._conn_manager.get_connection()
-        logger.debug(
-            "[SELF-MON-DEBUG] get_last_scan_log_id: Executing SELECT query for last successful scan"
-        )
-        cursor = conn.execute(
-            "SELECT log_id_end FROM self_monitoring_scans "
-            "WHERE status = 'SUCCESS' AND log_id_end IS NOT NULL "
-            "ORDER BY started_at DESC "
-            "LIMIT 1"
-        )
-        row = cursor.fetchone()
+        # Bug #1532 follow-up: route the raw connection through
+        # guarded_connection() so close_all() cannot close it mid-read.
+        with self._conn_manager.guarded_connection() as conn:
+            logger.debug(
+                "[SELF-MON-DEBUG] get_last_scan_log_id: Executing SELECT query for last successful scan"
+            )
+            cursor = conn.execute(
+                "SELECT log_id_end FROM self_monitoring_scans "
+                "WHERE status = 'SUCCESS' AND log_id_end IS NOT NULL "
+                "ORDER BY started_at DESC "
+                "LIMIT 1"
+            )
+            row = cursor.fetchone()
         result = row[0] if row else 0
         logger.debug(
             f"[SELF-MON-DEBUG] get_last_scan_log_id: Query complete - result={result}, has_row={row is not None}"

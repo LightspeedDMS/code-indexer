@@ -199,6 +199,36 @@ class TestUpsert:
         # Must not raise
         backend.upsert("k1", "voyage-ai", "voyage-code-3", 1, b"\x00", 0.0, 0.0)
 
+    def test_upsert_returns_true_on_success(self) -> None:
+        """Bug #1536: upsert() must report success via return value so
+        QueryEmbeddingCache.record_miss_or_shadow's write_failures_since_start()
+        counter is accurate on the PostgreSQL/cluster deployment path too."""
+        pool = _make_mock_pool()
+        backend = _make_backend(pool)
+        blob = _encode_vec([1.0])
+        now = time.time()
+        result = backend.upsert("k1", "voyage-ai", "voyage-code-3", 1, blob, now, now)
+        assert result is True
+
+    def test_upsert_returns_false_on_failure(self) -> None:
+        """Bug #1536: the fail-open swallow must surface False, not None, so
+        the caller can count the failure instead of it looking identical to
+        a successful write."""
+        pool = MagicMock()
+        pool.connection.side_effect = RuntimeError("DB down")
+        from code_indexer.server.storage.postgres.query_embedding_cache_backend import (
+            QueryEmbeddingCachePostgresBackend,
+        )
+
+        backend = QueryEmbeddingCachePostgresBackend.__new__(
+            QueryEmbeddingCachePostgresBackend
+        )
+        backend._pool = pool
+        result = backend.upsert(
+            "k1", "voyage-ai", "voyage-code-3", 1, b"\x00", 0.0, 0.0
+        )
+        assert result is False
+
 
 # ---------------------------------------------------------------------------
 # touch_last_used()

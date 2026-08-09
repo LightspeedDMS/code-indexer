@@ -467,6 +467,36 @@ def initialize_services() -> Dict[str, Any]:
     )
     if _backend_registry is not None:
         golden_repo_manager._global_repos_backend = _backend_registry.global_repos
+    # Bug #1549: prove this process is the sole live instance for
+    # server_data_dir BEFORE running any destructive startup orphan-cleanup
+    # sweep. A duplicate process (e.g. a crash-looping systemd unit racing
+    # an already-running out-of-band server) must not mark the live
+    # instance's just-created jobs as falsely "orphaned by restart".
+    from code_indexer.server.utils.primary_instance_lock import (
+        acquire_primary_instance_lock,
+    )
+
+    _is_primary_instance = acquire_primary_instance_lock(server_data_dir)
+    if not _is_primary_instance:
+        # Bug #1549 Finding 2b: under `uvicorn --workers N`, exactly one
+        # worker acquires this lock and the other N-1 correctly take this
+        # branch on EVERY multi-worker startup -- routine, by-design, not
+        # evidence of a caller bug (a genuinely crash-looping duplicate
+        # process is indistinguishable from a routine worker purely from
+        # this single failed-acquire signal). Demoted to DEBUG per the
+        # established Bug #1535 precedent (demote a happy-path log line
+        # rather than allowlisting it), since a WARNING here broke the
+        # mandatory post-E2E log-audit gate on a normal multi-worker
+        # deployment.
+        logger.debug(
+            "This process could not acquire the primary-instance lock for "
+            "%s -- another process appears to already be running against "
+            "this data directory. Startup orphan-cleanup sweeps will be "
+            "skipped to avoid corrupting jobs owned by the live instance "
+            "(Bug #1549).",
+            server_data_dir,
+        )
+
     # Story #311: Instantiate JobTracker before BackgroundJobManager (Epic #261 Story 1B)
     from code_indexer.server.services.job_tracker import JobTracker as _JobTracker
 
@@ -480,7 +510,9 @@ def initialize_services() -> Dict[str, Any]:
         # orphaned jobs, never another node's legitimately-running work.
         node_id=_node_id,
     )
-    job_tracker.cleanup_orphaned_jobs_on_startup()
+    job_tracker.cleanup_orphaned_jobs_on_startup(
+        is_primary_instance=_is_primary_instance
+    )
 
     # Story #313: Inject job_tracker into ClaudeCliManager singleton
     try:
@@ -512,6 +544,10 @@ def initialize_services() -> Dict[str, Any]:
         # Pod-pull: in postgres/cluster mode, leave _POD_PULL_OPS PENDING in the
         # shared queue for cross-pod work-stealing instead of the local pool.
         cluster_mode=(_storage_mode == "postgres"),
+        # Bug #1549: skip the unscoped SQLite orphan-cleanup sweeps when
+        # this process could not confirm exclusive ownership of
+        # server_data_dir.
+        is_primary_instance=_is_primary_instance,
     )
     # Inject BackgroundJobManager into GoldenRepoManager for async operations
     golden_repo_manager.background_job_manager = background_job_manager

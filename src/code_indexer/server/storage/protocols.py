@@ -539,6 +539,23 @@ class GoldenRepoMetadataBackend(Protocol):
         self, golden_alias: str
     ) -> Optional[Dict[str, Any]]: ...
 
+    # Bug #1539: cidx-meta backup conflict-resolution per-repo failure
+    # quarantine state (see global_repos/refresh_scheduler.py). Keyed by
+    # golden_alias (e.g. "cidx-meta-global") AND the upstream target
+    # commit SHA being rebased onto (never freeform error text -- Codex
+    # round-3 review found text fingerprinting fundamentally fragile).
+    # Persisted so the consecutive-failure count is visible across every
+    # worker/node, never a per-process in-memory counter.
+    def record_cidx_meta_conflict_failure(
+        self, golden_alias: str, target_sha: str, detail: str
+    ) -> int: ...
+
+    def reset_cidx_meta_conflict_failure(self, golden_alias: str) -> None: ...
+
+    def get_cidx_meta_conflict_failure_state(
+        self, golden_alias: str
+    ) -> Optional[Dict[str, Any]]: ...
+
     def close(self) -> None: ...
 
 
@@ -1792,11 +1809,17 @@ class QueryEmbeddingCacheBackend(Protocol):
         embedding: bytes,
         created_at: float,
         last_used: float,
-    ) -> None:
+    ) -> bool:
         """Insert or update the embedding row.
 
         On conflict (cache_key, provider, model, dimension) the existing row
         is updated (embedding + last_used).
+
+        Bug #1536: fails open (never raises) and reports success/failure via
+        the return value — True on success, False on failure — so callers
+        (QueryEmbeddingCache.record_miss_or_shadow) can count persistent
+        write failures instead of that condition being indistinguishable
+        from success.
 
         Args:
             cache_key: SHA-256 hex string of the (normalized) query text.
@@ -1806,6 +1829,9 @@ class QueryEmbeddingCacheBackend(Protocol):
             embedding: Float32 LE bytes blob.
             created_at: Epoch seconds (first write).
             last_used: Epoch seconds (most recent use).
+
+        Returns:
+            True on success, False on failure (never raises).
         """
         ...
 

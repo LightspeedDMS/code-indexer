@@ -129,7 +129,9 @@ def _rows_fixture() -> List[Dict[str, Any]]:
     ]
 
 
-def _make_metrics(*, meter, total_entries_fn=None, windowed_metrics_fn=None):
+def _make_metrics(
+    *, meter, total_entries_fn=None, windowed_metrics_fn=None, write_failures_fn=None
+):
     from code_indexer.server.services.embedding_cache_otel_metrics import (
         EmbeddingCacheOtelMetrics,
     )
@@ -139,6 +141,7 @@ def _make_metrics(*, meter, total_entries_fn=None, windowed_metrics_fn=None):
         total_entries_fn=total_entries_fn or (lambda: 0),
         windowed_metrics_fn=windowed_metrics_fn
         or (lambda f, t: build_windowed_result([])),
+        write_failures_fn=write_failures_fn,
     )
 
 
@@ -179,6 +182,67 @@ class TestTotalEntriesUnchangedSource:
         )
         _observe(meter, "cidx.cache.embedding.total_entries")
         assert windowed_calls["n"] == 0
+
+
+# ---------------------------------------------------------------------------
+# Bug #1536: write_failures gauge — cheap, NOT event-sourced (same class as
+# total_entries), reading QueryEmbeddingCache.write_failures_since_start()
+# so a persistent fail-open cache-write failure is operator-visible via OTEL
+# instead of only a buried WARNING log line.
+# ---------------------------------------------------------------------------
+
+
+class TestWriteFailuresGauge:
+    def test_write_failures_gauge_reads_write_failures_fn(self):
+        meter = _FakeMeter()
+        calls = {"n": 0}
+
+        def _write_failures_fn() -> int:
+            calls["n"] += 1
+            return 3
+
+        _make_metrics(meter=meter, write_failures_fn=_write_failures_fn)
+
+        observations = _observe(meter, "cidx.cache.embedding.write_failures")
+        assert len(observations) == 1
+        assert observations[0].value == 3
+        assert calls["n"] == 1
+
+    def test_write_failures_gauge_does_not_call_windowed_metrics_fn(self):
+        meter = _FakeMeter()
+        windowed_calls = {"n": 0}
+
+        def _windowed_metrics_fn(from_ts, to_ts):
+            windowed_calls["n"] += 1
+            return build_windowed_result([])
+
+        _make_metrics(
+            meter=meter,
+            write_failures_fn=lambda: 1,
+            windowed_metrics_fn=_windowed_metrics_fn,
+        )
+        _observe(meter, "cidx.cache.embedding.write_failures")
+        assert windowed_calls["n"] == 0
+
+    def test_write_failures_fn_omitted_defaults_to_zero(self):
+        """Backward compat: existing callers that never pass write_failures_fn
+        (e.g. any pre-#1536 construction site) must not break, and the
+        gauge must read 0 rather than raise or stay unregistered."""
+        meter = _FakeMeter()
+        _make_metrics(meter=meter, write_failures_fn=None)
+        observations = _observe(meter, "cidx.cache.embedding.write_failures")
+        assert len(observations) == 1
+        assert observations[0].value == 0
+
+    def test_write_failures_fn_raising_never_propagates(self):
+        meter = _FakeMeter()
+
+        def _raising_write_failures():
+            raise RuntimeError("boom")
+
+        _make_metrics(meter=meter, write_failures_fn=_raising_write_failures)
+        observations = _observe(meter, "cidx.cache.embedding.write_failures")
+        assert observations == []
 
 
 # ---------------------------------------------------------------------------
@@ -326,6 +390,7 @@ class TestNoPushBasedInstruments:
         # At minimum the enumerated instruments from the story body.
         expected_names = {
             "cidx.cache.embedding.total_entries",
+            "cidx.cache.embedding.write_failures",
             "cidx.cache.embedding.hit_rate",
             "cidx.cache.embedding.provider_calls",
             "cidx.cache.embedding.hits",

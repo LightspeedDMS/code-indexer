@@ -43,6 +43,51 @@ if TYPE_CHECKING:
     from code_indexer.server.services.job_tracker import JobTracker
 
 
+# Bug #1535: operation_types whose callers deliberately, by design, never
+# pass repo_alias to submit_job. For these operation_types, a missing
+# repo_alias is expected happy-path behavior on EVERY successful call, not
+# a signal of a caller bug -- log it at DEBUG so it stays discoverable
+# without flooding the WARNING channel the mandatory post-E2E log-audit
+# gate relies on. Every OTHER operation_type keeps the original WARNING
+# (AC5's intent: a missing repo_alias there usually does indicate a real
+# bug). Known intentional shapes, confirmed at each call site:
+#   - "temporal_query" (Story #1400's temporal_live_dispatch.py `_submit`
+#     closure): BGM's register_job_if_no_conflict per-(operation_type,
+#     repo_alias) uniqueness gate is the wrong dedup tool for temporal
+#     queries -- correct dedup granularity is the full query signature,
+#     enforced separately by TemporalDedupCache.
+#   - "xray_search_batch" (xray_batch.py): "no per-repo dedup; concurrent
+#     batches allowed" -- an explicit design comment at the call site.
+#   - "query_analytics_export" (inline_admin_ops.py's
+#     trigger_query_analytics_export): a global, cross-repo export job
+#     with no single owning repo_alias.
+_OPERATIONS_WITHOUT_REPO_ALIAS_BY_DESIGN = frozenset(
+    {"temporal_query", "xray_search_batch", "query_analytics_export"}
+)
+
+# Bug #1535: the "{platform}_discovery" family (web/routes.py's
+# discovery_start, CLAUDE.md's "Auto-Discovery Background Job Pattern")
+# constructs operation_type dynamically per platform and always submits
+# with repo_alias=None ("Manual dedup: repo_alias=None bypasses BGM atomic
+# DB gate" -- the discovery job is deliberately not repo-scoped for BGM's
+# dedup gate). A suffix match, not a fixed platform set, so a future
+# platform added to _resolve_provider is covered automatically.
+_OPERATION_SUFFIXES_WITHOUT_REPO_ALIAS_BY_DESIGN = ("_discovery",)
+
+
+def _operation_omits_repo_alias_by_design(operation_type: str) -> bool:
+    """Bug #1535: True when `operation_type` is a known, intentional,
+    permanent repo_alias=None omission (exact match or suffix-pattern
+    match), so submit_job should log the omission at DEBUG rather than
+    WARNING."""
+    if operation_type in _OPERATIONS_WITHOUT_REPO_ALIAS_BY_DESIGN:
+        return True
+    return any(
+        operation_type.endswith(suffix)
+        for suffix in _OPERATION_SUFFIXES_WITHOUT_REPO_ALIAS_BY_DESIGN
+    )
+
+
 class JobStatus(str, Enum):
     """Job status enumeration."""
 
@@ -209,6 +254,7 @@ class BackgroundJobManager:
         storage_backend: Optional[Any] = None,
         node_id: Optional[str] = None,
         cluster_mode: bool = False,
+        is_primary_instance: bool = True,
     ):
         """Initialize enhanced background job manager.
 
@@ -301,6 +347,12 @@ class BackgroundJobManager:
         # are left PENDING in PG for cross-pod claiming instead of dispatched to
         # this pod's local pool. False = legacy single-pod behavior (solo/CLI).
         self._cluster_mode: bool = cluster_mode
+
+        # Bug #1549: True (default) when this process confirmed it is the
+        # sole live instance for this data directory. False disables the
+        # unscoped SQLite-flavored orphan-cleanup sweeps below, which would
+        # otherwise mark another live instance's just-created jobs failed.
+        self._is_primary_instance: bool = is_primary_instance
 
         # Bug #1153: Cancel-handler registry keyed by operation_type.
         # Handlers are callables that signal cooperative cancellation to the
@@ -646,10 +698,20 @@ class BackgroundJobManager:
 
         # AC5: Validate repo_alias to prevent "unknown" values
         if repo_alias is None:
-            logging.warning(
-                f"Job submitted without repo_alias for operation '{operation_type}' "
-                f"by user '{submitter_username}'. Consider providing repo_alias."
-            )
+            # Bug #1535: some operation_types (e.g. "temporal_query") omit
+            # repo_alias by design on EVERY call -- that is happy-path, not
+            # a caller mistake, so it must not flood the WARNING channel.
+            if _operation_omits_repo_alias_by_design(operation_type):
+                logging.debug(
+                    f"Job submitted without repo_alias for operation '{operation_type}' "
+                    f"by user '{submitter_username}' (expected -- this operation_type "
+                    f"never supplies repo_alias by design)."
+                )
+            else:
+                logging.warning(
+                    f"Job submitted without repo_alias for operation '{operation_type}' "
+                    f"by user '{submitter_username}'. Consider providing repo_alias."
+                )
         elif repo_alias.lower() == "unknown":
             logging.warning(
                 f"Job submitted with repo_alias='unknown' for operation '{operation_type}' "
@@ -1312,13 +1374,32 @@ class BackgroundJobManager:
 
         now = datetime.now(timezone.utc)
 
-        with self._lock:
-            for job in list(self.jobs.values()):
-                if job.status in (JobStatus.RUNNING, JobStatus.PENDING):
-                    job.status = JobStatus.FAILED
-                    job.completed_at = now
-                    job.error = error
-                    count += 1
+        # Bug #1549 Finding 2a: this in-memory marking must be governed by
+        # the same primary-instance decision as the DB-level sweep below --
+        # a non-primary worker's own self.jobs dict can hold OTHER live
+        # workers'/nodes' running/pending jobs (loaded via list_jobs() at
+        # construction time, see _load_jobs_sqlite), so marking them FAILED
+        # here would misreport a live job as failed regardless of what the
+        # shared DB says. Default is_primary_instance=True preserves
+        # existing behavior for every pre-#1549 caller.
+        if self._is_primary_instance:
+            with self._lock:
+                for job in list(self.jobs.values()):
+                    if job.status in (JobStatus.RUNNING, JobStatus.PENDING):
+                        job.status = JobStatus.FAILED
+                        job.completed_at = now
+                        job.error = error
+                        count += 1
+        else:
+            # Finding 2b: routine under `uvicorn --workers N` (exactly one
+            # worker acquires the lock; the rest correctly skip on EVERY
+            # multi-worker startup) -- demoted to DEBUG per the Bug #1535
+            # precedent so this doesn't break the post-E2E log-audit gate.
+            logging.debug(
+                "fail_orphaned_jobs: skipping in-memory orphan marking -- "
+                "this process could not confirm it is the primary server "
+                "instance (Bug #1549)"
+            )
 
         # Story #1400 CRITICAL 3: the unscoped sweep below (no node filter)
         # is only safe for solo/SQLite (single process -- every
@@ -1339,6 +1420,19 @@ class BackgroundJobManager:
                 "fail_orphaned_jobs: skipping unscoped PostgreSQL sweep "
                 "(Story #1400 CRITICAL 3) -- node-scoped cleanup runs via "
                 "JobTracker.cleanup_orphaned_jobs_on_startup(node_id) instead"
+            )
+        elif self._sqlite_backend is not None and not self._is_primary_instance:
+            # Bug #1549: this sweep is unscoped (no time/process filter) --
+            # skip it when this process could not confirm it is the
+            # primary server instance, mirroring the guard applied to the
+            # constructor-time sweep in _load_jobs_sqlite(). Finding 2b:
+            # routine under `uvicorn --workers N` -- demoted to DEBUG per
+            # the Bug #1535 precedent so this doesn't break the post-E2E
+            # log-audit gate.
+            logging.debug(
+                "fail_orphaned_jobs: skipping unscoped SQLite sweep -- this "
+                "process could not confirm it is the primary server "
+                "instance (Bug #1549)"
             )
         elif self._sqlite_backend is not None:
             try:
@@ -2538,12 +2632,30 @@ class BackgroundJobManager:
         try:
             # Story #723: Clean up orphaned jobs on server startup
             # This must happen BEFORE loading jobs into memory to ensure
-            # the in-memory state reflects the cleaned-up database state
-            orphan_count = self._sqlite_backend.cleanup_orphaned_jobs_on_startup()
-            if orphan_count > 0:
-                logging.info(
-                    f"Cleaned up {orphan_count} orphaned jobs on server startup"
+            # the in-memory state reflects the cleaned-up database state.
+            # Bug #1549: skip this unscoped sweep when this process could
+            # not confirm it is the primary instance -- see
+            # JobTracker._should_skip_unscoped_orphan_sweep for the same
+            # guard applied to the sibling JobTracker sweep.
+            _backend_type_name = type(self._sqlite_backend).__name__
+            if (
+                _backend_type_name != "BackgroundJobsPostgresBackend"
+                and not self._is_primary_instance
+            ):
+                # Finding 2b: routine under `uvicorn --workers N` -- demoted
+                # to DEBUG per the Bug #1535 precedent so this doesn't break
+                # the post-E2E log-audit gate.
+                logging.debug(
+                    "BackgroundJobManager: skipping unscoped SQLite "
+                    "orphan-cleanup sweep -- this process could not confirm "
+                    "it is the primary server instance (Bug #1549)"
                 )
+            else:
+                orphan_count = self._sqlite_backend.cleanup_orphaned_jobs_on_startup()
+                if orphan_count > 0:
+                    logging.info(
+                        f"Cleaned up {orphan_count} orphaned jobs on server startup"
+                    )
 
             # Story #267 Component 6: Startup cleanup of old completed/failed jobs
             # Story #400 - AC5: Use DataRetentionConfig.background_jobs_retention_hours

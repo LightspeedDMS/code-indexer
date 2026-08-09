@@ -47,8 +47,12 @@ the probe is served in single-digit milliseconds.  Per-repo/per-category error
 and result semantics are covered separately by each path's own pre-existing
 test suites, which are unchanged by this story.
 
-Measurements are recorded to reports/perf/ following the shape Story #1493
-established in reports/perf/temporal_overfetch_1493_ac4_concurrency_results.json.
+Measurements are recorded following the shape Story #1493 established in
+reports/perf/temporal_overfetch_1493_ac4_concurrency_results.json. Per Bug
+#1544, by default they land in the gitignored tests/utils/perf_artifact_paths.py
+scratch location (.tmp/perf/) rather than the tracked reports/perf/ file, so
+running this suite never dirties git status; set CIDX_WRITE_PERF_ARTIFACTS=1
+to regenerate the committed evidence deliberately.
 """
 
 from __future__ import annotations
@@ -80,6 +84,8 @@ import httpx
 import pytest
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
+
+from tests.utils.perf_artifact_paths import perf_artifact_path
 
 if TYPE_CHECKING:
     from code_indexer.server.services.diagnostics_service import (
@@ -158,12 +164,10 @@ _TEST_BASE_URL = "http://testserver"
 # host even if a future change accidentally let a real subprocess run.
 _UNRESOLVABLE_CLONE_URL_TEMPLATE = "https://example.invalid/org/repo{index}.git"
 
-_PERF_ARTIFACT = (
-    Path(__file__).resolve().parents[3]
-    / "reports"
-    / "perf"
-    / "event_loop_blocking_1491_concurrency_results.json"
-)
+# Bug #1544: resolved via perf_artifact_path (imported above) so a plain
+# test run writes to a gitignored scratch location (.tmp/perf/) instead of
+# the tracked reports/perf/ file -- see the module docstring.
+_PERF_ARTIFACT = perf_artifact_path("event_loop_blocking_1491_concurrency_results.json")
 
 # Measurements are accumulated in-process and rewritten to the artifact after
 # every test, so the artifact is complete even when a subset of these tests

@@ -86,6 +86,7 @@
 
 - [project_backup_scope_dev_staging_only.md](project_backup_scope_dev_staging_only.md) - Epic #1454 backup-before-migration is a manual dev/staging-only precaution, NOT baked into migration code — production has no room for old-style backups
 - [project_chunk_storage_write_mode_context.md](project_chunk_storage_write_mode_context.md) - chunk-storage write mode is context-dependent: server enforces sqlite, CLI/daemon default json, json->sqlite conversion is ALWAYS explicit (server auto / CLI `--migrate-chunks-to-sqlite` #1488); existing layout always wins; never re-flip the global default to True
+- [project_shadow_mode_not_used_in_production.md](project_shadow_mode_not_used_in_production.md) - query-embedding cache "shadow" mode is NOT what production runs despite being the compiled default; assume `on` semantics (a HIT serves the persisted vector) or you will reason to a wrong conclusion, as happened on Bug #1536
 
 ## External References
 - [reference_staging_totp_programmatic_auth.md](reference_staging_totp_programmatic_auth.md) - Headless MFA auth: `.local-testing` stores TOTP as a shell `$(...)` command (NOT a static seed) — eval it for a live code, then two-step /auth/login -> /auth/mfa/verify; do these staging tests ALWAYS, never ask the user

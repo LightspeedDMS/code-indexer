@@ -775,12 +775,14 @@ class JobTracker:
                 )
                 return False
 
-        conn = self._conn_manager.get_connection()
-        cursor = conn.execute(
-            "SELECT cancelled FROM background_jobs WHERE job_id = ?",
-            (job_id,),
-        )
-        row = cursor.fetchone()
+        # Bug #1532 follow-up: route the raw connection through
+        # guarded_connection() so close_all() cannot close it mid-read.
+        with self._conn_manager.guarded_connection() as conn:
+            cursor = conn.execute(
+                "SELECT cancelled FROM background_jobs WHERE job_id = ?",
+                (job_id,),
+            )
+            row = cursor.fetchone()
         if row is None:
             return False
         return bool(row[0])
@@ -848,7 +850,6 @@ class JobTracker:
         Updates seen_ids in-place for each accepted row to prevent intra-query
         duplicates. Caller is responsible for pre-validating limit > 0.
         """
-        conn = self._conn_manager.get_connection()
         where_parts: List[str] = []
         params: List[Any] = []
 
@@ -869,8 +870,14 @@ class JobTracker:
             f"{where_clause} ORDER BY created_at DESC LIMIT ?"
         )
         params.append(limit)
+        # Bug #1532 follow-up: route the raw connection through
+        # guarded_connection() so close_all() cannot close it mid-read.
+        # Only the actual DB access needs the lock; fetchall() materializes
+        # the rows into plain Python data before the lock is released.
+        with self._conn_manager.guarded_connection() as conn:
+            fetched = conn.execute(sql, params).fetchall()
         rows: List[Dict[str, Any]] = []
-        for row in conn.execute(sql, params).fetchall():
+        for row in fetched:
             job = _row_to_tracked_job(row)
             if job.job_id not in seen_ids:
                 seen_ids.add(job.job_id)
@@ -998,11 +1005,11 @@ class JobTracker:
         )
         params.append(limit)
 
-        conn = self._conn_manager.get_connection()
-        cursor = conn.execute(sql, params)
-        return [
-            _tracked_job_to_dict(_row_to_tracked_job(row)) for row in cursor.fetchall()
-        ]
+        # Bug #1532 follow-up: route the raw connection through
+        # guarded_connection() so close_all() cannot close it mid-read.
+        with self._conn_manager.guarded_connection() as conn:
+            fetched = conn.execute(sql, params).fetchall()
+        return [_tracked_job_to_dict(_row_to_tracked_job(row)) for row in fetched]
 
     def check_operation_conflict(
         self,
@@ -1057,18 +1064,44 @@ class JobTracker:
                         existing_job_id=job.job_id,
                     )
 
-    def cleanup_orphaned_jobs_on_startup(self) -> int:
+    def _should_skip_unscoped_orphan_sweep(
+        self, backend_type_name: str, is_primary_instance: bool
+    ) -> bool:
+        """Bug #1549: the SQLite-flavored sweep is unscoped (no time/process
+        filter). Skip it when this process isn't confirmed as the sole live
+        instance. Postgres is already node_id-scoped -- never skip there."""
+        if is_primary_instance or backend_type_name == "BackgroundJobsPostgresBackend":
+            return False
+        # Finding 2b: under `uvicorn --workers N`, exactly one worker
+        # acquires the primary-instance lock and the other N-1 correctly
+        # take this branch on EVERY multi-worker startup -- routine, by
+        # design, not evidence of a caller bug. Demoted to DEBUG per the
+        # established Bug #1535 precedent (demote a happy-path log line
+        # rather than allowlisting it); a WARNING here broke the mandatory
+        # post-E2E log-audit gate on a normal multi-worker deployment.
+        logger.debug(
+            "JobTracker.cleanup_orphaned_jobs_on_startup: skipping unscoped "
+            "orphan-cleanup sweep -- this process could not confirm it is "
+            "the primary server instance (Bug #1549)"
+        )
+        return True
+
+    def cleanup_orphaned_jobs_on_startup(self, is_primary_instance: bool = True) -> int:
         """
         Mark stale running/pending jobs as failed.
 
         Called once on server startup to handle jobs that were in-flight when
-        the server last restarted.  In-memory dict is empty at startup, so
-        any job in running/pending state in the store is orphaned.
+        the server last restarted. See _should_skip_unscoped_orphan_sweep for
+        the is_primary_instance semantics (Bug #1549).
 
         Returns:
             Number of orphaned jobs marked as failed.
         """
         if self._backend is not None:
+            if self._should_skip_unscoped_orphan_sweep(
+                type(self._backend).__name__, is_primary_instance
+            ):
+                return 0
             count: int = int(
                 self._backend.cleanup_orphaned_jobs_on_startup(node_id=self._node_id)
             )
@@ -1079,6 +1112,12 @@ class JobTracker:
                 )
             return count
 
+        if self._should_skip_unscoped_orphan_sweep("", is_primary_instance):
+            return 0
+        return self._cleanup_legacy_sqlite_orphans()
+
+    def _cleanup_legacy_sqlite_orphans(self) -> int:
+        """Direct-SQLite (no injected backend) orphan sweep body."""
         now_iso = datetime.now(timezone.utc).isoformat()
         orphan_error = "orphaned - server restarted"
 
@@ -1447,14 +1486,16 @@ class JobTracker:
             )
             return result
 
-        conn = self._conn_manager.get_connection()
-        cursor = conn.execute(
-            "SELECT job_id FROM background_jobs "
-            "WHERE operation_type = ? AND repo_alias = ? "
-            "AND status IN ('pending', 'running') LIMIT 1",
-            (operation_type, repo_alias),
-        )
-        row = cursor.fetchone()
+        # Bug #1532 follow-up: route the raw connection through
+        # guarded_connection() so close_all() cannot close it mid-read.
+        with self._conn_manager.guarded_connection() as conn:
+            cursor = conn.execute(
+                "SELECT job_id FROM background_jobs "
+                "WHERE operation_type = ? AND repo_alias = ? "
+                "AND status IN ('pending', 'running') LIMIT 1",
+                (operation_type, repo_alias),
+            )
+            row = cursor.fetchone()
         return row[0] if row is not None else None
 
     def _insert_job(self, job: TrackedJob) -> None:
@@ -1580,12 +1621,14 @@ class JobTracker:
                 return None
             return _dict_to_tracked_job(d)
 
-        conn = self._conn_manager.get_connection()
-        cursor = conn.execute(
-            f"SELECT {_SELECT_COLUMNS} FROM background_jobs WHERE job_id = ?",
-            (job_id,),
-        )
-        row = cursor.fetchone()
+        # Bug #1532 follow-up: route the raw connection through
+        # guarded_connection() so close_all() cannot close it mid-read.
+        with self._conn_manager.guarded_connection() as conn:
+            cursor = conn.execute(
+                f"SELECT {_SELECT_COLUMNS} FROM background_jobs WHERE job_id = ?",
+                (job_id,),
+            )
+            row = cursor.fetchone()
         if row is None:
             return None
         return _row_to_tracked_job(row)

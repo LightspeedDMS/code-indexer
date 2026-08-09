@@ -53,7 +53,10 @@ from code_indexer.server.services.cidx_meta_backup import (
     CidxMetaBackupBootstrap,
     ClaudeConflictResolver,
     CidxMetaBackupSync,
+    ConflictResolutionFailedError,
+    SyncResult,
     detect_default_branch,
+    resolve_upstream_target_sha,
 )
 from code_indexer.server.services.config_service import get_config_service
 from code_indexer.server.services.db_outage_throttle import DbOutageThrottle
@@ -85,6 +88,29 @@ _GIT_URL_PREFIXES = ("https://", "http://", "git@", "ssh://", "git://")
 # PROMPT_FAILURE_QUARANTINE_THRESHOLD and Issue #1477's
 # FLEET_MIGRATION_FAILURE_QUARANTINE_THRESHOLD (both 3).
 _REFRESH_INTEGRITY_QUARANTINE_THRESHOLD = 3
+
+# Bug #1539 (Codex round-3 redesign): N consecutive cidx-meta backup
+# conflict-resolution failures against the IDENTICAL upstream target
+# commit SHA (see `resolve_upstream_target_sha`) for the same golden_alias
+# are QUARANTINED -- the scheduler skips sync() entirely on a later cycle
+# instead of retrying (and failing) forever. Keying on the SHA (never
+# freeform error text -- an earlier text-fingerprint design was rejected
+# on review as fundamentally fragile) also gives this quarantine an
+# automatic recovery path: the moment new commits land upstream (or
+# history changes), the resolved SHA no longer matches the stored one and
+# a fresh attempt proceeds with no manual reset required. Same threshold
+# value as _REFRESH_INTEGRITY_QUARANTINE_THRESHOLD, tracked as an
+# independent constant since the two mechanisms quarantine unrelated
+# failure modes.
+_CIDX_META_CONFLICT_QUARANTINE_THRESHOLD = 3
+
+# Bug #1539 (Codex round-4 finding 3): bounded retry count for
+# _reset_cidx_meta_conflict_quarantine's write -- a single transient
+# failure should not need to wait for a whole extra scheduled cycle to
+# clear a resolved condition. See that method's docstring for the full
+# rationale and the "next cycle retries anyway" self-healing property
+# this bound is layered on top of.
+_RESET_QUARANTINE_MAX_ATTEMPTS = 2
 
 # Bug #1506 4th-pass review Item 1: WriteLockManager.acquire()'s default TTL
 # is 3600s (1 hour). _held_write_lock_for_publish() holds this lock for the
@@ -2043,11 +2069,31 @@ class RefreshScheduler:
                                         )
 
                                 _branch = detect_default_branch(master_path) or "master"
-                                _sync_result = CidxMetaBackupSync(
+
+                                # Bug #1539: resolve the CURRENT upstream target SHA and
+                                # check quarantine AFTER the idempotent MetaDirectoryUpdater/
+                                # bootstrap steps above (unlike Bug #1506's pre-mutation
+                                # placement) -- SHA resolution needs a fully bootstrapped
+                                # git remote to be accurate, and those steps are cheap
+                                # no-ops on a repeat cycle; sync() itself is the expensive
+                                # work quarantine exists to avoid.
+                                _cidx_meta_target_sha = resolve_upstream_target_sha(
+                                    master_path, _branch
+                                )
+                                _cidx_meta_quarantine_skip = (
+                                    self._cidx_meta_conflict_quarantine_skip_result(
+                                        alias_name, _cidx_meta_target_sha
+                                    )
+                                )
+                                if _cidx_meta_quarantine_skip is not None:
+                                    return _cidx_meta_quarantine_skip
+
+                                _sync_result = self._perform_cidx_meta_backup_sync(
+                                    alias_name,
                                     master_path,
                                     _branch,
-                                    ClaudeConflictResolver(),
-                                ).sync()
+                                    _cidx_meta_target_sha,
+                                )
 
                                 if _sync_result.skipped and not force_reset:
                                     logger.info(
@@ -2156,11 +2202,26 @@ class RefreshScheduler:
                                         bootstrap_err,
                                     )
                             branch = detect_default_branch(master_path) or "master"
-                            sync_result = CidxMetaBackupSync(
-                                master_path,
-                                branch,
-                                ClaudeConflictResolver(),
-                            ).sync()
+
+                            # Bug #1539: resolve the CURRENT upstream target SHA and
+                            # check quarantine AFTER the idempotent MetaDirectoryUpdater/
+                            # bootstrap steps above -- mirrors the post-migration block's
+                            # placement and rationale (SHA resolution needs a fully
+                            # bootstrapped git remote to be accurate).
+                            _cidx_meta_target_sha = resolve_upstream_target_sha(
+                                master_path, branch
+                            )
+                            _cidx_meta_quarantine_skip = (
+                                self._cidx_meta_conflict_quarantine_skip_result(
+                                    alias_name, _cidx_meta_target_sha
+                                )
+                            )
+                            if _cidx_meta_quarantine_skip is not None:
+                                return _cidx_meta_quarantine_skip
+
+                            sync_result = self._perform_cidx_meta_backup_sync(
+                                alias_name, master_path, branch, _cidx_meta_target_sha
+                            )
                             if sync_result.skipped and not force_reset:
                                 logger.info(
                                     "No cidx-meta backup changes detected for %s, skipping refresh",
@@ -2813,6 +2874,226 @@ class RefreshScheduler:
                 f"state for {alias_name} (non-fatal): "
                 f"{type(reset_exc).__name__}: {reset_exc}"
             )
+
+    def _resolve_cidx_meta_conflict_backend_or_none(self):
+        """Resolve golden_repo_metadata for Bug #1539 bookkeeping WITHOUT
+        ever falling back to a per-node SQLite backend in postgres/
+        cluster mode when no shared backend is available yet (Codex
+        fail-closed finding). Return type matches the existing
+        golden_repo_metadata property's own Any return type -- both
+        SQLite and Postgres backends satisfy GoldenRepoMetadataBackend
+        (protocols.py) but neither is imported here to avoid a cycle.
+        Returns None ONLY in postgres/cluster mode with no shared backend
+        yet -- callers must treat that as "cannot determine, proceed",
+        never construct a node-local fallback (that would split-brain).
+        """
+        existing = getattr(self, "_golden_repo_metadata_backend", None)
+        if existing is not None:
+            return existing
+
+        from code_indexer.server.utils.registry_factory import (
+            resolve_backend_registry_attr,
+        )
+
+        backend, postgres_mode_without_backend = resolve_backend_registry_attr(
+            "golden_repo_metadata",
+            caller_name="RefreshScheduler-CidxMetaConflictQuarantine",
+        )
+        if backend is not None:
+            return backend
+        if postgres_mode_without_backend:
+            return None
+        return self.golden_repo_metadata
+
+    def _get_cidx_meta_conflict_quarantine_state_if_active(
+        self, alias_name: str, target_sha: Optional[str]
+    ) -> Optional[Dict[str, Any]]:
+        """Bug #1539 (SHA-based redesign): active quarantine state for
+        alias_name, or None. Requires the stored last_target_sha to
+        match the CURRENT target_sha AND the count to reach threshold --
+        the SHA-match is the automatic-recovery mechanism (new upstream
+        commits change the SHA, quarantine clears). Returns None (no
+        backend query) when target_sha is None or no shared backend is
+        available (cluster mode) -- both "cannot determine". A genuine
+        backend read exception still propagates (Bug #1506 precedent).
+        """
+        if target_sha is None:
+            return None
+        backend = self._resolve_cidx_meta_conflict_backend_or_none()
+        if backend is None:
+            return None
+        state: Optional[Dict[str, Any]] = backend.get_cidx_meta_conflict_failure_state(
+            alias_name
+        )
+        if (
+            state is not None
+            and state.get("last_target_sha") == target_sha
+            and state.get("consecutive_failure_count", 0)
+            >= _CIDX_META_CONFLICT_QUARANTINE_THRESHOLD
+        ):
+            return state
+        return None
+
+    def _cidx_meta_conflict_quarantine_skip_result(
+        self, alias_name: str, target_sha: Optional[str]
+    ) -> Optional[Dict[str, Any]]:
+        """Skip-result dict if sync must NOT run this cycle, else None.
+        Fail-CLOSED (skip) on a genuine backend read exception; fail-OPEN
+        (proceed) when no shared backend is available in cluster mode --
+        an unknown state must never itself quarantine the whole fleet
+        during a brief backend-registry startup window (Codex decision).
+        """
+        try:
+            quarantine_state = self._get_cidx_meta_conflict_quarantine_state_if_active(
+                alias_name, target_sha
+            )
+        except Exception as read_exc:
+            logger.error(
+                f"Bug #1539: failed to read cidx-meta conflict quarantine "
+                f"state for {alias_name} -- skipping backup sync this "
+                f"cycle to fail closed: {type(read_exc).__name__}: {read_exc}"
+            )
+            return {
+                "success": False,
+                "alias": alias_name,
+                "message": (
+                    "cidx-meta conflict quarantine state could not be "
+                    "read; skipping backup sync this cycle to fail closed"
+                ),
+                "skipped": "cidx_meta_conflict_quarantine_check_failed",
+            }
+        if quarantine_state is None:
+            return None
+        logger.error(
+            f"Bug #1539: {alias_name} cidx-meta backup sync is QUARANTINED "
+            f"against upstream target {target_sha} after "
+            f"{quarantine_state['consecutive_failure_count']} consecutive "
+            f"identical conflict-resolution failures -- skipping sync "
+            f"this cycle. Resolves automatically once new commits land "
+            f"upstream, or requires manual operator intervention."
+        )
+        return {
+            "success": False,
+            "alias": alias_name,
+            "message": "cidx-meta conflict quarantine active; sync skipped",
+            "skipped": "cidx_meta_conflict_quarantined",
+            "consecutive_failure_count": quarantine_state["consecutive_failure_count"],
+        }
+
+    def _record_cidx_meta_conflict_failure(
+        self,
+        alias_name: str,
+        target_sha: Optional[str],
+        exc: ConflictResolutionFailedError,
+    ) -> None:
+        """Persist one Bug #1539 failure for alias_name against
+        target_sha (the upstream SHA being rebased onto, never freeform
+        text). Skips silently (nothing stable to key on) when target_sha
+        is None. A resolver failure or a genuine write failure is
+        non-fatal but logged loudly -- ALL of it (including backend
+        resolution) runs inside one try/except so nothing here can ever
+        mask the original exception the caller re-raises.
+        """
+        if target_sha is None:
+            logger.warning(
+                f"Bug #1539: cannot record conflict failure for "
+                f"{alias_name} -- no upstream target SHA was resolved"
+            )
+            return
+        try:
+            backend = self._resolve_cidx_meta_conflict_backend_or_none()
+            if backend is None:
+                logger.warning(
+                    f"Bug #1539: no shared quarantine backend available "
+                    f"for {alias_name} (cluster mode); skipping "
+                    f"bookkeeping"
+                )
+                return
+            failure_count = backend.record_cidx_meta_conflict_failure(
+                alias_name, target_sha, exc.detail
+            )
+            if failure_count >= _CIDX_META_CONFLICT_QUARANTINE_THRESHOLD:
+                logger.error(
+                    f"Bug #1539: {alias_name} has failed cidx-meta backup "
+                    f"conflict resolution against the IDENTICAL upstream "
+                    f"target {target_sha} {failure_count} consecutive "
+                    f"times -- QUARANTINED."
+                )
+        except Exception as quarantine_exc:
+            logger.error(
+                f"Bug #1539: failed to record cidx-meta conflict "
+                f"quarantine state for {alias_name} (non-fatal): "
+                f"{type(quarantine_exc).__name__}: {quarantine_exc}"
+            )
+
+    def _reset_cidx_meta_conflict_quarantine(self, alias_name: str) -> None:
+        """Clear any prior Bug #1539 quarantine state on a successful
+        sync(). Silent no-op with no shared backend available; backend
+        resolution runs inside the try so a resolver failure can never
+        abort an otherwise-successful sync.
+
+        Bug #1539 (Codex round-4 finding 3): retries the write up to
+        `_RESET_QUARANTINE_MAX_ATTEMPTS` times -- a bare single-attempt
+        write left a genuine (if narrow) staleness window: a transient
+        write failure after a successful sync would leave the PRIOR
+        (sub-threshold) failure count on disk, which a later genuinely
+        new failure against the SAME target SHA would then inherit and
+        increment from, reaching the quarantine threshold faster than
+        the number of failures that actually happened this time. If
+        every attempt here still fails, this is logged loudly (ERROR,
+        never silently swallowed) rather than solved by an unbounded
+        retry loop -- the design is already self-healing beyond that
+        point: `_perform_cidx_meta_backup_sync` calls this method
+        unconditionally on EVERY successful or no-op sync outcome (never
+        gated on whether a LATER cycle's skip-check would fire), so a
+        stale sub-threshold row keeps getting a fresh reset attempt on
+        every normal scheduled cycle until one succeeds. The skip-check
+        only ever blocks calling sync() once the count for the SAME
+        target SHA reaches the threshold -- decoupling "did we skip"
+        from "did we just succeed, so try to clear now".
+        """
+        last_exc: Optional[Exception] = None
+        for _attempt in range(_RESET_QUARANTINE_MAX_ATTEMPTS):
+            try:
+                backend = self._resolve_cidx_meta_conflict_backend_or_none()
+                if backend is None:
+                    return
+                backend.reset_cidx_meta_conflict_failure(alias_name)
+                return
+            except Exception as reset_exc:
+                last_exc = reset_exc
+
+        logger.error(
+            f"Bug #1539: failed to reset cidx-meta conflict quarantine "
+            f"state for {alias_name} after {_RESET_QUARANTINE_MAX_ATTEMPTS} "
+            f"attempts (non-fatal -- the next successful/no-op sync cycle "
+            f"will retry automatically): "
+            f"{type(last_exc).__name__}: {last_exc}"
+        )
+
+    def _perform_cidx_meta_backup_sync(
+        self,
+        alias_name: str,
+        master_path: str,
+        branch: str,
+        target_sha: Optional[str],
+    ) -> SyncResult:
+        """Run CidxMetaBackupSync.sync() with Bug #1539 quarantine
+        bookkeeping. target_sha is the SHA the caller already resolved
+        (before the quarantine-skip check that gated this call) so the
+        failure record, if any, is keyed on exactly what was checked.
+        """
+        try:
+            result = CidxMetaBackupSync(
+                master_path, branch, ClaudeConflictResolver()
+            ).sync()
+        except ConflictResolutionFailedError as conflict_exc:
+            self._record_cidx_meta_conflict_failure(
+                alias_name, target_sha, conflict_exc
+            )
+            raise
+        self._reset_cidx_meta_conflict_quarantine(alias_name)
+        return result
 
     def _run_and_publish_integrity_gate(
         self,

@@ -1056,14 +1056,23 @@ class SyncJobsSqliteBackend:
 
     def list_jobs(self) -> list:
         """List all sync jobs."""
-        conn = self._conn_manager.get_connection()
-        cursor = conn.execute(
-            """SELECT job_id, username, user_alias, job_type, status, created_at,
-                      started_at, completed_at, repository_url, progress, error_message,
-                      phases, phase_weights, current_phase, progress_history,
-                      recovery_checkpoint, analytics_data FROM sync_jobs"""
-        )
-        return [self._row_to_dict(row) for row in cursor.fetchall()]
+        # Bug #1532 follow-up: route the raw connection through
+        # guarded_connection() so close_all() cannot close it mid-read.
+        # Correction to commit e5723217's message: this file has 82 OTHER
+        # bare-connection-fetch call sites (self._conn_manager plus the
+        # bare-fetch method name) beyond this one, not "~100+" as that
+        # commit message states -- history is immutable this deep in the
+        # chain, so the accurate count is recorded here instead. Still
+        # deliberately out of scope for a dedicated sweep, per that
+        # commit's own rationale.
+        with self._conn_manager.guarded_connection() as conn:
+            fetched = conn.execute(
+                """SELECT job_id, username, user_alias, job_type, status, created_at,
+                          started_at, completed_at, repository_url, progress, error_message,
+                          phases, phase_weights, current_phase, progress_history,
+                          recovery_checkpoint, analytics_data FROM sync_jobs"""
+            ).fetchall()
+        return [self._row_to_dict(row) for row in fetched]
 
     def delete_job(self, job_id: str) -> bool:
         """Delete a job by ID."""
@@ -1878,7 +1887,146 @@ class GoldenRepoMetadataSqliteBackend:
             """
             )
 
+            # Bug #1539: per-golden-alias cidx-meta backup conflict-
+            # resolution failure quarantine tracking (see
+            # record_cidx_meta_conflict_failure() below). This table
+            # stores the last failure's upstream target commit SHA --
+            # NOT freeform error text (Codex round-3 review found text
+            # fingerprinting fundamentally fragile: both false-positive
+            # collisions and false-negative misses across attempts) --
+            # so the SAME underlying rebase target can be distinguished
+            # from a genuinely different one across separate,
+            # independent sync() attempts, and automatically resets the
+            # moment the world changes (new commits land upstream).
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS cidx_meta_conflict_quarantine_state (
+                    golden_alias TEXT PRIMARY KEY NOT NULL,
+                    consecutive_failure_count INTEGER NOT NULL DEFAULT 0,
+                    last_target_sha TEXT,
+                    last_detail TEXT,
+                    first_failed_at TEXT,
+                    last_failed_at TEXT,
+                    updated_at TEXT
+                )
+            """
+            )
+
         self._conn_manager.execute_atomic(operation)
+
+    def record_cidx_meta_conflict_failure(
+        self, golden_alias: str, target_sha: str, detail: str
+    ) -> int:
+        """
+        Record one cidx-meta backup conflict-resolution failure for a
+        golden repo (Bug #1539). Unlike ``record_refresh_integrity_failure``
+        (which always increments), this INCREMENTS only when
+        ``target_sha`` matches the previously stored target SHA for
+        ``golden_alias`` -- a different upstream target (new commits
+        landed, or history changed) resets the count to 1, since it is
+        not the same stuck condition and must not inherit an unrelated
+        prior tally.
+
+        Returns:
+            The consecutive-failure count after recording this one.
+
+        Raises:
+            ValueError: golden_alias, target_sha, or detail is
+                empty/blank (including whitespace-only).
+        """
+        if not golden_alias or not golden_alias.strip():
+            raise ValueError("golden_alias must be a non-empty string")
+        if not target_sha or not target_sha.strip():
+            raise ValueError("target_sha must be a non-empty string")
+        if not detail or not detail.strip():
+            raise ValueError("detail must be a non-empty string")
+
+        now = datetime.now(timezone.utc).isoformat()
+
+        def operation(conn):
+            row = conn.execute(
+                "SELECT consecutive_failure_count, last_target_sha "
+                "FROM cidx_meta_conflict_quarantine_state WHERE golden_alias = ?",
+                (golden_alias,),
+            ).fetchone()
+            if row is None:
+                conn.execute(
+                    "INSERT INTO cidx_meta_conflict_quarantine_state "
+                    "(golden_alias, consecutive_failure_count, last_target_sha, "
+                    "last_detail, first_failed_at, last_failed_at, updated_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (golden_alias, 1, target_sha, detail, now, now, now),
+                )
+                return 1
+
+            new_count = row[0] + 1 if row[1] == target_sha else 1
+            conn.execute(
+                "UPDATE cidx_meta_conflict_quarantine_state "
+                "SET consecutive_failure_count = ?, last_target_sha = ?, "
+                "last_detail = ?, last_failed_at = ?, updated_at = ? "
+                "WHERE golden_alias = ?",
+                (new_count, target_sha, detail, now, now, golden_alias),
+            )
+            return new_count
+
+        return self._conn_manager.execute_atomic(operation)  # type: ignore[no-any-return]
+
+    def reset_cidx_meta_conflict_failure(self, golden_alias: str) -> None:
+        """
+        Clear any persisted cidx-meta conflict-resolution failure/
+        quarantine state for a golden repo (Bug #1539) -- called on a
+        successful sync(). A no-op (never raises FOR AN UNKNOWN ALIAS)
+        when no row exists for ``golden_alias``.
+
+        Raises:
+            ValueError: golden_alias is empty/blank (including
+                whitespace-only).
+        """
+        if not golden_alias or not golden_alias.strip():
+            raise ValueError("golden_alias must be a non-empty string")
+
+        def operation(conn):
+            conn.execute(
+                "DELETE FROM cidx_meta_conflict_quarantine_state WHERE golden_alias = ?",
+                (golden_alias,),
+            )
+
+        self._conn_manager.execute_atomic(operation)
+
+    def get_cidx_meta_conflict_failure_state(
+        self, golden_alias: str
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Return the currently persisted cidx-meta conflict-resolution
+        failure state for a golden repo, or None if it has never failed
+        (or was reset since).
+
+        Raises:
+            ValueError: golden_alias is empty/blank (including
+                whitespace-only).
+        """
+        if not golden_alias or not golden_alias.strip():
+            raise ValueError("golden_alias must be a non-empty string")
+
+        # Bug #1532/#1539: route the raw connection through
+        # guarded_connection() so close_all() cannot close it mid-read.
+        with self._conn_manager.guarded_connection() as conn:
+            row = conn.execute(
+                "SELECT golden_alias, consecutive_failure_count, last_target_sha, "
+                "last_detail, first_failed_at, last_failed_at "
+                "FROM cidx_meta_conflict_quarantine_state WHERE golden_alias = ?",
+                (golden_alias,),
+            ).fetchone()
+        if row is None:
+            return None
+        return {
+            "golden_alias": row[0],
+            "consecutive_failure_count": row[1],
+            "last_target_sha": row[2],
+            "last_detail": row[3],
+            "first_failed_at": row[4],
+            "last_failed_at": row[5],
+        }
 
     def record_refresh_integrity_failure(self, golden_alias: str, detail: str) -> int:
         """
@@ -7469,8 +7617,23 @@ class QueryEmbeddingCacheSqliteBackend:
         embedding: bytes,
         created_at: float,
         last_used: float,
-    ) -> None:
-        """Insert or update the embedding row (upserts on composite PK conflict)."""
+    ) -> bool:
+        """Insert or update the embedding row (upserts on composite PK conflict).
+
+        Bug #1536: fails open at the backend layer (mirrors
+        QueryEmbeddingCachePostgresBackend's already-fail-open upsert()) —
+        a write failure (e.g. an OperationalError from the 30s busy-timeout
+        expiring under writer contention on this dedicated db file) is
+        logged as a WARNING and reported via a `False` return, never raised.
+        The caller (QueryEmbeddingCache.record_miss_or_shadow) uses the
+        return value to count persistent failures
+        (write_failures_since_start()) rather than relying solely on an
+        exception, since a future/alternate backend implementation might
+        fail open the same way this Postgres sibling already does.
+
+        Returns:
+            True on success, False on failure (never raises).
+        """
 
         def operation(conn: Any) -> None:
             conn.execute(
@@ -7493,7 +7656,16 @@ class QueryEmbeddingCacheSqliteBackend:
                 ),
             )
 
-        self._conn_manager.execute_atomic(operation)
+        try:
+            self._conn_manager.execute_atomic(operation)
+            return True
+        except Exception as exc:  # noqa: BLE001 -- fail-open, never raise
+            logger.warning(
+                "QueryEmbeddingCacheSqliteBackend: upsert failed: %s",
+                exc,
+                exc_info=True,
+            )
+            return False
 
     def touch_last_used(
         self,

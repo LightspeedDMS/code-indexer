@@ -344,11 +344,13 @@ class WikiCache:
             if raw is None:
                 return None
             return json.loads(raw)  # type: ignore[no-any-return]
-        conn = self._conn_manager.get_connection()
-        row = conn.execute(
-            "SELECT sidebar_json FROM wiki_sidebar_cache WHERE repo_alias=?",
-            (repo_alias,),
-        ).fetchone()
+        # Bug #1532 follow-up: route the raw connection through
+        # guarded_connection() so close_all() cannot close it mid-read.
+        with self._conn_manager.guarded_connection() as conn:
+            row = conn.execute(
+                "SELECT sidebar_json FROM wiki_sidebar_cache WHERE repo_alias=?",
+                (repo_alias,),
+            ).fetchone()
         if row is None:
             return None
         return json.loads(row[0])  # type: ignore[no-any-return]

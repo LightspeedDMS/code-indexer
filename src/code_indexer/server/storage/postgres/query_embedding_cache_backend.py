@@ -106,8 +106,20 @@ class QueryEmbeddingCachePostgresBackend:
         embedding: bytes,
         created_at: float,
         last_used: float,
-    ) -> None:
-        """Insert or update the embedding row."""
+    ) -> bool:
+        """Insert or update the embedding row.
+
+        Bug #1536: reports success/failure via return value (True/False)
+        rather than implicit None on both paths — the caller
+        (QueryEmbeddingCache.record_miss_or_shadow) uses this to count
+        persistent write failures (write_failures_since_start()), which
+        would otherwise be indistinguishable from a successful write on the
+        PostgreSQL/cluster deployment path (this method already fails open
+        internally and never raises).
+
+        Returns:
+            True on success, False on failure (never raises).
+        """
         try:
             with self._pool.connection() as conn:
                 conn.execute(
@@ -131,8 +143,10 @@ class QueryEmbeddingCachePostgresBackend:
                     ),
                 )
                 conn.commit()
+            return True
         except Exception as exc:
             logger.warning("QueryEmbeddingCachePostgresBackend: upsert failed: %s", exc)
+            return False
 
     def touch_last_used(
         self,

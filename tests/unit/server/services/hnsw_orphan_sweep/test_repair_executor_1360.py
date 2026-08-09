@@ -24,7 +24,9 @@ Concurrency interlock (issue section "Concurrency interlock"):
 import json
 from pathlib import Path
 from typing import List
+from unittest.mock import MagicMock
 
+from code_indexer.server.cache.hnsw_index_cache import HNSWIndexCacheEntry
 from code_indexer.storage.hnsw_index_manager import HNSWIndexManager
 from code_indexer.server.services.hnsw_orphan_sweep.discovery import SweepCandidate
 from code_indexer.server.services.hnsw_orphan_sweep.repair_executor import (
@@ -175,6 +177,236 @@ class TestProcessCandidateRepairsAC5Fixture:
         process_candidate(candidate)
 
         assert (collection_path / ".index_rebuild.lock").exists()
+
+
+class TestProcessCandidateDefaultInvalidatorUsesCanonicalKey:
+    """Bug #1542: the DEFAULT cache invalidator (used when no
+    ``cache_invalidator`` is injected) must evict the SAME cache entry
+    ``FilesystemVectorStore.search()`` stores under -- composed via
+    ``hnsw_cache_key_for_collection()`` (Bug #1538's single authority), not a
+    bare resolved path. A bare-path ``get_global_cache().invalidate()`` call
+    matches nothing because Story #1458 AC11 made the real key embed a
+    chunk-layout token."""
+
+    def test_default_invalidator_evicts_the_real_search_cache_entry(
+        self, tmp_path: Path
+    ) -> None:
+        from code_indexer.server.cache import get_global_cache, reset_global_cache
+        from code_indexer.storage.filesystem_vector_store import (
+            FilesystemVectorStore,
+        )
+
+        reset_global_cache()
+        try:
+            repo_root = tmp_path / "repo"
+            collection_path = repo_root / ".code-indexer" / "index" / "voyage-code-3"
+            _plant_prebroken_fixture(collection_path)
+
+            # Seed the REAL global cache under the EXACT key search() uses --
+            # the single authority for that key, per Bug #1538.
+            store = FilesystemVectorStore(base_path=repo_root)
+            canonical_key = store.hnsw_cache_key_for_collection(collection_path)
+            cache = get_global_cache()
+            with cache._cache_lock:
+                cache._cache[canonical_key] = MagicMock(
+                    spec=HNSWIndexCacheEntry,
+                    repo_path=canonical_key,
+                    is_expired=lambda: False,
+                )
+
+            candidate = _make_candidate(
+                repo_root, ".code-indexer/index/voyage-code-3/hnsw_index.bin"
+            )
+            outcome = process_candidate(candidate)
+
+            assert outcome == SweepOutcome.REPAIRED
+            assert canonical_key not in cache._cache, (
+                "repaired collection's cache entry was NOT evicted -- the "
+                "default invalidator composed a key that does not match "
+                "the one search() actually stores under"
+            )
+        finally:
+            reset_global_cache()
+
+
+class TestProcessCandidateActivatedRepoDefaultInvalidatorUsesActivationScopedKey:
+    """Bug #1542 Codex-review follow-up: an ACTIVATED-repo candidate's cache
+    entry is scoped by BOTH the chunk-layout token AND its ``activation_id``
+    (Story #1458 AC11 Finding 7) -- the discriminator alone is not enough to
+    distinguish a deactivate-then-reactivate clone at the same path. The
+    default invalidator must resolve ``activation_id`` via an injected
+    ``activated_repo_manager`` (``ActivatedRepoManager.get_activation_id``)
+    for ``kind == "activated"`` candidates and compose the SAME
+    activation-scoped key ``FilesystemVectorStore.search()`` uses."""
+
+    def test_default_invalidator_evicts_activation_scoped_cache_entry(
+        self, tmp_path: Path
+    ) -> None:
+        from code_indexer.server.cache import get_global_cache, reset_global_cache
+        from code_indexer.storage.filesystem_vector_store import (
+            FilesystemVectorStore,
+        )
+
+        reset_global_cache()
+        try:
+            username = "alice"
+            user_alias = "myrepo"
+            activation_id = "11111111-2222-3333-4444-555555555555"
+            repo_root = tmp_path / "activated" / username / user_alias
+            collection_path = repo_root / ".code-indexer" / "index" / "voyage-code-3"
+            _plant_prebroken_fixture(collection_path)
+
+            # Seed the REAL global cache under the activation-scoped key an
+            # activated-repo search() actually stores under.
+            store = FilesystemVectorStore(
+                base_path=repo_root, activation_id=activation_id
+            )
+            canonical_key = store.hnsw_cache_key_for_collection(collection_path)
+            cache = get_global_cache()
+            with cache._cache_lock:
+                cache._cache[canonical_key] = MagicMock(
+                    spec=HNSWIndexCacheEntry,
+                    repo_path=canonical_key,
+                    is_expired=lambda: False,
+                )
+
+            class _FakeActivatedRepoManager:
+                def get_activation_id(self, u: str, a: str) -> str:
+                    assert u == username
+                    assert a == user_alias
+                    return activation_id
+
+            candidate = SweepCandidate(
+                sort_key=(
+                    f"activated:{username}/{user_alias}:"
+                    ".code-indexer/index/voyage-code-3/hnsw_index.bin"
+                ),
+                repo_root=repo_root,
+                index_relpath=Path(".code-indexer/index/voyage-code-3/hnsw_index.bin"),
+                kind="activated",
+                alias=f"{username}/{user_alias}",
+            )
+
+            outcome = process_candidate(
+                candidate, activated_repo_manager=_FakeActivatedRepoManager()
+            )
+
+            assert outcome == SweepOutcome.REPAIRED
+            assert canonical_key not in cache._cache, (
+                "activated-repo cache entry (scoped by activation_id) was "
+                "NOT evicted -- the default invalidator omitted "
+                "activation_id when composing the cache key"
+            )
+        finally:
+            reset_global_cache()
+
+
+class TestResolveActivationIdRejectsBlankValues:
+    """Bug #1542 Codex-review Q1 follow-up: a whitespace-only alias
+    component (e.g. ``" / "`` splits into two literally non-empty ``" "``
+    strings) or an empty/whitespace-only ``activation_id`` returned by the
+    manager must both be treated as "no valid activation_id", never
+    embedded literally into the cache key -- proven by seeding the cache
+    under the correctly-composed NON-activation-scoped (``activation_id
+    =None``) key and confirming eviction still lands there."""
+
+    def _seed_none_scoped_entry_and_repair(
+        self,
+        tmp_path: Path,
+        alias: str,
+        activated_repo_manager: object,
+    ) -> tuple[str, dict]:
+        from code_indexer.server.cache import get_global_cache, reset_global_cache
+        from code_indexer.storage.filesystem_vector_store import (
+            FilesystemVectorStore,
+        )
+
+        reset_global_cache()
+        repo_root = tmp_path / "activated" / "alice" / "myrepo"
+        collection_path = repo_root / ".code-indexer" / "index" / "voyage-code-3"
+        _plant_prebroken_fixture(collection_path)
+
+        # activation_id=None here is the CORRECT fallback key -- the same
+        # key a golden/non-activated collection would use.
+        store = FilesystemVectorStore(base_path=repo_root, activation_id=None)
+        canonical_key = store.hnsw_cache_key_for_collection(collection_path)
+        cache = get_global_cache()
+        with cache._cache_lock:
+            cache._cache[canonical_key] = MagicMock(
+                spec=HNSWIndexCacheEntry,
+                repo_path=canonical_key,
+                is_expired=lambda: False,
+            )
+
+        candidate = SweepCandidate(
+            sort_key=(
+                f"activated:{alias}:.code-indexer/index/voyage-code-3/hnsw_index.bin"
+            ),
+            repo_root=repo_root,
+            index_relpath=Path(".code-indexer/index/voyage-code-3/hnsw_index.bin"),
+            kind="activated",
+            alias=alias,
+        )
+
+        outcome = process_candidate(
+            candidate, activated_repo_manager=activated_repo_manager
+        )
+        return canonical_key, {"outcome": outcome, "cache": cache}
+
+    def test_whitespace_only_alias_component_falls_back_to_none(
+        self, tmp_path: Path
+    ) -> None:
+        # Discriminating trap: a REAL non-blank return value. Under the
+        # pre-fix falsy-only check, " / " splits into two literally
+        # non-empty (" ", " ") strings, so the OLD code would pass this
+        # value straight through into the cache key -- producing a key
+        # DIFFERENT from the seeded None-scoped one below, so the test
+        # would fail against unfixed code. The FIXED code rejects the
+        # whitespace-only alias structurally and never calls this manager
+        # at all.
+        class _ManagerReturningTrapValueForWhitespaceAlias:
+            def get_activation_id(self, u: str, a: str) -> str:
+                return "SHOULD_NOT_BE_USED"
+
+        try:
+            canonical_key, ctx = self._seed_none_scoped_entry_and_repair(
+                tmp_path, " / ", _ManagerReturningTrapValueForWhitespaceAlias()
+            )
+
+            assert ctx["outcome"] == SweepOutcome.REPAIRED
+            assert canonical_key not in ctx["cache"]._cache, (
+                "whitespace-only alias component was not rejected -- "
+                "the fallback key was not the plain None-scoped key"
+            )
+        finally:
+            from code_indexer.server.cache import reset_global_cache
+
+            reset_global_cache()
+
+    def test_empty_activation_id_from_manager_falls_back_to_none(
+        self, tmp_path: Path
+    ) -> None:
+        class _ManagerReturningBlankActivationId:
+            def get_activation_id(self, u: str, a: str) -> str:
+                assert u == "alice"
+                assert a == "myrepo"
+                return "   "
+
+        try:
+            canonical_key, ctx = self._seed_none_scoped_entry_and_repair(
+                tmp_path, "alice/myrepo", _ManagerReturningBlankActivationId()
+            )
+
+            assert ctx["outcome"] == SweepOutcome.REPAIRED
+            assert canonical_key not in ctx["cache"]._cache, (
+                "a whitespace-only activation_id returned by the manager "
+                "was not normalized to None -- the fallback key was not "
+                "the plain None-scoped key"
+            )
+        finally:
+            from code_indexer.server.cache import reset_global_cache
+
+            reset_global_cache()
 
 
 class TestProcessCandidateTransientSkips:
