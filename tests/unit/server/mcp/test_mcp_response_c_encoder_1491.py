@@ -9,6 +9,7 @@ while preserving semantic content.
 import json
 
 from code_indexer.server.mcp.handlers._utils import _mcp_response
+from tests.utils.perf_artifact_paths import perf_artifact_path
 
 
 def test_mcp_response_does_not_indent_json() -> None:
@@ -77,19 +78,17 @@ def test_compact_serialization_is_measurably_faster_than_indent_two() -> None:
     Compares median-of-trials wall time for the indented (pure-Python
     _iterencode) encoding -- the pre-change shape -- against the REAL
     production serializer ``_mcp_response``, on the same large payload, and
-    records both numbers to reports/perf/.
+    records both numbers via perf_artifact_path. Per Bug #1544, by default
+    this lands in the gitignored .tmp/perf/ scratch location rather than the
+    tracked reports/perf/ file, so running this test never dirties git
+    status; set CIDX_WRITE_PERF_ARTIFACTS=1 to regenerate the committed
+    evidence deliberately.
     """
     import statistics
     import time
-    from pathlib import Path
     from typing import List
 
-    artifact = (
-        Path(__file__).resolve().parents[4]
-        / "reports"
-        / "perf"
-        / "mcp_response_serialization_1491_ac7.json"
-    )
+    artifact = perf_artifact_path("mcp_response_serialization_1491_ac7.json")
     payload = _large_payload()
 
     indented: List[float] = []
