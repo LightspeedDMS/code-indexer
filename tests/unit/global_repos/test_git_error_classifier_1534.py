@@ -1,74 +1,193 @@
 """
-Unit test for Bug #1534: classify a fetch failure caused by a missing/invalid
-origin remote as "permanent", not "transient".
+Unit tests for Bug #1534: classify git fetch failures caused by a broken
+"origin" remote as "permanent", not "transient".
 
-"fatal: 'origin' does not appear to be a git repository" is emitted by git
-when the origin remote does not exist (or points at something that is not a
-valid git repository). This is a structurally permanent condition -- no
-amount of retrying will fix it -- yet no PERMANENT_PATTERNS entry matched it
-prior to this fix, so it fell through to "unknown" or (worse) could be
-conflated with transient network errors that retry forever.
+Git emits "fatal: '<X>' does not appear to be a git repository" in (at
+least) two structurally different situations, confirmed via real
+`git fetch` subprocess repros (second Codex review round):
+
+  Form 1 -- no "origin" remote configured at all. The quoted string is
+  literally the remote NAME:
+      fatal: 'origin' does not appear to be a git repository
+
+  Form 2 -- an "origin" remote IS configured, but its URL resolves to a
+  path that is not (or is no longer) a valid git repository. The quoted
+  string is the RESOLVED PATH, not the remote name:
+      fatal: '/some/stale/path' does not appear to be a git repository
+
+Both forms are structurally permanent: the local git object database is
+fine, but the configured remote itself does not point at a git
+repository. No amount of retrying resolves either form -- the operator
+must fix the remote configuration (or, for a golden repo whose origin
+points at its own resolved_source_path per the Bug #1534 fix,
+restore/relocate the source).
+
+Both forms were empirically verified, via real subprocess repros run
+against actual git binaries, to NEVER co-occur with genuinely transient
+wording ("Could not resolve host", "Connection refused", "unable to
+access ..."): git only emits "does not appear to be a git repository" for
+a local resolve-time failure, a structurally different code path than a
+network transport error. This is directly demonstrated below by
+`test_transient_network_failure_is_not_misclassified_permanent`, which
+runs a real `git fetch` against an unreachable local port and confirms
+the resulting stderr never contains that phrase.
 """
+
+import shutil
+import subprocess
 
 from code_indexer.global_repos.git_error_classifier import classify_fetch_error
 
+# Subprocess timeout for every real `git` invocation in this module. All
+# repros here are local-only (no real network I/O succeeds), so they
+# complete in well under a second; this bound only guards against an
+# unexpected hang.
+_GIT_SUBPROCESS_TIMEOUT_SECONDS = 15
 
-ORIGIN_NOT_A_GIT_REPO_STDERR = (
-    "fatal: 'origin' does not appear to be a git repository\n"
-    "fatal: Could not read from remote repository.\n\n"
-    "Please make sure you have the correct access rights\n"
-    "and the repository exists.\n"
-)
+# Loopback address + reserved/unassigned TCP port used to deterministically
+# trigger a real "Connection refused" from git, without depending on any
+# external network or DNS resolution being available in the test
+# environment. Port 1 (TCP port service multiplexer) is never bound by an
+# HTTP git server in practice, so nothing is expected to be listening.
+_UNREACHABLE_LOOPBACK_GIT_URL = "http://127.0.0.1:1/nonexistent-repo.git"
 
 
-def test_does_not_appear_to_be_a_git_repository_is_permanent():
+def _init_real_git_repo(path):
+    subprocess.run(
+        ["git", "init", "-q", str(path)],
+        check=True,
+        timeout=_GIT_SUBPROCESS_TIMEOUT_SECONDS,
+    )
+
+
+def _real_git_fetch_stderr(repo_path, remote_name="origin"):
     """
-    A missing/invalid origin remote must classify as "permanent", not
-    "transient" -- this failure can never self-resolve via retry.
+    Run a real `git fetch <remote_name>` in repo_path and return its
+    stderr. Asserts the fetch actually failed (non-zero exit) so a test
+    built on top of this helper cannot pass due to unrelated stderr
+    output from a fetch that unexpectedly succeeded.
     """
-    category = classify_fetch_error(ORIGIN_NOT_A_GIT_REPO_STDERR)
-    assert category == "permanent"
+    result = subprocess.run(
+        ["git", "fetch", remote_name],
+        cwd=str(repo_path),
+        capture_output=True,
+        text=True,
+        timeout=_GIT_SUBPROCESS_TIMEOUT_SECONDS,
+    )
+    assert result.returncode != 0, (
+        f"expected 'git fetch {remote_name}' to fail, but it succeeded; "
+        f"stdout={result.stdout!r} stderr={result.stderr!r}"
+    )
+    return result.stderr
 
 
-# Codex review Finding 2: the bare substring "does not appear to be a git
-# repository" is broad enough to also match a DIFFERENT remote name hitting a
-# superficially similar error, potentially co-occurring with genuinely
-# transient wording (e.g. an NFS mount blip). Only the exact, git-specific
-# phrasing for the "origin" remote (Bug #1534's actual scenario) should be
-# treated as permanent.
-OTHER_REMOTE_NOT_A_GIT_REPO_STDERR = (
-    "fatal: 'upstream' does not appear to be a git repository\n"
-    "fatal: Could not read from remote repository.\n\n"
-    "Please make sure you have the correct access rights\n"
-    "and the repository exists.\n"
-)
-
-
-def test_non_origin_remote_not_a_git_repo_is_not_misclassified_permanent():
+def test_does_not_appear_to_be_a_git_repository_is_permanent(tmp_path):
     """
-    A stderr message referencing a DIFFERENT quoted remote name (not
-    'origin') must not be swept into "permanent" by an over-broad substring
-    match. Since it also carries the generic "Could not read from remote"
-    transient wording, it must classify as "transient".
+    Form 1: no "origin" remote configured at all. Real git emits
+    "fatal: 'origin' does not appear to be a git repository". A missing
+    origin remote is a structurally permanent condition -- no amount of
+    retrying will fix it.
     """
-    category = classify_fetch_error(OTHER_REMOTE_NOT_A_GIT_REPO_STDERR)
-    assert category == "transient"
+    repo = tmp_path / "repo_no_origin"
+    _init_real_git_repo(repo)
+
+    stderr = _real_git_fetch_stderr(repo)
+    assert "'origin' does not appear to be a git repository" in stderr
+
+    assert classify_fetch_error(stderr) == "permanent"
 
 
-GENERIC_TRANSIENT_MOUNT_STDERR = (
-    "fatal: unable to access the repository\n"
-    "Could not read from remote repository.\n"
-    "Connection timed out\n"
-    "Network is unreachable\n"
-)
-
-
-def test_generic_transient_mount_message_without_origin_phrase_stays_transient():
+def test_origin_pointing_at_deleted_path_is_permanent(tmp_path):
     """
-    Ordinary transient wording (network/mount blip) that never mentions
-    "does not appear to be a git repository" at all must still classify as
-    "transient" -- locking in that the PERMANENT_PATTERNS entry never
-    over-broadens to swallow genuinely recoverable failures.
+    Form 2 (the actual reported gap): an "origin" remote IS configured,
+    but its URL points at a path that no longer exists / is not a valid
+    git repository. Uses a REAL `git fetch` subprocess (not a hand-typed
+    string) to capture git's actual wording, which quotes the RESOLVED
+    PATH rather than the literal string "origin". A prior fix required
+    the exact "'origin'" quoting and never matched this real-world case,
+    so it fell through to the broader transient "Could not read from
+    remote" pattern and was endlessly retried.
     """
-    category = classify_fetch_error(GENERIC_TRANSIENT_MOUNT_STDERR)
-    assert category == "transient"
+    repo = tmp_path / "repo_stale_origin"
+    gone_target = tmp_path / "gone_target"
+    _init_real_git_repo(gone_target)
+    _init_real_git_repo(repo)
+
+    subprocess.run(
+        ["git", "remote", "add", "origin", str(gone_target)],
+        cwd=str(repo),
+        check=True,
+        timeout=_GIT_SUBPROCESS_TIMEOUT_SECONDS,
+    )
+
+    # Delete the target AFTER configuring the remote, so origin points at
+    # a path that no longer resolves to a valid git repository.
+    shutil.rmtree(gone_target)
+
+    stderr = _real_git_fetch_stderr(repo)
+
+    # Sanity-check the real repro actually produced the expected phrase
+    # and that it is NOT the literal "'origin'"-quoted form.
+    assert "does not appear to be a git repository" in stderr
+    assert "'origin' does not appear to be a git repository" not in stderr
+
+    assert classify_fetch_error(stderr) == "permanent"
+
+
+def test_broken_remote_with_a_different_name_is_also_permanent(tmp_path):
+    """
+    The "does not appear to be a git repository" failure class is not
+    specific to the "origin" remote name -- any remote name pointing at a
+    non-repository path produces the identical structural failure, and it
+    is equally permanent regardless of the remote's name. A prior,
+    over-narrow fix required the literal "'origin'" quoting, which would
+    have misclassified this case as "transient" via the broader "Could
+    not read from remote" pattern. Real git output for a
+    differently-named broken remote (captured via a real subprocess) is
+    used here to prove the widened PERMANENT_PATTERNS entry ("does not
+    appear to be a git repository", without requiring the "origin"
+    quoting) is the correct fix -- this collision was never observed in
+    practice (see the transient test below).
+    """
+    repo = tmp_path / "repo_other_remote"
+    gone_target = tmp_path / "gone_target_other"
+    _init_real_git_repo(gone_target)
+    _init_real_git_repo(repo)
+
+    subprocess.run(
+        ["git", "remote", "add", "upstream", str(gone_target)],
+        cwd=str(repo),
+        check=True,
+        timeout=_GIT_SUBPROCESS_TIMEOUT_SECONDS,
+    )
+    shutil.rmtree(gone_target)
+
+    stderr = _real_git_fetch_stderr(repo, remote_name="upstream")
+    assert "does not appear to be a git repository" in stderr
+
+    assert classify_fetch_error(stderr) == "permanent"
+
+
+def test_transient_network_failure_is_not_misclassified_permanent(tmp_path):
+    """
+    A genuine transient network failure (connection refused against an
+    unreachable local port -- deterministic, no external network/DNS
+    dependency) must classify as "transient", and its real stderr must
+    NEVER contain the "does not appear to be a git repository" phrase.
+    This is the empirical confirmation that widening PERMANENT_PATTERNS
+    to the bare phrase does not swallow real transient failures.
+    """
+    repo = tmp_path / "repo_transient"
+    _init_real_git_repo(repo)
+
+    subprocess.run(
+        ["git", "remote", "add", "origin", _UNREACHABLE_LOOPBACK_GIT_URL],
+        cwd=str(repo),
+        check=True,
+        timeout=_GIT_SUBPROCESS_TIMEOUT_SECONDS,
+    )
+
+    stderr = _real_git_fetch_stderr(repo)
+    assert "does not appear to be a git repository" not in stderr
+
+    assert classify_fetch_error(stderr) == "transient"

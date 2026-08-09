@@ -42,17 +42,38 @@ PERMANENT_PATTERNS: List[str] = [
     "you don't have permission",
     "Repository not found",
     "remote: Not Found",
-    # Bug #1534 Codex review Finding 2: deliberately tightened to the exact,
-    # git-specific phrasing INCLUDING the quoted "origin" remote name, rather
-    # than the bare tail "does not appear to be a git repository". The bare
-    # substring is broad enough to also match a DIFFERENT remote name hitting
-    # a superficially similar error (potentially co-occurring with genuinely
-    # transient wording, e.g. an NFS mount blip) -- this exact quoting is
-    # tied to git's fixed error format for THIS specific failure (the
-    # "origin" remote's configured URL does not resolve to a valid git
-    # repository) and costs nothing in coverage: it still matches the real
-    # Bug #1534 scenario verbatim.
-    "'origin' does not appear to be a git repository",
+    # Bug #1534, second Codex review round: WIDENED from the first round's
+    # "'origin' does not appear to be a git repository" (which required the
+    # literal quoted remote NAME) back to the bare tail phrase below.
+    # Empirically confirmed via real `git fetch` subprocess repros (see
+    # tests/unit/global_repos/test_git_error_classifier_1534.py) that this
+    # exact wording is emitted by git in (at least) two structurally
+    # distinct situations:
+    #   Form 1 -- no "origin" remote configured at all, where the quoted
+    #     string IS the remote name: "fatal: 'origin' does not appear to
+    #     be a git repository".
+    #   Form 2 -- an "origin" remote IS configured, but its URL resolves
+    #     to a path that no longer exists / is not a valid git repository
+    #     (e.g. a golden repo's origin pointing at a now-stale
+    #     resolved_source_path). Here git quotes the RESOLVED PATH, not
+    #     the literal string "origin": "fatal: '/some/stale/path' does
+    #     not appear to be a git repository". The first round's exact
+    #     "'origin'" quoting requirement never matched this real-world
+    #     case, so it fell through to the broader TRANSIENT pattern
+    #     "Could not read from remote" and was endlessly retried -- this
+    #     is the more realistic real-world trigger for Bug #1534.
+    # The first round's stated collision risk (a different remote name
+    # co-occurring with genuinely transient wording) does not occur in
+    # practice: real transient failures (Connection refused, Could not
+    # resolve host, unable to access ...) were verified via real
+    # subprocess repros to NEVER contain "does not appear to be a git
+    # repository" -- git only emits that phrase for a local resolve-time
+    # failure, a structurally different code path from a network
+    # transport error. The phrase is also NOT specific to the "origin"
+    # remote name -- any remote pointing at a non-repository path
+    # produces the identical structural failure, and is equally
+    # permanent regardless of the remote's name.
+    "does not appear to be a git repository",
 ]
 
 # Patterns indicating local object database corruption.
