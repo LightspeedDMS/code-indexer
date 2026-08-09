@@ -335,3 +335,169 @@ def test_rebase_continue_fails_without_editor_env_bug1500(tmp_path, monkeypatch)
     verify = tmp_path / "verify-bug1500"
     _clone_repo(remote, verify)
     assert (verify / "shared.txt").read_text() == "resolved\n"
+
+
+# ---------------------------------------------------------------------------
+# Bug #1539: sync() raises a typed, data-carrying exception on an unresolved
+# conflict, and this module exposes a pure resolve_upstream_target_sha()
+# helper -- the actual retry/quarantine DECISION (keyed on that SHA, never
+# on freeform error text) lives in RefreshScheduler (persisted,
+# cross-process). See
+# tests/unit/global_repos/test_refresh_scheduler_cidx_meta_conflict_quarantine_1539.py
+# for that mechanism.
+# ---------------------------------------------------------------------------
+
+
+def _make_shared_txt_conflict(tmp_path: Path):
+    repo, remote = _bootstrap_repo(tmp_path)
+    divergent = tmp_path / "divergent"
+    _clone_repo(remote, divergent)
+    _commit_file(divergent, "shared.txt", "remote version\n", "remote: shared")
+    _git(["push", "origin", "master"], divergent)
+    _commit_file(repo, "shared.txt", "local version\n", "local: shared")
+    return repo, remote, divergent
+
+
+def _never_resolving_resolver(cidx_meta_path, conflict_files, branch):
+    return SimpleNamespace(success=False, error="LLM could not resolve conflict")
+
+
+def test_unresolved_conflict_raises_typed_error_with_data_1539(tmp_path):
+    """Bug #1539: an unresolved conflict raises ConflictResolutionFailedError
+    (not a bare RuntimeError) carrying the conflicted file list and raw
+    failure detail, so a caller (RefreshScheduler) can log diagnostics
+    without re-parsing the message string. The actual quarantine key is
+    the upstream target SHA (resolve_upstream_target_sha), resolved by the
+    caller independently -- this exception's data is diagnostics only.
+    """
+    import pytest
+    from code_indexer.server.services.cidx_meta_backup.sync import (
+        CidxMetaBackupSync,
+        ConflictResolutionFailedError,
+    )
+
+    repo, _remote, _divergent = _make_shared_txt_conflict(tmp_path)
+    resolver = SimpleNamespace(resolve=_never_resolving_resolver)
+
+    with pytest.raises(ConflictResolutionFailedError) as exc_info:
+        CidxMetaBackupSync(str(repo), "master", resolver).sync()
+
+    exc = exc_info.value
+    assert exc.conflict_files == ["shared.txt"]
+    assert exc.detail == "LLM could not resolve conflict"
+    assert str(exc).startswith("conflict resolution failed: ")
+    # Also a plain RuntimeError, so any pre-existing generic handler upstream
+    # keeps working unchanged.
+    assert isinstance(exc, RuntimeError)
+
+
+def test_resolve_upstream_target_sha_matches_real_rev_parse_1539(tmp_path):
+    """Bug #1539 (Codex round-3 SHA-based redesign): resolve_upstream_target_sha
+    returns the SAME commit SHA a direct `git rev-parse origin/{branch}`
+    would -- this is the stable identity RefreshScheduler keys quarantine
+    on, replacing the rejected text-fingerprint approach entirely.
+    """
+    from code_indexer.server.services.cidx_meta_backup.sync import (
+        resolve_upstream_target_sha,
+    )
+
+    repo, remote = _bootstrap_repo(tmp_path)
+
+    resolved = resolve_upstream_target_sha(str(repo), "master")
+
+    expected = _git(["rev-parse", "origin/master"], repo)
+    assert resolved == expected
+
+
+def test_resolve_upstream_target_sha_none_on_fetch_failure_1539(tmp_path):
+    """A fetch failure (unreachable remote) must return None, never raise
+    -- the caller treats None as "cannot determine, proceed with sync()"."""
+    from code_indexer.server.services.cidx_meta_backup.sync import (
+        resolve_upstream_target_sha,
+    )
+
+    repo, _remote = _bootstrap_repo(tmp_path)
+    _git(["remote", "set-url", "origin", "file:///definitely/missing/repo.git"], repo)
+
+    assert resolve_upstream_target_sha(str(repo), "master") is None
+
+
+def test_resolve_upstream_target_sha_none_on_missing_branch_1539(tmp_path):
+    """A branch that does not exist on the remote must return None (the
+    rev-parse step fails), never raise."""
+    from code_indexer.server.services.cidx_meta_backup.sync import (
+        resolve_upstream_target_sha,
+    )
+
+    repo, _remote = _bootstrap_repo(tmp_path)
+
+    assert resolve_upstream_target_sha(str(repo), "no-such-branch") is None
+
+
+def test_resolve_upstream_target_sha_none_on_invalid_input_1539():
+    """Bug #1539 Codex round-4 finding 2: invalid inputs must return None,
+    never raise ValueError -- the function's whole contract is "never
+    raises, caller treats None as cannot-determine"."""
+    from code_indexer.server.services.cidx_meta_backup.sync import (
+        resolve_upstream_target_sha,
+    )
+
+    assert resolve_upstream_target_sha("", "master") is None
+    assert resolve_upstream_target_sha("   ", "master") is None
+    assert resolve_upstream_target_sha("/some/path", "") is None
+    assert resolve_upstream_target_sha(None, "master") is None  # type: ignore[arg-type]
+    assert resolve_upstream_target_sha("/some/path", None) is None  # type: ignore[arg-type]
+
+
+def test_resolve_upstream_target_sha_none_on_timeout_1539(tmp_path, monkeypatch):
+    """Bug #1539 Codex round-4 finding 2: a hung `git fetch` (dead remote
+    that accepts a connection but never responds) must be bounded by
+    `_GIT_SUBPROCESS_TIMEOUT_SECONDS` and return None quickly, never hang
+    the whole scheduler cycle indefinitely.
+    """
+    import os
+    import shutil
+    import time
+
+    import code_indexer.server.services.cidx_meta_backup.sync as sync_module
+
+    # Patched timeout: short enough to keep this test fast.
+    PATCHED_TIMEOUT_SECONDS = 1
+    # Fake git's simulated hang: comfortably longer than the patched
+    # timeout, so a correct implementation never actually waits for it.
+    FAKE_HANG_SECONDS = 30
+    # Upper bound on observed wall-clock time: generous slack above the
+    # patched timeout for process-spawn overhead, but far below
+    # FAKE_HANG_SECONDS -- proves the timeout fired, not the sleep completing.
+    MAX_EXPECTED_ELAPSED_SECONDS = 10
+
+    monkeypatch.setattr(
+        sync_module, "_GIT_SUBPROCESS_TIMEOUT_SECONDS", PATCHED_TIMEOUT_SECONDS
+    )
+
+    repo, _remote = _bootstrap_repo(tmp_path)
+
+    real_git = shutil.which("git")
+    assert real_git is not None, "git executable not found on PATH"
+
+    # A fake `git` on PATH that hangs forever on `fetch`, ahead of the real
+    # git so subprocess.run's PATH lookup finds it first.
+    fake_bin = tmp_path / "fake-bin"
+    fake_bin.mkdir()
+    fake_git = fake_bin / "git"
+    fake_git.write_text(
+        "#!/bin/sh\n"
+        'if [ "$1" = "fetch" ]; then\n'
+        f"  sleep {FAKE_HANG_SECONDS}\n"
+        "fi\n"
+        f'exec "{real_git}" "$@"\n'
+    )
+    fake_git.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{fake_bin}{os.pathsep}{os.environ['PATH']}")
+
+    start = time.monotonic()
+    result = sync_module.resolve_upstream_target_sha(str(repo), "master")
+    elapsed = time.monotonic() - start
+
+    assert result is None
+    assert elapsed < MAX_EXPECTED_ELAPSED_SECONDS
