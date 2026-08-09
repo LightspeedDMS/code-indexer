@@ -1058,6 +1058,13 @@ class SyncJobsSqliteBackend:
         """List all sync jobs."""
         # Bug #1532 follow-up: route the raw connection through
         # guarded_connection() so close_all() cannot close it mid-read.
+        # Correction to commit e5723217's message: this file has 82 OTHER
+        # bare-connection-fetch call sites (self._conn_manager plus the
+        # bare-fetch method name) beyond this one, not "~100+" as that
+        # commit message states -- history is immutable this deep in the
+        # chain, so the accurate count is recorded here instead. Still
+        # deliberately out of scope for a dedicated sweep, per that
+        # commit's own rationale.
         with self._conn_manager.guarded_connection() as conn:
             fetched = conn.execute(
                 """SELECT job_id, username, user_alias, job_type, status, created_at,
