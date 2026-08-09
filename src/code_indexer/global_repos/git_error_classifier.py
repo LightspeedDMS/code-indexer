@@ -42,7 +42,17 @@ PERMANENT_PATTERNS: List[str] = [
     "you don't have permission",
     "Repository not found",
     "remote: Not Found",
-    "does not appear to be a git repository",
+    # Bug #1534 Codex review Finding 2: deliberately tightened to the exact,
+    # git-specific phrasing INCLUDING the quoted "origin" remote name, rather
+    # than the bare tail "does not appear to be a git repository". The bare
+    # substring is broad enough to also match a DIFFERENT remote name hitting
+    # a superficially similar error (potentially co-occurring with genuinely
+    # transient wording, e.g. an NFS mount blip) -- this exact quoting is
+    # tied to git's fixed error format for THIS specific failure (the
+    # "origin" remote's configured URL does not resolve to a valid git
+    # repository) and costs nothing in coverage: it still matches the real
+    # Bug #1534 scenario verbatim.
+    "'origin' does not appear to be a git repository",
 ]
 
 # Patterns indicating local object database corruption.

@@ -28,3 +28,47 @@ def test_does_not_appear_to_be_a_git_repository_is_permanent():
     """
     category = classify_fetch_error(ORIGIN_NOT_A_GIT_REPO_STDERR)
     assert category == "permanent"
+
+
+# Codex review Finding 2: the bare substring "does not appear to be a git
+# repository" is broad enough to also match a DIFFERENT remote name hitting a
+# superficially similar error, potentially co-occurring with genuinely
+# transient wording (e.g. an NFS mount blip). Only the exact, git-specific
+# phrasing for the "origin" remote (Bug #1534's actual scenario) should be
+# treated as permanent.
+OTHER_REMOTE_NOT_A_GIT_REPO_STDERR = (
+    "fatal: 'upstream' does not appear to be a git repository\n"
+    "fatal: Could not read from remote repository.\n\n"
+    "Please make sure you have the correct access rights\n"
+    "and the repository exists.\n"
+)
+
+
+def test_non_origin_remote_not_a_git_repo_is_not_misclassified_permanent():
+    """
+    A stderr message referencing a DIFFERENT quoted remote name (not
+    'origin') must not be swept into "permanent" by an over-broad substring
+    match. Since it also carries the generic "Could not read from remote"
+    transient wording, it must classify as "transient".
+    """
+    category = classify_fetch_error(OTHER_REMOTE_NOT_A_GIT_REPO_STDERR)
+    assert category == "transient"
+
+
+GENERIC_TRANSIENT_MOUNT_STDERR = (
+    "fatal: unable to access the repository\n"
+    "Could not read from remote repository.\n"
+    "Connection timed out\n"
+    "Network is unreachable\n"
+)
+
+
+def test_generic_transient_mount_message_without_origin_phrase_stays_transient():
+    """
+    Ordinary transient wording (network/mount blip) that never mentions
+    "does not appear to be a git repository" at all must still classify as
+    "transient" -- locking in that the PERMANENT_PATTERNS entry never
+    over-broadens to swallow genuinely recoverable failures.
+    """
+    category = classify_fetch_error(GENERIC_TRANSIENT_MOUNT_STDERR)
+    assert category == "transient"

@@ -1796,7 +1796,36 @@ class GoldenRepoManager:
         -- registration succeeding must never depend on this step.
         """
         try:
-            if not os.path.isdir(os.path.join(clone_path, ".git")):
+            git_dot_path = os.path.join(clone_path, ".git")
+
+            if os.path.isfile(git_dot_path):
+                # A `.git` FILE (not a directory) means the SOURCE was a git
+                # WORKTREE (created via `git worktree add`), and shutil.copytree
+                # copied only that small pointer file verbatim. The pointer
+                # still targets the SOURCE main repo's shared
+                # `.git/worktrees/<name>` admin dir, which in turn shares its
+                # `config` + object database with the source main repo via
+                # `commondir`. Empirically confirmed (Bug #1534 investigation):
+                # running `git remote add`/`git fetch`/etc. directly against
+                # such a copy mutates the SOURCE repository's own shared
+                # `.git/config` -- real cross-repository corruption, not a
+                # hypothetical. Converting the copy into a fully independent,
+                # self-contained repository is out of scope here, so this step
+                # is skipped entirely for a worktree-sourced clone: never
+                # attempt any git command against it. Registration still
+                # succeeds; refresh will not work for this specific clone
+                # (unchanged from pre-fix behavior for this case).
+                logging.warning(
+                    "Bug #1534: golden clone %s was copied from a git "
+                    "WORKTREE (.git is a file, not a directory) -- skipping "
+                    "origin/upstream setup to avoid mutating the source "
+                    "repository's shared git config/object database. "
+                    "Refresh will not work for this repo.",
+                    clone_path,
+                )
+                return
+
+            if not os.path.isdir(git_dot_path):
                 # Plain non-git directory copy (e.g. test_file_url_still_works) --
                 # nothing to configure.
                 return
@@ -1815,12 +1844,21 @@ class GoldenRepoManager:
             self._configure_upstream_tracking(clone_path, branch, git_env)
         except Exception as e:
             # Best-effort only -- never fail registration over this step.
-            logging.warning(
-                "Bug #1534: unexpected error establishing git remote/upstream "
-                "for golden clone %s: %s",
-                clone_path,
-                str(e),
-            )
+            # Codex review Finding 3: `str(e)` and `logging.warning(...)`
+            # itself could theoretically raise (e.g. a pathological __str__
+            # override, or a misconfigured logging handler), which would let
+            # the exception escape this "best-effort" handler and break the
+            # very contract it exists to uphold. Nothing inside this handler
+            # may ever propagate.
+            try:
+                logging.warning(
+                    "Bug #1534: unexpected error establishing git remote/upstream "
+                    "for golden clone %s: %s",
+                    clone_path,
+                    str(e),
+                )
+            except Exception:
+                pass
 
     def _configure_origin_remote(
         self, clone_path: str, resolved_source_path: str, git_env: dict
