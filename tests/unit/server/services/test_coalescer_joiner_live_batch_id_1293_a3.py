@@ -116,34 +116,91 @@ class TestConcurrentColdOwnerJoiner:
         assert provider.call_count == 1
 
     def test_warm_burst_after_cold_uses_warm_hit_with_null_batch_id(self, monkeypatch):
-        """After the key is warm, a burst of identical queries records
-        role=warm_hit / live_batch_id=None and adds zero provider calls."""
-        text = "A3 warm burst"
-        coalescer, provider, gov = _make_harness(monkeypatch, "on", pre_seed_text=text)
+        """After the key is warm, a burst of identical queries all resolve
+        with outcome=hit / live_batch_id=None and adds zero provider calls.
 
+        Bug #1531 correction: the original version started 3 unsynchronized
+        threads and asserted ``role == "warm_hit"`` for ALL of them. That only
+        held by scheduling luck -- the single-flight registry (Story #1148
+        PART 1) covers on-mode HITs too, so a same-key requestor that reaches
+        the inflight check while the owner's ``cache.lookup`` critical section
+        is still running becomes a genuine JOINER (role="joiner"), not a
+        second independent warm_hit. Under CPU contention (a full
+        server-fast-automation.sh run) the GIL can switch mid-critical-section
+        often enough to flip a thread from warm_hit to joiner, which is the
+        exact load-sensitive flake this bug reports.
+
+        This test now FORCES full overlap deterministically (delaying the
+        owner's ``cache.lookup`` via an Event, the same accumulate-window
+        technique ``_run_saturated_submits`` already uses for the MISS path)
+        and asserts the real single-flight invariant: exactly 1 owner
+        (role="warm_hit") + 2 joiners (role="joiner"), all outcome=hit,
+        live_batch_id=None (a joiner shares the owner's live_batch_id
+        verbatim, which is None for a warm-HIT resolution), correct embed_key,
+        zero provider calls.
+        """
+        import time
+
+        from code_indexer.server.services import governed_call
+
+        text = "A3 warm burst"
+        n_threads = 3
+        coalescer, provider, gov = _make_harness(monkeypatch, "on", pre_seed_text=text)
+        cache = governed_call.get_query_embedding_cache()
+
+        lookup_started = threading.Event()
+        release = threading.Event()
+        orig_lookup = cache.lookup
+
+        def _delayed_lookup(key, qualifier):
+            lookup_started.set()
+            release.wait(timeout=_JOIN_TIMEOUT)
+            return orig_lookup(key, qualifier)
+
+        monkeypatch.setattr(cache, "lookup", _delayed_lookup)
+
+        barrier = threading.Barrier(n_threads)
         results: list = []
         lock = threading.Lock()
 
         def _one() -> None:
+            barrier.wait()
             vec, meta = coalescer.submit(text)
             with lock:
                 results.append(meta)
 
-        threads = [threading.Thread(target=_one, daemon=True) for _ in range(3)]
+        threads = [threading.Thread(target=_one, daemon=True) for _ in range(n_threads)]
         for t in threads:
             t.start()
+
+        assert lookup_started.wait(timeout=_JOIN_TIMEOUT), (
+            "owner never reached the delayed cache.lookup call"
+        )
+        time.sleep(_ACCUMULATE_SECS)
+        release.set()
+
         for t in threads:
             t.join(timeout=_JOIN_TIMEOUT)
 
-        assert len(results) == 3
+        assert len(results) == n_threads
         expected_key = _expected_key(text)
+
+        owners = [m for m in results if m.role == "warm_hit"]
+        joiners = [m for m in results if m.role == "joiner"]
+        assert len(owners) == 1, (
+            f"expected exactly 1 warm_hit owner, got {len(owners)} "
+            f"(roles={[m.role for m in results]})"
+        )
+        assert len(joiners) == n_threads - 1, (
+            f"expected {n_threads - 1} joiners, got {len(joiners)} "
+            f"(roles={[m.role for m in results]})"
+        )
         for meta in results:
-            assert meta.role == "warm_hit"
             assert meta.outcome == "hit"
             assert meta.live_batch_id is None
             assert meta.embed_key == expected_key, (
-                "Story #1295: warm_hit EmbeddingCacheMetadata.embed_key must be "
-                f"the real resolved cache key; got {meta.embed_key!r}"
+                "Story #1295: embed_key must be the real resolved cache key; "
+                f"got {meta.embed_key!r}"
             )
         assert provider.call_count == 0
 

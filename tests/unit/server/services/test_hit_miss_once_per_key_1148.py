@@ -44,6 +44,7 @@ Design invariants:
 from __future__ import annotations
 
 import threading
+import time
 from pathlib import Path
 from typing import Any, Optional
 
@@ -254,57 +255,121 @@ class TestAC1OmniColdOneMiss:
 
 
 class TestAC2DirectCoalescerWarmHits:
-    """AC2 (coalescer level): K concurrent on-mode WARM direct submits -> hits == K.
+    """AC2 (coalescer level): K concurrent on-mode WARM direct submits.
 
-    At the coalescer level, on-mode HITs are NOT coalesced — the single-flight
-    registry check only applies when the owner is still computing (inflight).
-    For warm HITs the owner resolves very quickly; subsequent same-key requestors
-    each reach the HIT check independently and record their own hit metric.
+    Bug #1531 correction: the single-flight registry (Story #1148 PART 1)
+    covers BOTH on-mode HITs and MISSes -- the owner registers itself in
+    ``_inflight_keys`` BEFORE the (lock-free) ``cache.lookup`` call and pops
+    the entry only after resolving. For a genuinely-concurrent same-key warm
+    HIT, any requestor that reaches the inflight check while the owner is
+    still inside that critical section becomes a JOINER (role="joiner",
+    no independent hit metric) rather than an independent warm_hit.
 
-    This is CORRECT coalescer behavior.  Omni-level "1 hit per query" is
-    enforced one layer up: the omni handler (_omni_search_code) computes the
-    vector ONCE via _compute_shared_query_vector and passes it as
-    precomputed_query_vector to every per-repo search call, which bypasses
-    coalesced_query_embedding entirely via _PrecomputedEmbeddingProvider.
-    That separate concern is tested in TestAC2OmniPrecomputedVectorReuse.
+    On an idle machine the owner's lookup (an in-memory dict access) resolves
+    so fast that a `threading.Barrier`-released burst of threads almost never
+    overlaps that critical section, so `hits == K` held by scheduling luck.
+    Under real CPU contention (a full `server-fast-automation.sh` run — six
+    parallel, heavily-threaded pytest chunks) the GIL can switch threads
+    inside that window, making some concurrent submits genuine joiners and
+    `hits < K` — the exact load-sensitive flake reported in Bug #1531.
+
+    This test now FORCES full overlap deterministically (delaying the
+    owner's `cache.lookup` call via an Event, mirroring the accumulate-window
+    technique `_run_saturated_submits` already uses for the MISS/dispatch
+    path) instead of depending on scheduling luck, and asserts the actual,
+    deterministic single-flight invariant: exactly 1 owner (role="warm_hit")
+    + (K-1) joiners (role="joiner"), 1 hit metric, 0 misses, 0 provider calls.
+
+    Omni-level "1 hit per query" remains enforced one layer up (unchanged):
+    the omni handler (_omni_search_code) computes the vector ONCE via
+    _compute_shared_query_vector and passes it as precomputed_query_vector to
+    every per-repo search call, which bypasses coalesced_query_embedding
+    entirely via _PrecomputedEmbeddingProvider. That separate concern is
+    tested in TestAC2OmniPrecomputedVectorReuse.
     """
 
-    def _run_k_warm(self, coalescer, text: str) -> int:
-        """Submit the same pre-seeded text K times concurrently; return done count."""
+    def _run_k_warm_forced_concurrent(
+        self, monkeypatch, coalescer, cache, text: str
+    ) -> list:
+        """Submit the same pre-seeded text K times, deterministically forced
+        to genuinely overlap in the owner's cache-lookup critical section.
+
+        Delays ``cache.lookup`` (the owner's on-mode HIT resolution call)
+        behind a ``threading.Event`` so every other same-key thread's
+        inflight-registry check happens while the owner is still registered
+        -- making them provably-real joiners, not a scheduling accident.
+        Returns the list of EmbeddingCacheMetadata results (one per thread).
+        """
+        lookup_started = threading.Event()
+        release = threading.Event()
+        orig_lookup = cache.lookup
+
+        def _delayed_lookup(key, qualifier):
+            lookup_started.set()
+            release.wait(timeout=_JOIN_TIMEOUT)
+            return orig_lookup(key, qualifier)
+
+        monkeypatch.setattr(cache, "lookup", _delayed_lookup)
+
         barrier = threading.Barrier(_K_CONCURRENT)
-        done: list = []
+        metas: list = []
         lock = threading.Lock()
 
         def _one() -> None:
             barrier.wait()
-            coalescer.submit(text)
+            _vec, meta = coalescer.submit(text)
             with lock:
-                done.append(1)
+                metas.append(meta)
 
         threads = [
             threading.Thread(target=_one, daemon=True) for _ in range(_K_CONCURRENT)
         ]
         for t in threads:
             t.start()
+
+        assert lookup_started.wait(timeout=_JOIN_TIMEOUT), (
+            "owner never reached the delayed cache.lookup call"
+        )
+        # Deterministic accumulation window: give the remaining K-1 threads
+        # time to reach the inflight-registry check while the owner is held.
+        time.sleep(_ACCUMULATE_SECS)
+        release.set()
+
         for t in threads:
             t.join(timeout=_JOIN_TIMEOUT)
-        return len(done)
+        return metas
 
     def test_k_concurrent_warm_records_k_hits(self, monkeypatch):
-        """K concurrent WARM direct coalescer submits -> hits == K, misses == 0."""
+        """K forced-concurrent WARM direct submits -> 1 owner + (K-1) joiners,
+        1 hit metric, 0 misses -- the deterministic single-flight invariant."""
+        from code_indexer.server.services import governed_call
+
         text = "AC2 direct coalescer warm same key"
         coalescer, provider, metrics, _ = _make_harness(
             monkeypatch, "on", pre_seed_text=text
         )
+        cache = governed_call.get_query_embedding_cache()
 
-        done = self._run_k_warm(coalescer, text)
-        assert done == _K_CONCURRENT
+        metas = self._run_k_warm_forced_concurrent(monkeypatch, coalescer, cache, text)
+        assert len(metas) == _K_CONCURRENT
+
+        owners = [m for m in metas if m.role == "warm_hit"]
+        joiners = [m for m in metas if m.role == "joiner"]
+        assert len(owners) == 1, (
+            f"AC2 (coalescer, forced concurrent): expected exactly 1 warm_hit "
+            f"owner, got {len(owners)} (roles={[m.role for m in metas]})"
+        )
+        assert len(joiners) == _K_CONCURRENT - 1, (
+            f"AC2 (coalescer, forced concurrent): expected {_K_CONCURRENT - 1} "
+            f"joiners, got {len(joiners)} (roles={[m.role for m in metas]})"
+        )
+        assert all(m.outcome == "hit" for m in metas)
 
         snap = metrics.snapshot()["on"]
-        assert snap["hits"] == _K_CONCURRENT, (
-            f"AC2 (coalescer): {_K_CONCURRENT} concurrent WARM direct submits must "
-            f"each record 1 hit (HITs not coalesced at coalescer level), "
-            f"got hits={snap['hits']}"
+        assert snap["hits"] == 1, (
+            f"AC2 (coalescer, forced concurrent): single-flight must record "
+            f"exactly 1 hit metric for the coalesced group, got "
+            f"hits={snap['hits']}"
         )
         assert snap["misses"] == 0
         assert provider.call_count == 0  # all HITs -> no provider call
