@@ -275,8 +275,28 @@ class HNSWOrphanRepairSweepScheduler:
         Bug #1529: there is no longer a second processor. Every candidate --
         golden, activated, and the fixed-path ``golden_temporal`` shards --
         is repaired IN PLACE by the same ``process_fn``.
+
+        Bug #1542 (Codex-review follow-up): the REAL ``process_candidate``
+        accepts an optional ``activated_repo_manager`` kwarg it uses to
+        resolve an activated-repo candidate's ``activation_id`` for correct
+        cache-key composition (Story #1458 AC11). Passing that kwarg to an
+        arbitrary injected ``process_fn`` (test fakes declared as
+        ``Callable[[Any], SweepOutcome]``, e.g. ``spy_process(candidate)``)
+        would break the single-argument injection contract those tests
+        rely on -- so it is passed ONLY when ``self._process_fn`` IS the
+        real ``process_candidate`` (identity check, not a call to an
+        injected fake).
         """
         try:
+            if self._process_fn is process_candidate:
+                # Call the module-level function directly (not through the
+                # `self._process_fn: Callable[[Any], SweepOutcome]`-typed
+                # attribute) -- identity-equal to the object just checked,
+                # but mypy accepts the extra keyword argument here since
+                # `process_candidate`'s own declared signature includes it.
+                return process_candidate(
+                    candidate, activated_repo_manager=self._activated_repo_manager
+                )
             return self._process_fn(candidate)
         except Exception:
             logger.error(

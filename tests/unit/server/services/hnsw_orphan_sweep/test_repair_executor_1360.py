@@ -229,6 +229,78 @@ class TestProcessCandidateDefaultInvalidatorUsesCanonicalKey:
             reset_global_cache()
 
 
+class TestProcessCandidateActivatedRepoDefaultInvalidatorUsesActivationScopedKey:
+    """Bug #1542 Codex-review follow-up: an ACTIVATED-repo candidate's cache
+    entry is scoped by BOTH the chunk-layout token AND its ``activation_id``
+    (Story #1458 AC11 Finding 7) -- the discriminator alone is not enough to
+    distinguish a deactivate-then-reactivate clone at the same path. The
+    default invalidator must resolve ``activation_id`` via an injected
+    ``activated_repo_manager`` (``ActivatedRepoManager.get_activation_id``)
+    for ``kind == "activated"`` candidates and compose the SAME
+    activation-scoped key ``FilesystemVectorStore.search()`` uses."""
+
+    def test_default_invalidator_evicts_activation_scoped_cache_entry(
+        self, tmp_path: Path
+    ) -> None:
+        from code_indexer.server.cache import get_global_cache, reset_global_cache
+        from code_indexer.storage.filesystem_vector_store import (
+            FilesystemVectorStore,
+        )
+
+        reset_global_cache()
+        try:
+            username = "alice"
+            user_alias = "myrepo"
+            activation_id = "11111111-2222-3333-4444-555555555555"
+            repo_root = tmp_path / "activated" / username / user_alias
+            collection_path = repo_root / ".code-indexer" / "index" / "voyage-code-3"
+            _plant_prebroken_fixture(collection_path)
+
+            # Seed the REAL global cache under the activation-scoped key an
+            # activated-repo search() actually stores under.
+            store = FilesystemVectorStore(
+                base_path=repo_root, activation_id=activation_id
+            )
+            canonical_key = store.hnsw_cache_key_for_collection(collection_path)
+            cache = get_global_cache()
+            with cache._cache_lock:
+                cache._cache[canonical_key] = MagicMock(
+                    spec=HNSWIndexCacheEntry,
+                    repo_path=canonical_key,
+                    is_expired=lambda: False,
+                )
+
+            class _FakeActivatedRepoManager:
+                def get_activation_id(self, u: str, a: str) -> str:
+                    assert u == username
+                    assert a == user_alias
+                    return activation_id
+
+            candidate = SweepCandidate(
+                sort_key=(
+                    f"activated:{username}/{user_alias}:"
+                    ".code-indexer/index/voyage-code-3/hnsw_index.bin"
+                ),
+                repo_root=repo_root,
+                index_relpath=Path(".code-indexer/index/voyage-code-3/hnsw_index.bin"),
+                kind="activated",
+                alias=f"{username}/{user_alias}",
+            )
+
+            outcome = process_candidate(
+                candidate, activated_repo_manager=_FakeActivatedRepoManager()
+            )
+
+            assert outcome == SweepOutcome.REPAIRED
+            assert canonical_key not in cache._cache, (
+                "activated-repo cache entry (scoped by activation_id) was "
+                "NOT evicted -- the default invalidator omitted "
+                "activation_id when composing the cache key"
+            )
+        finally:
+            reset_global_cache()
+
+
 class TestProcessCandidateTransientSkips:
     def test_missing_bin_file_is_transient_skip(self, tmp_path: Path) -> None:
         repo_root = tmp_path / "repo"
