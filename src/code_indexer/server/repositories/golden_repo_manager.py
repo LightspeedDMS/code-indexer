@@ -1750,6 +1750,9 @@ class GoldenRepoManager:
             # Always use regular copy for golden repository registration
             # This avoids cross-device link issues that occur with CoW cloning
             shutil.copytree(source_path, clone_path, symlinks=True)
+            self._establish_local_git_remote_and_upstream(
+                clone_path, os.path.realpath(source_path)
+            )
             logging.info(
                 f"Golden repository registered using regular copy: {source_path} -> {clone_path}"
             )
@@ -1769,6 +1772,158 @@ class GoldenRepoManager:
         except shutil.Error as e:
             raise GitOperationError(
                 f"Failed to copy local repository: Copy operation failed: {str(e)}"
+            )
+
+    _GIT_LOCAL_REMOTE_TIMEOUT_SECONDS = 30
+    _GIT_LOCAL_FETCH_TIMEOUT_SECONDS = 60
+
+    def _establish_local_git_remote_and_upstream(
+        self, clone_path: str, resolved_source_path: str
+    ) -> None:
+        """
+        Deterministically configure the golden clone's own git remote/upstream
+        after a plain filesystem copy (Bug #1534).
+
+        A `shutil.copytree` of a local repo inherits whatever origin/upstream
+        config the SOURCE working tree happened to have (often none). Refresh
+        (GitPullUpdater) needs `git fetch origin` + `@{upstream}` to work on
+        THIS clone regardless of the source's own git state, so this method
+        sets an `origin` remote pointing at the resolved source path, fetches
+        it, and configures upstream tracking for the checked-out branch.
+
+        Entirely best-effort: any failure (git missing, timeout, no `.git` in
+        clone_path, detached HEAD, etc.) is logged as a WARNING and swallowed
+        -- registration succeeding must never depend on this step.
+        """
+        try:
+            if not os.path.isdir(os.path.join(clone_path, ".git")):
+                # Plain non-git directory copy (e.g. test_file_url_still_works) --
+                # nothing to configure.
+                return
+
+            git_env = build_non_interactive_git_env()
+
+            if not self._configure_origin_remote(
+                clone_path, resolved_source_path, git_env
+            ):
+                return
+            if not self._fetch_origin_for_golden_clone(clone_path, git_env):
+                return
+            branch = self._detect_checked_out_branch(clone_path, git_env)
+            if not branch:
+                return
+            self._configure_upstream_tracking(clone_path, branch, git_env)
+        except Exception as e:
+            # Best-effort only -- never fail registration over this step.
+            logging.warning(
+                "Bug #1534: unexpected error establishing git remote/upstream "
+                "for golden clone %s: %s",
+                clone_path,
+                str(e),
+            )
+
+    def _configure_origin_remote(
+        self, clone_path: str, resolved_source_path: str, git_env: dict
+    ) -> bool:
+        """Add (or replace) an `origin` remote pointing at resolved_source_path."""
+        add_result = subprocess.run(
+            ["git", "remote", "add", "origin", resolved_source_path],
+            cwd=clone_path,
+            capture_output=True,
+            text=True,
+            timeout=self._GIT_LOCAL_REMOTE_TIMEOUT_SECONDS,
+            env=git_env,
+        )
+        if add_result.returncode == 0:
+            return True
+
+        # origin already existed from the copied source config -- replace it.
+        set_url_result = subprocess.run(
+            ["git", "remote", "set-url", "origin", resolved_source_path],
+            cwd=clone_path,
+            capture_output=True,
+            text=True,
+            timeout=self._GIT_LOCAL_REMOTE_TIMEOUT_SECONDS,
+            env=git_env,
+        )
+        if set_url_result.returncode != 0:
+            logging.warning(
+                "Bug #1534: failed to configure origin remote for golden clone %s: %s",
+                clone_path,
+                set_url_result.stderr,
+            )
+            return False
+        return True
+
+    def _fetch_origin_for_golden_clone(self, clone_path: str, git_env: dict) -> bool:
+        """Fetch origin so the remote-tracking ref exists locally."""
+        fetch_result = subprocess.run(
+            ["git", "fetch", "origin"],
+            cwd=clone_path,
+            capture_output=True,
+            text=True,
+            timeout=self._GIT_LOCAL_FETCH_TIMEOUT_SECONDS,
+            env=git_env,
+        )
+        if fetch_result.returncode != 0:
+            logging.warning(
+                "Bug #1534: failed to fetch origin for golden clone %s: %s",
+                clone_path,
+                fetch_result.stderr,
+            )
+            return False
+        return True
+
+    def _detect_checked_out_branch(
+        self, clone_path: str, git_env: dict
+    ) -> Optional[str]:
+        """Return the checked-out branch name, or None if detached/unavailable."""
+        branch_result = subprocess.run(
+            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+            cwd=clone_path,
+            capture_output=True,
+            text=True,
+            timeout=self._GIT_LOCAL_REMOTE_TIMEOUT_SECONDS,
+            env=git_env,
+        )
+        if branch_result.returncode != 0:
+            logging.warning(
+                "Bug #1534: failed to detect current branch for golden clone %s: %s",
+                clone_path,
+                branch_result.stderr,
+            )
+            return None
+
+        branch = branch_result.stdout.strip()
+        if not branch or branch == "HEAD":
+            # Detached HEAD -- nothing to track.
+            logging.warning(
+                "Bug #1534: golden clone %s has detached HEAD; skipping "
+                "upstream configuration",
+                clone_path,
+            )
+            return None
+        return branch
+
+    def _configure_upstream_tracking(
+        self, clone_path: str, branch: str, git_env: dict
+    ) -> None:
+        """Configure `branch` to track `origin/branch` (requires a prior fetch)."""
+        upstream_result = subprocess.run(
+            ["git", "branch", f"--set-upstream-to=origin/{branch}", branch],
+            cwd=clone_path,
+            capture_output=True,
+            text=True,
+            timeout=self._GIT_LOCAL_REMOTE_TIMEOUT_SECONDS,
+            env=git_env,
+        )
+        if upstream_result.returncode != 0:
+            logging.warning(
+                "Bug #1534: failed to set upstream tracking for golden clone "
+                "%s branch %s: %s",
+                clone_path,
+                branch,
+                upstream_result.stderr,
             )
 
     def _clone_remote_repository(

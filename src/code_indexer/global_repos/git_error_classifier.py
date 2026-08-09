@@ -42,6 +42,7 @@ PERMANENT_PATTERNS: List[str] = [
     "you don't have permission",
     "Repository not found",
     "remote: Not Found",
+    "does not appear to be a git repository",
 ]
 
 # Patterns indicating local object database corruption.
