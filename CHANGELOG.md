@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [12.7.0] - 2026-08-09
+
+### Fixed
+
+- Bug #1549: scheduler jobs were failed as "interrupted by server restart" on a server with continuous uptime. The solo/SQLite orphan-cleanup sweeps carry no time filter and no process-identity filter -- the predicate is purely `status IN ('running','pending')`, resting on an assumption that solo mode is single-process. A `Restart=always` systemd unit whose port bind always failed had accumulated 5,982 restarts, and every doomed process ran the entire FastAPI lifespan, including both unscoped sweeps, against the live instance's databases before dying. A staleness window cannot fix this (jobs died ~13s after creation while the respawn interval was sub-10s), so the sweeps are now gated on an OS file lock proving sole ownership of the data directory, released by the kernel on process exit. Codex review additionally closed a restart race that could strand a predecessor's pending rows permanently behind the unique active-job index, an unguarded in-memory half of the sweep, and new WARNINGs that would have failed the post-E2E log-audit gate on a normal multi-worker startup.
+
+- Bug #1547: `TemporalDedupCache` re-served a completed prior job's frozen result snapshot for up to an hour after a temporal refresh, per node, because its signature carried no index-freshness component and no refresh path evicted entries. The dedup signature now folds in an on-disk identity fingerprint of every temporal shard's `hnsw_index.bin`, reusing Bug #1538's existing primitive rather than adding a second mechanism, and the terminal TTL derives from `payload_cache_ttl_seconds` instead of a hardcoded constant. Two Codex rounds closed seven further defects, including a per-dispatch blocking stat against a hard-mounted NFS root, a fingerprint collapse that could re-serve the exact stale snapshot the fix targets, a terminal TTL anchored on first observation rather than real completion time, a generation counter that restarted per cache instance, and a cache key that collided across different repositories.
+
+- Bug #1536: query-embedding cache write failures were silent. The PostgreSQL backend caught every exception internally and returned `None`, indistinguishable from success at the call site; the SQLite backend had no handling at all; and the cached-entry memo incremented either way, so the cache reported itself healthy while storing nothing and every later lookup re-embedded live. The backend contract now returns a boolean, failures increment a counter exposed as the `cidx.cache.embedding.write_failures` gauge, and the failure path returns early so the entry-count memo cannot drift. Two competing explanations were investigated and refuted by evidence rather than argument.
+
+- Bug #1542: the HNSW orphan-sweep's post-repair cache invalidation was a silent no-op. It hand-built a bare resolved-path key while the actual search-path key embeds a chunk-layout token (and an activation id for activated repositories), so no repaired collection was ever evicted. Invalidation now composes the key through the same helper the search path uses.
+
+- Bug #1539: `cidx-meta-global` refresh failed every tick with an unresolvable rebase conflict and retried forever, accumulating failed jobs. Quarantine now keys on the upstream commit SHA being rebased onto, persisted cross-worker, so three consecutive failures against the same target skip the sync while any advance of upstream automatically resumes it -- no manual intervention and no permanent quarantine.
+
+- Bug #1534: a golden repository registered from a `file://` source could never be refreshed. The clone was produced by `copytree` rather than `git clone`, so it inherited whatever remote configuration the source working tree happened to have, usually none; the resulting permanent failure was then misclassified as transient and retried forever. Registration now configures an origin remote with upstream tracking, and the git error classifier recognises the stale-path form of the failure.
+
+- Bug #1535: every successful temporal query logged a WARNING about a missing `repo_alias`, and golden-repo registration logged WARNINGs on its happy path. Operation types that intentionally omit `repo_alias` by design are demoted to DEBUG; genuinely unexpected omissions still warn.
+
+- Bug #1532: `server-fast-automation.sh` chunk 4 intermittently segfaulted. `DatabaseConnectionManager.close_all()` closed tracked SQLite connections while holding its lock, but direct-read call sites across the codebase read from those connections without holding it, so a connection could be closed mid-read on another thread. A `guarded_connection()` context manager now acquires the lock before fetching the connection and holds it for the whole operation.
+
+- Bug #1531: two embedding-coalescer concurrency tests failed intermittently under full parallel load. The tests asserted that K concurrent warm lookups always produce K independent hits, but the single-flight design legitimately allows a concurrent same-key request to become a joiner. The tests now force full overlap and assert the real invariant, including the returned vector values.
+
+- Bug #1543: `test_multi_search_service_handles_concurrent_requests` patched the system under test from inside ten worker threads. `unittest.mock.patch` mutates shared state on enter and exit and is not thread-safe for that pattern. The test now patches an external dependency once before any thread starts, with real on-disk repositories, and proves genuine thread overlap rather than assuming it.
+
+- Bug #1544: Story #1491's performance tests wrote real wall-clock measurements into tracked files under `reports/perf/` on every run, dirtying the working tree after every gate. Those writes now default to a gitignored scratch path, with an explicit opt-in for deliberately regenerating committed evidence.
+
 ## [12.6.0] - 2026-08-08
 
 ### Fixed
