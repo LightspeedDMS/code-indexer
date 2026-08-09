@@ -98,3 +98,26 @@ def test_parent_directory_is_created() -> None:
     path = perf_artifact_path("mkdir_check_1544.json")
 
     assert path.parent.is_dir()
+
+
+@pytest.mark.parametrize(
+    "whitespace_padded_value", [" 1 ", "1 ", " 1", " true ", "\ttrue\t", " yes\n"]
+)
+def test_whitespace_padded_truthy_value_stays_on_the_default_scratch_path(
+    monkeypatch: pytest.MonkeyPatch, whitespace_padded_value: str
+) -> None:
+    """Codex review finding for Bug #1544: an environment formatting mistake
+    (e.g. CIDX_WRITE_PERF_ARTIFACTS=" 1 ") must NOT silently opt in and write
+    tracked evidence. Only an EXACT (case-insensitive) match against the
+    truthy set opts in -- anything else, including whitespace-padded
+    truthy-looking values, must default safely to the gitignored scratch
+    path."""
+    monkeypatch.setenv(PERF_ARTIFACT_ENV_VAR, whitespace_padded_value)
+
+    path = perf_artifact_path("whitespace_padded_measurement_1544.json")
+
+    tracked_dir = _repo_root() / "reports" / "perf"
+    assert tracked_dir not in path.parents, (
+        f"whitespace-padded env value {whitespace_padded_value!r} incorrectly "
+        f"opted into writing the tracked {tracked_dir} directory"
+    )

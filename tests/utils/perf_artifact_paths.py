@@ -39,7 +39,12 @@ def _repo_root() -> Path:
 
 
 def _write_opt_in_enabled() -> bool:
-    return os.environ.get(PERF_ARTIFACT_ENV_VAR, "").strip().lower() in _TRUTHY_VALUES
+    # Bug #1544 (Codex review finding): NO .strip() here. A whitespace-padded
+    # value (e.g. " 1 ", set by an environment formatting mistake) must NOT
+    # be treated as opt-in -- only an EXACT (case-insensitive) match against
+    # the truthy set opts in. Anything else, including whitespace padding,
+    # defaults safely to the gitignored scratch path.
+    return os.environ.get(PERF_ARTIFACT_ENV_VAR, "").lower() in _TRUTHY_VALUES
 
 
 def perf_artifact_path(filename: str) -> Path:
