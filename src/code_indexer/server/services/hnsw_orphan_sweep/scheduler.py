@@ -26,7 +26,7 @@ from __future__ import annotations
 import logging
 import threading
 from datetime import datetime, timezone
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, Optional, cast
 
 from code_indexer.server.repositories.background_jobs import DuplicateJobError
 from code_indexer.server.services.hnsw_orphan_sweep.discovery import (
@@ -276,25 +276,41 @@ class HNSWOrphanRepairSweepScheduler:
         golden, activated, and the fixed-path ``golden_temporal`` shards --
         is repaired IN PLACE by the same ``process_fn``.
 
-        Bug #1542 (Codex-review follow-up): the REAL ``process_candidate``
+        Bug #1542 (Codex-review Q2 follow-up): the REAL ``process_candidate``
         accepts an optional ``activated_repo_manager`` kwarg it uses to
         resolve an activated-repo candidate's ``activation_id`` for correct
         cache-key composition (Story #1458 AC11). Passing that kwarg to an
         arbitrary injected ``process_fn`` (test fakes declared as
         ``Callable[[Any], SweepOutcome]``, e.g. ``spy_process(candidate)``)
         would break the single-argument injection contract those tests
-        rely on -- so it is passed ONLY when ``self._process_fn`` IS the
-        real ``process_candidate`` (identity check, not a call to an
-        injected fake).
+        rely on.
+
+        Dispatch is decided via a STRUCTURAL capability marker
+        (``process_candidate.supports_activated_repo_manager``), NOT an
+        identity check (``fn is process_candidate``) -- an identity check
+        is a silent-failure trap: any legitimate wrapper, ``functools
+        .partial``, decorator, or instrumentation layer around
+        ``process_candidate`` would fail it and silently fall back to the
+        "no activation_id" branch with zero diagnostic, even in real
+        production code. A plain function attribute survives
+        ``functools.wraps``-based wrapping (its ``WRAPPER_UPDATES`` copies
+        ``__dict__``, where this attribute lives), so a wrapper decorated
+        with ``@functools.wraps(process_candidate)`` inherits the marker
+        automatically and is dispatched exactly like the bare function --
+        test fakes that don't opt in (plain functions/lambdas with no such
+        attribute) fall through to the plain single-argument call below.
         """
         try:
-            if self._process_fn is process_candidate:
-                # Call the module-level function directly (not through the
-                # `self._process_fn: Callable[[Any], SweepOutcome]`-typed
-                # attribute) -- identity-equal to the object just checked,
-                # but mypy accepts the extra keyword argument here since
-                # `process_candidate`'s own declared signature includes it.
-                return process_candidate(
+            if getattr(self._process_fn, "supports_activated_repo_manager", False):
+                # `self._process_fn` is declared `Callable[[Any],
+                # SweepOutcome]`, which mypy takes literally (no extra
+                # kwarg) -- cast is safe here because the runtime check
+                # above is the actual contract enforcement, not the static
+                # type.
+                activation_aware_fn = cast(
+                    Callable[..., SweepOutcome], self._process_fn
+                )
+                return activation_aware_fn(
                     candidate, activated_repo_manager=self._activated_repo_manager
                 )
             return self._process_fn(candidate)

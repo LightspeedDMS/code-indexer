@@ -114,17 +114,20 @@ def _resolve_activation_id(
     Best-effort, matching ``_make_default_cache_invalidator``'s own
     best-effort contract: no ``activated_repo_manager`` injected, a
     malformed ``candidate.alias`` (not a non-empty ``"username/user_alias"``
-    string with EXACTLY two non-empty components), or any resolution failure
-    all return None rather than raise -- an activated repo's eviction then
-    still falls back to Bug #1538's on-disk identity fingerprint on the next
-    read (the pre-existing degraded behavior for every collection before
-    this fix), never blocking the repair itself.
+    string with EXACTLY two non-whitespace-only components -- a
+    whitespace-only component, e.g. ``" / "`` splitting into two literally
+    non-empty ``" "`` strings, is rejected the same as a truly empty one,
+    Codex-review Q1), or any resolution failure all return None rather than
+    raise -- an activated repo's eviction then still falls back to Bug
+    #1538's on-disk identity fingerprint on the next read (the pre-existing
+    degraded behavior for every collection before this fix), never blocking
+    the repair itself.
     """
     if candidate.kind != "activated" or activated_repo_manager is None:
         return None
     alias = candidate.alias
     parts = alias.split("/") if isinstance(alias, str) else []
-    if len(parts) != 2 or not parts[0] or not parts[1]:
+    if len(parts) != 2 or not parts[0].strip() or not parts[1].strip():
         logger.warning(
             "hnsw_orphan_sweep: activated candidate alias %r is not "
             "'username/user_alias'; cache invalidation will use a "
@@ -137,7 +140,6 @@ def _resolve_activation_id(
         activation_id: Optional[str] = activated_repo_manager.get_activation_id(
             username, user_alias
         )
-        return activation_id
     except Exception as exc:  # noqa: BLE001 -- best-effort, never block a repair
         logger.warning(
             "hnsw_orphan_sweep: could not resolve activation_id for %s: %s",
@@ -145,6 +147,13 @@ def _resolve_activation_id(
             exc,
         )
         return None
+    # Codex-review Q1: an empty/whitespace-only return is equivalent to "no
+    # valid activation_id" -- normalize it to None rather than embedding a
+    # blank string literally into the cache key (`not activation_id` short-
+    # circuits before `.strip()` when the manager returns None itself).
+    if not activation_id or not activation_id.strip():
+        return None
+    return activation_id
 
 
 def _make_default_cache_invalidator(
@@ -409,3 +418,19 @@ def process_candidate(
         logger.info("hnsw_orphan_sweep: repaired orphans for %s", collection_path)
 
     return outcome
+
+
+# Codex-review Q2 (Bug #1542 follow-up): a structural capability marker,
+# NOT an identity check. scheduler.py's HNSWOrphanRepairSweepScheduler used
+# to decide whether to pass `activated_repo_manager` via `fn is
+# process_candidate` -- a silent-failure trap, since ANY legitimate wrapper,
+# `functools.partial`, decorator, or instrumentation layer around this
+# function would fail that identity check and silently degrade to the
+# "no activation_id" branch with zero diagnostic, even in real production
+# code. A plain function attribute survives `functools.wraps`-based
+# wrapping (`functools.WRAPPER_UPDATES` copies `__dict__`, where this
+# attribute lives), so a wrapper decorated with
+# `@functools.wraps(process_candidate)` inherits it automatically. Callers
+# MUST check `getattr(fn, "supports_activated_repo_manager", False)`
+# instead of identity; see scheduler.py's `_process_one()`.
+process_candidate.supports_activated_repo_manager = True  # type: ignore[attr-defined]

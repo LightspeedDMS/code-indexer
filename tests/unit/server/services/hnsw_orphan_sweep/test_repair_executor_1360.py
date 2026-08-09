@@ -301,6 +301,114 @@ class TestProcessCandidateActivatedRepoDefaultInvalidatorUsesActivationScopedKey
             reset_global_cache()
 
 
+class TestResolveActivationIdRejectsBlankValues:
+    """Bug #1542 Codex-review Q1 follow-up: a whitespace-only alias
+    component (e.g. ``" / "`` splits into two literally non-empty ``" "``
+    strings) or an empty/whitespace-only ``activation_id`` returned by the
+    manager must both be treated as "no valid activation_id", never
+    embedded literally into the cache key -- proven by seeding the cache
+    under the correctly-composed NON-activation-scoped (``activation_id
+    =None``) key and confirming eviction still lands there."""
+
+    def _seed_none_scoped_entry_and_repair(
+        self,
+        tmp_path: Path,
+        alias: str,
+        activated_repo_manager: object,
+    ) -> tuple[str, dict]:
+        from code_indexer.server.cache import get_global_cache, reset_global_cache
+        from code_indexer.storage.filesystem_vector_store import (
+            FilesystemVectorStore,
+        )
+
+        reset_global_cache()
+        repo_root = tmp_path / "activated" / "alice" / "myrepo"
+        collection_path = repo_root / ".code-indexer" / "index" / "voyage-code-3"
+        _plant_prebroken_fixture(collection_path)
+
+        # activation_id=None here is the CORRECT fallback key -- the same
+        # key a golden/non-activated collection would use.
+        store = FilesystemVectorStore(base_path=repo_root, activation_id=None)
+        canonical_key = store.hnsw_cache_key_for_collection(collection_path)
+        cache = get_global_cache()
+        with cache._cache_lock:
+            cache._cache[canonical_key] = MagicMock(
+                spec=HNSWIndexCacheEntry,
+                repo_path=canonical_key,
+                is_expired=lambda: False,
+            )
+
+        candidate = SweepCandidate(
+            sort_key=(
+                f"activated:{alias}:.code-indexer/index/voyage-code-3/hnsw_index.bin"
+            ),
+            repo_root=repo_root,
+            index_relpath=Path(".code-indexer/index/voyage-code-3/hnsw_index.bin"),
+            kind="activated",
+            alias=alias,
+        )
+
+        outcome = process_candidate(
+            candidate, activated_repo_manager=activated_repo_manager
+        )
+        return canonical_key, {"outcome": outcome, "cache": cache}
+
+    def test_whitespace_only_alias_component_falls_back_to_none(
+        self, tmp_path: Path
+    ) -> None:
+        # Discriminating trap: a REAL non-blank return value. Under the
+        # pre-fix falsy-only check, " / " splits into two literally
+        # non-empty (" ", " ") strings, so the OLD code would pass this
+        # value straight through into the cache key -- producing a key
+        # DIFFERENT from the seeded None-scoped one below, so the test
+        # would fail against unfixed code. The FIXED code rejects the
+        # whitespace-only alias structurally and never calls this manager
+        # at all.
+        class _ManagerReturningTrapValueForWhitespaceAlias:
+            def get_activation_id(self, u: str, a: str) -> str:
+                return "SHOULD_NOT_BE_USED"
+
+        try:
+            canonical_key, ctx = self._seed_none_scoped_entry_and_repair(
+                tmp_path, " / ", _ManagerReturningTrapValueForWhitespaceAlias()
+            )
+
+            assert ctx["outcome"] == SweepOutcome.REPAIRED
+            assert canonical_key not in ctx["cache"]._cache, (
+                "whitespace-only alias component was not rejected -- "
+                "the fallback key was not the plain None-scoped key"
+            )
+        finally:
+            from code_indexer.server.cache import reset_global_cache
+
+            reset_global_cache()
+
+    def test_empty_activation_id_from_manager_falls_back_to_none(
+        self, tmp_path: Path
+    ) -> None:
+        class _ManagerReturningBlankActivationId:
+            def get_activation_id(self, u: str, a: str) -> str:
+                assert u == "alice"
+                assert a == "myrepo"
+                return "   "
+
+        try:
+            canonical_key, ctx = self._seed_none_scoped_entry_and_repair(
+                tmp_path, "alice/myrepo", _ManagerReturningBlankActivationId()
+            )
+
+            assert ctx["outcome"] == SweepOutcome.REPAIRED
+            assert canonical_key not in ctx["cache"]._cache, (
+                "a whitespace-only activation_id returned by the manager "
+                "was not normalized to None -- the fallback key was not "
+                "the plain None-scoped key"
+            )
+        finally:
+            from code_indexer.server.cache import reset_global_cache
+
+            reset_global_cache()
+
+
 class TestProcessCandidateTransientSkips:
     def test_missing_bin_file_is_transient_skip(self, tmp_path: Path) -> None:
         repo_root = tmp_path / "repo"

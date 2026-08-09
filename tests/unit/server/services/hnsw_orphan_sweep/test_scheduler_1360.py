@@ -515,6 +515,63 @@ def _make_activated_candidate(
     )
 
 
+def _seed_activation_scoped_entry(
+    repo_root: Path, collection_path: Path, activation_id: str
+) -> str:
+    """Seed the REAL global cache under the activation-scoped canonical
+    key an activated-repo ``search()`` actually stores under, returning
+    that key for later assertion."""
+    from code_indexer.server.cache import get_global_cache
+    from code_indexer.storage.filesystem_vector_store import FilesystemVectorStore
+
+    store = FilesystemVectorStore(base_path=repo_root, activation_id=activation_id)
+    canonical_key: str = store.hnsw_cache_key_for_collection(collection_path)
+    _seed_cache_entry(get_global_cache(), canonical_key)
+    return canonical_key
+
+
+def _make_activated_scheduler(
+    state_backend: Any,
+    username: str,
+    user_alias: str,
+    activation_id: str,
+    process_fn: Any = None,
+) -> HNSWOrphanRepairSweepScheduler:
+    kwargs: Dict[str, Any] = dict(
+        golden_repo_manager=_FakeGoldenRepoManager({}),
+        activated_repo_manager=_FakeActivatedRepoManagerWithActivationId(
+            username, user_alias, activation_id
+        ),
+        state_backend=state_backend,
+        background_job_manager=None,
+        config_service=_RecordingConfigService(),
+    )
+    if process_fn is not None:
+        kwargs["process_fn"] = process_fn
+    return HNSWOrphanRepairSweepScheduler(**kwargs)
+
+
+def _make_wrapped_process_candidate() -> Any:
+    """A ``functools.wraps``-wrapped ``process_candidate``, deliberately
+    NOT identical to the bare function, proving Codex-review Q2's
+    marker-based (not identity-based) dispatch fix. ``functools.wraps``
+    copies ``__dict__`` (``WRAPPER_UPDATES``), so the plain function
+    attribute ``supports_activated_repo_manager`` is inherited."""
+    import functools
+
+    from code_indexer.server.services.hnsw_orphan_sweep.repair_executor import (
+        process_candidate,
+    )
+
+    @functools.wraps(process_candidate)
+    def wrapped(candidate: Any, **kwargs: Any) -> Any:
+        return process_candidate(candidate, **kwargs)
+
+    assert wrapped is not process_candidate
+    assert getattr(wrapped, "supports_activated_repo_manager", False)
+    return wrapped
+
+
 class TestActivatedRepoCacheInvalidationWiring:
     """Bug #1542 Codex-review follow-up: the scheduler's default dispatch
     (``self._process_fn is`` the real ``process_candidate``) must thread
@@ -566,6 +623,44 @@ class TestActivatedRepoCacheInvalidationWiring:
                 "scheduler's default dispatch did not thread "
                 "activated_repo_manager through to process_candidate() -- "
                 "the activation-scoped cache entry was not evicted"
+            )
+        finally:
+            reset_global_cache()
+
+    def test_wrapped_process_candidate_still_gets_activation_id_via_capability_marker(
+        self, tmp_path: Path, state_backend
+    ) -> None:
+        """Codex-review Q2: a functools.wraps-wrapped, non-identical
+        callable must still get activated_repo_manager threaded through
+        via the inherited capability marker, not an identity check."""
+        from code_indexer.server.cache import get_global_cache, reset_global_cache
+
+        wrapped_process_candidate = _make_wrapped_process_candidate()
+        reset_global_cache()
+        try:
+            username, user_alias = "alice", "myrepo"
+            activation_id = "22222222-3333-4444-5555-666666666666"
+            repo_root = tmp_path / "activated" / username / user_alias
+            collection_path = repo_root / ".code-indexer" / "index" / "voyage-code-3"
+            _plant_activated_prebroken_fixture(collection_path)
+            canonical_key = _seed_activation_scoped_entry(
+                repo_root, collection_path, activation_id
+            )
+
+            scheduler = _make_activated_scheduler(
+                state_backend,
+                username,
+                user_alias,
+                activation_id,
+                wrapped_process_candidate,
+            )
+            candidate = _make_activated_candidate(repo_root, username, user_alias)
+            outcome = scheduler._process_one(candidate)
+
+            assert outcome == SweepOutcome.REPAIRED
+            assert canonical_key not in get_global_cache()._cache, (
+                "wrapped process_candidate did not get activated_repo_manager "
+                "threaded through -- dispatch is still identity-based"
             )
         finally:
             reset_global_cache()
