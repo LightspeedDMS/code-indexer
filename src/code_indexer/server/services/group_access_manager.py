@@ -894,19 +894,24 @@ class GroupAccessManager:
         if self._backend is not None:
             return self._backend.get_repo_groups(repo_name)  # type: ignore[no-any-return]
 
-        conn = self._get_connection()
-        cursor = conn.cursor()
-        cursor.row_factory = sqlite3.Row  # type: ignore[assignment]
-        cursor.execute(
-            """
-            SELECT g.* FROM groups g
-            JOIN repo_group_access rga ON g.id = rga.group_id
-            WHERE rga.repo_name = ?
-            ORDER BY g.name COLLATE NOCASE
-        """,
-            (repo_name,),
-        )
-        rows = cursor.fetchall()
+        # Bug #1532 follow-up: route through guarded_connection() (instead of
+        # the bare _get_connection()) so close_all() cannot close this
+        # connection mid-read; PRAGMA foreign_keys = ON is re-applied inline
+        # to match _get_connection()'s existing per-thread behavior.
+        with self._conn_manager.guarded_connection() as conn:  # type: ignore[union-attr]
+            conn.execute("PRAGMA foreign_keys = ON")
+            cursor = conn.cursor()
+            cursor.row_factory = sqlite3.Row  # type: ignore[assignment]
+            cursor.execute(
+                """
+                SELECT g.* FROM groups g
+                JOIN repo_group_access rga ON g.id = rga.group_id
+                WHERE rga.repo_name = ?
+                ORDER BY g.name COLLATE NOCASE
+            """,
+                (repo_name,),
+            )
+            rows = cursor.fetchall()
         return [self._row_to_group(row) for row in rows]
 
     def get_repo_access(

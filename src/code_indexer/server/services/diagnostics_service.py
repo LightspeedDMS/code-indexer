@@ -846,11 +846,14 @@ class DiagnosticsService:
                 if not Path(self._db_path).exists():
                     return
 
-                conn = self._conn_manager.get_connection()
-                cursor = conn.execute(
-                    "SELECT category, results_json, run_at FROM diagnostic_results"
-                )
-                rows = cursor.fetchall()
+                # Bug #1532 follow-up: route the raw connection through
+                # guarded_connection() so close_all() cannot close it
+                # mid-read.
+                with self._conn_manager.guarded_connection() as conn:
+                    cursor = conn.execute(
+                        "SELECT category, results_json, run_at FROM diagnostic_results"
+                    )
+                    rows = cursor.fetchall()
 
             for row in rows:
                 category_str, results_json, run_at = row
@@ -915,12 +918,15 @@ class DiagnosticsService:
                 if not Path(self._db_path).exists():
                     return None
 
-                conn = self._conn_manager.get_connection()
-                cursor = conn.execute(
-                    "SELECT results_json, run_at FROM diagnostic_results WHERE category = ?",
-                    (category.value,),
-                )
-                db_row = cursor.fetchone()
+                # Bug #1532 follow-up: route the raw connection through
+                # guarded_connection() so close_all() cannot close it
+                # mid-read.
+                with self._conn_manager.guarded_connection() as conn:
+                    cursor = conn.execute(
+                        "SELECT results_json, run_at FROM diagnostic_results WHERE category = ?",
+                        (category.value,),
+                    )
+                    db_row = cursor.fetchone()
 
                 if db_row is None:
                     return None
@@ -1090,9 +1096,13 @@ class DiagnosticsService:
 
         # Bug #149 Fix: Query database for registered golden repos instead of scanning filesystem
         try:
-            conn = self._conn_manager.get_connection()
-            cursor = conn.execute("SELECT alias, clone_path FROM golden_repos_metadata")
-            registered_repos = cursor.fetchall()
+            # Bug #1532 follow-up: route the raw connection through
+            # guarded_connection() so close_all() cannot close it mid-read.
+            with self._conn_manager.guarded_connection() as conn:
+                cursor = conn.execute(
+                    "SELECT alias, clone_path FROM golden_repos_metadata"
+                )
+                registered_repos = cursor.fetchall()
         except Exception as e:
             import logging
 

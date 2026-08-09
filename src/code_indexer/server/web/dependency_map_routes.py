@@ -1345,13 +1345,18 @@ def _get_known_repo_names() -> Optional[Set[str]]:
         server_dir = config_manager.server_dir
         db_path = str(server_dir / "data" / "cidx_server.db")
 
-        conn = DatabaseConnectionManager.get_instance(db_path).get_connection()
-        # INNER JOIN excludes orphaned global_repos entries (repos removed from
-        # golden_repos_metadata but whose global_repos row was never cleaned up).
-        rows = conn.execute(
-            "SELECT g.repo_name FROM global_repos g"
-            " INNER JOIN golden_repos_metadata m ON g.repo_name = m.alias"
-        ).fetchall()
+        # Bug #1532 follow-up: route the raw connection through
+        # guarded_connection() so close_all() cannot close it mid-read.
+        with DatabaseConnectionManager.get_instance(
+            db_path
+        ).guarded_connection() as conn:
+            # INNER JOIN excludes orphaned global_repos entries (repos removed
+            # from golden_repos_metadata but whose global_repos row was never
+            # cleaned up).
+            rows = conn.execute(
+                "SELECT g.repo_name FROM global_repos g"
+                " INNER JOIN golden_repos_metadata m ON g.repo_name = m.alias"
+            ).fetchall()
         return {row[0] for row in rows}
     except Exception as e:
         logger.warning("Failed to get known repo names for Check 6: %s", e)

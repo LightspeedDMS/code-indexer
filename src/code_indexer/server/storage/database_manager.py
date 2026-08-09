@@ -7,13 +7,14 @@ Provides:
 - DatabaseSchema: Creates and manages the SQLite schema for server state
 """
 
+import contextlib
 import logging
 import os
 import sqlite3
 import threading
 import time
 from pathlib import Path
-from typing import Callable, Dict, Optional, TypeVar
+from typing import Callable, Dict, Iterator, Optional, TypeVar
 
 T = TypeVar("T")
 
@@ -1891,12 +1892,66 @@ class DatabaseConnectionManager:
         connection: sqlite3.Connection = self._local.connection
         return connection
 
+    @contextlib.contextmanager
+    def guarded_connection(self) -> Iterator[sqlite3.Connection]:
+        """
+        Yield this thread's connection while holding self._lock.
+
+        Bug #1532 follow-up: the original fix made execute_atomic() hold
+        self._lock for its entire BEGIN..COMMIT/ROLLBACK duration, which
+        closed its specific race against close_all() (close_all() already
+        holds this SAME reentrant lock while it closes every tracked
+        connection -- see close_all()'s docstring). Code review found the
+        identical race still open at every OTHER call site that fetches
+        get_connection() and issues SQL directly without ever going through
+        execute_atomic() (a bare SELECT, a cursor-based multi-step read,
+        etc.) -- oauth_manager, payload_cache, job_tracker, wiki_cache, and
+        others. Any of those could still have close_all() close their
+        connection mid-read on another thread, unsafe at the C/SQLite layer
+        since connections are created with check_same_thread=False.
+
+        This context manager is the ONE mechanism any such call site must
+        route through instead of calling get_connection() directly, so the
+        protection is structural (every consumer gets it by construction)
+        rather than something to remember to wrap by hand at each site.
+
+        The lock is acquired BEFORE calling get_connection(), not after:
+        close_all() needs this same lock to close a connection, so
+        acquiring it first guarantees close_all() cannot run (and close our
+        connection) in the gap between get_connection() returning and this
+        generator resuming -- the original execute_atomic() fix had exactly
+        this narrow gap (get_connection() was called before `with
+        self._lock:`), closed here for both this method and execute_atomic()
+        (which now delegates to it). self._lock is an RLock (Bug #731), so
+        nesting with get_connection()'s own brief internal `with
+        self._lock:` section, or calling this recursively on the same
+        thread, is safe.
+
+        Yields:
+            This thread's SQLite connection, with close_all()/
+            close_thread_connection() guaranteed unable to close it until
+            the caller's `with` block exits.
+        """
+        with self._lock:
+            conn = self.get_connection()
+            yield conn
+
     def execute_atomic(self, operation: Callable[[sqlite3.Connection], T]) -> T:
         """
         Execute operation atomically with exclusive transaction.
 
         Uses BEGIN EXCLUSIVE to prevent concurrent writes, ensuring data
         integrity. Commits on success, rolls back on any exception.
+
+        Bug #1532: obtains its connection via guarded_connection(), which
+        holds self._lock for the whole BEGIN..COMMIT/ROLLBACK duration --
+        close_all() holds that SAME lock while closing tracked connections,
+        so close_all() can never close this connection out from under an
+        in-flight transaction on another thread. This was the confirmed
+        root cause of Issue #1532's intermittent SIGSEGV: close_all() (via
+        a backend's close(), from migrate_ssh_keys) racing
+        SQLiteLogHandler._writer_loop's execute_atomic() call on the same
+        DatabaseConnectionManager instance.
 
         Args:
             operation: Callable that takes a connection and performs database
@@ -1908,15 +1963,15 @@ class DatabaseConnectionManager:
         Raises:
             Any exception raised by the operation (after rollback).
         """
-        conn = self.get_connection()
-        conn.execute("BEGIN EXCLUSIVE")
-        try:
-            result = operation(conn)
-            conn.commit()
-            return result
-        except Exception:
-            conn.rollback()
-            raise
+        with self.guarded_connection() as conn:
+            conn.execute("BEGIN EXCLUSIVE")
+            try:
+                result = operation(conn)
+                conn.commit()
+                return result
+            except Exception:
+                conn.rollback()
+                raise
 
     def close_all(self) -> None:
         """

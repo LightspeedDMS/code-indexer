@@ -361,12 +361,14 @@ class PayloadCache:
 
         if self._conn_manager is None:
             raise RuntimeError("PayloadCache not initialized - call initialize() first")
-        conn = self._conn_manager.get_connection()
-        cursor = conn.execute(
-            "SELECT COUNT(*) FROM payload_cache WHERE handle = ?",
-            (key,),
-        )
-        row = cursor.fetchone()
+        # Bug #1532 follow-up: route the raw connection through
+        # guarded_connection() so close_all() cannot close it mid-read.
+        with self._conn_manager.guarded_connection() as conn:
+            cursor = conn.execute(
+                "SELECT COUNT(*) FROM payload_cache WHERE handle = ?",
+                (key,),
+            )
+            row = cursor.fetchone()
         return row[0] > 0 if row else False
 
     def retrieve(self, handle: str, page: int = 0) -> CacheRetrievalResult:
@@ -417,12 +419,14 @@ class PayloadCache:
 
         if self._conn_manager is None:
             raise RuntimeError("PayloadCache not initialized - call initialize() first")
-        conn = self._conn_manager.get_connection()
-        cursor = conn.execute(
-            "SELECT content, total_size FROM payload_cache WHERE handle = ?",
-            (handle,),
-        )
-        row = cursor.fetchone()
+        # Bug #1532 follow-up: route the raw connection through
+        # guarded_connection() so close_all() cannot close it mid-read.
+        with self._conn_manager.guarded_connection() as conn:
+            cursor = conn.execute(
+                "SELECT content, total_size FROM payload_cache WHERE handle = ?",
+                (handle,),
+            )
+            row = cursor.fetchone()
 
         if row is None:
             raise CacheNotFoundError(f"Cache handle not found: {handle}")
@@ -505,12 +509,14 @@ class PayloadCache:
             raise RuntimeError("PayloadCache not initialized - call initialize() first")
         cutoff_time = time.time() - self.config.cache_ttl_seconds
 
-        conn = self._conn_manager.get_connection()
-        cursor = conn.execute(
-            "SELECT COUNT(*) FROM payload_cache WHERE created_at < ?",
-            (cutoff_time,),
-        )
-        row = cursor.fetchone()
+        # Bug #1532 follow-up: route the raw connection through
+        # guarded_connection() so close_all() cannot close it mid-read.
+        with self._conn_manager.guarded_connection() as conn:
+            cursor = conn.execute(
+                "SELECT COUNT(*) FROM payload_cache WHERE created_at < ?",
+                (cutoff_time,),
+            )
+            row = cursor.fetchone()
         count = row[0] if row else 0
 
         def _do_delete(c: sqlite3.Connection) -> None:
