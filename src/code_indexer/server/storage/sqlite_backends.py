@@ -2008,13 +2008,15 @@ class GoldenRepoMetadataSqliteBackend:
         if not golden_alias or not golden_alias.strip():
             raise ValueError("golden_alias must be a non-empty string")
 
-        conn = self._conn_manager.get_connection()
-        row = conn.execute(
-            "SELECT golden_alias, consecutive_failure_count, last_target_sha, "
-            "last_detail, first_failed_at, last_failed_at "
-            "FROM cidx_meta_conflict_quarantine_state WHERE golden_alias = ?",
-            (golden_alias,),
-        ).fetchone()
+        # Bug #1532/#1539: route the raw connection through
+        # guarded_connection() so close_all() cannot close it mid-read.
+        with self._conn_manager.guarded_connection() as conn:
+            row = conn.execute(
+                "SELECT golden_alias, consecutive_failure_count, last_target_sha, "
+                "last_detail, first_failed_at, last_failed_at "
+                "FROM cidx_meta_conflict_quarantine_state WHERE golden_alias = ?",
+                (golden_alias,),
+            ).fetchone()
         if row is None:
             return None
         return {
