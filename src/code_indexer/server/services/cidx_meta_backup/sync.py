@@ -9,48 +9,48 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Optional
 
-from code_indexer.global_repos.repeated_failure_guard import RepeatedFailureGuard
 from code_indexer.server.git.git_subprocess_env import build_non_interactive_git_env
 
 from .conflict_resolver import ClaudeConflictResolver
 
-# Bug #1539: production observed every scheduled refresh failing with
-# "conflict resolution failed: ..." at a DIFFERENT rebase position each
-# time -- a fresh attempt each cycle, never one stuck job -- holding
-# /health degraded permanently with no forward progress. This guard
-# detects when the failure "shape" repeats identically across consecutive
-# attempts and stops retrying instead of doing so forever. RepeatedFailureGuard
-# is internally lock-protected (see repeated_failure_guard.py), so sharing
-# this single module-level instance across concurrent CidxMetaBackupSync
-# instances is safe.
-_CONFLICT_FAILURE_GUARD = RepeatedFailureGuard()
-
-# Normalizes away varying numeric details (e.g. "Rebasing (3/7)" vs
-# "Rebasing (9/12)") so the SAME underlying condition is recognized as the
-# same failure shape regardless of which rebase step it stops at.
-_DIGIT_RUN_PATTERN = re.compile(r"\d+")
+# Bug #1539: git's own rebase-progress banner ("Rebasing (2/18)") grows on
+# every failed attempt, because a failed conflict resolution aborts the
+# rebase but leaves the local unpushed auto-commit in place -- the NEXT
+# attempt has one more commit to replay, so the position (and total)
+# climbs every cycle even though the underlying conflict is identical.
+# Only THIS marker is normalized; every other digit in the failure text
+# (SHAs, line numbers) is left untouched so genuinely different failures
+# are never folded into the same fingerprint.
+_REBASE_POSITION_PATTERN = re.compile(r"\(\d+/\d+\)")
 
 
-def _conflict_failure_fingerprint(conflict_files: List[str], detail: str) -> str:
-    normalized_detail = _DIGIT_RUN_PATTERN.sub("#", detail)
+def conflict_failure_fingerprint(conflict_files: List[str], detail: str) -> str:
+    """Normalize a conflict-resolution failure into a stable "shape" key.
+
+    Used by callers (e.g. RefreshScheduler's Bug #1539 quarantine
+    bookkeeping) to recognize when the SAME underlying conflict has failed
+    repeatedly across separate, independent ``sync()`` calls -- this
+    module itself makes no retry/quarantine decisions; it only exposes a
+    fingerprint callers can persist and compare.
+    """
+    normalized_detail = _REBASE_POSITION_PATTERN.sub("(#/#)", detail)
     return "|".join(sorted(conflict_files)) + "::" + normalized_detail
 
 
-class StructurallyUnresolvableConflictError(RuntimeError):
-    """Raised when the identical conflict-resolution failure shape repeats.
+class ConflictResolutionFailedError(RuntimeError):
+    """Raised when a rebase conflict could not be resolved.
 
-    Signals that retrying cannot fix this condition -- it needs manual/
-    operator intervention (e.g. corrupt content in cidx-meta that the
-    LLM-based resolver cannot repair, or a rebase that will never converge
-    given the current state of both branches). Subclasses RuntimeError so
-    any existing ``except RuntimeError`` handling upstream keeps working
-    unchanged; only the message and type distinguish "stop retrying" from
-    a single transient failure.
+    Carries the conflicted file list and raw failure detail so a caller
+    can compute ``conflict_failure_fingerprint()`` and track repeated
+    occurrences in durable, cross-process storage (Bug #1539) -- this
+    class intentionally carries data only; it does not decide retry vs.
+    quarantine policy itself. Subclasses RuntimeError so any existing
+    ``except RuntimeError`` handling upstream keeps working unchanged.
     """
 
-    def __init__(self, message: str, *, occurrences: int, fingerprint: str) -> None:
-        self.occurrences = occurrences
-        self.fingerprint = fingerprint
+    def __init__(self, message: str, *, conflict_files: List[str], detail: str) -> None:
+        self.conflict_files = conflict_files
+        self.detail = detail
         super().__init__(message)
 
 
@@ -119,41 +119,29 @@ class CidxMetaBackupSync:
     def _raise_conflict_resolution_failure(
         self, conflict_files: List[str], detail: str
     ) -> None:
-        """Raise for a conflict-resolution failure, escalating on repeats.
+        """Raise ConflictResolutionFailedError carrying the failure data.
 
-        Bug #1539: the first N-1 occurrences of a given failure shape raise
-        a plain RuntimeError (the pre-existing, retry-next-cycle behavior,
-        preserved byte-for-byte). Once the SAME shape has now failed
-        `threshold` times in a row, raise
-        StructurallyUnresolvableConflictError instead -- a clear, distinct
-        signal that retrying will never help and this needs manual
-        intervention, instead of silently piling up identical failed jobs
-        forever.
+        Bug #1539: this method used to make an in-process retry/escalate
+        decision itself; it no longer does. It only raises a typed
+        exception so the caller (RefreshScheduler) can persist a
+        cross-process, cross-node consecutive-failure count via
+        golden_repo_metadata (the SAME dual-backend store Bug #1506 uses)
+        and decide, on a LATER cycle, whether to skip retrying.
         """
-        fingerprint = _conflict_failure_fingerprint(conflict_files, detail)
-        occurrences = _CONFLICT_FAILURE_GUARD.record_failure(
-            self.cidx_meta_path, fingerprint
+        raise ConflictResolutionFailedError(
+            "conflict resolution failed: " + detail,
+            conflict_files=conflict_files,
+            detail=detail,
         )
-        message = "conflict resolution failed: " + detail
-        if _CONFLICT_FAILURE_GUARD.is_exhausted(occurrences):
-            raise StructurallyUnresolvableConflictError(
-                f"{message} -- repeated identical failure {occurrences}x, "
-                "stopping retries: this condition cannot be resolved by "
-                "retrying and requires manual intervention on cidx-meta at "
-                f"{self.cidx_meta_path}",
-                occurrences=occurrences,
-                fingerprint=fingerprint,
-            )
-        raise RuntimeError(message)
 
     def _rebase_onto_remote(self) -> None:
         """Rebase local work onto ``origin/{branch}``, resolving conflicts.
 
         Extracted from ``sync()`` to keep that method short. Raises
-        RuntimeError (or, on repeated identical failures, Bug #1539's
-        StructurallyUnresolvableConflictError) on any unrecoverable
-        failure; returns normally when the rebase needed no action or
-        completed (with or without conflicts) successfully.
+        RuntimeError (or ConflictResolutionFailedError on a conflict that
+        could not be resolved) on any unrecoverable failure; returns
+        normally when the rebase needed no action or completed (with or
+        without conflicts) successfully.
         """
         rebase_result = self._git("rebase", f"origin/{self.branch}", check=False)
         if rebase_result.returncode == 0:
@@ -211,20 +199,9 @@ class CidxMetaBackupSync:
         remote_changed = head.stdout.strip() != remote_head.stdout.strip()
 
         if not local_committed and not remote_changed:
-            # Bug #1539: nothing to sync this cycle -- clear any stale
-            # conflict-failure tally so a LATER, genuinely new problem
-            # starts counting from zero rather than inheriting a stale
-            # count from an unrelated earlier condition.
-            _CONFLICT_FAILURE_GUARD.reset(self.cidx_meta_path)
             return SyncResult(skipped=True, sync_failure=None)
 
         self._rebase_onto_remote()
-
-        # Bug #1539: reaching this point means either no rebase was needed,
-        # or a rebase (with or without conflicts) completed successfully --
-        # any previously tracked conflict-failure tally for this repo no
-        # longer reflects reality and must be cleared.
-        _CONFLICT_FAILURE_GUARD.reset(self.cidx_meta_path)
 
         push_result = self._git("push", "origin", self.branch, check=False)
         if push_result.returncode != 0:

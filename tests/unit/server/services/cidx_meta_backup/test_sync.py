@@ -338,11 +338,12 @@ def test_rebase_continue_fails_without_editor_env_bug1500(tmp_path, monkeypatch)
 
 
 # ---------------------------------------------------------------------------
-# Bug #1539: repeated identical-shape conflict-resolution failures must stop
-# retrying instead of holding /health degraded forever.
+# Bug #1539: sync() raises a typed, data-carrying exception on an unresolved
+# conflict, and exposes a pure fingerprint helper -- the actual retry/
+# quarantine DECISION lives in RefreshScheduler (persisted, cross-process),
+# not here. See tests/unit/global_repos/test_refresh_scheduler_cidx_meta_conflict_quarantine_1539.py
+# for that mechanism.
 # ---------------------------------------------------------------------------
-
-MAX_RETRY_ATTEMPTS_1539 = 6
 
 
 def _make_shared_txt_conflict(tmp_path: Path):
@@ -355,90 +356,84 @@ def _make_shared_txt_conflict(tmp_path: Path):
     return repo, remote, divergent
 
 
-def _run_sync_until_stopped(repo: Path, resolver, max_attempts: int):
-    """Call sync() repeatedly; return (plain_failure_count, structural_error)."""
-    from code_indexer.server.services.cidx_meta_backup.sync import (
-        CidxMetaBackupSync,
-        StructurallyUnresolvableConflictError,
-    )
-
-    plain_runtime_failures = 0
-    structural_error = None
-    for _ in range(max_attempts):
-        try:
-            CidxMetaBackupSync(str(repo), "master", resolver).sync()
-        except StructurallyUnresolvableConflictError as exc:
-            structural_error = exc
-            break
-        except RuntimeError:
-            plain_runtime_failures += 1
-        # Each failed attempt runs `git rebase --abort`, so the working tree
-        # is clean again but the local commit is still un-rebased onto the
-        # (unchanged) remote -- the next sync() call reaches the identical
-        # conflict again, reproducing "fresh attempt each time" from the bug.
-    return plain_runtime_failures, structural_error
-
-
 def _never_resolving_resolver(cidx_meta_path, conflict_files, branch):
     return SimpleNamespace(success=False, error="LLM could not resolve conflict")
 
 
-def test_repeated_identical_conflict_failure_stops_retrying_1539(tmp_path):
-    """Bug #1539: N consecutive sync() attempts that fail with the SAME
-    conflict "shape" (same conflicted files, same resolver-error text) must
-    eventually surface a clear, distinct "structurally unresolvable, stopping
-    retries" signal instead of raising the same generic RuntimeError forever.
-
-    This reproduces the production symptom: every scheduled global_repo_refresh
-    of cidx-meta-global fails with "conflict resolution failed: ..." on a fresh
-    attempt each time (never actually a stuck job), holding /health degraded
-    permanently with no forward progress and no actionable signal.
+def test_unresolved_conflict_raises_typed_error_with_data_1539(tmp_path):
+    """Bug #1539: an unresolved conflict raises ConflictResolutionFailedError
+    (not a bare RuntimeError) carrying the conflicted file list and raw
+    failure detail, so a caller (RefreshScheduler) can compute a fingerprint
+    and persist quarantine bookkeeping without re-parsing the message string.
     """
+    import pytest
+    from code_indexer.server.services.cidx_meta_backup.sync import (
+        CidxMetaBackupSync,
+        ConflictResolutionFailedError,
+    )
+
     repo, _remote, _divergent = _make_shared_txt_conflict(tmp_path)
     resolver = SimpleNamespace(resolve=_never_resolving_resolver)
 
-    plain_failures, structural_error = _run_sync_until_stopped(
-        repo, resolver, MAX_RETRY_ATTEMPTS_1539
-    )
+    with pytest.raises(ConflictResolutionFailedError) as exc_info:
+        CidxMetaBackupSync(str(repo), "master", resolver).sync()
 
-    assert structural_error is not None, (
-        "Expected sync() to stop retrying and raise "
-        "StructurallyUnresolvableConflictError after repeated identical "
-        "conflict-resolution failures, but it kept raising plain "
-        f"RuntimeError across all attempts ({plain_failures} failures)"
-    )
-    # At least one plain RuntimeError must have been raised first -- a
-    # single failure must NOT immediately trip the breaker.
-    assert plain_failures >= 1
+    exc = exc_info.value
+    assert exc.conflict_files == ["shared.txt"]
+    assert exc.detail == "LLM could not resolve conflict"
+    assert str(exc).startswith("conflict resolution failed: ")
+    # Also a plain RuntimeError, so any pre-existing generic handler upstream
+    # keeps working unchanged.
+    assert isinstance(exc, RuntimeError)
 
 
-def test_different_conflict_shape_does_not_trip_breaker_1539(tmp_path):
-    """Bug #1539: a genuinely DIFFERENT failure shape (different conflicted
-    files / different resolver error) must not be confused with a previously
-    tracked failure and must not immediately trip the breaker on its very
-    first occurrence.
+def test_fingerprint_normalizes_only_rebase_position_marker_1539():
+    """Bug #1539 (Codex finding 1, false negative): the SAME underlying
+    conflict recurring across scheduled ticks has a GROWING git rebase
+    progress marker "(N/M)" in its failure text (more unpushed commits pile
+    up each failed attempt) -- the fingerprint must recognize these as the
+    SAME shape.
     """
     from code_indexer.server.services.cidx_meta_backup.sync import (
-        StructurallyUnresolvableConflictError,
+        conflict_failure_fingerprint,
     )
-    import pytest
-    from code_indexer.server.services.cidx_meta_backup.sync import CidxMetaBackupSync
 
-    repo, _remote, divergent = _make_shared_txt_conflict(tmp_path)
-    resolver = SimpleNamespace(resolve=_never_resolving_resolver)
+    detail_a = "Rebasing (2/18)\nerror: could not apply abc123... msg"
+    detail_b = "Rebasing (3/20)\nerror: could not apply abc123... msg"
 
-    # Trip the "shared.txt" failure shape once (below threshold), then abort
-    # and move on to a distinct conflict.
-    _run_sync_until_stopped(repo, resolver, max_attempts=1)
+    assert conflict_failure_fingerprint(["shared.txt"], detail_a) == (
+        conflict_failure_fingerprint(["shared.txt"], detail_b)
+    )
 
-    _commit_file(divergent, "other.txt", "remote other\n", "remote: other")
-    _git(["push", "origin", "master"], divergent)
-    _commit_file(repo, "other.txt", "local other\n", "local: other")
 
-    def _different_conflict_resolver(cidx_meta_path, conflict_files, branch):
-        return SimpleNamespace(success=False, error="different failure")
+def test_fingerprint_distinguishes_different_non_digit_content_1539():
+    """Bug #1539 (Codex finding 1, false positive): two failures whose
+    non-rebase-position digits differ in substance (e.g. different line
+    numbers or different commit SHAs) must NOT be folded into the same
+    fingerprint just because a blanket digit-strip would have erased the
+    distinction -- only the "(N/M)" marker is normalized.
+    """
+    from code_indexer.server.services.cidx_meta_backup.sync import (
+        conflict_failure_fingerprint,
+    )
 
-    resolver2 = SimpleNamespace(resolve=_different_conflict_resolver)
-    with pytest.raises(RuntimeError) as exc_info:
-        CidxMetaBackupSync(str(repo), "master", resolver2).sync()
-    assert not isinstance(exc_info.value, StructurallyUnresolvableConflictError)
+    detail_line_10 = "Rebasing (2/18)\nerror: failed parsing line 10"
+    detail_line_20 = "Rebasing (2/18)\nerror: failed parsing line 20"
+
+    assert conflict_failure_fingerprint(
+        ["shared.txt"], detail_line_10
+    ) != conflict_failure_fingerprint(["shared.txt"], detail_line_20)
+
+
+def test_fingerprint_distinguishes_different_conflict_files_1539():
+    """A genuinely different set of conflicted files must not be mistaken
+    for the same failure shape even with identical detail text."""
+    from code_indexer.server.services.cidx_meta_backup.sync import (
+        conflict_failure_fingerprint,
+    )
+
+    detail = "Rebasing (2/18)\nerror: could not apply abc123"
+
+    assert conflict_failure_fingerprint(
+        ["shared.txt"], detail
+    ) != conflict_failure_fingerprint(["other.txt"], detail)

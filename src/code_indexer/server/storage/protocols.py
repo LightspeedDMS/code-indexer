@@ -539,6 +539,22 @@ class GoldenRepoMetadataBackend(Protocol):
         self, golden_alias: str
     ) -> Optional[Dict[str, Any]]: ...
 
+    # Bug #1539: cidx-meta backup conflict-resolution per-repo failure
+    # quarantine state (see global_repos/refresh_scheduler.py). Mirrors
+    # the refresh-integrity quarantine shape above exactly, keyed by
+    # golden_alias (e.g. "cidx-meta-global") -- persisted so a
+    # consecutive-failure count is visible across every worker/node,
+    # never a per-process in-memory counter.
+    def record_cidx_meta_conflict_failure(
+        self, golden_alias: str, fingerprint: str, detail: str
+    ) -> int: ...
+
+    def reset_cidx_meta_conflict_failure(self, golden_alias: str) -> None: ...
+
+    def get_cidx_meta_conflict_failure_state(
+        self, golden_alias: str
+    ) -> Optional[Dict[str, Any]]: ...
+
     def close(self) -> None: ...
 
 
