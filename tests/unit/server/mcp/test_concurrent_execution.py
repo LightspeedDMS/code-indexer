@@ -263,44 +263,156 @@ class TestConcurrentExecutionNoRaceConditions:
             assert "content" in result
 
 
+# Bug #1543: TestMultiSearchServiceConcurrentExecution's test previously called
+# patch.object(service, "_search_single_repo_sync", ...) from inside each of
+# 10 worker-thread closures, all patching the SAME attribute on the SAME
+# instance. unittest.mock.patch is not thread-safe under that usage -- one
+# thread's __exit__ can delete/restore the attribute while another thread is
+# still inside service.search(...), producing an intermittent AttributeError
+# under load. It also mocked an internal method of the system under test
+# itself. The helpers below stub the actual EXTERNAL search dependency
+# (SemanticSearchService.search_repository_path) instead, installed exactly
+# once before any thread is spawned.
+
+
+def _fake_search_repository_path_stub(self, repo_path, search_request, **_kwargs):
+    """External-dependency stand-in: derives its result from repo_path so
+    cross-thread state mixing would be detectable rather than masked.
+    """
+    from pathlib import Path
+    from code_indexer.server.models.api_models import (
+        SemanticSearchResponse,
+        SearchResultItem,
+    )
+
+    return SemanticSearchResponse(
+        query=search_request.query,
+        results=[
+            SearchResultItem(
+                score=0.9,
+                file_path=f"{Path(repo_path).name}.py",
+                line_start=1,
+                line_end=1,
+                content="",
+                language=None,
+            )
+        ],
+        total=1,
+    )
+
+
+class _FakeGlobalReposForMultiSearch:
+    """Minimal stand-in for BackendRegistry.global_repos' repo lookup."""
+
+    def get_repo(self, repo_id: str):
+        return {"alias": repo_id}
+
+
+class _FakeBackendRegistryForMultiSearch:
+    """Minimal stand-in exposing only what
+    ``MultiSearchService._get_repository_path`` reads from app.state.
+    """
+
+    global_repos = _FakeGlobalReposForMultiSearch()
+
+
+def _create_fake_golden_repos_for_multi_search(golden_repos_dir, num_requests: int):
+    """Create real on-disk repo directories + real alias pointer files so
+    ``_get_repository_path`` resolves each ``repoN`` alias for real.
+    """
+    from code_indexer.global_repos.alias_manager import AliasManager
+
+    golden_repos_dir.mkdir()
+    alias_manager = AliasManager(str(golden_repos_dir / "aliases"))
+    for request_id in range(num_requests):
+        repo_dir = golden_repos_dir / f"repo{request_id}"
+        repo_dir.mkdir()
+        alias_manager.create_alias(f"repo{request_id}", str(repo_dir))
+
+
+def _run_concurrent_search_requests(service, num_requests: int):
+    """Fan out concurrent ``MultiSearchService.search()`` calls against
+    threads sharing an already-patched dependency (installed once by the
+    caller before this runs). Returns (results, errors), lock-protected.
+    """
+    from code_indexer.server.multi.models import MultiSearchRequest
+
+    results = []
+    errors = []
+    results_lock = threading.Lock()
+
+    def search_request_fn(request_id: int):
+        try:
+            request = MultiSearchRequest(
+                repositories=[f"repo{request_id}"],
+                query=f"query_{request_id}",
+                search_type="semantic",
+                limit=10,
+            )
+            response = service.search(request)
+            with results_lock:
+                results.append((request_id, response))
+        except Exception as e:
+            with results_lock:
+                errors.append((request_id, str(e)))
+
+    with ThreadPoolExecutor(max_workers=num_requests) as executor:
+        futures = [executor.submit(search_request_fn, i) for i in range(num_requests)]
+        for future in as_completed(futures):
+            future.result()
+
+    return results, errors
+
+
 class TestMultiSearchServiceConcurrentExecution:
     """Test MultiSearchService concurrent execution."""
 
-    def test_multi_search_service_handles_concurrent_requests(self):
-        """MultiSearchService should handle concurrent search requests."""
+    def test_multi_search_service_handles_concurrent_requests(self, tmp_path):
+        """MultiSearchService.search() stays correct under concurrent load.
+
+        See the Bug #1543 module comment above this class for the failure
+        this test regresses against and why the fix stubs an external
+        dependency instead of the SUT's own internal method.
+        """
         from code_indexer.server.multi.multi_search_service import MultiSearchService
         from code_indexer.server.multi.multi_search_config import MultiSearchConfig
-        from code_indexer.server.multi.models import MultiSearchRequest
+        from code_indexer.server.services.search_service import SemanticSearchService
+        from code_indexer.server.app import app as fastapi_app
+
+        num_requests = 10
+        golden_repos_dir = tmp_path / "golden-repos"
+        _create_fake_golden_repos_for_multi_search(golden_repos_dir, num_requests)
 
         config = MultiSearchConfig(max_workers=5, query_timeout_seconds=30)
         service = MultiSearchService(config)
 
-        results = []
-        errors = []
-
-        def search_request(request_id: int):
-            try:
-                request = MultiSearchRequest(
-                    repositories=[f"repo{request_id}"],
-                    query=f"query_{request_id}",
-                    search_type="semantic",
-                    limit=10,
-                )
-                with patch.object(
-                    service,
-                    "_search_single_repo_sync",
-                    return_value=[{"file_path": f"test_{request_id}.py", "score": 0.9}],
-                ):
-                    response = service.search(request)
-                    results.append((request_id, response))
-            except Exception as e:
-                errors.append((request_id, str(e)))
-
-        num_requests = 10
-        with ThreadPoolExecutor(max_workers=10) as executor:
-            futures = [executor.submit(search_request, i) for i in range(num_requests)]
-            for future in as_completed(futures):
-                future.result()
+        try:
+            with (
+                patch.object(
+                    fastapi_app.state,
+                    "golden_repos_dir",
+                    str(golden_repos_dir),
+                    create=True,
+                ),
+                patch.object(
+                    fastapi_app.state,
+                    "backend_registry",
+                    _FakeBackendRegistryForMultiSearch(),
+                    create=True,
+                ),
+                patch.object(
+                    SemanticSearchService,
+                    "search_repository_path",
+                    _fake_search_repository_path_stub,
+                ),
+            ):
+                results, errors = _run_concurrent_search_requests(service, num_requests)
+        finally:
+            service.shutdown()
 
         assert len(errors) == 0, f"Errors: {errors}"
         assert len(results) == num_requests
+        for request_id, response in results:
+            assert response.results[f"repo{request_id}"][0]["file_path"] == (
+                f"repo{request_id}.py"
+            )
