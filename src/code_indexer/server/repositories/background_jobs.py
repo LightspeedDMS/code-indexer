@@ -43,6 +43,22 @@ if TYPE_CHECKING:
     from code_indexer.server.services.job_tracker import JobTracker
 
 
+# Bug #1535: operation_types whose callers deliberately, by design, never
+# pass repo_alias to submit_job. Today this is exactly "temporal_query"
+# (Story #1400's temporal_live_dispatch.py `_submit` closure): BGM's
+# register_job_if_no_conflict per-(operation_type, repo_alias) uniqueness
+# gate is the wrong dedup tool for temporal queries (correct dedup
+# granularity is the full query signature, enforced separately by
+# TemporalDedupCache), so repo_alias is intentionally never forwarded. For
+# these operation_types, a missing repo_alias is expected happy-path
+# behavior on EVERY successful call, not a signal of a caller bug -- log it
+# at DEBUG so it stays discoverable without flooding the WARNING channel
+# the mandatory post-E2E log-audit gate relies on. Every OTHER
+# operation_type keeps the original WARNING (AC5's intent: a missing
+# repo_alias there usually does indicate a real bug).
+_OPERATIONS_WITHOUT_REPO_ALIAS_BY_DESIGN = frozenset({"temporal_query"})
+
+
 class JobStatus(str, Enum):
     """Job status enumeration."""
 
@@ -646,10 +662,20 @@ class BackgroundJobManager:
 
         # AC5: Validate repo_alias to prevent "unknown" values
         if repo_alias is None:
-            logging.warning(
-                f"Job submitted without repo_alias for operation '{operation_type}' "
-                f"by user '{submitter_username}'. Consider providing repo_alias."
-            )
+            # Bug #1535: some operation_types (e.g. "temporal_query") omit
+            # repo_alias by design on EVERY call -- that is happy-path, not
+            # a caller mistake, so it must not flood the WARNING channel.
+            if operation_type in _OPERATIONS_WITHOUT_REPO_ALIAS_BY_DESIGN:
+                logging.debug(
+                    f"Job submitted without repo_alias for operation '{operation_type}' "
+                    f"by user '{submitter_username}' (expected -- this operation_type "
+                    f"never supplies repo_alias by design)."
+                )
+            else:
+                logging.warning(
+                    f"Job submitted without repo_alias for operation '{operation_type}' "
+                    f"by user '{submitter_username}'. Consider providing repo_alias."
+                )
         elif repo_alias.lower() == "unknown":
             logging.warning(
                 f"Job submitted with repo_alias='unknown' for operation '{operation_type}' "

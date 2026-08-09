@@ -63,6 +63,35 @@ from code_indexer.storage.sqlite_chunk_store import chunk_store_has_real_data
 logger = logging.getLogger(__name__)
 
 
+def _log_config_json_present_diagnostic(
+    context: str, path: Path, cwd: Optional[str] = None
+) -> None:
+    """Bug #1535: config.json BEING PRESENT at a post-init/pre-index probe
+    point is the EXPECTED, happy-path outcome on every successful
+    golden-repo registration -- log it at DEBUG, not WARNING, so it stops
+    flooding the WARNING channel the mandatory post-E2E log-audit gate
+    relies on to spot real problems. (These probes were originally raised
+    from DEBUG to WARNING to diagnose a specific config-init race; the
+    ABSENT case remains a genuine anomaly and stays at WARNING at its own
+    call sites, untouched by this helper.)
+    """
+    if cwd is not None:
+        logger.debug(
+            "[config-init-diag] %s config.json present: path=%s mtime=%.6f cwd=%s",
+            context,
+            path,
+            path.stat().st_mtime,
+            cwd,
+        )
+    else:
+        logger.debug(
+            "[config-init-diag] %s config.json present: path=%s mtime=%.6f",
+            context,
+            path,
+            path.stat().st_mtime,
+        )
+
+
 def _collection_has_real_chunk_data(coll_dir: Path) -> bool:
     """Layout-aware existence check for a single collection directory
     (Issue #1459 AC1/AC5).
@@ -2275,10 +2304,8 @@ class GoldenRepoManager:
                     Path(clone_path) / ".code-indexer" / "config.json"
                 )
                 if _config_json_post_init.exists():
-                    logger.warning(
-                        "[config-init-diag] post-init config.json present: path=%s mtime=%.6f",
-                        _config_json_post_init,
-                        _config_json_post_init.stat().st_mtime,
+                    _log_config_json_present_diagnostic(
+                        "post-init", _config_json_post_init
                     )
                 else:
                     logger.warning(
@@ -2350,11 +2377,8 @@ class GoldenRepoManager:
             # Step 2: cidx index --fts --progress-json (semantic + FTS, Popen for real progress)
             _config_json_pre_index = Path(clone_path) / ".code-indexer" / "config.json"
             if _config_json_pre_index.exists():
-                logger.warning(
-                    "[config-init-diag] pre-index config.json present: path=%s mtime=%.6f cwd=%s",
-                    _config_json_pre_index,
-                    _config_json_pre_index.stat().st_mtime,
-                    clone_path,
+                _log_config_json_present_diagnostic(
+                    "pre-index", _config_json_pre_index, cwd=clone_path
                 )
             else:
                 logger.warning(
