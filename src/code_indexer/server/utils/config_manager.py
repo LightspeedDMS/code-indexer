@@ -1145,9 +1145,23 @@ class AliasLockConfig:
     rollback path to the OLD file-based mechanism for one release (e.g. a
     fleet with nodes still mid-rollout to the new code); it is not yet
     removed.
+
+    `db_backed_enabled_promoted` is an internal one-time migration marker
+    -- NOT a Web UI setting (never surfaced in
+    ConfigService._alias_lock_settings / _update_alias_lock_setting).
+    Runtime config is persisted as a full JSON blob and merged OVER this
+    dataclass's default on load, so changing the default above alone never
+    reaches a deployment that already has an explicit stored
+    `alias_lock_config` section from before Phase 3 shipped -- a stored
+    value always beats a dataclass default. Confirmed inert on a live
+    3-node staging cluster. See
+    ConfigService._apply_alias_lock_db_backed_promotion for the full
+    promotion mechanism. Once True, an operator's own choice (including an
+    explicit rollback to False) is never overwritten again.
     """
 
     db_backed_enabled: bool = True
+    db_backed_enabled_promoted: bool = False
 
 
 @dataclass

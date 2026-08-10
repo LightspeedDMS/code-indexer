@@ -347,9 +347,21 @@ class ConfigService:
             self._strip_config_file_to_bootstrap()
             # A7d (Story #885 AC-V4-17): persist lifecycle_analysis_config defaults
             # to SQLite on first boot after upgrade (key absent from legacy row).
+            #
+            # Issue #1546 Phase 3 promotion follow-up: this MUST save the
+            # CURRENT merged config (self.get_config(), which already
+            # reflects any in-place fix _merge_runtime_config just made and
+            # persisted -- e.g. the alias-lock promotion below), never the
+            # STALE pre-merge `runtime` dict captured above. Re-saving that
+            # stale dict here would silently clobber a write
+            # _merge_runtime_config already made to the DB row moments
+            # earlier.
             if "lifecycle_analysis_config" not in runtime:
-                runtime["lifecycle_analysis_config"] = asdict(LifecycleAnalysisConfig())
-                self._save_runtime_to_sqlite(runtime)
+                current_runtime_dict = self._extract_runtime_dict(self.get_config())
+                current_runtime_dict["lifecycle_analysis_config"] = asdict(
+                    LifecycleAnalysisConfig()
+                )
+                self._save_runtime_to_sqlite(current_runtime_dict)
         else:
             # First boot or pre-migration: seed DB from config.json
             config = self.get_config()
@@ -3699,6 +3711,80 @@ class ConfigService:
         # which correctly converts nested dicts to dataclass instances
         new_config = self.config_manager._dict_to_server_config(full_dict)
         self._config = new_config  # Atomic reference swap
+
+        # Issue #1546 Phase 3 promotion follow-up: must run AFTER self._config
+        # is published above, since persisting the promotion (if needed) may
+        # call materialize_launch_config() / self.get_config(), which must
+        # observe the freshly merged config, not a stale prior one.
+        self._apply_alias_lock_db_backed_promotion(new_config, runtime_dict)
+
+    def _apply_alias_lock_db_backed_promotion(
+        self, config: "ServerConfig", raw_runtime_dict: dict
+    ) -> None:
+        """One-time promotion of alias_lock_config.db_backed_enabled to True.
+
+        Issue #1546 Phase 3 changed AliasLockConfig.db_backed_enabled's
+        dataclass DEFAULT from False to True, but runtime config is
+        persisted as a full JSON blob and merged OVER that default on load
+        (this method's caller, _merge_runtime_config). A deployment with a
+        pre-Phase-3 stored `alias_lock_config` section therefore silently
+        keeps the old False value forever -- confirmed inert on a live
+        3-node staging cluster (all three nodes still used file-based
+        locking after upgrading to the release that flipped the default).
+
+        Promotes exactly ONCE per deployment. The discriminator is the RAW
+        stored dict (`raw_runtime_dict`), never the reconstructed
+        dataclass:
+
+        - A stored "alias_lock_config" section that is missing the
+          "db_backed_enabled_promoted" key can only have been written by
+          code that predates this migration -- every save since (
+          update_setting, save_config, or this method's own write below)
+          always serializes the full AliasLockConfig dataclass via
+          asdict(), which always includes that field. This is the ONLY
+          case that triggers a promotion + write.
+        - A stored section that already carries the key -- even with
+          db_backed_enabled=False -- is left untouched forever, whether
+          that False is this method's own past promotion having since been
+          rolled back by an operator, or an operator's very first explicit
+          choice on a fresh (already-default-True) deployment.
+        - No "alias_lock_config" section at all (never touched, not even
+          by Phase 2's toggle) needs no action: ServerConfig.__post_init__
+          already constructs a fresh AliasLockConfig() with the modern
+          default (True) in that case.
+        """
+        alc = config.alias_lock_config
+        if alc is None or alc.db_backed_enabled_promoted:
+            return
+        raw_alc = raw_runtime_dict.get("alias_lock_config")
+        if not (
+            isinstance(raw_alc, dict) and "db_backed_enabled_promoted" not in raw_alc
+        ):
+            return
+
+        alc.db_backed_enabled = True
+        alc.db_backed_enabled_promoted = True
+
+        if self._pool is not None:
+            self._save_runtime_to_pg(config)
+        elif self._sqlite_db_path is not None:
+            self._save_runtime_to_sqlite(self._extract_runtime_dict(config))
+        else:
+            # No runtime DB attached yet (bootstrap/file-only mode). The
+            # in-memory promotion still applies for this process; a later
+            # initialize_runtime_db()/set_connection_pool() call re-enters
+            # this exact merge path once a DB is attached, and persists it
+            # then.
+            return
+
+        logger.warning(
+            "ConfigService: promoted alias_lock.db_backed_enabled to True "
+            "(Issue #1546 Phase 3 one-time migration). The stored runtime "
+            "config predated the promoted default. This will not run "
+            "again for this deployment -- any future operator choice, "
+            "including an explicit rollback to False, is preserved from "
+            "here on."
+        )
 
     def save_config(self, config: ServerConfig) -> None:
         """Save config: runtime to DB (PG or SQLite), bootstrap to file.
