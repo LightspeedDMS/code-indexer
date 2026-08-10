@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [12.9.0] - 2026-08-10
+
+### Changed
+
+- Story #1546 Phase 3: DB-backed golden-repo alias locking is now the DEFAULT (`alias_lock.db_backed_enabled` flips from false to true). Phase 2 shipped the mechanism behind an opt-in flag, which meant every deployment still ran the legacy file-based `WriteLockManager` on a `vers=3,nolock,hard` NFS mount -- where `nolock` makes byte-range locking client-side-only, so file locks do not coordinate across cluster nodes at all and the defect this story addresses remained live regardless of how well the new mechanism worked. The flip is justified by direct evidence on the live 3-node staging cluster: with DB-backed locking enabled, three simultaneous same-alias index operations started within 15ms and exactly one acquired while two were cleanly refused with a lock-conflict error; with it disabled, all three entered and one detected lost ownership mid-operation (the split-brain symptom). An A-B-A toggle reproduced both directions deterministically, establishing the setting as the causal variable rather than a correlate. The flag, `WriteLockManager`, and the coordinator's file-mode branch are all deliberately RETAINED as the emergency rollback path for the lock guarding every golden-repo operation; removing them in the same release that changes the default would delete the escape hatch at the moment of highest risk. Test coverage of the file-mode path is likewise retained -- only assertions about which mode is the default were updated. During a rolling update the mixed-fleet window narrows but does not vanish (un-upgraded nodes still default to file locks); this is survivable because every node on 12.8.0 or later carries both mechanisms, and Phase 2's cross-mechanism conflict detection covers the overlap with its residual documented in the coordinator's module docstring.
+
 ## [12.8.0] - 2026-08-10
 
 ### Changed
