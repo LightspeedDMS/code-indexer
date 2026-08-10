@@ -270,6 +270,95 @@ class TestSiblingRoutesCSRFStatusCode:
         )
 
 
+@pytest.mark.slow
+@pytest.mark.timeout(_TEST_TIMEOUT)
+class TestApiKeySaveValidationStatusCode:
+    """POST /admin/config/api-keys/{platform} (save_api_key) shares the same
+    _create_config_page_response() defect as the config-section routes: a
+    rejected API-key save reported HTTP 200, so a caller checking only the
+    status code could believe a credential was stored when it was not."""
+
+    def test_mismatched_csrf_token_returns_403(
+        self, client, admin_session, config_csrf
+    ) -> None:
+        # CSRF validation runs before any token-format check, so a plain
+        # placeholder string is sufficient here.
+        resp = client.post(
+            "/admin/config/api-keys/github",
+            data={
+                "csrf_token": "this-does-not-match-the-real-cookie-value",
+                "token": "placeholder",
+            },
+            cookies=admin_session,
+            follow_redirects=True,
+        )
+        assert resp.status_code == 403, (
+            f"Issue #1554: rejected API-key save (bad CSRF) must return 403, "
+            f"got {resp.status_code}. Body: {resp.text[:300]}"
+        )
+        assert "invalid csrf token" in resp.text.lower()
+
+    def test_invalid_platform_returns_400(
+        self, client, admin_session, config_csrf
+    ) -> None:
+        resp = client.post(
+            "/admin/config/api-keys/bitbucket",
+            data={"csrf_token": config_csrf, "token": "placeholder"},
+            cookies=admin_session,
+            follow_redirects=True,
+        )
+        assert resp.status_code == 400, (
+            f"Issue #1554: unsupported platform must return 400, "
+            f"got {resp.status_code}. Body: {resp.text[:300]}"
+        )
+        assert "invalid platform" in resp.text.lower()
+
+    def test_invalid_token_format_returns_400(
+        self, client, admin_session, config_csrf
+    ) -> None:
+        """A malformed GitHub token genuinely raises TokenValidationError
+        inside CITokenManager.save_token -- not a contrived/mocked failure."""
+        resp = client.post(
+            "/admin/config/api-keys/github",
+            data={"csrf_token": config_csrf, "token": "not-a-valid-github-token"},
+            cookies=admin_session,
+            follow_redirects=True,
+        )
+        assert resp.status_code == 400, (
+            f"Issue #1554: invalid token format must return 400, "
+            f"got {resp.status_code}. Body: {resp.text[:300]}"
+        )
+        assert "invalid token format" in resp.text.lower()
+
+
+@pytest.mark.slow
+@pytest.mark.timeout(_TEST_TIMEOUT)
+class TestApiKeySaveFailureStatusCode:
+    def test_save_failure_returns_500(self, client, admin_session, config_csrf) -> None:
+        """A genuine backend/storage failure (not a client input error) must
+        surface as 500. CITokenManager.save_token -- an injected storage
+        dependency of the save_api_key route handler, not the handler itself
+        -- is patched to raise, since no other reachable code path in this
+        handler can deterministically trigger a real backend failure. The
+        patch replaces the whole method, so it never reaches real
+        token-format validation -- the token value below is a placeholder."""
+        with patch(
+            "code_indexer.server.services.ci_token_manager.CITokenManager.save_token",
+            side_effect=RuntimeError("simulated storage failure"),
+        ):
+            resp = client.post(
+                "/admin/config/api-keys/github",
+                data={"csrf_token": config_csrf, "token": "placeholder"},
+                cookies=admin_session,
+                follow_redirects=True,
+            )
+        assert resp.status_code == 500, (
+            f"Issue #1554: genuine save failure must return 500, "
+            f"got {resp.status_code}. Body: {resp.text[:300]}"
+        )
+        assert "failed to save api key" in resp.text.lower()
+
+
 if __name__ == "__main__":
     import pytest as _pytest
 

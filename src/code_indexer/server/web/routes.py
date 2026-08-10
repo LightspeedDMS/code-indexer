@@ -9601,13 +9601,19 @@ def save_api_key(
     # Validate CSRF token
     if not validate_login_csrf_token(request, csrf_token):
         return _create_config_page_response(
-            request, session, error_message="Invalid CSRF token"
+            request,
+            session,
+            error_message="Invalid CSRF token",
+            status_code=status.HTTP_403_FORBIDDEN,
         )
 
     # Validate platform
     if platform not in ["github", "gitlab"]:
         return _create_config_page_response(
-            request, session, error_message=f"Invalid platform: {platform}"
+            request,
+            session,
+            error_message=f"Invalid platform: {platform}",
+            status_code=status.HTTP_400_BAD_REQUEST,
         )
 
     # Save token using CITokenManager - use same server_dir as config service
@@ -9629,6 +9635,7 @@ def save_api_key(
             session,
             error_message=f"Invalid token format: {str(e)}",
             validation_errors={"api_keys": str(e)},
+            status_code=status.HTTP_400_BAD_REQUEST,
         )
     except Exception as e:
         logger.error(
@@ -9641,6 +9648,7 @@ def save_api_key(
             request,
             session,
             error_message=f"Failed to save API key: {str(e)}",
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
         )
 
 
