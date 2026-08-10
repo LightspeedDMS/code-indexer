@@ -35,6 +35,11 @@ class LogsPostgresBackend:
     brings down the application.
     """
 
+    # Bug #1553: explicit capability flag -- this backend IS a distinct
+    # cross-node store (PostgreSQL, shared across every cluster node), so
+    # read dispatch must route through it rather than a node-local file.
+    is_cross_node_backend: bool = True
+
     def __init__(self, pool: ConnectionPool) -> None:
         """
         Initialize with a shared connection pool and ensure the table exists.
@@ -147,20 +152,29 @@ class LogsPostgresBackend:
         except Exception as exc:
             logger.warning("LogsPostgresBackend: insert_log failed: %s", exc)
 
-    def insert_log_batch(self, items: List[Any]) -> None:
+    def insert_log_batch(self, items: List[Any]) -> bool:
         """Insert a batch of log records in ONE transaction via executemany.
 
         Issue #1241 P1.1: batched writer to eliminate per-record commit churn.
         Uses SET LOCAL synchronous_commit = off for ephemeral log rows (safe:
         rows are immediately visible; only crash-flush durability is relaxed).
 
+        Bug #1553: returns a real bool success signal (rather than implicit
+        None) so SQLiteLogHandler's writer loop can detect failure -- the
+        swallow-and-log-a-warning contract is unchanged, only the return
+        value is now observable by the caller.
+
         Args:
             items: List of 10-tuples in column order:
                 (timestamp, level, source, message, correlation_id,
                  user_id, request_path, extra_data, node_id, alias)
+
+        Returns:
+            True on success (including the empty-input no-op case), False
+            if the insert failed (already logged as a warning internally).
         """
         if not items:
-            return
+            return True
         try:
             with self._pool.connection() as conn:
                 # psycopg v3: executemany lives on the CURSOR, NOT the connection.
@@ -181,8 +195,10 @@ class LogsPostgresBackend:
                         items,
                     )
                 conn.commit()
+            return True
         except Exception as exc:
             logger.warning("LogsPostgresBackend: insert_log_batch failed: %s", exc)
+            return False
 
     def _build_query_conditions(
         self,
@@ -192,11 +208,25 @@ class LogsPostgresBackend:
         date_from: Optional[str],
         date_to: Optional[str],
         node_id: Optional[str],
+        levels: Optional[List[str]] = None,
+        search: Optional[str] = None,
     ) -> Tuple[str, List[Any]]:
-        """Build WHERE clause and params list for log queries (parameterized)."""
+        """Build WHERE clause and params list for log queries (parameterized).
+
+        Bug #1553: levels/search are additive, mirroring
+        LogAggregatorService._build_where_clause (levels takes precedence
+        over level, guarded by `if levels:` so an empty list never emits
+        invalid SQL like `level IN ()`; search is a case-insensitive
+        substring match across message/correlation_id via ILIKE -- plain
+        LIKE is case-SENSITIVE in PostgreSQL, unlike SQLite's default).
+        """
         conditions: List[str] = []
         params: List[Any] = []
-        if level is not None:
+        if levels:
+            placeholders = ",".join(["%s"] * len(levels))
+            conditions.append(f"level IN ({placeholders})")
+            params.extend(levels)
+        elif level is not None:
             conditions.append("level = %s")
             params.append(level)
         if source is not None:
@@ -214,6 +244,11 @@ class LogsPostgresBackend:
         if node_id is not None:
             conditions.append("node_id = %s")
             params.append(node_id)
+        if search:
+            conditions.append("(message ILIKE %s OR correlation_id ILIKE %s)")
+            search_pattern = f"%{search}%"
+            params.append(search_pattern)
+            params.append(search_pattern)
         where_clause = ("WHERE " + " AND ".join(conditions)) if conditions else ""
         return where_clause, params
 
@@ -254,26 +289,31 @@ class LogsPostgresBackend:
         node_id: Optional[str] = None,
         limit: int = 100,
         offset: int = 0,
+        levels: Optional[List[str]] = None,
+        search: Optional[str] = None,
+        sort_order: str = "desc",
     ) -> Tuple[List[Dict[str, Any]], int]:
         """Query log records with optional filtering and pagination.
 
-        Args:
-            level: Filter by log level (optional).
-            source: Filter by logger name (optional).
-            correlation_id: Filter by correlation ID (optional).
-            date_from: ISO 8601 lower bound for timestamp (inclusive, optional).
-            date_to: ISO 8601 upper bound for timestamp (inclusive, optional).
-            node_id: Filter by cluster node ID (optional).
-            limit: Maximum number of records to return (default 100).
-            offset: Number of records to skip for pagination (default 0).
+        Bug #1553: levels/search/sort_order are additive -- their defaults
+        preserve the exact pre-existing behaviour for every caller that
+        predates them (single-level equality, no text search, DESC).
 
         Returns:
             Tuple of (list_of_log_dicts, total_count) where total_count reflects
             the full match count before pagination is applied.
         """
         where_clause, params = self._build_query_conditions(
-            level, source, correlation_id, date_from, date_to, node_id
+            level,
+            source,
+            correlation_id,
+            date_from,
+            date_to,
+            node_id,
+            levels,
+            search,
         )
+        order_direction = "ASC" if sort_order == "asc" else "DESC"
 
         with self._pool.connection() as conn:
             count_row = conn.execute(
@@ -287,7 +327,7 @@ class LogsPostgresBackend:
                 SELECT id, timestamp, level, source, message, correlation_id,
                        user_id, request_path, extra_data, node_id, alias, created_at
                 FROM logs {where_clause}
-                ORDER BY timestamp DESC
+                ORDER BY timestamp {order_direction}
                 LIMIT %s OFFSET %s
                 """,
                 params + [limit, offset],

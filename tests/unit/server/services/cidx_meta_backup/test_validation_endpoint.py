@@ -37,12 +37,18 @@ def _build_client(monkeypatch, config_service, ssh_key_manager, bootstrap):
     monkeypatch.setattr(
         routes,
         "_create_config_page_response",
+        # Bug #1554 added ``status_code`` to the real helper so a rejected write
+        # no longer returns HTTP 200. This stub must accept AND propagate it,
+        # otherwise it silently reports every rejection as a success -- the very
+        # defect #1554 fixed -- and diverges from the function it stands in for.
         lambda request,
         session,
         success_message=None,
         error_message=None,
-        validation_errors=None: HTMLResponse(
-            content=success_message or error_message or ""
+        validation_errors=None,
+        status_code=200: HTMLResponse(
+            content=success_message or error_message or "",
+            status_code=status_code,
         ),
     )
     monkeypatch.setattr(routes, "_get_ssh_key_manager", lambda: ssh_key_manager)
@@ -107,7 +113,10 @@ def test_ssh_url_with_unknown_host_fails(tmp_path, monkeypatch):
         data={"enabled": "true", "remote_url": "git@gitlab.example.com:org/repo.git"},
     )
 
-    assert response.status_code == 200
+    # Bug #1554: a REJECTED config write returns 400, not 200. This assertion
+    # previously expected 200 -- encoding the exact defect #1554 fixed, where a
+    # rejection was indistinguishable from a success by status code alone.
+    assert response.status_code == 400
     assert "No SSH key configured for gitlab.example.com" in response.text
     bootstrap.bootstrap.assert_not_called()
 

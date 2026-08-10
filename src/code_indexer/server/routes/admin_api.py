@@ -104,8 +104,10 @@ def get_logs(
     # Get log database path from app state
     log_db_path = request.app.state.log_db_path
 
-    # Create LogAggregatorService instance
-    service = LogAggregatorService(log_db_path)
+    # Create LogAggregatorService instance. Bug #1553: pass logs_backend so
+    # cluster-mode reads follow the same store the writer thread uses.
+    logs_backend = getattr(request.app.state, "logs_backend", None)
+    service = LogAggregatorService(log_db_path, logs_backend=logs_backend)
 
     # Parse level parameter (comma-separated to list)
     levels = None
@@ -178,8 +180,10 @@ def export_logs(
     # Get log database path from app state
     log_db_path = request.app.state.log_db_path
 
-    # Create LogAggregatorService instance
-    service = LogAggregatorService(log_db_path)
+    # Create LogAggregatorService instance. Bug #1553: pass logs_backend so
+    # cluster-mode reads follow the same store the writer thread uses.
+    logs_backend = getattr(request.app.state, "logs_backend", None)
+    service = LogAggregatorService(log_db_path, logs_backend=logs_backend)
 
     # Parse level parameter (comma-separated to list)
     levels = None

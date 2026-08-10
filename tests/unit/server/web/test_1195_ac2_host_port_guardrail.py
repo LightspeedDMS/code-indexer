@@ -22,6 +22,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+from fastapi import status
 from fastapi.testclient import TestClient
 
 _REPO_ROOT = Path(__file__).resolve().parents[4]
@@ -30,8 +31,15 @@ _ROUTES_PATH = _REPO_ROOT / "src" / "code_indexer" / "server" / "web" / "routes.
 _TOKEN_USERNAME_BYTES = 8
 _TEST_TIMEOUT = 60
 
-# Default values from ServerConfig (used as the "unchanged" baseline)
-_DEFAULT_HOST = "0.0.0.0"
+# Default values from ServerConfig (used as the "unchanged" baseline).
+# Issue #1554 investigation: this MUST match ServerConfig.host's actual
+# dataclass default ("127.0.0.1", src/code_indexer/server/utils/config_manager.py).
+# A previously-wrong "0.0.0.0" value here silently tripped the host/port
+# confirmation guardrail on every "unchanged" POST -- invisible while the
+# guardrail rejection incorrectly returned HTTP 200 (the exact defect
+# Issue #1554 fixes) and the body-substring assertions below passed by
+# accident regardless of whether the write was actually accepted.
+_DEFAULT_HOST = "127.0.0.1"
 _DEFAULT_PORT = "8000"
 
 
@@ -215,8 +223,13 @@ class TestAC2Behavioral:
                 # NO confirm_host_port_change
             },
         )
-        # Response must indicate rejection (explicit error, not silent success)
-        assert resp.status_code == 200, f"Unexpected HTTP {resp.status_code}"
+        # Response must indicate rejection (explicit error, not silent success).
+        # Issue #1554: a rejected write must not report HTTP 200 -- the guardrail
+        # rejection now returns 400 (Bad Request) so a caller checking only the
+        # status code can tell the write did not go through.
+        assert resp.status_code == status.HTTP_400_BAD_REQUEST, (
+            f"Unexpected HTTP {resp.status_code}"
+        )
         html_lower = resp.text.lower()
         # Must render the exact guardrail rejection message from update_config_section:
         # "Changing host or port requires explicit confirmation — HAProxy backend

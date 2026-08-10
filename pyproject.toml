@@ -123,6 +123,11 @@ dev = [
     "mypy>=1.0.0",
     "types-PyYAML>=6.0.0",
     "types-requests>=2.28.0",
+    # Bug #1552: required by mypy for src/code_indexer/server/omni/omni_cache.py and
+    # services/git_operations_service.py. It was installed ad hoc on developer
+    # machines but never declared, so ./lint.sh passed locally and failed in any
+    # fresh environment (including CI) with "Library stubs not installed".
+    "types-cachetools>=5.0.0",
     "black>=23.0.0",
     "ruff>=0.0.280",
     "pre-commit>=3.0.0",

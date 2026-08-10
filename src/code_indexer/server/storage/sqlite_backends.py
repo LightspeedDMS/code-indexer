@@ -4317,6 +4317,11 @@ class LogsSqliteBackend:
     to isolate high-volume log writes from other server state.
     """
 
+    # Bug #1553: explicit capability flag -- this backend is node-local
+    # (same file the writer and every same-process reader see), so read
+    # dispatch must NOT route through it as a distinct cross-node store.
+    is_cross_node_backend: bool = False
+
     def __init__(self, db_path: str) -> None:
         """
         Initialize the backend and create the logs table if it does not exist.
@@ -4427,18 +4432,27 @@ class LogsSqliteBackend:
 
         self._conn_manager.execute_atomic(operation)
 
-    def insert_log_batch(self, items: List[Any]) -> None:
+    def insert_log_batch(self, items: List[Any]) -> bool:
         """Insert a batch of log records in ONE transaction via executemany.
 
         Issue #1241 P1.1: batched writer to eliminate per-record commit churn.
+
+        Bug #1553: returns a real bool success signal (rather than implicit
+        None) so SQLiteLogHandler's writer loop can detect failure without
+        relying on an exception alone -- matching the sibling
+        LogsPostgresBackend, which swallows its own failures internally and
+        must report them the same way.
 
         Args:
             items: List of 10-tuples in column order:
                 (timestamp, level, source, message, correlation_id,
                  user_id, request_path, extra_data, node_id, alias)
+
+        Returns:
+            True on success (including the empty-input no-op case).
         """
         if not items:
-            return
+            return True
 
         def operation(conn: Any) -> None:
             conn.executemany(
@@ -4452,6 +4466,7 @@ class LogsSqliteBackend:
             )
 
         self._conn_manager.execute_atomic(operation)
+        return True
 
     def _build_query_conditions(
         self,
@@ -4461,11 +4476,25 @@ class LogsSqliteBackend:
         date_from: Optional[str],
         date_to: Optional[str],
         node_id: Optional[str],
+        levels: Optional[List[str]] = None,
+        search: Optional[str] = None,
     ) -> Tuple[str, List[Any]]:
-        """Build WHERE clause and params list for log queries."""
+        """Build WHERE clause and params list for log queries.
+
+        Bug #1553: levels/search are additive params mirroring
+        LogAggregatorService._build_where_clause's semantics exactly
+        (levels takes precedence over level; search is a case-insensitive
+        substring match across message and correlation_id) so cluster reads
+        routed through this backend keep the same filtering capability the
+        standalone aggregator already offers.
+        """
         conditions: List[str] = []
         params: List[Any] = []
-        if level is not None:
+        if levels:
+            placeholders = ",".join(["?"] * len(levels))
+            conditions.append(f"level IN ({placeholders})")
+            params.extend(levels)
+        elif level is not None:
             conditions.append("level = ?")
             params.append(level)
         if source is not None:
@@ -4483,6 +4512,11 @@ class LogsSqliteBackend:
         if node_id is not None:
             conditions.append("node_id = ?")
             params.append(node_id)
+        if search:
+            conditions.append("(message LIKE ? OR correlation_id LIKE ?)")
+            search_pattern = f"%{search}%"
+            params.append(search_pattern)
+            params.append(search_pattern)
         where_clause = ("WHERE " + " AND ".join(conditions)) if conditions else ""
         return where_clause, params
 
@@ -4518,16 +4552,31 @@ class LogsSqliteBackend:
         node_id: Optional[str] = None,
         limit: int = 100,
         offset: int = 0,
+        levels: Optional[List[str]] = None,
+        search: Optional[str] = None,
+        sort_order: str = "desc",
     ) -> Tuple[List[Dict[str, Any]], int]:
         """Query log records with optional filtering and pagination.
+
+        Bug #1553: levels/search/sort_order are additive params -- their
+        defaults preserve the exact pre-existing behaviour for every caller
+        that predates them (single-level equality, no text search, DESC).
 
         Returns:
             Tuple of (list_of_log_dicts, total_count) where total_count reflects
             the full match count before pagination is applied.
         """
         where_clause, params = self._build_query_conditions(
-            level, source, correlation_id, date_from, date_to, node_id
+            level,
+            source,
+            correlation_id,
+            date_from,
+            date_to,
+            node_id,
+            levels,
+            search,
         )
+        order_direction = "ASC" if sort_order == "asc" else "DESC"
         conn = self._conn_manager.get_connection()
         total_count: int = conn.execute(
             f"SELECT COUNT(*) FROM logs {where_clause}", params
@@ -4537,7 +4586,7 @@ class LogsSqliteBackend:
             SELECT id, timestamp, level, source, message, correlation_id,
                    user_id, request_path, extra_data, node_id, alias, created_at
             FROM logs {where_clause}
-            ORDER BY timestamp DESC
+            ORDER BY timestamp {order_direction}
             LIMIT ? OFFSET ?
             """,
             params + [limit, offset],

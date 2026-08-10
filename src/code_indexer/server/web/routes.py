@@ -8053,8 +8053,15 @@ def _create_config_page_response(
     success_message: Optional[str] = None,
     error_message: Optional[str] = None,
     validation_errors: Optional[dict] = None,
+    status_code: int = 200,
 ) -> HTMLResponse:
-    """Create config page response with all necessary context."""
+    """Create config page response with all necessary context.
+
+    Issue #1554: ``status_code`` defaults to 200 (byte-identical to every
+    pre-existing caller). Callers rendering a REJECTED write must pass the
+    correct 4xx/5xx so the HTTP status code alone -- not just the rendered
+    HTML body -- tells a caller whether the write succeeded.
+    """
     csrf_token = generate_csrf_token()
     config = _get_current_config()
 
@@ -8084,6 +8091,7 @@ def _create_config_page_response(
             "gitlab_token_data": gitlab_token_data,
             "restart_required_fields": RESTART_REQUIRED_FIELDS,
         },
+        status_code=status_code,
     )
 
     set_csrf_cookie(response, csrf_token)
@@ -9026,7 +9034,10 @@ def reset_config(
     # Validate CSRF token
     if not validate_login_csrf_token(request, csrf_token):
         return _create_config_page_response(
-            request, session, error_message="Invalid CSRF token"
+            request,
+            session,
+            error_message="Invalid CSRF token",
+            status_code=status.HTTP_403_FORBIDDEN,
         )
 
     # Reset to defaults using ConfigService
@@ -9051,6 +9062,7 @@ def reset_config(
             request,
             session,
             error_message=f"Failed to reset configuration: {str(e)}",
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
         )
 
 
@@ -9074,7 +9086,10 @@ async def update_langfuse_pull_config(
 
     if not validate_login_csrf_token(request, csrf_token):
         return _create_config_page_response(
-            request, session, error_message="Invalid CSRF token"
+            request,
+            session,
+            error_message="Invalid CSRF token",
+            status_code=status.HTTP_403_FORBIDDEN,
         )
 
     form_data = await request.form()
@@ -9128,6 +9143,7 @@ async def update_langfuse_pull_config(
             session,
             error_message=f"Failed to save configuration: {str(e)}",
             validation_errors={"langfuse_pull": str(e)},
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
         )
 
 
@@ -9159,7 +9175,10 @@ async def update_cidx_meta_backup_config(
 
     if not validate_login_csrf_token(request, csrf_token):
         return _create_config_page_response(
-            request, session, error_message="Invalid CSRF token"
+            request,
+            session,
+            error_message="Invalid CSRF token",
+            status_code=status.HTTP_403_FORBIDDEN,
         )
 
     form_data = await request.form()
@@ -9181,6 +9200,7 @@ async def update_cidx_meta_backup_config(
                 validation_errors={
                     "cidx_meta_backup": f"No SSH key configured for {hostname}"
                 },
+                status_code=status.HTTP_400_BAD_REQUEST,
             )
 
     try:
@@ -9205,6 +9225,7 @@ async def update_cidx_meta_backup_config(
             session,
             error_message=f"Failed to save configuration: {str(e)}",
             validation_errors={"cidx_meta_backup": str(e)},
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
         )
 
 
@@ -9294,13 +9315,19 @@ async def update_config_section(
     # Validate CSRF token
     if not validate_login_csrf_token(request, csrf_token):
         return _create_config_page_response(
-            request, session, error_message="Invalid CSRF token"
+            request,
+            session,
+            error_message="Invalid CSRF token",
+            status_code=status.HTTP_403_FORBIDDEN,
         )
 
     # Validate section
     if section not in _VALID_CONFIG_SECTIONS:
         return _create_config_page_response(
-            request, session, error_message=f"Invalid section: {section}"
+            request,
+            session,
+            error_message=f"Invalid section: {section}",
+            status_code=status.HTTP_400_BAD_REQUEST,
         )
 
     # Get form data
@@ -9315,6 +9342,7 @@ async def update_config_section(
             session,
             error_message=error,
             validation_errors={section: error},
+            status_code=status.HTTP_400_BAD_REQUEST,
         )
 
     # Save configuration using ConfigService
@@ -9345,6 +9373,7 @@ async def update_config_section(
                         "Missing required field: elevation_enforcement_enabled, "
                         "elevation_idle_timeout_seconds, or elevation_max_age_seconds"
                     ),
+                    status_code=status.HTTP_400_BAD_REQUEST,
                 )
 
             try:
@@ -9352,7 +9381,10 @@ async def update_config_section(
                 _max_age = int(str(_raw_max_age))
             except (ValueError, TypeError) as _e:
                 return _create_config_page_response(
-                    request, session, error_message=f"Invalid numeric value: {_e}"
+                    request,
+                    session,
+                    error_message=f"Invalid numeric value: {_e}",
+                    status_code=status.HTTP_400_BAD_REQUEST,
                 )
 
             _enabled = str(_raw_enabled).lower() in _TOTP_TRUTHY_SET
@@ -9399,6 +9431,7 @@ async def update_config_section(
                         "HAProxy backend and firewall port-lock warning. "
                         "Please confirm the change via the confirmation dialog."
                     ),
+                    status_code=status.HTTP_400_BAD_REQUEST,
                 )
 
         # Strip the confirm flag from data before passing to update_setting
@@ -9457,6 +9490,7 @@ async def update_config_section(
                     request,
                     session,
                     error_message=f"Invalid OIDC configuration: {str(e)}. Changes not saved.",
+                    status_code=status.HTTP_400_BAD_REQUEST,
                 )
             config_service.save_config(config)
         else:
@@ -9477,6 +9511,7 @@ async def update_config_section(
             request,
             session,
             error_message=f"Failed to save configuration: {str(e)}",
+            status_code=status.HTTP_400_BAD_REQUEST,
         )
     except Exception as e:
         logger.error(
@@ -9489,6 +9524,7 @@ async def update_config_section(
             request,
             session,
             error_message=f"Failed to save configuration: {str(e)}",
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
         )
 
 
@@ -9565,13 +9601,19 @@ def save_api_key(
     # Validate CSRF token
     if not validate_login_csrf_token(request, csrf_token):
         return _create_config_page_response(
-            request, session, error_message="Invalid CSRF token"
+            request,
+            session,
+            error_message="Invalid CSRF token",
+            status_code=status.HTTP_403_FORBIDDEN,
         )
 
     # Validate platform
     if platform not in ["github", "gitlab"]:
         return _create_config_page_response(
-            request, session, error_message=f"Invalid platform: {platform}"
+            request,
+            session,
+            error_message=f"Invalid platform: {platform}",
+            status_code=status.HTTP_400_BAD_REQUEST,
         )
 
     # Save token using CITokenManager - use same server_dir as config service
@@ -9593,6 +9635,7 @@ def save_api_key(
             session,
             error_message=f"Invalid token format: {str(e)}",
             validation_errors={"api_keys": str(e)},
+            status_code=status.HTTP_400_BAD_REQUEST,
         )
     except Exception as e:
         logger.error(
@@ -9605,6 +9648,7 @@ def save_api_key(
             request,
             session,
             error_message=f"Failed to save API key: {str(e)}",
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
         )
 
 
@@ -10715,50 +10759,28 @@ def logs_page(
     # Generate CSRF token for forms
     csrf_token = generate_csrf_token()
 
-    # Story #501 AC4: use LogsBackend when available (cluster/postgres mode)
+    # Bug #1553: LogAggregatorService is the ONE place that decides whether
+    # reads go to the cross-node backend or the local file (via the
+    # is_cross_node_backend capability check) -- replaces the duplicated
+    # inline branch + fragile "Postgres" in type(x).__name__ string match.
     logs_backend = getattr(request.app.state, "logs_backend", None)
-    # is_cluster_mode is True when the backend is PostgreSQL (node_id column visible)
-    is_cluster_mode = (
-        logs_backend is not None and "Postgres" in type(logs_backend).__name__
+    log_db_path = request.app.state.log_db_path
+    from ..services.log_aggregator_service import LogAggregatorService
+
+    service = LogAggregatorService(log_db_path, logs_backend=logs_backend)
+    levels = [level] if level else None
+    result = service.query(
+        page=page,
+        page_size=50,
+        sort_order="desc",
+        search=search,
+        levels=levels,
+        source=logger or None,
+        node_id=node_id or None,
     )
-
-    if logs_backend is not None and is_cluster_mode:
-        # Cluster mode: use LogsBackend.query_logs() for cross-node aggregation
-        import math
-
-        page_size = 50
-        offset = (page - 1) * page_size
-        log_list, total = logs_backend.query_logs(
-            level=level or None,
-            source=logger or None,
-            node_id=node_id or None,
-            limit=page_size,
-            offset=offset,
-        )
-        total_pages = math.ceil(total / page_size) if total > 0 else 0
-        logs = log_list
-        pagination = {
-            "page": page,
-            "page_size": page_size,
-            "total": total,
-            "total_pages": total_pages,
-        }
-    else:
-        # Standalone mode: use LogAggregatorService (SQLite, supports text search)
-        log_db_path = request.app.state.log_db_path
-        from ..services.log_aggregator_service import LogAggregatorService
-
-        service = LogAggregatorService(log_db_path)
-        levels = [level] if level else None
-        result = service.query(
-            page=page,
-            page_size=50,
-            sort_order="desc",
-            search=search,
-            levels=levels,
-        )
-        logs = result["logs"]
-        pagination = result["pagination"]
+    logs = result["logs"]
+    pagination = result["pagination"]
+    is_cluster_mode = service.is_cluster_mode
 
     # Render template
     response = templates.TemplateResponse(
@@ -10815,50 +10837,28 @@ def logs_list_partial(
     if not csrf_token:
         csrf_token = generate_csrf_token()
 
-    # Story #501 AC4: use LogsBackend when available (cluster/postgres mode)
+    # Bug #1553: LogAggregatorService is the ONE place that decides whether
+    # reads go to the cross-node backend or the local file (via the
+    # is_cross_node_backend capability check) -- replaces the duplicated
+    # inline branch + fragile "Postgres" in type(x).__name__ string match.
     logs_backend = getattr(request.app.state, "logs_backend", None)
-    # is_cluster_mode is True when the backend is PostgreSQL (node_id column visible)
-    is_cluster_mode = (
-        logs_backend is not None and "Postgres" in type(logs_backend).__name__
+    log_db_path = request.app.state.log_db_path
+    from ..services.log_aggregator_service import LogAggregatorService
+
+    service = LogAggregatorService(log_db_path, logs_backend=logs_backend)
+    levels = [level] if level else None
+    result = service.query(
+        page=page,
+        page_size=50,
+        sort_order="desc",
+        search=search,
+        levels=levels,
+        source=logger or None,
+        node_id=node_id or None,
     )
-
-    if logs_backend is not None and is_cluster_mode:
-        # Cluster mode: use LogsBackend.query_logs() for cross-node aggregation
-        import math
-
-        page_size = 50
-        offset = (page - 1) * page_size
-        log_list, total = logs_backend.query_logs(
-            level=level or None,
-            source=logger or None,
-            node_id=node_id or None,
-            limit=page_size,
-            offset=offset,
-        )
-        total_pages = math.ceil(total / page_size) if total > 0 else 0
-        logs = log_list
-        pagination = {
-            "page": page,
-            "page_size": page_size,
-            "total": total,
-            "total_pages": total_pages,
-        }
-    else:
-        # Standalone mode: use LogAggregatorService (SQLite, supports text search)
-        log_db_path = request.app.state.log_db_path
-        from ..services.log_aggregator_service import LogAggregatorService
-
-        service = LogAggregatorService(log_db_path)
-        levels = [level] if level else None
-        result = service.query(
-            page=page,
-            page_size=50,
-            sort_order="desc",
-            search=search,
-            levels=levels,
-        )
-        logs = result["logs"]
-        pagination = result["pagination"]
+    logs = result["logs"]
+    pagination = result["pagination"]
+    is_cluster_mode = service.is_cluster_mode
 
     # Render partial template
     response = templates.TemplateResponse(
@@ -10911,13 +10911,15 @@ def export_logs_web(
             status_code=400, detail="Invalid format. Must be 'json' or 'csv'"
         )
 
-    # Get log database path from app state
+    # Get log database path from app state. Bug #1553: pass logs_backend so
+    # cluster-mode exports follow the same store the writer thread uses --
+    # this endpoint previously had NO backend awareness at all.
     log_db_path = request.app.state.log_db_path
+    logs_backend = getattr(request.app.state, "logs_backend", None)
 
-    # Create LogAggregatorService instance
     from ..services.log_aggregator_service import LogAggregatorService
 
-    service = LogAggregatorService(log_db_path)
+    service = LogAggregatorService(log_db_path, logs_backend=logs_backend)
 
     # Parse level parameter
     levels = None

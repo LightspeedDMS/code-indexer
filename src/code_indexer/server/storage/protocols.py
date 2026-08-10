@@ -905,6 +905,8 @@ class LogsBackend(Protocol):
     with filtering and pagination.
     """
 
+    is_cross_node_backend: bool
+
     def insert_log(
         self,
         timestamp: str,
@@ -945,8 +947,15 @@ class LogsBackend(Protocol):
         node_id: Optional[str] = None,
         limit: int = 100,
         offset: int = 0,
+        levels: Optional[List[str]] = None,
+        search: Optional[str] = None,
+        sort_order: str = "desc",
     ) -> "Tuple[List[Dict], int]":
         """Query log records with optional filtering and pagination.
+
+        Bug #1553: levels/search/sort_order are additive -- their defaults
+        preserve the exact pre-existing behaviour for every caller that
+        predates them.
 
         Args:
             level: Filter by log level (optional).
@@ -957,6 +966,11 @@ class LogsBackend(Protocol):
             node_id: Filter by cluster node ID (optional).
             limit: Maximum number of records to return (default 100).
             offset: Number of records to skip for pagination (default 0).
+            levels: Filter by multiple log levels (optional, takes precedence
+                over level).
+            search: Case-insensitive substring match across message and
+                correlation_id (optional).
+            sort_order: "asc" or "desc" (default "desc" = newest first).
 
         Returns:
             Tuple of (list_of_log_dicts, total_count) where total_count reflects

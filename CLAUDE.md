@@ -119,7 +119,7 @@ Security-sensitive changes (permission-model edits, prompt-template edits for ca
 
 | Suite | Scope | When Required | Time |
 |-------|-------|---------------|------|
-| `fast-automation.sh` | CLI, core logic, chunking, storage | ALL changes | ~12-13 min (measured: 760s / 12,697 tests as of 2026-07-13; grows with suite size -- re-measure before trusting this number) |
+| `fast-automation.sh` | CLI, core logic, chunking, storage | ALL changes | ~21 min (measured: 1272s / 14,558 tests as of 2026-08-10; was 760s / 12,697 tests on 2026-07-13 -- runtime grew 67% while test count grew 15%, so it grows FASTER than the suite; re-measure before trusting this number) |
 | `server-fast-automation.sh` | Server (MCP/REST/services/auth/storage) | Touching `src/code_indexer/server/` | ~10-15 min |
 | `e2e-automation.sh` | 5-phase E2E: CLI standalone, CLI daemon, server in-process, CLI remote, fault-injection resiliency | Final regression gate -- ALL completed work | ~45-90 min |
 
@@ -131,7 +131,7 @@ Security-sensitive changes (permission-model edits, prompt-template edits for ca
 
 1. Targeted tests (seconds): `pytest tests/unit/.../test_X*.py -v --tb=short`
 2. Manual testing
-3. `fast-automation.sh` (zero failures, under ~13 min -- MANDATORY 900000ms timeout; a timeout hit here is NOT automatically a hang -- check the actual duration against the current baseline above before assuming one)
+3. `fast-automation.sh` (zero failures; a timeout hit here is NOT automatically a hang -- check the actual duration against the current baseline above before assuming one). At the current ~21 min baseline the suite NO LONGER FITS a single foreground run: the Bash tool caps at 600000ms, so a foreground `timeout 900` is silently truncated to 10 min and kills a healthy run. Launch it in the BACKGROUND and poll at bounded intervals instead. When polling, do not use `pgrep -c -f fast-automation` as the liveness test -- the polling shell matches its own pattern and reports the suite alive forever; confirm completion from the log's `EXIT=` line.
 4. `server-fast-automation.sh` when server code touched
 5. `e2e-automation.sh` (final gate)
 
@@ -183,7 +183,22 @@ ruff check --fix src/ tests/
 
 Zero tolerance -- never leave GitHub Actions failed. Fix in the same session. See memory: `feedback_ruff_black_version_alignment.md`.
 
-Every story DoD must require `./lint.sh` to exit 0 BEFORE merging back to `development`. CI gate is full `./lint.sh` (ruff check + ruff format check + mypy across `src/` and `tests/`), not just `mypy src/`.
+Every story DoD must require `./lint.sh` to exit 0 BEFORE merging back to `development`.
+
+What CI actually runs (`.github/workflows/main.yml`, the only workflow -- Bug #1552 fixed a case where this description was aspirational and the job did not exist):
+
+| Job | What it runs | Is it a real gate? |
+|-----|--------------|--------------------|
+| `lint` | full `./lint.sh` (ruff check + ruff format check + mypy across `src/` AND `tests/`, plus the AC15 anti-orphan check), Python 3.9 | YES |
+| `test` | a deliberate SMOKE test only -- 3 files (`test_factory.py`, `test_protocol.py`, `test_database_health_cluster.py`) across a 4-version Python matrix | NO -- it is NOT the suite |
+| `create-tag` / `create-release` | gated on `[check-version, lint, test]` | tag/release cannot be cut from a red tree |
+
+**A green CI badge does NOT mean the test suite passed** -- it means lint passed and 3 smoke files passed. The real test gates are and remain LOCAL: `fast-automation.sh`, `server-fast-automation.sh`, `e2e-automation.sh`. Anything that skips them reaches `staging` unchecked no matter how green CI looks.
+
+Two sync constraints on the `lint` job, both learned by breaking them:
+
+1. It pins `ruff`/`mypy` to the exact versions `.pre-commit-config.yaml` pins, because `pyproject`'s dev extra only FLOORS them -- an unpinned CI install can pick up a newer ruff whose formatter disagrees with every developer's local one and turn the gate red on a clean tree.
+2. It runs on **Python 3.9**, which must track `[tool.mypy] python_version` in `pyproject.toml`. That config also sets `no_site_packages = false`, so mypy PARSES third-party sources under the declared target; running the job on a newer interpreter installs modern dependencies whose syntax a 3.9 target cannot parse, and the gate then dies inside `site-packages` instead of on our code (observed: `anyio/_core/_tasks.py: Pattern matching is only supported in Python 3.10 and greater`, on a tree that was clean locally). Do NOT "modernize" this to 3.12 without also moving the mypy target.
 
 ---
 

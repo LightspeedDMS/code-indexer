@@ -565,10 +565,14 @@ def handle_admin_logs_query(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     if not log_db_path:
         return _mcp_response({"success": False, "error": "Log database not configured"})  # type: ignore[no-any-return]
 
-    # Initialize service
+    # Initialize service. Bug #1553: pass the (possibly None) logs_backend so
+    # cluster-mode reads follow the same store the writer thread uses --
+    # without this, cluster mode always reads the frozen, empty node-local
+    # logs.db once the writer's backend is wired at startup.
     from code_indexer.server.services.log_aggregator_service import LogAggregatorService
 
-    service = LogAggregatorService(log_db_path)
+    logs_backend = getattr(_utils.app_module.app.state, "logs_backend", None)
+    service = LogAggregatorService(log_db_path, logs_backend=logs_backend)
 
     # Extract parameters
     page = args.get("page", 1)
@@ -705,11 +709,13 @@ def admin_logs_export(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     if not log_db_path:
         return _mcp_response({"success": False, "error": "Log database not configured"})  # type: ignore[no-any-return]
 
-    # Initialize services
+    # Initialize services. Bug #1553: pass logs_backend so cluster-mode
+    # exports follow the same store the writer thread uses.
     from code_indexer.server.services.log_aggregator_service import LogAggregatorService
     from code_indexer.server.services.log_export_formatter import LogExportFormatter
 
-    service = LogAggregatorService(log_db_path)
+    logs_backend = getattr(_utils.app_module.app.state, "logs_backend", None)
+    service = LogAggregatorService(log_db_path, logs_backend=logs_backend)
     formatter = LogExportFormatter()
 
     # Extract parameters
