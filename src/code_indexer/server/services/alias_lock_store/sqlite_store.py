@@ -60,6 +60,15 @@ from urllib.parse import quote
 _MILLISECONDS_PER_SECOND = 1000
 _DEFAULT_BUSY_TIMEOUT_SECONDS = 5.0
 
+# is_held()'s probe uses its OWN small, fixed timeout (Issue #1546 Phase
+# 2), deliberately decoupled from the store's configured
+# busy_timeout_seconds (which governs a genuine acquire attempt's
+# contention wait, potentially deliberately long). is_held() only needs
+# to know "is someone else's BEGIN IMMEDIATE currently open" -- a near
+# -zero bound is enough to distinguish "contended" from "not contended"
+# without making callers wait meaningfully.
+_IS_HELD_PROBE_TIMEOUT_SECONDS = 0.05
+
 # Substrings SQLite uses for the specific "another connection holds the
 # writer lock" condition. Any OTHER OperationalError (malformed database,
 # read-only filesystem, etc.) must propagate rather than be silently
@@ -198,6 +207,30 @@ def _validate_non_empty_str(value: str, name: str) -> str:
     if not isinstance(value, str) or not value:
         raise ValueError(f"{name} must be a non-empty string, got {value!r}")
     return value
+
+
+def _probe_lock_contention(db_path: Path) -> bool:
+    """Non-destructive, bounded probe (Issue #1546 Phase 2): True iff
+    `db_path`'s writer lock is currently held by ANOTHER connection.
+
+    Reuses `_open_and_begin_immediate()` -- the exact same mechanism a
+    real `try_acquire()` uses -- with the small, fixed
+    `_IS_HELD_PROBE_TIMEOUT_SECONDS` bound, but ALWAYS rolls back and
+    closes rather than ever returning the connection as a handle: this
+    probe must never actually hold the lock, even momentarily, past the
+    instant it needs to test contention. If the probe succeeds (no
+    contention), rolling back is a true no-op -- no row was ever
+    inserted, so nothing changes.
+    """
+    conn = _open_and_begin_immediate(db_path, _IS_HELD_PROBE_TIMEOUT_SECONDS)
+    if conn is None:
+        # Contended: someone else's BEGIN IMMEDIATE is currently open.
+        return True
+    try:
+        conn.execute("ROLLBACK")
+    finally:
+        conn.close()
+    return False
 
 
 _CLOSED_CONNECTION_MESSAGE_SUBSTRING = "cannot operate on a closed database"
@@ -379,6 +412,18 @@ class SqliteAliasLockStore:
                     ) from exc
             finally:
                 conn.close()
+
+    def is_held(self, lock_key: str) -> bool:
+        """Non-blocking contention probe (Issue #1546 Phase 2) -- see
+        `AliasLockStore.is_held()`'s docstring for the full contract and
+        the architecture reason this is a boolean, not a metadata read.
+        Body delegates to the module-level `_probe_lock_contention()`
+        helper; this method's job is only to validate `lock_key` and
+        resolve its dedicated file path.
+        """
+        lock_key = _validate_non_empty_str(lock_key, "lock_key")
+        db_path = _db_path_for_lock_key(self._lock_dir, lock_key)
+        return _probe_lock_contention(db_path)
 
     def renew(self, handle) -> None:
         """Diagnostic-only heartbeat: exact-token UPDATE of

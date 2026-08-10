@@ -118,6 +118,23 @@ def _temporal_legacy_migration_settings(config: ServerConfig) -> Dict[str, Any]:
     }
 
 
+def _alias_lock_settings(config: ServerConfig) -> Dict[str, Any]:
+    """Return alias_lock settings dict from ServerConfig (Issue #1546
+    Phase 2).
+
+    Surfaces AliasLockConfig's single field for the Web UI Config screen,
+    mirroring `_fleet_migration_settings`'s pattern. `db_backed_enabled`
+    defaults to False -- the old file-based WriteLockManager mechanism
+    stays active until an operator explicitly confirms (via the per-node
+    server_version dashboard) that every node runs the new code.
+    """
+    alc = config.alias_lock_config
+    assert alc is not None  # Guaranteed by ServerConfig.__post_init__
+    return {
+        "db_backed_enabled": alc.db_backed_enabled,
+    }
+
+
 def _search_timeouts_settings(config: ServerConfig) -> Dict[str, Any]:
     """Return search_timeouts settings dict from ServerConfig (Issue #1398).
 
@@ -800,6 +817,7 @@ class ConfigService:
             # Story #1397 - HNSW orphan-repair sweep Web UI configuration
             "hnsw_orphan_sweep": _hnsw_orphan_sweep_settings(config),
             "fleet_migration": _fleet_migration_settings(config),
+            "alias_lock": _alias_lock_settings(config),
             # Issue #1398 - Query & search timeouts Web UI configuration
             "search_timeouts": _search_timeouts_settings(config),
             # Story #1418 Phase 3 - Embedding & reranker call tracking config
@@ -1046,6 +1064,9 @@ class ConfigService:
         # Issue #1548 - Legacy temporal shard relocation Web UI configuration
         elif category == "temporal_legacy_migration":
             self._update_temporal_legacy_migration_setting(config, key, value)
+        # Issue #1546 Phase 2 - DB-backed alias lock rollout gate
+        elif category == "alias_lock":
+            self._update_alias_lock_setting(config, key, value)
         # Issue #1398 - Query & search timeouts Web UI configuration
         elif category == "search_timeouts":
             self._update_search_timeouts_setting(config, key, value)
@@ -2532,6 +2553,23 @@ class ConfigService:
             tlm.cleanup_authorized = _parse_bool(value)
         else:
             raise ValueError(f"Unknown temporal_legacy_migration setting: {key}")
+
+    def _update_alias_lock_setting(
+        self, config: ServerConfig, key: str, value: Any
+    ) -> None:
+        """Update an alias_lock setting (Issue #1546 Phase 2).
+
+        `db_backed_enabled` is coerced via the shared `_parse_bool`
+        helper, mirroring `_update_temporal_legacy_migration_setting`'s
+        coercion -- the Web UI submits an explicit "true"/"false" string
+        (boolean <select>, not a checkbox).
+        """
+        alc = config.alias_lock_config
+        assert alc is not None  # Guaranteed by ServerConfig.__post_init__
+        if key == "db_backed_enabled":
+            alc.db_backed_enabled = _parse_bool(value)
+        else:
+            raise ValueError(f"Unknown alias_lock setting: {key}")
 
     def _update_hnsw_orphan_sweep_setting(
         self, config: ServerConfig, key: str, value: Any

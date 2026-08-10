@@ -362,6 +362,13 @@ def _run_migration_sequence(
                 ),
             )
 
+    # Issue #1546 AC5: ownership-loss checkpoint immediately before the
+    # migration's work becomes durably published and query-visible --
+    # the last chance to detect the write lock is no longer legitimately
+    # held before firing the AC10 snapshot trigger.
+    refresh_scheduler.raise_if_write_lock_ownership_lost(
+        bare_alias, owner_name=MIGRATION_OWNER_NAME
+    )
     snapshot_path = trigger_post_consolidation_snapshot(
         refresh_scheduler, bare_alias, str(base_clone_path)
     )

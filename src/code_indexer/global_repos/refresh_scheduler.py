@@ -308,6 +308,8 @@ class RefreshScheduler:
         job_tracker: Optional["JobTracker"] = None,
         snapshot_manager: Optional["VersionedSnapshotManager"] = None,
         golden_repo_metadata_backend: Optional[Any] = None,
+        alias_lock_db_backed_enabled_getter: Optional[Callable[[], bool]] = None,
+        alias_lock_store_resolver: Optional[Callable[[], Any]] = None,
     ):
         """
         Initialize the refresh scheduler.
@@ -333,6 +335,20 @@ class RefreshScheduler:
                 golden_repos_metadata table alongside the -global-alias-keyed
                 global_repos table (self.registry) -- the two are structurally separate
                 stores for the same logical repo and can otherwise drift independently.
+            alias_lock_db_backed_enabled_getter: Issue #1546 Phase 2 -- optional
+                callable returning the CURRENT value of the operator-controlled
+                rollout flag (AliasLockConfig.db_backed_enabled), forwarded
+                unchanged into the AliasLockCoordinator installed as
+                `self.write_lock_manager`. `None` (the default -- every
+                existing caller that predates this story, including CLI/solo
+                construction) preserves byte-identical pure file-based
+                behavior, matching AC7's mixed-fleet rollout default.
+            alias_lock_store_resolver: Issue #1546 Phase 2 -- optional callable
+                returning the AliasLockStore to use for a DB-backed acquire
+                (production wiring: server/services/alias_lock_store/factory.py,
+                dispatching PostgreSQL/SQLite via is_postgres_storage_mode()).
+                Only ever consulted when alias_lock_db_backed_enabled_getter()
+                returns True.
         """
         self.golden_repos_dir = Path(golden_repos_dir)
         self.config_source = config_source
@@ -342,6 +358,8 @@ class RefreshScheduler:
         self.background_job_manager = background_job_manager
         self._job_tracker = job_tracker
         self._snapshot_manager = snapshot_manager
+        self._alias_lock_db_backed_enabled_getter = alias_lock_db_backed_enabled_getter
+        self._alias_lock_store_resolver = alias_lock_store_resolver
 
         # Initialize managers
         self.alias_manager = AliasManager(str(self.golden_repos_dir / "aliases"))
@@ -379,13 +397,24 @@ class RefreshScheduler:
         self._repo_locks: dict[str, threading.Lock] = {}
         self._repo_locks_lock = threading.Lock()  # Protects _repo_locks dict
 
-        # File-based write-lock manager for external writers (Story #230).
-        # Replaces the in-memory threading.Lock registry from Story #227.
-        # Keyed by repo alias without -global suffix (e.g., "cidx-meta").
-        from .write_lock_manager import WriteLockManager
+        # Write-lock coordinator for external writers (Story #230, replaced
+        # by Issue #1546 Phase 2). Preserves WriteLockManager's exact
+        # bool-based public API while dispatching per-alias between the
+        # legacy file-based lock (golden_repos_dir/.locks/{alias}.lock) and
+        # a DB-backed AliasLockStore, gated behind
+        # alias_lock_db_backed_enabled_getter (default: always-False, i.e.
+        # pure file-based, byte-identical to the pre-#1546 WriteLockManager).
+        # Every real call site in this codebase reaches the lock exclusively
+        # through self.write_lock_manager (directly) or the
+        # acquire_write_lock/release_write_lock/is_write_locked facade
+        # methods below (which delegate to it 1:1), so installing this ONE
+        # coordinator here rewires all of them without any call-site changes.
+        from .alias_lock_coordinator import AliasLockCoordinator
 
-        self.write_lock_manager = WriteLockManager(
-            golden_repos_dir=self.golden_repos_dir
+        self.write_lock_manager = AliasLockCoordinator(
+            golden_repos_dir=self.golden_repos_dir,
+            db_backed_enabled_getter=self._alias_lock_db_backed_enabled_getter,
+            store_resolver=self._alias_lock_store_resolver,
         )
 
         # Story #295: Per-alias consecutive fetch failure counters and re-clone
@@ -1186,6 +1215,57 @@ class RefreshScheduler:
             True if write lock is held, False otherwise
         """
         return self.write_lock_manager.is_locked(alias)
+
+    def raise_if_write_lock_ownership_lost(
+        self,
+        alias: str,
+        owner_name: str,
+        owner_token: Optional[str] = None,
+    ) -> None:
+        """
+        Issue #1546 AC5 ownership-loss checkpoint: call this at each
+        lease-holding phase of a long-running operation that holds the
+        write lock for `alias` (e.g. after a clone step, immediately
+        before an alias swap, before a post-loop snapshot) to detect
+        that ownership was lost partway through and abort BEFORE any
+        further destructive work, rather than continuing to act on data
+        the caller may no longer have exclusive ownership of.
+
+        Backend-agnostic: raises the SAME exception type regardless of
+        which mechanism is active. DB-backed mode's
+        AliasLockCoordinator.renew() already raises
+        AliasLockOwnershipLostError natively on loss (a zero-rows
+        -affected exact-token UPDATE) -- this propagates unwrapped.
+        File mode's WriteLockManager.renew() instead returns False on
+        the same condition (no lock file present, or an owner/
+        owner_token mismatch) -- translated here into the SAME exception
+        type so every call site gets ONE uniform contract, never needing
+        to branch on which backend is active.
+
+        Args:
+            alias: Repo alias without -global suffix.
+            owner_name: Must match the owner name used when acquiring
+                the lock.
+            owner_token: Must match the owner_token used when acquiring
+                the lock, if one was supplied.
+
+        Raises:
+            AliasLockOwnershipLostError: ownership was lost (or the lock
+                was never held by this caller in the first place).
+        """
+        from code_indexer.server.services.alias_lock_store.base import (
+            AliasLockOwnershipLostError,
+        )
+
+        renewed = self.write_lock_manager.renew(
+            alias, owner_name=owner_name, owner_token=owner_token
+        )
+        if not renewed:
+            raise AliasLockOwnershipLostError(
+                f"write lock ownership check failed for alias={alias!r} "
+                f"owner={owner_name!r} (renew reported failure) -- "
+                f"ownership lost, or the lock was never held"
+            )
 
     def check_refresh_not_in_progress(self, alias: str) -> None:
         """
@@ -2507,6 +2587,22 @@ class RefreshScheduler:
                                 "message": "Refresh integrity gate failed; publish skipped",
                                 "integrity_gate_detail": detail_summary,
                             }
+
+                        # Issue #1546 Fix 3 (Codex round review):
+                        # ownership-loss checkpoint immediately before the
+                        # destructive/publishing work below. The write
+                        # lock was acquired at the top of this `with`
+                        # block and held across indexing + the integrity
+                        # gate, but neither of those phases re-verified
+                        # ownership. A DB connection death (DB-backed
+                        # mode) or an external lock-file eviction (file
+                        # mode) mid-indexing rolls back/frees the lock
+                        # silently -- without this check, the code would
+                        # still create and publish a snapshot as if it
+                        # still held exclusive ownership.
+                        self.raise_if_write_lock_ownership_lost(
+                            repo_name, owner_name="refresh_scheduler"
+                        )
 
                         new_index_path = self._create_snapshot(
                             alias_name=alias_name, source_path=source_path

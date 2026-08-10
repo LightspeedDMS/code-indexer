@@ -3780,6 +3780,14 @@ class GoldenRepoManager:
                         phase="swap",
                         detail="branch change: activating new snapshot...",
                     )
+                # Issue #1546 AC5: ownership-loss checkpoint immediately
+                # before the swap -- the last chance to detect that this
+                # write lock is no longer legitimately held before
+                # publishing the new snapshot.
+                if scheduler is not None:
+                    scheduler.raise_if_write_lock_ownership_lost(
+                        alias, owner_name="branch_change"
+                    )
                 self._cb_swap_alias(alias, snapshot)
                 if progress_callback is not None:
                     progress_callback(
@@ -4398,6 +4406,15 @@ class GoldenRepoManager:
                         / alias
                     )
                     current_target = scheduler.alias_manager.read_alias(global_alias)
+
+                    # Issue #1546 AC5: ownership-loss checkpoint immediately
+                    # before the post-loop snapshot+swap publish sequence --
+                    # the last chance to detect the write lock is no longer
+                    # legitimately held before creating/publishing the new
+                    # snapshot.
+                    scheduler.raise_if_write_lock_ownership_lost(
+                        alias, owner_name="add_index"
+                    )
 
                     new_snapshot = scheduler._create_snapshot(
                         alias_name=global_alias,

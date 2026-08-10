@@ -285,6 +285,52 @@ def is_postgres_storage_mode() -> bool:
     return bool(getattr(_app_state, "storage_mode", None) == "postgres")
 
 
+STORAGE_MODE_PENDING_SENTINEL = "__pending__"
+"""Explicit, in-band marker `lifespan.py` stamps onto
+``app.state.storage_mode`` as the very first thing its startup function
+does, immediately overwritten a few lines later with the real resolved
+value ("sqlite"/"postgres"). Exists solely to close Issue #1546 Fix 1
+(Codex review): ``AliasLockStoreFactory.resolve()`` must never be able to
+silently cache a node-local SQLite lock store chosen while cluster mode is
+still genuinely unknown -- see :func:`is_storage_mode_undetermined`.
+"""
+
+
+def is_storage_mode_undetermined() -> bool:
+    """True ONLY during the brief real-server startup window where
+    ``app.state.storage_mode`` has been explicitly stamped with
+    :data:`STORAGE_MODE_PENDING_SENTINEL` but not yet overwritten with its
+    real value.
+
+    Deliberately narrower than "the storage_mode attribute is simply
+    absent": the overwhelming majority of this project's unit tests import
+    ``code_indexer.server.app`` (which populates ``app.state``) without
+    ever running its ``lifespan`` context manager, so ``storage_mode`` is
+    never assigned there at all -- that must NOT be confused with the
+    genuine pending window, or every such test would start failing loud.
+    Only ``lifespan.py``'s own startup code ever writes the sentinel, so
+    this function returns False for: no server process at all (pure CLI),
+    a server process whose lifespan never ran (most unit tests), and a
+    server process whose storage mode is already resolved to any real
+    value ("sqlite" or "postgres"). It returns True only for the narrow,
+    real in-process window the sentinel marks.
+
+    Issue #1546 Fix 1 (Codex review): without this signal,
+    ``AliasLockStoreFactory.resolve()`` would treat "not yet known" the
+    same as "definitely not postgres" (``is_postgres_storage_mode()``
+    returns False in both cases) and silently cache a node-local SQLite
+    lock store that other cluster nodes cannot see -- reproducing the
+    exact split-brain bug this mechanism exists to eliminate. Callers that
+    must never make that mistake check this FIRST and fail loud instead.
+    """
+    _app_state = _running_server_app_state()
+    if _app_state is None:
+        return False
+    return bool(
+        getattr(_app_state, "storage_mode", None) == STORAGE_MODE_PENDING_SENTINEL
+    )
+
+
 def resolve_backend_registry_state(caller_name: str = "") -> Tuple[Optional[Any], bool]:
     """
     Inspect the running server's app.state to determine cluster (postgres)

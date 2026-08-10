@@ -116,6 +116,13 @@ class GlobalReposLifecycleManager:
         # check_refresh_not_in_progress()'s fail-fast guard a permanent
         # no-op -- the activation/refresh race Bug #1393 was meant to close
         # never actually gets caught in production.
+        # Issue #1546 Phase 2: lazily-memoized AliasLockStoreFactory, built
+        # on first actual use via _resolve_alias_lock_store() below -- never
+        # at construction time. Mirrors the CleanupManager
+        # min_retention_age_getter lambda above, which also defers its
+        # get_config_service() read until the value is genuinely needed.
+        self._alias_lock_store_factory: Optional[Any] = None
+
         self.refresh_scheduler = RefreshScheduler(
             golden_repos_dir=str(self.golden_repos_dir),
             config_source=self.global_ops,
@@ -126,6 +133,8 @@ class GlobalReposLifecycleManager:
             job_tracker=job_tracker,
             snapshot_manager=snapshot_manager,
             golden_repo_metadata_backend=golden_repo_metadata_backend,
+            alias_lock_db_backed_enabled_getter=self._alias_lock_db_backed_enabled,
+            alias_lock_store_resolver=self._resolve_alias_lock_store,
         )
 
         # Track running state
@@ -136,6 +145,34 @@ class GlobalReposLifecycleManager:
             f"GlobalReposLifecycleManager initialized for {self.golden_repos_dir}",
             extra={"correlation_id": get_correlation_id()},
         )
+
+    def _alias_lock_db_backed_enabled(self) -> bool:
+        """Issue #1546 Phase 2: live read of the operator-controlled
+        rollout flag (AliasLockConfig.db_backed_enabled, Web UI Config
+        Screen) on EVERY call -- never cached -- so a flag flip takes
+        effect immediately, with no server restart required."""
+        from ..utils.config_manager import AliasLockConfig
+
+        alc = get_config_service().get_config().alias_lock_config or AliasLockConfig()
+        return bool(alc.db_backed_enabled)
+
+    def _resolve_alias_lock_store(self):
+        """Issue #1546 Phase 2: lazily construct and memoize the
+        AliasLockStoreFactory on first actual use, then delegate to its
+        resolve() (PostgreSQL/SQLite dispatch via is_postgres_storage_mode()).
+        Deferred construction mirrors this class's own
+        min_retention_age_getter lambda above -- neither requires
+        get_config_service() to be bootstrapped before
+        GlobalReposLifecycleManager itself is built."""
+        if self._alias_lock_store_factory is None:
+            from ..services.alias_lock_store.factory import AliasLockStoreFactory
+
+            server_config = get_config_service().get_config()
+            self._alias_lock_store_factory = AliasLockStoreFactory(
+                postgres_dsn=getattr(server_config, "postgres_dsn", None),
+                golden_repos_dir=str(self.golden_repos_dir),
+            )
+        return self._alias_lock_store_factory.resolve()
 
     def is_running(self) -> bool:
         """

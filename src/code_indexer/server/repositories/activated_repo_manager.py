@@ -3347,6 +3347,15 @@ class ActivatedRepoManager:
                 extra={"correlation_id": get_correlation_id()},
             )
 
+            # Issue #1546 AC5: ownership-loss checkpoint immediately
+            # after the (potentially very long) CoW clone completes --
+            # detects the write lock is no longer legitimately held
+            # before any further git manipulation continues under it.
+            if scheduler is not None:
+                scheduler.raise_if_write_lock_ownership_lost(
+                    golden_repo_alias, owner_name="activation_clone"
+                )
+
             # Step 2: Detect and convert bare repositories (Story #636)
             # Golden repos are stored as bare, but activated repos need working trees
             result = subprocess.run(
