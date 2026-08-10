@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [12.8.0] - 2026-08-10
+
+### Changed
+
+- Story #1546 Phase 2: golden-repo alias locking is now wired onto the DB-backed store built in Phase 1. That store shipped on 2026-08-07 complete and fully tested, and was imported by ZERO production files -- `WriteLockManager` remained the live mechanism, coordinating every golden-repo operation with JSON lock files on an NFS mount configured `vers=3,nolock,hard`, where `nolock` makes byte-range locking client-side-only so file locks do not coordinate across cluster nodes at all. A new `AliasLockCoordinator` is installed as `RefreshScheduler.write_lock_manager`; because all eight real call sites reach the lock through that facade, one wiring point rewires every one of them with no call-site signature changes (Bug #1548's `owner_token` already supplied the per-acquisition identity the store needs as a handle). Gated behind a new operator-controlled flag `alias_lock.db_backed_enabled` (default disabled, Web UI configurable) because nodes auto-update independently and an implicit cutover would leave part of the fleet on file locks and part on DB locks, unable to see each other's locks; release and renew therefore dispatch on how a lock was ACQUIRED rather than on the live flag value, so flipping mid-hold cannot leak a lock. Backend selection is treated as correctness rather than configuration: cluster mode resolves to PostgreSQL, solo to node-local SQLite, resolution fails loud when storage mode is not yet determined (an explicit pending sentinel now distinguishes "not postgres" from "not yet known"), and the SQLite lock database can never be placed under the golden-repos mount. Independent review additionally found and fixed a factory that could cache a node-local SQLite store during the storage-mode lazy-init window, cross-mechanism checks that could not see across processes, two destructive phases (refresh publish, dependency-map lifecycle repair) running with no ownership checkpoint, and a lifecycle wiring gap where the factory was never given `golden_repos_dir` so its containment check had nothing to validate against. `WriteLockManager` is deliberately retained as the default until an operator flips the flag; its deletion is post-rollout work.
+
 ## [12.7.0] - 2026-08-09
 
 ### Fixed
