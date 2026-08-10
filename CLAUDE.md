@@ -119,7 +119,7 @@ Security-sensitive changes (permission-model edits, prompt-template edits for ca
 
 | Suite | Scope | When Required | Time |
 |-------|-------|---------------|------|
-| `fast-automation.sh` | CLI, core logic, chunking, storage | ALL changes | ~12-13 min (measured: 760s / 12,697 tests as of 2026-07-13; grows with suite size -- re-measure before trusting this number) |
+| `fast-automation.sh` | CLI, core logic, chunking, storage | ALL changes | ~21 min (measured: 1272s / 14,558 tests as of 2026-08-10; was 760s / 12,697 tests on 2026-07-13 -- runtime grew 67% while test count grew 15%, so it grows FASTER than the suite; re-measure before trusting this number) |
 | `server-fast-automation.sh` | Server (MCP/REST/services/auth/storage) | Touching `src/code_indexer/server/` | ~10-15 min |
 | `e2e-automation.sh` | 5-phase E2E: CLI standalone, CLI daemon, server in-process, CLI remote, fault-injection resiliency | Final regression gate -- ALL completed work | ~45-90 min |
 
@@ -131,7 +131,7 @@ Security-sensitive changes (permission-model edits, prompt-template edits for ca
 
 1. Targeted tests (seconds): `pytest tests/unit/.../test_X*.py -v --tb=short`
 2. Manual testing
-3. `fast-automation.sh` (zero failures, under ~13 min -- MANDATORY 900000ms timeout; a timeout hit here is NOT automatically a hang -- check the actual duration against the current baseline above before assuming one)
+3. `fast-automation.sh` (zero failures; a timeout hit here is NOT automatically a hang -- check the actual duration against the current baseline above before assuming one). At the current ~21 min baseline the suite NO LONGER FITS a single foreground run: the Bash tool caps at 600000ms, so a foreground `timeout 900` is silently truncated to 10 min and kills a healthy run. Launch it in the BACKGROUND and poll at bounded intervals instead. When polling, do not use `pgrep -c -f fast-automation` as the liveness test -- the polling shell matches its own pattern and reports the suite alive forever; confirm completion from the log's `EXIT=` line.
 4. `server-fast-automation.sh` when server code touched
 5. `e2e-automation.sh` (final gate)
 
