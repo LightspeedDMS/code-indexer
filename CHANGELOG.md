@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [12.10.0] - 2026-08-10
+
+### Fixed
+
+- Story #1546 Phase 3 follow-up: the v12.9.0 default flip was INERT on every existing deployment, and this release is what actually makes DB-backed alias locking take effect. Runtime config persists as a full JSON blob and is merged OVER the dataclass defaults on load, so a stored value always beats a default -- changing `AliasLockConfig.db_backed_enabled`'s default therefore only reached deployments that had never saved runtime config, which in practice is none. Confirmed live on the 3-node staging cluster: all three nodes ran 12.9.0 and were still using file-based locking, with a no-config-change three-node race producing the file-lock split-brain signature (all three admitted, none refused, two reporting lost ownership mid-operation) identical to the control run with the setting explicitly disabled. The fix is a one-time promotion in `_merge_runtime_config` -- the load path every server executes at startup -- which sets the value and persists it to whichever backend is live. Its discriminator is the PRESENCE of a new internal `db_backed_enabled_promoted` marker in the raw stored blob, not its value: every save path serialises the full dataclass, so any blob written after this migration carries the key, and one missing it can only predate the migration. That distinguishes "false because it predates Phase 3" (promote once) from "false because an operator deliberately rolled back" (never touch) -- a value-based check cannot, since both are simply false, and silently overriding an operator's rollback would be the same class of defect inverted. Also fixes a latent hazard found while wiring it: the `lifecycle_analysis_config` save path re-persisted a stale pre-merge dict that would have clobbered the promotion write moments after it happened. The marker is internal and never surfaced as a Web UI setting.
+
 ## [12.9.0] - 2026-08-10
 
 ### Changed
