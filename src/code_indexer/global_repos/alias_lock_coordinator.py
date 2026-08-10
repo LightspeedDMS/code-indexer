@@ -74,11 +74,14 @@ acquire under the OTHER mechanism landing in the remaining, now much
 narrower window between a check and the corresponding act is still
 possible in principle and is NOT eliminated by this code. This residual
 is accepted, not ignored, for two reasons: (1) the DB-backed rollout is
-gated operationally -- ``AliasLockConfig.db_backed_enabled`` is meant to
-be flipped fleet-wide only after confirming every node runs this code
-(mirrors Story #1460's rollout gate), so the window where two DIFFERENT
-mechanisms could genuinely be attempted concurrently for the SAME alias
-is itself bounded to the flip transition, not steady-state operation;
+gated operationally -- ``AliasLockConfig.db_backed_enabled`` defaults to
+True as of Issue #1546 Phase 3 (proven correct on a live 3-node staging
+cluster), with the flag retained as an emergency rollback path to the
+OLD file-based mechanism (e.g. for a fleet with nodes still mid-rollout
+to the new code, mirrors Story #1460's rollout-gate pattern), so the
+window where two DIFFERENT mechanisms could genuinely be attempted
+concurrently for the SAME alias is itself bounded to a flip transition
+(in either direction), not steady-state operation;
 (2) within EITHER mechanism alone, the underlying primitive (the DB
 transaction's atomic INSERT, or the file lock's atomic O_CREAT|O_EXCL)
 still fully serializes every caller of THAT mechanism against each

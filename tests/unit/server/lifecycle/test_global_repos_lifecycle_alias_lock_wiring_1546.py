@@ -69,8 +69,27 @@ class TestAliasLockGetterWiring:
         assert getter is not None
         assert getter() is True
 
-    def test_getter_reflects_live_config_flag_false_by_default(self, tmp_path):
+    def test_getter_reflects_live_config_flag_true_by_default(self, tmp_path):
         fake_config = _FakeServerConfig(alias_lock_config=AliasLockConfig())
+        set_config_service(_FakeConfigService(fake_config))
+
+        lifecycle = GlobalReposLifecycleManager(
+            golden_repos_dir=str(tmp_path / "golden-repos"),
+        )
+
+        getter = lifecycle.refresh_scheduler._alias_lock_db_backed_enabled_getter
+        assert getter is not None
+        assert getter() is True
+
+    def test_getter_reflects_live_config_flag_false_when_explicitly_disabled(
+        self, tmp_path
+    ):
+        """The emergency-rollback path: an operator explicitly disabling
+        the flag (e.g. a fleet with nodes still mid-rollout to the new
+        code) must still be observed correctly through the getter."""
+        fake_config = _FakeServerConfig(
+            alias_lock_config=AliasLockConfig(db_backed_enabled=False)
+        )
         set_config_service(_FakeConfigService(fake_config))
 
         lifecycle = GlobalReposLifecycleManager(
@@ -85,7 +104,9 @@ class TestAliasLockGetterWiring:
         """The getter must re-read the config on EVERY call, not cache a
         snapshot at construction time -- an operator flipping the Web UI
         toggle must take effect without a server restart."""
-        fake_config = _FakeServerConfig(alias_lock_config=AliasLockConfig())
+        fake_config = _FakeServerConfig(
+            alias_lock_config=AliasLockConfig(db_backed_enabled=False)
+        )
         set_config_service(_FakeConfigService(fake_config))
 
         lifecycle = GlobalReposLifecycleManager(

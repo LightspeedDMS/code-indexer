@@ -1136,15 +1136,18 @@ class AliasLockConfig:
     use file locks and others use DB locks is unsafe (they would not see
     each other's locks at all).
 
-    `db_backed_enabled` therefore defaults to False (the OLD file-based
-    mechanism stays active) and requires an explicit operator opt-in,
-    mirroring `FleetMigrationConfig`/`TemporalLegacyMigrationConfig`'s own
-    rollout-gate pattern (Epic #1454 Story #1460): flip it only after
-    confirming via the existing per-node `server_version` dashboard that
-    every node runs the new code.
+    Issue #1546 Phase 3 promoted `db_backed_enabled` to default True: the
+    DB-backed mechanism has been proven correct on a live 3-node staging
+    cluster (deterministic A-B-A toggle -- exactly one of three
+    simultaneous same-alias operations acquired with the flag on; a
+    split-brain reproduced with it off), so the DB-backed lock is now the
+    default cross-node-correct behavior. The flag remains as an emergency
+    rollback path to the OLD file-based mechanism for one release (e.g. a
+    fleet with nodes still mid-rollout to the new code); it is not yet
+    removed.
     """
 
-    db_backed_enabled: bool = False
+    db_backed_enabled: bool = True
 
 
 @dataclass
