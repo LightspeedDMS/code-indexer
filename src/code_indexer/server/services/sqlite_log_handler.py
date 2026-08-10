@@ -132,6 +132,12 @@ class SQLiteLogHandler(logging.Handler):
         self._last_stderr_warn: float = 0.0
         self._writer_thread: Optional[threading.Thread] = None
 
+        # Bug #1553: records lost because logs_backend.insert_log_batch()
+        # failed (raised or returned False). Distinct from _dropped (which
+        # tracks queue-saturation drops) -- this tracks store-write failures.
+        self._backend_write_failures: int = 0
+        self._last_backend_failure_warn: float = 0.0
+
         if logs_backend is not None:
             # AC2: Skip SQLite init entirely when backend provided at construction.
             # No local database file is created in PG mode.
@@ -159,6 +165,30 @@ class SQLiteLogHandler(logging.Handler):
     def dropped_count(self) -> int:
         """Number of log records dropped due to a saturated writer queue."""
         return self._dropped
+
+    @property
+    def backend_write_failure_count(self) -> int:
+        """Number of log records lost because a backend write failed (Bug #1553)."""
+        return self._backend_write_failures
+
+    def _record_backend_write_failure(self, record_count: int) -> None:
+        """Count records lost to a failing logs_backend and surface via stderr.
+
+        Mirrors _record_drop's exact throttled-stderr pattern (Bug #1078):
+        stderr bypasses the logging system entirely, so this cannot recurse
+        even though it is called from inside the writer thread's own DB-write
+        try/except. Never retries, never falls back to another store, never
+        blocks -- the writer thread must keep running regardless.
+        """
+        self._backend_write_failures += record_count
+        now = time.monotonic()
+        if now - self._last_backend_failure_warn >= _STDERR_THROTTLE_S:
+            self._last_backend_failure_warn = now
+            sys.stderr.write(
+                f"[SQLiteLogHandler] backend insert_log_batch failed -- "
+                f"{self._backend_write_failures} log record(s) discarded so far "
+                "(cross-node log store may be unreachable)\n"
+            )
 
     def _record_drop(self) -> None:
         """Count a dropped record and surface it via a throttled stderr warning.
@@ -470,7 +500,13 @@ class SQLiteLogHandler(logging.Handler):
                         )
                         for (ts, lvl, src, msg, cid, uid, rpath, extra, alias) in batch
                     ]
-                    self._logs_backend.insert_log_batch(expanded)
+                    try:
+                        backend_success = self._logs_backend.insert_log_batch(expanded)
+                    except Exception:
+                        self._record_backend_write_failure(len(batch))
+                    else:
+                        if backend_success is False:
+                            self._record_backend_write_failure(len(batch))
                 else:
                     # Direct-SQLite path: executemany in ONE transaction.
                     # alias is persisted to its own column (Story #876 Phase C).
