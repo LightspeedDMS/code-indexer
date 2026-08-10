@@ -17,6 +17,7 @@ from code_indexer.server.logging_utils import format_error_log
 from code_indexer.server.services.sqlite_log_handler import SQLiteLogHandler
 from code_indexer.server.startup.bootstrap import _detect_repo_root
 from code_indexer.server.storage.database_manager import DatabaseConnectionManager
+from code_indexer.server.utils.registry_factory import STORAGE_MODE_PENDING_SENTINEL
 
 logger = logging.getLogger(__name__)
 
@@ -204,6 +205,21 @@ def make_lifespan(
         - Shutdown: Stop background services gracefully
         - Shutdown: Clean up resources
         """
+        # Issue #1546 Fix 1 (Codex review): stamp the explicit "still
+        # resolving" sentinel as the VERY FIRST statement of startup,
+        # before ANYTHING else runs -- including the storage_mode
+        # computation below. This closes a design-level hazard: if any
+        # future refactor causes background work (e.g. a scheduler's
+        # background thread) to be kicked off before the real
+        # app.state.storage_mode assignment a few lines down, that code
+        # would see the sentinel (via is_storage_mode_undetermined())
+        # instead of a bare missing attribute -- letting
+        # AliasLockStoreFactory.resolve() fail loud instead of silently
+        # caching a node-local SQLite lock store invisible to other
+        # cluster nodes. Overwritten unconditionally by the real value
+        # immediately below; nothing observes it in steady state.
+        app.state.storage_mode = STORAGE_MODE_PENDING_SENTINEL
+
         # Get server data directory (used by multiple components)
         server_data_dir = os.environ.get(
             "CIDX_SERVER_DATA_DIR", str(Path.home() / ".cidx-server")

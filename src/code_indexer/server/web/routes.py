@@ -381,6 +381,8 @@ _VALID_CONFIG_SECTIONS = (
     "fleet_migration",
     # Issue #1548 - Legacy temporal shard relocation configuration
     "temporal_legacy_migration",
+    # Issue #1546 Phase 2 - DB-backed alias lock rollout gate
+    "alias_lock",
     # Issue #1398 - Query & search timeouts configuration
     "search_timeouts",
     # Story #977 - X-Ray precision AST-aware code search configuration
@@ -6492,6 +6494,8 @@ def _get_current_config() -> dict:
         FleetMigrationConfig,
         # Issue #1548 - Legacy temporal shard relocation configuration
         TemporalLegacyMigrationConfig,
+        # Issue #1546 Phase 2 - DB-backed alias lock rollout gate
+        AliasLockConfig,
         # Issue #1398 - Query & search timeouts configuration
         SearchTimeoutsConfig,
         # Story #1418 Phase 3 - Embedding & reranker call tracking config
@@ -6728,6 +6732,8 @@ def _get_current_config() -> dict:
         "temporal_legacy_migration": settings.get(
             "temporal_legacy_migration", asdict(TemporalLegacyMigrationConfig())
         ),
+        # Issue #1546 Phase 2: DB-backed alias lock rollout gate
+        "alias_lock": settings.get("alias_lock", asdict(AliasLockConfig())),
         # Issue #1398: Query & search timeouts configuration
         "search_timeouts": settings.get(
             "search_timeouts", asdict(SearchTimeoutsConfig())

@@ -228,3 +228,34 @@ class AliasLockStore(Protocol):
                 unwrapped, and leaves the connection untouched.
         """
         ...
+
+    def is_held(self, lock_key: str) -> bool:
+        """Issue #1546 Phase 2: non-blocking probe of whether `lock_key`
+        is CURRENTLY held by ANYONE, WITHOUT acquiring the lock for keeps.
+
+        Needed by ``WriteLockManager``'s DB-backed dispatch to implement
+        the legacy file-based ``is_locked()``/``get_lock_info()`` API's
+        cross-process visibility contract.
+
+        Architecture fact this method's contract follows from (see this
+        module's own docstring: the lock IS a held, UNCOMMITTED
+        transaction, committed exactly once, at ``release()``): the row
+        is genuinely INVISIBLE to any other connection for as long as it
+        is held -- a plain SELECT on a different connection cannot see
+        an uncommitted INSERT in another connection's open transaction,
+        on EITHER backend. There is therefore no way to observe WHO
+        holds a lock from outside it -- only WHETHER something holds it,
+        via a bounded, ROLLED-BACK-BEFORE-RETURNING attempt using the
+        exact same acquire mechanism ``try_acquire()`` uses (never an
+        independent read path, since none exists that could see the
+        data). This is why the contract is a plain boolean, never a
+        metadata dict.
+
+        Returns:
+            ``True`` if `lock_key` is currently held by any connection
+            (including this store's own, from a different handle).
+            ``False`` if it is not currently held. Bounded by a small,
+            backend-specific timeout distinct from the acquire path's
+            configured contention wait -- never an indefinite block.
+        """
+        ...

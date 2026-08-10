@@ -1121,6 +1121,33 @@ class TemporalLegacyMigrationConfig:
 
 
 @dataclass
+class AliasLockConfig:
+    """
+    Configuration for the DB-backed golden-repo alias lock rollout gate
+    (Issue #1546 Phase 2).
+
+    `WriteLockManager` (global_repos/write_lock_manager.py) coordinates
+    golden-repo registration/removal/reconcile via a file-based lock on
+    the golden-repos NFS mount (`vers=3,nolock,hard` -- file locking does
+    not actually work across nodes there). Issue #1546 replaces it with a
+    DB-backed, session-held-transaction lock (SQLite solo / PostgreSQL
+    cluster), but the independent per-node auto-updater means nodes
+    upgrade on their own schedule -- an implicit cutover where some nodes
+    use file locks and others use DB locks is unsafe (they would not see
+    each other's locks at all).
+
+    `db_backed_enabled` therefore defaults to False (the OLD file-based
+    mechanism stays active) and requires an explicit operator opt-in,
+    mirroring `FleetMigrationConfig`/`TemporalLegacyMigrationConfig`'s own
+    rollout-gate pattern (Epic #1454 Story #1460): flip it only after
+    confirming via the existing per-node `server_version` dashboard that
+    every node runs the new code.
+    """
+
+    db_backed_enabled: bool = False
+
+
+@dataclass
 class XRayConfig:
     """
     Configuration for X-Ray precision AST-aware code search (Story #977).
@@ -1608,6 +1635,9 @@ class ServerConfig:
     # Issue #1548 - Legacy in-repo temporal shard relocation configuration
     temporal_legacy_migration_config: Optional[TemporalLegacyMigrationConfig] = None
 
+    # Issue #1546 Phase 2 - DB-backed golden-repo alias lock rollout gate
+    alias_lock_config: Optional[AliasLockConfig] = None
+
     # Story #977 - X-Ray precision AST-aware code search configuration (runtime, not bootstrap)
     xray_config: Optional[XRayConfig] = None
 
@@ -1908,6 +1938,9 @@ class ServerConfig:
         # exists further below, mirroring fleet_migration_config's pattern)
         if self.temporal_legacy_migration_config is None:
             self.temporal_legacy_migration_config = TemporalLegacyMigrationConfig()
+        # Issue #1546 Phase 2 - Initialize alias lock rollout-gate config
+        if self.alias_lock_config is None:
+            self.alias_lock_config = AliasLockConfig()
         # Story #977 - Initialize X-Ray config
         if self.xray_config is None:
             self.xray_config = XRayConfig()
@@ -2668,6 +2701,18 @@ class ServerConfigManager:
                 TemporalLegacyMigrationConfig(
                     **{k: v for k, v in _tlm_dict.items() if k in _tlm_allowed}
                 )
+            )
+
+        # Issue #1546 Phase 2: Convert alias_lock_config dict to
+        # AliasLockConfig. Same rationale as temporal_legacy_migration_config
+        # above -- unknown keys filtered for rolling-upgrade safety.
+        if "alias_lock_config" in config_dict and isinstance(
+            config_dict["alias_lock_config"], dict
+        ):
+            _alc_dict = config_dict["alias_lock_config"]
+            _alc_allowed = {f.name for f in fields(AliasLockConfig)}
+            config_dict["alias_lock_config"] = AliasLockConfig(
+                **{k: v for k, v in _alc_dict.items() if k in _alc_allowed}
             )
 
         # Story #977: Convert xray_config dict to XRayConfig

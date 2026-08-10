@@ -957,6 +957,63 @@ function saveLlmCredsConfig() {
     </article>
 </details>
 
+<!-- Alias Lock Settings Section (Issue #1546 Phase 2) -->
+<details class="config-section" id="section-alias-lock">
+    <summary>
+        <h2>Alias Lock</h2>
+    </summary>
+    <p class="section-description">
+        Selects which mechanism serializes golden-repo alias operations (registration,
+        removal, branch change, refresh). The legacy mechanism uses JSON lock files on the
+        golden-repos NFS mount, which is mounted <code>nolock</code> -- so file locking is
+        client-side only and does NOT coordinate across cluster nodes. The DB-backed
+        mechanism uses a session-held transaction (PostgreSQL in cluster mode, a node-local
+        SQLite file in solo mode) and has no TTL, no lease expiry and no reaper: a dead
+        holder's lock is released by its own connection dying.
+        Defaults to disabled. Because each node auto-updates on its own schedule, an
+        implicit cutover would leave some nodes on file locks and others on DB locks,
+        unable to see each other's locks at all -- so enable this ONLY after confirming via
+        the per-node <code>server_version</code> on the dashboard that every node runs the
+        new code.
+    </p>
+    <article>
+        <!-- Display Mode -->
+        <div id="display-alias-lock">
+            <table class="config-table">
+                <tr>
+                    <td class="config-label">DB-Backed Locking Enabled</td>
+                    <td class="config-value">{{ 'Yes' if config.alias_lock.db_backed_enabled else 'No' }}</td>
+                    <td class="config-description">Whether golden-repo alias locks use the DB-backed mechanism (default: No -- requires every node to be on the new code first)</td>
+                </tr>
+            </table>
+            <div class="form-actions">
+                <button class="outline small" onclick="toggleEditMode('alias-lock')">Edit</button>
+            </div>
+        </div>
+        <!-- Edit Mode -->
+        <form id="edit-form-alias-lock" method="post" action="/admin/config/alias_lock" style="display: none;">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            {% if validation_errors.alias_lock %}
+            <div class="validation-error">{{ validation_errors.alias_lock }}</div>
+            {% endif %}
+            <div class="form-grid">
+                <label for="alias-lock-db-backed-enabled">
+                    DB-Backed Locking Enabled
+                    <select id="alias-lock-db-backed-enabled" name="db_backed_enabled">
+                        <option value="true" {% if config.alias_lock.db_backed_enabled %}selected{% endif %}>Yes</option>
+                        <option value="false" {% if not config.alias_lock.db_backed_enabled %}selected{% endif %}>No</option>
+                    </select>
+                    <small>Confirm every node reports the new server_version before enabling.</small>
+                </label>
+            </div>
+            <div class="form-actions">
+                <button type="submit" class="primary">Save</button>
+                <button type="button" class="secondary" onclick="cancelEdit('alias-lock')">Cancel</button>
+            </div>
+        </form>
+    </article>
+</details>
+
 <!-- Temporal Legacy Migration Settings Section (Issue #1548) -->
 <details class="config-section" id="section-temporal-legacy-migration">
     <summary>

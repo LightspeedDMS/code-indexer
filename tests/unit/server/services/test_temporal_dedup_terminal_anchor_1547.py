@@ -89,7 +89,7 @@ class TestTerminalWindowAnchoredToRealCompletionTime:
         def status_check(job_id):
             return "completed", real_completed_at_epoch
 
-        submit_calls = []
+        submit_calls: list[str] = []
         cache = TemporalDedupCache(terminal_ttl_seconds=_TERMINAL_TTL_SECONDS)
         sig = canonical_signature({"query_text": "auth", "limit": _TEST_QUERY_LIMIT})
 
@@ -119,7 +119,7 @@ class TestTerminalWindowAnchoredToRealCompletionTime:
         def status_check(job_id):
             return "completed", recent_completed_at_epoch
 
-        submit_calls = []
+        submit_calls: list[str] = []
         cache = TemporalDedupCache(terminal_ttl_seconds=_TERMINAL_TTL_SECONDS)
         sig = canonical_signature({"query_text": "auth", "limit": _TEST_QUERY_LIMIT})
 

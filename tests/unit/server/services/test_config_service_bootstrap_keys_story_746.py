@@ -70,6 +70,11 @@ def test_all_server_config_fields_are_classified() -> None:
             "query_orchestration",
             "memory_retrieval_config",
             "lifecycle_analysis_config",
+            # Issue #1546 Phase 2 -- operator-controlled DB-backed alias-lock
+            # rollout gate. Runtime, not bootstrap: it is flipped from the Web
+            # UI Config screen after every node is confirmed on the new build,
+            # and is never needed before the DB exists.
+            "alias_lock_config",
             "codex_integration_config",  # Story #844 — runtime, not bootstrap
             "elevation_enforcement_enabled",  # Story #923/#925 — runtime Web UI setting
             "elevation_idle_timeout_seconds",  # Story #923/#925 — runtime Web UI setting

@@ -307,6 +307,39 @@ class PostgresAliasLockStore:
             conn.close()
             raise
 
+    def is_held(self, lock_key: str) -> bool:
+        """Non-blocking contention probe (Issue #1546 Phase 2). See
+        ``AliasLockStore.is_held()``'s docstring for the full contract
+        and the architecture reason this is a boolean, not a metadata
+        read: an uncommitted row is invisible to any other PostgreSQL
+        session under MVCC, exactly as it is under SQLite's own
+        transaction isolation, so only contention is observable.
+
+        Reuses the exact same probe mechanism ``try_acquire()`` uses
+        (``_connect`` + the bounded ``lock_timeout`` + the real acquire
+        INSERT via ``_execute_acquire_insert``), but ALWAYS rolls back
+        and closes regardless of outcome -- a successful insert
+        (uncontended) is undone rather than kept open, since this probe
+        must never actually hold the lock, even momentarily, past the
+        instant it needs to test contention.
+        """
+        lock_key = _validate_non_empty_str(lock_key, "lock_key")
+        probe_owner_token = str(uuid.uuid4())
+
+        conn = _connect(self._dsn, self._connect_timeout_seconds)
+        try:
+            lock_timeout_ms = _lock_timeout_milliseconds(
+                self._acquire_lock_timeout_seconds
+            )
+            conn.execute(f"SET lock_timeout = '{lock_timeout_ms}ms'")
+            row = _execute_acquire_insert(
+                conn, lock_key, probe_owner_token, "is_held_probe"
+            )
+            return row is None
+        finally:
+            conn.rollback()
+            conn.close()
+
     def release(self, handle: AliasLockHandle) -> None:
         """Exact-token DELETE on the SAME connection/transaction that
         acquired the lock, then COMMIT -- the only point in the lock's

@@ -570,6 +570,16 @@ class DependencyMapService:
                 )
                 broken = scanner.find_broken_or_missing()
                 if broken:
+                    # Issue #1546 Fix 3 (Codex round review):
+                    # ownership-loss checkpoint immediately before
+                    # LifecycleBatchRunner's repair writes to
+                    # cidx-meta/<alias>.md files. The write lock was
+                    # acquired above but never re-verified before this
+                    # destructive pre-flight step.
+                    if _write_lock_acquired and self._refresh_scheduler is not None:
+                        self._refresh_scheduler.raise_if_write_lock_ownership_lost(
+                            "cidx-meta", owner_name="dependency_map_service"
+                        )
                     runner = LifecycleBatchRunner(
                         golden_repos_dir=self._golden_repos_manager.golden_repos_dir,
                         job_tracker=self._job_tracker,
@@ -3245,6 +3255,15 @@ class DependencyMapService:
                 )
                 broken = scanner.find_broken_or_missing()
                 if broken:
+                    # Issue #1546 Fix 3 (Codex round review):
+                    # ownership-loss checkpoint immediately before
+                    # LifecycleBatchRunner's repair writes to
+                    # cidx-meta/<alias>.md files -- mirrors the identical
+                    # fix in run_full_analysis() above.
+                    if _write_lock_acquired and self._refresh_scheduler is not None:
+                        self._refresh_scheduler.raise_if_write_lock_ownership_lost(
+                            "cidx-meta", owner_name="dependency_map_service"
+                        )
                     runner = LifecycleBatchRunner(
                         golden_repos_dir=self._golden_repos_manager.golden_repos_dir,
                         job_tracker=self._job_tracker,

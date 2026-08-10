@@ -981,3 +981,81 @@ def test_bare_scheduler_registry_getter_raises_clear_error_in_solo_without_init(
 
     with pytest.raises(RuntimeError, match="golden_repos_dir"):
         _ = scheduler.registry
+
+
+# ---------------------------------------------------------------------------
+# Issue #1546 Fix 1 (Codex review): is_storage_mode_undetermined() -- an
+# explicit, in-band "still resolving" signal that lifespan.py will stamp
+# onto app.state.storage_mode BEFORE its real value is known. Deliberately
+# narrower than "attribute is absent": a plain unit test that imports
+# code_indexer.server.app but never runs its lifespan (the overwhelming
+# majority of this test suite) must NOT be treated as "undetermined" --
+# only the real startup window, marked by the dedicated sentinel, counts.
+# (The "no app.state at all / pure CLI" case is already covered by this
+# file's existing test_resolve_backend_registry_state_never_imports_server_app
+# -- not duplicated here.)
+# ---------------------------------------------------------------------------
+
+
+_DELETE_ATTR = object()
+
+
+@contextlib.contextmanager
+def _app_state_storage_mode(value: Any) -> Generator[None, None, None]:
+    """Temporarily set app.state.storage_mode to `value` (or delete the
+    attribute entirely when `value` is `_DELETE_ATTR`), restoring the
+    exact prior state (including "attribute never existed") on exit."""
+    from code_indexer.server import app as app_module
+
+    _unset = object()
+    saved = getattr(app_module.app.state, "storage_mode", _unset)
+    try:
+        if value is _DELETE_ATTR:
+            if hasattr(app_module.app.state, "storage_mode"):
+                delattr(app_module.app.state, "storage_mode")
+        else:
+            app_module.app.state.storage_mode = value
+        yield
+    finally:
+        if saved is _unset:
+            if hasattr(app_module.app.state, "storage_mode"):
+                delattr(app_module.app.state, "storage_mode")
+        else:
+            app_module.app.state.storage_mode = saved
+
+
+class TestIsStorageModeUndeterminedFalseCases:
+    def test_false_when_storage_mode_attribute_is_simply_absent(self) -> None:
+        """The common unit-test shape: code_indexer.server.app is imported
+        (so app.state exists) but its lifespan never ran, so
+        storage_mode was never assigned at all. This must NOT be treated
+        as the pending window -- only the explicit sentinel does that."""
+        from code_indexer.server.utils.registry_factory import (
+            is_storage_mode_undetermined,
+        )
+
+        with _app_state_storage_mode(_DELETE_ATTR):
+            assert is_storage_mode_undetermined() is False
+
+    def test_false_when_storage_mode_already_resolved(self) -> None:
+        from code_indexer.server.utils.registry_factory import (
+            is_storage_mode_undetermined,
+        )
+
+        with _app_state_storage_mode("sqlite"):
+            assert is_storage_mode_undetermined() is False
+        with _app_state_storage_mode("postgres"):
+            assert is_storage_mode_undetermined() is False
+
+
+class TestIsStorageModeUndeterminedPendingSentinel:
+    def test_true_when_pending_sentinel_is_stamped(self) -> None:
+        """The genuine startup window: lifespan.py has stamped the pending
+        sentinel but not yet overwritten it with the real value."""
+        from code_indexer.server.utils.registry_factory import (
+            STORAGE_MODE_PENDING_SENTINEL,
+            is_storage_mode_undetermined,
+        )
+
+        with _app_state_storage_mode(STORAGE_MODE_PENDING_SENTINEL):
+            assert is_storage_mode_undetermined() is True
