@@ -37,6 +37,35 @@ jobs:
       run: |
         python3 -m pytest tests/unit/server/storage/test_factory.py tests/unit/server/mcp/test_protocol.py tests/unit/services/test_database_health_cluster.py -v --tb=short --deselect=tests/unit/server/storage/test_factory.py::TestSQLiteProtocolSatisfaction::test_dependency_map_tracking_satisfies_protocol
 
+  lint:
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        submodules: recursive
+
+    - name: Set up Python 3.11
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        python3 -m pip install -e third_party/hnswlib --break-system-packages
+        python3 -m pip install -e ".[dev,cluster]" --break-system-packages
+        # Pin ruff/mypy to the SAME versions .pre-commit-config.yaml pins and that
+        # developers run locally. pyproject's dev extra only FLOORS these
+        # (ruff>=0.0.280, mypy>=1.0.0), so an unpinned install here can pick up a
+        # newer ruff whose formatter disagrees with the local one and turn this gate
+        # red on a locally-clean tree. A flapping gate is worse than no gate.
+        # Source of truth for the ruff pin: .pre-commit-config.yaml (keep in sync).
+        python3 -m pip install --break-system-packages ruff==0.14.1 mypy==1.18.2
+
+    - name: Run ./lint.sh (ruff check + ruff format check + mypy over src/ and tests/)
+      run: ./lint.sh
+
   check-version:
     runs-on: ubuntu-latest
     outputs:
@@ -92,7 +121,12 @@ jobs:
 
   create-tag:
     runs-on: ubuntu-latest
-    needs: [check-version]
+    # Bug #1552: the tag is what triggers the staging auto-deploy, so it must NOT be
+    # cut from a tree that failed lint or tests. Previously this needed only
+    # check-version, so a red `test` job still produced a tag and a green-looking
+    # release. If lint/test go red no tag is created and staging will not deploy
+    # until the failure is fixed -- that is the intended semantics of a gate.
+    needs: [check-version, lint, test]
     if: |
       needs.check-version.outputs.version_changed == 'true' &&
       github.ref == 'refs/heads/development'
@@ -125,7 +159,9 @@ jobs:
 
   create-release:
     runs-on: ubuntu-latest
-    needs: [check-version]
+    # Bug #1552: a production release must not be publishable from a tree that
+    # failed lint or tests (see the create-tag rationale above).
+    needs: [check-version, lint, test]
     if: |
       needs.check-version.outputs.version_changed == 'true' &&
       github.ref == 'refs/heads/master'

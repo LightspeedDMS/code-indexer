@@ -183,7 +183,19 @@ ruff check --fix src/ tests/
 
 Zero tolerance -- never leave GitHub Actions failed. Fix in the same session. See memory: `feedback_ruff_black_version_alignment.md`.
 
-Every story DoD must require `./lint.sh` to exit 0 BEFORE merging back to `development`. CI gate is full `./lint.sh` (ruff check + ruff format check + mypy across `src/` and `tests/`), not just `mypy src/`.
+Every story DoD must require `./lint.sh` to exit 0 BEFORE merging back to `development`.
+
+What CI actually runs (`.github/workflows/main.yml`, the only workflow -- Bug #1552 fixed a case where this description was aspirational and the job did not exist):
+
+| Job | What it runs | Is it a real gate? |
+|-----|--------------|--------------------|
+| `lint` | full `./lint.sh` (ruff check + ruff format check + mypy across `src/` AND `tests/`, plus the AC15 anti-orphan check), Python 3.11 | YES |
+| `test` | a deliberate SMOKE test only -- 3 files (`test_factory.py`, `test_protocol.py`, `test_database_health_cluster.py`) across a 4-version Python matrix | NO -- it is NOT the suite |
+| `create-tag` / `create-release` | gated on `[check-version, lint, test]` | tag/release cannot be cut from a red tree |
+
+**A green CI badge does NOT mean the test suite passed** -- it means lint passed and 3 smoke files passed. The real test gates are and remain LOCAL: `fast-automation.sh`, `server-fast-automation.sh`, `e2e-automation.sh`. Anything that skips them reaches `staging` unchecked no matter how green CI looks.
+
+The `lint` job pins `ruff`/`mypy` to the exact versions `.pre-commit-config.yaml` pins, because `pyproject`'s dev extra only floors them -- an unpinned CI install can pick up a newer ruff whose formatter disagrees with every developer's local one and turn the gate red on a clean tree. Keep those three in sync.
 
 ---
 
