@@ -35,7 +35,7 @@ class TestGetCurrentConfigIncludesAliasLock:
             config = routes._get_current_config()
 
         assert "alias_lock" in config
-        assert config["alias_lock"]["db_backed_enabled"] is False
+        assert config["alias_lock"]["db_backed_enabled"] is True
 
 
 class TestValidateConfigSectionAliasLock:

@@ -1,10 +1,13 @@
-"""Issue #1546 Phase 2: AliasLockConfig -- the operator-controlled rollout
-gate for the DB-backed golden-repo alias lock.
+"""Issue #1546: AliasLockConfig -- the operator-controlled rollout gate
+for the DB-backed golden-repo alias lock.
 
-Mirrors test_config_manager_1548.py's TemporalLegacyMigrationConfig
-pattern exactly: default OFF (old file-based WriteLockManager mechanism
-stays active), Web-UI-configurable, additive/unknown-key-tolerant dict
-conversion for rolling-upgrade safety.
+Phase 3 promoted the default to ON: the DB-backed mechanism has been
+proven correct on a live 3-node staging cluster, so it is now the
+default cross-node-correct behavior. The flag remains available
+(Web-UI-configurable) as an emergency rollback to the old file-based
+WriteLockManager mechanism. Dict conversion stays
+additive/unknown-key-tolerant for rolling-upgrade safety, mirroring
+test_config_manager_1548.py's TemporalLegacyMigrationConfig pattern.
 """
 
 from code_indexer.server.utils.config_manager import (
@@ -17,7 +20,7 @@ from code_indexer.server.utils.config_manager import (
 def test_server_config_defaults_alias_lock_config():
     config = ServerConfig(server_dir="/tmp/does-not-matter")
     assert isinstance(config.alias_lock_config, AliasLockConfig)
-    assert config.alias_lock_config.db_backed_enabled is False
+    assert config.alias_lock_config.db_backed_enabled is True
 
 
 def test_server_config_converts_persisted_dict_to_dataclass(tmp_path):

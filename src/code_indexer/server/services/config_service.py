@@ -124,9 +124,10 @@ def _alias_lock_settings(config: ServerConfig) -> Dict[str, Any]:
 
     Surfaces AliasLockConfig's single field for the Web UI Config screen,
     mirroring `_fleet_migration_settings`'s pattern. `db_backed_enabled`
-    defaults to False -- the old file-based WriteLockManager mechanism
-    stays active until an operator explicitly confirms (via the per-node
-    server_version dashboard) that every node runs the new code.
+    defaults to True (Issue #1546 Phase 3 -- proven correct on a live
+    3-node staging cluster). The flag remains available as an emergency
+    rollback to the old file-based WriteLockManager mechanism, e.g. for a
+    fleet with nodes still mid-rollout to the new code.
     """
     alc = config.alias_lock_config
     assert alc is not None  # Guaranteed by ServerConfig.__post_init__
