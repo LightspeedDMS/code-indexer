@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [12.11.0] - 2026-08-10
+
+### Fixed
+
+- **Bug #1553**: Cluster-mode log reads now follow log writes. `SQLiteLogHandler`'s
+  writer routes every record to the PostgreSQL backend once it is injected at startup
+  (~8-10s in), but seven read call sites -- including `handle_admin_logs_query`, the
+  handler the mandated post-E2E audit gate uses -- read the node-local `logs.db`, which
+  therefore appeared frozen forever at startup+9s and made that gate vacuously pass.
+  `LogAggregatorService` is now backend-aware at a single decision point, keyed on a
+  declared `LogsBackend.is_cross_node_backend` capability rather than a fragile type-name
+  string match, and the duplicated inline branch in the logs page was removed. `query_logs`
+  on both backends gained additive `levels`/`search`/`sort_order` so cluster reads keep
+  parity with the standalone aggregator. Backend write failures are now observable
+  (counter + throttled stderr) instead of silently swallowed. Solo/SQLite is unchanged.
+- **Bug #1554**: Rejected admin config writes no longer return HTTP 200. All 28
+  `_create_config_page_response` call sites are classified: CSRF failure 403, invalid
+  input 400, server failure 500, success unchanged at 200. Previously a rejection was
+  distinguishable from a success only by reading the HTML body.
+- **Bug #1552**: CI now runs the lint gate its documentation always claimed. A new `lint`
+  job runs the full `./lint.sh`, and `create-tag`/`create-release` are gated on it, so a
+  tag -- which triggers the staging deploy -- cannot be cut from a red tree. The job runs
+  on Python 3.9 to match `[tool.mypy] python_version`, and `types-cachetools` is now
+  declared in the dev extra (it was installed ad hoc on developer machines only, which is
+  why local lint passed while no fresh environment could reproduce it).
+
 ## [12.10.0] - 2026-08-10
 
 ### Fixed
