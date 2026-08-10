@@ -45,10 +45,19 @@ jobs:
       with:
         submodules: recursive
 
-    - name: Set up Python 3.11
+    # MUST be 3.9 -- it is what [tool.mypy] python_version targets in pyproject.toml
+    # AND what developers actually run ./lint.sh on locally. Because that config also
+    # sets no_site_packages = false, mypy PARSES third-party sources under the 3.9
+    # target; a newer interpreter installs modern dependencies (e.g. anyio) that use
+    # match statements, which a 3.9 target cannot parse, and the gate dies on
+    # site-packages instead of on our code. Verified: a 3.11 lint job failed with
+    # "anyio/_core/_tasks.py: Pattern matching is only supported in Python 3.10 and
+    # greater" while the identical tree passed locally on 3.9. Keep this in sync with
+    # [tool.mypy] python_version.
+    - name: Set up Python 3.9
       uses: actions/setup-python@v5
       with:
-        python-version: '3.11'
+        python-version: '3.9'
 
     - name: Install dependencies
       run: |

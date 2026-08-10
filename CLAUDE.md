@@ -189,13 +189,16 @@ What CI actually runs (`.github/workflows/main.yml`, the only workflow -- Bug #1
 
 | Job | What it runs | Is it a real gate? |
 |-----|--------------|--------------------|
-| `lint` | full `./lint.sh` (ruff check + ruff format check + mypy across `src/` AND `tests/`, plus the AC15 anti-orphan check), Python 3.11 | YES |
+| `lint` | full `./lint.sh` (ruff check + ruff format check + mypy across `src/` AND `tests/`, plus the AC15 anti-orphan check), Python 3.9 | YES |
 | `test` | a deliberate SMOKE test only -- 3 files (`test_factory.py`, `test_protocol.py`, `test_database_health_cluster.py`) across a 4-version Python matrix | NO -- it is NOT the suite |
 | `create-tag` / `create-release` | gated on `[check-version, lint, test]` | tag/release cannot be cut from a red tree |
 
 **A green CI badge does NOT mean the test suite passed** -- it means lint passed and 3 smoke files passed. The real test gates are and remain LOCAL: `fast-automation.sh`, `server-fast-automation.sh`, `e2e-automation.sh`. Anything that skips them reaches `staging` unchecked no matter how green CI looks.
 
-The `lint` job pins `ruff`/`mypy` to the exact versions `.pre-commit-config.yaml` pins, because `pyproject`'s dev extra only floors them -- an unpinned CI install can pick up a newer ruff whose formatter disagrees with every developer's local one and turn the gate red on a clean tree. Keep those three in sync.
+Two sync constraints on the `lint` job, both learned by breaking them:
+
+1. It pins `ruff`/`mypy` to the exact versions `.pre-commit-config.yaml` pins, because `pyproject`'s dev extra only FLOORS them -- an unpinned CI install can pick up a newer ruff whose formatter disagrees with every developer's local one and turn the gate red on a clean tree.
+2. It runs on **Python 3.9**, which must track `[tool.mypy] python_version` in `pyproject.toml`. That config also sets `no_site_packages = false`, so mypy PARSES third-party sources under the declared target; running the job on a newer interpreter installs modern dependencies whose syntax a 3.9 target cannot parse, and the gate then dies inside `site-packages` instead of on our code (observed: `anyio/_core/_tasks.py: Pattern matching is only supported in Python 3.10 and greater`, on a tree that was clean locally). Do NOT "modernize" this to 3.12 without also moving the mypy target.
 
 ---
 
