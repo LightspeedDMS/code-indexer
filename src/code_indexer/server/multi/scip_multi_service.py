@@ -485,9 +485,26 @@ class SCIPMultiService:
 
             if scip_db_path.exists():
                 return scip_db_path
-            else:
-                logger.info(f"No SCIP index found for repo {repo_id} at {scip_db_path}")
-                return None
+
+            # EVO-65021: the delegated golden SCIP build is ASYNC and writes its
+            # index.scip.db into the LIVE golden dir (the sandbox resolves golden_alias
+            # to the in-place golden root, and generator.py runs SCIPDatabaseBuilder
+            # there). But the add-index/refresh job creates the versioned snapshot and
+            # swaps the alias BEFORE that async build completes, so the alias target
+            # resolved above (a snapshot) never contains scip. Fall back to the live
+            # golden DB where the build authoritatively lands. Snapshot-first keeps a
+            # consistent DB once a later snapshot happens to capture scip; the
+            # live-fallback makes a freshly-built scip queryable on the first cycle.
+            live_db_path = self._live_golden_scip_db_path(repo_id)
+            if live_db_path is not None and live_db_path.exists():
+                logger.info(
+                    f"SCIP index for repo {repo_id} not in alias target "
+                    f"({scip_db_path}); using live golden DB {live_db_path}"
+                )
+                return live_db_path
+
+            logger.info(f"No SCIP index found for repo {repo_id} at {scip_db_path}")
+            return None
         except FileNotFoundError:
             # Let FileNotFoundError propagate so the proper error message
             # ("not found in global repositories") reaches the user
@@ -500,6 +517,33 @@ class SCIPMultiService:
                 )
             )
             return None
+
+    def _live_golden_scip_db_path(self, repo_id: str) -> Optional[Path]:
+        """Path to the LIVE golden-repo SCIP DB for *repo_id* (EVO-65021 fallback).
+
+        The delegated golden SCIP build writes ``index.scip.db`` into the in-place
+        golden root ``<golden_repos_dir>/<bare-alias>/.code-indexer/scip/`` rather than
+        the versioned snapshot the ``-global`` alias points at. ``repo_id`` is the
+        ``-global`` alias; the on-disk golden dir is the bare alias (a single, registry-
+        validated path segment). Returns ``None`` when the golden dir is not configured
+        or the derived alias is unsafe/empty (never raises).
+        """
+        try:
+            golden_repos_dir = _get_golden_repos_dir()
+        except RuntimeError:
+            return None
+        bare_alias = repo_id.removesuffix("-global")
+        # Defense-in-depth: the alias reached here already resolved a registered repo,
+        # but never build a path from an alias with a separator or traversal segment.
+        if not bare_alias or "/" in bare_alias or bare_alias in (".", ".."):
+            return None
+        return (
+            Path(golden_repos_dir)
+            / bare_alias
+            / ".code-indexer"
+            / "scip"
+            / "index.scip.db"
+        )
 
     def _get_repository_path(self, repo_id: str) -> str:
         """

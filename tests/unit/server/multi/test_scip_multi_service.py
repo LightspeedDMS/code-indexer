@@ -433,3 +433,62 @@ class TestSCIPMultiServicePartialFailure:
             assert "repo3" in response.results
             assert "repo_error" in response.errors
             assert "Database connection failed" in response.errors["repo_error"]
+
+
+class TestSCIPMultiServiceLiveGoldenFallback:
+    """EVO-65021: the delegated golden SCIP build is ASYNC and lands index.scip.db in the
+    LIVE golden dir, while the ``-global`` alias resolves to a versioned snapshot forked
+    before the scip completed. ``_get_scip_file_for_repo`` must fall back to the live DB
+    when the snapshot lacks it, but still prefer the snapshot DB when present."""
+
+    @staticmethod
+    def _service():
+        from code_indexer.server.multi.scip_multi_service import SCIPMultiService
+
+        return SCIPMultiService()
+
+    @staticmethod
+    def _resolve(service, snapshot_path, golden_dir, repo_id):
+        with (
+            patch.object(
+                service, "_get_repository_path", return_value=str(snapshot_path)
+            ),
+            patch(
+                "code_indexer.server.multi.scip_multi_service._get_golden_repos_dir",
+                return_value=str(golden_dir),
+            ),
+        ):
+            return service._get_scip_file_for_repo(repo_id)
+
+    def test_falls_back_to_live_golden_db_when_snapshot_lacks_scip(self, tmp_path):
+        golden = tmp_path / "golden-repos"
+        snapshot = golden / ".versioned" / "ssh-mcp-2" / "v_1"  # alias target: no scip
+        (snapshot / ".code-indexer" / "scip").mkdir(parents=True)
+        live_db = golden / "ssh-mcp-2" / ".code-indexer" / "scip" / "index.scip.db"
+        live_db.parent.mkdir(parents=True)
+        live_db.write_bytes(b"\x00")  # the delegated build's DB lands here
+
+        result = self._resolve(self._service(), snapshot, golden, "ssh-mcp-2-global")
+        assert result == live_db
+
+    def test_prefers_snapshot_db_when_present(self, tmp_path):
+        golden = tmp_path / "golden-repos"
+        snapshot = golden / ".versioned" / "ssh-mcp-2" / "v_1"
+        snap_db = snapshot / ".code-indexer" / "scip" / "index.scip.db"
+        snap_db.parent.mkdir(parents=True)
+        snap_db.write_bytes(b"\x00")
+        # A live DB also exists; it must NOT be chosen over the consistent snapshot DB.
+        live_db = golden / "ssh-mcp-2" / ".code-indexer" / "scip" / "index.scip.db"
+        live_db.parent.mkdir(parents=True)
+        live_db.write_bytes(b"\x01")
+
+        result = self._resolve(self._service(), snapshot, golden, "ssh-mcp-2-global")
+        assert result == snap_db
+
+    def test_returns_none_when_neither_snapshot_nor_live_has_scip(self, tmp_path):
+        golden = tmp_path / "golden-repos"
+        snapshot = golden / ".versioned" / "ssh-mcp-2" / "v_1"
+        (snapshot / ".code-indexer" / "scip").mkdir(parents=True)
+
+        result = self._resolve(self._service(), snapshot, golden, "ssh-mcp-2-global")
+        assert result is None
