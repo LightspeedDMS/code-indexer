@@ -298,3 +298,88 @@ class TestStaleMarkerCleanupOnResumePath:
             "verified the consolidated state, so it can never linger "
             "unmanaged and confuse a future pass"
         )
+
+
+class TestDeletionAuthorizedGateAtConsolidationLevel:
+    """Story #1560 AC19: with the Story #1460 rollout gate CLOSED and
+    duplicate point_id groups present, consolidate_collection_in_place
+    must NEVER report "consolidated"/"already_consolidated" -- it must
+    return a distinct, explicitly retryable status and perform zero
+    mutation."""
+
+    def test_gate_closed_with_duplicates_reports_dedup_deletion_gated(
+        self, tmp_path: Path
+    ) -> None:
+        _write_collection_meta(tmp_path)
+        winner_path = _write_record(
+            tmp_path,
+            project_id="proj",
+            file_hash="sha256:ac19",
+            index=0,
+            vector=[0.1, 0.2, 0.3, 0.4],
+            line_start=1,
+            line_end=10,
+            shard_suffix="-a",
+        )
+        _write_record(
+            tmp_path,
+            project_id="proj",
+            file_hash="sha256:ac19",
+            index=0,
+            vector=[0.9, 0.9, 0.9, 0.9],
+            line_start=1,
+            line_end=10,
+            shard_suffix="-b",
+        )
+        shared_point_id = _point_id("proj", "sha256:ac19", 0)
+        IDIndexManager().save_index(tmp_path, {shared_point_id: winner_path})
+
+        before = {p: p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()}
+
+        result = consolidate_collection_in_place(tmp_path, deletion_authorized=False)
+
+        assert result.status == "dedup_deletion_gated"
+        assert not (tmp_path / "chunks.db").exists()
+        assert resolve_chunk_layout(tmp_path) == ChunkLayout.SHARDED_JSON
+        assert len(list(tmp_path.rglob("vector_*.json"))) == 2
+
+        after = {p: p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()}
+        assert before == after, (
+            "AC19: deletion_authorized=False with duplicates present must "
+            "produce ZERO mutation to any file in the collection"
+        )
+
+    def test_gate_reopened_then_consolidates_normally(self, tmp_path: Path) -> None:
+        """Once the gate reopens, the SAME collection migrates normally
+        on the next attempt -- no manual intervention needed (AC19:
+        "becomes eligible again when the gate opens")."""
+        _write_collection_meta(tmp_path)
+        winner_path = _write_record(
+            tmp_path,
+            project_id="proj",
+            file_hash="sha256:ac19b",
+            index=0,
+            vector=[0.1, 0.2, 0.3, 0.4],
+            line_start=1,
+            line_end=10,
+            shard_suffix="-a",
+        )
+        _write_record(
+            tmp_path,
+            project_id="proj",
+            file_hash="sha256:ac19b",
+            index=0,
+            vector=[0.9, 0.9, 0.9, 0.9],
+            line_start=1,
+            line_end=10,
+            shard_suffix="-b",
+        )
+        shared_point_id = _point_id("proj", "sha256:ac19b", 0)
+        IDIndexManager().save_index(tmp_path, {shared_point_id: winner_path})
+
+        gated = consolidate_collection_in_place(tmp_path, deletion_authorized=False)
+        assert gated.status == "dedup_deletion_gated"
+
+        reopened = consolidate_collection_in_place(tmp_path, deletion_authorized=True)
+        assert reopened.status == "consolidated"
+        assert resolve_chunk_layout(tmp_path) == ChunkLayout.CHUNKS_DB

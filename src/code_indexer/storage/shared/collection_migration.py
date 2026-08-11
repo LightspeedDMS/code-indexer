@@ -2450,6 +2450,15 @@ def consolidate_collection_in_place(
     collection_dir: Union[str, Path],
     *,
     deletion_authorized: bool = True,
+    # Story #1560 AC20/AC21: optional query-tracker quiescing/drain
+    # threaded straight through to repair_duplicate_and_shifted_points.
+    # Typed Any (mirroring collection_dedup_repair.py's own convention)
+    # so this storage/shared module -- imported by the CLI/solo path --
+    # never needs to import the concrete QueryTracker class; None (the
+    # default) is a fail-open no-op for every pre-existing caller.
+    query_tracker: Optional[Any] = None,
+    refcount_key: Optional[str] = None,
+    drain_max_wait_seconds: Optional[float] = None,
 ) -> ConsolidationResult:
     """Consolidate ONE collection's sharded ``vector_*.json`` layout into a
     ``chunks.db`` written into the SAME directory, in place.
@@ -2573,7 +2582,13 @@ def consolidate_collection_in_place(
     # discriminator, so the still-present legacy files being scanned
     # there are already dedup-clean by construction.
     try:
-        repair_result = repair_duplicate_and_shifted_points(collection_dir)
+        repair_result = repair_duplicate_and_shifted_points(
+            collection_dir,
+            deletion_authorized=deletion_authorized,
+            query_tracker=query_tracker,
+            refcount_key=refcount_key,
+            drain_max_wait_seconds=drain_max_wait_seconds,
+        )
     except DedupRepairAmbiguousError as exc:
         # Unify with this module's own pre-existing, general-purpose
         # "refuse to flip, collection stays SHARDED_JSON" exception type
@@ -2586,6 +2601,39 @@ def consolidate_collection_in_place(
             f"dedup/renumber repair step could not safely proceed "
             f"({exc})"
         ) from exc
+
+    # Story #1560 AC19: with the Story #1460 rollout gate CLOSED and
+    # duplicate groups genuinely present, repair performed ZERO mutation
+    # -- the collection still has an unresolvable/ambiguous point_id
+    # population, so the scan below could not build an unambiguous
+    # chunks.db even if we let it try. Return a DISTINCT, explicitly
+    # retryable status IMMEDIATELY -- never fall through into steps 1-5,
+    # and never report "consolidated"/"already_consolidated" (that would
+    # be a false claim of success). This is deliberately a SEPARATE,
+    # clearly-distinguishable outcome from "skipped_insufficient_disk"
+    # (a different cause entirely, from the disk-headroom preflight
+    # below) and from a clean no-duplicates pass (whose
+    # repair_result.duplicate_groups == 0 never reaches here).
+    if repair_result.deletion_gated:
+        logger.warning(
+            "consolidate_collection_in_place: %s has %d duplicate "
+            "point_id group(s) but deletion_authorized=False (Story "
+            "#1460 rollout gate closed) -- consolidation DEFERRED, no "
+            "mutation performed. Will retry automatically once the gate "
+            "opens.",
+            collection_dir,
+            repair_result.duplicate_groups,
+        )
+        return ConsolidationResult(
+            status="dedup_deletion_gated",
+            detail=(
+                f"{repair_result.duplicate_groups} duplicate point_id "
+                f"group(s) detected; deletion withheld pending "
+                f"deletion_authorized=True"
+            ),
+            extra={"dedup_repair": repair_result},
+        )
+
     if not repair_result.gate_passed:
         logger.info(
             "consolidate_collection_in_place: Bug #1502 repair passed "
@@ -2595,14 +2643,31 @@ def consolidate_collection_in_place(
             "as it did before this repair existed.",
             collection_dir,
         )
-    elif repair_result.duplicates_found or repair_result.records_renumbered:
+    elif repair_result.duplicate_groups or repair_result.records_renumbered:
+        # Story #1560: `records_before`/`collection_total` are computed
+        # on the FILE-SCAN basis (every vector_*.json record found by
+        # the raw rglob scan), NEVER id_index.bin's entry count -- on a
+        # real production collection these can genuinely differ (a
+        # measured staging example: id_index.bin held 343,357 entries
+        # while the file scan found 343,604 records -- a ~204-record gap
+        # of pre-existing, never-duplicated, never-indexed orphans,
+        # unrelated to this repair). id_index.bin is consulted ONLY to
+        # resolve which copy is the winner within an already-detected
+        # duplicate group; it is never the base population count.
         logger.info(
-            "consolidate_collection_in_place: Bug #1502 repair for %s -- "
-            "%d duplicate(s) found, %d quarantined, %d record(s) "
-            "renumbered, id_index_rebuilt=%s, hnsw_rebuilt=%s",
+            "consolidate_collection_in_place: Bug #1502/#1560 repair for "
+            "%s -- %d duplicate group(s) (file-scan basis: "
+            "records_before=%d, collection_total=%d), %d record(s) "
+            "deleted (%d winner-kept groups, %d whole-group-deleted "
+            "groups), %d record(s) renumbered, id_index_rebuilt=%s, "
+            "hnsw_rebuilt=%s",
             collection_dir,
-            repair_result.duplicates_found,
-            repair_result.duplicates_quarantined,
+            repair_result.duplicate_groups,
+            repair_result.records_before,
+            repair_result.collection_total,
+            repair_result.records_deleted,
+            repair_result.winner_kept_groups,
+            repair_result.whole_group_deleted_groups,
             repair_result.records_renumbered,
             repair_result.id_index_rebuilt,
             repair_result.hnsw_rebuilt,

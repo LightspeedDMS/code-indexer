@@ -7,6 +7,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [12.13.0] - 2026-08-11
+
+### Changed
+
+- **Story #1560**: Fleet migration now auto-resolves duplicate `point_id`s instead of failing closed.
+  Previously a duplicate that `id_index.bin` could not arbitrate raised `DuplicateSourceIdError`, left
+  the collection untouched, and quarantined the repo after 3 consecutive failures -- turning a 2-chunk
+  ambiguity in a 343,604-chunk collection (0.0096%) into a permanently unconsolidated repo with no
+  visibility for the cause. At ~900 production repos that is unworkable. Migration now always
+  proceeds: when `id_index.bin` names a winner that copy is kept and the others deleted; when it has
+  no entry at all, every copy is deleted -- no arbitrary winner, no invented identity. The index is a
+  derived artifact (git is the source of truth and a re-index rebuilds it), so deletion removes an
+  identity rather than manufacturing one. The `.dedup-quarantine` sidecar is removed entirely; nothing
+  is left behind. A genuinely corrupt `id_index.bin` still raises `DedupRepairAmbiguousError` with the
+  collection byte-identical -- only the missing-entry case changed.
+
+### Added
+
+- **Story #1560**: Durable per-repo dedup-outcome state (`fleet_migration_dedup_state`, additive
+  migration 045) on BOTH the PostgreSQL and SQLite backends behind a shared protocol, so clustered and
+  solo deployments agree. Counts are cumulative per repo on a documented file-scan basis, with aliases
+  normalized to bare form at every backend boundary.
+- **Story #1560**: `/health` (`GET /api/system/health`) carries a bounded (K=50) dedup summary with
+  per-repo `records_deleted`, `collection_total`, `loss_ratio` and an explicit `incomplete` flag. The
+  condition sets DEGRADED and names the alias, count and ratio, and dedup reasons are prioritized
+  ahead of `MAX_FAILURE_REASONS` truncation so they cannot be swallowed into "+N more". `/healthz`
+  still returns HTTP 200 for degraded, so this can never drain a node over an index-completeness
+  issue. The affected repo remains fully queryable throughout -- degraded describes index
+  completeness, never availability.
+- **Story #1560**: A repo already quarantined by this cause is released by an explicit pre-attempt
+  reset. The existing state-signature auto-clear could never fire for it, because repair is the only
+  thing that would change the signature and a quarantined repo is skipped before repair runs.
+  Unrecoverable-corruption and disk-headroom quarantines are untouched.
+- **Story #1560**: The dedup record is cleared only by a successful FULL re-index, so operator
+  remediation actually clears the health signal; a failed or partial re-index retains it.
+
+### Fixed
+
+- **Story #1560**: The dedup outcome journal carries an explicit pending/completed phase, so a crash
+  between the journal write and the first unlink can no longer replay as a completed deletion and
+  double-count `records_deleted`. Un-swept journals now count as scheduler work, so the sweep stays
+  reachable even once every repo appears migrated.
+- **Story #1560**: With the Story #1460 rollout gate closed, consolidation returns a distinct,
+  retryable `dedup_deletion_gated` status that propagates to the scheduler and is quarantine-exempt --
+  never a false "migrated", never a generic failure.
+- **Story #1560**: Duplicate deletion now runs behind the existing QueryTracker bounded drain, which
+  was previously declared through the call chain but never supplied by the production orchestrator.
+
 ## [12.12.0] - 2026-08-11
 
 ### Fixed

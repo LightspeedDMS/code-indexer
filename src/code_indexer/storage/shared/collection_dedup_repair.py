@@ -44,13 +44,25 @@ Codex, including the Codex delta re-review round):
      vector data, NEVER silently defaulted to a hardcoded constant.
      Resolved during planning, BEFORE the marker is ever written, so an
      undeterminable value fails loud pre-mutation.
-  3. **Dedup**: for each duplicated point_id, the winner is the copy
-     ``id_index.bin`` currently references (== what query hydration
-     serves TODAY). Losers are MOVED to a quarantine sidecar OUTSIDE the
-     collection directory -- never deleted, and never left inside
-     ``collection_dir`` where a bare ``rglob("vector_*.json")`` scan
-     could still see them. Both the loser's original directory and the
-     quarantine destination directory are fsynced after the move.
+  3. **Dedup** (Story #1560, superseding the original quarantine-sidecar
+     design): for each duplicated point_id, IF ``id_index.bin`` currently
+     references one of the copies (== what query hydration serves
+     TODAY), that copy is kept and every OTHER copy is DELETED outright.
+     IF NO copy is referenced (or a corrupt-index check below is not
+     triggered but no entry exists), ALL copies are DELETED
+     symmetrically -- no arbitrary winner, no invented identity, no
+     manufactured ``chunk_index``. There is no sidecar, no quarantine
+     directory, no leftovers: the vector index is a DERIVED artifact,
+     the git repository is the source of truth, and a re-index
+     regenerates everything a deleted duplicate copy could ever have
+     held. Each deletion fsyncs its containing (source) directory for
+     durability. The only remaining raise from this step is
+     :class:`DedupRepairAmbiguousError`, and ONLY when ``id_index.bin``
+     itself is corrupt (fails to LOAD entirely) -- an entry that
+     resolves to NEITHER copy is ALSO folded into the ALL-COPIES-DELETED
+     case (Story #1560 coordinator review finding R1), since neither
+     scanned copy is what index-based hydration serves today either way
+     -- see :func:`_plan_dedup`.
   4. **Renumber**: every surviving record is grouped by
      ``(project_id, file_hash)`` (parsed from its ``unique_key``), sorted
      by ``line_start`` (tie-broken by ``line_end`` then old index), and
@@ -95,10 +107,10 @@ which would otherwise leave stale vectors falsely queryable forever.
 All detection (identity gate, malformed pre-check, dedup-winner
 resolution, unique_key parsing, gap-continuity sanity checking, HNSW
 build-parameter resolution) runs in a pure PLANNING phase before any disk
-mutation -- an ambiguous/malformed case raises
-:class:`DedupRepairAmbiguousError` (or, for an unresolvable duplicate, the
-pre-existing :class:`DuplicateSourceIdError`) with the collection left
-COMPLETELY untouched and no marker ever written (Messi Rule #13
+mutation -- an ambiguous/malformed case (including a corrupt
+id_index.bin) raises :class:`DedupRepairAmbiguousError`, with the
+collection left COMPLETELY untouched and no marker ever written (Messi
+Rule #13
 anti-silent-failure): never auto-resolved, requires manual review. This
 "leaves collection untouched" guarantee applies specifically to exceptions
 raised during planning -- once planning succeeds and the apply phase
@@ -118,7 +130,6 @@ import hashlib
 import json
 import logging
 import os
-import shutil
 import tempfile
 import time
 from dataclasses import dataclass, field
@@ -128,7 +139,6 @@ from typing import Any, Dict, List, Optional, Tuple
 from code_indexer.storage.hnsw_index_manager import HNSWIndexManager
 from code_indexer.storage.id_index_manager import (
     CorruptIDIndexError,
-    DuplicateSourceIdError,
     IDIndexManager,
 )
 from code_indexer.storage.shared.chunk_layout import ChunkLayout
@@ -137,8 +147,6 @@ from code_indexer.utils.file_locking import nfs_safe_fsync
 logger = logging.getLogger(__name__)
 
 _COLLECTION_META_FILENAME = "collection_meta.json"
-_QUARANTINE_DIRNAME = ".dedup-quarantine"
-_QUARANTINE_SUFFIX = ".quarantined"
 _MARKER_FILENAME = ".dedup-repair-pending"
 
 # Codex F1: derived from FixedSizeChunker's real overlap arithmetic (each
@@ -192,8 +200,28 @@ class DedupRepairResult:
     """Outcome of one :func:`repair_duplicate_and_shifted_points` call."""
 
     records_scanned: int = 0
-    duplicates_found: int = 0
-    duplicates_quarantined: int = 0
+    #: Story #1560 AC6: number of DISTINCT point_ids that had more than
+    #: one physical record file this pass.
+    duplicate_groups: int = 0
+    #: Story #1560 AC6: total physical vector record files scanned this
+    #: pass (across every point_id, duplicated or not) -- BEFORE this
+    #: pass's deletions. Equal to `collection_total`; both names exist
+    #: because AC6 and AC13/AC14 (the persisted health-state field) name
+    #: them separately, but they are the same measured quantity.
+    records_before: int = 0
+    #: Story #1560 AC6: total physical copies actually DELETED this pass
+    #: -- sum of (copies - 1) for every winner-kept group plus (copies)
+    #: for every whole-group-deleted group.
+    records_deleted: int = 0
+    #: Story #1560 AC1/AC6: duplicate groups where id_index.bin resolved
+    #: a winner -- every OTHER copy was deleted, one survivor remains.
+    winner_kept_groups: int = 0
+    #: Story #1560 AC2/AC6: duplicate groups with NO id_index.bin entry
+    #: -- ALL copies were deleted symmetrically, zero survivors.
+    whole_group_deleted_groups: int = 0
+    #: Story #1560 AC6: alias of `records_before` -- see that field's
+    #: docstring.
+    collection_total: int = 0
     records_renumbered: int = 0
     #: True unless the whole-collection identity gate rejected this
     #: collection (foreign/missing/self-inconsistent unique_key anywhere)
@@ -215,6 +243,13 @@ class DedupRepairResult:
     #: Sample of skipped groups' file_hash values (capped at
     #: _MAX_SKIPPED_GROUP_SAMPLE_SIZE), for logging/diagnostics.
     skipped_renumber_file_hashes: List[str] = field(default_factory=list)
+    #: Story #1560 AC19: True iff duplicate groups were DETECTED but
+    #: their deletion was WITHHELD this call because the caller passed
+    #: `deletion_authorized=False` (Story #1460's rollout-safety gate).
+    #: When True, ZERO mutation occurred this call -- no marker, no
+    #: deletion, no renumbering, no rebuild -- and the caller must NOT
+    #: treat this as a completed dedup outcome.
+    deletion_gated: bool = False
 
 
 def parse_unique_key(unique_key: Any) -> Tuple[str, str, int]:
@@ -490,6 +525,192 @@ def _delete_marker_durably(collection_dir: Path) -> None:
     _fsync_dir(collection_dir)
 
 
+_OUTCOME_FILENAME = ".dedup-outcome-pending"
+
+
+def _pending_outcome_path(collection_dir: Path) -> Path:
+    return collection_dir / _OUTCOME_FILENAME
+
+
+def _write_pending_outcome_durably(collection_dir: Path, data: Dict[str, Any]) -> None:
+    """Story #1560 AC22: durably write the dedup-outcome journal, same
+    atomic pattern as `_write_marker_durably` (temp file in the SAME
+    directory, flush+fsync, os.replace, then an nfs_safe_fsync of the
+    containing directory)."""
+    outcome_path = _pending_outcome_path(collection_dir)
+    tmp_fd, tmp_path = tempfile.mkstemp(dir=str(collection_dir), suffix=".tmp")
+    fd_owned = False
+    try:
+        try:
+            tmp_f = os.fdopen(tmp_fd, "w")
+            fd_owned = True
+            with tmp_f:
+                json.dump(data, tmp_f)
+                tmp_f.flush()
+                nfs_safe_fsync(tmp_f.fileno())
+            os.replace(tmp_path, str(outcome_path))
+        finally:
+            if not fd_owned:
+                try:
+                    os.close(tmp_fd)
+                except OSError:
+                    pass
+    except BaseException:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
+    _fsync_dir(collection_dir)
+
+
+def read_pending_dedup_outcome(
+    collection_dir: "Path | str",
+) -> Optional[Dict[str, Any]]:
+    """Story #1560 AC22/AC23: read the crash-durable dedup-outcome
+    journal for `collection_dir`, or None if absent (no unresolved
+    dedup outcome is waiting to be persisted). Never mutates. Callers
+    (the fleet-migration persistence layer) must attempt to record this
+    to the durable per-repo state and, ONLY on success, call
+    `clear_pending_dedup_outcome` -- never assume it was already
+    recorded merely because it exists."""
+    outcome_path = _pending_outcome_path(Path(collection_dir))
+    try:
+        with open(outcome_path) as f:
+            data = json.load(f)
+    except FileNotFoundError:
+        return None
+    except (OSError, json.JSONDecodeError) as exc:
+        logger.warning(
+            "read_pending_dedup_outcome: %s exists but could not be read/"
+            "parsed (%s) -- treating as absent (best-effort recovery; a "
+            "genuinely unreadable journal cannot be replayed anyway)",
+            outcome_path,
+            exc,
+        )
+        return None
+    if not isinstance(data, dict):
+        return None
+    return data
+
+
+def clear_pending_dedup_outcome(collection_dir: "Path | str") -> bool:
+    """Story #1560 AC22/AC23: remove the dedup-outcome journal (idempotent)
+    and fsync the containing directory. Callers must call this ONLY
+    AFTER the outcome has been successfully persisted to the durable
+    per-repo state -- clearing it any earlier would lose the audit trail
+    on a crash. Returns True iff a journal was actually present and
+    removed."""
+    collection_dir = Path(collection_dir)
+    outcome_path = _pending_outcome_path(collection_dir)
+    try:
+        outcome_path.unlink()
+    except FileNotFoundError:
+        return False
+    _fsync_dir(collection_dir)
+    return True
+
+
+def _accumulate_pending_outcome_durably(
+    collection_dir: Path, new_counts: Dict[str, int]
+) -> None:
+    """Story #1560 AC22: fold THIS pass's counts into any pre-existing
+    journal before writing it back, IF AND ONLY IF that existing
+    journal's `phase` is already "completed" -- a genuinely confirmed
+    prior outcome (filesystem-proven, see
+    `_mark_pending_outcome_completed_durably`) not yet persisted to the
+    DB. Mirrors the durable-state DB layer's own cumulative-vs-snapshot
+    semantics (`sqlite_backends.py`'s `_apply_dedup_outcome_upsert`) for
+    that safe case: `duplicate_groups`/`records_deleted`/
+    `winner_kept_groups`/`whole_group_deleted_groups` are ADDED to the
+    existing journal's totals; `records_before`/`collection_total` are
+    OVERWRITTEN to this pass's snapshot.
+
+    Codex review Finding F1: an existing journal that is NOT
+    "completed" (absent, or `phase == "pending"` from a possibly-
+    interrupted earlier attempt whose deletion may never have started
+    or finished) must NEVER be added onto -- doing so would double-
+    count once the interrupted work is retried and genuinely completes.
+    This pass's fresh, accurate recomputation SUPERSEDES it entirely
+    instead. Every write from this function is tagged
+    `phase: "pending"`, since a NEW deletion attempt is about to begin;
+    the caller flips it to "completed" only after filesystem state
+    proves the deletion actually finished."""
+    existing = read_pending_dedup_outcome(collection_dir) or {}
+    existing_is_confirmed_complete = existing.get("phase") == "completed"
+    merged: Dict[str, Any]
+    if existing_is_confirmed_complete:
+        merged = {
+            "duplicate_groups": int(existing.get("duplicate_groups", 0))
+            + new_counts["duplicate_groups"],
+            "records_deleted": int(existing.get("records_deleted", 0))
+            + new_counts["records_deleted"],
+            "winner_kept_groups": int(existing.get("winner_kept_groups", 0))
+            + new_counts["winner_kept_groups"],
+            "whole_group_deleted_groups": int(
+                existing.get("whole_group_deleted_groups", 0)
+            )
+            + new_counts["whole_group_deleted_groups"],
+            "records_before": new_counts["records_before"],
+            "collection_total": new_counts["collection_total"],
+        }
+    else:
+        merged = dict(new_counts)
+    merged["phase"] = "pending"
+    _write_pending_outcome_durably(collection_dir, merged)
+
+
+def _mark_pending_outcome_completed_durably(collection_dir: Path) -> None:
+    """Codex review Finding F1: flip the pending-outcome journal's
+    `phase` to "completed" -- called ONLY after filesystem state PROVES
+    the recorded intent actually happened (the deletion loop AND the
+    derived-artifact rebuild both finished successfully). A journal
+    already "completed" (e.g. a prior crash between this flip and the
+    marker delete) is idempotently rewritten unchanged. A genuinely
+    absent journal is a no-op -- a renumber-only pass with zero
+    duplicates never wrote one."""
+    existing = read_pending_dedup_outcome(collection_dir)
+    if existing is None:
+        return
+    if existing.get("phase") == "completed":
+        return
+    existing["phase"] = "completed"
+    _write_pending_outcome_durably(collection_dir, existing)
+
+
+def collection_has_duplicate_point_ids(collection_dir: "Path | str") -> bool:
+    """Story #1560 AC12: cheap, READ-ONLY predicate -- True iff
+    `collection_dir` currently has at least one duplicated point_id THAT
+    THIS REPAIR WOULD ACTUALLY AUTO-RESOLVE.
+
+    Deliberately NOT "any duplicate the raw scan finds" -- a collection
+    whose duplicate uses a FOREIGN/inconsistent identity scheme fails
+    the whole-collection identity gate, so `repair_duplicate_and_
+    shifted_points` passes it through UNTOUCHED and the pre-existing
+    scan (`IDIndexManager.scan_vectors_for_id_map_verbose`) still raises
+    `DuplicateSourceIdError` identically on every future attempt --
+    resetting quarantine for that case would just cause an immediate
+    re-failure, wasting a scheduling attempt for nothing. Reuses this
+    module's OWN `_scan_raw_records` + `_whole_collection_identity_gate_
+    passes` (the exact predicates `repair_duplicate_and_shifted_points`
+    itself uses to decide whether it can act) rather than a second,
+    looser detection mechanism -- so this function's answer is always
+    consistent with what repair would actually do.
+
+    False for malformed records, an empty collection, or a gate
+    failure (foreign scheme) -- True only when the gate passes AND at
+    least one point_id has more than one physical copy. Performs zero
+    disk mutation.
+    """
+    collection_dir = Path(collection_dir)
+    id_to_paths, malformed, identity_by_path = _scan_raw_records(collection_dir)
+    if malformed or not id_to_paths:
+        return False
+    if not _whole_collection_identity_gate_passes(id_to_paths, identity_by_path):
+        return False
+    return any(len(paths) > 1 for paths in id_to_paths.values())
+
+
 def clear_stale_repair_marker(collection_dir: Path) -> bool:
     """Idempotently remove a stale ``.dedup-repair-pending`` marker if
     present. Intended for ``consolidate_collection_in_place``'s RESUME
@@ -504,32 +725,19 @@ def clear_stale_repair_marker(collection_dir: Path) -> bool:
     return True
 
 
-def _quarantine_root(collection_dir: Path) -> Path:
-    return collection_dir.parent / _QUARANTINE_DIRNAME / collection_dir.name
+def _delete_loser(loser_path: Path) -> None:
+    """Story #1560 AC1/AC2/AC4: permanently DELETE a dedup loser (or an
+    unresolvable duplicate's copy) -- never move it anywhere. The vector
+    index is a derived artifact; the git repository is the source of
+    truth, and a re-index regenerates everything a deleted copy could
+    ever have held.
 
-
-def _quarantine_loser(collection_dir: Path, loser_path: Path) -> Path:
-    """Move a dedup loser OUTSIDE collection_dir entirely -- never deleted,
-    never left where a rglob("vector_*.json") scan of the collection could
-    still see it. Preserves the loser's relative sub-path (hash-shard
-    structure) under the quarantine root to avoid cross-collision, and
-    appends a non-matching suffix as defense-in-depth.
-
-    Codex M7: fsyncs BOTH the source directory (the loser's original
-    shard dir) and the destination directory (the quarantine sidecar
-    dir) after the move, so the move itself is durable against a crash
-    on either side.
-    """
-    rel = loser_path.relative_to(collection_dir)
-    target = _quarantine_root(collection_dir) / (str(rel) + _QUARANTINE_SUFFIX)
-    target.parent.mkdir(parents=True, exist_ok=True)
+    Fsyncs the file's containing (source) directory afterward for
+    durability -- there is no destination directory to fsync anymore,
+    since nothing is moved."""
     source_dir = loser_path.parent
-
-    shutil.move(str(loser_path), str(target))
-
+    loser_path.unlink()
     _fsync_dir(source_dir)
-    _fsync_dir(target.parent)
-    return target
 
 
 def _atomic_write_json_record(target_path: Path, record: Dict[str, Any]) -> None:
@@ -577,16 +785,45 @@ class _SurvivorRecord:
 
 def _plan_dedup(
     collection_dir: Path, duplicated: Dict[str, List[Path]]
-) -> Dict[str, Path]:
-    """Pure planning: resolve exactly one winner per duplicated point_id
-    via id_index.bin. Raises DuplicateSourceIdError -- the SAME exception
-    type the pre-existing raw scan (IDIndexManager.
-    scan_vectors_for_id_map_verbose) already raised for an unresolvable
-    duplicate, preserving that exact contract for callers (e.g. the fleet
-    migration scheduler's quarantine mechanism) that pre-date this repair
-    step and type-check the failure. Raises DedupRepairAmbiguousError only
-    for the genuinely NEW failure mode of a corrupt id_index.bin itself.
-    Performs ZERO disk mutation."""
+) -> Dict[str, Optional[Path]]:
+    """Pure planning: resolve a winner (or ``None`` -- "no winner, delete
+    ALL copies", Story #1560 AC2) per duplicated point_id via
+    id_index.bin.
+
+    A value of ``None`` for a point_id means id_index.bin has NO entry
+    for it at all, OR its entry resolves to NEITHER scanned copy -- the
+    caller deletes every copy symmetrically (AC2) either way. A
+    non-None value is the SURVIVING copy -- the caller deletes every
+    OTHER copy (AC1).
+
+    Coordinator review finding R1: the "matches neither copy" case was
+    ORIGINALLY still raised as ``DuplicateSourceIdError`` on the theory
+    that it is a distinct, "more suspicious" anomaly than a simple
+    missing entry. Re-examined: it is NOT distinct under AC2's own
+    stated rationale ("neither copy is query-visible today"). Every
+    file is scanned into ``id_to_paths`` by its OWN content id -- if
+    id_index.bin's resolved target genuinely carried this point_id, it
+    would already be one of the two scanned copies (AC1's branch). The
+    "matches neither" case therefore means id_index.bin's entry for
+    this id is itself stale/wrong (points to a path with a different
+    id, or a path that no longer exists) -- but critically, NEITHER of
+    the two scanned duplicate copies is what index-based hydration
+    would serve today, so deleting both changes nothing about what is
+    CURRENTLY query-visible for this id. Treating it as a distinct
+    raise also reopened Design decision 7's "NO quarantine for this
+    cause, unconditionally" through a narrower door:
+    ``DuplicateSourceIdError`` is exactly what the scheduler counts
+    toward ``consecutive_failure_count``. Folding it into AC2 closes
+    that gap. This is NOT the same as AC30's protected case (id_index.bin
+    itself failing to LOAD, handled below, unchanged) -- AC30's "only the
+    MISSING-entry case" wording scopes to the id_index.bin-load failure,
+    not to a stale single-entry mismatch.
+
+    Still raises ``DedupRepairAmbiguousError`` for a corrupt id_index.bin
+    itself (AC30, unchanged -- the file fails to LOAD at all, so NO
+    entry in it can be trusted, unlike a single stale entry). Performs
+    ZERO disk mutation.
+    """
     if not duplicated:
         return {}
 
@@ -600,28 +837,34 @@ def _plan_dedup(
             f"reference. Collection left untouched."
         ) from exc
 
-    winners: Dict[str, Path] = {}
+    winners: Dict[str, Optional[Path]] = {}
     for point_id, paths in duplicated.items():
         indexed_path = id_index.get(point_id)
         if indexed_path is None:
-            raise DuplicateSourceIdError(
-                f"Dedup repair refused for {collection_dir}: duplicate "
-                f"point_id {point_id!r} ({len(paths)} copies: "
-                f"{[str(p) for p in paths]}) has NO id_index.bin entry -- "
-                f"cannot determine a winner. Collection left untouched; "
-                f"requires manual review."
-            )
+            # Story #1560 AC2: no id_index.bin entry at all -- no winner
+            # is resolvable. Symmetric: ALL copies will be deleted by the
+            # caller. No exception, no arbitrary winner.
+            winners[point_id] = None
+            continue
         resolved_indexed = indexed_path.resolve()
         matching = [p for p in paths if p.resolve() == resolved_indexed]
         if not matching:
-            raise DuplicateSourceIdError(
-                f"Dedup repair refused for {collection_dir}: id_index.bin's "
-                f"entry for duplicate point_id {point_id!r} ({indexed_path}) "
-                f"matches NEITHER of its {len(paths)} copies "
-                f"({[str(p) for p in paths]}) -- refusing to guess a "
-                f"winner. Collection left untouched; requires manual "
-                f"review."
+            # R1: a stale/wrong id_index.bin entry -- NEITHER scanned
+            # copy is what index-based hydration currently serves for
+            # this id. Folded into AC2 (delete all, symmetric) rather
+            # than raised: see this function's docstring.
+            logger.warning(
+                "repair_duplicate_and_shifted_points: %s -- id_index.bin's "
+                "entry for duplicate point_id %r (%s) matches NEITHER of "
+                "its %d scanned copies; treating as AC2 (no resolvable "
+                "winner) -- deleting all copies symmetrically.",
+                collection_dir,
+                point_id,
+                indexed_path,
+                len(paths),
             )
+            winners[point_id] = None
+            continue
         winners[point_id] = matching[0]
 
     return winners
@@ -985,9 +1228,37 @@ def _rebuild_derived_artifacts(
 
 def repair_duplicate_and_shifted_points(
     collection_dir: "Path | str",
+    *,
+    deletion_authorized: bool = True,
+    query_tracker: Optional[Any] = None,
+    refcount_key: Optional[str] = None,
+    drain_max_wait_seconds: Optional[float] = None,
 ) -> DedupRepairResult:
     """Metadata-only dedup + canonical renumber repair for ONE legacy
     SHARDED_JSON collection directory.
+
+    Args:
+        deletion_authorized: Story #1560 AC19 / Story #1460's rollout-
+            safety gate. Defaults to True (byte-identical for every
+            pre-existing caller). When False AND duplicate point_id
+            groups are detected, this call performs ZERO mutation --
+            no deletion, no renumbering, no marker, no rebuild -- and
+            returns a result with ``deletion_gated=True``. The caller
+            (``consolidate_collection_in_place``) must NOT report a
+            completed dedup outcome in that case.
+        query_tracker: Story #1560 AC20/AC21. When given together with
+            ``refcount_key``, and duplicate groups are about to be
+            deleted, the key is marked quiescing (refusing new query
+            admissions) and drained with a bounded wait -- reusing
+            Story #1458 AC13's ``wait_for_activated_repo_query_drain``
+            -- before any file is deleted, and the mark is cleared on
+            EVERY exit path (success or exception). None (the default)
+            is a fail-open no-op, matching every pre-existing caller.
+        refcount_key: The query-tracker key for this collection's owning
+            repository (see ``query_tracker``).
+        drain_max_wait_seconds: Optional override for the bounded drain
+            wait, threaded through for test determinism. None resolves
+            the live config default (production behavior).
 
     See module docstring for the full algorithm and the rebuild-derived-
     artifacts crash-convergence mechanism.
@@ -1046,13 +1317,53 @@ def repair_duplicate_and_shifted_points(
         return DedupRepairResult(records_scanned=len(id_to_paths), gate_passed=False)
 
     duplicated = {pid: paths for pid, paths in id_to_paths.items() if len(paths) > 1}
+    collection_total = sum(len(paths) for paths in id_to_paths.values())
 
+    # ---- Story #1560 AC19: deletion_authorized=False gate ----
+    if duplicated and not deletion_authorized:
+        logger.warning(
+            "repair_duplicate_and_shifted_points: %d duplicate point_id "
+            "group(s) detected in %s but deletion_authorized=False "
+            "(Story #1460 rollout gate closed) -- performing ZERO "
+            "mutation and reporting deletion_gated=True; this collection "
+            "cannot be safely consolidated until the gate opens.",
+            len(duplicated),
+            collection_dir,
+        )
+        return DedupRepairResult(
+            records_scanned=len(id_to_paths),
+            gate_passed=True,
+            duplicate_groups=len(duplicated),
+            records_before=collection_total,
+            collection_total=collection_total,
+            deletion_gated=True,
+        )
+
+    # May raise DedupRepairAmbiguousError (corrupt id_index.bin) --
+    # collection left untouched (AC30). A stale/wrong single entry
+    # (matches neither copy) no longer raises; it is folded into AC2's
+    # delete-all-copies branch (coordinator review finding R1).
     winners = _plan_dedup(collection_dir, duplicated)
 
-    survivors: Dict[str, Path] = {
-        point_id: (winners[point_id] if point_id in duplicated else paths[0])
-        for point_id, paths in id_to_paths.items()
-    }
+    survivors: Dict[str, Path] = {}
+    winner_kept_groups = 0
+    whole_group_deleted_groups = 0
+    records_deleted = 0
+    for point_id, paths in id_to_paths.items():
+        if point_id not in duplicated:
+            survivors[point_id] = paths[0]
+            continue
+        winner_path = winners[point_id]
+        if winner_path is None:
+            # Story #1560 AC2: no resolvable winner -- ALL copies of
+            # this group are deleted below; no survivor for this id.
+            whole_group_deleted_groups += 1
+            records_deleted += len(paths)
+            continue
+        # Story #1560 AC1: winner resolved -- every OTHER copy deleted.
+        winner_kept_groups += 1
+        records_deleted += len(paths) - 1
+        survivors[point_id] = winner_path
 
     renumber_plan, skipped_groups = _plan_renumber(
         collection_dir, survivors, identity_by_path
@@ -1100,59 +1411,133 @@ def repair_duplicate_and_shifted_points(
     # fails loud, pre-mutation, never silently defaulted.
     vector_dim, space = _resolve_hnsw_build_params(collection_dir)
 
-    # ---- Marker written durably BEFORE the first mutation ----
-    _write_marker_durably(collection_dir)
+    # ---- Story #1560 AC20/AC21: quiesce query-tracker key BEFORE any
+    # deletion, and clear the mark on EVERY exit path. Only relevant
+    # when there is something to delete AND a tracker/key were supplied
+    # -- otherwise a true no-op, matching every pre-existing caller.
+    quiescing_marked = (
+        bool(duplicated) and query_tracker is not None and refcount_key is not None
+    )
+    if quiescing_marked and query_tracker is not None:
+        query_tracker.mark_quiescing(refcount_key)
+    try:
+        if quiescing_marked:
+            # Lazy import: this module is imported by the CLI/solo path
+            # (storage/shared/), which must never eagerly pull in the
+            # server package (Bug #1468's lazy-load discipline) -- only
+            # a caller that actually supplied a query_tracker (a server
+            # caller) pays this import cost.
+            from code_indexer.server.services.deactivation_query_drain import (
+                wait_for_activated_repo_query_drain,
+            )
 
-    # ---- PHASE 2: apply ----
-    duplicates_quarantined = 0
-    for point_id, paths in duplicated.items():
-        winner_path = winners[point_id]
-        for candidate in paths:
-            if candidate.resolve() != winner_path.resolve():
-                _quarantine_loser(collection_dir, candidate)
-                duplicates_quarantined += 1
+            wait_for_activated_repo_query_drain(
+                query_tracker,
+                refcount_key,
+                max_wait_seconds=drain_max_wait_seconds,
+            )
 
-    records_renumbered = 0
-    for old_point_id, path in survivors.items():
-        if old_point_id not in renumber_plan:
-            # Bug #1502 live-staging amendment: this record belongs to a
-            # group excluded from the renumber plan (genuine line gap or
-            # identical-line-range ambiguity) -- left byte-identical.
-            continue
-        new_point_id, new_unique_key, new_index, total = renumber_plan[old_point_id]
-        # Bug #1558: re-read the FULL record fresh from disk at write
-        # time rather than reusing a value retained since the planning
-        # scan -- the planning phase only keeps a lightweight identity
-        # view (see _extract_lightweight_identity_fields), never the
-        # full record (which includes the embedding vector and can be
-        # tens of KB per record). Safe: `path` is a survivor's ORIGINAL,
-        # unmoved file -- the dedup-quarantine loop above only moves
-        # LOSER paths, never a survivor's own path -- so its on-disk
-        # content here is exactly what the scan parsed.
-        record = _read_full_json_record(path)
-        record["id"] = new_point_id
-        payload = record.setdefault("payload", {})
-        payload["point_id"] = new_point_id
-        payload["unique_key"] = new_unique_key
-        payload["chunk_index"] = new_index
-        payload["total_chunks"] = total
-        if new_point_id != old_point_id:
-            records_renumbered += 1
-        _atomic_write_json_record(path, record)
+        # ---- Story #1560 AC22: crash-durable outcome journal, written
+        # BEFORE any deletion -- see _accumulate_pending_outcome_durably
+        # for why this is a distinct file from the marker below (its
+        # lifecycle is owned by the upstream DB-persistence layer, not
+        # by this function). Only when there is a dedup outcome worth
+        # journaling this pass (AC10: a clean renumber-only pass writes
+        # nothing here). records_before/collection_total both source
+        # from the SAME `collection_total` local -- they are the same
+        # measured quantity under two names (see DedupRepairResult's
+        # own docstring and this function's final return below).
+        if duplicated:
+            _accumulate_pending_outcome_durably(
+                collection_dir,
+                {
+                    "duplicate_groups": len(duplicated),
+                    "records_deleted": records_deleted,
+                    "winner_kept_groups": winner_kept_groups,
+                    "whole_group_deleted_groups": whole_group_deleted_groups,
+                    "records_before": collection_total,
+                    "collection_total": collection_total,
+                },
+            )
 
-    # ---- PHASE 3: rebuild id_index.bin + HNSW from repaired truth ----
-    # (skipped groups' unchanged records are naturally included -- the
-    # rebuild scans the CURRENT JSON tree, which still contains them
-    # under their existing point_ids.)
-    _rebuild_derived_artifacts(collection_dir, vector_dim, space)
+        # ---- Marker written durably BEFORE the first mutation ----
+        _write_marker_durably(collection_dir)
 
-    # ---- Marker deleted only after BOTH rebuilds complete ----
-    _delete_marker_durably(collection_dir)
+        # ---- PHASE 2: apply -- DELETE outright, never quarantine ----
+        for point_id, paths in duplicated.items():
+            winner_path = winners[point_id]
+            if winner_path is None:
+                # AC2: no winner -- delete ALL copies symmetrically.
+                for candidate in paths:
+                    _delete_loser(candidate)
+            else:
+                # AC1: delete every copy that is NOT the winner.
+                for candidate in paths:
+                    if candidate.resolve() != winner_path.resolve():
+                        _delete_loser(candidate)
+
+        records_renumbered = 0
+        for old_point_id, path in survivors.items():
+            if old_point_id not in renumber_plan:
+                # Bug #1502 live-staging amendment: this record belongs
+                # to a group excluded from the renumber plan (genuine
+                # line gap or identical-line-range ambiguity) -- left
+                # byte-identical.
+                continue
+            new_point_id, new_unique_key, new_index, total = renumber_plan[old_point_id]
+            # Bug #1558: re-read the FULL record fresh from disk at
+            # write time rather than reusing a value retained since the
+            # planning scan -- the planning phase only keeps a
+            # lightweight identity view (see
+            # _extract_lightweight_identity_fields), never the full
+            # record (which includes the embedding vector and can be
+            # tens of KB per record). Safe: `path` is a survivor's
+            # ORIGINAL, undeleted file -- the dedup-deletion loop above
+            # only deletes LOSER paths, never a survivor's own path --
+            # so its on-disk content here is exactly what the scan
+            # parsed.
+            record = _read_full_json_record(path)
+            record["id"] = new_point_id
+            payload = record.setdefault("payload", {})
+            payload["point_id"] = new_point_id
+            payload["unique_key"] = new_unique_key
+            payload["chunk_index"] = new_index
+            payload["total_chunks"] = total
+            if new_point_id != old_point_id:
+                records_renumbered += 1
+            _atomic_write_json_record(path, record)
+
+        # ---- PHASE 3: rebuild id_index.bin + HNSW from repaired truth
+        # ---- (skipped groups' unchanged records are naturally
+        # included -- the rebuild scans the CURRENT JSON tree, which
+        # still contains them under their existing point_ids.)
+        _rebuild_derived_artifacts(collection_dir, vector_dim, space)
+
+        # ---- Codex review Finding F1: only NOW, with the deletion loop
+        # and BOTH rebuilds proven complete, may the outcome journal (if
+        # any -- absent for a renumber-only pass) be flipped to
+        # "completed". Unconditional: covers both this pass having just
+        # written a fresh "pending" journal above, AND the marker-
+        # driven convergence case (duplicated empty this pass, but a
+        # stale "pending" journal from an EARLIER crashed pass survives
+        # -- reaching this line proves that earlier pass's deletion
+        # actually completed for real). ----
+        _mark_pending_outcome_completed_durably(collection_dir)
+
+        # ---- Marker deleted only after BOTH rebuilds complete ----
+        _delete_marker_durably(collection_dir)
+    finally:
+        if quiescing_marked and query_tracker is not None:
+            query_tracker.clear_quiescing(refcount_key)
 
     return DedupRepairResult(
         records_scanned=len(id_to_paths),
-        duplicates_found=len(duplicated),
-        duplicates_quarantined=duplicates_quarantined,
+        duplicate_groups=len(duplicated),
+        records_before=collection_total,
+        records_deleted=records_deleted,
+        winner_kept_groups=winner_kept_groups,
+        whole_group_deleted_groups=whole_group_deleted_groups,
+        collection_total=collection_total,
         records_renumbered=records_renumbered,
         gate_passed=True,
         id_index_rebuilt=True,

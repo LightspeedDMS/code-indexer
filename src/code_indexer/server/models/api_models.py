@@ -127,6 +127,26 @@ class HealthCheckResponse(BaseModel):
         "HealthCheckService.get_golden_repo_reconcile_auto_heal_event() so an "
         "operator can discover it via this /health field without log-searching.",
     )
+    # Any: a dynamic, nested JSON payload (a bounded list of per-repo
+    # dicts under 'repos') -- mirrors the identical Dict[str, Any]
+    # typing on the sibling field above, for the same reason.
+    fleet_migration_dedup_state: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="Story #1560 AC13/AC14/AC16: per-golden-repo record of "
+        "duplicate point_id groups auto-resolved (deleted) during fleet "
+        "migration, or null if none currently active. UNLIKE "
+        "last_golden_repo_reconcile_auto_heal, this DOES factor into "
+        "`status`/`failure_reasons` (AC15) -- lost search coverage is a "
+        "real, current degradation, not a resolved historical event. "
+        "Schema: {'affected_total': int, 'repos': [{'golden_alias': str, "
+        "'records_deleted': int, 'collection_total': int, 'loss_ratio': "
+        "float, 'incomplete': true, 'dropped_at': str|null (ISO-8601 UTC)}"
+        ", ...]}. 'repos' is bounded to at most 50 entries (AC16), ordered "
+        "by (dropped_at DESC, alias ASC) with NULL dropped_at sorted last "
+        "on both backends (AC17/R3); 'affected_total' is the UNBOUNDED "
+        "count. Cleared entries (AC8) are excluded. Populated from "
+        "HealthCheckService.get_fleet_migration_dedup_state_summary().",
+    )
 
 
 class RepositoryFilesInfo(BaseModel):

@@ -41,6 +41,8 @@ exact phase boundaries, per Codex's test-quality finding).
 import hashlib
 import json
 import logging
+import os
+import time
 import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -320,7 +322,7 @@ class TestRepairNoDuplicates:
 
         result = repair_duplicate_and_shifted_points(tmp_path)
 
-        assert result.duplicates_found == 0
+        assert result.duplicate_groups == 0
         assert result.gate_passed is True
         # Identity fast path: nothing changed, no marker existed -- zero
         # mutation, zero rebuild.
@@ -357,7 +359,7 @@ class TestRepairNoDuplicates:
 
         result = repair_duplicate_and_shifted_points(tmp_path)
 
-        assert result.duplicates_found == 0
+        assert result.duplicate_groups == 0
         assert result.records_renumbered == 2
         assert result.id_index_rebuilt is True
         assert result.hnsw_rebuilt is True
@@ -377,9 +379,11 @@ class TestRepairNoDuplicates:
 
 
 class TestRepairDeduplication:
-    def test_duplicate_resolved_via_id_index_winner_loser_quarantined(
+    def test_duplicate_resolved_via_id_index_winner_loser_deleted(
         self, tmp_path: Path
     ) -> None:
+        """Story #1560 AC1: winner resolvable via id_index.bin -> every
+        OTHER copy is DELETED outright (no sidecar, no leftovers)."""
         _write_collection_meta(tmp_path)
         # Natural collision: SAME (project_id, file_hash, index) computes
         # the SAME point_id via the real formula -- exactly how the
@@ -410,14 +414,21 @@ class TestRepairDeduplication:
 
         result = repair_duplicate_and_shifted_points(tmp_path)
 
-        assert result.duplicates_found == 1
-        assert result.duplicates_quarantined == 1
+        assert result.duplicate_groups == 1
+        assert result.winner_kept_groups == 1
+        assert result.whole_group_deleted_groups == 0
+        assert result.records_deleted == 1
+        assert result.records_before == 2
+        assert result.collection_total == 2
         assert result.id_index_rebuilt is True
         assert result.hnsw_rebuilt is True
         assert not _marker_path(tmp_path).exists()
 
-        # Loser physically removed from the collection tree.
+        # Loser physically removed from the collection tree -- DELETED,
+        # never moved anywhere.
         assert not loser_path.exists()
+        # No sidecar directory of any kind exists anywhere (AC3).
+        assert not any(".dedup-quarantine" in str(p) for p in tmp_path.rglob("*"))
         # Winner survives inside the collection tree.
         remaining = _all_json_files(tmp_path)
         assert len(remaining) == 1
@@ -431,13 +442,13 @@ class TestRepairDeduplication:
         assert surviving_data["payload"]["chunk_index"] == 0
         _assert_derived_artifacts_consistent(tmp_path)
         # Codex 7f: prove the HNSW label for the surviving id resolves to
-        # the WINNER's vector, never the quarantined loser's.
+        # the WINNER's vector, never the deleted loser's.
         _assert_hnsw_labels_resolve_to_correct_vectors(tmp_path)
 
-    def test_quarantined_file_invisible_to_downstream_json_scans(
+    def test_deleted_loser_invisible_to_downstream_json_scans(
         self, tmp_path: Path
     ) -> None:
-        """A quarantined loser must never satisfy a bare
+        """A deleted loser must never satisfy a bare
         collection_dir.rglob('vector_*.json') scan -- the exact scan
         consolidate_collection_in_place's own IDIndexManager relies on."""
         _write_collection_meta(tmp_path)
@@ -475,12 +486,12 @@ class TestRepairDeduplication:
         assert len(id_map) == 1
         assert len(list(tmp_path.rglob("vector_*.json"))) == 1
 
-    def test_quarantine_fsyncs_source_and_destination_directories(
+    def test_deletion_fsyncs_source_directory(
         self, tmp_path: Path, monkeypatch
     ) -> None:
-        """Codex M7: after moving a loser to the quarantine sidecar, both
-        the SOURCE directory (loser's original shard dir) and the
-        DESTINATION directory (quarantine sidecar dir) must be fsynced."""
+        """Story #1560 AC4: after unlinking a loser, its containing
+        (source) directory must be fsynced -- durability, no sidecar
+        destination exists anymore to fsync."""
         _write_collection_meta(tmp_path)
         winner_path = _write_record(
             tmp_path,
@@ -507,7 +518,7 @@ class TestRepairDeduplication:
 
         fsynced_dirs: List[str] = []
         real_fsync = repair_mod.nfs_safe_fsync
-        real_fdopendir_source = loser_path.parent
+        real_source_dir = loser_path.parent
 
         def _tracking_fsync(fd: int) -> None:
             # Resolve fd back to its directory path via /proc for assertion.
@@ -524,22 +535,24 @@ class TestRepairDeduplication:
 
         repair_duplicate_and_shifted_points(tmp_path)
 
-        # The loser's original shard directory and SOME quarantine
-        # destination directory must both have been fsynced.
-        assert any(str(real_fdopendir_source.resolve()) == d for d in fsynced_dirs), (
+        assert any(str(real_source_dir.resolve()) == d for d in fsynced_dirs), (
             f"source shard dir never fsynced; fsynced dirs were {fsynced_dirs}"
         )
-        assert any(".dedup-quarantine" in d for d in fsynced_dirs), (
-            f"quarantine destination dir never fsynced; fsynced dirs were {fsynced_dirs}"
+        assert not any(".dedup-quarantine" in d for d in fsynced_dirs), (
+            "no sidecar/quarantine directory must ever be fsynced -- it no "
+            "longer exists as a mechanism"
         )
 
 
 class TestRepairFailLoudDedupAmbiguity:
-    def test_duplicate_with_no_id_index_entry_raises_and_leaves_untouched(
+    def test_duplicate_with_no_id_index_entry_deletes_all_copies(
         self, tmp_path: Path
     ) -> None:
+        """Story #1560 AC2: NO id_index.bin entry at all for a duplicated
+        point_id -> ALL copies are deleted, symmetrically. No exception,
+        no arbitrary winner."""
         _write_collection_meta(tmp_path)
-        _write_record(
+        copy_a = _write_record(
             tmp_path,
             project_id="proj",
             file_hash="sha256:eee",
@@ -549,7 +562,7 @@ class TestRepairFailLoudDedupAmbiguity:
             line_end=10,
             shard_suffix="-a",
         )
-        _write_record(
+        copy_b = _write_record(
             tmp_path,
             project_id="proj",
             file_hash="sha256:eee",
@@ -560,20 +573,33 @@ class TestRepairFailLoudDedupAmbiguity:
             shard_suffix="-b",
         )
         # No id_index.bin at all -- no winner reference available.
-        before = {p: p.read_bytes() for p in _all_json_files(tmp_path)}
 
-        with pytest.raises(DuplicateSourceIdError):
-            repair_duplicate_and_shifted_points(tmp_path)
+        result = repair_duplicate_and_shifted_points(tmp_path)
 
-        after = {p: p.read_bytes() for p in _all_json_files(tmp_path)}
-        assert before == after
+        assert result.duplicate_groups == 1
+        assert result.winner_kept_groups == 0
+        assert result.whole_group_deleted_groups == 1
+        assert result.records_deleted == 2
+        assert result.records_before == 2
+        assert not copy_a.exists()
+        assert not copy_b.exists()
+        assert not any(".dedup-quarantine" in str(p) for p in tmp_path.rglob("*"))
+        assert len(list(tmp_path.rglob("vector_*.json"))) == 0
         assert not _marker_path(tmp_path).exists()
 
-    def test_id_index_referencing_neither_copy_raises_and_leaves_untouched(
+    def test_id_index_referencing_neither_copy_deletes_all_copies_symmetrically(
         self, tmp_path: Path
     ) -> None:
+        """Coordinator review finding R1: an id_index.bin entry that
+        resolves to NEITHER scanned copy is folded into AC2's symmetric
+        delete-all behavior -- NOT raised as DuplicateSourceIdError.
+        Raising here would recreate Design decision 7's "NO quarantine
+        for this cause, unconditionally" through a narrower door (the
+        scheduler counts DuplicateSourceIdError toward
+        consecutive_failure_count/quarantine). Completing without any
+        exception here IS the proof this cause no longer quarantines."""
         _write_collection_meta(tmp_path)
-        _write_record(
+        copy_a = _write_record(
             tmp_path,
             project_id="proj",
             file_hash="sha256:fff",
@@ -583,7 +609,7 @@ class TestRepairFailLoudDedupAmbiguity:
             line_end=10,
             shard_suffix="-a",
         )
-        _write_record(
+        copy_b = _write_record(
             tmp_path,
             project_id="proj",
             file_hash="sha256:fff",
@@ -596,13 +622,15 @@ class TestRepairFailLoudDedupAmbiguity:
         shared_point_id = _point_id("proj", "sha256:fff", 0)
         bogus_path = tmp_path / "does" / "not" / "exist.json"
         IDIndexManager().save_index(tmp_path, {shared_point_id: bogus_path})
-        before = {p: p.read_bytes() for p in _all_json_files(tmp_path)}
 
-        with pytest.raises(DuplicateSourceIdError):
-            repair_duplicate_and_shifted_points(tmp_path)
+        result = repair_duplicate_and_shifted_points(tmp_path)
 
-        after = {p: p.read_bytes() for p in _all_json_files(tmp_path)}
-        assert before == after
+        assert result.duplicate_groups == 1
+        assert result.winner_kept_groups == 0
+        assert result.whole_group_deleted_groups == 1
+        assert result.records_deleted == 2
+        assert not copy_a.exists()
+        assert not copy_b.exists()
         assert not _marker_path(tmp_path).exists()
 
 
@@ -790,8 +818,8 @@ class TestPerGroupRenumberGracefulDegradation:
         # deletes the legacy JSON files) ----
         result = repair_duplicate_and_shifted_points(tmp_path)
 
-        assert result.duplicates_found == 1
-        assert result.duplicates_quarantined == 1
+        assert result.duplicate_groups == 1
+        assert result.records_deleted == 1
         assert result.groups_skipped_renumber == 1
         assert result.skipped_renumber_file_hashes == ["sha256:gapA"]
         # cleanB's 2 records + dupC's 1 surviving winner all get a new
@@ -879,7 +907,7 @@ class TestPerGroupRenumberGracefulDegradation:
 
         second = repair_duplicate_and_shifted_points(tmp_path)
 
-        assert second.duplicates_found == 0
+        assert second.duplicate_groups == 0
         assert second.records_renumbered == 0
         assert second.groups_skipped_renumber == 1
         assert second.skipped_renumber_file_hashes == ["sha256:gapIdem"]
@@ -1143,7 +1171,7 @@ class TestCrashWindowRecovery:
 
         result = repair_duplicate_and_shifted_points(tmp_path)
 
-        assert result.duplicates_found == 0
+        assert result.duplicate_groups == 0
         assert result.records_renumbered == 0  # already canonical
         assert result.id_index_rebuilt is True
         assert result.hnsw_rebuilt is True
@@ -1543,11 +1571,11 @@ class TestCrashInjectionPhaseBoundaries:
         assert result.hnsw_rebuilt is True
         _assert_derived_artifacts_consistent(tmp_path)
 
-    def test_crash_during_quarantine_then_retry_converges(
+    def test_crash_during_deletion_then_retry_converges(
         self, tmp_path: Path, monkeypatch
     ) -> None:
         self._make_fixture(tmp_path)
-        self._crash_then_converge(tmp_path, monkeypatch, "_quarantine_loser")
+        self._crash_then_converge(tmp_path, monkeypatch, "_delete_loser")
 
     def test_crash_during_json_rewrite_then_retry_converges(
         self, tmp_path: Path, monkeypatch
@@ -1606,6 +1634,612 @@ class TestCrashInjectionPhaseBoundaries:
         self._crash_then_converge(tmp_path, monkeypatch, "_delete_marker_durably")
 
 
+# Story #1560 AC20/AC21 test timing/permission constants -- named to
+# avoid magic numbers in the drain-quiescence test bodies below.
+_DRAIN_RELEASE_DELAY_SECONDS = 0.3
+_DRAIN_TIMING_TOLERANCE_FRACTION = 0.8
+_DRAIN_GENEROUS_MAX_WAIT_SECONDS = 5.0
+_DRAIN_SHORT_MAX_WAIT_SECONDS = 1.0
+_DRAIN_EXPIRY_MAX_WAIT_SECONDS = 0.2
+_READ_ONLY_NO_WRITE_DIR_MODE = 0o500
+_THREAD_JOIN_TIMEOUT_SECONDS = 5.0
+
+
+class TestPendingDedupOutcomeJournal:
+    """Story #1560 AC22/AC23: a crash-durable journal, independent of
+    the marker's own lifecycle, so a crash between filesystem mutation
+    and DB persistence can never lose the audit record."""
+
+    def test_journal_written_when_duplicates_resolved(self, tmp_path: Path) -> None:
+        from code_indexer.storage.shared.collection_dedup_repair import (
+            read_pending_dedup_outcome,
+        )
+
+        _write_collection_meta(tmp_path)
+        winner_path = _write_record(
+            tmp_path,
+            project_id="proj",
+            file_hash="sha256:journal",
+            index=0,
+            vector=[0.1, 0.2, 0.3, 0.4],
+            line_start=1,
+            line_end=10,
+            shard_suffix="-a",
+        )
+        _write_record(
+            tmp_path,
+            project_id="proj",
+            file_hash="sha256:journal",
+            index=0,
+            vector=[0.9, 0.9, 0.9, 0.9],
+            line_start=1,
+            line_end=10,
+            shard_suffix="-b",
+        )
+        shared_point_id = _point_id("proj", "sha256:journal", 0)
+        IDIndexManager().save_index(tmp_path, {shared_point_id: winner_path})
+
+        _ = repair_duplicate_and_shifted_points(tmp_path)
+
+        journal = read_pending_dedup_outcome(tmp_path)
+        assert journal is not None
+        assert journal["duplicate_groups"] == 1
+        assert journal["records_deleted"] == 1
+        assert journal["winner_kept_groups"] == 1
+        assert journal["whole_group_deleted_groups"] == 0
+        assert journal["collection_total"] == 2
+
+    def test_journal_not_cleared_by_repair_itself(self, tmp_path: Path) -> None:
+        """The journal's clear lifecycle belongs to the upstream
+        DB-persistence layer -- repair() must never clear it on its
+        own successful completion."""
+        from code_indexer.storage.shared.collection_dedup_repair import (
+            read_pending_dedup_outcome,
+        )
+
+        _write_collection_meta(tmp_path)
+        winner_path = _write_record(
+            tmp_path,
+            project_id="proj",
+            file_hash="sha256:journalpersist",
+            index=0,
+            vector=[0.1, 0.2, 0.3, 0.4],
+            line_start=1,
+            line_end=10,
+            shard_suffix="-a",
+        )
+        _write_record(
+            tmp_path,
+            project_id="proj",
+            file_hash="sha256:journalpersist",
+            index=0,
+            vector=[0.9, 0.9, 0.9, 0.9],
+            line_start=1,
+            line_end=10,
+            shard_suffix="-b",
+        )
+        shared_point_id = _point_id("proj", "sha256:journalpersist", 0)
+        IDIndexManager().save_index(tmp_path, {shared_point_id: winner_path})
+
+        result = repair_duplicate_and_shifted_points(tmp_path)
+
+        assert result.records_deleted == 1
+        assert not _marker_path(tmp_path).exists(), "repair's OWN marker clears"
+        assert read_pending_dedup_outcome(tmp_path) is not None, (
+            "the outcome journal must survive repair's own successful "
+            "completion -- only the upstream persistence layer clears it"
+        )
+
+    def test_no_journal_for_a_clean_no_duplicate_pass(self, tmp_path: Path) -> None:
+        from code_indexer.storage.shared.collection_dedup_repair import (
+            read_pending_dedup_outcome,
+        )
+
+        _write_collection_meta(tmp_path)
+        _write_record(
+            tmp_path,
+            project_id="proj",
+            file_hash="sha256:noduplicate",
+            index=5,
+            vector=[0.1, 0.2, 0.3, 0.4],
+            line_start=1,
+            line_end=10,
+        )
+
+        _ = repair_duplicate_and_shifted_points(tmp_path)
+
+        assert read_pending_dedup_outcome(tmp_path) is None
+
+
+class TestPendingDedupOutcomeJournalMechanics:
+    """Story #1560 AC22/AC23: remaining journal-mechanism behaviors --
+    absent-read, idempotent clear, and cumulative-vs-snapshot
+    accumulation semantics."""
+
+    def test_read_returns_none_when_absent(self, tmp_path: Path) -> None:
+        from code_indexer.storage.shared.collection_dedup_repair import (
+            read_pending_dedup_outcome,
+        )
+
+        _write_collection_meta(tmp_path)
+        assert read_pending_dedup_outcome(tmp_path) is None
+
+    def test_clear_is_idempotent_and_reports_presence(self, tmp_path: Path) -> None:
+        from code_indexer.storage.shared.collection_dedup_repair import (
+            clear_pending_dedup_outcome,
+            read_pending_dedup_outcome,
+        )
+
+        _write_collection_meta(tmp_path)
+        winner_path = _write_record(
+            tmp_path,
+            project_id="proj",
+            file_hash="sha256:journalclear",
+            index=0,
+            vector=[0.1, 0.2, 0.3, 0.4],
+            line_start=1,
+            line_end=10,
+            shard_suffix="-a",
+        )
+        _write_record(
+            tmp_path,
+            project_id="proj",
+            file_hash="sha256:journalclear",
+            index=0,
+            vector=[0.9, 0.9, 0.9, 0.9],
+            line_start=1,
+            line_end=10,
+            shard_suffix="-b",
+        )
+        shared_point_id = _point_id("proj", "sha256:journalclear", 0)
+        IDIndexManager().save_index(tmp_path, {shared_point_id: winner_path})
+        _ = repair_duplicate_and_shifted_points(tmp_path)
+
+        assert clear_pending_dedup_outcome(tmp_path) is True
+        assert read_pending_dedup_outcome(tmp_path) is None
+        assert clear_pending_dedup_outcome(tmp_path) is False
+
+    def test_accumulate_adds_cumulative_fields_overwrites_snapshot_fields(
+        self, tmp_path: Path
+    ) -> None:
+        """Codex review Finding F1: accumulation across MULTIPLE passes
+        is only safe when the FIRST pass's journal was CONFIRMED
+        complete (filesystem-proven) before the second pass begins --
+        otherwise a crashed/unconfirmed first pass's speculative counts
+        would double-count once the interrupted work is later retried
+        for real. This test simulates that safe sequence explicitly via
+        `_mark_pending_outcome_completed_durably` between the two
+        accumulate calls."""
+        from code_indexer.storage.shared.collection_dedup_repair import (
+            _accumulate_pending_outcome_durably,
+            _mark_pending_outcome_completed_durably,
+            read_pending_dedup_outcome,
+        )
+
+        _write_collection_meta(tmp_path)
+        _accumulate_pending_outcome_durably(
+            tmp_path,
+            {
+                "duplicate_groups": 5,
+                "records_deleted": 6,
+                "winner_kept_groups": 4,
+                "whole_group_deleted_groups": 1,
+                "records_before": 1000,
+                "collection_total": 1000,
+            },
+        )
+        _mark_pending_outcome_completed_durably(tmp_path)
+        _accumulate_pending_outcome_durably(
+            tmp_path,
+            {
+                "duplicate_groups": 2,
+                "records_deleted": 3,
+                "winner_kept_groups": 1,
+                "whole_group_deleted_groups": 1,
+                "records_before": 1050,
+                "collection_total": 1050,
+            },
+        )
+
+        journal = read_pending_dedup_outcome(tmp_path)
+        assert journal is not None
+        assert journal["duplicate_groups"] == 7
+        assert journal["records_deleted"] == 9
+        assert journal["winner_kept_groups"] == 5
+        assert journal["whole_group_deleted_groups"] == 2
+        # Snapshot fields: NOT summed -- always the latest pass's value.
+        assert journal["records_before"] == 1050
+        assert journal["collection_total"] == 1050
+
+    def test_accumulate_never_sums_onto_an_unconfirmed_pending_journal(
+        self, tmp_path: Path
+    ) -> None:
+        """Codex review Finding F1 (the actual bug fix): a SECOND
+        accumulate call with NO confirmed completion in between must
+        NEVER sum onto the first, unconfirmed call's speculative
+        counts -- it must SUPERSEDE them with this pass's own fresh,
+        accurate recomputation. Prevents the double-count race: crash
+        after journal-write but before deletion -> retry recomputes and
+        would otherwise double the totals on top of the never-executed
+        first intent."""
+        from code_indexer.storage.shared.collection_dedup_repair import (
+            _accumulate_pending_outcome_durably,
+            read_pending_dedup_outcome,
+        )
+
+        _write_collection_meta(tmp_path)
+        _accumulate_pending_outcome_durably(
+            tmp_path,
+            {
+                "duplicate_groups": 5,
+                "records_deleted": 6,
+                "winner_kept_groups": 4,
+                "whole_group_deleted_groups": 1,
+                "records_before": 1000,
+                "collection_total": 1000,
+            },
+        )
+        _accumulate_pending_outcome_durably(
+            tmp_path,
+            {
+                "duplicate_groups": 2,
+                "records_deleted": 3,
+                "winner_kept_groups": 1,
+                "whole_group_deleted_groups": 1,
+                "records_before": 1050,
+                "collection_total": 1050,
+            },
+        )
+
+        journal = read_pending_dedup_outcome(tmp_path)
+        assert journal is not None
+        assert journal["duplicate_groups"] == 2
+        assert journal["records_deleted"] == 3
+        assert journal["winner_kept_groups"] == 1
+        assert journal["whole_group_deleted_groups"] == 1
+        assert journal["phase"] == "pending"
+
+
+class TestDeletionAuthorizedGate:
+    """Story #1560 AC19: with the Story #1460 rollout gate CLOSED
+    (deletion_authorized=False) and duplicate groups genuinely present,
+    repair must perform ZERO mutation and report deletion_gated=True --
+    never a false partial success."""
+
+    def test_gate_closed_with_duplicates_performs_zero_mutation(
+        self, tmp_path: Path
+    ) -> None:
+        _write_collection_meta(tmp_path)
+        winner_path = _write_record(
+            tmp_path,
+            project_id="proj",
+            file_hash="sha256:gated",
+            index=0,
+            vector=[0.1, 0.2, 0.3, 0.4],
+            line_start=1,
+            line_end=10,
+            shard_suffix="-a",
+        )
+        loser_path = _write_record(
+            tmp_path,
+            project_id="proj",
+            file_hash="sha256:gated",
+            index=0,
+            vector=[0.9, 0.9, 0.9, 0.9],
+            line_start=1,
+            line_end=10,
+            shard_suffix="-b",
+        )
+        shared_point_id = _point_id("proj", "sha256:gated", 0)
+        IDIndexManager().save_index(tmp_path, {shared_point_id: winner_path})
+        before = {p: p.read_bytes() for p in _all_json_files(tmp_path)}
+
+        result = repair_duplicate_and_shifted_points(
+            tmp_path, deletion_authorized=False
+        )
+
+        assert result.deletion_gated is True
+        assert result.duplicate_groups == 1
+        assert result.records_deleted == 0
+        assert result.winner_kept_groups == 0
+        assert result.whole_group_deleted_groups == 0
+        assert not _marker_path(tmp_path).exists()
+        assert winner_path.exists()
+        assert loser_path.exists()
+        after = {p: p.read_bytes() for p in _all_json_files(tmp_path)}
+        assert before == after, "gate closed must produce ZERO mutation"
+
+    def test_gate_closed_with_no_duplicates_still_proceeds(
+        self, tmp_path: Path
+    ) -> None:
+        """The AC19 gate is scoped to duplicate resolution ONLY -- a
+        clean collection's renumber-only pass is unaffected by
+        deletion_authorized=False."""
+        _write_collection_meta(tmp_path)
+        _write_record(
+            tmp_path,
+            project_id="proj",
+            file_hash="sha256:cleangate",
+            index=5,
+            vector=[0.1, 0.2, 0.3, 0.4],
+            line_start=1,
+            line_end=10,
+        )
+
+        result = repair_duplicate_and_shifted_points(
+            tmp_path, deletion_authorized=False
+        )
+
+        assert result.deletion_gated is False
+        assert result.duplicate_groups == 0
+        assert result.records_renumbered == 1
+
+
+class TestQueryQuiescenceBeforeDeletion:
+    """Story #1560 AC20/AC21: before deleting any duplicate copy, the
+    collection's query-tracker key is marked quiescing and drained with
+    a bounded wait (reusing Story #1458 AC13's real
+    wait_for_activated_repo_query_drain, never a reimplementation), and
+    the mark is cleared on every exit path."""
+
+    def _make_dup_fixture(self, tmp_path: Path) -> Path:
+        _write_collection_meta(tmp_path)
+        winner_path = _write_record(
+            tmp_path,
+            project_id="proj",
+            file_hash="sha256:quiesce",
+            index=0,
+            vector=[0.1, 0.2, 0.3, 0.4],
+            line_start=1,
+            line_end=10,
+            shard_suffix="-a",
+        )
+        _write_record(
+            tmp_path,
+            project_id="proj",
+            file_hash="sha256:quiesce",
+            index=0,
+            vector=[0.9, 0.9, 0.9, 0.9],
+            line_start=1,
+            line_end=10,
+            shard_suffix="-b",
+        )
+        shared_point_id = _point_id("proj", "sha256:quiesce", 0)
+        IDIndexManager().save_index(tmp_path, {shared_point_id: winner_path})
+        return winner_path
+
+    def test_deletion_waits_for_real_reader_to_release_before_proceeding(
+        self, tmp_path: Path
+    ) -> None:
+        """Real timing proof (no mocking of the SUT): a reader holds the
+        refcount for _DRAIN_RELEASE_DELAY_SECONDS before releasing it on
+        a background thread -- the whole repair call must not return
+        faster than that, proving the drain genuinely blocked."""
+        import threading
+
+        from code_indexer.global_repos.query_tracker import QueryTracker
+
+        self._make_dup_fixture(tmp_path)
+        tracker = QueryTracker()
+        refcount_key = str(tmp_path)
+        tracker.increment_ref(refcount_key)
+
+        def _release_shortly() -> None:
+            time.sleep(_DRAIN_RELEASE_DELAY_SECONDS)
+            tracker.decrement_ref(refcount_key)
+
+        release_thread = threading.Thread(target=_release_shortly)
+        release_thread.start()
+        try:
+            start = time.monotonic()
+            result = repair_duplicate_and_shifted_points(
+                tmp_path,
+                query_tracker=tracker,
+                refcount_key=refcount_key,
+                drain_max_wait_seconds=_DRAIN_GENEROUS_MAX_WAIT_SECONDS,
+            )
+            elapsed = time.monotonic() - start
+        finally:
+            release_thread.join(timeout=_THREAD_JOIN_TIMEOUT_SECONDS)
+
+        assert (
+            elapsed >= _DRAIN_RELEASE_DELAY_SECONDS * _DRAIN_TIMING_TOLERANCE_FRACTION
+        ), (
+            f"repair returned after only {elapsed:.3f}s -- the drain must "
+            f"have blocked until the reader released its reference "
+            f"(~{_DRAIN_RELEASE_DELAY_SECONDS}s)"
+        )
+        assert result.records_deleted == 1
+        # Cleared on the successful exit path.
+        assert tracker.is_quiescing(refcount_key) is False
+        assert tracker.get_ref_count(refcount_key) == 0
+
+    @pytest.mark.skipif(
+        os.geteuid() == 0,
+        reason=(
+            "root bypasses directory write permission checks -- this "
+            "fault-injection technique cannot force mkstemp() to fail "
+            "as root"
+        ),
+    )
+    def test_quiescing_mark_is_cleared_even_on_exception(self, tmp_path: Path) -> None:
+        """Real OS-level fault injection (never mocking the SUT): the
+        collection directory is made read-only, so the marker's
+        tempfile.mkstemp() genuinely fails -- proving the finally clause
+        clears the quiescing mark on a real exception."""
+        from code_indexer.global_repos.query_tracker import QueryTracker
+
+        self._make_dup_fixture(tmp_path)
+        tracker = QueryTracker()
+        refcount_key = str(tmp_path)
+
+        original_mode = tmp_path.stat().st_mode
+        # read+execute, no write -- mkstemp() must fail.
+        tmp_path.chmod(_READ_ONLY_NO_WRITE_DIR_MODE)
+        try:
+            with pytest.raises(OSError):
+                repair_duplicate_and_shifted_points(
+                    tmp_path,
+                    query_tracker=tracker,
+                    refcount_key=refcount_key,
+                    drain_max_wait_seconds=_DRAIN_SHORT_MAX_WAIT_SECONDS,
+                )
+        finally:
+            tmp_path.chmod(original_mode)
+
+        assert tracker.is_quiescing(refcount_key) is False
+
+    def test_drain_expiry_logs_warning_and_still_proceeds(
+        self, tmp_path: Path, caplog
+    ) -> None:
+        """Reuses Story #1458 AC13's exact drain contract: on expiry it
+        logs a WARNING naming the key/refcount and proceeds -- this
+        module does not reimplement that primitive."""
+        from code_indexer.global_repos.query_tracker import QueryTracker
+
+        self._make_dup_fixture(tmp_path)
+        tracker = QueryTracker()
+        refcount_key = str(tmp_path)
+        tracker.increment_ref(refcount_key)  # never released
+
+        with caplog.at_level(logging.WARNING):
+            result = repair_duplicate_and_shifted_points(
+                tmp_path,
+                query_tracker=tracker,
+                refcount_key=refcount_key,
+                drain_max_wait_seconds=_DRAIN_EXPIRY_MAX_WAIT_SECONDS,
+            )
+
+        assert result.records_deleted == 1
+        assert any(refcount_key in record.getMessage() for record in caplog.records), (
+            "drain expiry must log a warning naming the refcount key"
+        )
+        assert tracker.is_quiescing(refcount_key) is False
+
+    def test_no_tracker_supplied_is_a_no_op(self, tmp_path: Path) -> None:
+        """None (the default) is a fail-open no-op -- byte-identical to
+        every pre-existing caller."""
+        self._make_dup_fixture(tmp_path)
+
+        result = repair_duplicate_and_shifted_points(tmp_path)
+
+        assert result.records_deleted == 1
+
+
+class TestCollectionHasDuplicatePointIds:
+    """Story #1560 AC12: cheap, read-only duplicate-detection predicate
+    used by the fleet-migration quarantine reset check."""
+
+    def test_false_for_a_foreign_identity_scheme_duplicate(
+        self, tmp_path: Path
+    ) -> None:
+        """Regression: a duplicate using a FOREIGN identity scheme
+        (point_id does not equal md5(unique_key)) fails the
+        whole-collection identity gate -- repair passes it through
+        UNTOUCHED and the pre-existing scan raises DuplicateSourceIdError
+        identically on every future attempt. The predicate must return
+        False for this case, or the AC12 quarantine reset would fire
+        and immediately cause the exact same re-failure -- a real bug
+        found and fixed while running the scheduler regression suite
+        (test_scheduler_1458.py's _build_corrupt_repo_with_duplicate_
+        point_id fixture uses exactly this foreign-scheme shape)."""
+        from code_indexer.storage.shared.collection_dedup_repair import (
+            collection_has_duplicate_point_ids,
+        )
+
+        _write_collection_meta(tmp_path)
+        _write_record(
+            tmp_path,
+            project_id="proj",
+            file_hash="sha256:foreign",
+            index=0,
+            vector=[0.1, 0.2, 0.3, 0.4],
+            line_start=1,
+            line_end=10,
+            point_id_override="dupe0001",
+            unique_key_override="dupe0001",
+            shard_suffix="-a",
+        )
+        _write_record(
+            tmp_path,
+            project_id="proj",
+            file_hash="sha256:foreign",
+            index=0,
+            vector=[0.9, 0.9, 0.9, 0.9],
+            line_start=1,
+            line_end=10,
+            point_id_override="dupe0001",
+            unique_key_override="dupe0001",
+            shard_suffix="-b",
+        )
+
+        assert collection_has_duplicate_point_ids(tmp_path) is False
+
+    def test_true_for_a_collection_with_a_duplicate(self, tmp_path: Path) -> None:
+        from code_indexer.storage.shared.collection_dedup_repair import (
+            collection_has_duplicate_point_ids,
+        )
+
+        _write_collection_meta(tmp_path)
+        _write_record(
+            tmp_path,
+            project_id="proj",
+            file_hash="sha256:predicate",
+            index=0,
+            vector=[0.1, 0.2, 0.3, 0.4],
+            line_start=1,
+            line_end=10,
+            shard_suffix="-a",
+        )
+        _write_record(
+            tmp_path,
+            project_id="proj",
+            file_hash="sha256:predicate",
+            index=0,
+            vector=[0.9, 0.9, 0.9, 0.9],
+            line_start=1,
+            line_end=10,
+            shard_suffix="-b",
+        )
+        before = {p: p.read_bytes() for p in _all_json_files(tmp_path)}
+
+        assert collection_has_duplicate_point_ids(tmp_path) is True
+
+        after = {p: p.read_bytes() for p in _all_json_files(tmp_path)}
+        assert before == after, "the predicate must never mutate anything"
+
+    def test_false_for_a_clean_collection(self, tmp_path: Path) -> None:
+        from code_indexer.storage.shared.collection_dedup_repair import (
+            collection_has_duplicate_point_ids,
+        )
+
+        _write_collection_meta(tmp_path)
+        _write_record(
+            tmp_path,
+            project_id="proj",
+            file_hash="sha256:clean-predicate",
+            index=0,
+            vector=[0.1, 0.2, 0.3, 0.4],
+            line_start=1,
+            line_end=10,
+        )
+        before = {p: p.read_bytes() for p in _all_json_files(tmp_path)}
+
+        assert collection_has_duplicate_point_ids(tmp_path) is False
+
+        after = {p: p.read_bytes() for p in _all_json_files(tmp_path)}
+        assert before == after, "the predicate must never mutate anything"
+
+    def test_false_for_an_empty_collection(self, tmp_path: Path) -> None:
+        from code_indexer.storage.shared.collection_dedup_repair import (
+            collection_has_duplicate_point_ids,
+        )
+
+        _write_collection_meta(tmp_path)
+
+        assert collection_has_duplicate_point_ids(tmp_path) is False
+
+
 class TestRepairEmptyCollection:
     def test_empty_collection_is_a_clean_no_op(self, tmp_path: Path) -> None:
         _write_collection_meta(tmp_path)
@@ -1613,6 +2247,6 @@ class TestRepairEmptyCollection:
         result = repair_duplicate_and_shifted_points(tmp_path)
 
         assert result.records_scanned == 0
-        assert result.duplicates_found == 0
+        assert result.duplicate_groups == 0
         assert result.records_renumbered == 0
         assert not _marker_path(tmp_path).exists()

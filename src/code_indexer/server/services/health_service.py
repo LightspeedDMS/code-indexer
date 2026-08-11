@@ -55,6 +55,7 @@ DISK_CRITICAL_THRESHOLD_PERCENT = 90.0  # 90% used = 10% free = critical
 RESPONSE_TIME_WARNING = 1000  # 1 second
 RESPONSE_TIME_CRITICAL = 5000  # 5 seconds
 MAX_FAILURE_REASONS = 3  # Story #727 AC5: Limit displayed failure reasons
+FLEET_MIGRATION_DEDUP_STATE_MAX_ENTRIES = 50  # Story #1560 AC16
 PG_CONNECT_TIMEOUT_SECONDS = 5  # Timeout for PostgreSQL connectivity check
 
 # CPU sustained threshold detection (Story #727 AC4)
@@ -220,6 +221,11 @@ class HealthCheckService:
         # rather than only via the internal helper method.
         auto_heal_event = self.get_golden_repo_reconcile_auto_heal_event()
 
+        # Story #1560 AC13: unlike auto_heal_event above (historical),
+        # this field's content DOES feed into overall_status/
+        # failure_reasons via _calculate_overall_status() -- see AC15.
+        dedup_state_summary = self.get_fleet_migration_dedup_state_summary()
+
         end_time = time.time()
         logger.info(
             f"Health check completed in {end_time - start_time:.3f} seconds",
@@ -233,6 +239,7 @@ class HealthCheckService:
             system=system_info,
             failure_reasons=failure_reasons,
             last_golden_repo_reconcile_auto_heal=auto_heal_event,
+            fleet_migration_dedup_state=dedup_state_summary,
         )
 
     def _check_database_health(self) -> ServiceHealthInfo:
@@ -452,6 +459,117 @@ class HealthCheckService:
 
         return [row[0] for row in rows]
 
+    _DEDUP_STATE_COLUMNS = (
+        "golden_alias, duplicate_groups, records_before, records_deleted, "
+        "winner_kept_groups, whole_group_deleted_groups, collection_total, "
+        "first_dropped_at, dropped_at, cleared_at, cleared_reason"
+    )
+
+    @staticmethod
+    def _normalize_dedup_timestamp(value: Any) -> Optional[str]:
+        """Story #1560 R2: ISO-8601 UTC string regardless of backend --
+        SQLite already returns a string; PostgreSQL's psycopg driver
+        returns a native datetime for a TIMESTAMPTZ column. Mirrors
+        get_golden_repo_reconcile_auto_heal_event()'s established
+        normalization exactly (Issue #1383)."""
+        if isinstance(value, datetime):
+            return value.isoformat()
+        if value is None:
+            return None
+        return str(value)
+
+    def _read_fleet_migration_dedup_state_rows(self) -> List[Dict[str, Any]]:
+        """
+        Story #1560 AC13/AC14: read every CURRENTLY ACTIVE (uncleared,
+        AC8) fleet_migration_dedup_state row.
+
+        Raises on any DB error (including "table does not exist yet")
+        -- the caller is responsible for fail-open handling. Mirrors
+        _read_fleet_migration_unrecoverable_aliases's exact storage-mode
+        branching.
+        """
+        if self.storage_mode == "postgres":
+            if not self.postgres_dsn:
+                return []
+            import psycopg  # type: ignore
+
+            with psycopg.connect(
+                self.postgres_dsn, connect_timeout=PG_CONNECT_TIMEOUT_SECONDS
+            ) as conn:
+                rows = conn.execute(
+                    f"SELECT {self._DEDUP_STATE_COLUMNS} "
+                    f"FROM fleet_migration_dedup_state WHERE cleared_at IS NULL"
+                ).fetchall()
+        else:
+            db_path = self.database_url.replace("sqlite:///", "")
+            connection = DatabaseConnectionManager.get_instance(
+                db_path
+            ).get_connection()
+            cursor = connection.cursor()
+            try:
+                cursor.execute(
+                    f"SELECT {self._DEDUP_STATE_COLUMNS} "
+                    f"FROM fleet_migration_dedup_state WHERE cleared_at IS NULL"
+                )
+                rows = cursor.fetchall()
+            finally:
+                cursor.close()
+
+        return [
+            {
+                "golden_alias": row[0],
+                "duplicate_groups": row[1],
+                "records_before": row[2],
+                "records_deleted": row[3],
+                "winner_kept_groups": row[4],
+                "whole_group_deleted_groups": row[5],
+                "collection_total": row[6],
+                "first_dropped_at": self._normalize_dedup_timestamp(row[7]),
+                "dropped_at": self._normalize_dedup_timestamp(row[8]),
+                "cleared_at": self._normalize_dedup_timestamp(row[9]),
+                "cleared_reason": row[10],
+            }
+            for row in rows
+        ]
+
+    def _collect_fleet_migration_dedup_failures(self) -> Tuple[bool, bool, List[str]]:
+        """
+        Story #1560 AC15: surface a repo with dropped duplicate records
+        as a DEGRADED health signal -- ALWAYS, regardless of the loss
+        ratio (maintainer decision 5: "mark it DEGRADED as soon as the
+        condition exists"). Mirrors
+        _collect_fleet_migration_unrecoverable_failures()'s exact
+        fail-open contract.
+
+        Fail-open: any error reading the table (including "table does
+        not exist yet" on a fresh install) is treated as "nothing to
+        report".
+        """
+        try:
+            rows = self._read_fleet_migration_dedup_state_rows()
+        except Exception as exc:
+            logger.debug("Fleet-migration dedup-state health check skipped: %s", exc)
+            return False, False, []
+
+        if not rows:
+            return False, False, []
+
+        reasons = []
+        for row in sorted(rows, key=lambda r: r["golden_alias"]):
+            collection_total = row["collection_total"] or 0
+            records_deleted = row["records_deleted"] or 0
+            loss_ratio = (
+                records_deleted / collection_total if collection_total > 0 else 0.0
+            )
+            reasons.append(
+                f"Fleet migration: repo '{row['golden_alias']}' dropped "
+                f"{records_deleted} duplicate record(s) out of "
+                f"{collection_total} (loss ratio {loss_ratio:.4%}) -- "
+                f"index completeness affected, repo remains fully "
+                f"queryable (Story #1560)."
+            )
+        return True, False, reasons
+
     def _collect_fleet_migration_unrecoverable_failures(
         self,
     ) -> Tuple[bool, bool, List[str]]:
@@ -581,6 +699,72 @@ class HealthCheckService:
             event["occurred_at"] = occurred_at.isoformat()
 
         return event
+
+    @staticmethod
+    def _order_dedup_rows_for_health(
+        rows: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        """Story #1560 AC16/AC17/R3: explicit, backend-agnostic ordering
+        -- (dropped_at DESC, alias ASC), NULL dropped_at sorted LAST
+        regardless of backend. Done in PYTHON (never a SQL ORDER BY) so
+        PostgreSQL's and SQLite's differing NULL-ordering semantics can
+        never cause the two backends to disagree. ISO-8601 strings sort
+        lexicographically in chronological order, so a plain string
+        sort with reverse=True achieves DESC; pre-sorting by alias first
+        gives the ASC tie-break (stable sort preserves it)."""
+        with_ts = sorted(
+            (r for r in rows if r.get("dropped_at")),
+            key=lambda r: r["golden_alias"],
+        )
+        with_ts.sort(key=lambda r: r["dropped_at"], reverse=True)
+        without_ts = sorted(
+            (r for r in rows if not r.get("dropped_at")),
+            key=lambda r: r["golden_alias"],
+        )
+        return with_ts + without_ts
+
+    @staticmethod
+    def _dedup_row_to_health_entry(row: Dict[str, Any]) -> Dict[str, Any]:
+        """Story #1560 AC14: per-repo health entry with an explicit
+        loss_ratio and incomplete=True flag (Messi #13 anti-silent-
+        failure -- a healthy HTTP status must never imply complete
+        search coverage)."""
+        collection_total = row["collection_total"] or 0
+        records_deleted = row["records_deleted"] or 0
+        loss_ratio = records_deleted / collection_total if collection_total > 0 else 0.0
+        return {
+            "golden_alias": row["golden_alias"],
+            "records_deleted": records_deleted,
+            "collection_total": collection_total,
+            "loss_ratio": loss_ratio,
+            "incomplete": True,
+            "dropped_at": row.get("dropped_at"),
+        }
+
+    def get_fleet_migration_dedup_state_summary(self) -> Optional[Dict[str, Any]]:
+        """
+        Story #1560 AC13/AC14/AC16/AC17: independently queryable /health
+        surface for duplicate-point-id auto-resolution outcomes.
+
+        Returns None on any read error (fail-open) or when there are NO
+        currently-active (uncleared) rows -- distinct from an empty
+        dict, so a caller can tell "nothing to report" from "the
+        feature reported zero repos".
+        """
+        try:
+            rows = self._read_fleet_migration_dedup_state_rows()
+        except Exception as exc:
+            logger.debug("Fleet-migration dedup-state summary read skipped: %s", exc)
+            return None
+
+        if not rows:
+            return None
+
+        ordered = self._order_dedup_rows_for_health(rows)
+        bounded = ordered[:FLEET_MIGRATION_DEDUP_STATE_MAX_ENTRIES]
+        repos = [self._dedup_row_to_health_entry(row) for row in bounded]
+
+        return {"affected_total": len(rows), "repos": repos}
 
     def _check_storage_health(self) -> ServiceHealthInfo:
         """
@@ -1121,6 +1305,14 @@ class HealthCheckService:
         has_error = has_error or fmu_err
         failure_reasons.extend(fmu_reasons)
 
+        # Story #1560 AC15: duplicate-point-id auto-resolution outcome
+        # escalation (maintainer decision 5 -- DEGRADED as soon as the
+        # condition exists, unconditionally, regardless of loss ratio).
+        fmd_warn, fmd_err, fmd_reasons = self._collect_fleet_migration_dedup_failures()
+        has_warning = has_warning or fmd_warn
+        has_error = has_error or fmd_err
+        failure_reasons.extend(fmd_reasons)
+
         # Bug #1433: golden-repos storage readability (bounded-timeout
         # probe) -- see _collect_golden_repos_storage_failures() docstring.
         grs_warn, grs_err, grs_reasons = self._collect_golden_repos_storage_failures()
@@ -1147,6 +1339,23 @@ class HealthCheckService:
             status = HealthStatus.DEGRADED
         else:
             status = HealthStatus.HEALTHY
+
+        # Codex review Finding F8: whenever active Story #1560 dedup-state
+        # reasons exist, RESERVE/PRIORITIZE them ahead of every other
+        # category before truncating -- staging's real /health already
+        # carries MAX_FAILURE_REASONS non-dedup reasons (2 volume-usage +
+        # 1 fleet-migration-unrecoverable), so positional truncation
+        # alone silently swallowed the dedup reason into "+N more" on
+        # every observation, making it permanently invisible on /health.
+        # `fmd_reasons` is `failure_reasons`'s own subset (Story #1560
+        # AC15's block above), so this preserves every OTHER reason's
+        # relative order unchanged -- only the dedup reasons move to the
+        # front.
+        if fmd_reasons:
+            fmd_reason_set = set(fmd_reasons)
+            failure_reasons = fmd_reasons + [
+                reason for reason in failure_reasons if reason not in fmd_reason_set
+            ]
 
         # AC5: Limit to MAX_FAILURE_REASONS with "+N more" indicator
         if len(failure_reasons) > MAX_FAILURE_REASONS:

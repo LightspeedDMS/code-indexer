@@ -539,6 +539,29 @@ class GoldenRepoMetadataBackend(Protocol):
         self, golden_alias: str
     ) -> Optional[Dict[str, Any]]: ...
 
+    # Story #1560: per-golden-alias duplicate-point-id auto-resolution
+    # outcome state (see server/services/fleet_migration/dedup_state.py).
+    # A NEW table, distinct from fleet_migration_quarantine_state above --
+    # that one means "this repo keeps failing"; this one means "this
+    # repo migrated successfully but permanently lost N records".
+    def record_dedup_outcome(
+        self,
+        golden_alias: str,
+        *,
+        duplicate_groups: int,
+        records_before: int,
+        records_deleted: int,
+        winner_kept_groups: int,
+        whole_group_deleted_groups: int,
+        collection_total: int,
+    ) -> Dict[str, Any]: ...
+
+    def get_dedup_state(self, golden_alias: str) -> Optional[Dict[str, Any]]: ...
+
+    def list_dedup_states(self) -> List[Dict[str, Any]]: ...
+
+    def clear_dedup_state(self, golden_alias: str, reason: str) -> None: ...
+
     # Bug #1539: cidx-meta backup conflict-resolution per-repo failure
     # quarantine state (see global_repos/refresh_scheduler.py). Keyed by
     # golden_alias (e.g. "cidx-meta-global") AND the upstream target
