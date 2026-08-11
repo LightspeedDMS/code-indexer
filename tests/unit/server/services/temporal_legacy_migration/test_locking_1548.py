@@ -6,7 +6,12 @@ from typing import List
 
 import pytest
 
-from code_indexer.server.repositories.background_jobs import DuplicateJobError
+# Bug #1558: job_tracker's DuplicateJobError is the exact class
+# RefreshScheduler.check_refresh_not_in_progress() raises in production
+# (via JobTracker.check_operation_conflict()) -- distinct from the
+# same-named class in server.repositories.background_jobs that
+# locking.py was previously (incorrectly) importing for this call site.
+from code_indexer.server.services.job_tracker import DuplicateJobError
 from code_indexer.server.services.temporal_legacy_migration import (
     locking as locking_mod,
 )
@@ -110,6 +115,9 @@ class _FakeRefreshScheduler:
     def check_refresh_not_in_progress(self, alias):
         self.check_calls.append(alias)
         if self._refresh_in_progress:
+            # Mirrors the exact exception class the real
+            # RefreshScheduler.check_refresh_not_in_progress() raises in
+            # production (job_tracker.DuplicateJobError, imported above).
             raise DuplicateJobError("global_repo_refresh", alias, "job-123")
 
     def release_write_lock(self, alias, *, owner_name, owner_token=None):

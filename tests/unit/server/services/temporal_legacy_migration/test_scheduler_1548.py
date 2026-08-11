@@ -6,7 +6,11 @@ from typing import Dict, List
 
 import pytest
 
-from code_indexer.server.repositories.background_jobs import DuplicateJobError
+# Bug #1558: job_tracker's DuplicateJobError is the exact class
+# RefreshScheduler.check_refresh_not_in_progress() raises in production
+# (see locking.py / test_locking_1548.py for the full rationale) --
+# distinct from the same-named class in server.repositories.background_jobs.
+from code_indexer.server.services.job_tracker import DuplicateJobError
 from code_indexer.server.services.temporal_legacy_migration.scheduler import (
     TemporalLegacyMigrationScheduler,
 )
