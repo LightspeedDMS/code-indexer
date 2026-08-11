@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [12.12.0] - 2026-08-11
+
+### Fixed
+
+- **Bug #1558**: Fleet migration no longer exhausts memory on large legacy collections. Step 0's
+  dedup repair (`collection_dedup_repair._scan_raw_records`) retained the entire parsed JSON --
+  embedding vector and all payload -- for every record across the whole scan/plan/apply lifecycle,
+  even when nothing was renumbered. Measured on staging: 6.6 GB RSS in one worker on a 7.5 GB node
+  for a 343,604-file collection, swap thrash, worker recycled repeatedly, repo never migrated, and
+  no OOM-kill to surface it as a failure. The scan now retains only the identity fields the gate and
+  renumber planner use, re-reading the full record from disk at apply time
+  (tracemalloc: 288.8 MB -> 11.8 MB at N=8000; 577.0 MB -> 23.0 MB at N=16000). The consolidation
+  engine itself is untouched, so pure-addition -> verify -> durable flip -> delete, field-for-field
+  verification, the content-digest manifest and the `deletion_authorized` gate all keep their
+  existing guarantees.
+- **Bug #1558 (also)**: `temporal_legacy_migration/locking.py` caught
+  `background_jobs.DuplicateJobError` while the call it wraps raises the same-named
+  `job_tracker.DuplicateJobError`, so a benign refresh collision escaped uncaught and surfaced as a
+  FAILED job instead of a graceful skip. Both test fakes raised the wrong class as well, which is
+  why no test caught it.
+
+### Added
+
+- `docs/migration-playbook.md` -- operator procedure for the two data migrations, written from a
+  verified staging run: runtime config pickup without restart, cross-node/cross-worker job
+  serialization, web-session elevation, and the pre-flight checks.
+
 ## [12.11.0] - 2026-08-10
 
 ### Fixed
