@@ -45,6 +45,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, Optional
@@ -79,6 +80,15 @@ _DEFAULT_JSONRPC_PATH = "/v1/sandbox/mcp"
 # and the startup health check. Health is un-versioned and un-authed
 # (``GET /health``, no ``/v1`` prefix) per the sandbox contract.
 _DEFAULT_HEALTH_PATH = "/health"
+
+# EVO-65021: bounded budget for the post-build ``index.scip`` visibility check
+# (see ``DelegatedIndexer._index_written``). ``output_dir`` is a shared NetApp/ONTAP
+# FlexVol that cidx and the sandbox mount through DIFFERENT NFS clients, so a freshly
+# written index can be briefly hidden by cidx's stale directory/negative-dentry cache.
+# A READDIR busts it immediately; the poll/settle only backstops any residual
+# write-propagation delay and is paid ONLY on the miss path.
+_INDEX_SETTLE_SECONDS = 5.0
+_INDEX_POLL_SECONDS = 0.25
 
 
 class DelegatedIndexer(SCIPIndexer):
@@ -128,6 +138,9 @@ class DelegatedIndexer(SCIPIndexer):
         self._jsonrpc_path = jsonrpc_path
         self._health_path = health_path
         self._request_id = 0
+        # FlexVol index-visibility settle budget (overridable in tests).
+        self._index_settle_seconds = _INDEX_SETTLE_SECONDS
+        self._index_poll_seconds = _INDEX_POLL_SECONDS
 
     # ------------------------------------------------------------------ helpers
     def _requests(self) -> Any:
@@ -287,8 +300,7 @@ class DelegatedIndexer(SCIPIndexer):
         except ValueError as exc:
             return self._failure(
                 start_time,
-                f"project_dir/output_dir not under repo_root "
-                f"{self._repo_root}: {exc}",
+                f"project_dir/output_dir not under repo_root {self._repo_root}: {exc}",
             )
 
         # EVO-65021: success is judged by the presence of ``output_dir/index.scip``
@@ -396,6 +408,37 @@ class DelegatedIndexer(SCIPIndexer):
             )
         return None
 
+    def _index_written(self, scip_file: Path) -> bool:
+        """Return True once the sandbox's ``index.scip`` is visible on cidx's mount.
+
+        EVO-65021: ``output_dir`` lives on a shared NetApp/ONTAP FlexVol that cidx and
+        the sandbox mount through DIFFERENT NFS clients. ``_remove_stale_index`` unlinks
+        the old ``index.scip`` through cidx's client, priming a NEGATIVE dentry cache for
+        that name; the sandbox then writes a fresh ``index.scip`` through ITS client.
+        cidx's immediate ``Path.exists()`` reads the stale negative cache and misses the
+        file — which silently dropped a valid index on every delegated golden build. A
+        READDIR of the parent invalidates the cached directory listing, so we
+        ``os.listdir`` before re-checking; a short bounded poll backstops any residual
+        write-propagation delay. The wait is paid ONLY on the miss path: a normally
+        visible index returns on the first probe, and a genuine no-index build spends the
+        (small) budget once — rare, and already fail-soft downstream.
+        """
+        if scip_file.exists():
+            return True
+        deadline = time.monotonic() + self._index_settle_seconds
+        parent = scip_file.parent
+        while True:
+            # Bust the NFS negative-dentry / directory-attribute cache, then re-check.
+            try:
+                os.listdir(parent)
+            except OSError:
+                pass
+            if scip_file.exists():
+                return True
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(self._index_poll_seconds)
+
     def _map_result(
         self,
         run_result: Dict[str, Any],
@@ -414,9 +457,12 @@ class DelegatedIndexer(SCIPIndexer):
         else:
             duration = time.time() - start_time
 
-        # cidx owns the output path; it never trusts an echoed one.
+        # cidx owns the output path; it never trusts an echoed one. Only the
+        # exit_code==0 branch cares whether the file is present, so gate the
+        # (potentially settling) visibility check on it — a non-zero exit is FAILED
+        # regardless and must not pay the FlexVol settle budget.
         scip_file = output_dir / "index.scip"
-        file_exists = scip_file.exists()
+        file_exists = exit_code == 0 and self._index_written(scip_file)
 
         if exit_code == 0 and file_exists:
             # EVO-65365: the sandbox reports ``degenerate`` in its envelope when it
@@ -447,8 +493,7 @@ class DelegatedIndexer(SCIPIndexer):
             stderr_parts.append("\n".join(str(e) for e in errors))
         if exit_code == 0 and not file_exists:
             stderr_parts.append(
-                f"sandbox_scip exited 0 but no index.scip was written at "
-                f"{scip_file}"
+                f"sandbox_scip exited 0 but no index.scip was written at {scip_file}"
             )
         if not stderr_parts:
             stderr_parts.append(combined_output[-2000:])

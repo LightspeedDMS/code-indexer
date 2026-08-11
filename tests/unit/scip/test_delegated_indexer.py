@@ -618,3 +618,118 @@ class TestDelegatedIndexerHealth:
     def test_get_version_is_none(self, tmp_path):
         indexer = DelegatedIndexer(config=_config(), repo_root=tmp_path)
         assert indexer.get_version() is None
+
+
+class TestDelegatedIndexerFlexVolIndexVisibility:
+    """EVO-65021: a valid ``index.scip`` written by the sandbox on the shared FlexVol
+    can be briefly hidden from cidx by a stale NFS negative-dentry cache (cidx unlinked
+    the stale file through its own client before dispatch). ``_index_written`` must
+    invalidate that cache (READDIR) so the fresh index is seen, instead of dropping a
+    perfectly good index as "no index.scip was written"."""
+
+    def test_stale_negative_dentry_cache_recovered_by_readdir(
+        self, tmp_path, monkeypatch
+    ):
+        import os as _os
+        from pathlib import Path as _P
+
+        output_dir = tmp_path / ".code-indexer" / "scip"
+        output_dir.mkdir(parents=True)
+        scip_file = output_dir / "index.scip"
+
+        payload = _rpc_result(exit_code=0, output="ok", duration_ms=1)
+        # The sandbox writes a REAL index.scip on the shared FlexVol this call.
+        fake = _fake_requests(post_side_effect=_post_writing_index(output_dir, payload))
+        indexer = _make_indexer(tmp_path, fake)
+
+        # Simulate the stale NFS negative-dentry cache: ``exists()`` lies (False) for the
+        # freshly-written index until a READDIR (``os.listdir``) of the parent refreshes
+        # the client's cached listing.
+        refreshed = {"v": False}
+        real_listdir = _os.listdir
+
+        def fake_listdir(p):
+            if _P(p) == output_dir:
+                refreshed["v"] = True
+            return real_listdir(p)
+
+        real_exists = _P.exists
+
+        def fake_exists(self):
+            if self == scip_file and not refreshed["v"]:
+                return False
+            return real_exists(self)
+
+        monkeypatch.setattr(_os, "listdir", fake_listdir)
+        monkeypatch.setattr(_P, "exists", fake_exists)
+
+        result = indexer.generate(
+            tmp_path,
+            output_dir,
+            "poetry",
+            golden_alias="ls-token-validator-python",
+            language="python",
+            allow_degenerate=True,
+        )
+
+        assert result.status is IndexerStatus.SUCCESS
+        assert result.output_file == scip_file
+        # The readdir cache-bust was actually exercised (the file was cache-hidden).
+        assert refreshed["v"] is True
+
+    def test_missing_index_still_fails_within_bounded_budget(self, tmp_path):
+        output_dir = tmp_path / ".code-indexer" / "scip"
+        output_dir.mkdir(parents=True)
+
+        payload = _rpc_result(
+            exit_code=0, output="ran but wrote nothing", duration_ms=1
+        )
+        # POST does NOT write index.scip — a genuine no-index build.
+        fake = _fake_requests(post_return=_fake_response(payload=payload))
+        indexer = _make_indexer(tmp_path, fake)
+        # Keep the settle budget tiny so the test cannot hang.
+        indexer._index_settle_seconds = 0.05
+        indexer._index_poll_seconds = 0.01
+
+        result = indexer.generate(
+            tmp_path,
+            output_dir,
+            "poetry",
+            golden_alias="x",
+            language="python",
+            allow_degenerate=True,
+        )
+
+        assert result.status is IndexerStatus.FAILED
+        assert "no index.scip was written" in result.stderr
+
+    def test_visible_index_returns_without_readdir(self, tmp_path, monkeypatch):
+        import os as _os
+
+        output_dir = tmp_path / ".code-indexer" / "scip"
+        output_dir.mkdir(parents=True)
+
+        payload = _rpc_result(exit_code=0, output="ok", duration_ms=1)
+        fake = _fake_requests(post_side_effect=_post_writing_index(output_dir, payload))
+        indexer = _make_indexer(tmp_path, fake)
+
+        # Fast path: a normally-visible index must NOT touch the readdir cache-bust.
+        called = {"listdir": False}
+        real_listdir = _os.listdir
+
+        def fake_listdir(p):
+            called["listdir"] = True
+            return real_listdir(p)
+
+        monkeypatch.setattr(_os, "listdir", fake_listdir)
+
+        result = indexer.generate(
+            tmp_path,
+            output_dir,
+            "npm",
+            workspace_id="W",
+            language="typescript",
+        )
+
+        assert result.status is IndexerStatus.SUCCESS
+        assert called["listdir"] is False
