@@ -53,6 +53,10 @@ from code_indexer.server.repositories.background_jobs import DuplicateJobError
 from code_indexer.server.services.fleet_migration.completion_gate import (
     invalidate_post_consolidation_snapshot_marker,
 )
+from code_indexer.server.services.fleet_migration.dedup_state import (
+    DedupStateUnavailableError,
+    sweep_pending_dedup_outcomes_for_candidate,
+)
 from code_indexer.server.services.fleet_migration.discovery import (
     FleetMigrationCandidate,
     enumerate_fleet_migration_candidates,
@@ -73,14 +77,32 @@ from code_indexer.server.services.fleet_migration.quarantine import (
     probe_quarantine_backend_health,
     record_migration_failure,
     record_unrecoverable_corruption,
+    reset_duplicate_caused_quarantine_if_resolved,
     reset_migration_failure,
     status_counts_as_quarantine_failure,
+)
+from code_indexer.storage.shared.collection_dedup_repair import (
+    read_pending_dedup_outcome,
 )
 from code_indexer.storage.shared.collection_migration import (
     UnrecoverableConsolidationCorruptionError,
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _candidate_has_unswept_dedup_journal(candidate: FleetMigrationCandidate) -> bool:
+    """Codex review Finding F2: True iff any of `candidate.
+    semantic_collection_dirs` still has a pending dedup-outcome journal
+    on disk -- read-only, side-effect-free (never sweeps/mutates
+    anything itself; `_fleet_has_pending_work()` uses this to decide
+    whether the fleet still needs a tick, and the actual sweep runs
+    later, inside `_run_next_candidate()`'s per-candidate loop)."""
+    return any(
+        read_pending_dedup_outcome(collection_dir) is not None
+        for collection_dir in candidate.semantic_collection_dirs
+    )
+
 
 # Granularity of the sleep loop: check stop_event this often (seconds) --
 # mirrors HNSWOrphanRepairSweepScheduler's _TICK_SECONDS pattern.
@@ -232,10 +254,23 @@ class FleetMigrationScheduler:
         CONSERVATIVELY as "there is pending work" (never silently
         assumed done) -- a backend outage must never cause the scheduler
         to falsely believe the fleet is fully resolved.
+
+        Codex review Finding F2: checked for EVERY candidate,
+        REGARDLESS of migration status -- a collection can legitimately
+        flip to CHUNKS_DB (is_repo_already_migrated becomes True) while
+        its dedup-outcome journal from that SAME successful pass is
+        still sitting un-swept on disk (the sweep only runs on the NEXT
+        tick). If that repo is the last one needing migration in the
+        whole fleet, no later tick would ever be scheduled to sweep it
+        without this check -- the loss it records would never reach
+        /health. A read-only, side-effect-free check
+        (`read_pending_dedup_outcome`), never the sweep itself.
         """
         for candidate in enumerate_fleet_migration_candidates(
             self._golden_repo_manager
         ):
+            if _candidate_has_unswept_dedup_journal(candidate):
+                return True
             if is_repo_already_migrated(candidate):
                 continue
             try:
@@ -499,6 +534,33 @@ class FleetMigrationScheduler:
         for candidate in enumerate_fleet_migration_candidates(
             self._golden_repo_manager
         ):
+            # Story #1560 AC22/AC23: sweep any leftover dedup-outcome
+            # journal for THIS candidate BEFORE any other check -- runs
+            # even for an already-migrated candidate about to be
+            # skipped below, so a crash between the filesystem deletion
+            # and this sweep can never permanently orphan the audit
+            # record (the journal survives independently of migration
+            # status; only this sweep clears it, and only on success).
+            try:
+                sweep_pending_dedup_outcomes_for_candidate(
+                    self._golden_repo_manager, candidate
+                )
+            except DedupStateUnavailableError as exc:
+                logger.error(
+                    "FleetMigrationScheduler: Story #1560 dedup-outcome "
+                    "persistence for repo '%s' is UNAVAILABLE (backend "
+                    "write failed) -- the filesystem deletion already "
+                    "happened; aborting this scheduling tick so the audit "
+                    "record is retried rather than lost: %s",
+                    candidate.golden_alias,
+                    exc,
+                )
+                return {
+                    "status": "dedup_state_unavailable",
+                    "golden_alias": candidate.golden_alias,
+                    "detail": str(exc),
+                }
+
             if is_repo_already_migrated(candidate):
                 any_repo_migrated_before_this_one = True
                 continue
@@ -530,6 +592,31 @@ class FleetMigrationScheduler:
                     "state for repo '%s' is UNAVAILABLE (backend read "
                     "failed) -- aborting this scheduling tick WITHOUT "
                     "running any migration attempt: %s",
+                    candidate.golden_alias,
+                    exc,
+                )
+                return {
+                    "status": "quarantine_state_unavailable",
+                    "golden_alias": candidate.golden_alias,
+                    "detail": str(exc),
+                }
+
+            # Story #1560 AC12: explicit, durable pre-attempt reset for a
+            # repo already quarantined by a duplicate-point-id cause --
+            # BEFORE is_quarantined() below, whose own signature auto-clear
+            # can never fire for this cause. Same outage handling as
+            # is_quarantined() itself: abort the tick, never proceed
+            # silently.
+            try:
+                reset_duplicate_caused_quarantine_if_resolved(
+                    self._golden_repo_manager, candidate
+                )
+            except QuarantineStateUnavailableError as exc:
+                logger.error(
+                    "FleetMigrationScheduler: Story #1560 duplicate-caused "
+                    "quarantine reset check for repo '%s' is UNAVAILABLE "
+                    "(backend read failed) -- aborting this scheduling "
+                    "tick WITHOUT running any migration attempt: %s",
                     candidate.golden_alias,
                     exc,
                 )

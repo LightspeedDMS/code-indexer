@@ -1756,6 +1756,144 @@ class SSHKeysSqliteBackend:
 _RECONCILE_AUTO_HEAL_EVENT_ROW_ID = 1
 
 
+def _dedup_state_row_to_dict(row: Any) -> Dict[str, Any]:
+    """Story #1560: map one ``fleet_migration_dedup_state`` row (SQLite
+    tuple, column order matching every SELECT in
+    :class:`GoldenRepoMetadataSqliteBackend`'s dedup-state methods) into
+    the dict shape callers (the /health surface, dedup_state.py) expect.
+    Shared by ``record_dedup_outcome``/``get_dedup_state``/
+    ``list_dedup_states`` to avoid triplicating this field mapping."""
+    return {
+        "golden_alias": row[0],
+        "duplicate_groups": row[1],
+        "records_before": row[2],
+        "records_deleted": row[3],
+        "winner_kept_groups": row[4],
+        "whole_group_deleted_groups": row[5],
+        "collection_total": row[6],
+        "first_dropped_at": row[7],
+        "dropped_at": row[8],
+        "cleared_at": row[9],
+        "cleared_reason": row[10],
+    }
+
+
+def _insert_new_dedup_row(
+    conn: Any,
+    golden_alias: str,
+    duplicate_groups: int,
+    records_before: int,
+    records_deleted: int,
+    winner_kept_groups: int,
+    whole_group_deleted_groups: int,
+    collection_total: int,
+    now: str,
+) -> None:
+    """Story #1560 AC7: first-ever dedup outcome for `golden_alias`."""
+    conn.execute(
+        "INSERT INTO fleet_migration_dedup_state "
+        "(golden_alias, duplicate_groups, records_before, "
+        "records_deleted, winner_kept_groups, "
+        "whole_group_deleted_groups, collection_total, "
+        "first_dropped_at, dropped_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            golden_alias,
+            duplicate_groups,
+            records_before,
+            records_deleted,
+            winner_kept_groups,
+            whole_group_deleted_groups,
+            collection_total,
+            now,
+            now,
+        ),
+    )
+
+
+def _update_existing_dedup_row(
+    conn: Any,
+    golden_alias: str,
+    existing_counts: tuple,
+    duplicate_groups: int,
+    records_before: int,
+    records_deleted: int,
+    winner_kept_groups: int,
+    whole_group_deleted_groups: int,
+    collection_total: int,
+    now: str,
+) -> None:
+    """Story #1560 AC9: cumulative UPDATE. `existing_counts` is the prior
+    (duplicate_groups, records_deleted, winner_kept_groups,
+    whole_group_deleted_groups) tuple -- ADDED to, since these permanent
+    deletions must never be double-counted or discarded. `records_before`/
+    `collection_total` are OVERWRITTEN (snapshot semantics -- summing a
+    collection's size across passes would be meaningless). Resets
+    `cleared_at`/`cleared_reason` -- a fresh outcome is active again."""
+    conn.execute(
+        "UPDATE fleet_migration_dedup_state SET duplicate_groups = ?, "
+        "records_before = ?, records_deleted = ?, winner_kept_groups = ?, "
+        "whole_group_deleted_groups = ?, collection_total = ?, "
+        "dropped_at = ?, cleared_at = NULL, cleared_reason = NULL "
+        "WHERE golden_alias = ?",
+        (
+            existing_counts[0] + duplicate_groups,
+            records_before,
+            existing_counts[1] + records_deleted,
+            existing_counts[2] + winner_kept_groups,
+            existing_counts[3] + whole_group_deleted_groups,
+            collection_total,
+            now,
+            golden_alias,
+        ),
+    )
+
+
+def _apply_dedup_outcome_upsert(
+    conn: Any,
+    golden_alias: str,
+    duplicate_groups: int,
+    records_before: int,
+    records_deleted: int,
+    winner_kept_groups: int,
+    whole_group_deleted_groups: int,
+    collection_total: int,
+    now: str,
+) -> None:
+    """Story #1560 AC6/AC7/AC9: dispatch to insert or cumulative-update
+    for one `fleet_migration_dedup_state` row."""
+    existing = conn.execute(
+        "SELECT duplicate_groups, records_deleted, winner_kept_groups, "
+        "whole_group_deleted_groups FROM fleet_migration_dedup_state "
+        "WHERE golden_alias = ?",
+        (golden_alias,),
+    ).fetchone()
+    if existing is None:
+        _insert_new_dedup_row(
+            conn,
+            golden_alias,
+            duplicate_groups,
+            records_before,
+            records_deleted,
+            winner_kept_groups,
+            whole_group_deleted_groups,
+            collection_total,
+            now,
+        )
+    else:
+        _update_existing_dedup_row(
+            conn,
+            golden_alias,
+            existing,
+            duplicate_groups,
+            records_before,
+            records_deleted,
+            winner_kept_groups,
+            whole_group_deleted_groups,
+            collection_total,
+            now,
+        )
+
+
 class GoldenRepoMetadataSqliteBackend:
     """
     SQLite backend for golden repository metadata (Story #711).
@@ -1863,6 +2001,30 @@ class GoldenRepoMetadataSqliteBackend:
                     updated_at TEXT,
                     signature_checked_at TEXT,
                     failure_cause TEXT
+                )
+            """
+            )
+
+            # Story #1560: per-golden-alias duplicate-point-id auto-
+            # resolution outcome tracking (see record_dedup_outcome()
+            # below). A NEW table, distinct from
+            # fleet_migration_quarantine_state above -- that one means
+            # "this repo keeps failing"; this one means "this repo
+            # migrated successfully but permanently lost N records".
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS fleet_migration_dedup_state (
+                    golden_alias TEXT PRIMARY KEY NOT NULL,
+                    duplicate_groups INTEGER NOT NULL DEFAULT 0,
+                    records_before INTEGER NOT NULL DEFAULT 0,
+                    records_deleted INTEGER NOT NULL DEFAULT 0,
+                    winner_kept_groups INTEGER NOT NULL DEFAULT 0,
+                    whole_group_deleted_groups INTEGER NOT NULL DEFAULT 0,
+                    collection_total INTEGER NOT NULL DEFAULT 0,
+                    first_dropped_at TEXT,
+                    dropped_at TEXT,
+                    cleared_at TEXT,
+                    cleared_reason TEXT
                 )
             """
             )
@@ -2893,6 +3055,97 @@ class GoldenRepoMetadataSqliteBackend:
             }
             for row in rows
         ]
+
+    # ------------------------------------------------------------------
+    # Duplicate-point-id auto-resolution outcome state (Story #1560)
+    # ------------------------------------------------------------------
+
+    _DEDUP_STATE_SELECT_COLUMNS = (
+        "golden_alias, duplicate_groups, records_before, records_deleted, "
+        "winner_kept_groups, whole_group_deleted_groups, collection_total, "
+        "first_dropped_at, dropped_at, cleared_at, cleared_reason"
+    )
+
+    def record_dedup_outcome(
+        self,
+        golden_alias: str,
+        *,
+        duplicate_groups: int,
+        records_before: int,
+        records_deleted: int,
+        winner_kept_groups: int,
+        whole_group_deleted_groups: int,
+        collection_total: int,
+    ) -> Dict[str, Any]:
+        """Record one dedup-resolution outcome (AC6/AC7/AC9) -- see
+        `_apply_dedup_outcome_upsert` for the cumulative-vs-snapshot
+        semantics. `Dict[str, Any]` mirrors this class's own
+        `get_fleet_migration_failure_state` return-type convention.
+        Returns the resulting row."""
+        if not isinstance(golden_alias, str) or not golden_alias:
+            raise ValueError("golden_alias must be a non-empty string")
+        now = datetime.now(timezone.utc).isoformat()
+
+        def operation(conn):
+            _apply_dedup_outcome_upsert(
+                conn,
+                golden_alias,
+                duplicate_groups,
+                records_before,
+                records_deleted,
+                winner_kept_groups,
+                whole_group_deleted_groups,
+                collection_total,
+                now,
+            )
+            row = conn.execute(
+                f"SELECT {self._DEDUP_STATE_SELECT_COLUMNS} "
+                f"FROM fleet_migration_dedup_state WHERE golden_alias = ?",
+                (golden_alias,),
+            ).fetchone()
+            return _dedup_state_row_to_dict(row)
+
+        return self._conn_manager.execute_atomic(operation)  # type: ignore[no-any-return]
+
+    def get_dedup_state(self, golden_alias: str) -> Optional[Dict[str, Any]]:
+        """Currently persisted dedup-outcome state, or None if absent."""
+        if not isinstance(golden_alias, str) or not golden_alias:
+            raise ValueError("golden_alias must be a non-empty string")
+        conn = self._conn_manager.get_connection()
+        row = conn.execute(
+            f"SELECT {self._DEDUP_STATE_SELECT_COLUMNS} "
+            f"FROM fleet_migration_dedup_state WHERE golden_alias = ?",
+            (golden_alias,),
+        ).fetchone()
+        return None if row is None else _dedup_state_row_to_dict(row)
+
+    def list_dedup_states(self) -> List[Dict[str, Any]]:
+        """Every persisted dedup-outcome row -- used by the /health
+        surface (AC13-AC18)."""
+        conn = self._conn_manager.get_connection()
+        rows = conn.execute(
+            f"SELECT {self._DEDUP_STATE_SELECT_COLUMNS} "
+            f"FROM fleet_migration_dedup_state"
+        ).fetchall()
+        return [_dedup_state_row_to_dict(row) for row in rows]
+
+    def clear_dedup_state(self, golden_alias: str, reason: str) -> None:
+        """Mark a dedup-outcome state as cleared (AC8) -- e.g. after a
+        verified successful full re-index. No-op if absent."""
+        if not isinstance(golden_alias, str) or not golden_alias:
+            raise ValueError("golden_alias must be a non-empty string")
+        if not isinstance(reason, str) or not reason:
+            raise ValueError("reason must be a non-empty string")
+        now = datetime.now(timezone.utc).isoformat()
+
+        def operation(conn):
+            conn.execute(
+                "UPDATE fleet_migration_dedup_state SET cleared_at = ?, "
+                "cleared_reason = ? WHERE golden_alias = ?",
+                (now, reason, golden_alias),
+            )
+
+        self._conn_manager.execute_atomic(operation)
 
     def close(self) -> None:
         """Close database connections."""

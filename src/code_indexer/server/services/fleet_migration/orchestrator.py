@@ -45,7 +45,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any, List, Optional, Tuple
 
 from code_indexer.global_repos.alias_manager import AliasManager
 from code_indexer.server.services.config_service import get_config_service
@@ -154,8 +154,17 @@ def _consolidate_collections(
     collection_dirs: List[Path],
     *,
     deletion_authorized: bool = True,
-) -> Tuple[int, int]:
-    """AC1 step (1). Returns (consolidated_count, skipped_disk_count).
+    # Codex review Finding F4: Optional[Any] -- mirrors
+    # collection_migration.py's/collection_dedup_repair.py's own
+    # identical typing convention for this exact parameter (no shared
+    # QueryTracker Protocol exists anywhere in this codebase; this
+    # module must not import the concrete class purely for a type hint
+    # on a fail-open, duck-typed pass-through parameter).
+    query_tracker: Optional[Any] = None,
+    refcount_key: Optional[str] = None,
+) -> Tuple[int, int, int]:
+    """AC1 step (1). Returns (consolidated_count, skipped_disk_count,
+    dedup_gated_count).
 
     Bug #1528: kind-agnostic. TEMPORAL shard directories now flow through
     this SAME helper -- and therefore the same symlink/immutable-path
@@ -166,9 +175,22 @@ def _consolidate_collections(
     ``deletion_authorized`` is Story #1460's AC1/AC2 rollout-safety gate,
     threaded straight through to ``consolidate_collection_in_place`` --
     see that function's own docstring for the full semantics.
+
+    Codex review Finding F4: ``query_tracker``/``refcount_key`` (the
+    real, shared ``RefreshScheduler.query_tracker`` and the repo's own
+    ``str(index_path)`` -- the SAME key format live query-serving code
+    already uses to increment_ref/decrement_ref against, see
+    ``mcp/handlers/search.py``'s golden-repo query path) are threaded
+    straight through to ``consolidate_collection_in_place`` for EVERY
+    collection under this repo (semantic AND temporal, both callers of
+    this shared helper), so a real active reader is genuinely
+    quiesced/drained before any duplicate-point-id deletion runs.
+    ``None`` (the default) is a fail-open no-op, matching every
+    pre-existing caller.
     """
     consolidated_count = 0
     skipped_disk_count = 0
+    dedup_gated_count = 0
     for collection_dir in collection_dirs:
         # Codex round-6 CRITICAL finding #4 (TOCTOU): discovery.py's own
         # is_symlink() rejection only proves this path was safe AT
@@ -189,13 +211,24 @@ def _consolidate_collections(
                 f"could run."
             )
         result = consolidate_collection_in_place(
-            collection_dir, deletion_authorized=deletion_authorized
+            collection_dir,
+            deletion_authorized=deletion_authorized,
+            query_tracker=query_tracker,
+            refcount_key=refcount_key,
         )
         if result.status in ("consolidated", "already_consolidated"):
             consolidated_count += 1
         elif result.status == "skipped_insufficient_disk":
             skipped_disk_count += 1
-    return consolidated_count, skipped_disk_count
+        elif result.status == "dedup_deletion_gated":
+            # Codex review Finding F3: previously silently dropped into
+            # NEITHER bucket, so the overall repo result collapsed to
+            # the GENERIC "incomplete" status via the fresh-
+            # verification-failure fallback further down the pipeline
+            # -- which counts toward the quarantine breaker, violating
+            # Design decision 7 ("this cause must NEVER quarantine").
+            dedup_gated_count += 1
+    return consolidated_count, skipped_disk_count, dedup_gated_count
 
 
 def _consolidate_temporal_namespaces(
@@ -204,7 +237,11 @@ def _consolidate_temporal_namespaces(
     sister_root: Path,
     *,
     deletion_authorized: bool = True,
-) -> Tuple[int, int]:
+    # Codex review Finding F4: same Optional[Any] convention as
+    # _consolidate_collections above.
+    query_tracker: Optional[Any] = None,
+    refcount_key: Optional[str] = None,
+) -> Tuple[int, int, int]:
     """AC1 step (2), Bug #1528 revision: consolidate every in-repo temporal
     shard IN PLACE, synchronously, inside THIS same write-lock hold, as a
     literal sub-step of this job.
@@ -219,9 +256,13 @@ def _consolidate_temporal_namespaces(
     directory, discriminator flip, legacy files deleted only after a
     verified durable write.
 
-    Returns ``(consolidated_count, skipped_disk_count)`` from that shared
-    helper; ``deletion_authorized`` is Story #1460's AC1/AC2 rollout-safety
+    Returns ``(consolidated_count, skipped_disk_count, dedup_gated_count)``
+    from that shared helper (Codex review Finding F3 added the third
+    element); ``deletion_authorized`` is Story #1460's AC1/AC2 rollout-safety
     gate, threaded straight through to ``consolidate_collection_in_place``.
+    ``query_tracker``/``refcount_key`` (Codex review Finding F4) are
+    likewise threaded straight through, so a temporal shard's deletion is
+    quiesced/drained exactly like a semantic collection's.
 
     A namespace that ALREADY has a sister alias pointer (published by the
     retired mechanism before this fix) is still consolidated in place, but
@@ -279,6 +320,8 @@ def _consolidate_temporal_namespaces(
     return _consolidate_collections(
         consolidatable,
         deletion_authorized=deletion_authorized,
+        query_tracker=query_tracker,
+        refcount_key=refcount_key,
     )
 
 
@@ -304,18 +347,63 @@ def _run_migration_sequence(
     completion gate below naturally refuses to fire AC10's snapshot in that
     case, since withheld deletion always leaves legacy sharded files behind
     and therefore a not-yet-fully-migrated collection.
+
+    Codex review Finding F4: the real, shared
+    ``refresh_scheduler.query_tracker`` and this repo's own
+    ``str(index_path)`` -- the SAME key format live query-serving code
+    already uses (``mcp/handlers/search.py``'s golden-repo query path,
+    via ``increment_ref(index_path)``/``decrement_ref(index_path)``) --
+    are resolved ONCE here and threaded through BOTH the semantic and
+    temporal consolidation calls below, so a real active reader is
+    genuinely quiesced/drained before any duplicate-point-id deletion
+    runs, for every collection under this repo.
     """
-    consolidated_count, skipped_disk_count = _consolidate_collections(
-        semantic_collection_dirs, deletion_authorized=deletion_authorized
+    query_tracker = refresh_scheduler.query_tracker
+    refcount_key = str(index_path)
+    consolidated_count, skipped_disk_count, dedup_gated_count = (
+        _consolidate_collections(
+            semantic_collection_dirs,
+            deletion_authorized=deletion_authorized,
+            query_tracker=query_tracker,
+            refcount_key=refcount_key,
+        )
     )
-    temporal_consolidated, temporal_skipped_disk = _consolidate_temporal_namespaces(
+    (
+        temporal_consolidated,
+        temporal_skipped_disk,
+        temporal_dedup_gated,
+    ) = _consolidate_temporal_namespaces(
         temporal_namespaces,
         sister_alias_manager,
         sister_root,
         deletion_authorized=deletion_authorized,
+        query_tracker=query_tracker,
+        refcount_key=refcount_key,
     )
     consolidated_count += temporal_consolidated
     skipped_disk_count += temporal_skipped_disk
+    dedup_gated_count += temporal_dedup_gated
+
+    # Codex review Finding F3: a distinct, explicitly retryable status --
+    # never the generic "incomplete" the fresh-verification-failure
+    # fallback further below would otherwise produce for this exact
+    # cause. Checked BEFORE the disk/temporal-completeness gate: no
+    # success, no snapshot, no counter increment, no generic failure
+    # record (see quarantine.py's _QUARANTINE_EXEMPT_TRANSIENT_STATUSES,
+    # Design decision 7 -- this cause must NEVER quarantine).
+    if dedup_gated_count > 0:
+        return FleetMigrationRepoResult(
+            status="dedup_deletion_gated",
+            collections_consolidated=consolidated_count,
+            collections_skipped_disk=skipped_disk_count,
+            temporal_namespaces_processed=len(temporal_namespaces),
+            detail=(
+                f"{dedup_gated_count} collection(s) have duplicate "
+                f"point_id group(s) detected but deletion_authorized="
+                f"False (Story #1460 rollout gate closed) -- will retry "
+                f"automatically once the gate opens"
+            ),
+        )
 
     # AC1 step (3) / AC10: Bug #1528 -- temporal shards are migrated IN
     # PLACE, so their directories legitimately remain; the gate is that

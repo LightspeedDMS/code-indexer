@@ -1056,6 +1056,189 @@ class GoldenRepoMetadataPostgresBackend:
             "last_failed_at": row[4],
         }
 
+    # ------------------------------------------------------------------
+    # Duplicate-point-id auto-resolution outcome state (Story #1560)
+    #
+    # Reachable exactly like every other method on this class: via
+    # dedup_state.py's _get_dedup_backend(golden_repo_manager), which
+    # duck-types whatever backend GoldenRepoManager/StorageFactory
+    # injected (this class in cluster/postgres mode,
+    # GoldenRepoMetadataSqliteBackend in solo/sqlite mode) and calls
+    # backend.record_dedup_outcome(...) generically -- there is no
+    # PG-specific call site anywhere for ANY method here, and none is
+    # needed; that is this codebase's established integration pattern.
+    # ------------------------------------------------------------------
+
+    _DEDUP_STATE_SELECT_COLUMNS = (
+        "golden_alias, duplicate_groups, records_before, records_deleted, "
+        "winner_kept_groups, whole_group_deleted_groups, collection_total, "
+        "first_dropped_at, dropped_at, cleared_at, cleared_reason"
+    )
+
+    # AC9: cumulative fields ADDED server-side via `+=` on conflict (a
+    # single atomic statement -- avoids the read-then-write lost-update
+    # race record_fleet_migration_failure's own PG mirror already
+    # guards against for an analogous counter); records_before/
+    # collection_total OVERWRITTEN (snapshot semantics);
+    # first_dropped_at absent from SET so a conflict never touches it;
+    # cleared_at/cleared_reason reset -- a fresh outcome is active again.
+    _RECORD_DEDUP_OUTCOME_SQL = (
+        "INSERT INTO fleet_migration_dedup_state "
+        "(golden_alias, duplicate_groups, records_before, records_deleted, "
+        "winner_kept_groups, whole_group_deleted_groups, collection_total, "
+        "first_dropped_at, dropped_at) "
+        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s) "
+        "ON CONFLICT (golden_alias) DO UPDATE SET "
+        "duplicate_groups = fleet_migration_dedup_state.duplicate_groups "
+        "+ EXCLUDED.duplicate_groups, "
+        "records_before = EXCLUDED.records_before, "
+        "records_deleted = fleet_migration_dedup_state.records_deleted "
+        "+ EXCLUDED.records_deleted, "
+        "winner_kept_groups = fleet_migration_dedup_state.winner_kept_groups "
+        "+ EXCLUDED.winner_kept_groups, "
+        "whole_group_deleted_groups = "
+        "fleet_migration_dedup_state.whole_group_deleted_groups "
+        "+ EXCLUDED.whole_group_deleted_groups, "
+        "collection_total = EXCLUDED.collection_total, "
+        "dropped_at = EXCLUDED.dropped_at, "
+        "cleared_at = NULL, cleared_reason = NULL "
+        f"RETURNING {_DEDUP_STATE_SELECT_COLUMNS}"
+    )
+
+    @staticmethod
+    def _dedup_state_row_to_dict(row: Any) -> Dict[str, Any]:
+        """`row: Any` -- a psycopg cursor row tuple; column types vary
+        and have no single precise static type in this codebase's
+        convention (mirrors sqlite_backends.py's identical helper)."""
+        return {
+            "golden_alias": row[0],
+            "duplicate_groups": row[1],
+            "records_before": row[2],
+            "records_deleted": row[3],
+            "winner_kept_groups": row[4],
+            "whole_group_deleted_groups": row[5],
+            "collection_total": row[6],
+            "first_dropped_at": row[7],
+            "dropped_at": row[8],
+            "cleared_at": row[9],
+            "cleared_reason": row[10],
+        }
+
+    def record_dedup_outcome(
+        self,
+        golden_alias: str,
+        *,
+        duplicate_groups: int,
+        records_before: int,
+        records_deleted: int,
+        winner_kept_groups: int,
+        whole_group_deleted_groups: int,
+        collection_total: int,
+    ) -> Dict[str, Any]:
+        """Record one dedup-resolution outcome (AC6/AC7/AC9) -- see
+        `_RECORD_DEDUP_OUTCOME_SQL` for the cumulative-vs-snapshot
+        semantics. Numeric parameters are trusted at their type-hinted
+        `int` contract with zero additional runtime range validation --
+        matching every OTHER method in this class (e.g.
+        `record_fleet_migration_failure`'s implicit `+1` counter,
+        `soft_reset_fleet_migration_failure_count`'s hardcoded `0`) and
+        the already-accepted SQLite mirror in sqlite_backends.py.
+
+        Raises:
+            ValueError: golden_alias is not a non-empty (non-whitespace)
+                string.
+        """
+        if not isinstance(golden_alias, str) or not golden_alias.strip():
+            raise ValueError(
+                f"golden_alias must be a non-empty string, got {golden_alias!r}"
+            )
+        now = datetime.now(timezone.utc)
+
+        with self._pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    self._RECORD_DEDUP_OUTCOME_SQL,
+                    (
+                        golden_alias,
+                        duplicate_groups,
+                        records_before,
+                        records_deleted,
+                        winner_kept_groups,
+                        whole_group_deleted_groups,
+                        collection_total,
+                        now,
+                        now,
+                    ),
+                )
+                row = cur.fetchone()
+            conn.commit()
+
+        assert row is not None, (
+            "INSERT ... RETURNING on fleet_migration_dedup_state must "
+            "always yield exactly one row"
+        )
+        return self._dedup_state_row_to_dict(row)
+
+    def get_dedup_state(self, golden_alias: str) -> Optional[Dict[str, Any]]:
+        """Currently persisted dedup-outcome state, or None if absent.
+
+        Raises:
+            ValueError: golden_alias is not a non-empty (non-whitespace)
+                string.
+        """
+        if not isinstance(golden_alias, str) or not golden_alias.strip():
+            raise ValueError(
+                f"golden_alias must be a non-empty string, got {golden_alias!r}"
+            )
+
+        with self._pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"SELECT {self._DEDUP_STATE_SELECT_COLUMNS} "
+                    f"FROM fleet_migration_dedup_state WHERE golden_alias = %s",
+                    (golden_alias,),
+                )
+                row = cur.fetchone()
+
+        return None if row is None else self._dedup_state_row_to_dict(row)
+
+    def list_dedup_states(self) -> List[Dict[str, Any]]:
+        """Every persisted dedup-outcome row -- used by the /health
+        surface (AC13-AC18)."""
+        with self._pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"SELECT {self._DEDUP_STATE_SELECT_COLUMNS} "
+                    f"FROM fleet_migration_dedup_state"
+                )
+                rows = cur.fetchall()
+
+        return [self._dedup_state_row_to_dict(row) for row in rows]
+
+    def clear_dedup_state(self, golden_alias: str, reason: str) -> None:
+        """Mark a dedup-outcome state as cleared (AC8). No-op if absent.
+
+        Raises:
+            ValueError: golden_alias or reason is not a non-empty
+                (non-whitespace) string.
+        """
+        if not isinstance(golden_alias, str) or not golden_alias.strip():
+            raise ValueError(
+                f"golden_alias must be a non-empty string, got {golden_alias!r}"
+            )
+        if not isinstance(reason, str) or not reason.strip():
+            raise ValueError(f"reason must be a non-empty string, got {reason!r}")
+        now = datetime.now(timezone.utc)
+
+        with self._pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE fleet_migration_dedup_state SET cleared_at = %s, "
+                    "cleared_reason = %s WHERE golden_alias = %s",
+                    (now, reason, golden_alias),
+                )
+            conn.commit()
+
     def close(self) -> None:
         """Close the underlying connection pool."""
         self._pool.close()

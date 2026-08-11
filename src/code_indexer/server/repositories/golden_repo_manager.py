@@ -4461,6 +4461,37 @@ class GoldenRepoManager:
                         detail="Snapshot complete",
                     )
 
+                # Codex review Finding F6 (Story #1560 AC8): the "semantic"
+                # branch above ALWAYS passes --clear (Bug #468), so a
+                # successful call with "semantic" in index_types IS, by
+                # construction, a genuine full re-index -- exactly the
+                # "successful full re-index's completion marker" AC8
+                # requires to clear any duplicate-point-id auto-
+                # resolution outcome previously recorded for this repo.
+                # Non-fatal: a clear failure must never fail the
+                # reindex job itself (mirrors the retention-enforcement
+                # non-fatal pattern immediately above).
+                if "semantic" in index_types:
+                    try:
+                        from code_indexer.server.services.fleet_migration.dedup_state import (
+                            clear_dedup_state,
+                        )
+
+                        clear_dedup_state(
+                            self,
+                            alias,
+                            reason=(
+                                "successful full re-index via "
+                                "add_indexes_to_golden_repo (--clear)"
+                            ),
+                        )
+                    except Exception as _dedup_clear_exc:
+                        logging.warning(
+                            f"[add_index] Clearing dedup-outcome state for "
+                            f"'{alias}' failed (non-fatal, reindex itself "
+                            f"succeeded): {_dedup_clear_exc}"
+                        )
+
                 return {
                     "success": True,
                     "alias": alias,

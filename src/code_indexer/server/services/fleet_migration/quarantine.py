@@ -55,6 +55,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
+from code_indexer.server.services.fleet_migration.alias_normalization import (
+    normalize_golden_alias,
+)
 from code_indexer.server.services.fleet_migration.discovery import (
     FleetMigrationCandidate,
 )
@@ -352,6 +355,7 @@ def record_migration_failure(
             G (the scheduler's pre-flight health probe) for how the
             scheduler must respond to a PERSISTENT write outage.
     """
+    golden_alias = normalize_golden_alias(golden_alias)
     backend = _get_quarantine_backend(golden_repo_manager)
     if backend is None or not hasattr(backend, "record_fleet_migration_failure"):
         return
@@ -390,6 +394,7 @@ def reset_migration_failure(golden_repo_manager: Any, golden_alias: str) -> None
             `FleetMigrationScheduler`'s success-reset call) for how each
             handles this.
     """
+    golden_alias = normalize_golden_alias(golden_alias)
     backend = _get_quarantine_backend(golden_repo_manager)
     if backend is None or not hasattr(backend, "reset_fleet_migration_failure"):
         return
@@ -424,6 +429,7 @@ def soft_reset_migration_failure(golden_repo_manager: Any, golden_alias: str) ->
             falls back further to logging a WARNING and proceeding
             without resetting anything.
     """
+    golden_alias = normalize_golden_alias(golden_alias)
     backend = _get_quarantine_backend(golden_repo_manager)
     if backend is None or not hasattr(
         backend, "soft_reset_fleet_migration_failure_count"
@@ -457,6 +463,7 @@ def touch_migration_failure_check(golden_repo_manager: Any, golden_alias: str) -
     than the ideal cadence, which is a performance concern, not a
     correctness one.
     """
+    golden_alias = normalize_golden_alias(golden_alias)
     backend = _get_quarantine_backend(golden_repo_manager)
     if backend is None or not hasattr(backend, "touch_fleet_migration_failure_check"):
         return
@@ -567,6 +574,7 @@ def get_failure_state(
             non-raising status). The caller (the scheduler) must catch
             this specifically and abort the scheduling tick instead.
     """
+    golden_alias = normalize_golden_alias(golden_alias)
     backend = _get_quarantine_backend(golden_repo_manager)
     if backend is None or not hasattr(backend, "get_fleet_migration_failure_state"):
         return None
@@ -913,6 +921,12 @@ _QUARANTINE_EXEMPT_TRANSIENT_STATUSES = frozenset(
     {
         "lock_held",
         "refresh_in_flight",
+        # Codex review Finding F3 / Design decision 7: a duplicate-
+        # point-id group detected while the Story #1460 rollout gate is
+        # closed (deletion_authorized=False) resolves on its own once
+        # the operator opens the gate -- it must NEVER quarantine,
+        # unconditionally, regardless of how many ticks it recurs.
+        "dedup_deletion_gated",
     }
 )
 
@@ -1045,6 +1059,79 @@ def is_permanently_unrecoverable(golden_repo_manager: Any, golden_alias: str) ->
     if state is None:
         return False
     return bool(state.get("failure_cause") == UNRECOVERABLE_FAILURE_CAUSE)
+
+
+def reset_duplicate_caused_quarantine_if_resolved(
+    golden_repo_manager: Any,
+    candidate: FleetMigrationCandidate,
+    *,
+    threshold: int = FLEET_MIGRATION_FAILURE_QUARANTINE_THRESHOLD,
+) -> bool:
+    """Story #1560 AC12: explicit, durable pre-attempt reset for a repo
+    already quarantined by a duplicate-point-id cause -- called BEFORE
+    `is_quarantined()`, since that check's own signature auto-clear can
+    never fire for this cause (repair never runs on an already-skipped
+    candidate, so nothing ever changes the signature). Skips repos
+    below `threshold` or quarantined for `UNRECOVERABLE_FAILURE_CAUSE`
+    (permanent data loss has no duplicate-resolution fix).
+
+    Resets WHEN `collection_has_duplicate_point_ids()` finds a
+    duplicate STILL present -- this is intentional, not inverted: prior
+    to this story, a duplicate point_id made the repair step raise
+    `DuplicateSourceIdError`, which is why the repo was quarantined in
+    the first place. That repair step no longer raises for this
+    condition -- it auto-resolves it by deletion. So finding a
+    duplicate still present is exactly the signal that this repo's
+    STUCK quarantine is explained by a cause the CODE now safely
+    handles; the DATA itself is resolved on the very next migration
+    attempt this reset unblocks, not before.
+
+    Reuses `collection_has_duplicate_point_ids` (read-only) and
+    `_clear_quarantine_after_detected_repair` (existing reset/fallback
+    logic) rather than reimplementing either. Returns True iff reset.
+
+    Raises:
+        QuarantineStateUnavailableError: propagated from
+            `get_failure_state()` on a genuine backend READ failure.
+    """
+    state = get_failure_state(golden_repo_manager, candidate.golden_alias)
+    if state is None:
+        return False
+    # Codex finding F5: a permanently-unrecoverable OR a disk-headroom
+    # quarantine has nothing to do with duplicate-point-id resolution --
+    # neither is fixed by deleting duplicates, so this reset must never
+    # unblock either. is_quarantined() already has its own correct
+    # disk-headroom auto-clear (based on the preflight re-passing); this
+    # function must not duplicate or override that separate mechanism.
+    if state.get("failure_cause") in (
+        UNRECOVERABLE_FAILURE_CAUSE,
+        DISK_HEADROOM_FAILURE_CAUSE,
+    ):
+        return False
+    if int(state.get("consecutive_failure_count", 0)) < threshold:
+        return False
+
+    from code_indexer.storage.shared.collection_dedup_repair import (
+        collection_has_duplicate_point_ids,
+    )
+
+    for collection_dir in candidate.semantic_collection_dirs:
+        if collection_has_duplicate_point_ids(collection_dir):
+            logger.info(
+                "Story #1560: repo %r is quarantined and %s currently "
+                "has duplicate point_id(s) -- this is now a resolvable "
+                "cause (auto-delete, no longer a raised exception) -- "
+                "resetting quarantine so the next attempt can succeed.",
+                candidate.golden_alias,
+                collection_dir,
+            )
+            _clear_quarantine_after_detected_repair(
+                golden_repo_manager,
+                candidate.golden_alias,
+                reason="duplicate point_id cause now auto-resolvable (Story #1560)",
+            )
+            return True
+    return False
 
 
 #: Substring `orchestrator.py`'s `_run_migration_sequence()` uses verbatim
