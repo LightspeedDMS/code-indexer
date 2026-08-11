@@ -50,6 +50,12 @@ def _make_indexer(tmp_path, fake):
     indexer = DelegatedIndexer(config=_config(), repo_root=tmp_path)
     # Inject the fake requests module (lazy-imported inside the indexer).
     indexer._requests = lambda: fake  # type: ignore[method-assign]
+    # Unit tests must not wait on the real FlexVol index-visibility settle budget
+    # (_index_written): on the exit_code==0 miss path it would poll the full
+    # _INDEX_SETTLE_SECONDS. A cache-bust test that needs a specific budget overrides
+    # these; everyone else stays fast.
+    indexer._index_settle_seconds = 0.05
+    indexer._index_poll_seconds = 0.01
     return indexer
 
 
@@ -572,6 +578,10 @@ class TestDelegatedIndexerTransport:
             repo_root=tmp_path,
         )
         indexer._requests = lambda: fake  # type: ignore[method-assign]
+        # This test only asserts the POST URL; the post_return does not rewrite the
+        # index, so avoid waiting the real FlexVol settle budget on the miss path.
+        indexer._index_settle_seconds = 0.05
+        indexer._index_poll_seconds = 0.01
 
         indexer.generate(
             tmp_path, output_dir, "npm", workspace_id="W", language="typescript"

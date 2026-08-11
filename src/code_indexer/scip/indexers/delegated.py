@@ -85,9 +85,13 @@ _DEFAULT_HEALTH_PATH = "/health"
 # (see ``DelegatedIndexer._index_written``). ``output_dir`` is a shared NetApp/ONTAP
 # FlexVol that cidx and the sandbox mount through DIFFERENT NFS clients, so a freshly
 # written index can be briefly hidden by cidx's stale directory/negative-dentry cache.
-# A READDIR busts it immediately; the poll/settle only backstops any residual
-# write-propagation delay and is paid ONLY on the miss path.
-_INDEX_SETTLE_SECONDS = 5.0
+# A READDIR usually busts it immediately, but under heavy concurrent churn (verified in
+# tools-test EKS: a first golden SCIP build right after a 6-pod rollout, while the startup
+# reconcile was CoW-cloning ~31 repos at once) the FlexVol attribute cache held stale past
+# 5s and the build fail-soft dropped, only registering on the next maintenance retry. The
+# budget is therefore sized to outlast that transient (~ONTAP acdirmax) so a first attempt
+# succeeds; it is paid ONLY on the miss path (gated on exit_code==0), which is rare.
+_INDEX_SETTLE_SECONDS = 20.0
 _INDEX_POLL_SECONDS = 0.25
 
 
