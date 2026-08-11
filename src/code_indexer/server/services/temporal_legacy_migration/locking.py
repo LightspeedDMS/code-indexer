@@ -20,7 +20,20 @@ import uuid
 from contextlib import contextmanager
 from typing import Any, Iterator
 
-from code_indexer.server.repositories.background_jobs import DuplicateJobError
+
+# Bug #1558: this MUST be job_tracker's DuplicateJobError, NOT the
+# same-named class in server.repositories.background_jobs. The single
+# call this module wraps -- RefreshScheduler.check_refresh_not_in_progress
+# (below) -- calls JobTracker.check_operation_conflict() directly, never
+# through BackgroundJobManager.submit_job()'s canonical-translation path,
+# so it raises job_tracker's class. fleet_migration/orchestrator.py wraps
+# the identical call and imports from the same, correct module -- mirror
+# that convention here. Importing the wrong (background_jobs) class here
+# previously let the raw exception escape the except clause below
+# uncaught, surfacing a benign global_repo_refresh collision as a hard
+# temporal_legacy_migration job failure instead of the graceful
+# RefreshInProgressError every sibling path already produces.
+from code_indexer.server.services.job_tracker import DuplicateJobError
 
 logger = logging.getLogger(__name__)
 

@@ -285,6 +285,58 @@ def _is_vector_record_file(json_file: Path) -> bool:
     return True
 
 
+def _extract_lightweight_identity_fields(
+    data: Dict[str, Any], point_id: str
+) -> Dict[str, Any]:
+    """Bug #1558: extract ONLY the fields the planning phase needs
+    (the whole-collection identity gate + renumber-plan grouping/sorting)
+    from a freshly-parsed record, discarding everything else -- most
+    importantly the embedding ``vector`` and any large payload fields
+    (e.g. ``content``/``chunk_text``).
+
+    Profiling (tracemalloc) proved retaining every scanned record's FULL
+    parsed JSON for the whole scan -> plan -> apply lifecycle was the
+    dominant unbounded in-memory allocation for a large legacy
+    collection: 288.8 MB @ N=8000 records, 577.0 MB @ N=16000 -- almost
+    exactly linear in N, extrapolating to multi-GB at the 343,604-record
+    scale that drove a production worker to 6.6 GB RSS and repeated
+    recycling. Letting the caller discard the full parsed ``data`` dict
+    immediately (this function returns a small, bounded-size substitute)
+    is what actually bounds memory.
+
+    The APPLY phase (see ``repair_duplicate_and_shifted_points``'s
+    renumber loop, via ``_read_full_json_record``) re-reads each
+    survivor's full record fresh from disk at write time instead of
+    reusing a value from this lightweight view, so no information is
+    lost -- only its *lifetime* is shortened.
+    """
+    payload = data.get("payload")
+    lightweight_payload: Optional[Dict[str, Any]] = None
+    if isinstance(payload, dict):
+        lightweight_payload = {
+            "unique_key": payload.get("unique_key"),
+            "line_start": payload.get("line_start"),
+            "line_end": payload.get("line_end"),
+        }
+    return {"id": point_id, "payload": lightweight_payload}
+
+
+def _read_full_json_record(json_path: Path) -> Dict[str, Any]:
+    """Bug #1558: re-read a record's FULL content (including its
+    embedding vector) fresh from disk, for the APPLY phase's write step.
+
+    Safe to call for any SURVIVOR path in
+    :func:`repair_duplicate_and_shifted_points`'s renumber loop: the
+    dedup-quarantine loop that runs earlier in the same PHASE 2 only
+    moves LOSER paths, never a survivor's own path, and the whole
+    fresh-path migration runs under the repo's exclusive write lock, so
+    nothing else can be mutating this file concurrently.
+    """
+    with open(json_path) as f:
+        record: Dict[str, Any] = json.load(f)
+    return record
+
+
 def _scan_raw_records(
     collection_dir: Path,
 ) -> Tuple[Dict[str, List[Path]], List[Tuple[Path, str]], Dict[Path, Dict[str, Any]]]:
@@ -292,9 +344,10 @@ def _scan_raw_records(
     point_id -> [paths] map (never raising on a duplicate -- resolving
     that ambiguity is this module's job), collects a (path, reason) entry
     for every MALFORMED record (Codex H4 -- checked eagerly, surfaced by
-    the caller BEFORE any mutation of any other record), and caches every
-    successfully-parsed record dict by path (avoids re-reading files for
-    the identity gate, renumber planning, and the apply phase).
+    the caller BEFORE any mutation of any other record), and caches a
+    LIGHTWEIGHT identity view of every successfully-parsed record by path
+    (Bug #1558: never the full record -- see
+    :func:`_extract_lightweight_identity_fields`).
 
     "Malformed" mirrors IDIndexManager.scan_vectors_for_id_map_verbose's
     own notion (JSON parse error, non-dict JSON, or a missing/invalid
@@ -306,7 +359,7 @@ def _scan_raw_records(
     """
     id_to_paths: Dict[str, List[Path]] = {}
     malformed: List[Tuple[Path, str]] = []
-    loaded_by_path: Dict[Path, Dict[str, Any]] = {}
+    identity_by_path: Dict[Path, Dict[str, Any]] = {}
 
     for json_file in collection_dir.rglob("*.json"):
         if not _is_vector_record_file(json_file):
@@ -330,10 +383,16 @@ def _scan_raw_records(
             malformed.append((json_file, f"missing/invalid 'id' field: {point_id!r}"))
             continue
 
-        loaded_by_path[json_file] = data
+        # Bug #1558: retain only the lightweight identity view -- `data`
+        # (which may hold a large embedding vector + payload content)
+        # goes out of scope at the end of this iteration and is freed
+        # immediately, rather than being kept alive for the whole scan.
+        identity_by_path[json_file] = _extract_lightweight_identity_fields(
+            data, point_id
+        )
         id_to_paths.setdefault(point_id, []).append(json_file)
 
-    return id_to_paths, malformed, loaded_by_path
+    return id_to_paths, malformed, identity_by_path
 
 
 def _record_has_self_consistent_identity(record: Dict[str, Any]) -> bool:
@@ -360,7 +419,7 @@ def _record_has_self_consistent_identity(record: Dict[str, Any]) -> bool:
 
 
 def _whole_collection_identity_gate_passes(
-    id_to_paths: Dict[str, List[Path]], loaded_by_path: Dict[Path, Dict[str, Any]]
+    id_to_paths: Dict[str, List[Path]], identity_by_path: Dict[Path, Dict[str, Any]]
 ) -> bool:
     """Runs the identity-consistency predicate over EVERY raw record
     (including every copy of a duplicated point_id) -- a single failure
@@ -369,7 +428,7 @@ def _whole_collection_identity_gate_passes(
     untouched."""
     for paths in id_to_paths.values():
         for path in paths:
-            if not _record_has_self_consistent_identity(loaded_by_path[path]):
+            if not _record_has_self_consistent_identity(identity_by_path[path]):
                 return False
     return True
 
@@ -571,7 +630,7 @@ def _plan_dedup(
 def _plan_renumber(
     collection_dir: Path,
     survivors: Dict[str, Path],
-    loaded_by_path: Dict[Path, Dict[str, Any]],
+    identity_by_path: Dict[Path, Dict[str, Any]],
 ) -> Tuple[Dict[str, Tuple[str, str, int, int]], List[Tuple[str, str, str]]]:
     """Pure planning: parse every survivor record's identity (guaranteed
     present/parseable/self-consistent by the whole-collection identity
@@ -612,7 +671,7 @@ def _plan_renumber(
     groups: Dict[Tuple[str, str], List[_SurvivorRecord]] = {}
 
     for point_id, path in survivors.items():
-        record = loaded_by_path[path]
+        record = identity_by_path[path]
         payload = record.get("payload") or {}
         unique_key = payload.get("unique_key")
         try:
@@ -937,7 +996,7 @@ def repair_duplicate_and_shifted_points(
     marker_exists_on_entry = _marker_path(collection_dir).exists()
 
     # ---- PHASE 1: pure planning -- zero disk mutation ----
-    id_to_paths, malformed, loaded_by_path = _scan_raw_records(collection_dir)
+    id_to_paths, malformed, identity_by_path = _scan_raw_records(collection_dir)
 
     if malformed:
         sample = malformed[:_MAX_MALFORMED_SAMPLE_SIZE]
@@ -973,7 +1032,7 @@ def repair_duplicate_and_shifted_points(
             )
         return DedupRepairResult()
 
-    if not _whole_collection_identity_gate_passes(id_to_paths, loaded_by_path):
+    if not _whole_collection_identity_gate_passes(id_to_paths, identity_by_path):
         logger.info(
             "repair_duplicate_and_shifted_points: %s does not use this "
             "repair's identity scheme (a missing, foreign, or non-self-"
@@ -996,7 +1055,7 @@ def repair_duplicate_and_shifted_points(
     }
 
     renumber_plan, skipped_groups = _plan_renumber(
-        collection_dir, survivors, loaded_by_path
+        collection_dir, survivors, identity_by_path
     )
 
     skipped_sample = [
@@ -1061,7 +1120,16 @@ def repair_duplicate_and_shifted_points(
             # identical-line-range ambiguity) -- left byte-identical.
             continue
         new_point_id, new_unique_key, new_index, total = renumber_plan[old_point_id]
-        record = loaded_by_path[path]
+        # Bug #1558: re-read the FULL record fresh from disk at write
+        # time rather than reusing a value retained since the planning
+        # scan -- the planning phase only keeps a lightweight identity
+        # view (see _extract_lightweight_identity_fields), never the
+        # full record (which includes the embedding vector and can be
+        # tens of KB per record). Safe: `path` is a survivor's ORIGINAL,
+        # unmoved file -- the dedup-quarantine loop above only moves
+        # LOSER paths, never a survivor's own path -- so its on-disk
+        # content here is exactly what the scan parsed.
+        record = _read_full_json_record(path)
         record["id"] = new_point_id
         payload = record.setdefault("payload", {})
         payload["point_id"] = new_point_id
