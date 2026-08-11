@@ -7,6 +7,58 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [12.14.0] - 2026-08-11
+
+### Fixed
+
+- **Bug #1563** (priority-1): a recycled uvicorn worker no longer fails every running job on its node.
+  `cleanup_orphaned_jobs_on_startup` runs on app lifespan startup, and under `uvicorn --workers N`
+  every worker runs its own lifespan, so its `UPDATE` -- scoped by `executing_node` but not by worker
+  -- marked as `failed` every running job on the node, including hours-long jobs owned by healthy
+  sibling workers that kept running regardless. Proven live: `NRestarts=0`, node up 5 weeks, yet a
+  fleet-migration job was failed 11 seconds after a replacement worker spawned, with the misleading
+  error "Job interrupted by server restart". Because spurious failures drive
+  `consecutive_failure_count` toward the quarantine threshold, this could permanently strand a repo.
+  Fixed with an `executing_pid` column (additive migration 046) plus a PID-liveness check, chosen
+  over a designated-sweeper approach because if the lock-holding worker recycles its replacement
+  reproduces the identical bug. A genuine full-node restart still reclaims everything. PID reuse is a
+  documented, bounded residual that can only defer reclaiming a real orphan, never kill a live job.
+- **Bug #1564**: stale quarantine rows no longer produce a permanent false DEGRADED on `/health`.
+  All three rows on the staging cluster were stale -- one repo flagged "permanently UNRECOVERABLE,
+  requires manual data recovery" was fully consolidated and answering queries normally, one was fully
+  migrated yet still quarantined, and one named an alias that is not a registered golden repo at all.
+  Quarantine state is now re-validated against positive evidence using the existing read-only
+  `chunk_store_has_real_data` primitive (never creates files, never raises), and rows for vanished
+  aliases are reaped. Genuinely broken repos stay reported.
+- **Bug #1562**: fleet-migration jobs now report real progress instead of a constant `25` for their
+  entire multi-hour run. The worker declared no `progress_callback`, so `BackgroundJobManager` never
+  injected one and the consolidation engine had no instrumentation at all. Measured on staging: 2h29m
+  at a constant 25 while working correctly -- indistinguishable from the Bug #1558 hang, which
+  produced the identical signature. Progress now ticks WITHIN the dominant phase, not only at phase
+  boundaries, because the phases are wildly uneven (scan+write 2h11m versus ~4 minutes to delete
+  343,561 files). Observability only; no timeouts added.
+- **Bug #1561**: an over-broad test assertion no longer makes a release gate flaky. The test counted
+  every subprocess and asserted exactly one, using total count as a proxy for "cidx init ran once",
+  so unrelated activity in the same code path broke it. Found in 4 of the file's 5 tests.
+- **Bug #1551**: `SSHKeySyncService`'s by-design pytest-guard refusal is logged at DEBUG rather than
+  CRITICAL, where it had been producing 8 of 14 high-severity entries in a 24-hour window. The guard
+  itself is unchanged.
+- **Bug #1545**: fixed the three worst offenders behind parallel-load test flakes. The underlying
+  causes were worse than slowness -- one test performed a live `git clone`/`pull` into the real
+  `$HOME` and a real `npm install -g` of the Claude CLI on every run; another spawned the real
+  `claude` CLI and blocked a full 10 seconds on a genuine timeout. Both are now mocked, removing
+  network dependence and side effects on the developer's environment. Runtimes: 9.23s to 0.54s,
+  20.1s to 1.17s, 9.06s to 0.17s, with no assertion weakened.
+
+### Closed without code
+
+- **Bug #1559**: already resolved by Story #1560 (v12.13.0); verified against a measured oracle.
+- **Bug #1556**: disproved. The solo/SQLite store does persist records -- a single front-door request
+  hitting a real `logger.warning` grew `logs.db` within ~2 seconds. All three "no growth"
+  observations had innocent explanations: the handler sits at WARNING while the probes emitted INFO,
+  failed logins route to a separate audit table behind a `NullHandler` with `propagate = False`, and
+  one admin path logs nothing at all.
+
 ## [12.13.0] - 2026-08-11
 
 ### Changed
