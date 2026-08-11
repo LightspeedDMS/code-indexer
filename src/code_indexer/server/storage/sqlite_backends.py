@@ -9,10 +9,13 @@ eliminating race conditions from concurrent GlobalRegistry instances.
 
 import json
 import logging
+import os
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from types import MappingProxyType
 from typing import Any, Dict, List, Optional, Set, Tuple
+
+import psutil
 
 from .database_manager import DatabaseConnectionManager
 
@@ -1096,6 +1099,25 @@ class SyncJobsSqliteBackend:
         for audit trail.
 
         Bug #436: Orphaned jobs persist as "running" after server restart.
+
+        Bug #1563 scope note: this method is UNCONDITIONALLY unscoped
+        (no node or worker identity check at all), the same class of
+        hazard fixed for BackgroundJobsSqliteBackend/
+        BackgroundJobsPostgresBackend above/elsewhere in this module.
+        It is deliberately NOT given the same worker-pid-liveness fix
+        here: the `sync_jobs` table has no owning-node or owning-worker
+        identity column at all (unlike `background_jobs`'s
+        executing_node/executing_pid), so there is nothing to check
+        liveness against. Adding one would require a schema change in
+        storage/database_manager.py (this table's schema owner) and a
+        caller change in jobs/manager.py's SyncJobManager (the only
+        production caller, which stamps no owner today) -- both outside
+        this fix's authorized file scope. In practice this is a solo-only
+        code path today (SyncJobManager only ever constructs
+        self._sqlite_backend, never a PostgreSQL sync-jobs backend), so
+        the multi-worker recycle scenario this bug describes does not
+        currently reach it; left here as an accurate, honest scope
+        boundary rather than a silent gap.
 
         Returns:
             Number of orphaned jobs that were cleaned up.
@@ -3520,6 +3542,55 @@ class DependencyMapTrackingBackend:
 _TERMINAL_JOB_STATUSES = ("completed", "completed_partial", "failed", "cancelled")
 
 
+def _owning_worker_process_is_alive(executing_pid: Optional[int]) -> bool:
+    """Bug #1563: True only when a job's recorded owning-worker PID is a
+    live OS process on THIS host.
+
+    Under `uvicorn --workers N`, every worker runs its own lifespan and
+    each lifespan calls cleanup_orphaned_jobs_on_startup(). The pre-fix
+    behavior failed EVERY running/pending job unconditionally, including
+    jobs genuinely still executing inside a healthy sibling worker
+    process that merely happened to share the same node -- because
+    "node" was the only identity ever recorded. This helper adds a
+    worker-level (PID) identity check on top, resolving exactly the
+    ambiguity between "a sibling worker on this node is still alive" and
+    "the owning process is provably gone".
+
+    - executing_pid is None: no worker identity was ever recorded for
+      this row (a legacy row from before this fix). Returns False so the
+      caller's pre-existing unconditional-fail behavior for such rows is
+      preserved exactly.
+    - executing_pid is a live PID: the owning worker is still running --
+      returns True so the caller does NOT fail this job.
+    - executing_pid is a dead PID: the owner is provably gone (a real
+      crash, or the specific worker that owned it was recycled) --
+      returns False so the caller still reclaims it, exactly as a genuine
+      full-node restart requires (every worker's PID becomes dead at
+      once, so every row is still correctly reclaimed).
+
+    Known, accepted, bounded residual risk (documented rather than
+    engineered away): PID reuse. If the OS recycles a PID number between
+    the owning process's death and this check, an unrelated process could
+    coincidentally occupy the same PID and be misread as "still alive",
+    deferring reclamation of a genuine orphan until a later sweep. This
+    never causes the opposite (and far worse) failure mode of killing a
+    job that is still genuinely running.
+    """
+    if executing_pid is None:
+        return False
+    try:
+        return bool(psutil.pid_exists(executing_pid))
+    except Exception:
+        # Fail conservatively toward "cannot disprove liveness" -- never
+        # wrongly fail a job whose owner we could not prove is gone.
+        logger.warning(
+            "Bug #1563: liveness probe for owning worker pid %s raised; "
+            "treating as alive (conservative)",
+            executing_pid,
+        )
+        return True
+
+
 class BackgroundJobsSqliteBackend:
     """
     SQLite backend for background job management.
@@ -3532,6 +3603,60 @@ class BackgroundJobsSqliteBackend:
     def __init__(self, db_path: str) -> None:
         """Initialize the backend."""
         self._conn_manager = DatabaseConnectionManager.get_instance(db_path)
+        self._ensure_executing_pid_column()
+
+    def _ensure_executing_pid_column(self) -> None:
+        """Bug #1563: idempotent, self-contained schema self-heal.
+
+        The background_jobs table's base schema is owned by
+        storage/database_manager.py, which is out of scope for this fix.
+        Rather than touch that file, this backend defensively adds its
+        own new column the same way GoldenRepoMetadataSqliteBackend
+        already does further up in this module (PRAGMA table_info check +
+        ALTER TABLE ADD COLUMN) -- idempotent and safe to run on every
+        construction, and self-heals an already-deployed database exactly
+        like a rolling PostgreSQL migration would (see migration 046).
+        """
+
+        def operation(conn):
+            cursor = conn.execute("PRAGMA table_info(background_jobs)")
+            existing_cols = {row[1] for row in cursor.fetchall()}
+            if not existing_cols:
+                # Regression fix (post-#1563): PRAGMA table_info against a
+                # table that does not exist AT ALL returns an EMPTY result
+                # set rather than raising -- it never returns a non-empty
+                # set with a missing column list, since a SQLite table
+                # cannot have zero columns. An empty result therefore means
+                # "the table itself does not exist yet", never "a table
+                # with zero columns". Falling into the ALTER branch here
+                # (as the original #1563 fix did) raised
+                # sqlite3.OperationalError: no such table: background_jobs
+                # whenever this backend is constructed BEFORE
+                # DatabaseSchema.initialize_database() has created the
+                # table -- the exact path StorageFactory._create_sqlite_backends()
+                # / create_backends() exercise when called directly against
+                # a fresh data_dir (several pre-existing unit tests do this
+                # legitimately, never touching background_jobs at all).
+                # There is nothing to migrate yet, so return without
+                # altering. Real production always calls
+                # DatabaseSchema.initialize_database() BEFORE
+                # StorageFactory.create_backends() (see service_init.py /
+                # lifespan.py), so by the time this constructor runs there
+                # the table already exists (without executing_pid, since
+                # CREATE_BACKGROUND_JOBS_TABLE never defines it) and the
+                # ALTER branch below still fires and self-heals it, on both
+                # a brand-new database and an already-deployed one.
+                return None
+            if "executing_pid" not in existing_cols:
+                conn.execute(
+                    "ALTER TABLE background_jobs ADD COLUMN executing_pid INTEGER"
+                )
+                logger.info(
+                    "Migrated background_jobs: added executing_pid column (Bug #1563)"
+                )
+            return None
+
+        self._conn_manager.execute_atomic(operation)
 
     def save_job(
         self,
@@ -3563,6 +3688,15 @@ class BackgroundJobsSqliteBackend:
     ) -> None:
         """Save a new background job."""
 
+        # Bug #1563: stamp the OWNING WORKER's OS pid alongside the node
+        # whenever this row is being claimed (executing_node provided).
+        # Computed internally via os.getpid() -- always correct because
+        # this call always executes inside the very process taking
+        # ownership -- so no caller change is required. Rows with no
+        # owner (executing_node=None, e.g. a pod-pull-eligible row left
+        # for cross-node work-stealing) get no pid either.
+        executing_pid = os.getpid() if executing_node is not None else None
+
         def operation(conn):
             conn.execute(
                 """INSERT OR IGNORE INTO background_jobs
@@ -3570,8 +3704,9 @@ class BackgroundJobsSqliteBackend:
                     result, error, progress, username, is_admin, cancelled, repo_alias,
                     resolution_attempts, claude_actions, failure_reason, extended_error,
                     language_resolution_status, current_phase, phase_detail,
-                    progress_info, metadata, executing_node, claimed_at, actor_username)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    progress_info, metadata, executing_node, claimed_at, actor_username,
+                    executing_pid)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     job_id,
                     operation_type,
@@ -3604,6 +3739,7 @@ class BackgroundJobsSqliteBackend:
                     executing_node,
                     claimed_at,
                     actor_username,
+                    executing_pid,
                 ),
             )
             return None
@@ -3655,6 +3791,11 @@ class BackgroundJobsSqliteBackend:
                 INSERT due to a duplicate active job for (operation_type, repo_alias).
         """
 
+        # Bug #1563: see save_job's identical comment -- stamp the owning
+        # worker's OS pid whenever this row is claimed with an owning
+        # node, computed internally so no caller change is required.
+        executing_pid = os.getpid() if executing_node is not None else None
+
         def operation(conn):
             conn.execute(
                 """INSERT INTO background_jobs
@@ -3662,8 +3803,9 @@ class BackgroundJobsSqliteBackend:
                     result, error, progress, username, is_admin, cancelled, repo_alias,
                     resolution_attempts, claude_actions, failure_reason, extended_error,
                     language_resolution_status, current_phase, phase_detail,
-                    progress_info, metadata, executing_node, claimed_at, actor_username)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    progress_info, metadata, executing_node, claimed_at, actor_username,
+                    executing_pid)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     job_id,
                     operation_type,
@@ -3696,6 +3838,7 @@ class BackgroundJobsSqliteBackend:
                     executing_node,
                     claimed_at,
                     actor_username,
+                    executing_pid,
                 ),
             )
             return None
@@ -4158,6 +4301,20 @@ class BackgroundJobsSqliteBackend:
         same process's restart. Node scoping only matters when a shared
         cluster backend could see another node's still-running work.
 
+        Bug #1563: even within a single node, a misconfigured or future
+        multi-worker SQLite deployment would face the exact same hazard
+        PostgreSQL cluster mode does -- a recycled worker's own startup
+        sweep would otherwise fail every running/pending row in this
+        database, including rows genuinely owned by a still-alive sibling
+        worker process. This is defended the same way as the PostgreSQL
+        backend: candidates are read first, then only rows whose recorded
+        owning-worker PID (see save_job/atomic_claim_insert) is NOT a live
+        OS process are actually failed. A genuine full-node/single-process
+        restart is unaffected -- every recorded pid on this host becomes
+        dead at once, so every row is still correctly reclaimed. See
+        _owning_worker_process_is_alive for the full contract, including
+        the documented residual PID-reuse risk.
+
         Returns:
             Number of orphaned jobs that were cleaned up.
         """
@@ -4166,12 +4323,27 @@ class BackgroundJobsSqliteBackend:
 
         def operation(conn):
             cursor = conn.execute(
-                """UPDATE background_jobs
-                   SET status = 'failed',
-                       error = ?,
-                       completed_at = ?
-                   WHERE status IN ('running', 'pending')""",
-                (error_message, interrupted_at),
+                "SELECT job_id, executing_pid FROM background_jobs "
+                "WHERE status IN ('running', 'pending')"
+            )
+            candidates = cursor.fetchall()
+            job_ids_to_fail = [
+                row[0]
+                for row in candidates
+                if not _owning_worker_process_is_alive(row[1])
+            ]
+            if not job_ids_to_fail:
+                return 0
+
+            placeholders = ", ".join("?" for _ in job_ids_to_fail)
+            cursor = conn.execute(
+                f"""UPDATE background_jobs
+                    SET status = 'failed',
+                        error = ?,
+                        completed_at = ?
+                    WHERE status IN ('running', 'pending')
+                      AND job_id IN ({placeholders})""",
+                [error_message, interrupted_at, *job_ids_to_fail],
             )
             return cursor.rowcount
 

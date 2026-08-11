@@ -61,6 +61,7 @@ from code_indexer.server.services.query_path_cache import (
 )
 from code_indexer.server.services.job_tracker import DuplicateJobError
 from code_indexer.storage.shared.collection_migration import (
+    ProgressCallback,
     consolidate_collection_in_place,
     verify_collection_fully_migrated,
 )
@@ -69,6 +70,82 @@ if TYPE_CHECKING:
     from code_indexer.global_repos.refresh_scheduler import RefreshScheduler
 
 logger = logging.getLogger(__name__)
+
+#: Bug #1562: fleet-migration jobs reported a constant progress=25 for
+#: their entire multi-hour lifetime, indistinguishable from a hang,
+#: because nothing between the scheduler and the real per-collection
+#: consolidation threaded a progress_callback through. `ProgressCallback`
+#: is reused unchanged from collection_migration.py (the shape
+#: BackgroundJobManager.submit_job() injects into a worker declaring a
+#: `progress_callback` parameter), so no adapter is needed at this layer.
+_PROGRESS_MIN = 0
+_PROGRESS_MAX = 100
+
+
+def _make_item_scoped_progress_callback(
+    progress_callback: Optional[ProgressCallback],
+    *,
+    item_index: int,
+    item_count: int,
+    progress_base: int,
+    progress_span: int,
+    phase_prefix: str,
+) -> Optional[ProgressCallback]:
+    """Bug #1562: compose an outer `progress_callback` with a PER-ITEM
+    percentage rescaling and phase-name prefixing, so the Nth of
+    `item_count` collections/namespaces under one repo reports its own
+    LOCAL 0-100 progress (as `consolidate_collection_in_place` already
+    produces) within its own slice of `[progress_base, progress_base +
+    progress_span]`, never overlapping a sibling item's slice or
+    exceeding the outer range.
+
+    Returns None (a no-op) only when `progress_callback` is None. Every
+    call site in this module derives `item_index`/`item_count` from
+    `enumerate()` over the SAME non-empty list, so `item_count <= 0` or
+    `item_index` outside `[0, item_count)` is always a genuine
+    programming error (Messi Rule #15) -- validated UNCONDITIONALLY,
+    before the `progress_callback is None` early return, so this
+    precondition is never silently bypassed for a caller that happens
+    to pass `progress_callback=None`.
+
+    A coarse outer `progress_span` narrower than `item_count` (integer
+    division truncation) can legitimately produce a ZERO-WIDTH slice for
+    some items -- that item's ticks still fire at its fixed `item_base`
+    value rather than being silently dropped; it just does not itself
+    show intra-item movement, which is an acceptable degradation of an
+    already-coarse allocation, never a disabled callback.
+
+    Raises:
+        ValueError: `item_count <= 0`, or `item_index` is not within
+            `[0, item_count)`.
+    """
+    if item_count <= 0 or not (0 <= item_index < item_count):
+        raise ValueError(
+            f"_make_item_scoped_progress_callback: item_index={item_index} "
+            f"out of range for item_count={item_count}"
+        )
+    if progress_callback is None:
+        return None
+    item_base = progress_base + int(progress_span * item_index / item_count)
+    item_next_base = progress_base + int(progress_span * (item_index + 1) / item_count)
+    item_span = max(item_next_base - item_base, 0)
+
+    def _scoped(
+        progress: int, phase: Optional[str] = None, detail: Optional[str] = None
+    ) -> None:
+        clamped = max(_PROGRESS_MIN, min(_PROGRESS_MAX, progress))
+        mapped = item_base + (
+            int(item_span * clamped / _PROGRESS_MAX) if item_span else 0
+        )
+        scoped_phase = (
+            f"{phase_prefix} ({item_index + 1}/{item_count})"
+            if phase is None
+            else f"{phase_prefix} ({item_index + 1}/{item_count}):{phase}"
+        )
+        progress_callback(mapped, scoped_phase, detail)
+
+    return _scoped
+
 
 #: Owner identity recorded in the WriteLockManager lock file (AC2/AC7).
 MIGRATION_OWNER_NAME = "fleet_migration"
@@ -162,6 +239,10 @@ def _consolidate_collections(
     # on a fail-open, duck-typed pass-through parameter).
     query_tracker: Optional[Any] = None,
     refcount_key: Optional[str] = None,
+    progress_callback: Optional[ProgressCallback] = None,
+    progress_base: int = 0,
+    progress_span: int = 100,
+    phase_prefix: str = "consolidating semantic collection",
 ) -> Tuple[int, int, int]:
     """AC1 step (1). Returns (consolidated_count, skipped_disk_count,
     dedup_gated_count).
@@ -187,11 +268,20 @@ def _consolidate_collections(
     quiesced/drained before any duplicate-point-id deletion runs.
     ``None`` (the default) is a fail-open no-op, matching every
     pre-existing caller.
+
+    Bug #1562: ``progress_callback``, if given, is invoked once per
+    collection via a per-item scoped wrapper
+    (``_make_item_scoped_progress_callback``) that rescales
+    ``consolidate_collection_in_place``'s own LOCAL 0-100 progress into
+    this collection's own slice of ``[progress_base, progress_base +
+    progress_span]`` -- the defaults (0, 100) are byte-identical to
+    "report across the whole caller-given range", matching every
+    pre-existing caller that does not pass these parameters.
     """
     consolidated_count = 0
     skipped_disk_count = 0
     dedup_gated_count = 0
-    for collection_dir in collection_dirs:
+    for item_index, collection_dir in enumerate(collection_dirs):
         # Codex round-6 CRITICAL finding #4 (TOCTOU): discovery.py's own
         # is_symlink() rejection only proves this path was safe AT
         # DISCOVERY TIME -- re-validate immediately before the
@@ -210,11 +300,20 @@ def _consolidate_collections(
                 f"validation but changed before this destructive write "
                 f"could run."
             )
+        item_progress_callback = _make_item_scoped_progress_callback(
+            progress_callback,
+            item_index=item_index,
+            item_count=len(collection_dirs),
+            progress_base=progress_base,
+            progress_span=progress_span,
+            phase_prefix=f"{phase_prefix} {collection_dir.name}",
+        )
         result = consolidate_collection_in_place(
             collection_dir,
             deletion_authorized=deletion_authorized,
             query_tracker=query_tracker,
             refcount_key=refcount_key,
+            progress_callback=item_progress_callback,
         )
         if result.status in ("consolidated", "already_consolidated"):
             consolidated_count += 1
@@ -241,6 +340,9 @@ def _consolidate_temporal_namespaces(
     # _consolidate_collections above.
     query_tracker: Optional[Any] = None,
     refcount_key: Optional[str] = None,
+    progress_callback: Optional[ProgressCallback] = None,
+    progress_base: int = 0,
+    progress_span: int = 100,
 ) -> Tuple[int, int, int]:
     """AC1 step (2), Bug #1528 revision: consolidate every in-repo temporal
     shard IN PLACE, synchronously, inside THIS same write-lock hold, as a
@@ -270,6 +372,13 @@ def _consolidate_temporal_namespaces(
     is pointer-first, so reads for that namespace keep resolving to the
     previously-published sister copy rather than to the shard just
     consolidated here.
+
+    Bug #1562: ``progress_callback``/``progress_base``/``progress_span``
+    are forwarded straight through to ``_consolidate_collections`` --
+    that function's own per-item scoping already handles rescaling each
+    consolidatable namespace's progress into its own slice of the given
+    range. Defaults (``None``, ``0``, ``100``) are byte-identical to
+    every pre-existing caller.
     """
     for spec in temporal_namespaces:
         if sister_alias_manager.alias_exists(spec.pointer_namespace):
@@ -322,6 +431,10 @@ def _consolidate_temporal_namespaces(
         deletion_authorized=deletion_authorized,
         query_tracker=query_tracker,
         refcount_key=refcount_key,
+        progress_callback=progress_callback,
+        progress_base=progress_base,
+        progress_span=progress_span,
+        phase_prefix="consolidating temporal namespace",
     )
 
 
@@ -336,6 +449,7 @@ def _run_migration_sequence(
     sister_root: Path,
     *,
     deletion_authorized: bool = True,
+    progress_callback: Optional[ProgressCallback] = None,
 ) -> FleetMigrationRepoResult:
     """AC1 steps (1)-(3), run under the ALREADY-acquired write lock and
     AFTER AC9's in-flight-refresh check has already passed.
@@ -357,15 +471,30 @@ def _run_migration_sequence(
     temporal consolidation calls below, so a real active reader is
     genuinely quiesced/drained before any duplicate-point-id deletion
     runs, for every collection under this repo.
+
+    Bug #1562: ``progress_callback``, if given, is split PROPORTIONALLY
+    by item count between the semantic and temporal consolidation calls
+    below (a repo with 3 semantic collections and 1 temporal namespace
+    gives semantic 75% of the overall range, temporal 25%) -- rather than
+    a fixed 50/50 split, so a repo with only one kind of collection gives
+    that kind the FULL range instead of an unreachable half.
     """
     query_tracker = refresh_scheduler.query_tracker
     refcount_key = str(index_path)
+    total_items = len(semantic_collection_dirs) + len(temporal_namespaces)
+    semantic_span = (
+        int(100 * len(semantic_collection_dirs) / total_items) if total_items else 0
+    )
+    temporal_span = 100 - semantic_span if total_items else 0
     consolidated_count, skipped_disk_count, dedup_gated_count = (
         _consolidate_collections(
             semantic_collection_dirs,
             deletion_authorized=deletion_authorized,
             query_tracker=query_tracker,
             refcount_key=refcount_key,
+            progress_callback=progress_callback,
+            progress_base=0,
+            progress_span=semantic_span,
         )
     )
     (
@@ -379,6 +508,9 @@ def _run_migration_sequence(
         deletion_authorized=deletion_authorized,
         query_tracker=query_tracker,
         refcount_key=refcount_key,
+        progress_callback=progress_callback,
+        progress_base=semantic_span,
+        progress_span=temporal_span,
     )
     consolidated_count += temporal_consolidated
     skipped_disk_count += temporal_skipped_disk
@@ -487,6 +619,7 @@ def run_fleet_migration_for_repo(
     temporal_namespaces: List[TemporalNamespaceSpec],
     sister_root: Path,
     deletion_authorized: Optional[bool] = None,
+    progress_callback: Optional[ProgressCallback] = None,
 ) -> FleetMigrationRepoResult:
     """Run the full per-repo fleet-migration pass for one golden repo.
 
@@ -518,6 +651,11 @@ def run_fleet_migration_for_repo(
             (not just ``FleetMigrationScheduler``, the only production
             caller today) gets the real, fail-closed config value rather
             than silently deleting unconditionally.
+        progress_callback: Bug #1562. Forwarded unchanged into
+            ``_run_migration_sequence`` (which proportionally splits it
+            between semantic and temporal consolidation). ``None`` (the
+            default) is a no-op, byte-identical to every pre-existing
+            caller.
 
     Returns:
         A :class:`FleetMigrationRepoResult` describing the outcome.
@@ -594,6 +732,7 @@ def run_fleet_migration_for_repo(
             temporal_namespaces,
             sister_root,
             deletion_authorized=resolved_deletion_authorized,
+            progress_callback=progress_callback,
         )
     finally:
         # AC2: held continuously through the whole sequence above,

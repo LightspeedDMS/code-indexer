@@ -644,6 +644,24 @@ class TestExecuteWiresEnsureNodejsBeforeNpmConsumers:
             patch.object(
                 executor, "_ensure_git_safe_directory_wildcard", return_value=True
             ),
+            # Bug #1545 cause-1 fix: on any dev/CI box that actually has npm/git
+            # on PATH, these two unmocked steps used to run for REAL --
+            # `_ensure_claude_cli_updated` shells out to a real, network-bound
+            # `npm install -g @anthropic-ai/claude-code@latest`, and
+            # `_ensure_pace_maker_installed` does a real `git clone`/`git pull`
+            # of the pace-maker repo into the actual $HOME. Measured: together
+            # they accounted for ~8.5s of this test's ~9.2s isolated runtime
+            # (cProfile: _ensure_pace_maker_installed cumtime=5.27s,
+            # _ensure_claude_cli_updated cumtime=3.24s), which is why it
+            # timed out at 15.01s (limit 15.0s) under concurrent chunk load
+            # in CI. This test only asserts call ORDER among ensure_nodejs/
+            # ensure_scip_python/_ensure_codex_cli_installed, so mocking these
+            # unrelated real-I/O steps (matching this class's existing
+            # patch-the-siblings pattern) preserves the test's verification
+            # value exactly while removing both the timeout risk and the
+            # unwanted real npm/git side effects on the host running the test.
+            patch.object(executor, "_ensure_claude_cli_updated", return_value=True),
+            patch.object(executor, "_ensure_pace_maker_installed", return_value=True),
             patch.object(
                 executor, "ensure_nodejs", side_effect=record("ensure_nodejs")
             ),

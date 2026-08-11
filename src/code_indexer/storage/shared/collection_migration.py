@@ -42,7 +42,7 @@ import sqlite3
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, Iterable, Optional, Union
+from typing import Any, Callable, Dict, Iterable, Optional, Union
 
 from code_indexer.storage.id_index_manager import IDIndexManager
 from code_indexer.storage.shared.chunk_layout import (
@@ -63,6 +63,108 @@ from code_indexer.storage.sqlite_chunk_store import (
 from code_indexer.utils.file_locking import nfs_safe_fsync
 
 logger = logging.getLogger(__name__)
+
+#: Bug #1562: fleet-migration jobs reported a constant progress=25 for
+#: their entire multi-hour lifetime, indistinguishable from a hang, because
+#: this module -- where ALL the time is spent -- had zero progress
+#: instrumentation. `ProgressCallback` matches the shape
+#: `BackgroundJobManager.submit_job()` already injects into any worker
+#: function that declares a `progress_callback` parameter
+#: (`progress_callback(progress: int, phase: Optional[str] = None,
+#: detail: Optional[str] = None)`, server/repositories/background_jobs.py),
+#: so a callback threaded all the way down from
+#: `FleetMigrationScheduler._run_next_candidate` can be handed to this
+#: module's functions without any adapter.
+ProgressCallback = Callable[[int, Optional[str], Optional[str]], None]
+
+
+def _emit_progress(
+    progress_callback: Optional[ProgressCallback],
+    progress: int,
+    *,
+    phase: Optional[str] = None,
+    detail: Optional[str] = None,
+) -> None:
+    """Bug #1562: best-effort progress emission. A no-op when
+    `progress_callback` is None (every pre-existing caller, byte-
+    identical). Never lets a callback failure interrupt the actual
+    migration -- this is a pure observability side-channel, not business
+    logic, so a raising callback (e.g. a broken dashboard-side handler)
+    must never abort or corrupt a real, multi-hour consolidation."""
+    if progress_callback is None:
+        return
+    try:
+        progress_callback(progress, phase, detail)
+    except Exception:
+        logger.warning(
+            "consolidate_collection_in_place: progress_callback raised -- "
+            "ignoring (observability only, must never interrupt migration)",
+            exc_info=True,
+        )
+
+
+def _phase_scoped_callback(
+    progress_callback: Optional[ProgressCallback],
+    *,
+    base: int,
+    span: int,
+    phase_prefix: str,
+) -> Optional[ProgressCallback]:
+    """Bug #1562: wrap `progress_callback` so a callee's own LOCAL 0-100
+    progress value is rescaled into `[base, base + span]`, and its phase
+    name is namespaced under `phase_prefix`. This is how a long inner loop
+    (e.g. the write+verify batch loop, which knows only its own
+    records-written/total-records ratio) reports genuine intra-phase
+    progress within the outer function's overall phase allocation --
+    exactly the guidance that a naive equal-weight-per-phase mapping would
+    still look stuck during the real staging incident's dominant ~2h11m
+    scan+write phase.
+
+    Returns None (a no-op) when `progress_callback` is None, so every
+    caller can pass the result straight through without a None-check.
+
+    Raises:
+        ValueError: `base`/`span` fall outside the valid `[0, 100]`
+            percentage range, or `base + span` exceeds 100 -- a defensive
+            precondition (Messi Rule #15), enforced UNCONDITIONALLY
+            (before the `progress_callback is None` check) since every
+            call site in this module passes literal constants, so a
+            violation here is a genuine programming error, never live/
+            user-supplied data.
+    """
+    if not (0 <= base <= 100):
+        raise ValueError(f"_phase_scoped_callback: base={base} out of [0, 100]")
+    if not (0 <= span <= 100):
+        raise ValueError(f"_phase_scoped_callback: span={span} out of [0, 100]")
+    if base + span > 100:
+        raise ValueError(
+            f"_phase_scoped_callback: base={base} + span={span} exceeds 100"
+        )
+    if progress_callback is None:
+        return None
+
+    def _scoped(
+        progress: int, phase: Optional[str] = None, detail: Optional[str] = None
+    ) -> None:
+        clamped = max(0, min(100, progress))
+        mapped = base + int(span * clamped / 100)
+        scoped_phase = phase_prefix if phase is None else f"{phase_prefix}:{phase}"
+        _emit_progress(progress_callback, mapped, phase=scoped_phase, detail=detail)
+
+    return _scoped
+
+
+#: Bug #1562: named percentage checkpoints for `consolidate_collection_in_
+#: place`'s FRESH path (scan -> write -> finalize -> delete). Named rather
+#: than inline literals so the overall phase allocation is documented in
+#: one place instead of scattered magic numbers at each call site.
+_PROGRESS_AFTER_SCAN = 15
+_PROGRESS_WRITE_PHASE_BASE = 20
+_PROGRESS_WRITE_PHASE_SPAN = 60
+_PROGRESS_AFTER_FINALIZE = _PROGRESS_WRITE_PHASE_BASE + _PROGRESS_WRITE_PHASE_SPAN + 5
+_PROGRESS_DELETE_PHASE_BASE = _PROGRESS_AFTER_FINALIZE
+_PROGRESS_DELETE_PHASE_SPAN = 100 - _PROGRESS_DELETE_PHASE_BASE - 1
+
 
 CHUNKS_DB_FILENAME = "chunks.db"
 
@@ -2114,14 +2216,31 @@ def _remove_empty_subdirs(collection_dir: Path) -> None:
             pass  # Not empty (race) or already gone -- harmless, skip
 
 
+#: Bug #1562: how often (in deletions) the deletion loop below ticks its
+#: progress_callback. This loop is FAST relative to the write phase
+#: (~2181 files/sec on the real staging incident), so ticking on every
+#: single deletion would be needless overhead for no visible benefit;
+#: this interval still produces many ticks even for a large fleet repo
+#: (343,561 files / 500 = ~687 ticks).
+_DELETE_PROGRESS_TICK_INTERVAL = 500
+
+
 def _cleanup_old_sharded_files(
-    collection_dir: Path, verified_paths: "Iterable[Path]"
+    collection_dir: Path,
+    verified_paths: "Iterable[Path]",
+    progress_callback: Optional[ProgressCallback] = None,
 ) -> int:
     """AC3 step 5 / AC4 resume-cleanup: delete every VERIFIED legacy
     ``vector_*.json`` file individually, unlink the retired
     ``id_index.bin`` if present, then remove now-empty shard
     subdirectories. Idempotent -- safe to call on a collection that has
     already been fully cleaned up (no-op).
+
+    Bug #1562: `progress_callback` (if given) is ticked with a LOCAL
+    0-100 "deleting_legacy_files" phase value every
+    `_DELETE_PROGRESS_TICK_INTERVAL` deletions, plus once more at the end
+    -- so this fast-but-real phase is visibly distinguishable from the
+    (much longer) write phase rather than silently invisible.
 
     Codex Finding 1(b) (CRITICAL, AC7 data loss): this function deletes
     ONLY the exact ``verified_paths`` captured in the consolidation's
@@ -2148,6 +2267,7 @@ def _cleanup_old_sharded_files(
     reported as success.
     """
     verified = {Path(p).resolve() for p in verified_paths}
+    total_to_delete = len(verified)
 
     # Codex Finding 1(b): any vector_*.json on disk that is NOT part of the
     # verified snapshot is UNVERIFIED data -- abort touching anything and
@@ -2181,6 +2301,20 @@ def _cleanup_old_sharded_files(
                 exc,
             )
             failed_paths.append(json_path)
+        if total_to_delete > 0 and deleted % _DELETE_PROGRESS_TICK_INTERVAL == 0:
+            _emit_progress(
+                progress_callback,
+                int(100 * deleted / total_to_delete),
+                phase="deleting_legacy_files",
+                detail=f"{deleted}/{total_to_delete} legacy files deleted",
+            )
+    if total_to_delete > 0:
+        _emit_progress(
+            progress_callback,
+            100,
+            phase="deleting_legacy_files",
+            detail=f"{deleted}/{total_to_delete} legacy files deleted",
+        )
 
     # Codex MEDIUM finding (round 5): attempt the unlink UNCONDITIONALLY
     # -- no fallible Path.exists() pre-check -- mirroring the stray
@@ -2252,23 +2386,43 @@ def _clear_chunks_db_discriminator(collection_dir: Path) -> None:
 
 
 def _write_verified_chunks_db(
-    collection_dir: Path, chunks_db_path: Path, id_map: Dict[str, Path]
+    collection_dir: Path,
+    chunks_db_path: Path,
+    id_map: Dict[str, Path],
+    progress_callback: Optional[ProgressCallback] = None,
 ) -> "set":
     """Codex Finding 4(a) inner build: discard any corrupt/stale leftover,
     create the store, write+verify every batch via a fresh reopen, then a
     global exact-set comparison. Returns ``expected_ids``. Raises the raw
     engine/sqlite errors as-is -- the typed-envelope translation belongs to
-    :func:`_build_fresh_chunks_db_verified`."""
+    :func:`_build_fresh_chunks_db_verified`.
+
+    Bug #1562: this is the dominant long-running loop (the real staging
+    incident's ~2h11m scan+write phase). `progress_callback`, if given, is
+    ticked once per batch with a LOCAL 0-100 value reflecting
+    records-written / total-records so far -- the only granular signal
+    available for a multi-hour run, since the total record count is known
+    up front from `id_map`.
+    """
     # A leftover chunks.db from an earlier interrupted attempt may be corrupt
     # OR healthy-but-STALE -- discard either (safe: discriminator not yet set).
     _discard_corrupt_leftover_chunks_db(chunks_db_path, expected_ids=set(id_map.keys()))
     # Ensure chunks.db (schema) exists even when id_map is empty.
     ChunkStore(chunks_db_path, durable_synchronous=True).close()
 
+    total_records = len(id_map)
     expected_ids: set = set()
     for batch in _batched(list(id_map.items()), _MIGRATION_BATCH_SIZE):
         _write_and_verify_batch(chunks_db_path, batch)
         expected_ids.update(point_id for point_id, _json_path in batch)
+        if total_records > 0:
+            written = len(expected_ids)
+            _emit_progress(
+                progress_callback,
+                int(100 * written / total_records),
+                phase="writing",
+                detail=f"{written}/{total_records} records written",
+            )
 
     with ChunkStore(chunks_db_path) as final_store:
         actual_ids = final_store.all_point_ids()
@@ -2288,7 +2442,10 @@ def _write_verified_chunks_db(
 
 
 def _build_fresh_chunks_db_verified(
-    collection_dir: Path, chunks_db_path: Path, id_map: Dict[str, Path]
+    collection_dir: Path,
+    chunks_db_path: Path,
+    id_map: Dict[str, Path],
+    progress_callback: Optional[ProgressCallback] = None,
 ) -> "set":
     """Codex Finding 4(a) (HIGH): build+verify+force-durable a FRESH
     chunks.db from ``id_map`` inside a TYPED envelope covering the ENTIRE
@@ -2297,9 +2454,15 @@ def _build_fresh_chunks_db_verified(
     removes the partial chunks.db (best-effort) and leaves the legacy
     source untouched (the discriminator is not written until after this
     returns). Returns ``expected_ids`` on success.
+
+    Bug #1562: `progress_callback` (if given) is forwarded unchanged into
+    :func:`_write_verified_chunks_db`, the only phase of this function
+    with a granular records-processed/total signal to report.
     """
     try:
-        expected_ids = _write_verified_chunks_db(collection_dir, chunks_db_path, id_map)
+        expected_ids = _write_verified_chunks_db(
+            collection_dir, chunks_db_path, id_map, progress_callback
+        )
         _force_durable_and_integrity_check(collection_dir, chunks_db_path)
         return expected_ids
     except (ConsolidationVerificationError, UnrecoverableConsolidationCorruptionError):
@@ -2459,6 +2622,7 @@ def consolidate_collection_in_place(
     query_tracker: Optional[Any] = None,
     refcount_key: Optional[str] = None,
     drain_max_wait_seconds: Optional[float] = None,
+    progress_callback: Optional[ProgressCallback] = None,
 ) -> ConsolidationResult:
     """Consolidate ONE collection's sharded ``vector_*.json`` layout into a
     ``chunks.db`` written into the SAME directory, in place.
@@ -2466,6 +2630,15 @@ def consolidate_collection_in_place(
     Discriminator-driven and idempotent (AC4): if the collection already
     resolves to ``ChunkLayout.CHUNKS_DB`` on entry, steps 1-4 are NEVER
     redone -- only step 5's cleanup runs (a no-op if already clean).
+
+    Bug #1562: ``progress_callback``, if given, is invoked with
+    ``(progress: int, phase: Optional[str], detail: Optional[str])``
+    checkpoints at each real phase transition (scan -> write -> verify ->
+    flip -> delete legacy files), with genuine intra-phase ticks during
+    the write and deletion loops (the two phases with a known total up
+    front) -- this is what makes a genuinely advancing multi-hour
+    migration distinguishable from a hang. ``None`` (the default) is a
+    no-op, byte-identical to every pre-existing caller.
 
     Args:
         collection_dir: The collection directory to consolidate (a
@@ -2525,6 +2698,16 @@ def consolidate_collection_in_place(
         # Resume path. Finding #4: fail loudly on any rejected legacy
         # record found during the fresh re-scan (never silently proceed).
         still_present_id_map = _scan_or_fail_on_rejected_records(collection_dir)
+        # Bug #1562: a resume attempt can legitimately have a large number
+        # of still-present legacy files (a crash between the durable flip
+        # and cleanup completing) -- emit a checkpoint here so this is
+        # visibly distinct from a fresh-path scan.
+        _emit_progress(
+            progress_callback,
+            50,
+            phase="resuming_verified_chunks_db",
+            detail=f"{len(still_present_id_map)} legacy record(s) still present",
+        )
         # Finding #2: never trust the discriminator flag alone -- reopen
         # chunks.db fresh and verify it actually has every still-present
         # legacy record before deleting anything.
@@ -2564,8 +2747,17 @@ def consolidate_collection_in_place(
                 old_files_deleted=0,
                 deletion_gated=had_legacy_files,
             )
+        # Bug #1562: rescale the deletion loop's own LOCAL 0-100 progress
+        # into the remaining half of this resume pass, so a large resumed
+        # cleanup (e.g. a crash right before the fresh path's own delete
+        # step) is visibly advancing rather than silent.
+        resume_delete_callback = _phase_scoped_callback(
+            progress_callback, base=50, span=49, phase_prefix="deleting_legacy_files"
+        )
         deleted = _cleanup_old_sharded_files(
-            collection_dir, set(still_present_id_map.values())
+            collection_dir,
+            set(still_present_id_map.values()),
+            resume_delete_callback,
         )
         return ConsolidationResult(
             status="already_consolidated", old_files_deleted=deleted
@@ -2676,6 +2868,15 @@ def consolidate_collection_in_place(
     # Step 1: side-effect-free scan -- trustworthy point_id -> json_path
     # map. Finding #4: fail loudly on any rejected record, never flip.
     id_map = _scan_or_fail_on_rejected_records(collection_dir)
+    # Bug #1562: the scan itself has no internal progress signal (it is a
+    # single call into IDIndexManager), so it is reported as one
+    # before/after checkpoint rather than an intra-phase tick series.
+    _emit_progress(
+        progress_callback,
+        _PROGRESS_AFTER_SCAN,
+        phase="scanning_legacy_records",
+        detail=f"{len(id_map)} legacy record(s) found",
+    )
 
     estimated_bytes = _estimate_bytes_needed(id_map.values())
     if not _has_disk_headroom(collection_dir, estimated_bytes):
@@ -2694,6 +2895,16 @@ def consolidate_collection_in_place(
         )
 
     chunks_db_path = collection_dir / CHUNKS_DB_FILENAME
+    # Bug #1562: the write+verify loop is the dominant long-running phase
+    # (the real staging incident's ~2h11m scan+write phase) -- rescale its
+    # own LOCAL 0-100 records-written/total-records ticks into this
+    # repo's overall pass.
+    write_callback = _phase_scoped_callback(
+        progress_callback,
+        base=_PROGRESS_WRITE_PHASE_BASE,
+        span=_PROGRESS_WRITE_PHASE_SPAN,
+        phase_prefix="writing_chunks_db",
+    )
     # Bug #1486 + Codex Finding 4(a): build+verify+force-durable the whole
     # pre-discriminator chunks.db lifecycle inside ONE typed envelope --
     # discard any corrupt/stale leftover, create the store, batched
@@ -2705,7 +2916,7 @@ def consolidate_collection_in_place(
     # discriminator is not written until this returns, so a failure always
     # leaves the collection resolving as SHARDED_JSON, safe to retry.
     expected_ids = _build_fresh_chunks_db_verified(
-        collection_dir, chunks_db_path, id_map
+        collection_dir, chunks_db_path, id_map, write_callback
     )
 
     # Codex CRITICAL finding (round 4): persist the crash-durable content
@@ -2728,6 +2939,12 @@ def consolidate_collection_in_place(
 
     # Step 4: durable discriminator flip -- only after full verification.
     write_chunks_db_discriminator(collection_dir)
+    # Bug #1562: the write phase is done and the collection is already
+    # durably CHUNKS_DB at this point -- checkpoint before the (fast)
+    # deletion phase starts.
+    _emit_progress(
+        progress_callback, _PROGRESS_AFTER_FINALIZE, phase="finalizing_chunks_db"
+    )
 
     # Step 5: delete the old files individually -- gated by Story #1460's
     # rollout-safety flag. When withheld, the collection is left in the
@@ -2757,7 +2974,17 @@ def consolidate_collection_in_place(
             deletion_gated=had_legacy_files,
         )
 
-    deleted = _cleanup_old_sharded_files(collection_dir, set(id_map.values()))
+    # Bug #1562: rescale the deletion loop's own LOCAL 0-100 progress into
+    # the final percentage points of this repo's overall pass.
+    delete_callback = _phase_scoped_callback(
+        progress_callback,
+        base=_PROGRESS_DELETE_PHASE_BASE,
+        span=_PROGRESS_DELETE_PHASE_SPAN,
+        phase_prefix="deleting_legacy_files",
+    )
+    deleted = _cleanup_old_sharded_files(
+        collection_dir, set(id_map.values()), delete_callback
+    )
 
     return ConsolidationResult(
         status="consolidated",

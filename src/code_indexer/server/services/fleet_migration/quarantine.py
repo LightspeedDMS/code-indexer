@@ -53,14 +53,17 @@ import os
 import stat
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, List, Optional, Set
 
 from code_indexer.server.services.fleet_migration.alias_normalization import (
     normalize_golden_alias,
 )
 from code_indexer.server.services.fleet_migration.discovery import (
     FleetMigrationCandidate,
+    enumerate_fleet_migration_candidates,
 )
+from code_indexer.storage.shared.chunk_layout import ChunkLayout, resolve_chunk_layout
+from code_indexer.storage.sqlite_chunk_store import chunk_store_has_real_data
 
 logger = logging.getLogger(__name__)
 
@@ -1183,3 +1186,246 @@ def _disk_headroom_currently_sufficient(candidate: FleetMigrationCandidate) -> b
         if not _has_disk_headroom(collection_dir, estimated_bytes):
             return False
     return True
+
+
+def _chunk_stores_now_read_cleanly(candidate: FleetMigrationCandidate) -> bool:
+    """Bug #1564: True iff EVERY semantic collection directory for
+    `candidate` currently resolves to the consolidated CHUNKS_DB layout
+    AND reads real, committed chunk rows via the read-only, never-
+    creates-a-file `chunk_store_has_real_data()` primitive (Issue #1459's
+    own established read-only inspection contract, `on_error=
+    "treat_absent"` so a locked/corrupt store degrades to False rather
+    than raising) -- positive, on-disk proof that a previously-recorded
+    quarantine condition (corrupt chunks.db, or a still-incomplete
+    migration) no longer holds.
+
+    A candidate with NO semantic collections at all is conservatively
+    NOT treated as healthy (vacuously true would wrongly clear a
+    quarantine for a repo whose collections vanished rather than
+    recovered) -- a repo that no longer exists at all is instead reaped
+    by the alias-liveness check in `reconcile_stale_quarantine_rows()`;
+    a repo that still exists but lost its collections is left
+    quarantined here rather than guessed at.
+    """
+    if not candidate.semantic_collection_dirs:
+        return False
+    for collection_dir in candidate.semantic_collection_dirs:
+        if resolve_chunk_layout(collection_dir) != ChunkLayout.CHUNKS_DB:
+            return False
+        db_path = collection_dir / "chunks.db"
+        if not chunk_store_has_real_data(db_path, on_error="treat_absent"):
+            return False
+    return True
+
+
+def _reconcile_one_quarantine_row(
+    golden_repo_manager: Any,
+    row: Dict[str, Any],
+    *,
+    live_aliases: Set[str],
+    candidates_by_alias: Dict[str, FleetMigrationCandidate],
+    threshold: int,
+) -> None:
+    """Reconcile exactly one persisted quarantine row (Bug #1564) --
+    isolated in its own try/except so a fault reconciling ONE row (a
+    corrupt/locked store, an unexpected exception) can never prevent
+    every OTHER row from being reconciled, and can never propagate up
+    into a resilient /health call.
+    """
+    try:
+        alias = row.get("golden_alias")
+        if not alias or alias == _HEALTH_PROBE_ALIAS:
+            return
+        normalized_alias = normalize_golden_alias(alias)
+
+        if normalized_alias not in live_aliases:
+            # Gap 3: a row for a golden_alias that is no longer a
+            # registered golden repo at all -- reaped regardless of
+            # failure_cause/consecutive_failure_count, since a dangling
+            # row is garbage no matter how many times it "failed".
+            logger.info(
+                "Bug #1564: reaping fleet-migration quarantine row for "
+                "%r -- it is no longer a registered golden repo.",
+                alias,
+            )
+            try:
+                reset_migration_failure(golden_repo_manager, alias)
+            except QuarantineStateUnavailableError as exc:
+                logger.warning(
+                    "Bug #1564: failed to reap quarantine row for %r: %s",
+                    alias,
+                    exc,
+                )
+            return
+
+        failure_cause = row.get("failure_cause")
+        if failure_cause == DISK_HEADROOM_FAILURE_CAUSE:
+            # Already has its own independent, correct auto-clear oracle
+            # inside is_quarantined() (_disk_headroom_currently_
+            # sufficient) -- never duplicate it here.
+            return
+        if (
+            failure_cause != UNRECOVERABLE_FAILURE_CAUSE
+            and int(row.get("consecutive_failure_count", 0)) < threshold
+        ):
+            # Not yet quarantined by any consumer's definition -- an
+            # ordinary retry will resolve this on its own. This gate is
+            # deliberately SKIPPED for UNRECOVERABLE_FAILURE_CAUSE --
+            # mirroring is_permanently_unrecoverable()'s own binary,
+            # non-count-driven contract: record_unrecoverable_corruption()
+            # records exactly ONE failure, which never reaches the
+            # ordinary quarantine threshold on its own.
+            return
+
+        candidate = candidates_by_alias.get(normalized_alias)
+        if candidate is None:
+            # Cannot currently resolve this repo's on-disk state (e.g. a
+            # transiently-unresolvable clone path) -- no positive
+            # evidence either way, leave the row untouched.
+            return
+
+        if not _chunk_stores_now_read_cleanly(candidate):
+            return
+
+        # Gap 1 (UNRECOVERABLE_FAILURE_CAUSE never auto-clears on its
+        # own) and Gap 2 (a GENERIC-cause quarantine whose repo has
+        # since been repaired is never re-attempted, because the
+        # scheduler only re-checks the candidate it is CURRENTLY
+        # considering) both close here: positive on-disk evidence of
+        # health clears the row so the next attempt/health-check
+        # observes reality instead of a stale failure.
+        logger.info(
+            "Bug #1564: repo %r's quarantine (cause=%s) shows positive "
+            "on-disk evidence of health (chunks.db reads cleanly with "
+            "real committed rows) -- clearing quarantine.",
+            alias,
+            failure_cause,
+        )
+        _clear_quarantine_after_detected_repair(
+            golden_repo_manager,
+            alias,
+            reason="Bug #1564: positive chunk-store health re-validation",
+        )
+    except Exception as exc:  # noqa: BLE001 -- isolate faults per-row
+        logger.warning(
+            "Bug #1564: quarantine reconciliation for row %r failed "
+            "unexpectedly -- leaving it untouched: %s",
+            row.get("golden_alias"),
+            exc,
+        )
+
+
+def reconcile_stale_quarantine_rows(
+    golden_repo_manager: Any,
+    *,
+    threshold: int = FLEET_MIGRATION_FAILURE_QUARANTINE_THRESHOLD,
+) -> None:
+    """Bug #1564: proactively re-validate and reap stale fleet-migration
+    quarantine rows.
+
+    Three independent staleness gaps, all closed here:
+
+    1. `UNRECOVERABLE_FAILURE_CAUSE` never auto-clears via
+       `is_quarantined()` by design (`record_unrecoverable_corruption()`'s
+       own documented contract) -- a manually/out-of-band repaired
+       chunks.db stayed permanently reported on /health forever with no
+       way to observe the repair.
+    2. A GENERIC-cause quarantine whose repo has since been repaired
+       never gets re-attempted, because the scheduler only ever re-checks
+       the ONE candidate it is CURRENTLY considering (the first not-yet-
+       migrated repo, alias-sorted) -- an already-passed-over candidate's
+       stale row just sits there, generating WARNING noise every tick.
+    3. A row for a golden_alias that is no longer a registered golden
+       repo at all is never reaped -- deleting a golden repo leaves its
+       quarantine state behind forever.
+
+    This is called from `health_service.py` before it reports
+    quarantine-derived /health signals, but the effect is durable and
+    backend-shared: clearing/reaping a row here is immediately visible to
+    `is_quarantined()`/`is_permanently_unrecoverable()` on their NEXT
+    call (including `FleetMigrationScheduler`'s own next tick), closing
+    the "resolution observed too late" loop WITHOUT this module (or
+    health_service.py) needing to talk to the scheduler directly.
+
+    Deliberately excludes `DISK_HEADROOM_FAILURE_CAUSE` rows from the
+    re-validation branch -- that cause already has its own independent,
+    correct auto-clear oracle inside `is_quarantined()`
+    (`_disk_headroom_currently_sufficient`); duplicating it here would
+    risk the two oracles disagreeing. Story #1560's
+    `reset_duplicate_caused_quarantine_if_resolved` is likewise untouched
+    -- this is a separate, general re-validation/reaping path.
+
+    Fail-open and NEVER raises: this function backs a resilient /health
+    reporting surface. Every read/write against the persisted backend,
+    the live golden-repo list, and each row's on-disk re-validation is
+    independently guarded so that ANY single failure (a locked/corrupt
+    store, a backend outage, an unexpected exception) degrades to
+    "leave this row alone" rather than crashing the health check, or
+    reaping/clearing based on missing evidence (Messi Rule #13: anti-
+    silent-failure in spirit, applied conservatively -- absence of proof
+    of a problem is never treated as proof of health).
+    """
+    try:
+        backend = _get_quarantine_backend(golden_repo_manager)
+        if backend is None or not hasattr(
+            backend, "list_fleet_migration_failure_states"
+        ):
+            return
+
+        try:
+            rows = backend.list_fleet_migration_failure_states()
+        except Exception as exc:
+            logger.debug(
+                "Bug #1564: quarantine reconciliation skipped -- could not "
+                "list persisted quarantine rows: %s",
+                exc,
+            )
+            return
+        if not rows:
+            return
+
+        try:
+            live_aliases: Set[str] = {
+                normalize_golden_alias(alias)
+                for entry in golden_repo_manager.list_golden_repos()
+                for alias in (entry.get("alias") or entry.get("alias_name"),)
+                if alias
+            }
+        except Exception as exc:
+            logger.debug(
+                "Bug #1564: quarantine reconciliation skipped -- could not "
+                "list live golden repos: %s",
+                exc,
+            )
+            return
+
+        try:
+            candidates_by_alias: Dict[str, FleetMigrationCandidate] = {
+                normalize_golden_alias(candidate.golden_alias): candidate
+                for candidate in enumerate_fleet_migration_candidates(
+                    golden_repo_manager
+                )
+            }
+        except Exception as exc:
+            logger.debug(
+                "Bug #1564: quarantine reconciliation could not enumerate "
+                "on-disk candidates -- reaping-by-alias will still run, "
+                "but positive-health re-validation will be skipped this "
+                "pass: %s",
+                exc,
+            )
+            candidates_by_alias = {}
+
+        for row in rows:
+            _reconcile_one_quarantine_row(
+                golden_repo_manager,
+                row,
+                live_aliases=live_aliases,
+                candidates_by_alias=candidates_by_alias,
+                threshold=threshold,
+            )
+    except Exception as exc:  # pragma: no cover -- defense in depth
+        logger.warning(
+            "Bug #1564: quarantine reconciliation aborted unexpectedly: %s",
+            exc,
+        )

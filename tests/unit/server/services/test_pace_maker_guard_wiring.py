@@ -5,6 +5,7 @@ Tests that enforce_pace_maker_config() is called by:
 2. ResearchAssistantService._run_claude_background()
 """
 
+import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -22,9 +23,23 @@ class TestClaudeInvokerCallsGuard:
         def fake_guard() -> None:
             guard_calls.append(True)
 
-        with patch(
-            "code_indexer.server.services.claude_invoker.enforce_pace_maker_config",
-            side_effect=fake_guard,
+        with (
+            patch(
+                "code_indexer.server.services.claude_invoker.enforce_pace_maker_config",
+                side_effect=fake_guard,
+            ),
+            # Bug #1545 cause-1: unmocked, this test spawned the REAL claude
+            # CLI subprocess and blocked for the full real timeout=10 seconds
+            # waiting on a genuine TimeoutExpired (measured 10.05s isolated --
+            # 67% of the 15s pytest-timeout budget). The test only asserts
+            # that the guard was called, not the subprocess outcome, so
+            # mocking subprocess.run to raise the identical TimeoutExpired
+            # instantly preserves the exact "fails at subprocess level"
+            # behavior the docstring/comment describe, without the real wait.
+            patch(
+                "code_indexer.server.services.claude_invoker.subprocess.run",
+                side_effect=subprocess.TimeoutExpired(cmd=["claude"], timeout=10),
+            ),
         ):
             # Invoke with valid args - will fail at subprocess level but guard must be called
             invoker.invoke(
@@ -44,9 +59,18 @@ class TestClaudeInvokerCallsGuard:
 
         invoker = ClaudeInvoker()
 
-        with patch(
-            "code_indexer.server.services.claude_invoker.enforce_pace_maker_config",
-            side_effect=RuntimeError("guard blew up"),
+        with (
+            patch(
+                "code_indexer.server.services.claude_invoker.enforce_pace_maker_config",
+                side_effect=RuntimeError("guard blew up"),
+            ),
+            # Bug #1545 cause-1: same real-subprocess-timeout waste as above
+            # (measured 10.05s isolated) -- mock the subprocess boundary
+            # instead of waiting out a real 10s CLI timeout.
+            patch(
+                "code_indexer.server.services.claude_invoker.subprocess.run",
+                side_effect=subprocess.TimeoutExpired(cmd=["claude"], timeout=10),
+            ),
         ):
             # Should not raise - invoke must continue despite guard failure
             result = invoker.invoke(

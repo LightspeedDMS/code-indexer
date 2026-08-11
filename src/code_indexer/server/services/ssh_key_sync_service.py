@@ -115,7 +115,16 @@ class SSHKeySyncService:
                 f"with an unoverridden real ssh_dir ({self._ssh_dir}). "
                 "Pass an explicit tmp_path-based ssh_dir in tests."
             )
-            logger.critical(msg)
+            # Bug #1551: this refusal is a by-design, correctly-handled
+            # guard -- it fires on every test run that constructs this
+            # service without an explicit tmp_path-based ssh_dir, which is
+            # expected happy-path behavior, not an emergency. Logging it at
+            # CRITICAL devalued the tier (8 of 14 high-severity entries in a
+            # 24h window were this single benign message), crowding out
+            # genuine emergencies. DEBUG keeps it discoverable without
+            # flooding the high-severity channel. The guard's REFUSAL
+            # behavior itself is unchanged -- only this log line's severity.
+            logger.debug(msg)
             return {"written": [], "removed": [], "unchanged": [], "errors": [msg]}
 
         self._ssh_dir.mkdir(parents=True, mode=0o700, exist_ok=True)

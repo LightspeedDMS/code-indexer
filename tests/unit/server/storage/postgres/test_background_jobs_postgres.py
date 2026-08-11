@@ -15,7 +15,21 @@ The mock hierarchy is:
 from __future__ import annotations
 
 import json
+import subprocess
+import sys
 from unittest.mock import MagicMock
+
+
+def _dead_pid() -> int:
+    """Spawn a trivial subprocess, wait for it to exit (reaping it), and
+    return its PID -- guaranteed absent from the OS process table. Used
+    by the Bug #1563 cleanup_orphaned_jobs_on_startup tests below, which
+    need a real, provably-dead OS pid to drive
+    _owning_worker_process_is_alive's (unmocked) psutil.pid_exists check."""
+    proc = subprocess.Popen([sys.executable, "-c", "pass"])
+    exit_code = proc.wait()
+    assert exit_code == 0, f"helper subprocess exited with {exit_code}"
+    return proc.pid
 
 
 # ---------------------------------------------------------------------------
@@ -990,12 +1004,22 @@ class TestCleanupOrphanedJobsOnStartup:
         """
         When cleanup_orphaned_jobs_on_startup() is called
         Then the UPDATE SQL targets 'running' and 'pending' statuses.
+
+        Bug #1563: the pid-liveness check (_owning_worker_process_is_alive)
+        is real, unmocked logic -- only the psycopg driver plumbing is
+        mocked here. Both candidate rows use a real, provably-dead pid so
+        both are correctly reclaimed.
         """
         from code_indexer.server.storage.postgres.background_jobs_backend import (
             BackgroundJobsPostgresBackend,
         )
 
+        dead_pid = _dead_pid()
         pool, conn, cur = _make_pool(rowcount=2)
+        cur.fetchall.side_effect = [
+            [("job-a", dead_pid), ("job-b", dead_pid)],  # branch A candidates
+            [],  # branch B (NULL-owner)
+        ]
         backend = BackgroundJobsPostgresBackend(pool)
 
         count = backend.cleanup_orphaned_jobs_on_startup(node_id="test-node")
@@ -1058,41 +1082,54 @@ class TestCleanupOrphanedJobsOnStartupNodeScoped:
     def test_cleanup_with_node_id_scopes_where_to_executing_node(self):
         """
         When cleanup_orphaned_jobs_on_startup(node_id='node-A') is called,
-        the UPDATE SQL must include AND executing_node = %s with 'node-A'.
+        the candidate-SELECT SQL must include AND executing_node = %s with
+        'node-A'.
+
+        Bug #1563: node scoping now structurally lives in the candidate
+        SELECT (branch A) rather than in a single blind UPDATE -- the
+        final UPDATE targets specific job_ids and no longer mentions
+        executing_node at all. The FIRST cur.execute() call is therefore
+        the one that carries this assertion now.
         """
         from code_indexer.server.storage.postgres.background_jobs_backend import (
             BackgroundJobsPostgresBackend,
         )
 
+        dead_pid = _dead_pid()
         pool, conn, cur = _make_pool(rowcount=1)
+        cur.fetchall.side_effect = [[("job-a", dead_pid)], []]
         backend = BackgroundJobsPostgresBackend(pool)
 
         count = backend.cleanup_orphaned_jobs_on_startup(node_id="node-A")
 
         assert count == 1
-        sql, params = cur.execute.call_args[0]
+        sql, params = cur.execute.call_args_list[0][0]
         assert "executing_node" in sql
         assert "node-A" in params
 
     def test_cleanup_with_node_id_does_not_affect_other_nodes(self):
         """
         When cleanup_orphaned_jobs_on_startup(node_id='node-A') is called,
-        the WHERE clause must NOT match jobs from other nodes.
-        Specifically, 'node-B' must not appear as a param or unbounded condition.
+        the candidate-SELECT WHERE clause must NOT match jobs from other
+        nodes. Specifically, 'node-B' must not appear as a param or
+        unbounded condition.
         """
         from code_indexer.server.storage.postgres.background_jobs_backend import (
             BackgroundJobsPostgresBackend,
         )
 
+        dead_pid = _dead_pid()
         pool, conn, cur = _make_pool(rowcount=1)
+        cur.fetchall.side_effect = [[("job-a", dead_pid)], []]
         backend = BackgroundJobsPostgresBackend(pool)
 
         backend.cleanup_orphaned_jobs_on_startup(node_id="node-A")
 
-        sql, params = cur.execute.call_args[0]
+        sql, params = cur.execute.call_args_list[0][0]
         # The only node value in params must be 'node-A', not 'node-B'
         assert "node-B" not in params
-        # The SQL must not be an unbounded UPDATE (no executing_node filter missing)
+        # The SQL must not be an unbounded candidate SELECT (no
+        # executing_node filter missing)
         assert "executing_node" in sql
 
     def test_cleanup_no_node_id_logs_warning(self, caplog):
@@ -1138,52 +1175,59 @@ class TestCleanupOrphanedJobsOnStartupNullExecutingNode:
     def test_cleanup_sql_also_matches_running_with_null_executing_node(self):
         """
         Given cleanup_orphaned_jobs_on_startup(node_id="node-A")
-        When the UPDATE SQL is generated
-        Then it must ALSO match rows with status='running' AND
-        executing_node IS NULL, not only rows owned by node-A.
+        Then a SEPARATE SELECT (branch B) must ALSO match rows with
+        status='running' AND executing_node IS NULL, not only rows owned
+        by node-A.
 
-        This is the discriminating assertion: the pre-fix SQL only contains
-        `AND executing_node = %s` — a single node-scoped equality check with
-        no NULL-handling branch at all. A NULL-owner row structurally cannot
-        match that clause on any node, so it is never reachable. The fixed
-        SQL must add an explicit `executing_node IS NULL` disjunct scoped to
-        status='running' (never 'pending', to avoid breaking pod-pull).
+        This is the discriminating assertion: the pre-fix SQL only
+        contains `AND executing_node = %s` — a single node-scoped
+        equality check with no NULL-handling branch at all. A NULL-owner
+        row structurally cannot match that clause on any node, so it is
+        never reachable. The fixed implementation (Bug #1563) issues a
+        second, independent SELECT scoped to status='running' (never
+        'pending', to avoid breaking pod-pull) that finds these rows
+        unconditionally -- this branch is deliberately never pid-checked,
+        see the production docstring for why.
         """
         from code_indexer.server.storage.postgres.background_jobs_backend import (
             BackgroundJobsPostgresBackend,
         )
 
         pool, conn, cur = _make_pool(rowcount=1)
+        cur.fetchall.side_effect = [[], [("job-null-owner",)]]
         backend = BackgroundJobsPostgresBackend(pool)
 
         count = backend.cleanup_orphaned_jobs_on_startup(node_id="node-A")
 
         assert count == 1
-        sql, params = cur.execute.call_args[0]
-        # Node-scoped ownership branch is still present (existing behavior).
-        assert "executing_node = %s" in sql
-        assert "node-A" in params
-        # New: an explicit NULL-executing_node branch scoped to 'running'.
-        assert "executing_node IS NULL" in sql
+        calls = cur.execute.call_args_list
+        # Exactly 3 statements: branch A SELECT, branch B SELECT, then the
+        # targeted UPDATE (non-empty job_ids_to_fail from branch B).
+        assert len(calls) == 3
+        branch_a_sql, branch_a_params = calls[0][0]
+        assert "SELECT" in branch_a_sql
+        # Node-scoped ownership branch (call 1) is still present.
+        assert "executing_node = %s" in branch_a_sql
+        assert "node-A" in branch_a_params
+        # New: an explicit, separate NULL-executing_node branch (call 2)
+        # scoped to 'running'.
+        branch_b_sql = calls[1][0][0]
+        assert "SELECT" in branch_b_sql
+        assert "executing_node IS NULL" in branch_b_sql
+        assert "status = 'running'" in branch_b_sql
+        update_sql, update_params = calls[2][0]
+        assert "UPDATE background_jobs" in update_sql
+        assert "job-null-owner" in update_params[-1]
 
     def test_cleanup_null_branch_never_matches_pending_status(self):
         """
-        The NULL-executing_node reclaim branch must be scoped to status =
-        'running' only. It must NOT read as a bare `executing_node IS NULL`
-        disjunct with no status qualifier, or it would also reclaim
-        legitimate PENDING pod-pull work-stealing rows (executing_node IS
-        NULL is their normal, expected, unclaimed queue state) and break
-        cross-node work-stealing.
-
-        Verified structurally: the SQL must contain a single grouped
-        condition tying `status = 'running'` directly to
-        `executing_node IS NULL` within the same parenthesized clause, not
-        merely have both substrings appear somewhere in the query (which a
-        malformed unscoped `OR executing_node IS NULL` combined with the
-        pre-existing 'running'/'pending' text elsewhere would also satisfy).
+        The NULL-executing_node reclaim branch (its own standalone SELECT,
+        Bug #1563) must be scoped to status = 'running' only -- it must
+        NOT also match 'pending', or it would reclaim legitimate PENDING
+        pod-pull work-stealing rows (executing_node IS NULL is their
+        normal, expected, unclaimed queue state) and break cross-node
+        work-stealing.
         """
-        import re
-
         from code_indexer.server.storage.postgres.background_jobs_backend import (
             BackgroundJobsPostgresBackend,
         )
@@ -1193,20 +1237,15 @@ class TestCleanupOrphanedJobsOnStartupNullExecutingNode:
 
         backend.cleanup_orphaned_jobs_on_startup(node_id="node-A")
 
-        sql, _params = cur.execute.call_args[0]
-        # The NULL-reclaim branch must be its own grouped clause combining
-        # status = 'running' AND executing_node IS NULL, in either order,
-        # with nothing else inside that specific parenthesized group.
-        grouped_pattern = re.compile(
-            r"\(\s*status\s*=\s*'running'\s+AND\s+executing_node\s+IS\s+NULL\s*\)"
-            r"|"
-            r"\(\s*executing_node\s+IS\s+NULL\s+AND\s+status\s*=\s*'running'\s*\)",
-            re.IGNORECASE,
-        )
-        assert grouped_pattern.search(sql), (
-            f"Expected a grouped (status='running' AND executing_node IS NULL) "
-            f"clause in SQL, got: {sql}"
-        )
+        calls = cur.execute.call_args_list
+        # No candidates found in either branch (both fetchall() calls
+        # default to []), so no UPDATE is issued: exactly 2 statements.
+        assert len(calls) == 2
+        branch_b_sql = calls[1][0][0]
+        assert "SELECT" in branch_b_sql
+        assert "status = 'running'" in branch_b_sql
+        assert "executing_node IS NULL" in branch_b_sql
+        assert "pending" not in branch_b_sql
 
 
 # ---------------------------------------------------------------------------

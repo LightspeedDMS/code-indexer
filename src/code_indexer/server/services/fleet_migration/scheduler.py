@@ -85,6 +85,7 @@ from code_indexer.storage.shared.collection_dedup_repair import (
     read_pending_dedup_outcome,
 )
 from code_indexer.storage.shared.collection_migration import (
+    ProgressCallback,
     UnrecoverableConsolidationCorruptionError,
 )
 
@@ -474,7 +475,9 @@ class FleetMigrationScheduler:
                 "detail": str(bookkeeping_exc),
             }
 
-    def _run_next_candidate(self) -> Dict[str, Any]:
+    def _run_next_candidate(
+        self, progress_callback: Optional[ProgressCallback] = None
+    ) -> Dict[str, Any]:
         """Enumerate candidates fresh, run the real orchestrator on the
         FIRST not-yet-migrated one found.
 
@@ -483,6 +486,22 @@ class FleetMigrationScheduler:
         trigger_now() (e.g. a job-queue worker invoking the submitted
         callable directly) -- so the kill switch is checked independently
         HERE too, never relying solely on trigger_now()'s own check.
+
+        Bug #1562: this method is the WORKER `submit_job()` (called from
+        `trigger_now()`) actually submits to `BackgroundJobManager`.
+        `BackgroundJobManager` injects a `progress_callback` into a
+        worker ONLY when the worker's signature DECLARES a parameter
+        named `progress_callback` (`inspect.signature(func)` --
+        server/repositories/background_jobs.py) -- without this
+        parameter, BGM instead emits ONE hardcoded `progress_callback(25)`
+        at job start and never calls it again, which is the literal root
+        cause of this bug: a job pinned at progress=25 for its entire
+        multi-hour lifetime, indistinguishable from a hang. Declaring the
+        parameter here means BGM's `func_signature.parameters` check now
+        finds it, so BGM stops emitting the hardcoded 25% marker and
+        instead lets this method (and the real migration it drives)
+        report genuine progress -- forwarded straight through to
+        `run_fleet_migration_for_repo`.
         """
         if not self._is_enabled_now():
             logger.info(
@@ -741,6 +760,7 @@ class FleetMigrationScheduler:
                     semantic_collection_dirs=candidate.semantic_collection_dirs,
                     temporal_namespaces=candidate.temporal_namespaces,
                     sister_root=candidate.sister_root,
+                    progress_callback=progress_callback,
                 )
             except UnrecoverableConsolidationCorruptionError as unrecoverable_exc:
                 # Bug #1486 Fix C: chunks.db is genuinely corrupt AND the
