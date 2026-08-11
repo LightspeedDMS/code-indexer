@@ -108,7 +108,8 @@ def background_jobs_table_1512(pg_dsn_for_null_executing_node_1512):
                 claimed_at TIMESTAMPTZ,
                 current_phase TEXT,
                 phase_detail TEXT,
-                actor_username TEXT
+                actor_username TEXT,
+                executing_pid INTEGER
             )
             """
         )

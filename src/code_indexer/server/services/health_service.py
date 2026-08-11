@@ -39,6 +39,7 @@ from code_indexer.server.services.golden_repo_reconciler import (
 )
 from code_indexer.server.services.fleet_migration.quarantine import (
     UNRECOVERABLE_FAILURE_CAUSE,
+    reconcile_stale_quarantine_rows,
 )
 
 logger = logging.getLogger(__name__)
@@ -570,6 +571,46 @@ class HealthCheckService:
             )
         return True, False, reasons
 
+    def _reconcile_fleet_migration_quarantine_state(self) -> None:
+        """
+        Bug #1564: re-validate and reap stale fleet-migration quarantine
+        rows BEFORE this health check reports (or, via the SAME shared
+        persisted backend, before FleetMigrationScheduler's next tick
+        skips) based on them.
+
+        HealthCheckService holds no `golden_repo_manager` reference by
+        design (a minimal, self-contained /health surface) -- the
+        manager is resolved here via the module-level
+        `get_golden_repo_manager()` accessor (app.state). This must
+        degrade gracefully (log at DEBUG, do nothing) when the server
+        has not finished starting up yet, or in a unit-test context
+        that never wired `app.state.golden_repo_manager` -- /health
+        must remain resilient regardless.
+        """
+        try:
+            from code_indexer.server.repositories.golden_repo_manager import (
+                get_golden_repo_manager,
+            )
+
+            golden_repo_manager = get_golden_repo_manager()
+        except Exception as exc:
+            logger.debug(
+                "Bug #1564: fleet-migration quarantine reconciliation "
+                "skipped -- golden_repo_manager unavailable: %s",
+                exc,
+            )
+            return
+
+        try:
+            reconcile_stale_quarantine_rows(golden_repo_manager)
+        except Exception as exc:  # pragma: no cover -- defense in depth
+            logger.warning(
+                "Bug #1564: fleet-migration quarantine reconciliation "
+                "failed unexpectedly -- /health will report the PRE-"
+                "reconciliation state this cycle: %s",
+                exc,
+            )
+
     def _collect_fleet_migration_unrecoverable_failures(
         self,
     ) -> Tuple[bool, bool, List[str]]:
@@ -587,7 +628,15 @@ class HealthCheckService:
         not exist yet" on a fresh install, or the DB not being ready) is
         treated as "nothing to report" -- this is a best-effort
         visibility aid, never a source of false health alarms.
+
+        Bug #1564: BEFORE reading, re-validates and reaps stale
+        quarantine rows (see `_reconcile_fleet_migration_quarantine_
+        state()`) -- otherwise a manually/out-of-band repaired repo, or
+        one whose golden repo no longer exists, stays permanently
+        reported here.
         """
+        self._reconcile_fleet_migration_quarantine_state()
+
         try:
             aliases = self._read_fleet_migration_unrecoverable_aliases()
         except Exception as exc:
