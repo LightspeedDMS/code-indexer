@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Production-scale hazard: two O(repos) startup sweeps blocked the event loop.**
+  `reconcile_versioned_snapshots` and `reconcile_golden_repo_registry` are both synchronous functions
+  that were called directly inside `async def lifespan`. A sync call inside an async function blocks
+  the ENTIRE event loop for its duration -- the server answers nothing until it returns.
+  Both walk the fleet: the versioned-snapshot sweep performs roughly 18 filesystem operations per
+  namespace, and the golden-repo reconcile resolves one filesystem path per registered repo. At
+  production scale (~900 repositories) that is on the order of 16,000 NFS metadata operations on the
+  event loop -- roughly 80 seconds of a fully unresponsive server on every boot.
+  The worse case is not slowness. The cow-storage mount is `hard` NFSv3, where `os.stat` blocks in
+  UNINTERRUPTIBLE kernel retry if the server is unresponsive -- it never times out. On the event loop
+  that is a permanently hung node at startup, so a single unreachable storage host could take a node
+  down at boot.
+  Both now run inside backgrounded closures via `anyio.to_thread.run_sync(lambda: ...)`, matching the
+  `_run_orphan_sweep` convention that already existed in the same function. Each dependent
+  result-consuming block moved inside its closure; behaviour, ordering and every safety guard (the
+  900s age floor, keep-last-N, pointer protection, the reclaim conjunction, and the golden-repo
+  circuit-breaker/confirmation-counter/health-gate) are unchanged -- only WHERE the work executes.
+  Guarded by AST tests that verify the call is the deferred body of a `lambda:` passed to a
+  recognized thread-offload. This deliberately rejects the plausible-looking wrong fix
+  `await run_sync(reconcile(...))`, which evaluates the call EAGERLY on the loop before `run_sync`
+  ever sees it and would pass any behavioural test while blocking exactly as before.
+  Found only because the fleet size was questioned: on the 30-repo development server -- 3% of
+  production -- both sweeps completed instantly and looked correct. Recorded as a binding invariant
+  in CLAUDE.md ("Production Scale -- DESIGN EVERYTHING FOR IT").
+  Audited the rest of `lifespan.py` for the same anti-pattern: `fail_orphaned_jobs` and
+  `reconcile_orphaned_exports` are single bounded UPDATE queries (not O(repos), left as-is);
+  `ShardPrewarmService.start()` already spawns a real thread; `SSHKeySyncService.sync()` has the same
+  shape but is bounded by SSH key count and needs result-consumption restructuring, so it is reported
+  rather than changed here.
+
 ## [12.17.0] - 2026-08-12
 
 ### Fixed

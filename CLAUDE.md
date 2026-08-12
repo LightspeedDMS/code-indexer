@@ -204,6 +204,37 @@ Two sync constraints on the `lint` job, both learned by breaking them:
 
 ## Critical Architecture Invariants
 
+### Production Scale — DESIGN EVERYTHING FOR IT
+
+**Production runs ~900 repositories with ONE operator and no ops team.** Every design decision must
+be made against that number, not against whatever the local dev server happens to hold.
+
+**The dev server is ~30 repos — 3% of production. NEVER extrapolate performance or safety from it.**
+Work that is instantaneous on 30 repos can freeze production for minutes. A local measurement proves
+CORRECTNESS at best; it proves nothing about behaviour at fleet scale.
+
+**Hard rules that follow from the scale:**
+
+| Rule | Why |
+|------|-----|
+| NEVER call a synchronous filesystem/network function directly inside `async def` | It blocks the WHOLE event loop -- the server answers nothing while it runs. Offload with `anyio.to_thread.run_sync(...)` (the established idiom; see `_run_orphan_sweep` in `startup/lifespan.py`). |
+| Any work that is O(number of repos) must be offloaded AND paced | ~18 filesystem ops/repo x 900 repos = ~16,000 NFS metadata ops. At 5ms/op that is ~80s. |
+| Never put O(fleet) work on the STARTUP path unbacked | It delays readiness for the whole fleet's scan, and a failure there takes the node down at boot. |
+| Treat `hard` NFS as able to block FOREVER | The cow-storage mount is `hard` NFSv3: `os.stat` blocks in UNINTERRUPTIBLE kernel retry when the server is unresponsive -- it never times out. On the event loop that is a permanently hung node, not a slow one. |
+| No settings, no manual steps, no babysitting | One operator cannot flip switches or sweep leftovers across 900 repos. See the "no settings to gate a fix" rule. |
+| Cleanup/repair must self-heal and converge | Anything left behind is left behind permanently and accumulates with every repo ever touched. |
+
+**Concrete failure this rule exists to prevent (2026-08-12):** the Bug #1567/#1570 versioned-snapshot
+sweep was written as a synchronous filesystem walk called directly inside `async def lifespan`. On the
+30-repo dev server it completed instantly and looked fine. At 900 repos it would block the event loop
+for roughly 80 seconds on every boot, and on an unresponsive NFS host it would hang the node
+indefinitely -- while the CORRECT pattern (`anyio.to_thread.run_sync`) already existed 480 lines
+above in the same function.
+
+**How to apply:** before shipping anything that touches repos, ask "what does this do at 900?" for
+BOTH time and blocking behaviour. In code review, treat a sync I/O call inside `async def` as a
+defect regardless of how fast it looks locally.
+
 ### Cluster-Aware State — ABSOLUTE RULE
 
 **NEVER use module-level dicts, class-level dicts, or any per-node RAM for state that must be visible to another HTTP request in a cluster.** In a multi-node deployment (HAProxy round-robin), a request that writes to `mydict: Dict = {}` in `routes.py` stores data ONLY on the node that handled that request. A subsequent request routed to a different node sees nothing. This has caused production bugs and is unacceptable.
