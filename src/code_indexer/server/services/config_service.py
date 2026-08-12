@@ -84,6 +84,15 @@ def _hnsw_orphan_sweep_settings(config: ServerConfig) -> Dict[str, Any]:
     }
 
 
+def _indexing_watchdog_settings(config: ServerConfig) -> Dict[str, Any]:
+    """Return indexing_watchdog settings dict from ServerConfig (Issue #1530)."""
+    watchdog = config.indexing_watchdog_config
+    assert watchdog is not None  # Guaranteed by ServerConfig.__post_init__
+    return {
+        "stale_activity_timeout_seconds": watchdog.stale_activity_timeout_seconds,
+    }
+
+
 def _fleet_migration_settings(config: ServerConfig) -> Dict[str, Any]:
     """Return fleet_migration settings dict from ServerConfig (Story
     #1458, Epic #1454, round-6 item #10).
@@ -842,6 +851,8 @@ class ConfigService:
             "activated_reaper": _activated_reaper_settings(config),
             # Story #1397 - HNSW orphan-repair sweep Web UI configuration
             "hnsw_orphan_sweep": _hnsw_orphan_sweep_settings(config),
+            # Issue #1530 - Indexing-subprocess activity watchdog configuration
+            "indexing_watchdog": _indexing_watchdog_settings(config),
             "fleet_migration": _fleet_migration_settings(config),
             # Bug #1567 Gap 2 - Versioned-snapshot orphan sweep mode config
             "versioned_snapshot_reconcile": _versioned_snapshot_reconcile_settings(
@@ -1088,6 +1099,9 @@ class ConfigService:
         # Story #1397 - HNSW orphan-repair sweep Web UI configuration
         elif category == "hnsw_orphan_sweep":
             self._update_hnsw_orphan_sweep_setting(config, key, value)
+        # Issue #1530 - Indexing-subprocess activity watchdog configuration
+        elif category == "indexing_watchdog":
+            self._update_indexing_watchdog_setting(config, key, value)
         # Story #1458 (Epic #1454) - Fleet migration Web UI configuration
         elif category == "fleet_migration":
             self._update_fleet_migration_setting(config, key, value)
@@ -2651,6 +2665,17 @@ class ConfigService:
             sweep.operating_hours_end_utc = int(value)
         else:
             raise ValueError(f"Unknown hnsw_orphan_sweep setting: {key}")
+
+    def _update_indexing_watchdog_setting(
+        self, config: ServerConfig, key: str, value: Any
+    ) -> None:
+        """Update an indexing_watchdog setting (Issue #1530)."""
+        watchdog = config.indexing_watchdog_config
+        assert watchdog is not None  # Guaranteed by ServerConfig.__post_init__
+        if key == "stale_activity_timeout_seconds":
+            watchdog.stale_activity_timeout_seconds = float(value)
+        else:
+            raise ValueError(f"Unknown indexing_watchdog setting: {key}")
 
     def _update_search_timeouts_setting(
         self, config: ServerConfig, key: str, value: Any

@@ -60,6 +60,7 @@ DEFAULT_MAX_RETRY_DELAY_SECONDS = 60.0
 MINIMUM_RETRY_SECONDS = 5
 MAXIMUM_RETRY_SECONDS = 60
 RETRY_MULTIPLIER = 10
+WARN_MIN_STATUS = 500  # Bug #1566: min status code for a response-side WARNING
 
 
 class GlobalErrorHandler(BaseHTTPMiddleware):
@@ -145,6 +146,11 @@ class GlobalErrorHandler(BaseHTTPMiddleware):
         try:
             # Process the request through the rest of the application
             response = await call_next(request)
+            already_logged = getattr(request.state, "error_already_logged", False)
+            if not already_logged and response.status_code >= WARN_MIN_STATUS:
+                msg = f"HTTP {response.status_code}"
+                cid = generate_correlation_id()
+                self._log_error("HTTPException", msg, cid, request)
             return cast(Response, response)
 
         except (PydanticValidationError, RequestValidationError) as e:
@@ -152,7 +158,7 @@ class GlobalErrorHandler(BaseHTTPMiddleware):
             return self._create_error_response(self.handle_validation_error(e, request))
 
         except HTTPException as e:
-            # Handle FastAPI HTTP exceptions (let them pass through mostly unchanged)
+            # Bug #1566: dead here -- ExceptionMiddleware converts it first.
             return self._create_http_exception_response(e, request)
 
         except (DatabaseRetryableError, DatabasePermanentError) as e:
@@ -332,6 +338,8 @@ class GlobalErrorHandler(BaseHTTPMiddleware):
             request: HTTP request context
             exception: Original exception (optional)
         """
+        # Bug #1566: mark logged so dispatch()'s 5xx check skips duplicates.
+        request.state.error_already_logged = True
         try:
             # Get sanitized request information
             request_info = self.sanitizer.sanitize_request_info(request)

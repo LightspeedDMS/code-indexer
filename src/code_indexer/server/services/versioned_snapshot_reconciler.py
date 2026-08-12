@@ -439,6 +439,59 @@ def _reconcile_one_namespace(
         )
 
 
+def _debug_log_namespace_decision(
+    bare_namespace: str,
+    *,
+    ts_live: int,
+    snapshots: List[Tuple[str, int]],
+    referenced_paths: Set[str],
+    keep_last: int,
+    candidates: List[str],
+) -> None:
+    """Bug #1567c: DEBUG-only breakdown of WHY each snapshot in this
+    namespace was kept or became a candidate. Purely observational --
+    computed from the same inputs compute_snapshot_deletion_candidates
+    already used, but never influences which paths get deleted. An
+    operator promoting versioned_snapshot_reconcile_config.mode to
+    "delete" needs to see this reasoning first.
+
+    The "kept" buckets below can overlap (a snapshot can be both
+    referenced by a pointer AND within keep-last-N) -- this is a
+    diagnostic breakdown, not a strict partition.
+    """
+    if not logger.isEnabledFor(logging.DEBUG):
+        return
+    older = sorted(
+        ((p, ts) for p, ts in snapshots if ts < ts_live), key=lambda item: item[1]
+    )
+    at_or_newer_than_live = sum(1 for _p, ts in snapshots if ts >= ts_live)
+    all_paths_here = {p for p, _ts in snapshots}
+    # Mirrors _protected_snapshot_paths's own referenced-path bucket
+    # exactly (referenced_paths & all_paths_here) -- NOT restricted to
+    # older-only paths, since a live/newer snapshot can also be
+    # separately referenced by another pointer.
+    referenced_kept = referenced_paths & all_paths_here
+    keep_from_history = max(keep_last - 1, 0)
+    keep_last_kept = (
+        {p for p, _ts in older[-keep_from_history:]} if keep_from_history else set()
+    )
+    logger.debug(
+        "Bug #1567 reconcile: namespace '%s' decision -- ts_live=%d "
+        "total_snapshots=%d at_or_newer_than_live(kept)=%d older=%d "
+        "referenced_by_pointer(kept)=%d within_keep_last_%d(kept)=%d "
+        "candidates=%d",
+        bare_namespace,
+        ts_live,
+        len(snapshots),
+        at_or_newer_than_live,
+        len(older),
+        len(referenced_kept),
+        keep_last,
+        len(keep_last_kept),
+        len(candidates),
+    )
+
+
 def _reconcile_one_namespace_body(
     bare_namespace: str,
     *,
@@ -471,7 +524,11 @@ def _reconcile_one_namespace_body(
     # path-rooting + sanitization-mismatch notes); golden_repos_path
     # remains this function's own parameter, used by
     # compute_snapshot_deletion_candidates's signature-compat kwarg below.
-    if parse_live_timestamp(target_path) is None:
+    # Bug #1567c: capture the parsed timestamp instead of discarding it --
+    # reused below by _debug_log_namespace_decision's operator-facing
+    # decision breakdown.
+    ts_live = parse_live_timestamp(target_path)
+    if ts_live is None:
         # target_path resolved but is NOT an interpretable v_<ts>
         # snapshot under THIS namespace (e.g. the master clone on first
         # refresh, a write-mode source, or a foreign path). Record it as
@@ -505,6 +562,15 @@ def _reconcile_one_namespace_body(
         referenced_paths=referenced_paths,
         keep_last=keep_last,
         min_absolute_age_seconds=min_absolute_age_seconds,
+    )
+
+    _debug_log_namespace_decision(
+        bare_namespace,
+        ts_live=ts_live,
+        snapshots=snapshots,
+        referenced_paths=referenced_paths,
+        keep_last=keep_last,
+        candidates=candidates,
     )
 
     for path in candidates:

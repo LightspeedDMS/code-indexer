@@ -377,6 +377,8 @@ _VALID_CONFIG_SECTIONS = (
     "activated_reaper",
     # Story #1397 - HNSW orphan-repair sweep operating-hours window config
     "hnsw_orphan_sweep",
+    # Issue #1530 - Indexing-subprocess activity watchdog configuration
+    "indexing_watchdog",
     # Story #1458 (Epic #1454) - Fleet migration scheduler configuration
     "fleet_migration",
     # Bug #1567 Gap 2 - Versioned-snapshot orphan sweep mode configuration
@@ -6492,6 +6494,7 @@ def _get_current_config() -> dict:
         ActivatedReaperConfig,
         # Story #1397 - HNSW orphan-repair sweep operating-hours window config
         HNSWOrphanRepairSweepConfig,
+        IndexingWatchdogConfig,
         # Story #1458 (Epic #1454) - Fleet migration scheduler configuration
         FleetMigrationConfig,
         # Bug #1567 Gap 2 - Versioned-snapshot orphan sweep mode configuration
@@ -6727,6 +6730,10 @@ def _get_current_config() -> dict:
         # Story #1397: HNSW orphan-repair sweep operating-hours window config
         "hnsw_orphan_sweep": settings.get(
             "hnsw_orphan_sweep", asdict(HNSWOrphanRepairSweepConfig())
+        ),
+        # Issue #1530: Indexing-subprocess activity watchdog configuration
+        "indexing_watchdog": settings.get(
+            "indexing_watchdog", asdict(IndexingWatchdogConfig())
         ),
         # Story #1458 (Epic #1454): Fleet migration scheduler configuration
         "fleet_migration": settings.get(
@@ -7633,6 +7640,32 @@ def _validate_config_section(section: str, data: dict) -> Optional[str]:
                     return "Batch Size must be at least 1"
             except (ValueError, TypeError):
                 return "Batch Size must be a valid number"
+
+    elif section == "indexing_watchdog":
+        # Issue #1530: indexing-subprocess activity watchdog configuration
+        # validation. Bounds are IMPORTED from config_manager.py (never
+        # duplicated as literals) so both layers can never drift apart.
+        from ..utils.config_manager import (
+            INDEXING_WATCHDOG_MAX_STALE_ACTIVITY_TIMEOUT_SECONDS,
+            INDEXING_WATCHDOG_MIN_STALE_ACTIVITY_TIMEOUT_SECONDS,
+        )
+
+        stale_timeout = data.get("stale_activity_timeout_seconds")
+        if stale_timeout is not None:
+            try:
+                val_float = float(stale_timeout)
+                if not (
+                    INDEXING_WATCHDOG_MIN_STALE_ACTIVITY_TIMEOUT_SECONDS
+                    <= val_float
+                    <= INDEXING_WATCHDOG_MAX_STALE_ACTIVITY_TIMEOUT_SECONDS
+                ):
+                    return (
+                        f"Stale Activity Timeout must be between "
+                        f"{INDEXING_WATCHDOG_MIN_STALE_ACTIVITY_TIMEOUT_SECONDS} and "
+                        f"{INDEXING_WATCHDOG_MAX_STALE_ACTIVITY_TIMEOUT_SECONDS} seconds"
+                    )
+            except (ValueError, TypeError):
+                return "Stale Activity Timeout must be a valid number"
 
     elif section == "fleet_migration":
         # Story #1458 (Epic #1454), round-6 item #10: fleet migration

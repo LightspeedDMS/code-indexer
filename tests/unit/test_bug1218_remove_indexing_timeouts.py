@@ -93,26 +93,51 @@ class TestProgressSubprocessRunnerNoTimeout:
             "Bug #1218 requires removing the whole watchdog/SIGKILL block."
         )
 
-    def test_no_watchdog_thread_in_progress_subprocess_runner(self):
-        """The watchdog threading.Thread must be removed from run_with_popen_progress."""
+    @staticmethod
+    def _runner_source_text() -> str:
+        """Combined source of the public runner AND its implementation.
+
+        Issue #1530 split the runner into a thin arming wrapper plus
+        `_run_with_popen_progress_impl`, which now carries the whole
+        Popen/poll body. Inspecting only the wrapper would make every guard
+        below pass vacuously -- the code they exist to police lives in the
+        impl.
+        """
         from code_indexer.services.progress_subprocess_runner import (
+            _run_with_popen_progress_impl,
             run_with_popen_progress,
         )
 
-        src = _source_text(run_with_popen_progress)
-        # The watchdog pattern was: if timeout is not None: def _watchdog() ...
-        assert "_watchdog" not in src, (
-            "progress_subprocess_runner still contains _watchdog (watchdog thread). "
-            "Bug #1218 requires removing it entirely."
+        return _source_text(run_with_popen_progress) + _source_text(
+            _run_with_popen_progress_impl
+        )
+
+    def test_no_watchdog_thread_in_progress_subprocess_runner(self):
+        """The wall-clock watchdog threading.Thread must stay removed.
+
+        The removed pattern was `if timeout is not None: def _watchdog()
+        ... os.killpg(...)`, so the nested function definition and its
+        thread spawn are what this asserts on. A bare "_watchdog"
+        substring is NOT usable here: Issue #1530's activity watchdog
+        (`last_watchdog_check`, `watchdog_verdict`) is a forward-progress
+        detector with no wall-clock component whatsoever, and it shares the
+        word by nature. The mechanism Bug #1218 deleted remains policed by
+        the `timeout`-parameter guard above and the module-wide `os.killpg`
+        guard below, neither of which this narrowing touches.
+        """
+        src = self._runner_source_text()
+        assert "def _watchdog" not in src, (
+            "progress_subprocess_runner defines a nested _watchdog function "
+            "again. Bug #1218 requires the wall-clock watchdog to stay removed."
+        )
+        assert "target=_watchdog" not in src, (
+            "progress_subprocess_runner spawns a _watchdog thread again. "
+            "Bug #1218 requires the wall-clock watchdog to stay removed."
         )
 
     def test_no_timed_out_sentinel_in_progress_subprocess_runner(self):
         """The timed_out Event sentinel used by the watchdog must be removed."""
-        from code_indexer.services.progress_subprocess_runner import (
-            run_with_popen_progress,
-        )
-
-        src = _source_text(run_with_popen_progress)
+        src = self._runner_source_text()
         assert "timed_out" not in src, (
             "progress_subprocess_runner still has `timed_out` Event (watchdog sentinel). "
             "Bug #1218 requires removing it."
@@ -120,11 +145,7 @@ class TestProgressSubprocessRunnerNoTimeout:
 
     def test_no_returncode_minus9_timeout_check(self):
         """The `returncode == -9` timeout detection block must be removed."""
-        from code_indexer.services.progress_subprocess_runner import (
-            run_with_popen_progress,
-        )
-
-        src = _source_text(run_with_popen_progress)
+        src = self._runner_source_text()
         assert "returncode == -9" not in src and "returncode==-9" not in src, (
             "progress_subprocess_runner still checks returncode==-9 for timeout. "
             "Bug #1218 requires removing this check."

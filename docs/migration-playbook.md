@@ -109,28 +109,30 @@ what was exercised on staging and it worked, but it removes your ability to comp
 
 ### Step 3 -- Fleet migration (chunks.db consolidation)
 
-**STOP: do not enable this in production until Bug #1558 is fixed.**
+**Requires v12.12.0 or later.** Older versions are unsafe on large collections -- see the history note
+at the end of this step.
 
-Fleet migration loads a collection's ENTIRE legacy record set into memory before writing `chunks.db`.
-Measured on staging against a 343,604-file collection: one uvicorn worker reached **6.6 GB RSS on a
-7.5 GB node**, the memory governor went RED (`used_pct=89.6`, swap thrashing), the worker was recycled,
-and the scheduler re-triggered the same repo indefinitely. After ~25 minutes the collection was
-completely unchanged -- still 343,604 JSON files, still no `chunks.db` -- while the whole server
-degraded. Disabling the flag recovered the node immediately (7.0 Gi -> 3.0 Gi used).
+Expect this step to run for HOURS on a large repo and plan the window accordingly. Measured on
+staging against a 343,604-file collection: scan plus `chunks.db` write took **2h11m**, followed by
+roughly 4 minutes to delete the 343,561 legacy files. That is the normal, healthy shape of the
+operation, not a stall.
 
-Note what this failure looks like, because it does NOT look like a failure: the job sits in `running`
-at progress 25, the scheduler keeps firing, and nothing reports that the repo is too large.
-
-Pre-flight sizing check until #1558 is fixed -- count the legacy files per collection first:
+Pre-flight, count the legacy files per collection so you know what you are committing to:
 
 ```bash
 find <repo>/.code-indexer/index -name 'vector_*.json' | wc -l
 ```
 
-Small collections (order 1e3) consolidate fine and were verified working. A collection in the hundreds
-of thousands must NOT be attempted on a node without headroom far exceeding its size. If in doubt,
-leave fleet migration disabled -- legacy `SHARDED_JSON` collections remain fully readable; consolidation
-is an optimization, not a correctness requirement.
+Legacy `SHARDED_JSON` collections remain fully readable either way. Consolidation is an optimization,
+not a correctness requirement, so deferring a large repo to a quieter window costs nothing.
+
+History -- why this step carried a hard STOP before v12.12.0: Bug #1558. Step 0's dedup repair
+retained every parsed record, embedding vector included, for the entire scan/plan/apply lifecycle. On
+this same 343,604-file collection one uvicorn worker reached 6.6 GB RSS on a 7.5 GB node, the memory
+governor went RED, the worker was recycled, and the scheduler re-triggered the repo indefinitely
+without ever migrating it -- with no OOM-kill to surface it as a failure. The scan now retains only
+the identity fields it actually uses and re-reads the full record at apply time. If you are on
+anything older than v12.12.0, upgrade before enabling this step.
 
 Web UI: Config screen -> "Fleet Migration".
 
@@ -141,9 +143,13 @@ Web UI: Config screen -> "Fleet Migration".
   confirmation, so the sweep would stall with no front-door way to resume it. Revisit once that
   endpoint exists.
 
-The sweep is deliberately one repo at a time. Large repos take a long time: a 343,604-file collection
-on an NFS mount showed no visible change for the first ~10 minutes because the engine scans every
-legacy file before it writes anything. Absence of early progress is not a stall.
+The sweep is deliberately one repo at a time, and a large repo holds it for hours.
+
+On v12.14.0 and later, progress ticks WITHIN the dominant phase rather than only at phase boundaries
+(Bug #1562), so a healthy long run advances visibly and a genuinely stuck one is distinguishable.
+Before that fix a correctly-working migration sat at a constant progress 25 for hours -- the exact
+signature the Bug #1558 hang produced -- which is why the two were indistinguishable from the
+dashboard alone.
 
 ### Step 4 -- Turn the flags back OFF when the fleet is converted
 

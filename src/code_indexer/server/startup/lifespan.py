@@ -175,6 +175,71 @@ def _materialize_solo_ssh_keys(
     return result
 
 
+def _log_vsr_sweep_completion(
+    vsr_result: Any,  # Any: avoids an eager module-level import of
+    # VersionedSnapshotReconcileResult -- its producer module is only
+    # ever imported lazily inside the Bug #1567 startup block's own
+    # try/except (mirrors this file's existing latency_tracker: Any
+    # convention on make_lifespan).
+    mode: str,
+) -> None:
+    """Bug #1567c: unconditional completion summary for the versioned-
+    snapshot orphan sweep -- emitted every time the sweep runs, whether
+    or not it found anything, so a silent skip is never indistinguishable
+    from a healthy zero-candidate run. INFO level always (never WARNING
+    for a clean run -- see Bug #1565 lesson on by-design-condition
+    WARNING noise).
+    """
+    if vsr_result is None:
+        # Defensive only -- the real startup call site always passes a
+        # genuine VersionedSnapshotReconcileResult. Nothing to summarize.
+        return
+    if vsr_result.aborted:
+        # Abort cases (single-flight conflict / unhealthy base dir) already
+        # log their own message inside the reconciler; nothing more to add.
+        return
+    actually_scheduled = mode == "delete" and bool(vsr_result.scheduled_paths)
+    logger.info(
+        "Startup: Bug #1567 versioned-snapshot orphan sweep completed "
+        "(mode=%s): scanned %d namespace(s) %s, found %d candidate(s), "
+        "%d namespace(s) skipped %s, deletions_scheduled=%s",
+        mode,
+        len(vsr_result.scanned_namespaces),
+        vsr_result.scanned_namespaces,
+        len(vsr_result.scheduled_paths),
+        len(vsr_result.skipped_namespaces),
+        list(vsr_result.skipped_namespaces.keys()),
+        actually_scheduled,
+    )
+
+
+def _log_vsr_guard_skip(
+    global_lifecycle_manager: Any,  # Any: only ever None-checked here --
+    # importing GlobalReposLifecycleManager purely for this type hint
+    # would add an import-time coupling this module does not need.
+    snapshot_manager: Any,  # Any: same reasoning -- only None-checked.
+) -> None:
+    """Bug #1567c: the sweep guard (`global_lifecycle_manager is not None
+    and snapshot_manager is not None`) previously skipped SILENTLY on
+    either dependency being None. This is the ONLY mechanism that heals
+    pre-existing leaked snapshots -- a silent skip on it is the exact
+    failure class Bug #1567 exists to eliminate, so this is WARNING
+    (not INFO): it means the healing mechanism did not run this cycle.
+    """
+    missing = []
+    if global_lifecycle_manager is None:
+        missing.append("global_lifecycle_manager")
+    if snapshot_manager is None:
+        missing.append("snapshot_manager")
+    logger.warning(
+        "Startup: Bug #1567 versioned-snapshot orphan sweep SKIPPED -- "
+        "required dependency not available: %s (this is the only "
+        "mechanism that heals pre-existing leaked .versioned snapshots; "
+        "it did not run this cycle)",
+        ", ".join(missing),
+    )
+
+
 def make_lifespan(
     background_job_manager: Any,
     job_tracker: Any,
@@ -2514,24 +2579,23 @@ def make_lifespan(
                         job_tracker=job_tracker,
                         mode=_vsr_mode,
                     )
-                    if _vsr_result.scheduled_paths or _vsr_result.skipped_namespaces:
-                        logger.info(
-                            "Startup: Bug #1567 versioned-snapshot orphan sweep "
-                            "(mode=%s) found %d superseded snapshot "
-                            "candidate(s) across %d namespace(s), %d "
-                            "namespace(s) skipped: %s",
-                            _vsr_mode,
-                            len(_vsr_result.scheduled_paths),
-                            len(_vsr_result.scanned_namespaces),
-                            len(_vsr_result.skipped_namespaces),
-                            list(_vsr_result.skipped_namespaces.keys()),
-                        )
+                    # Bug #1567c: unconditional -- previously only logged
+                    # when something was found, making a healthy
+                    # zero-candidate sweep indistinguishable from one that
+                    # silently never ran.
+                    _log_vsr_sweep_completion(_vsr_result, _vsr_mode)
                 except Exception as _vsr_exc:
                     logger.warning(
                         "Startup: Bug #1567 versioned-snapshot orphan sweep "
                         "failed (non-fatal): %s",
                         _vsr_exc,
                     )
+            else:
+                # Bug #1567c: this guard previously skipped SILENTLY --
+                # the ONLY mechanism that heals pre-existing leaked
+                # `.versioned` snapshots must never fail to run without a
+                # visible signal.
+                _log_vsr_guard_skip(global_lifecycle_manager, snapshot_manager)
 
             def _dep_map_health_check_fn():
                 from code_indexer.server.services.dep_map_health_detector import (

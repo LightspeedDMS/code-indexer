@@ -5,23 +5,16 @@ Handles database operation retries with exponential backoff following
 CLAUDE.md Foundation #1: No mocks - real retry logic with actual timing.
 """
 
-from code_indexer.server.middleware.correlation import get_correlation_id
-
 import asyncio
 import time
-import random
-import logging
 from typing import Callable, TypeVar
 
-from ..models.error_models import (
-    RetryConfiguration,
-    DatabaseRetryableError,
-    DatabasePermanentError,
+from ..models.error_models import RetryConfiguration
+from .retry_policy import (
+    should_retry_error,
+    calculate_retry_delay,
+    decide_retry_delay,
 )
-from code_indexer.server.logging_utils import format_error_log
-
-# Configure logger for this module
-logger = logging.getLogger(__name__)
 
 # Type variable for retry functions
 T = TypeVar("T")
@@ -50,33 +43,7 @@ class DatabaseRetryHandler:
         Returns:
             True if the error should be retried, False otherwise
         """
-        if attempt > self.config.max_attempts:
-            return False
-
-        # DatabaseRetryableError should be retried
-        if isinstance(error, DatabaseRetryableError):
-            return True
-
-        # DatabasePermanentError should NOT be retried
-        if isinstance(error, DatabasePermanentError):
-            return False
-
-        # Check for known transient database errors by message patterns
-        error_message = str(error).lower()
-        transient_patterns = [
-            "connection timeout",
-            "connection refused",
-            "connection reset",
-            "connection pool exhausted",
-            "temporary failure",
-            "deadlock detected",
-            "lock wait timeout",
-            "server shutdown",
-            "too many connections",
-            "connection lost",
-        ]
-
-        return any(pattern in error_message for pattern in transient_patterns)
+        return should_retry_error(error, attempt, self.config)
 
     def calculate_delay(self, attempt: int) -> float:
         """
@@ -88,20 +55,7 @@ class DatabaseRetryHandler:
         Returns:
             Delay in seconds
         """
-        # Exponential backoff: base_delay * (multiplier ^ (attempt - 1))
-        base_delay = self.config.base_delay_seconds * (
-            self.config.backoff_multiplier ** (attempt - 1)
-        )
-
-        # Apply maximum delay limit
-        delay = min(base_delay, self.config.max_delay_seconds)
-
-        # Add jitter to prevent thundering herd
-        if self.config.jitter_factor > 0:
-            jitter = delay * self.config.jitter_factor * random.random()
-            delay += jitter
-
-        return delay
+        return calculate_retry_delay(attempt, self.config)
 
     def execute_with_retry(self, operation: Callable[[], T]) -> T:
         """
@@ -123,23 +77,8 @@ class DatabaseRetryHandler:
                 return operation()
             except Exception as e:
                 last_exception = e
-
-                if not self.should_retry(e, attempt):
-                    # Don't retry permanent errors or if max attempts exceeded
-                    raise e
-
-                if (
-                    attempt <= self.config.max_attempts
-                ):  # Don't delay after final attempt
-                    delay = self.calculate_delay(attempt)
-                    logger.warning(
-                        format_error_log(
-                            "REPO-GENERAL-020",
-                            f"Database operation failed on attempt {attempt}, retrying in {delay:.2f}s: {e}",
-                            extra={"correlation_id": get_correlation_id()},
-                        )
-                    )
-                    time.sleep(delay)
+                delay = decide_retry_delay(e, attempt, self.config)
+                time.sleep(delay)
 
         # This should not be reached, but provide fallback
         raise last_exception or Exception("Retry logic error")
@@ -176,23 +115,8 @@ class DatabaseRetryHandler:
                 return result
             except Exception as e:
                 last_exception = e
-
-                if not self.should_retry(e, attempt):
-                    # Don't retry permanent errors or if max attempts exceeded
-                    raise e
-
-                if (
-                    attempt <= self.config.max_attempts
-                ):  # Don't delay after final attempt
-                    delay = self.calculate_delay(attempt)
-                    logger.warning(
-                        format_error_log(
-                            "REPO-GENERAL-020",
-                            f"Database operation failed on attempt {attempt}, retrying in {delay:.2f}s: {e}",
-                            extra={"correlation_id": get_correlation_id()},
-                        )
-                    )
-                    await asyncio.sleep(delay)
+                delay = decide_retry_delay(e, attempt, self.config)
+                await asyncio.sleep(delay)
 
         # This should not be reached, but provide fallback
         raise last_exception or Exception("Retry logic error")
