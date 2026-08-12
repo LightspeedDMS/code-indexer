@@ -58,6 +58,16 @@ RESPONSE_TIME_CRITICAL = 5000  # 5 seconds
 MAX_FAILURE_REASONS = 3  # Story #727 AC5: Limit displayed failure reasons
 FLEET_MIGRATION_DEDUP_STATE_MAX_ENTRIES = 50  # Story #1560 AC16
 PG_CONNECT_TIMEOUT_SECONDS = 5  # Timeout for PostgreSQL connectivity check
+# Bug #1555 Defect B: a Bug #1539 cidx-meta conflict quarantine that has
+# persisted (since its first recorded failure against the currently-
+# stored target SHA) for longer than this escalates from a log-only
+# ERROR to a DEGRADED /health failure_reason. 2 hours -- twice the
+# DEFAULT_REFRESH_INTERVAL (1 hour) -- so a single scheduled cycle's
+# quarantine does not immediately flap /health, while a genuinely stuck
+# quarantine (the reported incident persisted ~14 hours) surfaces well
+# before an operator would otherwise have to go log-searching.
+CIDX_META_CONFLICT_QUARANTINE_HEALTH_THRESHOLD_SECONDS = 7200
+_SECONDS_PER_HOUR = 3600.0
 
 # CPU sustained threshold detection (Story #727 AC4)
 CPU_SUSTAINED_THRESHOLD = 95.0  # CPU % threshold for sustained high load detection
@@ -144,8 +154,17 @@ class HealthCheckService:
             config_manager = ConfigManager.create_with_backtrack()
             self.config = config_manager.get_config()
 
-            # Server data directory
-            self.data_dir = Path.home() / ".cidx-server" / "data"
+            # Server data directory. Bug #1569: honor CIDX_SERVER_DATA_DIR
+            # exactly as ServerConfigManager does (server/utils/config_manager.py),
+            # rather than hardcoding ~/.cidx-server -- otherwise this service
+            # reads a different server instance's database when the data
+            # directory has been relocated (e.g. Bug #879 IPC path alignment).
+            server_dir = Path(
+                os.environ.get(
+                    "CIDX_SERVER_DATA_DIR", str(Path.home() / ".cidx-server")
+                )
+            )
+            self.data_dir = server_dir / "data"
             self.data_dir.mkdir(parents=True, exist_ok=True)
 
             # Real database URL for health checks (SQLite mode)
@@ -416,6 +435,115 @@ class HealthCheckService:
                 f"needs admin review (Bug #1382)."
             ],
         )
+
+    def _read_cidx_meta_conflict_quarantine_rows(self) -> List[Dict[str, Any]]:
+        """Bug #1555: read cidx_meta_conflict_quarantine_state rows
+        at/above Bug #1539's quarantine threshold. Raises on any DB
+        error (including "table does not exist yet") -- caller fails
+        open. Mirrors _read_fleet_migration_unrecoverable_aliases's
+        storage-mode branching."""
+        from code_indexer.global_repos.refresh_scheduler import (
+            _CIDX_META_CONFLICT_QUARANTINE_THRESHOLD as threshold,
+        )
+
+        select = (
+            "SELECT golden_alias, consecutive_failure_count, "
+            "last_target_sha, first_failed_at FROM "
+            "cidx_meta_conflict_quarantine_state "
+            "WHERE consecutive_failure_count >= "
+        )
+        if self.storage_mode == "postgres":
+            if not self.postgres_dsn:
+                return []
+            import psycopg  # type: ignore
+
+            with psycopg.connect(
+                self.postgres_dsn, connect_timeout=PG_CONNECT_TIMEOUT_SECONDS
+            ) as conn:
+                rows = conn.execute(select + "%s", (threshold,)).fetchall()
+        else:
+            db_path = self.database_url.replace("sqlite:///", "")
+            connection = DatabaseConnectionManager.get_instance(
+                db_path
+            ).get_connection()
+            cursor = connection.cursor()
+            try:
+                cursor.execute(select + "?", (threshold,))
+                rows = cursor.fetchall()
+            finally:
+                cursor.close()
+
+        return [
+            {
+                "golden_alias": r[0],
+                "consecutive_failure_count": r[1],
+                "last_target_sha": r[2],
+                "first_failed_at": r[3],
+            }
+            for r in rows
+        ]
+
+    def _cidx_meta_quarantine_row_age_seconds(
+        self, row: Dict[str, Any]
+    ) -> Optional[float]:
+        """Seconds since row['first_failed_at'] (parsed inline: SQLite
+        stores an ISO string, PostgreSQL/psycopg returns a native
+        datetime for the TIMESTAMPTZ column). None when unparseable --
+        caller must treat that as "cannot determine age"."""
+        value = row["first_failed_at"]
+        if isinstance(value, datetime):
+            first_failed_at = (
+                value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+            )
+        elif isinstance(value, str) and value:
+            try:
+                parsed = datetime.fromisoformat(value)
+            except ValueError:
+                return None
+            first_failed_at = (
+                parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+            )
+        else:
+            return None
+        return (datetime.now(timezone.utc) - first_failed_at).total_seconds()
+
+    def _collect_cidx_meta_conflict_quarantine_failures(
+        self,
+    ) -> Tuple[bool, bool, List[str]]:
+        """Bug #1555: surface a Bug #1539 cidx-meta conflict quarantine
+        that has persisted beyond
+        CIDX_META_CONFLICT_QUARANTINE_HEALTH_THRESHOLD_SECONDS as a
+        DEGRADED /health failure_reason naming the alias -- mirrors
+        _collect_golden_repo_reconcile_breaker_failures() (Bug #1382).
+        Fail-open on any read error (including a not-yet-existing
+        table)."""
+        try:
+            rows = self._read_cidx_meta_conflict_quarantine_rows()
+        except Exception as exc:
+            logger.debug("cidx-meta conflict quarantine health check skipped: %s", exc)
+            return False, False, []
+
+        reasons: List[str] = []
+        for row in sorted(rows, key=lambda r: r["golden_alias"]):
+            age_seconds = self._cidx_meta_quarantine_row_age_seconds(row)
+            if (
+                age_seconds is None
+                or age_seconds < CIDX_META_CONFLICT_QUARANTINE_HEALTH_THRESHOLD_SECONDS
+            ):
+                continue
+            reasons.append(
+                f"cidx-meta backup: '{row['golden_alias']}' has been "
+                f"QUARANTINED against upstream target "
+                f"{row['last_target_sha']} for "
+                f"{age_seconds / _SECONDS_PER_HOUR:.1f}h "
+                f"({row['consecutive_failure_count']} consecutive "
+                f"conflict-resolution failures) -- manual operator "
+                f"intervention required (Bug #1539/#1555)."
+            )
+
+        if not reasons:
+            return False, False, []
+        return True, False, reasons
 
     def _read_fleet_migration_unrecoverable_aliases(self) -> List[str]:
         """
@@ -1343,6 +1471,18 @@ class HealthCheckService:
         has_warning = has_warning or grb_warn
         has_error = has_error or grb_err
         failure_reasons.extend(grb_reasons)
+
+        # Bug #1555 Defect B: cidx-meta backup conflict-resolution
+        # quarantine (Bug #1539's circuit-breaker) escalation once it has
+        # persisted beyond CIDX_META_CONFLICT_QUARANTINE_HEALTH_THRESHOLD_
+        # SECONDS -- see _collect_cidx_meta_conflict_quarantine_failures()
+        # docstring.
+        cmc_warn, cmc_err, cmc_reasons = (
+            self._collect_cidx_meta_conflict_quarantine_failures()
+        )
+        has_warning = has_warning or cmc_warn
+        has_error = has_error or cmc_err
+        failure_reasons.extend(cmc_reasons)
 
         # Bug #1486 High Finding 4: fleet-migration permanent
         # unrecoverable-corruption escalation (see quarantine.py's

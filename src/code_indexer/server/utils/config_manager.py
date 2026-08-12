@@ -1044,6 +1044,32 @@ class HNSWOrphanRepairSweepConfig:
     operating_hours_end_utc: int = 0
 
 
+#: Issue #1530 validate_config() range bounds (Bug #1218: MAX keeps this a
+#: detection threshold, never a job-duration timeout).
+INDEXING_WATCHDOG_MIN_STALE_ACTIVITY_TIMEOUT_SECONDS = 1.0
+INDEXING_WATCHDOG_MAX_STALE_ACTIVITY_TIMEOUT_SECONDS = 3600.0
+
+
+@dataclass
+class IndexingWatchdogConfig:
+    """
+    Configuration for the indexing-subprocess activity watchdog (Issue
+    #1530).
+
+    Detect-and-mitigate for a `cidx index --progress-json` child that hangs
+    indefinitely showing zero forward progress (per its own
+    ActivityBeacon/ActivityHeartbeatWriter instrumentation) -- never for
+    being merely slow (Bug #1218: no wall-clock bound on legitimate
+    multi-hour indexing work).
+    """
+
+    # Staleness threshold in seconds: a generous multiple of the "a few
+    # seconds" normal ceiling for every instrumented tick operation, to
+    # absorb GC pauses/network jitter/a slow batch, while still catching a
+    # real stall in under 2 minutes instead of 40 hours (default: 120.0).
+    stale_activity_timeout_seconds: float = 120.0
+
+
 @dataclass
 class FleetMigrationConfig:
     """
@@ -1659,6 +1685,8 @@ class ServerConfig:
 
     # Story #1360 (Epic #1333 S3) - HNSW orphan repair fleet sweep configuration
     hnsw_orphan_repair_sweep_config: Optional[HNSWOrphanRepairSweepConfig] = None
+    # Issue #1530 - Indexing-subprocess activity watchdog configuration
+    indexing_watchdog_config: Optional[IndexingWatchdogConfig] = None
 
     # Story #1458 (Epic #1454) - Fleet migration scheduler configuration
     fleet_migration_config: Optional[FleetMigrationConfig] = None
@@ -1966,6 +1994,9 @@ class ServerConfig:
         # Story #1360 (Epic #1333 S3) - Initialize HNSW orphan repair sweep config
         if self.hnsw_orphan_repair_sweep_config is None:
             self.hnsw_orphan_repair_sweep_config = HNSWOrphanRepairSweepConfig()
+        # Issue #1530 - Initialize indexing watchdog config
+        if self.indexing_watchdog_config is None:
+            self.indexing_watchdog_config = IndexingWatchdogConfig()
         # Story #1458 (Epic #1454) - Initialize fleet migration scheduler config
         if self.fleet_migration_config is None:
             self.fleet_migration_config = FleetMigrationConfig()
@@ -2716,6 +2747,18 @@ class ServerConfigManager:
                 )
             )
 
+        # Issue #1530: Convert indexing_watchdog_config dict to
+        # IndexingWatchdogConfig. Same rationale/pattern as
+        # hnsw_orphan_repair_sweep_config above.
+        if "indexing_watchdog_config" in config_dict and isinstance(
+            config_dict["indexing_watchdog_config"], dict
+        ):
+            _watchdog_dict = config_dict["indexing_watchdog_config"]
+            _watchdog_allowed = {f.name for f in fields(IndexingWatchdogConfig)}
+            config_dict["indexing_watchdog_config"] = IndexingWatchdogConfig(
+                **{k: v for k, v in _watchdog_dict.items() if k in _watchdog_allowed}
+            )
+
         # Story #1458 (Epic #1454): Convert fleet_migration_config dict to
         # FleetMigrationConfig. Same rationale as
         # hnsw_orphan_repair_sweep_config above -- without this block, the
@@ -3125,6 +3168,7 @@ class ServerConfigManager:
                     "temporal_inline_wait_seconds must be >= 0.0, "
                     f"got {st.temporal_inline_wait_seconds}"
                 )
+
             _temporal_grace_ceiling = (
                 st.search_code_handler_timeout_seconds
                 - TEMPORAL_RESPONSE_RESERVE_SECONDS
@@ -3137,6 +3181,25 @@ class ServerConfigManager:
                     f"got {st.temporal_inline_wait_seconds} with "
                     "search_code_handler_timeout_seconds="
                     f"{st.search_code_handler_timeout_seconds}"
+                )
+
+        # Validate indexing_watchdog_config (Issue #1530). A SIBLING of the
+        # search_timeouts_config block above -- never nested inside it (an
+        # earlier revision spliced this into the middle of that block and
+        # silently re-parented the Story #1400 grace-budget cross-field
+        # check onto this unrelated config object).
+        if config.indexing_watchdog_config:
+            iw = config.indexing_watchdog_config
+            if not (
+                INDEXING_WATCHDOG_MIN_STALE_ACTIVITY_TIMEOUT_SECONDS
+                <= iw.stale_activity_timeout_seconds
+                <= INDEXING_WATCHDOG_MAX_STALE_ACTIVITY_TIMEOUT_SECONDS
+            ):
+                raise ValueError(
+                    f"stale_activity_timeout_seconds must be between "
+                    f"{INDEXING_WATCHDOG_MIN_STALE_ACTIVITY_TIMEOUT_SECONDS} and "
+                    f"{INDEXING_WATCHDOG_MAX_STALE_ACTIVITY_TIMEOUT_SECONDS}, got "
+                    f"{iw.stale_activity_timeout_seconds}"
                 )
 
         # Validate embedding_stats_config (Story #1418 Phase 3)

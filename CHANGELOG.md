@@ -7,6 +7,101 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [12.16.0] - 2026-08-12
+
+### Added
+
+- **Bug #1530 (partial -- issue remains OPEN, mechanism is NOT yet active)**: the primitives for
+  detecting a stalled indexing subprocess. `ActivityBeacon` tracks in-flight operations per thread
+  and reports the age of the OLDEST in-flight one -- deliberately not a single global
+  `last_activity` scalar, which cannot distinguish "one slow operation" from "everything stopped".
+  A child-side heartbeat writer and a parent-side watchdog evaluator accompany it, wired into the one
+  shared `run_with_popen_progress()` every `cidx index --progress-json` child goes through.
+  **This ships INERT and must be read that way**: the watchdog parameters default to `None`, so
+  behaviour is byte-identical unless explicitly enabled, and no CLI child writes a heartbeat file
+  yet. Nothing detects or kills anything in a real run today.
+  Two design constraints were found during implementation and must gate the remaining work, because
+  either would cause production damage if the sequence were completed naively. First, the
+  "heartbeat never appeared" signal is elapsed-time-since-spawn gated on file absence, so wiring the
+  server-side threshold BEFORE the CLI child that writes the file would kill every real indexing job
+  at the threshold. Second, the provider-delay exemption is per-thread, but the thread legitimately
+  sleeping on a rate-limit `Retry-After` is not the thread that ticks -- so instrumenting the
+  embedding providers as designed would false-kill healthy, rate-limited jobs. Both need resolving
+  before the remaining priorities land. Consistent with the standing invariant, no wall-clock job,
+  subprocess, or per-file timeout was added: the signal is absence of forward progress only.
+
+### Fixed
+
+- **Bug #1568**: the middleware file-size compliance test is green again after being permanently RED.
+  `retry_handler.py` (198) and `error_formatters.py` (315) both exceeded the limits that test
+  enforces, so a release gate carried a failure that never changed -- indistinguishable at a glance
+  from a new regression, which cost real time during this session's sweeps. Split along the seams the
+  files already had rather than cutting at the line count: the retry classification/backoff policy
+  and the shared per-attempt retry decision moved to a new `retry_policy.py`, and the response
+  primitives (correlation id, timestamps, serialization) moved to a new
+  `error_response_primitives.py`. `DatabaseRetryHandler`'s public API is byte-identical and every
+  existing import site still resolves via re-export.
+  Two deliberate calls. First, an unreachable `if attempt <= max_attempts` guard inside each retry
+  loop was removed rather than carried across: `should_retry_error` already returns False (forcing a
+  raise) once that condition fails, so the delay/log/sleep step was only ever reached when it was
+  true. Second, the initial split landed `retry_handler.py` at exactly 150/150 -- rejected, because a
+  file pinned against its cap re-breaks on the next edit and relocates the problem instead of fixing
+  it. It now sits at 122/150 and `error_formatters.py` at 274/300, both with genuine margin.
+  The Bug #1468 import-budget guard was verified before and after: the module that now owns
+  `generate_correlation_id` imports only uuid/datetime/pathlib/typing, so the split moved in the
+  safe direction.
+
+- **Bug #1569**: `HealthCheckService` no longer reports a different server instance's health. It
+  hardcoded `Path.home() / ".cidx-server" / "data"` and ignored `CIDX_SERVER_DATA_DIR`, which
+  `ServerConfigManager` honors -- so on any host that relocates its data directory (the documented
+  Bug #879 IPC-path-alignment case) every DB-sourced health signal was read from whatever happened to
+  sit at the default path. That is either silently empty, in which case the fail-open collectors
+  report nothing and real problems stay invisible, or actively wrong. `self.database_url` feeds seven
+  call sites, so this was never confined to one check. Reproduced live before fixing: a second server
+  started with `CIDX_SERVER_DATA_DIR` set, with deliberately different values seeded in each
+  database, reported the OTHER instance's row; relocating `HOME` so `Path.home()` matched made it
+  report its own, with no other change. Now resolved via the same env var with the same semantics as
+  `ServerConfigManager` (the variable names the SERVER directory; `data` is its subdirectory) --
+  reusing that convention rather than inventing a second one. Found while proving Story #1560's
+  final acceptance criterion on an isolated instance.
+
+- **Bug #1555**: the cidx-meta backup-sync quarantine no longer promises a resolution it cannot
+  deliver. The ERROR line said the condition "resolves automatically once new commits land upstream,
+  or requires manual operator intervention" -- but the quarantine is only ever reached by raising
+  `ConflictResolutionFailedError`, which happens exclusively AFTER the automatic resolver has already
+  tried and failed against that exact upstream target. New upstream commits do not resolve a
+  conflicting rebase, they only move the target. On clustered staging an operator could reasonably
+  have read that line and waited; the condition held for roughly 14 hours against one unchanged SHA.
+  The message now states plainly that the condition will not clear by waiting and that manual
+  intervention is required. The quarantine threshold, the log level, and the circuit-breaker itself
+  are all unchanged -- the breaker was working correctly; only its description was wrong.
+  A persistent quarantine also now surfaces on `/health` as DEGRADED once it has held for longer than
+  twice the refresh interval (2h), naming the affected alias, so it is visible where operators
+  actually look instead of only in a repeating log line. This reuses the existing Bug #1539
+  quarantine table and mirrors the golden-repo reconcile breaker's established health-surface
+  pattern; no schema change, and the existing failure-reason truncation applies unmodified.
+
+- **Bug #1566**: server-side HTTP errors are logged again. `GlobalErrorHandler.dispatch`'s
+  `except HTTPException` branch could not fire: Starlette nests `ExceptionMiddleware` INSIDE user
+  `BaseHTTPMiddleware`, so an `HTTPException` is already converted to a `Response` before it reaches
+  this middleware -- the exception never propagates, and the handler waited for something that
+  structurally cannot arrive. Replaced with a response-side check after `call_next`, which observes
+  the converted result instead. Only status `>= 500` is logged: 401/403/404/422 are ordinary,
+  by-design outcomes, and logging them would recreate exactly the operational noise Bug #1565 was
+  filed to remove. The dedup guard is set inside `_log_error` itself rather than at each of its four
+  call sites, so it holds by construction for any path added later. The RED test drives a real ASGI
+  stack -- a direct `dispatch()` unit test passes against the broken code and proves nothing.
+
+### Changed
+
+- **Bug #1567 (observability follow-up)**: the versioned-snapshot reconcile sweep now reports what it
+  did on every run -- one unconditional INFO line carrying mode, namespaces scanned, candidates,
+  skipped, and deletions scheduled -- plus a WARNING naming the specific dependency when the startup
+  guard skips the sweep entirely. Previously a sweep that never ran and a sweep that ran and found
+  nothing were indistinguishable, which left "is this mechanism inert?" unanswerable from logs alone.
+  Deliberately NOT raised to WARNING to force `logs.db` visibility: that store persists WARNING and
+  above, and promoting a routine success line to reach it is what Bug #1565 had to undo.
+
 ## [12.15.0] - 2026-08-12
 
 ### Fixed

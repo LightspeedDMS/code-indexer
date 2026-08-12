@@ -3065,8 +3065,11 @@ class RefreshScheduler:
             f"against upstream target {target_sha} after "
             f"{quarantine_state['consecutive_failure_count']} consecutive "
             f"identical conflict-resolution failures -- skipping sync "
-            f"this cycle. Resolves automatically once new commits land "
-            f"upstream, or requires manual operator intervention."
+            f"this cycle. The automatic conflict resolver already "
+            f"attempted and failed against this exact upstream target; "
+            f"this condition will NOT clear merely by waiting. Manual "
+            f"operator intervention is required to resolve the "
+            f"underlying conflict (Bug #1555)."
         )
         return {
             "success": False,

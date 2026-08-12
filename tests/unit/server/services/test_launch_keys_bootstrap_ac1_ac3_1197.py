@@ -177,6 +177,7 @@ class TestAC1BootstrapKeysRemoved:
                 "fleet_migration_config",  # Story #1458 — runtime Web UI setting (fleet migration scheduler enable/interval)
                 "temporal_legacy_migration_config",  # Issue #1548 — runtime Web UI setting (legacy temporal shard relocation gates)
                 "versioned_snapshot_reconcile_config",  # Bug #1567 Gap 2 — runtime Web UI setting (orphan-sweep mode: report/delete)
+                "indexing_watchdog_config",  # Bug #1530 — runtime Web UI setting (indexing watchdog thresholds)
             }
         )
 
