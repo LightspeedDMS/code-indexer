@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [12.18.0] - 2026-08-12
+
 ### Fixed
 
 - **Production-scale hazard: two O(repos) startup sweeps blocked the event loop.**
