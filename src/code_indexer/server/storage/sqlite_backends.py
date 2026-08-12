@@ -9,6 +9,7 @@ eliminating race conditions from concurrent GlobalRegistry instances.
 
 import json
 import logging
+import math
 import os
 import sqlite3
 from datetime import datetime, timedelta, timezone
@@ -2096,6 +2097,24 @@ class GoldenRepoMetadataSqliteBackend:
             """
             )
 
+            # Bug #1567: durable pending-deletion queue for versioned-
+            # snapshot cleanup (see global_repos/cleanup_manager.py). The
+            # PRE-FIX queue lived only in per-process dicts keyed by
+            # time.monotonic() -- any restart/worker-recycle silently
+            # discarded a scheduled deletion. scheduled_at is a WALL-CLOCK
+            # epoch-seconds float (time.time()), never time.monotonic(),
+            # since the minimum-retention-age floor
+            # (CleanupManager.MIN_RETENTION_AGE_SECONDS) must survive a
+            # process restart to mean anything across processes.
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS cleanup_pending_deletion_state (
+                    index_path TEXT PRIMARY KEY NOT NULL,
+                    scheduled_at REAL NOT NULL
+                )
+            """
+            )
+
         self._conn_manager.execute_atomic(operation)
 
     def record_cidx_meta_conflict_failure(
@@ -3165,6 +3184,109 @@ class GoldenRepoMetadataSqliteBackend:
                 "UPDATE fleet_migration_dedup_state SET cleared_at = ?, "
                 "cleared_reason = ? WHERE golden_alias = ?",
                 (now, reason, golden_alias),
+            )
+
+        self._conn_manager.execute_atomic(operation)
+
+    # ------------------------------------------------------------------
+    # Cleanup pending-deletion queue (Bug #1567)
+    # ------------------------------------------------------------------
+
+    def schedule_cleanup_deletion(self, index_path: str, scheduled_at: float) -> float:
+        """
+        Durably record ``index_path`` as pending deletion.
+
+        Idempotent: if a row already exists for ``index_path``, its
+        ORIGINAL ``scheduled_at`` is preserved and returned -- a
+        re-schedule of an already-queued path must NOT reset its age
+        (mirrors the in-process ``setdefault()`` semantics
+        CleanupManager relies on: "scheduled_at" means the ORIGINAL
+        supersession moment). Otherwise inserts a new row with
+        ``scheduled_at`` and returns it unchanged.
+
+        Args:
+            index_path: Filesystem path scheduled for deletion.
+            scheduled_at: WALL-CLOCK epoch-seconds (``time.time()``) --
+                never ``time.monotonic()``, which has no meaning across
+                process restarts.
+
+        Returns:
+            The authoritative (existing-or-new) scheduled_at.
+
+        Raises:
+            ValueError: index_path is not a non-empty string, or
+                scheduled_at is not a finite number.
+        """
+        if not isinstance(index_path, str) or not index_path.strip():
+            raise ValueError(
+                f"index_path must be a non-empty string, got {index_path!r}"
+            )
+        if not isinstance(scheduled_at, (int, float)) or isinstance(scheduled_at, bool):
+            raise ValueError(
+                f"scheduled_at must be a real number, got {scheduled_at!r}"
+            )
+        scheduled_at = float(scheduled_at)
+        if not math.isfinite(scheduled_at):
+            raise ValueError(
+                f"scheduled_at must be a finite number, got {scheduled_at!r}"
+            )
+
+        def operation(conn):
+            row = conn.execute(
+                "SELECT scheduled_at FROM cleanup_pending_deletion_state "
+                "WHERE index_path = ?",
+                (index_path,),
+            ).fetchone()
+            if row is not None:
+                return float(row[0])
+            conn.execute(
+                "INSERT INTO cleanup_pending_deletion_state "
+                "(index_path, scheduled_at) VALUES (?, ?)",
+                (index_path, scheduled_at),
+            )
+            return float(scheduled_at)
+
+        return self._conn_manager.execute_atomic(operation)  # type: ignore[no-any-return]
+
+    def list_cleanup_pending_deletions(self) -> List[Dict[str, Any]]:
+        """
+        Return every durably-pending deletion row.
+
+        Used to hydrate a freshly-constructed CleanupManager's in-memory
+        queue -- recovering exactly what a PRIOR process/worker already
+        scheduled, closing the silent-loss window a bare in-process queue
+        left on every restart/worker-recycle (Bug #1567). Wrapped through
+        the same execute_atomic() transaction boundary every write in
+        this class uses, so a concurrent writer cannot be observed
+        mid-transaction.
+        """
+
+        def operation(conn):
+            rows = conn.execute(
+                "SELECT index_path, scheduled_at FROM cleanup_pending_deletion_state"
+            ).fetchall()
+            return [
+                {"index_path": row[0], "scheduled_at": float(row[1])} for row in rows
+            ]
+
+        return self._conn_manager.execute_atomic(operation)  # type: ignore[no-any-return]
+
+    def remove_cleanup_pending_deletion(self, index_path: str) -> None:
+        """Remove one durably-pending deletion row. Idempotent -- a no-op
+        when no row exists for ``index_path`` (Bug #1567).
+
+        Raises:
+            ValueError: index_path is not a non-empty string.
+        """
+        if not isinstance(index_path, str) or not index_path.strip():
+            raise ValueError(
+                f"index_path must be a non-empty string, got {index_path!r}"
+            )
+
+        def operation(conn):
+            conn.execute(
+                "DELETE FROM cleanup_pending_deletion_state WHERE index_path = ?",
+                (index_path,),
             )
 
         self._conn_manager.execute_atomic(operation)

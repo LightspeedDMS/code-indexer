@@ -7,6 +7,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [12.15.0] - 2026-08-12
+
+### Fixed
+
+- **Bug #1567** (priority-1, production-critical): versioned snapshots no longer leak forever.
+  `CleanupManager` held its pending-deletion queue in in-process dictionaries stamped with
+  `time.monotonic()`, while deletion is gated behind refcount-zero plus a 900-second retention floor.
+  Any process restart or uvicorn worker recycle inside that window silently discarded the queue, and
+  nothing ever re-derived deletions from disk -- so a superseded snapshot became permanently
+  unreachable by the deleter. Losses were cumulative and irreversible. Measured on staging: 229
+  snapshots for one repo against a keep-last-3 policy (~120 GB), with 5 of 10 repos over the limit;
+  the compliant-looking ones had simply never been refreshed twice. Production is more exposed than
+  staging, because the auto-updater restarts the server on every deploy cycle.
+  Fixed in two halves, since either alone is inert: the queue is now persisted in the shared backend
+  (additive migration 047) with wall-clock timestamps so it survives a restart, and a new reconciler
+  re-derives deletions from disk, which is what heals installations that have already leaked.
+  The supersession predicate is anchored strictly below the live target's own version id, which
+  closes a real live-data hazard: a snapshot is materialized at its final path well before
+  `swap_alias` runs, so an in-flight publish is newer than the target and referenced by nothing, and
+  a naive keep-set could delete it mid-copy. Anchoring also makes NFS staleness safe-directional --
+  a stale read returns an older pointer, so it can only ever under-delete.
+  The live retention path now shares that single predicate instead of carrying its own. It previously
+  used `AliasManager.read_alias()`, which returns the write-mode source path for a `-global` alias
+  with an active write session, and read the target and previous paths from two separate opens that
+  could straddle two generations mid-swap. Both are now one atomic read of the raw pointer JSON,
+  unioned over every alias file. A new operator setting (`report` | `delete`, defaulting to `report`)
+  exposes the full candidate list without deleting.
+- **Bug #1541**: `DependencyLatencyTracker` no longer kills its writer thread on transient SQLite
+  contention. "database is locked" is self-healing but counted toward the same five-failure cap as
+  unrecoverable errors, permanently terminating the writer with no auto-restart, after which latency
+  samples were silently dropped until a process restart. Transient lock errors are now retried with
+  capped backoff and never count toward termination, and the terminal state is queryable rather than
+  silent. A separate data-loss bug in the same path was also fixed: the buffer was cleared before the
+  insert succeeded, so a failed attempt dropped those samples permanently even when the retry
+  afterwards succeeded.
+- **Bug #1565**: by-design scheduler conditions no longer dominate WARNING output. Measured over 24
+  hours on staging, roughly 1,900 of 2,223 WARNING entries were mechanisms working exactly as
+  intended -- 1,543 from a single message. "Duplicate active job rejected by database" is the
+  single-flight guard succeeding, and "repo X is quarantined -- skipping" restates an unchanged fact
+  every tick. Because that log line lives in a shared backend method reached both by callers that
+  treat a duplicate as the expected no-op and by callers for which it is a real error, severity is now
+  decided by the caller rather than blanket-demoted, so genuine failures keep their signal. The
+  per-tick quarantine and skip lines gained a bounded per-alias cadence.
+
 ## [12.14.0] - 2026-08-11
 
 ### Fixed

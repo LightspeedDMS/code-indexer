@@ -107,6 +107,7 @@ def test_all_server_config_fields_are_classified() -> None:
             "temporal_indexing_config",  # Story #1404 — runtime Web UI setting (global temporal indexing floor date)
             "deactivation_query_drain_max_wait_seconds",  # Story #1458 AC13 — runtime Web UI setting (deactivation QueryTracker drain bound)
             "fleet_migration_config",  # Story #1458 — runtime Web UI setting (fleet migration scheduler enable/interval)
+            "versioned_snapshot_reconcile_config",  # Bug #1567 Gap 2 — runtime Web UI setting (orphan-sweep mode: report/delete)
             "temporal_legacy_migration_config",  # Issue #1548 — runtime Web UI setting (legacy temporal shard relocation gates)
         }
     )

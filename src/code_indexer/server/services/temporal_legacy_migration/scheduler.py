@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import logging
 import threading
-from typing import Any, Dict, Optional, cast
+import time
+from typing import Any, Callable, Dict, Optional, cast
 
 from code_indexer.server.repositories.background_jobs import DuplicateJobError
 from .discovery import discover_candidates
@@ -21,6 +22,19 @@ logger = logging.getLogger(__name__)
 # fallback path here (unlike the CLI's explicit-admin-action command,
 # which documents its own narrower exception). A caller with no real
 # RefreshScheduler available must not construct this scheduler at all.
+
+# Bug #1565: "temporal legacy migration: skipping '<alias>' this pass" is
+# a by-design, correctly-handled fact (the write lock is held, or a
+# refresh is in flight for this alias -- the pass simply moves on to the
+# next candidate, per _migrate_one_candidate's own docstring) that used to
+# re-fire on EVERY single pass for as long as the contention stayed
+# unresolved -- measured on staging: 122 occurrences in 24h. Bounded to at
+# most once per hour PER ALIAS: the first observation of a given alias's
+# skip still logs at WARNING, repeat observations within this window are
+# demoted to DEBUG, and a fresh WARNING reminder fires once the window
+# elapses and the skip is still unresolved. Logging-cadence hint only
+# (never correctness state) -- tracked in per-instance RAM.
+_SKIP_WARNING_MIN_INTERVAL_SECONDS = 3600.0
 
 
 class TemporalLegacyMigrationScheduler:
@@ -57,6 +71,7 @@ class TemporalLegacyMigrationScheduler:
         # directly.
         refresh_scheduler: Any,
         background_job_manager: Optional[Any] = None,
+        clock: Optional[Callable[[], float]] = None,
     ) -> None:
         if refresh_scheduler is None:
             raise ValueError(
@@ -68,6 +83,14 @@ class TemporalLegacyMigrationScheduler:
         self._config_service = config_service
         self._background_job_manager = background_job_manager
         self._refresh_scheduler = refresh_scheduler
+        self._clock: Callable[[], float] = (
+            clock if clock is not None else time.monotonic
+        )
+        # Bug #1565: per-alias last-WARNING-logged timestamp for the
+        # skip-log bounded-cadence throttle. Logging-cadence hint only,
+        # never correctness state -- see
+        # _SKIP_WARNING_MIN_INTERVAL_SECONDS's own docstring.
+        self._skip_warning_last_logged: Dict[str, float] = {}
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
 
@@ -127,6 +150,27 @@ class TemporalLegacyMigrationScheduler:
             raise RuntimeError("temporal_legacy_migration_config is unavailable")
         return settings
 
+    def _log_skip(self, alias: str, exc: Exception) -> None:
+        """Bug #1565: log the by-design "skipping this pass" fact at
+        WARNING at most once per ``_SKIP_WARNING_MIN_INTERVAL_SECONDS``
+        PER ALIAS -- the first observation of a given alias's skip (or the
+        first observation once the window has elapsed and the skip is
+        STILL unresolved) logs at WARNING; every other repeat observation
+        logs at DEBUG. Never affects control flow -- the caller's
+        ``return None`` is unconditional either way.
+        """
+        now = self._clock()
+        last_logged = self._skip_warning_last_logged.get(alias)
+        message = "temporal legacy migration: skipping %r this pass: %s"
+        if (
+            last_logged is None
+            or (now - last_logged) >= _SKIP_WARNING_MIN_INTERVAL_SECONDS
+        ):
+            logger.warning(message, alias, exc)
+            self._skip_warning_last_logged[alias] = now
+        else:
+            logger.debug(message, alias, exc)
+
     def _migrate_one_candidate(
         self,
         # Typed Any deliberately: a TemporalMigrationCandidate from
@@ -158,11 +202,7 @@ class TemporalLegacyMigrationScheduler:
                     lock_lost_check=lock_loss_signal,
                 )
         except (WriteLockHeldError, RefreshInProgressError) as exc:
-            logger.warning(
-                "temporal legacy migration: skipping %r this pass: %s",
-                candidate.alias,
-                exc,
-            )
+            self._log_skip(candidate.alias, exc)
             return None
 
     def trigger_now(self) -> Optional[str]:
