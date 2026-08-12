@@ -21,6 +21,8 @@ Zero behavior change: same paths, methods, response models, and handler logic.
 import logging
 from typing import Dict, Any, Optional
 
+import re
+
 from fastapi import (
     FastAPI,
     HTTPException,
@@ -28,6 +30,7 @@ from fastapi import (
     Depends,
     Response,
     Request,
+    Header,
     Body,
 )
 from fastapi.responses import JSONResponse
@@ -64,6 +67,26 @@ _DEFAULT_EXPORT_RETENTION_DAYS: int = 30
 
 # Module-level logger
 logger = logging.getLogger(__name__)
+
+# EVO-65484: the seeder and workspace-mcp both authenticate as the cidx ``admin``
+# user, so every golden-repo job is stamped "submitted by admin" -- useless for
+# telling apart the golden seeder vs the workspace-mcp server vs a real operator.
+# A caller may send an ``X-Cidx-Caller`` header (e.g. "seeder", "workspace-mcp");
+# when it matches this strict allowlist pattern it is used as the job's submitter
+# LABEL only -- authorization is unchanged (still gated on the authenticated admin
+# user via get_current_admin_user). Anything malformed/absent falls back to the
+# authenticated username, so this can never widen access or inject into a log line.
+# fullmatch (not $) so a trailing newline cannot sneak into the label.
+_CIDX_CALLER_RE = re.compile(r"[a-z][a-z0-9-]{0,31}")
+
+
+def _resolve_job_submitter(
+    caller_header: Optional[str], authenticated_username: str
+) -> str:
+    """Return the job submitter label: a sanitized ``X-Cidx-Caller`` or the auth user."""
+    if caller_header and _CIDX_CALLER_RE.fullmatch(caller_header):
+        return caller_header
+    return authenticated_username
 
 
 class ExportFiltersRequest(BaseModel):
@@ -250,6 +273,7 @@ def register_admin_ops_routes(
     def add_golden_repo(
         repo_data: AddGoldenRepoRequest,
         current_user: dependencies.User = Depends(dependencies.get_current_admin_user),
+        x_cidx_caller: Optional[str] = Header(default=None, alias="X-Cidx-Caller"),
     ):
         """
         Add a golden repository (admin only) - async operation.
@@ -316,7 +340,9 @@ def register_admin_ops_routes(
                 )
 
             job_id = golden_repo_manager.add_golden_repo(
-                submitter_username=current_user.username,
+                submitter_username=_resolve_job_submitter(
+                    x_cidx_caller, current_user.username
+                ),
                 **func_kwargs,  # type: ignore[arg-type]
             )
             return JobResponse(
