@@ -579,6 +579,20 @@ class GoldenRepoMetadataBackend(Protocol):
         self, golden_alias: str
     ) -> Optional[Dict[str, Any]]: ...
 
+    # Bug #1567: durable pending-deletion queue for versioned-snapshot
+    # cleanup (see global_repos/cleanup_manager.py). Backs the in-process
+    # queue that a restart/worker-recycle previously discarded silently,
+    # using a WALL-CLOCK timestamp (never time.monotonic(), which has no
+    # cross-process meaning) so the minimum-retention-age floor survives a
+    # restart.
+    def schedule_cleanup_deletion(
+        self, index_path: str, scheduled_at: float
+    ) -> float: ...
+
+    def list_cleanup_pending_deletions(self) -> List[Dict[str, Any]]: ...
+
+    def remove_cleanup_pending_deletion(self, index_path: str) -> None: ...
+
     def close(self) -> None: ...
 
 

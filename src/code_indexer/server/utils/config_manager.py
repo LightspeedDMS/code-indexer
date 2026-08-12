@@ -1100,6 +1100,20 @@ class FleetMigrationConfig:
 
 
 @dataclass
+class VersionedSnapshotReconcileConfig:
+    """Configuration for the versioned-snapshot orphan sweep (Bug #1567
+    Gap 2). `mode` controls `reconcile_versioned_snapshots` (server/
+    services/versioned_snapshot_reconciler.py): "report" (default,
+    fail-closed) computes and logs superseded-snapshot candidates WITHOUT
+    scheduling any deletion; "delete" is an explicit operator promotion,
+    exposed via the Web UI Config Screen (`versioned_snapshot_reconcile`
+    section in web/routes.py / config_service.py), mirroring
+    FleetMigrationConfig's pattern exactly."""
+
+    mode: str = "report"
+
+
+@dataclass
 class TemporalLegacyMigrationConfig:
     """
     Configuration for relocating legacy in-repo temporal shards into the
@@ -1649,6 +1663,11 @@ class ServerConfig:
     # Story #1458 (Epic #1454) - Fleet migration scheduler configuration
     fleet_migration_config: Optional[FleetMigrationConfig] = None
 
+    # Bug #1567 Gap 2 - Versioned-snapshot orphan sweep mode (report/delete)
+    versioned_snapshot_reconcile_config: Optional[VersionedSnapshotReconcileConfig] = (
+        None
+    )
+
     # Issue #1548 - Legacy in-repo temporal shard relocation configuration
     temporal_legacy_migration_config: Optional[TemporalLegacyMigrationConfig] = None
 
@@ -1950,6 +1969,14 @@ class ServerConfig:
         # Story #1458 (Epic #1454) - Initialize fleet migration scheduler config
         if self.fleet_migration_config is None:
             self.fleet_migration_config = FleetMigrationConfig()
+        # Bug #1567 Gap 2 - Initialize versioned-snapshot reconcile mode
+        # config (the dict-to-dataclass conversion for a DB-persisted raw
+        # dict is added further below, mirroring fleet_migration_config's
+        # pattern exactly)
+        if self.versioned_snapshot_reconcile_config is None:
+            self.versioned_snapshot_reconcile_config = (
+                VersionedSnapshotReconcileConfig()
+            )
         # Issue #1548 - Initialize legacy temporal migration config (the
         # dict-to-dataclass conversion for a DB-persisted raw dict already
         # exists further below, mirroring fleet_migration_config's pattern)
@@ -2703,6 +2730,24 @@ class ServerConfigManager:
             _fm_allowed = {f.name for f in fields(FleetMigrationConfig)}
             config_dict["fleet_migration_config"] = FleetMigrationConfig(
                 **{k: v for k, v in _fm_dict.items() if k in _fm_allowed}
+            )
+
+        # Bug #1567 Gap 2: Convert versioned_snapshot_reconcile_config dict
+        # to VersionedSnapshotReconcileConfig. Same rationale as
+        # fleet_migration_config above -- without this block, the raw
+        # dict round-tripped through the runtime DB's JSON column
+        # survives unconverted and `cfg.mode` access raises
+        # AttributeError (Bug #1368-class regression). Unknown keys
+        # filtered for rolling-upgrade safety.
+        if "versioned_snapshot_reconcile_config" in config_dict and isinstance(
+            config_dict["versioned_snapshot_reconcile_config"], dict
+        ):
+            _vsr_dict = config_dict["versioned_snapshot_reconcile_config"]
+            _vsr_allowed = {f.name for f in fields(VersionedSnapshotReconcileConfig)}
+            config_dict["versioned_snapshot_reconcile_config"] = (
+                VersionedSnapshotReconcileConfig(
+                    **{k: v for k, v in _vsr_dict.items() if k in _vsr_allowed}
+                )
             )
 
         # Issue #1548: Convert temporal_legacy_migration_config dict to

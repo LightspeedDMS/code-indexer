@@ -47,7 +47,8 @@ from __future__ import annotations
 
 import logging
 import threading
-from typing import Any, Dict, Optional
+import time
+from typing import Any, Callable, Dict, Optional
 
 from code_indexer.server.repositories.background_jobs import DuplicateJobError
 from code_indexer.server.services.fleet_migration.completion_gate import (
@@ -140,6 +141,22 @@ _CANARY_PENDING_FAILURE_CAUSE = "canary_pending"
 #: silently reporting success.
 _STOP_JOIN_TIMEOUT_SECONDS = 10
 
+#: Bug #1565: the "repo 'X' is quarantined -- skipping" WARNING is a
+#: by-design, correctly-handled fact (Issue #1477's fleet-starvation fix
+#: working) that used to re-fire on EVERY single tick for as long as the
+#: quarantine stayed unresolved -- measured on staging: 78+28 = 106 of
+#: ~2,223 WARNING entries in 24h from just two quarantined repos. Bounded
+#: to at most once per hour PER ALIAS: the first observation of a given
+#: alias's quarantine still logs at WARNING, repeat observations within
+#: this window are demoted to DEBUG, and a fresh WARNING reminder fires
+#: once the window elapses and the quarantine is still unresolved. This
+#: is a logging-cadence hint only (never correctness state) -- tracked in
+#: per-instance RAM (self._quarantine_warning_last_logged), so it is safe
+#: under this project's Cluster-Aware State rule: losing it (e.g. a
+#: single-flight leadership hand-off to a different node) only costs one
+#: extra WARNING, never an incorrect skip decision.
+_QUARANTINE_WARNING_MIN_INTERVAL_SECONDS = 3600.0
+
 
 class FleetMigrationScheduler:
     """Paced, resumable, fleet-wide-serialized golden-repo migration
@@ -166,6 +183,7 @@ class FleetMigrationScheduler:
         refresh_scheduler: Any,
         background_job_manager: Optional[Any],
         config_service: Any,
+        clock: Optional[Callable[[], float]] = None,
     ) -> None:
         """
         Args:
@@ -182,11 +200,24 @@ class FleetMigrationScheduler:
             config_service: Object with ``get_config()`` returning a config
                 exposing ``fleet_migration_config`` (enabled,
                 tick_interval_minutes).
+            clock: Bug #1565 -- monotonic time source for the quarantine-
+                skip WARNING's bounded-cadence throttle. Defaults to
+                ``time.monotonic``; tests may override
+                ``self._clock`` directly for deterministic time control.
         """
         self._golden_repo_manager = golden_repo_manager
         self._refresh_scheduler = refresh_scheduler
         self._background_job_manager = background_job_manager
         self._config_service = config_service
+        self._clock: Callable[[], float] = (
+            clock if clock is not None else time.monotonic
+        )
+
+        # Bug #1565: per-alias last-WARNING-logged timestamp for the
+        # quarantine-skip bounded-cadence throttle. Logging-cadence hint
+        # only, never correctness state -- see
+        # _QUARANTINE_WARNING_MIN_INTERVAL_SECONDS's own docstring.
+        self._quarantine_warning_last_logged: Dict[str, float] = {}
 
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
@@ -475,6 +506,32 @@ class FleetMigrationScheduler:
                 "detail": str(bookkeeping_exc),
             }
 
+    def _log_quarantine_skip(self, alias: str) -> None:
+        """Bug #1565: log the by-design "repo is quarantined -- skipping"
+        fact at WARNING at most once per
+        ``_QUARANTINE_WARNING_MIN_INTERVAL_SECONDS`` PER ALIAS -- the
+        first observation of a given alias's quarantine (or the first
+        observation once the window has elapsed and the quarantine is
+        STILL unresolved) logs at WARNING; every other repeat observation
+        logs at DEBUG. Never affects control flow -- the caller's
+        ``continue`` is unconditional either way.
+        """
+        now = self._clock()
+        last_logged = self._quarantine_warning_last_logged.get(alias)
+        message = (
+            "FleetMigrationScheduler: repo '%s' is quarantined "
+            "after repeated consecutive failures -- skipping and "
+            "advancing to the next candidate"
+        )
+        if (
+            last_logged is None
+            or (now - last_logged) >= _QUARANTINE_WARNING_MIN_INTERVAL_SECONDS
+        ):
+            logger.warning(message, alias)
+            self._quarantine_warning_last_logged[alias] = now
+        else:
+            logger.debug(message, alias)
+
     def _run_next_candidate(
         self, progress_callback: Optional[ProgressCallback] = None
     ) -> Dict[str, Any]:
@@ -686,12 +743,7 @@ class FleetMigrationScheduler:
                 }
 
             if candidate_is_quarantined:
-                logger.warning(
-                    "FleetMigrationScheduler: repo '%s' is quarantined "
-                    "after repeated consecutive failures -- skipping and "
-                    "advancing to the next candidate",
-                    candidate.golden_alias,
-                )
+                self._log_quarantine_skip(candidate.golden_alias)
                 continue
 
             # Finding G (HIGH, Codex round-5 review, live-reproduced --

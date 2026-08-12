@@ -1042,6 +1042,31 @@ def make_lifespan(
             )
             global_lifecycle_manager.start()
 
+            # Bug #1567: wire the durable pending-deletion-queue backend
+            # into CleanupManager so a scheduled deletion survives a
+            # restart/worker-recycle. Reuses golden_repo_manager's OWN
+            # shared metadata backend (_sqlite_backend -- PostgreSQL in
+            # cluster mode, SQLite in solo mode, per Bug #1533's
+            # established pattern) rather than opening a second store.
+            # Fail-soft: without this, CleanupManager still works exactly
+            # as before Bug #1567 (in-process-only queue).
+            if golden_repo_manager is not None:
+                try:
+                    _cleanup_persistence_backend = getattr(
+                        golden_repo_manager, "_sqlite_backend", None
+                    )
+                    if _cleanup_persistence_backend is not None:
+                        global_lifecycle_manager.cleanup_manager.set_persistence_backend(
+                            _cleanup_persistence_backend
+                        )
+                except Exception as _cpb_exc:
+                    logger.warning(
+                        "Startup: Bug #1567 CleanupManager persistence-backend "
+                        "wiring failed (non-fatal, queue stays in-process-only "
+                        "for this run): %s",
+                        _cpb_exc,
+                    )
+
             # Store lifecycle manager in app state for access by query handlers
             app.state.global_lifecycle_manager = global_lifecycle_manager
             app.state.query_tracker = global_lifecycle_manager.query_tracker
@@ -2444,6 +2469,68 @@ def make_lifespan(
                     logger.warning(
                         "Startup: golden-repo registry-orphan reconcile failed: %s",
                         _gre,
+                    )
+
+            # Bug #1567: orphan sweep for leaked `.versioned` snapshots.
+            # CleanupManager's durable queue (wired above) only stops
+            # FUTURE leaks -- this heals the EXISTING backlog every
+            # installation already has. mode is READ FROM THE RUNTIME
+            # CONFIG (Bug #1567 Gap 2, versioned_snapshot_reconcile_config,
+            # Web UI Config Screen) -- default "report" is FAIL-CLOSED: it
+            # computes and logs candidates WITHOUT scheduling any deletion,
+            # replacing a mass-deletion ratio guard the maintainer
+            # explicitly rejected (see versioned_snapshot_reconciler.py's
+            # module docstring). Promoting to mode="delete" is a
+            # deliberate, explicit operator action via the Web UI -- never
+            # a code-level default. Fail-soft: never blocks startup.
+            # Read-only in report mode, so running inline (matching the
+            # Bug #1317 block immediately above) is safe.
+            if global_lifecycle_manager is not None and snapshot_manager is not None:
+                try:
+                    from code_indexer.server.services.versioned_snapshot_reconciler import (
+                        reconcile_versioned_snapshots,
+                    )
+
+                    try:
+                        _vsr_mode = (
+                            get_config_service()
+                            .get_config()
+                            .versioned_snapshot_reconcile_config.mode
+                        )
+                    except Exception as _vsr_mode_exc:
+                        logger.warning(
+                            "Startup: failed to read versioned_snapshot_"
+                            "reconcile_config.mode (falling back to "
+                            "fail-closed 'report'): %s",
+                            _vsr_mode_exc,
+                        )
+                        _vsr_mode = "report"
+
+                    _vsr_result = reconcile_versioned_snapshots(
+                        str(golden_repos_dir),
+                        snapshot_manager=snapshot_manager,
+                        alias_manager=global_lifecycle_manager.refresh_scheduler.alias_manager,
+                        cleanup_manager=global_lifecycle_manager.cleanup_manager,
+                        job_tracker=job_tracker,
+                        mode=_vsr_mode,
+                    )
+                    if _vsr_result.scheduled_paths or _vsr_result.skipped_namespaces:
+                        logger.info(
+                            "Startup: Bug #1567 versioned-snapshot orphan sweep "
+                            "(mode=%s) found %d superseded snapshot "
+                            "candidate(s) across %d namespace(s), %d "
+                            "namespace(s) skipped: %s",
+                            _vsr_mode,
+                            len(_vsr_result.scheduled_paths),
+                            len(_vsr_result.scanned_namespaces),
+                            len(_vsr_result.skipped_namespaces),
+                            list(_vsr_result.skipped_namespaces.keys()),
+                        )
+                except Exception as _vsr_exc:
+                    logger.warning(
+                        "Startup: Bug #1567 versioned-snapshot orphan sweep "
+                        "failed (non-fatal): %s",
+                        _vsr_exc,
                     )
 
             def _dep_map_health_check_fn():

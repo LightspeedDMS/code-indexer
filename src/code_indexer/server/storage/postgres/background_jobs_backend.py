@@ -255,8 +255,26 @@ class BackgroundJobsPostgresBackend:
         current_phase: Optional[str] = None,
         phase_detail: Optional[str] = None,
         actor_username: Optional[str] = None,
+        *,
+        duplicate_violation_log_level: int = logging.WARNING,
     ) -> None:
         """Insert a new background job row.
+
+        Args:
+            duplicate_violation_log_level: Bug #1565 -- severity for the
+                "Duplicate active job rejected by database" log emitted
+                when idx_active_job_per_repo rejects this INSERT. Defaults
+                to WARNING, which is correct for this method's DIRECT
+                callers (JobTracker.register_job()/_insert_job(), and the
+                one-time migrate_background_jobs() JSON import) -- neither
+                expects or tolerates a duplicate, so a violation there is a
+                genuine anomaly. atomic_claim_insert() below -- the
+                EXCLUSIVE call path behind
+                register_job_if_no_conflict()'s by-design cross-node
+                single-flight guard, whose DuplicateJobError is always
+                caught and handled as an expected no-op by every real
+                caller -- passes DEBUG instead. The caller decides
+                severity; this method never guesses from context.
 
         Raises:
             IntegrityError: When a duplicate active job exists for the same
@@ -346,7 +364,13 @@ class BackgroundJobsPostgresBackend:
             if "UniqueViolation" in type(exc).__name__ or (
                 hasattr(exc, "sqlstate") and getattr(exc, "sqlstate") == "23505"
             ):
-                logger.warning(
+                # Bug #1565: severity is caller-decided via
+                # duplicate_violation_log_level (see this method's own
+                # docstring) -- WARNING by default for save_job()'s direct
+                # callers, DEBUG for atomic_claim_insert()'s by-design
+                # single-flight path.
+                logger.log(
+                    duplicate_violation_log_level,
                     "Duplicate active job rejected by database: "
                     "operation_type=%s, repo_alias=%s (job_id=%s)",
                     operation_type,
@@ -393,6 +417,15 @@ class BackgroundJobsPostgresBackend:
         UniqueViolation. This method is the Protocol-compliant entry point that
         job_tracker._atomic_insert_impl uses on the backend path.
 
+        Bug #1565: this method is the EXCLUSIVE call path behind
+        JobTracker.register_job_if_no_conflict()'s by-design cross-node
+        single-flight guard -- every real caller catches the resulting
+        DuplicateJobError and treats it as an expected, handled no-op
+        (skip this tick, return HTTP 409, etc.), never an unhandled crash.
+        The duplicate-violation log is therefore emitted at DEBUG below,
+        not save_job()'s default WARNING (which remains correct for
+        save_job()'s OTHER, non-conflict-tolerant direct callers).
+
         Raises:
             psycopg.errors.UniqueViolation: When idx_active_job_per_repo rejects
                 the INSERT due to a duplicate active job for (operation_type, repo_alias).
@@ -423,6 +456,7 @@ class BackgroundJobsPostgresBackend:
             executing_node=executing_node,
             claimed_at=claimed_at,
             actor_username=actor_username,
+            duplicate_violation_log_level=logging.DEBUG,
         )
 
     def get_job(self, job_id: str) -> Optional[Dict[str, Any]]:

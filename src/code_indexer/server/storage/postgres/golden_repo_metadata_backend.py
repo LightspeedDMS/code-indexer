@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
@@ -1236,6 +1237,83 @@ class GoldenRepoMetadataPostgresBackend:
                     "UPDATE fleet_migration_dedup_state SET cleared_at = %s, "
                     "cleared_reason = %s WHERE golden_alias = %s",
                     (now, reason, golden_alias),
+                )
+            conn.commit()
+
+    # ------------------------------------------------------------------
+    # Cleanup pending-deletion queue (Bug #1567)
+    # ------------------------------------------------------------------
+
+    def schedule_cleanup_deletion(self, index_path: str, scheduled_at: float) -> float:
+        """
+        Durably record ``index_path`` as pending deletion. See
+        GoldenRepoMetadataSqliteBackend for the full contract -- this is
+        the drop-in PostgreSQL (cluster-mode) mirror.
+
+        Raises:
+            ValueError: index_path is not a non-empty string, or
+                scheduled_at is not a finite number.
+        """
+        if not isinstance(index_path, str) or not index_path.strip():
+            raise ValueError(
+                f"index_path must be a non-empty string, got {index_path!r}"
+            )
+        if not isinstance(scheduled_at, (int, float)) or isinstance(scheduled_at, bool):
+            raise ValueError(
+                f"scheduled_at must be a real number, got {scheduled_at!r}"
+            )
+        scheduled_at = float(scheduled_at)
+        if not math.isfinite(scheduled_at):
+            raise ValueError(
+                f"scheduled_at must be a finite number, got {scheduled_at!r}"
+            )
+
+        with self._pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT scheduled_at FROM cleanup_pending_deletion_state "
+                    "WHERE index_path = %s",
+                    (index_path,),
+                )
+                row = cur.fetchone()
+                if row is not None:
+                    return float(row[0])
+                cur.execute(
+                    "INSERT INTO cleanup_pending_deletion_state "
+                    "(index_path, scheduled_at) VALUES (%s, %s)",
+                    (index_path, scheduled_at),
+                )
+            conn.commit()
+        return float(scheduled_at)
+
+    def list_cleanup_pending_deletions(self) -> List[Dict[str, Any]]:
+        """Return every durably-pending deletion row. See
+        GoldenRepoMetadataSqliteBackend for the full contract -- this is
+        the drop-in PostgreSQL (cluster-mode) mirror."""
+        with self._pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT index_path, scheduled_at FROM cleanup_pending_deletion_state"
+                )
+                rows = cur.fetchall()
+        return [{"index_path": row[0], "scheduled_at": float(row[1])} for row in rows]
+
+    def remove_cleanup_pending_deletion(self, index_path: str) -> None:
+        """Remove one durably-pending deletion row, idempotent. See
+        GoldenRepoMetadataSqliteBackend for the full contract.
+
+        Raises:
+            ValueError: index_path is not a non-empty string.
+        """
+        if not isinstance(index_path, str) or not index_path.strip():
+            raise ValueError(
+                f"index_path must be a non-empty string, got {index_path!r}"
+            )
+        with self._pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "DELETE FROM cleanup_pending_deletion_state WHERE index_path = %s",
+                    (index_path,),
                 )
             conn.commit()
 

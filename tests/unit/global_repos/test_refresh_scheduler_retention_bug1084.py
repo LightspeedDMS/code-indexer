@@ -91,8 +91,22 @@ class TestKeepLastN:
         }
 
     def test_never_deletes_current_or_previous(self, golden_repos_dir):
-        """current target_path and previous_path are force-kept even if they fall
-        outside the N-newest window."""
+        """Two invariants, both force-protective:
+
+        1. current target_path and previous_path are force-kept even if they
+           fall outside the N-newest window.
+        2. Bug #1567 ts_live anchoring: nothing at or newer than the live
+           target's version id is EVER scheduled, regardless of keep_last.
+           `_create_snapshot` materializes a snapshot at its final path and
+           only later runs NFS-visibility waits, git index updates, config
+           fixes and validation before `swap_alias`. During that window a
+           snapshot newer than the live target can exist on disk while
+           referenced by nothing -- indistinguishable, from disk state
+           alone, from a crash-orphan left by a failed swap. Deleting it
+           would destroy an in-flight build, and the subsequent swap would
+           then point the alias at a path being removed: a live-serving
+           outage caused by retention itself.
+        """
         cm = MagicMock(spec=CleanupManager)
         # 5 snapshots; N=1 would normally keep only v_500, but current=v_300 and
         # previous=v_200 must also survive.
@@ -121,14 +135,25 @@ class TestKeepLastN:
             )
 
         scheduled = {c.args[0] for c in cm.schedule_cleanup.call_args_list}
-        # Kept: v_500 (N-newest=1), v_300 (current), v_200 (previous).
-        # Scheduled: v_100, v_400.
+        # Kept: v_300 (current), v_200 (previous) -- invariant 1.
         assert "/mnt/cow/.versioned/my-repo/v_300" not in scheduled
         assert "/mnt/cow/.versioned/my-repo/v_200" not in scheduled
+        # Kept: v_500 -- newer than the live target (ts=500 >= ts_live=300).
         assert "/mnt/cow/.versioned/my-repo/v_500" not in scheduled
+        # Kept: v_400 -- Bug #1567 ts_live anchoring (invariant 2). v_400
+        # (ts=400 >= ts_live=300) is unreferenced by any alias pointer and
+        # would have been deleted under the pre-#1567 "N-newest-on-disk"
+        # heuristic. It MUST survive: it is indistinguishable from an
+        # in-flight snapshot build not yet swapped in, or a crash-orphan
+        # from a failed swap -- deleting it risks destroying live/in-flight
+        # data. This assertion is deliberately explicit (not folded into a
+        # smaller expected set) so the invariant cannot be silently
+        # regressed by a future edit.
+        assert "/mnt/cow/.versioned/my-repo/v_400" not in scheduled
+        # Scheduled: only v_100, the sole snapshot strictly older than
+        # ts_live(300) and not otherwise protected.
         assert scheduled == {
             "/mnt/cow/.versioned/my-repo/v_100",
-            "/mnt/cow/.versioned/my-repo/v_400",
         }
 
     def test_no_op_when_at_or_below_n(self, golden_repos_dir):
