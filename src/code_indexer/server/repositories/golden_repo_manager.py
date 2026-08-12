@@ -841,28 +841,11 @@ class GoldenRepoManager:
                 # exceptions), but we wrap the call in a belt-and-suspenders
                 # try/except for consistency with the other hooks and to
                 # guard against any unexpected error in the wiring itself.
-                # EVO-65484: gate the synchronous description/lifecycle generation.
-                # It runs the orchestrator -> Claude seam inside this add worker;
-                # when disabled (config, default ON) we skip it so a failing seam
-                # (e.g. 401 on leased LLM creds) can't add per-add latency + spam.
-                # Skipping it only omits the generated description -- never affects
-                # the repo's search/index correctness.
-                if self._golden_description_generation_enabled():
-                    try:
-                        self._register_lifecycle_after_registration(
-                            alias, submitter_username
-                        )
-                    except Exception as hook_error:
-                        logging.error(
-                            f"Lifecycle registration hook failed for '{alias}': "
-                            f"{hook_error}. Golden repository added but lifecycle "
-                            f"detection rebuild was not scheduled."
-                        )
-                else:
-                    logging.info(
-                        "EVO-65484: golden_description_generation_enabled=false; "
-                        f"skipping description/lifecycle generation for '{alias}'."
-                    )
+                # EVO-65484: gate + run the synchronous description/lifecycle
+                # generation (extracted so the gate is unit-testable).
+                self._maybe_register_lifecycle_after_registration(
+                    alias, submitter_username
+                )
 
                 return {
                     "success": True,
@@ -951,6 +934,33 @@ class GoldenRepoManager:
                 f"({exc}); defaulting to enabled."
             )
             return True
+
+    def _maybe_register_lifecycle_after_registration(
+        self, alias: str, submitter_username: str
+    ) -> None:
+        """EVO-65484: run description/lifecycle generation unless gated off.
+
+        Extracted from ``execute_add_golden_repo_work`` so the gate is unit-testable.
+        When ``golden_description_generation_enabled`` is False (config), skip the
+        synchronous orchestrator -> Claude seam (a failing seam otherwise adds
+        per-add latency + spam). Skipping only omits the generated description --
+        never the repo's search/index data. The generation call is itself sidecar-
+        disciplined; the belt-and-suspenders try/except keeps the add worker alive.
+        """
+        if not self._golden_description_generation_enabled():
+            logging.info(
+                "EVO-65484: golden_description_generation_enabled=false; "
+                f"skipping description/lifecycle generation for '{alias}'."
+            )
+            return
+        try:
+            self._register_lifecycle_after_registration(alias, submitter_username)
+        except Exception as hook_error:
+            logging.error(
+                f"Lifecycle registration hook failed for '{alias}': "
+                f"{hook_error}. Golden repository added but lifecycle "
+                f"detection rebuild was not scheduled."
+            )
 
     def _register_lifecycle_after_registration(
         self, alias: str, submitter_username: str

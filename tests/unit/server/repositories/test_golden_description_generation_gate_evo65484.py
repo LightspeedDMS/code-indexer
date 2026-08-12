@@ -56,3 +56,45 @@ def test_gate_true_when_indexing_config_none():
         return_value=svc,
     ):
         assert _mgr()._golden_description_generation_enabled() is True
+
+
+class TestMaybeRegisterLifecycleGate:
+    """The CALL-SITE gate (_maybe_register_lifecycle_after_registration): the hook
+    runs iff the flag is on; a hook error never propagates."""
+
+    def test_runs_hook_when_enabled(self):
+        mgr = _mgr()
+        with (
+            patch.object(
+                mgr, "_golden_description_generation_enabled", return_value=True
+            ),
+            patch.object(mgr, "_register_lifecycle_after_registration") as hook,
+        ):
+            mgr._maybe_register_lifecycle_after_registration("alias-1", "admin")
+        hook.assert_called_once_with("alias-1", "admin")
+
+    def test_skips_hook_when_disabled(self):
+        mgr = _mgr()
+        with (
+            patch.object(
+                mgr, "_golden_description_generation_enabled", return_value=False
+            ),
+            patch.object(mgr, "_register_lifecycle_after_registration") as hook,
+        ):
+            mgr._maybe_register_lifecycle_after_registration("alias-1", "admin")
+        hook.assert_not_called()
+
+    def test_hook_error_is_swallowed(self):
+        mgr = _mgr()
+        with (
+            patch.object(
+                mgr, "_golden_description_generation_enabled", return_value=True
+            ),
+            patch.object(
+                mgr,
+                "_register_lifecycle_after_registration",
+                side_effect=RuntimeError("401 API key is invalid"),
+            ),
+        ):
+            # Must NOT raise -- the add worker survives a failing description seam.
+            mgr._maybe_register_lifecycle_after_registration("alias-1", "admin")
