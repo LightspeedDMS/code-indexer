@@ -1513,6 +1513,15 @@ class GoldenRepoManager:
             # them on a later step's success bought nothing and cost
             # consistency. Each remains individually non-fatal.
 
+            # Bug #1570: delete the repo's entire `.versioned/{alias}/`
+            # snapshot tree BEFORE the `-global` alias pointer is deleted
+            # below -- a non-local clone backend may need that pointer to
+            # identify the on-disk namespace, and the Bug #1567 orphan
+            # sweep fail-closed-skips any namespace whose pointer is gone,
+            # so nothing else would ever reclaim it once removal deletes
+            # the pointer.
+            self._cleanup_versioned_snapshots(alias)
+
             # Deactivate global activation (Story #532)
             # Remove GlobalRegistry entry and alias pointer file
             try:
@@ -2077,6 +2086,69 @@ class GoldenRepoManager:
                 e,
             )
             return "main"
+
+    def _delete_versioned_snapshots_for_alias(self, alias: str) -> None:
+        """Delete every versioned snapshot for *alias* via the wired
+        VersionedSnapshotManager (Bug #1570). A no-op if no snapshot
+        manager is wired. Per-snapshot / list failures are logged and
+        skipped -- never fatal, called from a removal-cascade teardown
+        step where the golden_repos row is already gone."""
+        snapshot_manager = self._snapshot_manager
+        if snapshot_manager is None:
+            return
+        try:
+            snapshots = snapshot_manager.list_snapshots(alias)
+        except Exception as list_error:
+            logging.error(
+                f"Bug #1570: failed to list versioned snapshots for "
+                f"'{alias}': {list_error}"
+            )
+            return
+        for snapshot_path, _ts in snapshots:
+            try:
+                snapshot_manager.delete_snapshot(alias, snapshot_path)
+            except Exception as snap_error:
+                logging.error(
+                    f"Bug #1570: failed to delete versioned snapshot "
+                    f"'{snapshot_path}' for '{alias}': {snap_error}"
+                )
+
+    def _cleanup_versioned_snapshots(self, alias: str) -> None:
+        """
+        Delete *alias*'s entire `.versioned/{alias}/` snapshot tree
+        (Bug #1570) so it never survives golden repo removal.
+
+        MUST be called BEFORE the `-global` alias pointer is deleted (a
+        non-local clone backend may need it to identify the on-disk
+        namespace). Individually non-fatal (Bug #1523 discipline): a
+        failure here is logged and swallowed, never raised.
+        """
+        # Defensive invariant (Messi Rule #15): alias is already validated
+        # for traversal characters at registration time and only reaches
+        # here via an alias resolved from the registry -- re-checked
+        # anyway before it feeds a path passed to shutil.rmtree.
+        if ".." in alias or "/" in alias or "\\" in alias:
+            logging.error(
+                f"Bug #1570: refusing to clean up versioned snapshots for "
+                f"alias '{alias}': contains path traversal characters."
+            )
+            return
+
+        self._delete_versioned_snapshots_for_alias(alias)
+
+        # Local/CoW filesystem convention (snapshot_paths.py canonical
+        # shape): remove the namespace directory itself so it never lingers
+        # as an untracked, unreachable entry -- also the sole cleanup
+        # mechanism when no snapshot_manager is wired.
+        versioned_ns_dir = Path(self.golden_repos_dir) / ".versioned" / alias
+        try:
+            if versioned_ns_dir.exists():
+                shutil.rmtree(versioned_ns_dir)
+        except Exception as dir_error:
+            logging.error(
+                f"Bug #1570: failed to remove versioned namespace directory "
+                f"'{versioned_ns_dir}' for '{alias}': {dir_error}"
+            )
 
     def _cleanup_repository_files(self, clone_path: str) -> bool:
         """

@@ -7,6 +7,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Bug #1570** (priority-1): removing a golden repo no longer orphans its entire `.versioned/`
+  snapshot tree forever. `remove_golden_repo`'s cascade deleted the base clone and the `-global` alias
+  pointer but never touched `.versioned/{alias}/` -- and because the pointer was gone, the Bug #1567
+  reconciler then had no live-target reference and correctly refused to guess which snapshot was safe
+  to keep, so the space became permanently unreachable. Measured on one small dev node: 3.0 GB across
+  15 orphaned namespaces, reported as "skipped" on every single boot.
+  Fixed in both halves, because a write-path fix alone cannot heal what already leaked (the Bug #1567
+  lesson). Removal now deletes the snapshot tree as part of its cascade -- resolved BEFORE the alias
+  pointer is removed, since the pointer may be what identifies it, and non-fatal per the Bug #1523
+  teardown discipline. Existing orphans are reclaimed by the reconciler through the SAME
+  `cleanup_manager.schedule_cleanup` gates (refcount-zero plus minimum retention age), never a
+  separate deletion path.
+  The reclaim discriminator is a strict conjunction: no readable pointer AND no base clone AND absent
+  from the golden-repo registry. A repo that still exists with a temporarily unreadable pointer stays
+  skipped -- that skip protects live data and must not be weakened. Absence is proven with an explicit
+  `os.stat()`, and any other `OSError` (permission denied, stale NFS handle) blocks the reclaim rather
+  than being read as "gone".
+
+- **Bug #1567 (follow-up, supersedes the 12.16.0 entry)**: the `versioned_snapshot_reconcile_config.mode`
+  setting is REMOVED and snapshot deletion is now unconditional. Shipping the leak fix behind a
+  `report`/`delete` toggle that defaulted to `report` meant no deployment actually reclaimed anything
+  -- the defect was still present by default, just better logged. A bug fix must not be
+  operator-gated. Removed the dataclass, the `ServerConfig` field, the config-service accessors, the
+  Web UI section, and the startup mode resolution.
+  The guards that decide WHICH snapshots are safe to delete are unchanged and load-bearing: the 900s
+  minimum-absolute-age floor (so an in-flight publish is never deleted mid-copy), keep-last-N
+  retention, never deleting a path any pointer references, and `ts_live` anchoring.
+
+- **Bug #1555 (follow-up, supersedes the 12.16.0 entry)**: fixed the actual cause instead of the
+  symptom. `sync()` rebased local commits onto `origin/{branch}`, which treats the remote as a peer
+  whose history must be preserved. The remote is a backup mirror and local is the sole source of
+  truth, so there was never anything to preserve -- and since cidx-meta content is machine-generated,
+  a remote commit touching the same regenerated file produced a conflict that could never resolve
+  differently on retry. That is why it sat quarantined for 59+ hours against one unchanged SHA.
+  `sync()` now publishes local HEAD directly with `git push --force-with-lease` -- no rebase, no
+  merge, no conflict-resolution step, self-healing on the next cycle. `--force-with-lease` rather than
+  `--force` because the immediately preceding fetch refreshes the tracking ref, making the push
+  race-safe without reintroducing a merge; a lease mismatch simply defers to the next cycle.
+  This deletes the entire machinery that existed only to cope with those conflicts: the Claude
+  conflict resolver and its prompt, six quarantine-bookkeeping methods on the refresh scheduler, three
+  CRUD methods across the storage protocol and both backends, and the `/health` quarantine surface
+  added earlier in 12.16.0 -- which can never fire again, since the table can no longer gain a row.
+  The quarantine tables themselves are left in place per the never-drop-tables migration rule; they
+  simply stay empty.
+
 ## [12.16.0] - 2026-08-12
 
 ### Added

@@ -11,6 +11,7 @@
 - [feedback_versioned_path_trap.md](feedback_versioned_path_trap.md) - _resolve_golden_repo_path returns VERSIONED path — NEVER write to it, resolve to base clone first
 - [feedback_convert_tool_docs_destructive.md](feedback_convert_tool_docs_destructive.md) - NEVER run tools/convert_tool_docs.py — silently breaks entire MCP tool surface
 - [feedback_no_secrets_in_memory.md](feedback_no_secrets_in_memory.md) - NEVER write IPs, secrets, credentials, topology into memory files — they are versioned
+- [feedback_never_retry_loop_auth_endpoint.md](feedback_never_retry_loop_auth_endpoint.md) - NEVER retry-loop an auth endpoint; auth rejection is terminal and repetition locks the shared staging admin account (self-inflicted 13-min lockout on 2026-08-12)
 - [feedback_own_all_repo_changes.md](feedback_own_all_repo_changes.md) - NEVER revert other subagents' changes — own ALL changes found in repo
 - [feedback_parallel_agents_shared_tree_no_broad_git_ops.md](feedback_parallel_agents_shared_tree_no_broad_git_ops.md) - When N agents edit the same uncommitted tree in parallel, each prompt must explicitly forbid git checkout/restore/reset/clean/stash outside its own file list
 - [feedback_no_rogue_agents.md](feedback_no_rogue_agents.md) - Never frame unexpected repo state as "rogue/sabotaging agents" — default explanation is user changed it
@@ -28,6 +29,7 @@
 - [feedback_e2e_not_code_inspection.md](feedback_e2e_not_code_inspection.md) - E2E means executing real functionality, NEVER code inspection/source checks
 - [feedback_e2e_verify_indexes_work.md](feedback_e2e_verify_indexes_work.md) - E2E must verify indexes EXIST on disk and RETURN RESULTS
 - [feedback_no_fallbacks_ever.md](feedback_no_fallbacks_ever.md) - NEVER write fallback code paths — one path that works or fails loudly
+- [feedback_no_settings_to_gate_bug_fixes.md](feedback_no_settings_to_gate_bug_fixes.md) - NEVER add ANY new config setting unless the user explicitly asks for that thing to be configurable, PERIOD; and never gate a bug fix behind one — 900 repos, no ops team to flip switches (keep correctness guards like age floors, drop behaviour toggles)
 - [feedback_no_half_wired_features.md](feedback_no_half_wired_features.md) - Never ship a data-relocation write-path without its read-path (and status-path); verify BOTH halves round-trip end-to-end (root cause of temporal #1482)
 - [feedback_no_sleep_in_production.md](feedback_no_sleep_in_production.md) - NEVER add time.sleep() for UI visibility — fix display logic
 - [feedback_no_artificial_work_budgets.md](feedback_no_artificial_work_budgets.md) - NEVER cap legitimate analysis/indexing work with hardcoded search-call ceilings, agent-turn caps, or per-file/job timeouts — correctness over bounded cost (same disease as Bug #1218); the dep-map "AT MOST 5 search calls" ceiling is a repeat offender

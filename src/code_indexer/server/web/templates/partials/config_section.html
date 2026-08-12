@@ -1003,58 +1003,6 @@ function saveLlmCredsConfig() {
     </article>
 </details>
 
-<!-- Versioned Snapshot Reconcile Section (Bug #1567 Gap 2) -->
-<details class="config-section" id="section-versioned-snapshot-reconcile">
-    <summary>
-        <h2>Versioned Snapshot Reconcile</h2>
-    </summary>
-    <p class="section-description">
-        Configures the orphan-sweep mode for leaked `.versioned` snapshots. This sweep
-        heals the backlog CleanupManager's durable queue alone cannot fix (a stale/pre-fix
-        installation can have hundreds of superseded snapshots per repo). "Report" (the
-        fail-closed default) computes and logs candidates WITHOUT deleting anything;
-        "Delete" is an explicit operator promotion that schedules them for real cleanup
-        through the existing refcount+retention-age-gated CleanupManager. Changes take
-        effect on the sweep's next run -- no server restart is required.
-    </p>
-    <article>
-        <!-- Display Mode -->
-        <div id="display-versioned-snapshot-reconcile">
-            <table class="config-table">
-                <tr>
-                    <td class="config-label">Mode</td>
-                    <td class="config-value">{{ config.versioned_snapshot_reconcile.mode }}</td>
-                    <td class="config-description">"report" (default, fail-closed) computes and logs candidates without deleting; "delete" is an explicit operator promotion to real cleanup</td>
-                </tr>
-            </table>
-            <div class="form-actions">
-                <button class="outline small" onclick="toggleEditMode('versioned-snapshot-reconcile')">Edit</button>
-            </div>
-        </div>
-        <!-- Edit Mode -->
-        <form id="edit-form-versioned-snapshot-reconcile" method="post" action="/admin/config/versioned_snapshot_reconcile" style="display: none;">
-            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-            {% if validation_errors.versioned_snapshot_reconcile %}
-            <div class="validation-error">{{ validation_errors.versioned_snapshot_reconcile }}</div>
-            {% endif %}
-            <div class="form-grid">
-                <label for="versioned-snapshot-reconcile-mode">
-                    Mode
-                    <select id="versioned-snapshot-reconcile-mode" name="mode">
-                        <option value="report" {% if config.versioned_snapshot_reconcile.mode == "report" %}selected{% endif %}>Report (fail-closed, no deletion)</option>
-                        <option value="delete" {% if config.versioned_snapshot_reconcile.mode == "delete" %}selected{% endif %}>Delete (schedule real cleanup)</option>
-                    </select>
-                    <small>Promote to "Delete" only after confirming the candidates logged in "Report" mode are genuinely superseded.</small>
-                </label>
-            </div>
-            <div class="form-actions">
-                <button type="submit" class="primary">Save</button>
-                <button type="button" class="secondary" onclick="cancelEdit('versioned-snapshot-reconcile')">Cancel</button>
-            </div>
-        </form>
-    </article>
-</details>
-
 <!-- Alias Lock Settings Section (Issue #1546 Phase 2) -->
 <details class="config-section" id="section-alias-lock">
     <summary>

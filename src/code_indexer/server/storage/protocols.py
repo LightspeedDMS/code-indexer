@@ -562,22 +562,13 @@ class GoldenRepoMetadataBackend(Protocol):
 
     def clear_dedup_state(self, golden_alias: str, reason: str) -> None: ...
 
-    # Bug #1539: cidx-meta backup conflict-resolution per-repo failure
-    # quarantine state (see global_repos/refresh_scheduler.py). Keyed by
-    # golden_alias (e.g. "cidx-meta-global") AND the upstream target
-    # commit SHA being rebased onto (never freeform error text -- Codex
-    # round-3 review found text fingerprinting fundamentally fragile).
-    # Persisted so the consecutive-failure count is visible across every
-    # worker/node, never a per-process in-memory counter.
-    def record_cidx_meta_conflict_failure(
-        self, golden_alias: str, target_sha: str, detail: str
-    ) -> int: ...
-
-    def reset_cidx_meta_conflict_failure(self, golden_alias: str) -> None: ...
-
-    def get_cidx_meta_conflict_failure_state(
-        self, golden_alias: str
-    ) -> Optional[Dict[str, Any]]: ...
+    # Bug #1539's cidx-meta backup conflict-resolution per-repo failure
+    # quarantine state (record_cidx_meta_conflict_failure /
+    # reset_cidx_meta_conflict_failure / get_cidx_meta_conflict_failure_state)
+    # is RETIRED as of Bug #1555's root-cause fix: CidxMetaBackupSync.sync()
+    # is now a plain mirror-push that can never raise
+    # ConflictResolutionFailedError, so nothing ever calls these again. See
+    # cidx_meta_backup/sync.py's module docstring for the design rationale.
 
     # Bug #1567: durable pending-deletion queue for versioned-snapshot
     # cleanup (see global_repos/cleanup_manager.py). Backs the in-process

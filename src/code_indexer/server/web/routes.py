@@ -381,8 +381,6 @@ _VALID_CONFIG_SECTIONS = (
     "indexing_watchdog",
     # Story #1458 (Epic #1454) - Fleet migration scheduler configuration
     "fleet_migration",
-    # Bug #1567 Gap 2 - Versioned-snapshot orphan sweep mode configuration
-    "versioned_snapshot_reconcile",
     # Issue #1548 - Legacy temporal shard relocation configuration
     "temporal_legacy_migration",
     # Issue #1546 Phase 2 - DB-backed alias lock rollout gate
@@ -6497,8 +6495,6 @@ def _get_current_config() -> dict:
         IndexingWatchdogConfig,
         # Story #1458 (Epic #1454) - Fleet migration scheduler configuration
         FleetMigrationConfig,
-        # Bug #1567 Gap 2 - Versioned-snapshot orphan sweep mode configuration
-        VersionedSnapshotReconcileConfig,
         # Issue #1548 - Legacy temporal shard relocation configuration
         TemporalLegacyMigrationConfig,
         # Issue #1546 Phase 2 - DB-backed alias lock rollout gate
@@ -6738,10 +6734,6 @@ def _get_current_config() -> dict:
         # Story #1458 (Epic #1454): Fleet migration scheduler configuration
         "fleet_migration": settings.get(
             "fleet_migration", asdict(FleetMigrationConfig())
-        ),
-        # Bug #1567 Gap 2: Versioned-snapshot orphan sweep mode configuration
-        "versioned_snapshot_reconcile": settings.get(
-            "versioned_snapshot_reconcile", asdict(VersionedSnapshotReconcileConfig())
         ),
         # Issue #1548: Legacy temporal shard relocation configuration
         "temporal_legacy_migration": settings.get(
@@ -7679,16 +7671,6 @@ def _validate_config_section(section: str, data: dict) -> Optional[str]:
                     return "Tick Interval Minutes must be at least 1"
             except (ValueError, TypeError):
                 return "Tick Interval Minutes must be a valid number"
-
-    elif section == "versioned_snapshot_reconcile":
-        # Bug #1567 Gap 2: the orphan sweep's mode is a two-value
-        # <select> ("report"/"delete"), never free text -- "report" is
-        # the fail-closed default, "delete" is an explicit operator
-        # promotion. Reject anything else with a clear message rather
-        # than silently coercing.
-        mode_val = data.get("mode")
-        if mode_val is not None and mode_val not in ("report", "delete"):
-            return "Mode must be either 'report' or 'delete'"
 
     elif section == "temporal_legacy_migration":
         # Issue #1548: both fields are booleans (Yes/No <select>) -- no

@@ -112,7 +112,6 @@ def _find_vsr_guard_if(tree: ast.AST) -> Optional[ast.If]:
 class TestLogVsrSweepCompletionCleanAndAbortedRuns:
     def test_clean_zero_candidate_run_logs_one_info_and_zero_warnings(self, caplog):
         result = VersionedSnapshotReconcileResult(
-            mode="report",
             scanned_namespaces=["repo-a", "repo-b"],
             skipped_namespaces={},
             scheduled_paths=[],
@@ -121,7 +120,7 @@ class TestLogVsrSweepCompletionCleanAndAbortedRuns:
         with caplog.at_level(
             logging.DEBUG, logger="code_indexer.server.startup.lifespan"
         ):
-            _log_vsr_sweep_completion(result, "report")
+            _log_vsr_sweep_completion(result)
 
         info_records = [r for r in caplog.records if r.levelno == logging.INFO]
         warning_or_above = [r for r in caplog.records if r.levelno >= logging.WARNING]
@@ -140,7 +139,6 @@ class TestLogVsrSweepCompletionCleanAndAbortedRuns:
 
     def test_aborted_result_emits_no_completion_info_line(self, caplog):
         result = VersionedSnapshotReconcileResult(
-            mode="report",
             scanned_namespaces=[],
             skipped_namespaces={},
             scheduled_paths=[],
@@ -150,7 +148,7 @@ class TestLogVsrSweepCompletionCleanAndAbortedRuns:
         with caplog.at_level(
             logging.DEBUG, logger="code_indexer.server.startup.lifespan"
         ):
-            _log_vsr_sweep_completion(result, "report")
+            _log_vsr_sweep_completion(result)
 
         info_records = [r for r in caplog.records if r.levelno == logging.INFO]
         assert not info_records, (
@@ -160,10 +158,13 @@ class TestLogVsrSweepCompletionCleanAndAbortedRuns:
         )
 
 
-class TestLogVsrSweepCompletionModeDistinction:
-    def test_delete_mode_with_candidates_reports_deletions_scheduled_true(self, caplog):
+class TestLogVsrSweepCompletionUnconditionalDeletion:
+    """Deletion is unconditional (Bug #1567: a fix must not ship behind
+    an off-by-default toggle) -- deletions_scheduled now reflects purely
+    whether the sweep found candidates, never a report/delete mode."""
+
+    def test_candidates_found_reports_deletions_scheduled_true(self, caplog):
         result = VersionedSnapshotReconcileResult(
-            mode="delete",
             scanned_namespaces=["repo-a", "repo-b", "repo-c"],
             skipped_namespaces={"repo-x": "some reason"},
             scheduled_paths=["/a/v_1", "/a/v_2"],
@@ -172,7 +173,7 @@ class TestLogVsrSweepCompletionModeDistinction:
         with caplog.at_level(
             logging.INFO, logger="code_indexer.server.startup.lifespan"
         ):
-            _log_vsr_sweep_completion(result, "delete")
+            _log_vsr_sweep_completion(result)
 
         info_records = [r for r in caplog.records if r.levelno == logging.INFO]
         assert len(info_records) == 1
@@ -182,27 +183,23 @@ class TestLogVsrSweepCompletionModeDistinction:
         assert "1" in message  # skipped count
         assert "True" in message  # deletions were actually scheduled
 
-    def test_report_mode_with_candidates_reports_deletions_scheduled_false(
-        self, caplog
-    ):
+    def test_zero_candidates_reports_deletions_scheduled_false(self, caplog):
         result = VersionedSnapshotReconcileResult(
-            mode="report",
-            scanned_namespaces=["repo-a", "repo-b", "repo-c"],
-            skipped_namespaces={"repo-x": "some reason"},
-            scheduled_paths=["/a/v_1", "/a/v_2"],
+            scanned_namespaces=["repo-a"],
+            skipped_namespaces={},
+            scheduled_paths=[],
             aborted=False,
         )
         with caplog.at_level(
             logging.INFO, logger="code_indexer.server.startup.lifespan"
         ):
-            _log_vsr_sweep_completion(result, "report")
+            _log_vsr_sweep_completion(result)
 
         info_records = [r for r in caplog.records if r.levelno == logging.INFO]
         assert len(info_records) == 1
         message = info_records[0].getMessage()
         assert "False" in message, (
-            "report mode found candidates but must state deletions were "
-            f"NOT scheduled: {message}"
+            f"zero candidates must report deletions_scheduled=False: {message}"
         )
 
 

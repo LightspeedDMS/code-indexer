@@ -1,10 +1,11 @@
 """Bug #1567c: per-namespace DEBUG decision-reasoning logging for the
 Bug #1567 versioned-snapshot orphan sweep.
 
-An operator promoting `versioned_snapshot_reconcile_config.mode` from the
-fail-closed default "report" to "delete" needs to inspect WHY each
-snapshot in a namespace was kept or became a candidate before doing so.
-This module drives `reconcile_versioned_snapshots(...)` directly (real
+The sweep deletes unconditionally (there is no "report" vs "delete"
+mode -- that config-mode wrapper was removed as an off-by-default
+toggle a bug fix must not ship behind). An operator still needs to
+inspect WHY each snapshot in a namespace was kept or became a deletion
+candidate. This module drives `reconcile_versioned_snapshots(...)` directly (real
 filesystem + real AliasManager/VersionedSnapshotManager/CleanupManager,
 mirroring the `_make_env`/`_make_snapshot_dir` helpers from
 test_versioned_snapshot_reconciler_1567.py) and asserts on the DEBUG-only
@@ -82,7 +83,6 @@ class TestNamespaceDecisionDebugLogging:
                 alias_manager=alias_manager,
                 cleanup_manager=cleanup_manager,
                 retention_keep_last=KEEP_LAST_MINIMAL,
-                mode="report",
             )
 
         assert result.scheduled_paths  # sanity: candidate really found
@@ -127,7 +127,6 @@ class TestNamespaceDecisionDebugLogging:
                 alias_manager=alias_manager,
                 cleanup_manager=cleanup_manager,
                 retention_keep_last=2,
-                mode="report",
             )
 
         assert result.scheduled_paths == []  # sanity: fully protected
@@ -165,7 +164,6 @@ class TestNamespaceDecisionDebugLogging:
                 alias_manager=alias_manager,
                 cleanup_manager=cleanup_manager,
                 retention_keep_last=KEEP_LAST_MINIMAL,
-                mode="report",
             )
 
         assert not _decision_records(caplog), (

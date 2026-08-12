@@ -111,19 +111,6 @@ def _fleet_migration_settings(config: ServerConfig) -> Dict[str, Any]:
     }
 
 
-def _versioned_snapshot_reconcile_settings(config: ServerConfig) -> Dict[str, Any]:
-    """Return versioned_snapshot_reconcile settings dict from ServerConfig
-    (Bug #1567 Gap 2). Surfaces VersionedSnapshotReconcileConfig's single
-    `mode` field for the Web UI Config screen -- "report" (default,
-    fail-closed) computes and logs candidates without deleting; "delete"
-    is an explicit operator promotion."""
-    vsr = config.versioned_snapshot_reconcile_config
-    assert vsr is not None  # Guaranteed by ServerConfig.__post_init__
-    return {
-        "mode": vsr.mode,
-    }
-
-
 def _temporal_legacy_migration_settings(config: ServerConfig) -> Dict[str, Any]:
     """Return temporal_legacy_migration settings dict from ServerConfig
     (Issue #1548).
@@ -854,10 +841,6 @@ class ConfigService:
             # Issue #1530 - Indexing-subprocess activity watchdog configuration
             "indexing_watchdog": _indexing_watchdog_settings(config),
             "fleet_migration": _fleet_migration_settings(config),
-            # Bug #1567 Gap 2 - Versioned-snapshot orphan sweep mode config
-            "versioned_snapshot_reconcile": _versioned_snapshot_reconcile_settings(
-                config
-            ),
             "alias_lock": _alias_lock_settings(config),
             # Issue #1398 - Query & search timeouts Web UI configuration
             "search_timeouts": _search_timeouts_settings(config),
@@ -1105,9 +1088,6 @@ class ConfigService:
         # Story #1458 (Epic #1454) - Fleet migration Web UI configuration
         elif category == "fleet_migration":
             self._update_fleet_migration_setting(config, key, value)
-        # Bug #1567 Gap 2 - Versioned-snapshot orphan sweep mode Web UI config
-        elif category == "versioned_snapshot_reconcile":
-            self._update_versioned_snapshot_reconcile_setting(config, key, value)
         # Issue #1548 - Legacy temporal shard relocation Web UI configuration
         elif category == "temporal_legacy_migration":
             self._update_temporal_legacy_migration_setting(config, key, value)
@@ -2581,28 +2561,6 @@ class ConfigService:
             fm.canary_gate_enabled = _parse_bool(value)
         else:
             raise ValueError(f"Unknown fleet_migration setting: {key}")
-
-    def _update_versioned_snapshot_reconcile_setting(
-        self, config: ServerConfig, key: str, value: Any
-    ) -> None:
-        """Update a versioned_snapshot_reconcile setting (Bug #1567 Gap 2).
-
-        `mode` must be exactly "report" or "delete" -- a rejected value
-        must NEVER take effect (this is an operator promotion to a
-        destructive mode, not a value that should silently coerce).
-        """
-        vsr = config.versioned_snapshot_reconcile_config
-        assert vsr is not None  # Guaranteed by ServerConfig.__post_init__
-        if key == "mode":
-            mode_str = str(value)
-            if mode_str not in ("report", "delete"):
-                raise ValueError(
-                    f"Invalid versioned_snapshot_reconcile mode: {mode_str!r} "
-                    f"(must be 'report' or 'delete')"
-                )
-            vsr.mode = mode_str
-        else:
-            raise ValueError(f"Unknown versioned_snapshot_reconcile setting: {key}")
 
     def _update_temporal_legacy_migration_setting(
         self, config: ServerConfig, key: str, value: Any

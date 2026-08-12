@@ -97,7 +97,6 @@ def test_corrupt_json_pointer_yields_zero_deletions_for_that_repo(tmp_path):
         alias_manager=alias_manager,
         cleanup_manager=cleanup_manager,
         retention_keep_last=KEEP_LAST_MINIMAL,
-        mode="delete",
     )
 
     assert result.scheduled_paths == []
@@ -126,7 +125,6 @@ def test_non_snapshot_target_path_yields_zero_deletions_for_that_repo(tmp_path):
         alias_manager=alias_manager,
         cleanup_manager=cleanup_manager,
         retention_keep_last=KEEP_LAST_MINIMAL,
-        mode="delete",
     )
 
     assert old not in cleanup_manager.get_pending_cleanups()
@@ -161,7 +159,6 @@ def test_list_snapshots_raising_yields_zero_deletions_for_that_repo(tmp_path):
             alias_manager=alias_manager,
             cleanup_manager=cleanup_manager,
             retention_keep_last=KEEP_LAST_MINIMAL,
-            mode="delete",
         )
     finally:
         os.chmod(str(ns_dir), 0o755)
@@ -199,7 +196,6 @@ def test_crash_orphan_newer_than_live_target_is_never_scheduled(tmp_path):
         alias_manager=alias_manager,
         cleanup_manager=cleanup_manager,
         retention_keep_last=KEEP_LAST_MINIMAL,
-        mode="delete",
     )
 
     pending = cleanup_manager.get_pending_cleanups()
@@ -242,7 +238,6 @@ def test_referenced_by_any_pointer_across_all_alias_files_is_protected(tmp_path)
         alias_manager=alias_manager,
         cleanup_manager=cleanup_manager,
         retention_keep_last=KEEP_LAST_MINIMAL,
-        mode="delete",
     )
 
     pending = cleanup_manager.get_pending_cleanups()
@@ -276,7 +271,6 @@ def test_first_deploy_backlog_scheduled_in_one_sweep_no_cap(tmp_path):
         alias_manager=alias_manager,
         cleanup_manager=cleanup_manager,
         retention_keep_last=KEEP_LAST_PRODUCTION_DEFAULT,
-        mode="delete",
     )
 
     pending = cleanup_manager.get_pending_cleanups()
@@ -390,7 +384,6 @@ def test_concurrent_swap_fresh_read_after_swap_protects_both_targets(tmp_path):
         alias_manager=alias_manager,
         cleanup_manager=cleanup_manager,
         retention_keep_last=KEEP_LAST_MINIMAL,
-        mode="delete",
     )
 
     pending = cleanup_manager.get_pending_cleanups()
