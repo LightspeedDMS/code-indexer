@@ -1,6 +1,15 @@
 """Bug #1567: orphan sweep for leaked `.versioned` snapshots -- core
 coverage (basic reap, current/previous protection, health gates,
-missing/unreadable alias, no-ops, single-flight, report/delete mode).
+missing/unreadable alias, no-ops, single-flight, unconditional deletion).
+
+The sweep deletes unconditionally -- there is no "report" vs "delete"
+mode. A bug fix must not ship behind an off-by-default toggle (the
+config-mode wrapper this module previously had was removed; see
+versioned_snapshot_reconciler.py's module docstring). The real safety
+mechanisms (minimum-absolute-age floor, keep-last-N retention, pointer
+protection, ts_live anchoring) are what decide WHICH paths are safe to
+delete -- they are exercised throughout this file and are never gated by
+a mode flag.
 
 See versioned_snapshot_reconciler.py's module docstring for the full
 Codex-hardened algorithm and rationale, and the sibling file
@@ -76,7 +85,6 @@ def test_reaps_a_leaked_snapshot_that_was_never_scheduled(tmp_path):
         alias_manager=alias_manager,
         cleanup_manager=cleanup_manager,
         retention_keep_last=KEEP_LAST_MINIMAL,
-        mode="delete",
     )
 
     assert leaked in cleanup_manager.get_pending_cleanups()
@@ -107,7 +115,6 @@ def test_never_schedules_current_or_previous_target(tmp_path):
         alias_manager=alias_manager,
         cleanup_manager=cleanup_manager,
         retention_keep_last=KEEP_LAST_MINIMAL,
-        mode="delete",
     )
 
     pending = cleanup_manager.get_pending_cleanups()
@@ -138,7 +145,6 @@ def test_health_gate_skips_sweep_when_versioned_base_dir_unreadable(tmp_path):
             alias_manager=alias_manager,
             cleanup_manager=cleanup_manager,
             retention_keep_last=KEEP_LAST_MINIMAL,
-            mode="delete",
         )
     finally:
         os.chmod(str(versioned_dir), 0o755)
@@ -164,7 +170,6 @@ def test_missing_alias_yields_zero_deletions_for_that_repo(tmp_path):
         alias_manager=alias_manager,
         cleanup_manager=cleanup_manager,
         retention_keep_last=KEEP_LAST_MINIMAL,
-        mode="delete",
     )
 
     assert cleanup_manager.get_pending_cleanups() == set()
@@ -195,7 +200,6 @@ def test_genuinely_unreadable_alias_file_yields_zero_deletions_for_that_repo(
             alias_manager=alias_manager,
             cleanup_manager=cleanup_manager,
             retention_keep_last=KEEP_LAST_MINIMAL,
-            mode="delete",
         )
     finally:
         os.chmod(str(alias_file), 0o644)
@@ -231,7 +235,6 @@ def test_single_flight_guard_skips_when_another_worker_already_running(tmp_path)
         cleanup_manager=cleanup_manager,
         job_tracker=_FakeConflictingJobTracker(),
         retention_keep_last=KEEP_LAST_MINIMAL,
-        mode="delete",
     )
 
     assert result.aborted is True
@@ -249,7 +252,6 @@ def test_no_op_when_versioned_dir_does_not_exist_yet(tmp_path):
         alias_manager=alias_manager,
         cleanup_manager=cleanup_manager,
         retention_keep_last=KEEP_LAST_PRODUCTION_DEFAULT,
-        mode="delete",
     )
 
     assert result.aborted is False
@@ -275,10 +277,13 @@ def test_no_op_when_snapshot_manager_is_none(tmp_path):
     assert cleanup_manager.get_pending_cleanups() == set()
 
 
-def test_report_mode_computes_candidates_but_never_schedules(tmp_path):
-    """The honest substitute for the mass-deletion circuit breaker: the
-    default mode computes and records candidates for visibility WITHOUT
-    ever scheduling a deletion."""
+def test_reconciler_deletes_unconditionally_by_default(tmp_path):
+    """A bug fix must not ship behind an off-by-default toggle: calling
+    reconcile_versioned_snapshots with NO mode-like argument at all must
+    still schedule the deletion of a genuinely superseded snapshot
+    through cleanup_manager -- the real (age-floor, keep-last,
+    pointer-protection) safety guards are what gate WHICH paths are
+    deleted, never a report/delete switch."""
     golden_repos_dir, alias_manager, snapshot_manager, cleanup_manager = _make_env(
         tmp_path
     )
@@ -295,26 +300,10 @@ def test_report_mode_computes_candidates_but_never_schedules(tmp_path):
         alias_manager=alias_manager,
         cleanup_manager=cleanup_manager,
         retention_keep_last=KEEP_LAST_MINIMAL,
-        # mode omitted -- must default to "report"
     )
 
-    assert result.mode == "report"
     assert leaked in result.scheduled_paths
-    assert cleanup_manager.get_pending_cleanups() == set(), (
-        "report mode must NEVER call cleanup_manager.schedule_cleanup()"
+    assert leaked in cleanup_manager.get_pending_cleanups(), (
+        "the reconciler must schedule deletion unconditionally -- there "
+        "is no off-by-default mode gating this behavior"
     )
-
-
-def test_invalid_mode_raises_value_error(tmp_path):
-    golden_repos_dir, alias_manager, snapshot_manager, cleanup_manager = _make_env(
-        tmp_path
-    )
-
-    with pytest.raises(ValueError):
-        reconcile_versioned_snapshots(
-            str(golden_repos_dir),
-            snapshot_manager=snapshot_manager,
-            alias_manager=alias_manager,
-            cleanup_manager=cleanup_manager,
-            mode="delete-everything",  # type: ignore[arg-type]
-        )

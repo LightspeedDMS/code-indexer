@@ -2117,119 +2117,14 @@ class GoldenRepoMetadataSqliteBackend:
 
         self._conn_manager.execute_atomic(operation)
 
-    def record_cidx_meta_conflict_failure(
-        self, golden_alias: str, target_sha: str, detail: str
-    ) -> int:
-        """
-        Record one cidx-meta backup conflict-resolution failure for a
-        golden repo (Bug #1539). Unlike ``record_refresh_integrity_failure``
-        (which always increments), this INCREMENTS only when
-        ``target_sha`` matches the previously stored target SHA for
-        ``golden_alias`` -- a different upstream target (new commits
-        landed, or history changed) resets the count to 1, since it is
-        not the same stuck condition and must not inherit an unrelated
-        prior tally.
-
-        Returns:
-            The consecutive-failure count after recording this one.
-
-        Raises:
-            ValueError: golden_alias, target_sha, or detail is
-                empty/blank (including whitespace-only).
-        """
-        if not golden_alias or not golden_alias.strip():
-            raise ValueError("golden_alias must be a non-empty string")
-        if not target_sha or not target_sha.strip():
-            raise ValueError("target_sha must be a non-empty string")
-        if not detail or not detail.strip():
-            raise ValueError("detail must be a non-empty string")
-
-        now = datetime.now(timezone.utc).isoformat()
-
-        def operation(conn):
-            row = conn.execute(
-                "SELECT consecutive_failure_count, last_target_sha "
-                "FROM cidx_meta_conflict_quarantine_state WHERE golden_alias = ?",
-                (golden_alias,),
-            ).fetchone()
-            if row is None:
-                conn.execute(
-                    "INSERT INTO cidx_meta_conflict_quarantine_state "
-                    "(golden_alias, consecutive_failure_count, last_target_sha, "
-                    "last_detail, first_failed_at, last_failed_at, updated_at) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                    (golden_alias, 1, target_sha, detail, now, now, now),
-                )
-                return 1
-
-            new_count = row[0] + 1 if row[1] == target_sha else 1
-            conn.execute(
-                "UPDATE cidx_meta_conflict_quarantine_state "
-                "SET consecutive_failure_count = ?, last_target_sha = ?, "
-                "last_detail = ?, last_failed_at = ?, updated_at = ? "
-                "WHERE golden_alias = ?",
-                (new_count, target_sha, detail, now, now, golden_alias),
-            )
-            return new_count
-
-        return self._conn_manager.execute_atomic(operation)  # type: ignore[no-any-return]
-
-    def reset_cidx_meta_conflict_failure(self, golden_alias: str) -> None:
-        """
-        Clear any persisted cidx-meta conflict-resolution failure/
-        quarantine state for a golden repo (Bug #1539) -- called on a
-        successful sync(). A no-op (never raises FOR AN UNKNOWN ALIAS)
-        when no row exists for ``golden_alias``.
-
-        Raises:
-            ValueError: golden_alias is empty/blank (including
-                whitespace-only).
-        """
-        if not golden_alias or not golden_alias.strip():
-            raise ValueError("golden_alias must be a non-empty string")
-
-        def operation(conn):
-            conn.execute(
-                "DELETE FROM cidx_meta_conflict_quarantine_state WHERE golden_alias = ?",
-                (golden_alias,),
-            )
-
-        self._conn_manager.execute_atomic(operation)
-
-    def get_cidx_meta_conflict_failure_state(
-        self, golden_alias: str
-    ) -> Optional[Dict[str, Any]]:
-        """
-        Return the currently persisted cidx-meta conflict-resolution
-        failure state for a golden repo, or None if it has never failed
-        (or was reset since).
-
-        Raises:
-            ValueError: golden_alias is empty/blank (including
-                whitespace-only).
-        """
-        if not golden_alias or not golden_alias.strip():
-            raise ValueError("golden_alias must be a non-empty string")
-
-        # Bug #1532/#1539: route the raw connection through
-        # guarded_connection() so close_all() cannot close it mid-read.
-        with self._conn_manager.guarded_connection() as conn:
-            row = conn.execute(
-                "SELECT golden_alias, consecutive_failure_count, last_target_sha, "
-                "last_detail, first_failed_at, last_failed_at "
-                "FROM cidx_meta_conflict_quarantine_state WHERE golden_alias = ?",
-                (golden_alias,),
-            ).fetchone()
-        if row is None:
-            return None
-        return {
-            "golden_alias": row[0],
-            "consecutive_failure_count": row[1],
-            "last_target_sha": row[2],
-            "last_detail": row[3],
-            "first_failed_at": row[4],
-            "last_failed_at": row[5],
-        }
+    # Bug #1539's record_cidx_meta_conflict_failure /
+    # reset_cidx_meta_conflict_failure / get_cidx_meta_conflict_failure_state
+    # are RETIRED as of Bug #1555's root-cause fix: CidxMetaBackupSync.sync()
+    # is now a plain mirror-push that can never raise
+    # ConflictResolutionFailedError, so nothing ever calls these again. The
+    # cidx_meta_conflict_quarantine_state table (ensure_table_exists above)
+    # is left in place per this project's backward-compatible-migrations
+    # rule -- it simply gains no new rows.
 
     def record_refresh_integrity_failure(self, golden_alias: str, detail: str) -> int:
         """

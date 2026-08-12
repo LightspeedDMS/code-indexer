@@ -181,7 +181,6 @@ def _log_vsr_sweep_completion(
     # ever imported lazily inside the Bug #1567 startup block's own
     # try/except (mirrors this file's existing latency_tracker: Any
     # convention on make_lifespan).
-    mode: str,
 ) -> None:
     """Bug #1567c: unconditional completion summary for the versioned-
     snapshot orphan sweep -- emitted every time the sweep runs, whether
@@ -189,6 +188,9 @@ def _log_vsr_sweep_completion(
     from a healthy zero-candidate run. INFO level always (never WARNING
     for a clean run -- see Bug #1565 lesson on by-design-condition
     WARNING noise).
+
+    Deletion is unconditional (Bug #1567: a fix must not ship behind an
+    off-by-default toggle) -- there is no report/delete mode left to log.
     """
     if vsr_result is None:
         # Defensive only -- the real startup call site always passes a
@@ -198,12 +200,11 @@ def _log_vsr_sweep_completion(
         # Abort cases (single-flight conflict / unhealthy base dir) already
         # log their own message inside the reconciler; nothing more to add.
         return
-    actually_scheduled = mode == "delete" and bool(vsr_result.scheduled_paths)
+    actually_scheduled = bool(vsr_result.scheduled_paths)
     logger.info(
-        "Startup: Bug #1567 versioned-snapshot orphan sweep completed "
-        "(mode=%s): scanned %d namespace(s) %s, found %d candidate(s), "
-        "%d namespace(s) skipped %s, deletions_scheduled=%s",
-        mode,
+        "Startup: Bug #1567 versioned-snapshot orphan sweep completed: "
+        "scanned %d namespace(s) %s, found %d candidate(s), %d "
+        "namespace(s) skipped %s, deletions_scheduled=%s",
         len(vsr_result.scanned_namespaces),
         vsr_result.scanned_namespaces,
         len(vsr_result.scheduled_paths),
@@ -2539,37 +2540,30 @@ def make_lifespan(
             # Bug #1567: orphan sweep for leaked `.versioned` snapshots.
             # CleanupManager's durable queue (wired above) only stops
             # FUTURE leaks -- this heals the EXISTING backlog every
-            # installation already has. mode is READ FROM THE RUNTIME
-            # CONFIG (Bug #1567 Gap 2, versioned_snapshot_reconcile_config,
-            # Web UI Config Screen) -- default "report" is FAIL-CLOSED: it
-            # computes and logs candidates WITHOUT scheduling any deletion,
-            # replacing a mass-deletion ratio guard the maintainer
-            # explicitly rejected (see versioned_snapshot_reconciler.py's
-            # module docstring). Promoting to mode="delete" is a
-            # deliberate, explicit operator action via the Web UI -- never
-            # a code-level default. Fail-soft: never blocks startup.
-            # Read-only in report mode, so running inline (matching the
-            # Bug #1317 block immediately above) is safe.
+            # installation already has. Deletion is UNCONDITIONAL: an
+            # earlier revision gated it behind a Web UI report/delete mode
+            # setting (since removed), but shipping "report" as the
+            # default meant the leak (229 snapshots for one repo, ~120GB,
+            # confirmed live) stayed unfixed on every deployment -- a bug
+            # fix must not ship behind an off-by-default toggle. The real
+            # safety mechanisms (minimum-absolute-age floor, keep-last-N
+            # retention, cross-alias pointer protection, ts_live anchoring
+            # -- see versioned_snapshot_reconciler.py's module docstring)
+            # decide WHICH paths are safe to delete; WHETHER to delete is
+            # no longer a decision exposed here.
+            # Fail-soft: never blocks startup.
+            #
+            # Bug #1570 Half 2: golden_repo_manager is also passed so a
+            # namespace whose alias pointer was deleted by a PAST removal
+            # (before Half 1's write-path fix existed) can be reclaimed --
+            # see versioned_snapshot_reclaim.py's module docstring for the
+            # conjunctive discriminator that keeps this fail-closed for a
+            # repo that still exists.
             if global_lifecycle_manager is not None and snapshot_manager is not None:
                 try:
                     from code_indexer.server.services.versioned_snapshot_reconciler import (
                         reconcile_versioned_snapshots,
                     )
-
-                    try:
-                        _vsr_mode = (
-                            get_config_service()
-                            .get_config()
-                            .versioned_snapshot_reconcile_config.mode
-                        )
-                    except Exception as _vsr_mode_exc:
-                        logger.warning(
-                            "Startup: failed to read versioned_snapshot_"
-                            "reconcile_config.mode (falling back to "
-                            "fail-closed 'report'): %s",
-                            _vsr_mode_exc,
-                        )
-                        _vsr_mode = "report"
 
                     _vsr_result = reconcile_versioned_snapshots(
                         str(golden_repos_dir),
@@ -2577,13 +2571,13 @@ def make_lifespan(
                         alias_manager=global_lifecycle_manager.refresh_scheduler.alias_manager,
                         cleanup_manager=global_lifecycle_manager.cleanup_manager,
                         job_tracker=job_tracker,
-                        mode=_vsr_mode,
+                        golden_repo_manager=golden_repo_manager,
                     )
                     # Bug #1567c: unconditional -- previously only logged
                     # when something was found, making a healthy
                     # zero-candidate sweep indistinguishable from one that
                     # silently never ran.
-                    _log_vsr_sweep_completion(_vsr_result, _vsr_mode)
+                    _log_vsr_sweep_completion(_vsr_result)
                 except Exception as _vsr_exc:
                     logger.warning(
                         "Startup: Bug #1567 versioned-snapshot orphan sweep "

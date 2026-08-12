@@ -66,9 +66,17 @@ falsely appear superseded. NO ratio threshold/confirmation
 counter/abort-on-too-many heuristic anywhere here: Bug #1382 is the
 precedent for why that backfires (a genuine orphan set tripped a >50%
 breaker every restart for ~2 months, healing nothing). The honest
-substitute is `mode`: "report" (default, fail-closed) computes and logs
-candidates WITHOUT scheduling deletion; "delete" is an explicit operator
-promotion.
+substitute is the positive-evidence algorithm itself, not a mode switch:
+deletion is UNCONDITIONAL -- a fix for a real leak (229 snapshots for one
+repo, ~120GB, confirmed live) must not ship behind an off-by-default
+toggle, or the leak is not actually fixed on any deployment. An earlier
+revision of this module gated scheduling behind a `mode` parameter
+("report" default / "delete" opt-in); that toggle was removed because
+shipping "report" as the default meant the leak stayed unfixed
+everywhere. WHICH paths are safe to delete is still gated -- by the
+minimum-absolute-age floor, keep-last-N retention, cross-alias pointer
+protection, and the ts_live anchor below -- WHETHER to delete at all is
+no longer a decision this module exposes.
 
 FACTS RECORDED, NOT ACTED ON: `previous_path` is NOT a rollback mechanism
 (no rollback code exists; `_execute_refresh` schedules it for deletion
@@ -91,7 +99,7 @@ import logging
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Dict, List, Literal, Optional, Set, Tuple
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Tuple
 
 # Bug #1567 Gap 1: the pointer-reading + ts_live-anchored supersession
 # predicate is now defined ONCE in global_repos/snapshot_retention.py and
@@ -113,6 +121,17 @@ from code_indexer.global_repos.snapshot_retention import (
     resolve_retention_keep_last,
 )
 from code_indexer.server.services.job_tracker import DuplicateJobError
+
+# Bug #1570 Half 2: reclaiming namespaces already leaked by golden-repo
+# removal (as opposed to Half 1's write-path fix, which stops FUTURE
+# leaks). See versioned_snapshot_reclaim.py's module docstring for the
+# full conjunctive discriminator and rationale.
+from code_indexer.server.services.versioned_snapshot_reclaim import (
+    GoldenRepoManagerLike,
+    namespace_is_genuinely_orphaned,
+    reclaim_orphaned_namespace,
+    resolve_registered_aliases,
+)
 
 __all__ = [
     "_protected_snapshot_paths",
@@ -139,9 +158,6 @@ DEFAULT_RECONCILE_SUBMITTER = "system-versioned-snapshot-reconcile"
 RECONCILE_OPERATION_TYPE = "versioned_snapshot_reconcile_sweep"
 RECONCILE_SWEEP_SENTINEL_ALIAS = "__versioned_snapshot_reconcile_sweep__"
 
-SweepMode = Literal["report", "delete"]
-_VALID_MODES = ("report", "delete")
-
 #: job_tracker is typed Any deliberately: callers pass either the real
 #: JobTracker (server/services/job_tracker.py) or a duck-typed test double
 #: exposing register_job_if_no_conflict/complete_job/fail_job. A concrete
@@ -155,14 +171,18 @@ JobTrackerLike = Any
 class VersionedSnapshotReconcileResult:
     """Summary of one orphan-sweep pass over `.versioned/`."""
 
-    mode: str = "report"
     scanned_namespaces: List[str] = field(default_factory=list)
     #: bare namespace -> reason skipped. Never set for a reconciled one.
     skipped_namespaces: Dict[str, str] = field(default_factory=dict)
-    #: Candidates found safe to delete. In "report" mode NEVER scheduled
-    #: (recorded for visibility only). In "delete" mode every entry was
-    #: also passed to cleanup_manager.schedule_cleanup().
+    #: Candidates found safe to delete -- every entry here was also passed
+    #: to cleanup_manager.schedule_cleanup() (deletion is unconditional;
+    #: there is no report-only mode).
     scheduled_paths: List[str] = field(default_factory=list)
+    #: Bug #1570 Half 2: namespaces proven genuinely orphaned (no base
+    #: clone, no alias pointer, not a registry row) and fully reclaimed --
+    #: a strict subset of scanned_namespaces, disjoint from
+    #: skipped_namespaces.
+    reclaimed_namespaces: List[str] = field(default_factory=list)
     #: True only when the WHOLE sweep was refused (base-dir OSError or a
     #: single-flight conflict) -- never for a per-repo skip.
     aborted: bool = False
@@ -225,10 +245,10 @@ def _finalize_sweep_job(
             job_tracker.complete_job(
                 job_id,
                 result={
-                    "mode": result.mode,
                     "scanned": len(result.scanned_namespaces),
                     "candidates": len(result.scheduled_paths),
                     "skipped": len(result.skipped_namespaces),
+                    "reclaimed": len(result.reclaimed_namespaces),
                 },
             )
     except Exception as bookkeeping_error:  # noqa: BLE001
@@ -247,25 +267,29 @@ def reconcile_versioned_snapshots(
     job_tracker: Optional[JobTrackerLike] = None,
     retention_keep_last: Optional[int] = None,
     min_absolute_age_seconds: float = DEFAULT_MIN_ABSOLUTE_AGE_SECONDS,
-    mode: SweepMode = "report",
     submitter_username: str = DEFAULT_RECONCILE_SUBMITTER,
+    golden_repo_manager: Optional[GoldenRepoManagerLike] = None,
 ) -> VersionedSnapshotReconcileResult:
-    """Scan `.versioned/` for superseded snapshots and, in "delete" mode,
-    schedule their deletion through the existing refcount+retention-age-
-    gated CleanupManager. See the module docstring for the full contract.
+    """Scan `.versioned/` for superseded snapshots and schedule their
+    deletion, unconditionally, through the existing refcount+retention-
+    age-gated CleanupManager. See the module docstring for the full
+    contract.
 
     ``alias_manager`` is used ONLY for its ``aliases_dir`` path -- pointer
-    files are read directly (module docstring hole A). ``mode="report"``
-    (default) is fail-closed: candidates are computed and recorded but
-    never scheduled; ``"delete"`` is an explicit operator promotion.
+    files are read directly (module docstring hole A). Deletion is NOT
+    gated by a mode flag: a computed candidate is safe to delete precisely
+    because it survived the age-floor, keep-last-N, and pointer-protection
+    checks in ``compute_snapshot_deletion_candidates`` -- there is no
+    separate "report only" pass.
 
-    Raises:
-        ValueError: *mode* is neither "report" nor "delete".
+    ``golden_repo_manager`` (Bug #1570 Half 2, optional): when provided,
+    enables reclaiming a namespace whose alias pointer is missing/
+    unreadable AND whose base clone is absent AND whose alias is not a
+    registered `golden_repos` row -- see versioned_snapshot_reclaim.py's
+    module docstring. Omitted (the default, matching every pre-#1570
+    caller), such a namespace is skipped exactly as before.
     """
-    if mode not in _VALID_MODES:
-        raise ValueError(f"mode must be one of {_VALID_MODES}, got {mode!r}")
-
-    result = VersionedSnapshotReconcileResult(mode=mode)
+    result = VersionedSnapshotReconcileResult()
     if snapshot_manager is None:
         return result
 
@@ -282,7 +306,7 @@ def reconcile_versioned_snapshots(
             cleanup_manager=cleanup_manager,
             retention_keep_last=retention_keep_last,
             min_absolute_age_seconds=min_absolute_age_seconds,
-            mode=mode,
+            golden_repo_manager=golden_repo_manager,
             result=result,
         )
     except Exception as exc:  # noqa: BLE001 -- reconcile safety
@@ -311,12 +335,17 @@ class _SweepContext:
     pointers: Dict[str, Tuple[str, Optional[str]]]
     referenced_paths: Set[str]
     keep_last: int
+    #: Bug #1570 Half 2: None means "no registry signal available" (no
+    #: golden_repo_manager supplied, or the registry read itself failed)
+    #: -- reclaim can never fire in that case (fail-closed).
+    registered_aliases: Optional[Set[str]] = None
 
 
 def _build_sweep_context(
     golden_repos_path: Path,
     alias_manager: "AliasManager",
     retention_keep_last: Optional[int],
+    golden_repo_manager: Optional[GoldenRepoManagerLike],
     result: VersionedSnapshotReconcileResult,
 ) -> Optional[_SweepContext]:
     """Resolves both base-directory health gates plus the global pointer
@@ -354,7 +383,11 @@ def _build_sweep_context(
         else resolve_retention_keep_last()
     )
     return _SweepContext(
-        namespace_entries, pointers, globally_referenced_paths(pointers), keep_last
+        namespace_entries,
+        pointers,
+        globally_referenced_paths(pointers),
+        keep_last,
+        registered_aliases=resolve_registered_aliases(golden_repo_manager),
     )
 
 
@@ -366,7 +399,7 @@ def _run_sweep(
     cleanup_manager: "CleanupManager",
     retention_keep_last: Optional[int],
     min_absolute_age_seconds: float,
-    mode: SweepMode,
+    golden_repo_manager: Optional[GoldenRepoManagerLike],
     result: VersionedSnapshotReconcileResult,
 ) -> None:
     """Enumerate `.versioned/`, build the pointer union ONCE, reconcile
@@ -374,7 +407,11 @@ def _run_sweep(
     base-directory health gates may abort the whole sweep."""
     golden_repos_path = Path(golden_repos_dir)
     context = _build_sweep_context(
-        golden_repos_path, alias_manager, retention_keep_last, result
+        golden_repos_path,
+        alias_manager,
+        retention_keep_last,
+        golden_repo_manager,
+        result,
     )
     if context is None:
         return
@@ -390,7 +427,7 @@ def _run_sweep(
             referenced_paths=context.referenced_paths,
             keep_last=context.keep_last,
             min_absolute_age_seconds=min_absolute_age_seconds,
-            mode=mode,
+            registered_aliases=context.registered_aliases,
             result=result,
         )
 
@@ -405,7 +442,7 @@ def _reconcile_one_namespace(
     referenced_paths: Set[str],
     keep_last: int,
     min_absolute_age_seconds: float,
-    mode: SweepMode,
+    registered_aliases: Optional[Set[str]],
     result: VersionedSnapshotReconcileResult,
 ) -> None:
     """Reconcile ONE namespace. Genuinely never raises -- any failure
@@ -421,7 +458,7 @@ def _reconcile_one_namespace(
             referenced_paths=referenced_paths,
             keep_last=keep_last,
             min_absolute_age_seconds=min_absolute_age_seconds,
-            mode=mode,
+            registered_aliases=registered_aliases,
             result=result,
         )
     except Exception as namespace_error:  # noqa: BLE001 -- per-repo isolation
@@ -451,9 +488,10 @@ def _debug_log_namespace_decision(
     """Bug #1567c: DEBUG-only breakdown of WHY each snapshot in this
     namespace was kept or became a candidate. Purely observational --
     computed from the same inputs compute_snapshot_deletion_candidates
-    already used, but never influences which paths get deleted. An
-    operator promoting versioned_snapshot_reconcile_config.mode to
-    "delete" needs to see this reasoning first.
+    already used, but never influences which paths get deleted. Since
+    deletion is unconditional, an operator wanting to understand WHY a
+    given snapshot was (or was not) deleted needs this reasoning
+    available at DEBUG level.
 
     The "kept" buckets below can overlap (a snapshot can be both
     referenced by a pointer AND within keep-last-N) -- this is a
@@ -502,11 +540,28 @@ def _reconcile_one_namespace_body(
     referenced_paths: Set[str],
     keep_last: int,
     min_absolute_age_seconds: float,
-    mode: SweepMode,
+    registered_aliases: Optional[Set[str]],
     result: VersionedSnapshotReconcileResult,
 ) -> None:
     governing = resolve_governing_pointer(bare_namespace, pointers)
     if governing is None:
+        # Bug #1570 Half 2: before fail-closed-skipping, check whether this
+        # namespace has been PROVEN genuinely orphaned (no base clone, not
+        # a registry row) -- if so it can be safely reclaimed instead of
+        # skipped forever. A repo that still exists but has a merely
+        # unreadable pointer right now is never reclaimed: it fails this
+        # check via either the registry or the base-clone conjunct.
+        if namespace_is_genuinely_orphaned(
+            bare_namespace, golden_repos_path, registered_aliases
+        ):
+            scheduled = reclaim_orphaned_namespace(
+                bare_namespace,
+                snapshot_manager=snapshot_manager,
+                cleanup_manager=cleanup_manager,
+            )
+            result.scheduled_paths.extend(scheduled)
+            result.reclaimed_namespaces.append(bare_namespace)
+            return
         result.skipped_namespaces[bare_namespace] = (
             "alias pointer missing or unreadable -- skipping entirely "
             "(fail-closed, zero deletions for this repo)"
@@ -579,5 +634,4 @@ def _reconcile_one_namespace_body(
         if not snapshot_manager.is_versioned_snapshot(path):
             continue
         result.scheduled_paths.append(path)
-        if mode == "delete":
-            cleanup_manager.schedule_cleanup(path)
+        cleanup_manager.schedule_cleanup(path)

@@ -5,7 +5,7 @@ metadata:
   node_type: memory
   type: project
   originSessionId: bf453024-c658-4c98-bc2d-eebbb3ac44f3
-  modified: 2026-08-03T20:23:38.214Z
+  modified: 2026-08-12T13:12:06.045Z
 ---
 
 I (the agent) own and am responsible for the systemd-managed `cidx-server.service` running on this local development machine, and for the code-indexer checkout it runs from (`/home/jsbattig/code-indexer` -- separate from the interactive session working directory `/home/jsbattig/Dev/code-indexer`).
@@ -34,5 +34,23 @@ Recovery (safe order): confirm `active_jobs == 0` via `/health` FIRST, `git -C /
 pull --ff-only origin development`, `kill -TERM <out-of-band pid>`, wait for the port to free, then
 `sudo systemctl start cidx-server`. Verify `version`, `NRestarts=0`, and that jobs created AFTER
 startup complete rather than being marked restart-orphaned.
+
+**It is mine to USE, not merely to maintain (user, 2026-08-12):** this server exists so I can TEST MY
+OWN WORK on it. That is its entire purpose. So:
+
+- After landing a change, update this install to the current `development` tip and RESTART it, then
+  exercise the change against it. Do not leave it several versions behind while verifying only on a
+  shared remote environment -- that wastes the one environment I am free to break.
+- It is the correct first place to try anything I would hesitate to try on a shared environment:
+  destructive config modes, cleanup/reconciler sweeps, migrations, restart-dependent behaviour.
+  Reach for it BEFORE reaching for a remote environment, not after.
+- Restarting it is normal maintenance, not an escalation -- confirm `active_jobs == 0` first (a
+  restart kills in-flight long jobs), then restart via systemd.
+
+Failing to use it is a real miss: on 2026-08-12 I shipped a seven-item batch and verified it only on
+the remote environment while this server sat four minor versions stale, and the user rightly called
+that out. Its data also makes it a genuinely better test target than a clean instance -- it carries
+real accumulated repos and artifacts, which is what surfaced a reconciler coverage gap that a fresh
+instance could not have shown.
 
 **How to apply:** In any future session on this machine, proactively check `cidx-server.service`'s health/branch/auto-update state rather than assuming someone else owns it or that it's out of scope. Fix drift (wrong branch, crash loops, stale deploys) as part of normal maintenance, not as a special escalation. Also verify the server is actually running FROM the dedicated checkout under systemd -- an `active` unit is not enough if something else holds the port.

@@ -25,12 +25,9 @@ import sqlite3
 import threading
 import time
 from pathlib import Path
-from typing import Callable, Dict, List, Optional
-
-import pytest
+from typing import List
 
 from code_indexer.server.storage.database_manager import DatabaseConnectionManager
-from code_indexer.server.storage.sqlite_backends import GoldenRepoMetadataSqliteBackend
 
 # Time the slow direct-read sleeps while holding the connection open, widening
 # the race window deterministically (mirrors the execute_atomic race test).
@@ -161,104 +158,3 @@ def test_bare_get_connection_races_with_close_all(tmp_path: Path) -> None:
     assert len(errors) == 1, f"expected exactly one race error, got: {errors}"
     assert isinstance(errors[0], sqlite3.ProgrammingError), type(errors[0])
     assert "closed database" in str(errors[0]).lower(), errors[0]
-
-
-def _slow_get_connection_factory(
-    real_get_connection: Callable[[], sqlite3.Connection], started: threading.Event
-) -> Callable[[], sqlite3.Connection]:
-    """Build a get_connection() replacement that first delegates to the real
-    implementation (creating/registering the calling thread's connection --
-    the same registration close_all() iterates), THEN signals `started` and
-    sleeps before returning that connection object. The production method
-    under test has no injectable slow point of its own, so this widens the
-    race window between connection registration and the SQL read that
-    follows, deterministically -- mirroring the sleep-inside technique this
-    file's other race tests use (get/register the connection first, THEN
-    signal readiness, THEN let close_all() race the still-pending read)."""
-
-    def slow_get_connection() -> sqlite3.Connection:
-        conn = real_get_connection()
-        started.set()
-        time.sleep(_READ_HOLD_SECONDS)
-        return conn
-
-    return slow_get_connection
-
-
-def _read_cidx_meta_conflict_state(
-    backend: GoldenRepoMetadataSqliteBackend,
-    golden_alias: str,
-    results: List[Optional[Dict[str, object]]],
-    errors: List[Exception],
-) -> None:
-    """Reader body: records the production method's return value, or
-    whatever exception a connection closed out from under it raises."""
-    try:
-        results.append(backend.get_cidx_meta_conflict_failure_state(golden_alias))
-    except Exception as exc:  # pragma: no cover - failure path under test
-        errors.append(exc)
-
-
-def test_get_cidx_meta_conflict_failure_state_does_not_race_with_close_all(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Regression test for Bug #1532/#1539.
-
-    get_cidx_meta_conflict_failure_state() used a BARE get_connection() read
-    (unlike its execute_atomic()-protected siblings
-    record_cidx_meta_conflict_failure()/reset_cidx_meta_conflict_failure()),
-    exposing it to the same close_all() race
-    test_bare_get_connection_races_with_close_all pins above. Drives the
-    real production method on a background thread while close_all() runs on
-    the main thread. Protected code (guarded_connection()) blocks close_all()
-    until the read finishes; unprotected code lets close_all() close the
-    connection mid-sleep, raising sqlite3.ProgrammingError once the read
-    resumes.
-    """
-    golden_alias = "alias-guard-1539"
-    db_path = tmp_path / "cidx_meta_conflict_guard_1539.db"
-    backend = GoldenRepoMetadataSqliteBackend(str(db_path))
-    mgr = backend._conn_manager
-    started = threading.Event()
-    results: List[Optional[Dict[str, object]]] = []
-    errors: List[Exception] = []
-
-    try:
-        backend.ensure_table_exists()
-        backend.record_cidx_meta_conflict_failure(
-            golden_alias, "sha-abc123", "conflict detail text"
-        )
-        monkeypatch.setattr(
-            mgr,
-            "get_connection",
-            _slow_get_connection_factory(mgr.get_connection, started),
-        )
-
-        reader_thread = threading.Thread(
-            target=_read_cidx_meta_conflict_state,
-            args=(backend, golden_alias, results, errors),
-        )
-        reader_thread.start()
-        try:
-            assert started.wait(timeout=_STARTED_WAIT_TIMEOUT_SECONDS), (
-                "reader thread never entered get_cidx_meta_conflict_failure_state"
-            )
-            time.sleep(_PRE_CLOSE_SETTLE_SECONDS)
-        finally:
-            # Must block until the reader's read finishes rather than
-            # closing the connection out from under it.
-            mgr.close_all()
-        reader_thread.join(timeout=_READER_JOIN_TIMEOUT_SECONDS)
-        assert not reader_thread.is_alive(), "reader thread did not finish"
-    finally:
-        mgr.close_all()
-
-    assert not errors, (
-        "get_cidx_meta_conflict_failure_state() raised while racing "
-        f"close_all() -- connection was closed out from under an "
-        f"in-flight read: {errors}"
-    )
-    assert results and results[0] is not None
-    assert results[0]["golden_alias"] == golden_alias
-    assert results[0]["consecutive_failure_count"] == 1
-    assert results[0]["last_target_sha"] == "sha-abc123"
