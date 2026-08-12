@@ -638,6 +638,15 @@ class IndexingConfig:
     # boundaries and skipped (with a WARNING) at command-build sites.
     temporal_all_branches_enabled: bool = False
 
+    # EVO-65484: gate the synchronous meta-description / lifecycle generation that
+    # runs inside every golden-repo add worker (via the orchestrator -> Claude seam).
+    # Default True (unchanged behavior). Set False to skip it: when that seam is
+    # failing (e.g. a 401 on leased LLM creds), the description step still adds
+    # latency + error spam to every add, so disabling it lets golden-repo
+    # registration keep up with the catalog. Purely additive metadata -- disabling
+    # never affects search/index correctness, only the generated description.
+    golden_description_generation_enabled: bool = True
+
     # Story #223 - AC1: Configurable file extensions for indexing.
     # 60 unique extensions with leading dots matching CLI Config.file_extensions defaults.
     indexable_extensions: List[str] = field(

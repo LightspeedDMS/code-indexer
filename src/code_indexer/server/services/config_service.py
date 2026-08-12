@@ -833,6 +833,12 @@ class ConfigService:
                     if config.indexing_config is not None
                     else False
                 ),
+                # EVO-65484: golden-repo description-generation gate display wiring
+                "golden_description_generation_enabled": (
+                    config.indexing_config.golden_description_generation_enabled
+                    if config.indexing_config is not None
+                    else True
+                ),
             },
             # Story #323 - Wiki metadata fields configuration
             # Story #325 - Configurable metadata display order
@@ -2769,6 +2775,17 @@ class ConfigService:
             logger.info(
                 "Updated indexing.temporal_all_branches_enabled to %s",
                 indexing.temporal_all_branches_enabled,
+                extra={"correlation_id": get_correlation_id()},
+            )
+            return
+
+        # EVO-65484: golden-repo description-generation gate (default ON).
+        if key == "golden_description_generation_enabled":
+            indexing.golden_description_generation_enabled = _parse_bool(value)
+            self.save_config(config)
+            logger.info(
+                "Updated indexing.golden_description_generation_enabled to %s",
+                indexing.golden_description_generation_enabled,
                 extra={"correlation_id": get_correlation_id()},
             )
             return

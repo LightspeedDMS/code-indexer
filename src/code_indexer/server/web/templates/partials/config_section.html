@@ -1883,6 +1883,11 @@ function saveLlmCredsConfig() {
                         <td class="config-value">{{ 'Enabled' if config.indexing.temporal_all_branches_enabled else 'Disabled' }}</td>
                         <td class="config-note"><small>When disabled (default), golden temporal indexing tracks only the registered branch; all-branches requests are rejected</small></td>
                     </tr>
+                    <tr>
+                        <td class="config-label">Golden Description Generation</td>
+                        <td class="config-value">{{ 'Enabled' if config.indexing.golden_description_generation_enabled else 'Disabled' }}</td>
+                        <td class="config-note"><small>When disabled, golden-repo add skips the description/lifecycle generation (orchestrator seam). Use when that seam is failing so registration keeps up; only omits the generated description, never search/index data</small></td>
+                    </tr>
                 </tbody>
             </table>
             <div class="section-actions">
@@ -1942,6 +1947,15 @@ function saveLlmCredsConfig() {
                     <input type="checkbox" id="indexing-temporal-all-branches-enabled" name="temporal_all_branches_enabled" value="true" {% if config.indexing.temporal_all_branches_enabled %}checked{% endif %}>
                     Temporal All-Branches Indexing
                     <small>When disabled (default), golden temporal indexing tracks only the branch registered at golden-repo registration. Enabling later requires no re-index.</small>
+                </label>
+                <label for="indexing-golden-description-generation-enabled">
+                    <!-- EVO-65484: hidden fallback guarantees the key is always submitted
+                         even when unchecked (browsers omit unchecked checkboxes) -- same
+                         pattern as the temporal_all_branches_enabled field above. -->
+                    <input type="hidden" name="golden_description_generation_enabled" value="false">
+                    <input type="checkbox" id="indexing-golden-description-generation-enabled" name="golden_description_generation_enabled" value="true" {% if config.indexing.golden_description_generation_enabled %}checked{% endif %}>
+                    Golden Description Generation
+                    <small>Enabled by default. Disable to skip the synchronous description/lifecycle generation on golden-repo add (the orchestrator -> Claude seam) -- use when that seam is failing so registration throughput is not throttled. Only the generated description is omitted; search/index data is unaffected.</small>
                 </label>
             </div>
             <div class="form-actions">

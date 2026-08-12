@@ -841,15 +841,27 @@ class GoldenRepoManager:
                 # exceptions), but we wrap the call in a belt-and-suspenders
                 # try/except for consistency with the other hooks and to
                 # guard against any unexpected error in the wiring itself.
-                try:
-                    self._register_lifecycle_after_registration(
-                        alias, submitter_username
-                    )
-                except Exception as hook_error:
-                    logging.error(
-                        f"Lifecycle registration hook failed for '{alias}': "
-                        f"{hook_error}. Golden repository added but lifecycle "
-                        f"detection rebuild was not scheduled."
+                # EVO-65484: gate the synchronous description/lifecycle generation.
+                # It runs the orchestrator -> Claude seam inside this add worker;
+                # when disabled (config, default ON) we skip it so a failing seam
+                # (e.g. 401 on leased LLM creds) can't add per-add latency + spam.
+                # Skipping it only omits the generated description -- never affects
+                # the repo's search/index correctness.
+                if self._golden_description_generation_enabled():
+                    try:
+                        self._register_lifecycle_after_registration(
+                            alias, submitter_username
+                        )
+                    except Exception as hook_error:
+                        logging.error(
+                            f"Lifecycle registration hook failed for '{alias}': "
+                            f"{hook_error}. Golden repository added but lifecycle "
+                            f"detection rebuild was not scheduled."
+                        )
+                else:
+                    logging.info(
+                        "EVO-65484: golden_description_generation_enabled=false; "
+                        f"skipping description/lifecycle generation for '{alias}'."
                     )
 
                 return {
@@ -916,6 +928,29 @@ class GoldenRepoManager:
         )
         shutil.rmtree(clone_path, ignore_errors=True)
         return True
+
+    def _golden_description_generation_enabled(self) -> bool:
+        """EVO-65484: whether to run description/lifecycle generation on golden add.
+
+        Reads ``indexing.golden_description_generation_enabled`` (default True).
+        Fail-open: any error resolving the config returns True so the (historical)
+        generation still runs -- the flag is an opt-OUT knob, never a silent skip.
+        """
+        try:
+            from ..services.config_service import get_config_service
+
+            indexing = get_config_service().get_config().indexing_config
+            if indexing is None:
+                return True
+            return bool(
+                getattr(indexing, "golden_description_generation_enabled", True)
+            )
+        except Exception as exc:  # noqa: BLE001 -- config read must never block add
+            logging.warning(
+                "EVO-65484: could not read golden_description_generation_enabled "
+                f"({exc}); defaulting to enabled."
+            )
+            return True
 
     def _register_lifecycle_after_registration(
         self, alias: str, submitter_username: str
