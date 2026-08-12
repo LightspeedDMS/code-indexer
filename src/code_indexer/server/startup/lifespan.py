@@ -2512,30 +2512,52 @@ def make_lifespan(
             # fail-soft, log the count, never block startup. Correct on
             # both SQLite (solo) and PostgreSQL (cluster) since
             # list_golden_repos() always queries the shared backend.
+            #
+            # Production-scale hazard fix: reconcile_golden_repo_registry is
+            # a plain synchronous `def` whose _run_sweep() performs one
+            # filesystem resolution (get_actual_repo_path) PER GOLDEN REPO.
+            # At production scale (~900 golden repos) that is ~900 blocking
+            # metadata ops; called bare inside this async lifespan it froze
+            # the ENTIRE event loop for the sweep's whole duration -- and
+            # since the cow-storage mount is `hard` NFSv3, an unresponsive
+            # NFS server makes os.stat() block in uninterruptible kernel
+            # retry with NO timeout, i.e. a permanently hung server at boot
+            # rather than merely a slow one. Offloaded via
+            # anyio.to_thread.run_sync, mirroring the sibling
+            # `_run_vsr_sweep` closure below (Bug #1567) exactly. Backgrounded
+            # via asyncio.create_task (not awaited) because nothing later in
+            # lifespan reads the reconcile result -- same rationale as that
+            # sibling.
             if golden_repo_manager is not None:
-                try:
-                    from code_indexer.server.services.golden_repo_reconciler import (
-                        reconcile_golden_repo_registry,
-                    )
 
-                    _reconcile_result = reconcile_golden_repo_registry(
-                        golden_repo_manager
-                    )
-                    if _reconcile_result.orphans_found:
-                        logger.info(
-                            "Startup: Bug #1317 reconcile found %d golden-repo "
-                            "registry-orphan(s) (%d removal(s) submitted, %d "
-                            "failed to submit): %s",
-                            len(_reconcile_result.orphans_found),
-                            len(_reconcile_result.orphans_removed),
-                            len(_reconcile_result.orphans_failed),
-                            _reconcile_result.orphans_found,
+                async def _run_golden_repo_reconcile_sweep() -> None:
+                    try:
+                        import anyio.to_thread as _to_thread
+                        from code_indexer.server.services.golden_repo_reconciler import (
+                            reconcile_golden_repo_registry,
                         )
-                except Exception as _gre:
-                    logger.warning(
-                        "Startup: golden-repo registry-orphan reconcile failed: %s",
-                        _gre,
-                    )
+
+                        _reconcile_result = await _to_thread.run_sync(
+                            lambda: reconcile_golden_repo_registry(golden_repo_manager)
+                        )
+                        if _reconcile_result.orphans_found:
+                            logger.info(
+                                "Startup: Bug #1317 reconcile found %d "
+                                "golden-repo registry-orphan(s) (%d "
+                                "removal(s) submitted, %d failed to "
+                                "submit): %s",
+                                len(_reconcile_result.orphans_found),
+                                len(_reconcile_result.orphans_removed),
+                                len(_reconcile_result.orphans_failed),
+                                _reconcile_result.orphans_found,
+                            )
+                    except Exception as _gre:  # noqa: BLE001 -- startup safety
+                        logger.warning(
+                            "Startup: golden-repo registry-orphan reconcile failed: %s",
+                            _gre,
+                        )
+
+                asyncio.create_task(_run_golden_repo_reconcile_sweep())
 
             # Bug #1567: orphan sweep for leaked `.versioned` snapshots.
             # CleanupManager's durable queue (wired above) only stops
@@ -2560,30 +2582,51 @@ def make_lifespan(
             # conjunctive discriminator that keeps this fail-closed for a
             # repo that still exists.
             if global_lifecycle_manager is not None and snapshot_manager is not None:
-                try:
-                    from code_indexer.server.services.versioned_snapshot_reconciler import (
-                        reconcile_versioned_snapshots,
-                    )
+                # Production-scale hazard fix: reconcile_versioned_snapshots()
+                # is a plain synchronous `def` performing ~18 filesystem ops
+                # per `.versioned/` namespace. At production scale (~900
+                # golden repos) that is ~16K blocking metadata ops; called
+                # bare inside this async lifespan it froze the ENTIRE event
+                # loop for the sweep's whole duration -- and since the
+                # cow-storage mount is `hard` NFSv3, an unresponsive NFS
+                # server makes os.stat() block in uninterruptible kernel
+                # retry with NO timeout, i.e. a permanently hung server at
+                # boot rather than merely a slow one. Offloaded via
+                # anyio.to_thread.run_sync, mirroring the sibling
+                # `_run_orphan_sweep` closure above (Story #1032 AC8 / HIGH
+                # #3) exactly. Backgrounded via asyncio.create_task (not
+                # awaited) because nothing later in lifespan reads
+                # _vsr_result -- same rationale as that sibling.
+                async def _run_vsr_sweep() -> None:
+                    try:
+                        import anyio.to_thread as _to_thread
+                        from code_indexer.server.services.versioned_snapshot_reconciler import (
+                            reconcile_versioned_snapshots,
+                        )
 
-                    _vsr_result = reconcile_versioned_snapshots(
-                        str(golden_repos_dir),
-                        snapshot_manager=snapshot_manager,
-                        alias_manager=global_lifecycle_manager.refresh_scheduler.alias_manager,
-                        cleanup_manager=global_lifecycle_manager.cleanup_manager,
-                        job_tracker=job_tracker,
-                        golden_repo_manager=golden_repo_manager,
-                    )
-                    # Bug #1567c: unconditional -- previously only logged
-                    # when something was found, making a healthy
-                    # zero-candidate sweep indistinguishable from one that
-                    # silently never ran.
-                    _log_vsr_sweep_completion(_vsr_result)
-                except Exception as _vsr_exc:
-                    logger.warning(
-                        "Startup: Bug #1567 versioned-snapshot orphan sweep "
-                        "failed (non-fatal): %s",
-                        _vsr_exc,
-                    )
+                        _vsr_result = await _to_thread.run_sync(
+                            lambda: reconcile_versioned_snapshots(
+                                str(golden_repos_dir),
+                                snapshot_manager=snapshot_manager,
+                                alias_manager=global_lifecycle_manager.refresh_scheduler.alias_manager,
+                                cleanup_manager=global_lifecycle_manager.cleanup_manager,
+                                job_tracker=job_tracker,
+                                golden_repo_manager=golden_repo_manager,
+                            )
+                        )
+                        # Bug #1567c: unconditional -- previously only logged
+                        # when something was found, making a healthy
+                        # zero-candidate sweep indistinguishable from one that
+                        # silently never ran.
+                        _log_vsr_sweep_completion(_vsr_result)
+                    except Exception as _vsr_exc:  # noqa: BLE001 -- startup safety
+                        logger.warning(
+                            "Startup: Bug #1567 versioned-snapshot orphan sweep "
+                            "failed (non-fatal): %s",
+                            _vsr_exc,
+                        )
+
+                asyncio.create_task(_run_vsr_sweep())
             else:
                 # Bug #1567c: this guard previously skipped SILENTLY --
                 # the ONLY mechanism that heals pre-existing leaked

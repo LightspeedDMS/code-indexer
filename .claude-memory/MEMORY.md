@@ -29,6 +29,7 @@
 - [feedback_e2e_not_code_inspection.md](feedback_e2e_not_code_inspection.md) - E2E means executing real functionality, NEVER code inspection/source checks
 - [feedback_e2e_verify_indexes_work.md](feedback_e2e_verify_indexes_work.md) - E2E must verify indexes EXIST on disk and RETURN RESULTS
 - [feedback_no_fallbacks_ever.md](feedback_no_fallbacks_ever.md) - NEVER write fallback code paths — one path that works or fails loudly
+- [feedback_design_for_900_repo_scale.md](feedback_design_for_900_repo_scale.md) - Design EVERYTHING for ~900 production repos; the 30-repo dev server is 3% and proves nothing about scale — never call sync filesystem/network I/O inside async def (blocks the whole event loop; hard NFS blocks FOREVER)
 - [feedback_no_settings_to_gate_bug_fixes.md](feedback_no_settings_to_gate_bug_fixes.md) - NEVER add ANY new config setting unless the user explicitly asks for that thing to be configurable, PERIOD; and never gate a bug fix behind one — 900 repos, no ops team to flip switches (keep correctness guards like age floors, drop behaviour toggles)
 - [feedback_no_half_wired_features.md](feedback_no_half_wired_features.md) - Never ship a data-relocation write-path without its read-path (and status-path); verify BOTH halves round-trip end-to-end (root cause of temporal #1482)
 - [feedback_no_sleep_in_production.md](feedback_no_sleep_in_production.md) - NEVER add time.sleep() for UI visibility — fix display logic
