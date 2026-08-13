@@ -4,7 +4,9 @@ Shared fixtures for JobTracker unit tests.
 Story #310: JobTracker Class, TrackedJob Dataclass, Schema Migration (Epic #261 Story 1A)
 """
 
+import os
 import sqlite3
+import subprocess
 from contextlib import ExitStack
 from unittest.mock import patch
 
@@ -132,3 +134,121 @@ def _isolate_research_home(isolated_research_base_dir):
                 )
             )
         yield
+
+
+def _run_git_fixture_command(args, cwd, env):
+    """Run a git command for fixture setup, raising loudly on failure.
+
+    Bug #1572: fixture-construction helper only -- not used by any test
+    assertion. A failure here means the fixture itself is broken, so it must
+    fail fast and loud rather than let a broken fixture masquerade as a
+    passing (or flaky) test.
+    """
+    result = subprocess.run(
+        args,
+        cwd=cwd,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"git fixture setup command failed: {args}\n"
+            f"stdout={result.stdout}\nstderr={result.stderr}"
+        )
+    return result
+
+
+@pytest.fixture(scope="session")
+def remote_git_repo_dir(tmp_path_factory):
+    """
+    Bug #1572: real local bare git repository for RemoteBranchService tests.
+
+    `git ls-remote` behaves identically against a local path/`file://` URL as
+    it does against a real HTTPS remote. This fixture builds ONE genuine bare
+    repository (session-scoped -- paid once for the whole test session) via a
+    real working clone that is pushed and then discarded, replacing the
+    previous live `github.com` calls with a real, deterministic, network-free
+    git repository.
+
+    Branch set is deliberately chosen to exercise the behaviours the tests
+    assert on end-to-end through the real service:
+    - "main": the default branch (bare repo HEAD symref points here, exactly
+      what `_detect_default_branch`'s `git ls-remote --symref` reads).
+    - "develop", "feature/login": ordinary branches, including a
+      slash-containing name.
+    - "SCM-1234", "feature/SCM-1234-hotfix": issue-tracker-pattern branches
+      that `filter_issue_tracker_branches` must exclude from the result, so
+      the issue-tracker-filtering test exercises real filtering rather than
+      trivially passing on an empty case.
+    """
+    base = tmp_path_factory.mktemp("remote_branch_service_repo")
+    bare_repo = base / "remote.git"
+    work_clone = base / "work"
+
+    git_env = dict(os.environ)
+    git_env.update(
+        {
+            "GIT_AUTHOR_NAME": "Bug1572 Fixture",
+            "GIT_AUTHOR_EMAIL": "bug1572@example.invalid",
+            "GIT_COMMITTER_NAME": "Bug1572 Fixture",
+            "GIT_COMMITTER_EMAIL": "bug1572@example.invalid",
+            "GIT_TERMINAL_PROMPT": "0",
+        }
+    )
+
+    # Bare "remote" repo whose HEAD symref points at "main" -- this is what
+    # RemoteBranchService._detect_default_branch reads via
+    # `git ls-remote --symref <url> HEAD`.
+    _run_git_fixture_command(
+        ["git", "init", "--bare", "-b", "main", str(bare_repo)],
+        cwd=str(base),
+        env=git_env,
+    )
+
+    # Scratch working clone used only to populate the bare repo with a known
+    # branch set, then pushed once and discarded (never read by tests).
+    _run_git_fixture_command(
+        ["git", "init", "-b", "main", str(work_clone)], cwd=str(base), env=git_env
+    )
+    (work_clone / "README.md").write_text("Bug #1572 fixture repo\n")
+    _run_git_fixture_command(
+        ["git", "add", "README.md"], cwd=str(work_clone), env=git_env
+    )
+    _run_git_fixture_command(
+        ["git", "commit", "-m", "initial commit"], cwd=str(work_clone), env=git_env
+    )
+
+    other_branches = ["develop", "feature/login", "SCM-1234", "feature/SCM-1234-hotfix"]
+    for branch_name in other_branches:
+        _run_git_fixture_command(
+            ["git", "checkout", "-b", branch_name, "main"],
+            cwd=str(work_clone),
+            env=git_env,
+        )
+    _run_git_fixture_command(
+        ["git", "checkout", "main"], cwd=str(work_clone), env=git_env
+    )
+
+    _run_git_fixture_command(
+        ["git", "push", str(bare_repo), "main", *other_branches],
+        cwd=str(work_clone),
+        env=git_env,
+    )
+
+    return str(bare_repo)
+
+
+@pytest.fixture(scope="session")
+def non_git_repo_dir(tmp_path_factory):
+    """
+    Bug #1572: a real local directory that is definitively NOT a git repository.
+
+    Used for RemoteBranchService failure-path tests: `git ls-remote` against
+    this path fails deterministically (non-zero exit, git's own "does not
+    appear to be a git repository" on stderr) with zero network involvement
+    -- replacing a previous dependency on how DNS/GitHub answer for a
+    nonexistent repository name.
+    """
+    return str(tmp_path_factory.mktemp("not_a_git_repo"))

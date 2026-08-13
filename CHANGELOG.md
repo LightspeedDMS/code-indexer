@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Bug #1572**: the unit suite no longer makes live public-internet calls. Seven tests in
+  `test_remote_branch_service.py` / `test_remote_branch_service_credentials.py` shelled out to
+  `git ls-remote` against `github.com/octocat/Hello-World.git` -- and one asserted on a FAILURE path
+  against a deliberately nonexistent repo, so its result depended on how DNS and GitHub answered.
+  All seven failed `server-fast-automation.sh` with `Failed: Timeout (>15.0s) from pytest-timeout`
+  under the gate's six-way parallelism, taking down a release gate. Individually they ran in
+  0.32-1.09s, which is why nothing ever flagged them: the project's threshold measures DURATION, and
+  these were never slow -- they were NON-DETERMINISTIC, with runtime governed by something outside
+  the machine.
+  Fixed with a real bare git repository built in a session-scoped tmpdir fixture, not with mocks:
+  `git ls-remote` treats a local path exactly as it treats an HTTPS URL, so every test still spawns a
+  real `git` process against a real repository and asserts on real `ls-remote` output and real exit
+  codes (Messi Rule #1, anti-mock, is preserved -- zero mocks were added and no production code was
+  touched). The failure-path test now targets a real directory that is definitively not a git repo,
+  giving a deterministic exit 128.
+  `@pytest.mark.slow` was explicitly rejected: it would gate these by a property they do not have
+  while leaving them network-dependent whenever they did run -- hiding the flake rather than removing
+  it.
+  The fixture seeds branches `SCM-1234` and `feature/SCM-1234-hotfix` so the issue-tracker filtering
+  assertion has something real to filter, and `feature/login` to exercise slash-containing names --
+  otherwise those tests would pass vacuously against a repo with only clean branch names.
+  Verified by running the suite inside a network namespace (`unshare --net`) with GitHub confirmed
+  unreachable: 43 passed in 2.39s. That is stronger than grepping for URLs, since it proves no code
+  path reaches the network by ANY route. Timing for the seven: 6.55s -> 1.93s. The 17 pure
+  parsing/filtering/dataclass tests in those files are byte-identical.
+
 ## [12.19.0] - 2026-08-13
 
 ### Fixed
