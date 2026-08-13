@@ -36,6 +36,21 @@ from .file_chunking_manager import FileChunkingManager, FileProcessingResult
 
 logger = logging.getLogger(__name__)
 
+
+def multimodal_indexing_enabled() -> bool:
+    """EVO-65484: whether to build the multimodal (image) index during indexing.
+
+    cidx builds a multimodal (voyage-multimodal-3 / embed-v4.0) image index in
+    parallel with the code index on every run, embedding images in markdown/etc.
+    On deployments that never issue multimodal (image) queries this is pure vendor
+    spend — tools-test showed ~13k multimodal embeds/day with ZERO image searches
+    over 7 days. Default ON (unchanged behavior); set
+    CIDX_MULTIMODAL_INDEXING_ENABLED=false to skip building it. The query path
+    already no-ops when the multimodal collection is absent, so search is unaffected.
+    """
+    return os.getenv("CIDX_MULTIMODAL_INDEXING_ENABLED", "true").lower() != "false"
+
+
 # Export imports for tests
 __all__ = [
     "HighThroughputProcessor",
@@ -43,6 +58,7 @@ __all__ = [
     "FileProcessingResult",
     "BranchIndexingResult",
     "FileStatus",  # Export unified FileStatus enum
+    "multimodal_indexing_enabled",
 ]
 
 
@@ -91,7 +107,9 @@ class HighThroughputProcessor(GitAwareDocumentProcessor):
         # File processing rate tracking for files/s metric
         self._file_rate_lock = threading.Lock()
         self._file_processing_start_time = None
-        self._file_completion_history = []  # List of (timestamp, files_completed) tuples
+        self._file_completion_history = (
+            []
+        )  # List of (timestamp, files_completed) tuples
         self._rolling_window_seconds = (
             30.0  # Rolling window for smoothed files/s calculation
         )
@@ -102,7 +120,9 @@ class HighThroughputProcessor(GitAwareDocumentProcessor):
         self._total_source_bytes_processed = (
             0  # Thread-safe counter for cumulative source bytes
         )
-        self._source_bytes_history = []  # List of (timestamp, total_bytes) tuples for smoothed KB/s
+        self._source_bytes_history = (
+            []
+        )  # List of (timestamp, total_bytes) tuples for smoothed KB/s
 
     def request_cancellation(self) -> None:
         """Request cancellation of processing."""
@@ -287,11 +307,14 @@ class HighThroughputProcessor(GitAwareDocumentProcessor):
         # Initialize file processing rate tracking for files/s metric
         self._initialize_file_rate_tracking()
 
-        # Create multimodal client for image+text embedding support
+        # Create multimodal client for image+text embedding support (EVO-65484: only
+        # when multimodal indexing is enabled — otherwise no image index is built and
+        # no multimodal vendor calls are made).
         multimodal_client: Optional[Any] = None
         provider_name = self.embedding_provider.get_provider_name()
+        _mm_enabled = multimodal_indexing_enabled()
 
-        if provider_name == "voyage-ai" and os.getenv("VOYAGE_API_KEY"):
+        if _mm_enabled and provider_name == "voyage-ai" and os.getenv("VOYAGE_API_KEY"):
             from ..config import VoyageAIConfig, VOYAGE_MULTIMODAL_MODEL
             from .voyage_multimodal import VoyageMultimodalClient
 
@@ -300,7 +323,7 @@ class HighThroughputProcessor(GitAwareDocumentProcessor):
                 api_endpoint="https://api.voyageai.com/v1/multimodalembeddings",
             )
             multimodal_client = VoyageMultimodalClient(voyage_config)
-        elif provider_name == "cohere":
+        elif _mm_enabled and provider_name == "cohere":
             from ..config import CohereConfig
             from .cohere_multimodal import CohereMultimodalClient
 
@@ -482,9 +505,9 @@ class HighThroughputProcessor(GitAwareDocumentProcessor):
 
                 # Create file queue and results storage
                 file_queue: Queue = Queue()
-                hash_results: Dict[
-                    Path, tuple
-                ] = {}  # {file_path: (metadata, file_size)}
+                hash_results: Dict[Path, tuple] = (
+                    {}
+                )  # {file_path: (metadata, file_size)}
                 hash_errors: List[str] = []  # List to capture any errors
 
                 # Populate queue with all files
