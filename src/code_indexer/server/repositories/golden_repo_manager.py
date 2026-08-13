@@ -1135,11 +1135,15 @@ class GoldenRepoManager:
         CONSERVATIVE — it only removes a row whose clone dir is an IN-TREE
         ``<golden_repos_dir>/<alias>`` that is verifiably absent from the SAME
         cache-fresh directory listing used above (so an NFS negative-dentry blip
-        can't trigger it), and it SKIPS globally-active repos (whose ``-global``
-        pointer would need separate teardown) — those are logged for attention.
+        can't trigger it), and it SKIPS repos that are globally active (whose
+        ``-global`` pointer would need separate teardown) OR that still have per-user
+        activated repos derived from them (which ``remove_golden_repo`` cascades but
+        this background prune must not silently orphan) — those are logged for
+        manual attention.
 
         Returns counts: scanned / indexed / backfilled / skipped_registered /
-        pruned_orphan_rows / orphan_rows_skipped_global / errors.
+        pruned_orphan_rows / orphan_rows_skipped_global /
+        orphan_rows_skipped_activated / errors.
         """
         from code_indexer.server.routers.repository_health import detect_semantic_index
 
@@ -1150,6 +1154,7 @@ class GoldenRepoManager:
             "skipped_registered": 0,
             "pruned_orphan_rows": 0,
             "orphan_rows_skipped_global": 0,
+            "orphan_rows_skipped_activated": 0,
             "errors": 0,
         }
         root = Path(self.golden_repos_dir)
@@ -1230,6 +1235,22 @@ class GoldenRepoManager:
                         "EVO-65484: registry row '%s' has no on-disk clone but is "
                         "globally active — leaving it for manual teardown",
                         alias,
+                    )
+                    continue
+                # Don't prune a golden whose row still has per-user activated repos
+                # derived from it: remove_golden_repo cascades those (deactivate),
+                # but this conservative background prune must not silently orphan a
+                # live user activation. Skip + log for manual teardown, mirroring the
+                # globally-active guard above.
+                derived = self.activated_repo_manager.find_repos_by_golden_alias(alias)
+                if derived:
+                    counts["orphan_rows_skipped_activated"] += 1
+                    logging.warning(
+                        "EVO-65484: registry row '%s' has no on-disk clone but %d "
+                        "activated repo(s) derive from it — leaving it for manual "
+                        "teardown",
+                        alias,
+                        len(derived),
                     )
                     continue
                 self._sqlite_backend.remove_repo(alias)

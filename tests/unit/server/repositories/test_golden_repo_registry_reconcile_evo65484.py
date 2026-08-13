@@ -91,6 +91,10 @@ def _manager_rows(tmp_path, rows):
     m.list_golden_repos = MagicMock(return_value=rows)  # type: ignore[method-assign]
     m._sqlite_backend = MagicMock()
     m.is_globally_active = MagicMock(return_value=False)  # type: ignore[method-assign]
+    # No per-user activated repos derive from these aliases by default (a bare
+    # MagicMock would return a truthy Mock and wrongly block every prune).
+    m.activated_repo_manager = MagicMock()
+    m.activated_repo_manager.find_repos_by_golden_alias.return_value = []
     return m, gr
 
 
@@ -128,6 +132,23 @@ class TestRegistryReconcilePrunesOrphanRows:
         counts = m.reconcile_registry_from_filesystem()
 
         m._sqlite_backend.remove_repo.assert_not_called()
+        assert counts["pruned_orphan_rows"] == 0
+
+    def test_skips_orphan_row_with_derived_activated_repos(self, tmp_path):
+        # dir gone, but a per-user activated repo still derives from this golden —
+        # must NOT prune (remove_golden_repo cascades; this background prune won't).
+        m, gr = _manager_rows(
+            tmp_path,
+            [{"alias": "shared", "clone_path": str(tmp_path / "golden" / "shared")}],
+        )
+        m.activated_repo_manager.find_repos_by_golden_alias.return_value = [
+            {"username": "alice", "user_alias": "shared", "is_composite": False}
+        ]
+
+        counts = m.reconcile_registry_from_filesystem()
+
+        m._sqlite_backend.remove_repo.assert_not_called()
+        assert counts["orphan_rows_skipped_activated"] == 1
         assert counts["pruned_orphan_rows"] == 0
 
     def test_skips_globally_active_orphan_row(self, tmp_path):
