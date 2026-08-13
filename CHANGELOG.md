@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [12.19.0] - 2026-08-13
+
 ### Fixed
 
 - **Bug #1571**: the versioned-snapshot sweep now removes an empty `.versioned/{namespace}/`
