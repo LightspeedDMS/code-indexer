@@ -152,3 +152,52 @@ class TestLocalUnchangedRegression:
 
         files = service.find_scip_files(repository_alias="flask-global")
         assert snapshot_db in files
+
+
+class TestScipLiveFallbackWhenSnapshotLacksScip:
+    """EVO-66086: the delegated golden SCIP build is async and lands index.scip.db in the LIVE
+    golden dir, but the alias points at a versioned snapshot forked BEFORE that build. When the
+    snapshot's ``.code-indexer/scip`` dir exists (from embeddings) but has NO ``*.scip.db``,
+    find_scip_files must fall back to the live golden dir -- mirroring the EVO-65021 live-fallback
+    in scip_multi_service._get_scip_file_for_repo -- instead of returning []."""
+
+    def test_falls_back_to_live_golden_scip_when_snapshot_lacks_scip_db(self, tmp_path):
+        golden = tmp_path / "golden-repos"
+        golden.mkdir()
+
+        # Alias -> versioned snapshot whose .code-indexer/scip EXISTS but has NO *.scip.db
+        # (scip was built later, into the live dir).
+        snapshot = golden / ".versioned" / "analyzer" / "v_1717000000"
+        (snapshot / ".code-indexer" / "scip").mkdir(parents=True)
+        _make_alias(golden / "aliases", "analyzer-global", snapshot)
+
+        # The LIVE golden dir has the freshly-built scip.db (where the delegated build lands it).
+        live_db = _scip_index(golden / "analyzer")
+
+        service = SCIPQueryService(
+            golden_repos_dir=str(golden), access_filtering_service=None
+        )
+
+        files = service.find_scip_files(repository_alias="analyzer-global")
+        assert live_db in files, (
+            "EVO-66086: when the alias snapshot has no scip.db, SCIP must fall back to the live "
+            f"golden dir's index.scip.db. Got: {files}"
+        )
+
+    def test_snapshot_scip_still_preferred_when_present(self, tmp_path):
+        """Snapshot-first preserved: when the snapshot HAS scip.db, use it, not the live dir."""
+        golden = tmp_path / "golden-repos"
+        golden.mkdir()
+        snapshot = golden / ".versioned" / "fresca" / "v_1717000000"
+        snap_db = _scip_index(snapshot)
+        _make_alias(golden / "aliases", "fresca-global", snapshot)
+        # A live dir also exists but must NOT be used while the snapshot carries scip.
+        _scip_index(golden / "fresca")
+
+        service = SCIPQueryService(
+            golden_repos_dir=str(golden), access_filtering_service=None
+        )
+        files = service.find_scip_files(repository_alias="fresca-global")
+        assert snap_db in files
+        live_db = golden / "fresca" / ".code-indexer" / "scip" / "index.scip.db"
+        assert live_db not in files

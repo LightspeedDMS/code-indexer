@@ -141,7 +141,24 @@ class SCIPQueryService:
             if alias_root is not None:
                 scip_dir = alias_root / ".code-indexer" / "scip"
                 if scip_dir.exists():
-                    return list(scip_dir.glob("**/*.scip.db"))
+                    dbs = list(scip_dir.glob("**/*.scip.db"))
+                    if dbs:
+                        return dbs
+                # EVO-66086: the delegated golden SCIP build is ASYNC and lands
+                # index.scip.db in the LIVE golden dir, but the alias points at a
+                # versioned snapshot forked BEFORE that build completes -- so the
+                # snapshot's scip dir exists (from embeddings) yet has no *.scip.db.
+                # Fall back to the live golden DB where the build authoritatively
+                # lands (mirrors scip_multi_service._get_scip_file_for_repo's
+                # snapshot-first, live-fallback). Without this, a freshly-built golden
+                # scip (java/csharp and any repo indexed after its last snapshot) is
+                # never queryable. normalized_alias is the bare, -global-stripped alias.
+                live_scip_dir = (
+                    self._golden_repos_dir / normalized_alias / ".code-indexer" / "scip"
+                )
+                if live_scip_dir.exists():
+                    return list(live_scip_dir.glob("**/*.scip.db"))
+                return []
 
         for repo_dir in golden_repos_path.iterdir():
             # Skip non-directories
