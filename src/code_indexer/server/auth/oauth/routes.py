@@ -77,13 +77,39 @@ def get_oauth_manager(request: Request) -> OAuthManager:
 
 
 def get_user_manager() -> UserManager:
+    """Return the app-wired (backend-aware) UserManager.
+
+    EVO-66121: a bare ``UserManager()`` defaults to the per-node JSON-file store
+    (``~/.cidx-server/users.json``). In a multipod / Postgres deployment that
+    store holds none of the real users, so the ``/oauth/token``
+    client_credentials grant and the ``/oauth/authorize`` password grant both
+    authenticate against the wrong (empty) backend and fail. ``app_wiring`` wires
+    the real backend-aware UserManager onto the auth ``dependencies`` module
+    singleton at startup (same instance also on ``app.state``) — resolve that.
+    Fall back to a fresh instance only when unwired (CLI / solo / unit tests).
+    """
+    from code_indexer.server.auth import dependencies as _deps
+
+    wired: Optional[UserManager] = _deps.user_manager
+    if wired is not None:
+        return wired
     return UserManager()
 
 
 def get_mcp_credential_manager() -> MCPCredentialManager:
-    """Get MCPCredentialManager instance with UserManager injected."""
-    user_manager = get_user_manager()
-    return MCPCredentialManager(user_manager=user_manager)
+    """Get the app-wired (backend-aware) MCPCredentialManager (EVO-66121).
+
+    Prefer the singleton wired by ``app_wiring`` (built over the Postgres-backed
+    UserManager). When only the UserManager singleton is wired, build over THAT
+    so credential verification still hits the correct backend; construct a fresh
+    pair only when nothing is wired.
+    """
+    from code_indexer.server.auth import dependencies as _deps
+
+    wired: Optional[MCPCredentialManager] = _deps.mcp_credential_manager
+    if wired is not None:
+        return wired
+    return MCPCredentialManager(user_manager=get_user_manager())
 
 
 # Pydantic models for request/response
