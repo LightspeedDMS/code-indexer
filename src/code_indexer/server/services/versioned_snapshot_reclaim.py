@@ -35,6 +35,29 @@ versioned-snapshot entry found for the namespace is scheduled for
 deletion (not merely the superseded ones), through the SAME refcount+
 min-age-gated `cleanup_manager.schedule_cleanup` the supersession path
 already uses.
+
+Bug #1571 (sibling gap): the reclaim above -- and the ordinary keep-
+last-N supersession path in versioned_snapshot_reconciler.py -- both
+delete SNAPSHOTS one at a time through `cleanup_manager`, which only
+ever receives a snapshot path (`.versioned/{ns}/v_{ts}`). Nothing owns
+the enclosing `.versioned/{ns}/` directory itself, so once a namespace
+reaches zero snapshots it is left behind empty, forever. Measured live:
+15 of 30 namespaces on one dev server.
+
+`reclaim_empty_namespace_directory` closes that gap on a LATER sweep
+pass, once the namespace has already become empty on disk (the SAME
+pass that schedules a snapshot's deletion must NOT also try to remove
+its enclosing directory -- CleanupManager's own `min_retention_age_seconds`
+gate means the snapshot is still physically present at that moment; see
+that module's docstring). It runs unconditionally for every namespace
+the sweep observes, independent of registry/base-clone state, because
+its own safety net (`os.rmdir`'s atomic "fails if non-empty") is
+unconditionally sufficient on its own: a directory that is not
+physically empty right now is never touched, full stop. The one
+additional guard is a resolvable alias pointer (even a dangling one
+whose target has already been deleted) -- that pointer still names this
+namespace as the intended home for a future snapshot, so removing the
+directory it names must wait until the pointer itself is gone.
 """
 
 from __future__ import annotations
@@ -42,7 +65,9 @@ from __future__ import annotations
 import logging
 import os
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, List, Optional, Set
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Tuple
+
+from code_indexer.global_repos.snapshot_retention import resolve_governing_pointer
 
 if TYPE_CHECKING:
     from code_indexer.global_repos.cleanup_manager import CleanupManager
@@ -233,3 +258,74 @@ def reclaim_orphaned_namespace(
         len(scheduled),
     )
     return scheduled
+
+
+def reclaim_empty_namespace_directory(
+    bare_namespace: str,
+    *,
+    versioned_dir: Path,
+    pointers: Dict[str, Tuple[str, Optional[str]]],
+) -> bool:
+    """Bug #1571: remove a `.versioned/{bare_namespace}/` directory that
+    is ALREADY empty on disk right now (see module docstring's Bug #1571
+    addendum for the full rationale and the "why a later sweep, not this
+    one" ordering argument).
+
+    Relies entirely on `os.rmdir`'s own atomic "fails if non-empty"
+    semantics -- never `shutil.rmtree`, which would force emptiness
+    rather than merely observe it. The only other guard is a resolvable
+    (even dangling) alias pointer, via the SAME `resolve_governing_pointer`
+    the supersession path uses -- a namespace a pointer still names is
+    never even attempted, regardless of current disk state.
+
+    Returns True only on an actual removal. Any `OSError` (ENOTEMPTY,
+    permission error, a raced concurrent creator) is caught, logged at
+    DEBUG, and treated as non-fatal -- never propagated to the caller's
+    sweep of the remaining namespaces.
+    """
+    if _is_unsafe_namespace(bare_namespace):
+        logger.error(
+            "Bug #1571 reconcile: refusing to evaluate empty-namespace "
+            "removal for '%r': unsafe/empty namespace name.",
+            bare_namespace,
+        )
+        return False
+    if not isinstance(versioned_dir, Path):
+        logger.error(
+            "Bug #1571 reconcile: refusing to evaluate empty-namespace "
+            "removal for '%s': versioned_dir is not a Path (%r).",
+            bare_namespace,
+            versioned_dir,
+        )
+        return False
+    if not isinstance(pointers, dict):
+        logger.error(
+            "Bug #1571 reconcile: refusing to evaluate empty-namespace "
+            "removal for '%s': pointers is not a dict (%r).",
+            bare_namespace,
+            type(pointers),
+        )
+        return False
+    if resolve_governing_pointer(bare_namespace, pointers) is not None:
+        return False
+
+    namespace_path = versioned_dir / bare_namespace
+    try:
+        os.rmdir(namespace_path)
+    except OSError as rmdir_error:
+        logger.debug(
+            "Bug #1571 reconcile: namespace '%s' at '%s' is not "
+            "removable right now (non-fatal): %s",
+            bare_namespace,
+            namespace_path,
+            rmdir_error,
+        )
+        return False
+
+    logger.info(
+        "Bug #1571 reconcile: removed empty, unreferenced namespace "
+        "directory '%s' at '%s'.",
+        bare_namespace,
+        namespace_path,
+    )
+    return True

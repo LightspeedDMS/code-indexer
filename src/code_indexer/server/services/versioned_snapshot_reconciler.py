@@ -129,6 +129,7 @@ from code_indexer.server.services.job_tracker import DuplicateJobError
 from code_indexer.server.services.versioned_snapshot_reclaim import (
     GoldenRepoManagerLike,
     namespace_is_genuinely_orphaned,
+    reclaim_empty_namespace_directory,
     reclaim_orphaned_namespace,
     resolve_registered_aliases,
 )
@@ -183,6 +184,12 @@ class VersionedSnapshotReconcileResult:
     #: a strict subset of scanned_namespaces, disjoint from
     #: skipped_namespaces.
     reclaimed_namespaces: List[str] = field(default_factory=list)
+    #: Bug #1571: namespaces whose already-empty, unreferenced
+    #: `.versioned/{ns}/` directory was removed outright by this pass --
+    #: a strict subset of scanned_namespaces, disjoint from both
+    #: skipped_namespaces and reclaimed_namespaces (a removed namespace
+    #: never proceeds to the reclaim/supersession logic below it).
+    removed_empty_namespaces: List[str] = field(default_factory=list)
     #: True only when the WHOLE sweep was refused (base-dir OSError or a
     #: single-flight conflict) -- never for a per-repo skip.
     aborted: bool = False
@@ -249,6 +256,7 @@ def _finalize_sweep_job(
                     "candidates": len(result.scheduled_paths),
                     "skipped": len(result.skipped_namespaces),
                     "reclaimed": len(result.reclaimed_namespaces),
+                    "removed_empty": len(result.removed_empty_namespaces),
                 },
             )
     except Exception as bookkeeping_error:  # noqa: BLE001
@@ -331,6 +339,10 @@ def _enumerate_versioned_namespaces(versioned_dir: Path) -> Optional[List[str]]:
 
 @dataclass
 class _SweepContext:
+    #: Bug #1571: the `.versioned/` directory itself, needed by
+    #: reclaim_empty_namespace_directory to build each namespace's
+    #: direct-child path.
+    versioned_dir: Path
     namespace_entries: List[str]
     pointers: Dict[str, Tuple[str, Optional[str]]]
     referenced_paths: Set[str]
@@ -363,7 +375,8 @@ def _build_sweep_context(
         logger.warning("Bug #1567 reconcile: %s", result.abort_reason)
         return None
     if namespace_entries is None:
-        return _SweepContext([], {}, set(), 1)  # nothing provisioned -- empty sweep
+        # nothing provisioned -- empty sweep
+        return _SweepContext(versioned_dir, [], {}, set(), 1)
 
     try:
         pointers = collect_all_pointers(alias_manager.aliases_dir)
@@ -383,6 +396,7 @@ def _build_sweep_context(
         else resolve_retention_keep_last()
     )
     return _SweepContext(
+        versioned_dir,
         namespace_entries,
         pointers,
         globally_referenced_paths(pointers),
@@ -418,6 +432,21 @@ def _run_sweep(
 
     for bare_namespace in context.namespace_entries:
         result.scanned_namespaces.append(bare_namespace)
+        # Bug #1571: attempted FIRST and unconditionally, independent of
+        # registry/pointer-skip state below -- a namespace already empty
+        # on disk (typically left behind once a PRIOR sweep's reclaim/
+        # supersession deletions actually landed) has nothing left to
+        # reconcile. os.rmdir's own atomic emptiness check is the sole
+        # safety net; a namespace that is not truly empty right now (or
+        # still has a resolvable pointer) is simply left for the normal
+        # logic below.
+        if reclaim_empty_namespace_directory(
+            bare_namespace,
+            versioned_dir=context.versioned_dir,
+            pointers=context.pointers,
+        ):
+            result.removed_empty_namespaces.append(bare_namespace)
+            continue
         _reconcile_one_namespace(
             bare_namespace,
             golden_repos_path=golden_repos_path,
