@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Bug #1571**: the versioned-snapshot sweep now removes an empty `.versioned/{namespace}/`
+  directory instead of leaving it behind forever. When a golden repo is fully deregistered, Bug
+  #1570's reclaim deletes all of its snapshots, but nothing owned the enclosing namespace directory --
+  `cleanup_manager` only ever receives snapshot paths. Measured on a live server: 15 of 30 namespaces
+  were empty directories that had survived the sweep which emptied them, a service restart, and the
+  cleanup thread. This only occurs when a namespace reaches ZERO snapshots (a removed repo); normal
+  retention always leaves the current snapshot, so a live repo never leaks.
+  Deliberately implemented sweep-side rather than coupled to cleanup completion. Two independent
+  900s gates run in series -- the reconciler's age floor uses the snapshot's own timestamp, while
+  `CleanupManager.min_retention_age_seconds` starts at `scheduled_at` -- so at scheduling time the
+  snapshots are still physically on disk. Removing the directory there would either fail or race the
+  cleanup thread. A LATER sweep observing an already-empty namespace is naturally idempotent and
+  race-free.
+  Safety is enforced by construction rather than by a pre-check: `os.rmdir` only (never
+  `shutil.rmtree`, which would force emptiness), so the "fails if non-empty" test is atomic and
+  cannot be defeated by anything racing in; a single non-recursive join to a direct child of
+  `.versioned/`; any `OSError` is non-fatal, logged, and the sweep continues to the next namespace;
+  and removal is declined outright whenever `resolve_governing_pointer` resolves ANY alias pointer,
+  including a dangling one -- the pointer's presence is what protects live data in #1570's
+  conjunction and that trust is not weakened here.
+  Severity is low and recorded as such: roughly 4 KB per directory, a few syscalls per empty
+  namespace, and growth bounded by the number of repos ever removed rather than by uptime. An earlier
+  revision of the issue overstated this as approaching the event-loop cost fixed in v12.18.0; it does
+  not. The 842 MB stale-pointer orphan originally filed alongside it was dropped as a one-off
+  artifact rather than a recurring class.
+
 ## [12.18.0] - 2026-08-12
 
 ### Fixed
