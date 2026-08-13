@@ -1011,6 +1011,58 @@ def make_lifespan(
                     _run_registry_reconcile()
                 )
 
+                # EVO-65484: periodically enqueue delegated SCIP builds for
+                # SCIP-eligible golden repos that have none. Opt-in (the method
+                # no-ops unless CIDX_SCIP_AUTO_RECONCILE_ENABLED=true), language-gated
+                # (CIDX_SCIP_LANGUAGES), and bounded per cycle
+                # (CIDX_SCIP_RECONCILE_MAX_PER_CYCLE) so the serialized delegated
+                # queue drains the backlog over many cycles without a thundering herd.
+                try:
+                    _scip_interval = int(
+                        os.environ.get("CIDX_SCIP_RECONCILE_INTERVAL_SECONDS", "1800")
+                    )
+                except ValueError:
+                    _scip_interval = 1800
+                try:
+                    _scip_max = int(
+                        os.environ.get("CIDX_SCIP_RECONCILE_MAX_PER_CYCLE", "5")
+                    )
+                except ValueError:
+                    _scip_max = 5
+
+                async def _run_scip_reconcile() -> None:
+                    import anyio.to_thread as _to_thread
+
+                    while True:
+                        try:
+                            _c = await _to_thread.run_sync(
+                                lambda: _grm_for_reconcile.reconcile_scip_from_filesystem(
+                                    _scip_max
+                                )
+                            )
+                            if _c.get("enqueued") or _c.get("errors"):
+                                logger.info(
+                                    "EVO-65484: periodic SCIP reconcile: %s", _c
+                                )
+                        except asyncio.CancelledError:
+                            raise
+                        except Exception as _scip_err:  # noqa: BLE001 — safety
+                            logger.warning(
+                                "EVO-65484: SCIP reconcile failed: %s",
+                                _scip_err,
+                                exc_info=True,
+                            )
+                        if _scip_interval <= 0:
+                            return
+                        try:
+                            await asyncio.sleep(_scip_interval)
+                        except asyncio.CancelledError:
+                            raise
+
+                app.state.scip_reconcile_task = asyncio.create_task(
+                    _run_scip_reconcile()
+                )
+
             # Story #1034: inject snapshot_manager into GoldenRepoManager so
             # change_branch CoW routes through VersionedSnapshotManager (single
             # source of truth).  Belt-and-suspenders: also wire directly into
@@ -4411,6 +4463,14 @@ def make_lifespan(
         if _reconcile_task is not None:
             try:
                 _reconcile_task.cancel()
+            except Exception:
+                pass
+
+        # Shutdown: Stop the EVO-65484 periodic SCIP reconcile loop (same rationale).
+        _scip_reconcile_task = getattr(app.state, "scip_reconcile_task", None)
+        if _scip_reconcile_task is not None:
+            try:
+                _scip_reconcile_task.cancel()
             except Exception:
                 pass
 

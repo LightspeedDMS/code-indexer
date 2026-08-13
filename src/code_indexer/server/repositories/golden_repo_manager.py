@@ -1274,6 +1274,136 @@ class GoldenRepoManager:
         )
         return counts
 
+    def _scip_present(self, repo_dir: "Path") -> bool:
+        """True if any ``.scip.db`` exists under the repo's ``.code-indexer/scip``."""
+        scip_dir = repo_dir / ".code-indexer" / "scip"
+        if not scip_dir.is_dir():
+            return False
+        for _ in scip_dir.rglob("*.scip.db"):
+            return True
+        return False
+
+    def _scip_attempt_cooldown_active(
+        self, marker: "Path", cooldown_seconds: int
+    ) -> bool:
+        """True if a SCIP-build was attempted for this repo within the cooldown — so a
+        repo whose build keeps failing (e.g. an unresolved compiled build) is retried
+        at most once per cooldown instead of on every reconcile cycle."""
+        try:
+            age = time.time() - marker.stat().st_mtime
+            return age < cooldown_seconds
+        except OSError:
+            return False  # no marker → not on cooldown
+
+    def reconcile_scip_from_filesystem(self, max_enqueue: int = 5) -> Dict[str, int]:
+        """EVO-65484: backfill SCIP indexes for SCIP-eligible golden repos that have
+        none — the SCIP analog of ``reconcile_registry_from_filesystem``.
+
+        For each ``<golden_repos_dir>/<alias>`` with no ``.scip.db`` on disk, run the
+        SCIP project discovery (build-file based). When it finds a project in a
+        SCIP-ENABLED language, enqueue a delegated SCIP build via the shared funnel
+        (``funnel_golden_scip``). Once the build lands a ``.scip.db``, the existing
+        ``_reconcile_scip_flag`` sets ``enable_scip=True`` on the next refresh, so
+        this only needs to trigger the initial build (breaking the chicken-and-egg).
+
+        Deliberately conservative + opt-in, because each enqueue triggers a real
+        (delegated, per-repo sandbox) build:
+        - Gated by ``CIDX_SCIP_AUTO_RECONCILE_ENABLED`` (default off).
+        - Language-gated by ``CIDX_SCIP_LANGUAGES`` (default ``python,typescript,go``
+          — the languages proven to index without a compiled build; java/csharp need
+          in-sandbox dependency resolution first and are excluded until that lands).
+        - Bounded to ``max_enqueue`` per cycle (thundering-herd guard over hundreds of
+          eligible repos; the serialized delegated queue drains them over many cycles).
+        - Per-repo attempt cooldown marker so a repeatedly-failing build is retried at
+          most once per ``CIDX_SCIP_ATTEMPT_COOLDOWN_SECONDS``.
+
+        Returns counts: scanned / scip_present / not_discoverable / language_skipped /
+        cooldown_skipped / enqueued / errors.
+        """
+        counts = {
+            k: 0
+            for k in (
+                "scanned",
+                "scip_present",
+                "not_discoverable",
+                "language_skipped",
+                "cooldown_skipped",
+                "enqueued",
+                "errors",
+            )
+        }
+        if os.getenv("CIDX_SCIP_AUTO_RECONCILE_ENABLED", "false").lower() != "true":
+            return counts
+
+        from code_indexer.scip.discovery import ProjectDiscovery
+        from code_indexer.server.services.scip_lifecycle import funnel_golden_scip
+        from code_indexer.server.services.config_service import get_config_service
+
+        enabled_langs = {
+            lang.strip().lower()
+            for lang in os.getenv("CIDX_SCIP_LANGUAGES", "python,typescript,go").split(
+                ","
+            )
+            if lang.strip()
+        }
+        try:
+            cooldown = int(os.getenv("CIDX_SCIP_ATTEMPT_COOLDOWN_SECONDS", "86400"))
+        except ValueError:
+            cooldown = 86400
+
+        root = Path(self.golden_repos_dir)
+        if not root.is_dir():
+            return counts
+        cfg = get_config_service().get_config()
+
+        for entry in sorted(root.iterdir(), key=lambda p: p.name):
+            if counts["enqueued"] >= max_enqueue:
+                break
+            if entry.name.startswith(".") or not entry.is_dir():
+                continue
+            counts["scanned"] += 1
+            if self._scip_present(entry):
+                counts["scip_present"] += 1
+                continue
+            try:
+                projects = ProjectDiscovery(entry).discover()
+            except Exception as exc:  # noqa: BLE001
+                counts["errors"] += 1
+                logging.warning(
+                    "EVO-65484: SCIP discover failed for '%s': %s", entry.name, exc
+                )
+                continue
+            if not projects:
+                counts["not_discoverable"] += 1
+                continue
+            if not ({p.language.lower() for p in projects} & enabled_langs):
+                counts["language_skipped"] += 1
+                continue
+            marker = entry / ".code-indexer" / ".scip_reconcile_attempt"
+            if self._scip_attempt_cooldown_active(marker, cooldown):
+                counts["cooldown_skipped"] += 1
+                continue
+            try:
+                marker.parent.mkdir(parents=True, exist_ok=True)
+                marker.touch()
+                outcome = funnel_golden_scip(entry.name, str(entry), cfg)
+                counts["enqueued"] += 1
+                logging.info(
+                    "EVO-65484: enqueued SCIP build for '%s' (outcome=%s)",
+                    entry.name,
+                    getattr(outcome, "value", outcome),
+                )
+            except Exception as exc:  # noqa: BLE001
+                counts["errors"] += 1
+                logging.warning(
+                    "EVO-65484: SCIP reconcile enqueue failed for '%s': %s",
+                    entry.name,
+                    exc,
+                )
+
+        logging.info("EVO-65484: SCIP reconcile from filesystem complete: %s", counts)
+        return counts
+
     def is_globally_active(self, alias: str) -> bool:
         """Return True if *alias* is registered and globally activated (Story #1039).
 
