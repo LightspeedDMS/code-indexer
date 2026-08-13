@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [12.20.0] - 2026-08-13
+
 ### Fixed
 
 - **Bug #1572**: the unit suite no longer makes live public-internet calls. Seven tests in
