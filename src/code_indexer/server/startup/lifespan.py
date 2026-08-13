@@ -961,26 +961,55 @@ def make_lifespan(
             # pods may run it concurrently.
             if golden_repo_manager is not None:
                 _grm_for_reconcile = golden_repo_manager
+                # EVO-65484: run PERIODICALLY, not just at startup. A crash between
+                # index-build and registry-row (or a removeOnDisk that skipped
+                # deregister) can drift the registry at any time; a startup-only heal
+                # leaves that drift until the next pod restart. Default 900s; set
+                # CIDX_REGISTRY_RECONCILE_INTERVAL_SECONDS<=0 for startup-only.
+                try:
+                    _reconcile_interval = int(
+                        os.environ.get(
+                            "CIDX_REGISTRY_RECONCILE_INTERVAL_SECONDS", "900"
+                        )
+                    )
+                except ValueError:
+                    _reconcile_interval = 900
 
                 async def _run_registry_reconcile() -> None:
-                    try:
-                        import anyio.to_thread as _to_thread
+                    import anyio.to_thread as _to_thread
 
-                        _counts = await _to_thread.run_sync(
-                            _grm_for_reconcile.reconcile_registry_from_filesystem
-                        )
-                        logger.info(
-                            "EVO-65484: startup registry reconcile from filesystem: %s",
-                            _counts,
-                        )
-                    except Exception as _reconcile_err:  # noqa: BLE001 — startup safety
-                        logger.warning(
-                            "EVO-65484: startup registry reconcile failed: %s",
-                            _reconcile_err,
-                            exc_info=True,
-                        )
+                    first = True
+                    while True:
+                        try:
+                            _counts = await _to_thread.run_sync(
+                                _grm_for_reconcile.reconcile_registry_from_filesystem
+                            )
+                            logger.info(
+                                "EVO-65484: %s registry reconcile from filesystem: %s",
+                                "startup" if first else "periodic",
+                                _counts,
+                            )
+                        except asyncio.CancelledError:
+                            raise
+                        except Exception as _reconcile_err:  # noqa: BLE001 — safety
+                            logger.warning(
+                                "EVO-65484: registry reconcile failed: %s",
+                                _reconcile_err,
+                                exc_info=True,
+                            )
+                        first = False
+                        if _reconcile_interval <= 0:
+                            return  # startup-only
+                        try:
+                            await asyncio.sleep(_reconcile_interval)
+                        except asyncio.CancelledError:
+                            raise
 
-                asyncio.create_task(_run_registry_reconcile())
+                # Keep a reference on app.state so the task is not garbage-collected
+                # mid-flight and can be cancelled on shutdown.
+                app.state.registry_reconcile_task = asyncio.create_task(
+                    _run_registry_reconcile()
+                )
 
             # Story #1034: inject snapshot_manager into GoldenRepoManager so
             # change_branch CoW routes through VersionedSnapshotManager (single
@@ -4375,6 +4404,16 @@ def make_lifespan(
                 _audit_stop_exc,
             )
 
+        # Shutdown: Stop the EVO-65484 periodic registry reconcile loop so it does
+        # not outlive the lifespan. cancel() unblocks its asyncio.sleep and the
+        # coroutine re-raises CancelledError; non-fatal if it already finished.
+        _reconcile_task = getattr(app.state, "registry_reconcile_task", None)
+        if _reconcile_task is not None:
+            try:
+                _reconcile_task.cancel()
+            except Exception:
+                pass
+
         # Shutdown: Stop the async-logging QueueListener FIRST (py-spy logging
         # follow-up to Bug #1078). The listener owns the real handlers behind the
         # root QueueHandler; stop() drains every queued record and then closes the
@@ -4622,7 +4661,9 @@ def make_lifespan(
                     "DependencyLatencyTracker stopped successfully",
                     extra={"correlation_id": get_correlation_id()},
                 )
-            except Exception as e:  # broad catch intentional: shutdown must not abort remaining cleanup chain
+            except (
+                Exception
+            ) as e:  # broad catch intentional: shutdown must not abort remaining cleanup chain
                 logger.error(
                     format_error_log(
                         "APP-GENERAL-027",

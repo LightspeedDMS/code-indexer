@@ -27,11 +27,38 @@ class TestLifespanRegistryReconcileWiringSourceGuard:
             "EVO-65484: lifespan.py no longer invokes "
             "reconcile_registry_from_filesystem — the registry/disk split-brain "
             "(indexed-but-unregistered golden repos) silently returns on every node. "
-            "Re-add the startup background task after the golden_repo_manager wiring."
+            "Re-add the background reconcile task after the golden_repo_manager wiring."
         )
-        assert "asyncio.create_task(_run_registry_reconcile())" in source, (
+        assert (
+            "asyncio.create_task(" in source and "_run_registry_reconcile()" in source
+        ), (
             "EVO-65484: the registry reconcile must be scheduled as a background "
-            "task (asyncio.create_task) so it is actually invoked at startup."
+            "task (asyncio.create_task) so it is actually invoked."
+        )
+        # A referenced handle (not fire-and-forget) so the periodic task is neither
+        # garbage-collected mid-flight nor leaked past shutdown.
+        assert "app.state.registry_reconcile_task" in source, (
+            "EVO-65484: the reconcile task must be kept on app.state so it survives "
+            "GC and can be cancelled on shutdown."
+        )
+
+    def test_registry_reconcile_is_periodic(self):
+        """EVO-65484 Gap 1: the reconcile must run PERIODICALLY, not only at startup —
+        drift created between index-build and registry-row (or by a removeOnDisk that
+        skipped deregister) at runtime would otherwise persist until the next restart.
+        """
+        source = _LIFESPAN_PATH.read_text()
+        assert "CIDX_REGISTRY_RECONCILE_INTERVAL_SECONDS" in source, (
+            "EVO-65484: the reconcile interval must be configurable "
+            "(CIDX_REGISTRY_RECONCILE_INTERVAL_SECONDS)."
+        )
+        marker = "async def _run_registry_reconcile"
+        start = source.find(marker)
+        assert start != -1, "EVO-65484: _run_registry_reconcile helper is missing"
+        body = source[start : source.find("app.state.registry_reconcile_task", start)]
+        assert "while True:" in body and "asyncio.sleep" in body, (
+            "EVO-65484: the reconcile helper must loop (while True + asyncio.sleep) "
+            "to run periodically, not just once at startup."
         )
 
     def test_registry_reconcile_runs_off_the_event_loop(self):
@@ -41,10 +68,8 @@ class TestLifespanRegistryReconcileWiringSourceGuard:
         marker = "async def _run_registry_reconcile"
         start = source.find(marker)
         assert start != -1, "EVO-65484: _run_registry_reconcile helper is missing"
-        # inspect only the helper body (up to the create_task that schedules it)
-        body = source[
-            start : source.find("asyncio.create_task(_run_registry_reconcile())", start)
-        ]
+        # inspect only the helper body (up to where the task is scheduled)
+        body = source[start : source.find("app.state.registry_reconcile_task", start)]
         assert "to_thread.run_sync" in body, (
             "EVO-65484: reconcile_registry_from_filesystem must be dispatched via "
             "anyio.to_thread.run_sync so the NFS scan does not block the event loop."

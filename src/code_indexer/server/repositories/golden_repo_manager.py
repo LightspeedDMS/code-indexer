@@ -1112,20 +1112,34 @@ class GoldenRepoManager:
         return repo_url, default_branch
 
     def reconcile_registry_from_filesystem(self) -> Dict[str, int]:
-        """EVO-65484: backfill registry entries for golden repos that are indexed on
-        disk but missing from the registry, making the registry a faithful
-        projection of on-disk state.
+        """EVO-65484: make the golden-repo registry a faithful, self-healing
+        projection of on-disk state — BIDIRECTIONALLY.
 
-        Registration persists the index (``_execute_post_clone_workflow``) BEFORE
-        the registry row (``add_repo``), so a crash / pod eviction between the two
-        leaves an index with no registry entry. The workspace-mcp seeder then sees
-        the repo as unregistered and re-provisions it (EVO-65481). This reconcile
-        heals that drift: for each ``<golden_repos_dir>/<alias>`` that has a
-        completed semantic index but no registry row, reconstruct its identity from
-        the on-disk clone and add the row. It NEVER re-indexes (the index already
-        exists), is idempotent, and tolerates a sibling pod winning the insert.
+        A filesystem index-build and a DB registry-row insert cannot be atomic
+        across a process crash, so the registry can drift from disk in two ways;
+        this reconcile heals BOTH (and is meant to run periodically, not just at
+        startup — see the lifespan wiring):
 
-        Returns counts: scanned / indexed / backfilled / skipped_registered / errors.
+        1. Index-orphan (index on disk, no registry row). Registration persists the
+           index (``_execute_post_clone_workflow``) BEFORE the row (``add_repo``), so
+           a crash / pod eviction between the two orphans the index; the workspace-mcp
+           seeder then re-provisions it (EVO-65481). Heal: reconstruct identity from
+           the on-disk clone and add the row. NEVER re-indexes (index already exists).
+
+        2. Row-orphan (registry row, but its on-disk clone directory is entirely
+           gone — e.g. a removeOnDisk that didn't deregister). The row is
+           unqueryable and misleads callers. Heal: prune the row.
+
+        Both passes are idempotent and tolerate sibling pods racing (IntegrityError
+        on insert / already-gone on delete are benign). The prune is deliberately
+        CONSERVATIVE — it only removes a row whose clone dir is an IN-TREE
+        ``<golden_repos_dir>/<alias>`` that is verifiably absent from the SAME
+        cache-fresh directory listing used above (so an NFS negative-dentry blip
+        can't trigger it), and it SKIPS globally-active repos (whose ``-global``
+        pointer would need separate teardown) — those are logged for attention.
+
+        Returns counts: scanned / indexed / backfilled / skipped_registered /
+        pruned_orphan_rows / orphan_rows_skipped_global / errors.
         """
         from code_indexer.server.routers.repository_health import detect_semantic_index
 
@@ -1134,15 +1148,22 @@ class GoldenRepoManager:
             "indexed": 0,
             "backfilled": 0,
             "skipped_registered": 0,
+            "pruned_orphan_rows": 0,
+            "orphan_rows_skipped_global": 0,
             "errors": 0,
         }
         root = Path(self.golden_repos_dir)
         if not root.is_dir():
             return counts
-        registered = {r["alias"] for r in self.list_golden_repos()}
+        registered_rows = self.list_golden_repos()
+        registered = {r["alias"] for r in registered_rows}
+        # A cache-fresh snapshot of the on-disk golden dirs (one iterdir busts the
+        # NFS negative-dentry cache), reused by BOTH the backfill and prune passes.
+        present_dirs = set()
         for entry in sorted(root.iterdir(), key=lambda p: p.name):
             if entry.name.startswith(".") or not entry.is_dir():
                 continue
+            present_dirs.add(entry.name)
             counts["scanned"] += 1
             if not detect_semantic_index(entry / ".code-indexer" / "index"):
                 continue
@@ -1186,6 +1207,47 @@ class GoldenRepoManager:
                     entry.name,
                     exc,
                 )
+
+        # Pass 2 — prune row-orphans whose in-tree clone dir has vanished.
+        root_str = str(root)
+        for row in registered_rows:
+            alias = row.get("alias")
+            clone_path = row.get("clone_path")
+            if not alias or not clone_path:
+                continue
+            # Only in-tree clones (<golden_repos_dir>/<name>) are prunable: their
+            # presence is exactly what `present_dirs` (cache-fresh) records. Skip
+            # external / symlinked clone paths — we can't vouch for those mounts.
+            parent = os.path.dirname(os.path.normpath(clone_path))
+            if parent != root_str:
+                continue
+            if os.path.basename(os.path.normpath(clone_path)) in present_dirs:
+                continue  # dir still present — not an orphan
+            try:
+                if self.is_globally_active(alias):
+                    counts["orphan_rows_skipped_global"] += 1
+                    logging.warning(
+                        "EVO-65484: registry row '%s' has no on-disk clone but is "
+                        "globally active — leaving it for manual teardown",
+                        alias,
+                    )
+                    continue
+                self._sqlite_backend.remove_repo(alias)
+                self.golden_repos.pop(alias, None)
+                counts["pruned_orphan_rows"] += 1
+                logging.info(
+                    "EVO-65484: pruned registry row '%s' — its on-disk clone %s is gone",
+                    alias,
+                    clone_path,
+                )
+            except Exception as exc:  # noqa: BLE001
+                counts["errors"] += 1
+                logging.warning(
+                    "EVO-65484: could not prune orphan registry row '%s': %s",
+                    alias,
+                    exc,
+                )
+
         logging.info(
             "EVO-65484: registry reconcile from filesystem complete: %s", counts
         )
