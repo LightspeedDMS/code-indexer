@@ -72,6 +72,13 @@ logger = logging.getLogger(__name__)
 
 EMBEDDING_STATS_BOOTSTRAP_DIR_ENV = "CIDX_EMBEDDING_STATS_BOOTSTRAP_DIR"
 
+# EVO-66113: per-job correlation tags threaded from parent to child so every
+# EmbeddingCallRecord produced by the child carries the repo alias, job id,
+# and cluster node id of the parent's job context.
+EMBEDDING_STATS_GOLDEN_REPO_ALIAS_ENV = "CIDX_EMBEDDING_STATS_GOLDEN_REPO_ALIAS"
+EMBEDDING_STATS_JOB_ID_ENV = "CIDX_EMBEDDING_STATS_JOB_ID"
+EMBEDDING_STATS_NODE_ID_ENV = "CIDX_EMBEDDING_STATS_NODE_ID"
+
 # Bounded connect/acquire timeout for the child's dedicated pool -- infra
 # (connection establishment), NOT an indexing-work timeout (Bug #1218: no
 # wall-clock timeout is ever applied to the indexing work itself).
@@ -152,7 +159,12 @@ def _resolve_embedding_stats_config(
 
 
 def build_embedding_stats_child_env(
-    server_config: Optional[ServerConfig], base_env: Optional[Dict[str, str]] = None
+    server_config: Optional[ServerConfig],
+    base_env: Optional[Dict[str, str]] = None,
+    *,
+    golden_repo_alias: Optional[str] = None,
+    job_id: Optional[str] = None,
+    node_id: Optional[str] = None,
 ) -> Dict[str, str]:
     """Build the env dict for a `cidx index` child Popen call.
 
@@ -160,6 +172,12 @@ def build_embedding_stats_child_env(
         server_config: The server's own ServerConfig, or None if unavailable.
         base_env: Environment to merge into (copied, never mutated). When
             None, defaults to a copy of the current process's os.environ.
+        golden_repo_alias: EVO-66113 -- optional repo alias to tag every
+            EmbeddingCallRecord produced by the child.
+        job_id: EVO-66113 -- optional job id for cost correlation.
+        node_id: EVO-66113 -- optional cluster node id. When None and
+            server_config has a cluster.node_id, that value is used
+            automatically.
 
     Returns:
         A NEW dict (base_env or os.environ, copied). When server_config is
@@ -168,12 +186,30 @@ def build_embedding_stats_child_env(
         modes (unlike build_temporal_child_env, this is unconditional on
         storage_mode). When server_config is None, the dict is returned
         unchanged (no bootstrap var -- the child falls back to NoOpWriter).
+
+        EVO-66113: when golden_repo_alias / job_id / node_id are provided
+        (or node_id is resolved from server_config.cluster), the
+        corresponding CIDX_EMBEDDING_STATS_* env vars are set so the child
+        can tag its EmbeddingCallRecords.
     """
     merged: Dict[str, str] = (
         dict(base_env) if base_env is not None else dict(os.environ)
     )
     if server_config is not None:
         merged[EMBEDDING_STATS_BOOTSTRAP_DIR_ENV] = server_config.server_dir
+
+        # EVO-66113: resolve node_id from cluster config when not explicitly
+        # provided by the caller.
+        effective_node_id = node_id
+        if effective_node_id is None and server_config.cluster:
+            effective_node_id = server_config.cluster.node_id or None
+
+        if golden_repo_alias:
+            merged[EMBEDDING_STATS_GOLDEN_REPO_ALIAS_ENV] = golden_repo_alias
+        if job_id:
+            merged[EMBEDDING_STATS_JOB_ID_ENV] = job_id
+        if effective_node_id:
+            merged[EMBEDDING_STATS_NODE_ID_ENV] = effective_node_id
     return merged
 
 

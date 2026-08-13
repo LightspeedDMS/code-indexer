@@ -49,6 +49,43 @@ _stats_purpose_override: "contextvars.ContextVar[Optional[str]]" = (
     contextvars.ContextVar("_stats_purpose_override", default=None)
 )
 
+# EVO-66113: process-level fallback tags for golden_repo_alias, job_id,
+# node_id.  Set ONCE at child-process startup (via
+# set_process_embed_stats_tags) from env vars threaded by the parent; read
+# as defaults when instrument_call()/instrument_call_async() callers pass
+# None (which is ALL existing embed-provider call sites -- they have no
+# per-job context to thread).
+_stats_golden_repo_alias: "contextvars.ContextVar[Optional[str]]" = (
+    contextvars.ContextVar("_stats_golden_repo_alias", default=None)
+)
+_stats_job_id: "contextvars.ContextVar[Optional[str]]" = (
+    contextvars.ContextVar("_stats_job_id", default=None)
+)
+_stats_node_id: "contextvars.ContextVar[Optional[str]]" = (
+    contextvars.ContextVar("_stats_node_id", default=None)
+)
+
+
+def set_process_embed_stats_tags(
+    *,
+    golden_repo_alias: Optional[str] = None,
+    job_id: Optional[str] = None,
+    node_id: Optional[str] = None,
+) -> None:
+    """Set process-level fallback tags for all subsequent embed-stats records.
+
+    Called once at child-process startup from env vars threaded by the parent
+    server process (see embedding_stats_child_wiring.py).  Values persist for
+    the child's entire lifetime -- a `cidx index` subprocess handles exactly
+    one repo/job, so per-process scope is correct.
+    """
+    if golden_repo_alias:
+        _stats_golden_repo_alias.set(golden_repo_alias)
+    if job_id:
+        _stats_job_id.set(job_id)
+    if node_id:
+        _stats_node_id.set(node_id)
+
 
 @contextmanager
 def stats_purpose_override(purpose: str) -> Iterator[None]:
@@ -86,6 +123,12 @@ def _record_call(
     """
     try:
         effective_purpose = _stats_purpose_override.get() or purpose
+        # EVO-66113: fall back to process-level tags when the caller did not
+        # pass explicit values (which is the normal case for all embed-
+        # provider call sites -- they have no per-job context to thread).
+        effective_alias = golden_repo_alias or _stats_golden_repo_alias.get()
+        effective_job_id = job_id or _stats_job_id.get()
+        effective_node_id = node_id or _stats_node_id.get()
         record = EmbeddingCallRecord(
             provider=provider,
             call_type=call_type,
@@ -97,9 +140,9 @@ def _record_call(
             success=success,
             latency_ms=latency_ms,
             occurred_at=time.time(),
-            golden_repo_alias=golden_repo_alias,
-            job_id=job_id,
-            node_id=node_id,
+            golden_repo_alias=effective_alias,
+            job_id=effective_job_id,
+            node_id=effective_node_id,
         )
         EmbeddingStatsWriter.get_active().record(record)
     except Exception as exc:  # fail-open: never mask the real result/exception

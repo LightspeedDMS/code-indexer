@@ -2698,7 +2698,9 @@ class RefreshScheduler:
                 error_label=error_label,
             )
             _popen_kwargs["env"] = build_embedding_stats_child_env(
-                get_config_service().get_config(), base_env=env
+                get_config_service().get_config(),
+                base_env=env,
+                golden_repo_alias=alias_name,
             )
             # Bug #1388: only pass orphan_event_callback when not None, for
             # the same reason as env above -- several pre-existing tests

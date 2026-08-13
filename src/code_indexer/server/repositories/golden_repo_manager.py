@@ -685,6 +685,7 @@ class GoldenRepoManager:
                     temporal_options=temporal_options,
                     progress_callback=progress_callback,
                     orphan_event_callback=_make_hnsw_orphan_event_logger(alias),
+                    golden_repo_alias=alias,
                 )
 
                 # Create golden repository record
@@ -2328,6 +2329,8 @@ class GoldenRepoManager:
         temporal_options: Optional[Dict] = None,
         progress_callback=None,
         orphan_event_callback: Optional[Any] = None,
+        golden_repo_alias: Optional[str] = None,
+        job_id: Optional[str] = None,
     ) -> None:
         """
         Execute the required workflow after successful repository cloning.
@@ -2348,6 +2351,8 @@ class GoldenRepoManager:
                 subprocess's stderr -- forwarded verbatim to
                 run_with_popen_progress. A channel entirely separate from
                 progress_callback (see _make_hnsw_orphan_event_logger).
+            golden_repo_alias: EVO-66113 optional alias to tag embed stats records.
+            job_id: EVO-66113 optional job id for embed stats correlation.
 
         Raises:
             GitOperationError: If any workflow step fails
@@ -2504,7 +2509,10 @@ class GoldenRepoManager:
                 error_label=error_label,
             )
             _popen_kwargs["env"] = build_embedding_stats_child_env(
-                _get_config_service_for_stats().get_config(), base_env=env
+                _get_config_service_for_stats().get_config(),
+                base_env=env,
+                golden_repo_alias=golden_repo_alias,
+                job_id=job_id,
             )
             # Bug #1388: only pass orphan_event_callback when not None, for
             # the same reason as env above -- defensive compatibility with
@@ -4241,7 +4249,9 @@ class GoldenRepoManager:
                         error_label=error_label,
                     )
                     _shared_kwargs["env"] = build_embedding_stats_child_env(
-                        _get_config_service_for_stats().get_config(), base_env=env
+                        _get_config_service_for_stats().get_config(),
+                        base_env=env,
+                        golden_repo_alias=alias,
                     )
                     try:
                         _run_with_popen_progress_shared(**_shared_kwargs)

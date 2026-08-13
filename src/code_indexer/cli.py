@@ -2905,6 +2905,32 @@ def _install_embedding_stats_writer_for_index() -> None:
             )
 
             EmbeddingStatsWriter.set_active(NoOpWriter())
+
+        # EVO-66113: read per-job correlation tags from the env vars
+        # threaded by the parent and install them as process-level
+        # fallbacks so every EmbeddingCallRecord produced by this child
+        # carries the repo alias, job id, and cluster node id.
+        try:
+            from .server.storage.postgres.embedding_stats_child_wiring import (
+                EMBEDDING_STATS_GOLDEN_REPO_ALIAS_ENV,
+                EMBEDDING_STATS_JOB_ID_ENV,
+                EMBEDDING_STATS_NODE_ID_ENV,
+            )
+            from .server.services.embedding_call_instrumentation import (
+                set_process_embed_stats_tags,
+            )
+
+            set_process_embed_stats_tags(
+                golden_repo_alias=os.environ.get(EMBEDDING_STATS_GOLDEN_REPO_ALIAS_ENV),
+                job_id=os.environ.get(EMBEDDING_STATS_JOB_ID_ENV),
+                node_id=os.environ.get(EMBEDDING_STATS_NODE_ID_ENV),
+            )
+        except Exception as exc:
+            logger.debug(
+                "_install_embedding_stats_writer_for_index: failed to set "
+                "embed stats tags (non-fatal): %s",
+                exc,
+            )
     else:
         from .server.services.embedding_stats_writer import (
             EmbeddingStatsWriter,

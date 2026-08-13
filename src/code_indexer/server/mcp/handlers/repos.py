@@ -1919,6 +1919,7 @@ def _run_provider_subprocess(
     phase_name: str,
     index_types: list,
     progress_callback,
+    golden_repo_alias: Optional[str] = None,
 ) -> tuple:
     """Run cidx index subprocess with progress reporting.
 
@@ -1967,7 +1968,9 @@ def _run_provider_subprocess(
     )
 
     env_with_stats = build_embedding_stats_child_env(
-        get_config_service().get_config(), base_env=env
+        get_config_service().get_config(),
+        base_env=env,
+        golden_repo_alias=golden_repo_alias,
     )
     sanitized_env = build_cidx_subprocess_env(env_with_stats)
 
@@ -2044,6 +2047,7 @@ def _provider_index_job(
         "semantic",
         ["semantic"],
         progress_callback,
+        golden_repo_alias=repo_alias,
     )
 
     if success and is_versioned and actual_path != repo_path:
@@ -2151,6 +2155,7 @@ def _provider_temporal_index_job(
         "temporal",
         ["temporal"],
         progress_callback,
+        golden_repo_alias=repo_alias,
     )
 
     if success:
