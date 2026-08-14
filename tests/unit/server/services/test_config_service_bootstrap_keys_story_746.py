@@ -42,6 +42,7 @@ def test_all_server_config_fields_are_classified() -> None:
             "resource_config",
             "cache_config",
             "oidc_provider_config",
+            "trusted_gateway_config",  # EVO-66121 — runtime, not bootstrap
             "telemetry_config",
             "search_limits_config",
             "golden_repos_config",
