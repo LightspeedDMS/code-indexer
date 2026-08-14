@@ -2924,6 +2924,43 @@ def make_lifespan(
                 extra={"correlation_id": get_correlation_id()},
             )
 
+        # EVO-66121: trusted mcp-gateway per-user RS256 bearer authenticator (default off).
+        # Validates per-user RS256 JWTs the gateway forwards + JIT-provisions via the OIDC
+        # path (its OWN identity-link store, isolated from interactive SSO), so cidx enforces
+        # its OWN per-user access. build_gateway_authenticator is fail-safe -> None when
+        # disabled/misconfigured, so gateway_identity_authenticator stays None and the /mcp
+        # dispatch no-ops.
+        try:
+            from code_indexer.server.services.config_service import get_config_service
+            from code_indexer.server.auth import dependencies as _gw_deps
+            from code_indexer.server.auth.gateway_auth_wiring import (
+                build_gateway_authenticator,
+            )
+
+            _tg_cfg = get_config_service().get_config()
+            _tg = getattr(_tg_cfg, "trusted_gateway_config", None) if _tg_cfg else None
+            _gw_auth = await build_gateway_authenticator(
+                _tg,
+                user_manager=user_manager,  # module-level Postgres-backed instance
+                jwt_manager=jwt_manager,  # module-level instance
+                group_manager=getattr(app.state, "group_manager", None),
+            )
+            _gw_deps.gateway_identity_authenticator = _gw_auth
+            logger.info(
+                "EVO-66121: trusted mcp-gateway bearer auth %s",
+                "enabled" if _gw_auth is not None else "not enabled",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        except Exception as e:
+            logger.error(
+                format_error_log(
+                    "APP-GENERAL-024",
+                    f"Failed to wire trusted-gateway auth: {e}",
+                    exc_info=True,
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
+
         # Startup: Initialize Langfuse Trace Sync Service (Story #168)
         global langfuse_sync_service
         langfuse_sync_service = None  # type: ignore[name-defined]
