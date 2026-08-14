@@ -30,6 +30,7 @@ logger = logging.getLogger(__name__)
 if TYPE_CHECKING:
     from .oauth.oauth_manager import OAuthManager
     from .mcp_credential_manager import MCPCredentialManager
+    from .gateway_identity_authenticator import GatewayIdentityAuthenticator
     from code_indexer.server.utils.config_manager import ServerConfig
 
 
@@ -44,6 +45,10 @@ mcp_credential_manager: Optional["MCPCredentialManager"] = None
 api_key_manager: Optional[ApiKeyManager] = None
 # Story #563: Server config reference for non-SSO API restriction check
 server_config: Optional["ServerConfig"] = None
+# EVO-66121: authenticator for per-user RS256 JWTs forwarded by a trusted mcp-gateway.
+# Set by lifespan only when trusted_gateway_config.enabled; None otherwise (default off),
+# so the /mcp dispatch below no-ops on deployments that don't front cidx with the gateway.
+gateway_identity_authenticator: Optional["GatewayIdentityAuthenticator"] = None
 
 # Security scheme for bearer token authentication
 # auto_error=False allows us to handle missing credentials manually and return 401 per MCP spec
@@ -586,6 +591,56 @@ async def get_current_user_for_mcp(request: Request) -> User:
     user = await get_mcp_user_from_credentials(request)
     if user:
         return user
+
+    # Priority 1.5 (EVO-66121): trusted mcp-gateway per-user RS256 bearer.
+    # When cidx is fronted by the mcp-gateway, the gateway forwards each end user's
+    # identity as an RS256 JWT. Validate it against the gateway JWKS and JIT-provision
+    # the user via the OIDC path so cidx enforces its OWN per-user access. Only tokens
+    # whose issuer matches the configured gateway are handled here; everything else
+    # (cidx HS256 tokens, OAuth opaque tokens, api keys) falls through to Priority 2.
+    gw = gateway_identity_authenticator
+    if gw is not None:
+        _auth_header = request.headers.get("Authorization", "")
+        if _auth_header.startswith("Bearer "):
+            _gw_token = _auth_header[7:]
+            if gw.handles(_gw_token):
+                from .gateway_jwt_validator import GatewayTokenError
+
+                try:
+                    gw_user: User = await gw.authenticate(_gw_token)
+                except GatewayTokenError:
+                    raise HTTPException(
+                        status_code=status.HTTP_401_UNAUTHORIZED,
+                        detail="Invalid gateway token",
+                        headers={"WWW-Authenticate": _build_www_authenticate_header()},
+                    )
+                _check_non_sso_api_restriction(gw_user)
+                # Pre-elevate like the OAuth Bearer path (v10.4.8): the per-user gateway
+                # token is itself a step-up artifact. Stable session key from the token.
+                import hashlib
+
+                _session_key = (
+                    f"gw:{hashlib.sha256(_gw_token.encode()).hexdigest()[:16]}"
+                )
+                request.state.user_jti = _session_key
+                if elevated_session_manager is not None:
+                    try:
+                        _ip = request.client.host if request.client else "unknown"
+                        elevated_session_manager.create(
+                            session_key=_session_key,
+                            username=gw_user.username,
+                            elevated_from_ip=_ip,
+                            scope="full",
+                        )
+                    except Exception as exc:
+                        logger.warning(
+                            "EVO-66121: failed to pre-elevate gateway session for "
+                            "%s: %s",
+                            gw_user.username,
+                            exc,
+                            exc_info=True,
+                        )
+                return gw_user
 
     # Priority 2: Fall back to OAuth/JWT (existing auth)
     # Extract credentials from request for get_current_user

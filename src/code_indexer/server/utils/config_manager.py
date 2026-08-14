@@ -220,6 +220,46 @@ class OIDCProviderConfig:
 
 
 @dataclass
+class TrustedGatewayConfig:
+    """EVO-66121: trust an mcp-gateway as an external RS256 bearer-token issuer.
+
+    When enabled, cidx validates per-user RS256 JWTs the gateway forwards (verified
+    against the gateway JWKS) and JIT-provisions the user via the OIDC path, so cidx
+    enforces its OWN per-user access (groups / repo_group_access). Disabled by default
+    -- zero effect on fresh installs.
+
+    Distinct from ``oidc_provider_config`` (the interactive SSO-login IdP): the gateway
+    is a separate issuer and cidx only accepts *bearer* tokens from it, never runs an
+    interactive login against it. The claim names feed the token validator; the
+    provisioning fields (``default_role`` / ``require_email_verification`` /
+    ``enable_jit_provisioning`` / ``group_mappings``) feed the shared OIDCManager path.
+    """
+
+    enabled: bool = False
+    issuer: str = ""  # expected `iss`; also routes the auth dispatch
+    jwks_uri: str = ""  # gateway JWKS endpoint (RS256 signing keys)
+    audience: str = ""  # expected `aud` == this cidx deployment
+    username_claim: str = "preferred_username"
+    email_claim: str = "email"
+    groups_claim: str = "groups"
+    default_role: str = "normal_user"
+    require_email_verification: bool = True
+    enable_jit_provisioning: bool = True
+    group_mappings: Optional[Union[Dict[str, str], List[Dict[str, str]]]] = None
+    leeway_seconds: int = 60
+
+    def __post_init__(self):
+        if self.group_mappings is None:
+            self.group_mappings = []
+        elif isinstance(self.group_mappings, dict):
+            # Backward compatibility: old dict format -> list format (mirrors OIDC).
+            self.group_mappings = [
+                {"external_group_id": external_id, "cidx_group": cidx_group}
+                for external_id, cidx_group in self.group_mappings.items()
+            ]
+
+
+@dataclass
 class TelemetryConfig:
     """
     OpenTelemetry configuration for CIDX Server (Story #695).
@@ -1483,6 +1523,8 @@ class ServerConfig:
     resource_config: Optional[ServerResourceConfig] = None
     cache_config: Optional[CacheConfig] = None
     oidc_provider_config: Optional[OIDCProviderConfig] = None
+    # EVO-66121: trust an mcp-gateway as an external RS256 bearer issuer (default off).
+    trusted_gateway_config: Optional["TrustedGatewayConfig"] = None
     telemetry_config: Optional[TelemetryConfig] = None
 
     # Story #3 - Configuration Consolidation: Migrated settings
@@ -1768,6 +1810,8 @@ class ServerConfig:
             self.cache_config = CacheConfig()
         if self.oidc_provider_config is None:
             self.oidc_provider_config = OIDCProviderConfig()
+        if self.trusted_gateway_config is None:
+            self.trusted_gateway_config = TrustedGatewayConfig()
         if self.telemetry_config is None:
             self.telemetry_config = TelemetryConfig()
         # Story #3 - Configuration Consolidation: Initialize migrated configs
@@ -2114,6 +2158,14 @@ class ServerConfigManager:
         ):
             config_dict["oidc_provider_config"] = OIDCProviderConfig(
                 **config_dict["oidc_provider_config"]
+            )
+
+        # EVO-66121: convert nested trusted_gateway_config dict to TrustedGatewayConfig
+        if "trusted_gateway_config" in config_dict and isinstance(
+            config_dict["trusted_gateway_config"], dict
+        ):
+            config_dict["trusted_gateway_config"] = TrustedGatewayConfig(
+                **config_dict["trusted_gateway_config"]
             )
 
         # Convert nested telemetry_config dict to TelemetryConfig
