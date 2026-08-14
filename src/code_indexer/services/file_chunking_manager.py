@@ -15,6 +15,7 @@ Architecture:
 - Immediate queuing feedback before async processing
 """
 
+import contextvars
 import hashlib
 import logging
 import time
@@ -271,7 +272,13 @@ class FileChunkingManager:
         # Always use clean implementation
         process_method = self._process_file_clean_lifecycle
 
+        # Capture current context (including embed stats ContextVars) so
+        # the ThreadPoolExecutor worker inherits them — without this, the
+        # worker thread starts with empty ContextVars and embed stats tags
+        # (golden_repo_alias, job_id, node_id) are all NULL.
+        _stats_ctx = contextvars.copy_context()
         future = self.executor.submit(
+            _stats_ctx.run,
             process_method,
             file_path,
             metadata,
