@@ -168,6 +168,15 @@ RESTART_REQUIRED_FIELDS = [
     "payload_max_fetch_size_chars",
     "payload_cache_ttl_seconds",
     "payload_cleanup_interval_seconds",
+    # EVO-66121 trusted_gateway.* — the gateway authenticator is built once at startup
+    # (gateway_auth_wiring.build_gateway_authenticator); no live reload. Only the field
+    # names UNIQUE to this section are listed (the hint matches by bare field name, so
+    # shared names like "enabled"/"email_claim" would wrongly flag other sections too;
+    # the section description carries the restart caveat for those).
+    "issuer",
+    "jwks_uri",
+    "audience",
+    "leeway_seconds",
 ]
 
 
@@ -262,6 +271,7 @@ _VALID_CONFIG_SECTIONS = (
     "password_security",
     "totp_elevation",  # Bug #943: TOTP step-up elevation runtime config
     "oidc",
+    "trusted_gateway",  # EVO-66121: trusted mcp-gateway RS256 bearer issuer
     "telemetry",
     "langfuse",
     "search_limits",
@@ -6329,6 +6339,7 @@ def _get_current_config() -> dict:
     from ..services.config_service import get_config_service
     from ..utils.config_manager import (
         OIDCProviderConfig,
+        TrustedGatewayConfig,
         TelemetryConfig,
         LangfuseConfig,
         SearchLimitsConfig,
@@ -6380,6 +6391,11 @@ def _get_current_config() -> dict:
     if not oidc_config:
         # Provide defaults if OIDC config is missing
         oidc_config = asdict(OIDCProviderConfig())
+
+    # EVO-66121: trusted mcp-gateway bearer config (defaults if missing)
+    trusted_gateway_config = settings.get("trusted_gateway")
+    if not trusted_gateway_config:
+        trusted_gateway_config = asdict(TrustedGatewayConfig())
 
     # Ensure telemetry config has all required fields with defaults
     telemetry_config = settings.get("telemetry")
@@ -6534,6 +6550,7 @@ def _get_current_config() -> dict:
         # Story #997: Pace-maker mode enforcement
         "pace_maker": settings.get("pace_maker", {"pace_maker_mode": "disabled"}),
         "oidc": oidc_config,
+        "trusted_gateway": trusted_gateway_config,
         "telemetry": telemetry_config,
         "langfuse": langfuse_config,
         "claude_delegation": claude_delegation_config,

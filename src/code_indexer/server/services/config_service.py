@@ -459,6 +459,7 @@ class ConfigService:
         assert config.resource_config is not None
         assert config.password_security is not None
         assert config.oidc_provider_config is not None
+        assert config.trusted_gateway_config is not None  # EVO-66121
         assert config.telemetry_config is not None
         # Story #3 - Configuration Consolidation: Assert new config objects
         assert config.search_limits_config is not None
@@ -606,6 +607,21 @@ class ConfigService:
                 "default_role": config.oidc_provider_config.default_role,
                 "groups_claim": config.oidc_provider_config.groups_claim,
                 "group_mappings": config.oidc_provider_config.group_mappings,
+            },
+            # EVO-66121: trusted mcp-gateway RS256 bearer issuer (default off)
+            "trusted_gateway": {
+                "enabled": config.trusted_gateway_config.enabled,
+                "issuer": config.trusted_gateway_config.issuer,
+                "jwks_uri": config.trusted_gateway_config.jwks_uri,
+                "audience": config.trusted_gateway_config.audience,
+                "username_claim": config.trusted_gateway_config.username_claim,
+                "email_claim": config.trusted_gateway_config.email_claim,
+                "groups_claim": config.trusted_gateway_config.groups_claim,
+                "default_role": config.trusted_gateway_config.default_role,
+                "require_email_verification": config.trusted_gateway_config.require_email_verification,
+                "enable_jit_provisioning": config.trusted_gateway_config.enable_jit_provisioning,
+                "leeway_seconds": config.trusted_gateway_config.leeway_seconds,
+                "group_mappings": config.trusted_gateway_config.group_mappings,
             },
             # SCIP workspace cleanup (Story #647, Story #15 AC2: moved to scip_config)
             "scip_cleanup": {
@@ -1000,6 +1016,8 @@ class ConfigService:
             self._update_claude_cli_setting(config, key, value)
         elif category == "oidc":
             self._update_oidc_setting(config, key, value)
+        elif category == "trusted_gateway":
+            self._update_trusted_gateway_setting(config, key, value)
         elif category == "scip_cleanup":
             self._update_scip_cleanup_setting(config, key, value)
         elif category == "telemetry":
@@ -1917,6 +1935,63 @@ class ConfigService:
                 )
         else:
             raise ValueError(f"Unknown OIDC setting: {key}")
+
+    def _update_trusted_gateway_setting(
+        self, config: ServerConfig, key: str, value: Any
+    ) -> None:
+        """Update a trusted mcp-gateway bearer-auth setting (EVO-66121).
+
+        Note: the gateway authenticator is built once at startup from this config
+        (see gateway_auth_wiring.build_gateway_authenticator), so changes take effect
+        on the next server restart -- there is no live reload for this section.
+        """
+        tg = config.trusted_gateway_config
+        assert tg is not None  # Guaranteed by ServerConfig.__post_init__
+        if key == "enabled":
+            tg.enabled = value in ["true", True]
+        elif key == "issuer":
+            tg.issuer = str(value)
+        elif key == "jwks_uri":
+            tg.jwks_uri = str(value)
+        elif key == "audience":
+            tg.audience = str(value)
+        elif key == "username_claim":
+            tg.username_claim = str(value)
+        elif key == "email_claim":
+            tg.email_claim = str(value)
+        elif key == "groups_claim":
+            tg.groups_claim = str(value)
+        elif key == "default_role":
+            tg.default_role = str(value)
+        elif key == "require_email_verification":
+            tg.require_email_verification = value in ["true", True]
+        elif key == "enable_jit_provisioning":
+            tg.enable_jit_provisioning = value in ["true", True]
+        elif key == "leeway_seconds":
+            tg.leeway_seconds = int(value)
+        elif key == "group_mappings":
+            import json
+
+            if isinstance(value, (dict, list)):
+                tg.group_mappings = value
+            elif isinstance(value, str):
+                try:
+                    parsed = json.loads(value)
+                    if not isinstance(parsed, (dict, list)):
+                        raise ValueError(
+                            f"Invalid JSON for group_mappings: must be dict or list, got {type(parsed)}"
+                        )
+                    tg.group_mappings = parsed
+                except json.JSONDecodeError:
+                    raise ValueError(
+                        f"Invalid JSON for group_mappings: {value}. Expected format: [{{'external_group_id': 'guid', 'cidx_group': 'admins'}}]"
+                    )
+            else:
+                raise ValueError(
+                    f"Invalid type for group_mappings: {type(value)}. Expected dict, list, or JSON string"
+                )
+        else:
+            raise ValueError(f"Unknown trusted_gateway setting: {key}")
 
     def _update_scip_cleanup_setting(
         self, config: ServerConfig, key: str, value: Any
