@@ -2924,62 +2924,38 @@ def make_lifespan(
                 extra={"correlation_id": get_correlation_id()},
             )
 
-        # EVO-66121: trusted mcp-gateway per-user RS256 bearer authenticator.
-        # When enabled, cidx validates per-user RS256 JWTs the gateway forwards and
-        # JIT-provisions the user via the OIDC path, so cidx enforces its OWN per-user
-        # access. Default off -> gateway_identity_authenticator stays None and the /mcp
-        # dispatch no-ops. Reuses the OIDC JIT/group path with the gateway's own config
-        # (a separate issuer from the interactive-SSO oidc_provider_config).
+        # EVO-66121: trusted mcp-gateway per-user RS256 bearer authenticator (default off).
+        # Validates per-user RS256 JWTs the gateway forwards + JIT-provisions via the OIDC
+        # path (its OWN identity-link store, isolated from interactive SSO), so cidx enforces
+        # its OWN per-user access. build_gateway_authenticator is fail-safe -> None when
+        # disabled/misconfigured, so gateway_identity_authenticator stays None and the /mcp
+        # dispatch no-ops.
         try:
             from code_indexer.server.services.config_service import get_config_service
             from code_indexer.server.auth import dependencies as _gw_deps
+            from code_indexer.server.auth.gateway_auth_wiring import (
+                build_gateway_authenticator,
+            )
 
             _tg_cfg = get_config_service().get_config()
             _tg = getattr(_tg_cfg, "trusted_gateway_config", None) if _tg_cfg else None
-            if _tg and _tg.enabled:
-                from code_indexer.server.auth.gateway_jwt_validator import (
-                    GatewayJwtValidator,
-                )
-                from code_indexer.server.auth.gateway_identity_authenticator import (
-                    GatewayIdentityAuthenticator,
-                )
-                from code_indexer.server.auth.oidc.oidc_manager import OIDCManager
-
-                _gw_validator = GatewayJwtValidator(
-                    issuer=_tg.issuer,
-                    jwks_uri=_tg.jwks_uri,
-                    audience=_tg.audience,
-                    username_claim=_tg.username_claim,
-                    email_claim=_tg.email_claim,
-                    groups_claim=_tg.groups_claim,
-                    leeway=_tg.leeway_seconds,
-                )
-                _gw_oidc = OIDCManager(
-                    config=_tg,
-                    user_manager=user_manager,  # module-level Postgres-backed instance
-                    jwt_manager=jwt_manager,  # module-level instance
-                )
-                await _gw_oidc.initialize()
-                if hasattr(app.state, "group_manager") and app.state.group_manager:
-                    _gw_oidc.group_manager = app.state.group_manager
-                _gw_deps.gateway_identity_authenticator = GatewayIdentityAuthenticator(
-                    _gw_validator, _gw_oidc
-                )
-                logger.info(
-                    "EVO-66121: trusted mcp-gateway bearer auth enabled (issuer=%s)",
-                    _tg.issuer,
-                    extra={"correlation_id": get_correlation_id()},
-                )
-            else:
-                logger.info(
-                    "EVO-66121: trusted mcp-gateway bearer auth is not enabled",
-                    extra={"correlation_id": get_correlation_id()},
-                )
+            _gw_auth = await build_gateway_authenticator(
+                _tg,
+                user_manager=user_manager,  # module-level Postgres-backed instance
+                jwt_manager=jwt_manager,  # module-level instance
+                group_manager=getattr(app.state, "group_manager", None),
+            )
+            _gw_deps.gateway_identity_authenticator = _gw_auth
+            logger.info(
+                "EVO-66121: trusted mcp-gateway bearer auth %s",
+                "enabled" if _gw_auth is not None else "not enabled",
+                extra={"correlation_id": get_correlation_id()},
+            )
         except Exception as e:
             logger.error(
                 format_error_log(
                     "APP-GENERAL-024",
-                    f"Failed to initialize trusted-gateway auth: {e}",
+                    f"Failed to wire trusted-gateway auth: {e}",
                     exc_info=True,
                     extra={"correlation_id": get_correlation_id()},
                 )
