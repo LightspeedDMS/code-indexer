@@ -168,6 +168,15 @@ RESTART_REQUIRED_FIELDS = [
     "payload_max_fetch_size_chars",
     "payload_cache_ttl_seconds",
     "payload_cleanup_interval_seconds",
+    # EVO-66121 trusted_gateway.* — the gateway authenticator is built once at startup
+    # (gateway_auth_wiring.build_gateway_authenticator); no live reload. Only the field
+    # names UNIQUE to this section are listed (the hint matches by bare field name, so
+    # shared names like "enabled"/"email_claim" would wrongly flag other sections too;
+    # the section description carries the restart caveat for those).
+    "issuer",
+    "jwks_uri",
+    "audience",
+    "leeway_seconds",
 ]
 
 

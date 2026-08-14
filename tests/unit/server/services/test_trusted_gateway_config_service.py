@@ -61,3 +61,13 @@ class TestTrustedGatewayConfigService:
         svc = _service(tmp_path)
         with pytest.raises(ValueError):
             svc.update_setting("trusted_gateway", "nope", "x")
+
+    def test_malformed_group_mappings_json_raises(self, tmp_path):
+        svc = _service(tmp_path)
+        with pytest.raises(ValueError):
+            svc.update_setting("trusted_gateway", "group_mappings", "{not valid json")
+
+    def test_non_numeric_leeway_raises(self, tmp_path):
+        svc = _service(tmp_path)
+        with pytest.raises((ValueError, TypeError)):
+            svc.update_setting("trusted_gateway", "leeway_seconds", "not-a-number")

@@ -2805,6 +2805,197 @@ function saveLlmCredsConfig() {
 </details>
 
 
+<!-- Trusted mcp-gateway bearer auth (EVO-66121) -->
+<details class="config-section" id="section-trusted_gateway">
+    <summary>
+        <h2>Trusted Gateway (per-user bearer)</h2>
+    </summary>
+    <p class="section-description">
+        Trusts an mcp-gateway as an external RS256 bearer-token issuer. When enabled, cidx validates the per-user RS256 JWTs the gateway forwards (against the gateway JWKS) and JIT-provisions the user via the OIDC path, so cidx enforces its own per-user access (groups / repo_group_access). This is a separate issuer from the SSO Authentication section above. <strong>Changes to this section apply on the next server restart</strong> (the authenticator is built once at startup).
+    </p>
+    <article>
+        <!-- Display Mode -->
+        <div id="display-trusted_gateway">
+            <table class="config-table">
+                <tbody>
+                    <tr>
+                        <td class="config-label">Enabled</td>
+                        <td class="config-value">{{ 'Yes' if config.trusted_gateway.enabled else 'No' }}</td>
+                        <td class="config-note"></td>
+                    </tr>
+                    <tr>
+                        <td class="config-label">Issuer</td>
+                        <td class="config-value">{{ config.trusted_gateway.issuer or 'Not configured' }}</td>
+                        <td class="config-note">
+                            {% if 'issuer' in restart_required_fields %}
+                            <small class="restart-note">Requires server restart</small>
+                            {% endif %}
+                        </td>
+                    </tr>
+                    <tr>
+                        <td class="config-label">JWKS URI</td>
+                        <td class="config-value">{{ config.trusted_gateway.jwks_uri or 'Not configured' }}</td>
+                        <td class="config-note">
+                            {% if 'jwks_uri' in restart_required_fields %}
+                            <small class="restart-note">Requires server restart</small>
+                            {% endif %}
+                        </td>
+                    </tr>
+                    <tr>
+                        <td class="config-label">Audience</td>
+                        <td class="config-value">{{ config.trusted_gateway.audience or 'Not configured' }}</td>
+                        <td class="config-note">
+                            {% if 'audience' in restart_required_fields %}
+                            <small class="restart-note">Requires server restart</small>
+                            {% endif %}
+                        </td>
+                    </tr>
+                    <tr>
+                        <td class="config-label">Email Claim</td>
+                        <td class="config-value">{{ config.trusted_gateway.email_claim }}</td>
+                        <td class="config-note"></td>
+                    </tr>
+                    <tr>
+                        <td class="config-label">Username Claim</td>
+                        <td class="config-value">{{ config.trusted_gateway.username_claim }}</td>
+                        <td class="config-note"></td>
+                    </tr>
+                    <tr>
+                        <td class="config-label">Groups Claim</td>
+                        <td class="config-value">{{ config.trusted_gateway.groups_claim }}</td>
+                        <td class="config-note"><small>Claim containing user's groups</small></td>
+                    </tr>
+                    <tr>
+                        <td class="config-label">Group Mappings</td>
+                        <td class="config-value">
+                            {% if config.trusted_gateway.group_mappings %}
+                                <div style="font-family: monospace; font-size: 0.9em;">
+                                {% for mapping in config.trusted_gateway.group_mappings %}
+                                    {{ mapping.external_group_id }} → {{ mapping.cidx_group }}<br>
+                                {% endfor %}
+                                </div>
+                            {% else %}
+                                None configured
+                            {% endif %}
+                        </td>
+                        <td class="config-note"><small>Maps gateway groups to CIDX groups</small></td>
+                    </tr>
+                    <tr>
+                        <td class="config-label">Require Email Verification</td>
+                        <td class="config-value">{{ 'Yes' if config.trusted_gateway.require_email_verification else 'No' }}</td>
+                        <td class="config-note"></td>
+                    </tr>
+                    <tr>
+                        <td class="config-label">Enable JIT Provisioning</td>
+                        <td class="config-value">{{ 'Yes' if config.trusted_gateway.enable_jit_provisioning else 'No' }}</td>
+                        <td class="config-note"><small>Auto-create users on first request</small></td>
+                    </tr>
+                    <tr>
+                        <td class="config-label">Default Role</td>
+                        <td class="config-value">{{ config.trusted_gateway.default_role }}</td>
+                        <td class="config-note"><small>For JIT-provisioned users</small></td>
+                    </tr>
+                    <tr>
+                        <td class="config-label">Leeway (seconds)</td>
+                        <td class="config-value">{{ config.trusted_gateway.leeway_seconds }}</td>
+                        <td class="config-note">
+                            {% if 'leeway_seconds' in restart_required_fields %}
+                            <small class="restart-note">Requires server restart</small>
+                            {% endif %}
+                        </td>
+                    </tr>
+                </tbody>
+            </table>
+            <div class="section-actions">
+                <button class="outline small" onclick="toggleEditMode('trusted_gateway')">Edit</button>
+            </div>
+        </div>
+        <!-- Edit Mode -->
+        <form id="edit-form-trusted_gateway" method="post" action="/admin/config/trusted_gateway" style="display: none;">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            {% if validation_errors.trusted_gateway %}
+            <div class="validation-error">{{ validation_errors.trusted_gateway }}</div>
+            {% endif %}
+            <div class="form-grid">
+                <label for="trusted_gateway-enabled">
+                    Enabled
+                    <select id="trusted_gateway-enabled" name="enabled">
+                        <option value="true" {% if config.trusted_gateway.enabled %}selected{% endif %}>Yes</option>
+                        <option value="false" {% if not config.trusted_gateway.enabled %}selected{% endif %}>No</option>
+                    </select>
+                </label>
+                <label for="trusted_gateway-issuer">
+                    Issuer
+                    <input type="text" id="trusted_gateway-issuer" name="issuer" value="{{ config.trusted_gateway.issuer }}" placeholder="https://mcp.test.lightspeedtools.cloud">
+                    <small>Expected <code>iss</code>; also routes the auth dispatch</small>
+                </label>
+                <label for="trusted_gateway-jwks-uri">
+                    JWKS URI
+                    <input type="text" id="trusted_gateway-jwks-uri" name="jwks_uri" value="{{ config.trusted_gateway.jwks_uri }}" placeholder="https://mcp.test.lightspeedtools.cloud/oauth/jwks.json">
+                    <small>Gateway JWKS endpoint (RS256 signing keys)</small>
+                </label>
+                <label for="trusted_gateway-audience">
+                    Audience
+                    <input type="text" id="trusted_gateway-audience" name="audience" value="{{ config.trusted_gateway.audience }}">
+                    <small>Expected <code>aud</code> (this cidx deployment)</small>
+                </label>
+                <label for="trusted_gateway-email-claim">
+                    Email Claim
+                    <input type="text" id="trusted_gateway-email-claim" name="email_claim" value="{{ config.trusted_gateway.email_claim }}">
+                </label>
+                <label for="trusted_gateway-username-claim">
+                    Username Claim
+                    <input type="text" id="trusted_gateway-username-claim" name="username_claim" value="{{ config.trusted_gateway.username_claim }}">
+                    <small>Used ONLY when creating new users via JIT provisioning</small>
+                </label>
+                <label for="trusted_gateway-groups-claim">
+                    Groups Claim
+                    <input type="text" id="trusted_gateway-groups-claim" name="groups_claim" value="{{ config.trusted_gateway.groups_claim }}">
+                    <small>Claim containing user's groups (e.g., "groups", "roles")</small>
+                </label>
+                <label for="trusted_gateway-group-mappings" style="grid-column: 1 / -1;">
+                    Group Mappings (JSON Array)
+                    <textarea id="trusted_gateway-group-mappings" name="group_mappings" rows="6" placeholder='[{"external_group_id": "guid-or-name", "cidx_group": "admins"}]'>{{ config.trusted_gateway.group_mappings | tojson if config.trusted_gateway.group_mappings else '[]' }}</textarea>
+                    <small>Map gateway groups to CIDX groups. Each object: <code>external_group_id</code> (required), <code>cidx_group</code> (required, "admins"/"powerusers"/"users").</small>
+                </label>
+                <label for="trusted_gateway-require-email-verification">
+                    Require Email Verification
+                    <select id="trusted_gateway-require-email-verification" name="require_email_verification">
+                        <option value="true" {% if config.trusted_gateway.require_email_verification %}selected{% endif %}>Yes</option>
+                        <option value="false" {% if not config.trusted_gateway.require_email_verification %}selected{% endif %}>No</option>
+                    </select>
+                </label>
+                <label for="trusted_gateway-enable-jit-provisioning">
+                    Enable JIT Provisioning
+                    <select id="trusted_gateway-enable-jit-provisioning" name="enable_jit_provisioning">
+                        <option value="true" {% if config.trusted_gateway.enable_jit_provisioning %}selected{% endif %}>Yes</option>
+                        <option value="false" {% if not config.trusted_gateway.enable_jit_provisioning %}selected{% endif %}>No</option>
+                    </select>
+                    <small>Auto-create users on first request</small>
+                </label>
+                <label for="trusted_gateway-default-role">
+                    Default Role
+                    <select id="trusted_gateway-default-role" name="default_role">
+                        <option value="normal_user" {% if config.trusted_gateway.default_role == 'normal_user' %}selected{% endif %}>Normal User</option>
+                        <option value="admin" {% if config.trusted_gateway.default_role == 'admin' %}selected{% endif %}>Admin</option>
+                    </select>
+                    <small>Role assigned to JIT-provisioned users</small>
+                </label>
+                <label for="trusted_gateway-leeway-seconds">
+                    Leeway (seconds)
+                    <input type="number" id="trusted_gateway-leeway-seconds" name="leeway_seconds" value="{{ config.trusted_gateway.leeway_seconds }}" min="0">
+                    <small>Clock-skew tolerance for exp/iat</small>
+                </label>
+            </div>
+            <div class="form-actions">
+                <button type="submit" class="primary">Save</button>
+                <button type="button" class="secondary" onclick="cancelEdit('trusted_gateway')">Cancel</button>
+            </div>
+        </form>
+    </article>
+</details>
+
+
 <!-- Password Security Settings Section -->
 <details class="config-section" id="section-password_security">
     <summary>
