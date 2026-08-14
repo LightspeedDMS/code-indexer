@@ -1654,12 +1654,19 @@ class RefreshScheduler:
         # worker must NOT register a second job for the same pair or it collides
         # with its own parent row and the refresh is marked failed before it
         # starts.
+        # EVO-66113: mutable holder so the closure can read the job_id
+        # assigned by submit_job() below (which runs AFTER the closure is
+        # defined). By the time the background thread starts, submit_job
+        # has already returned and populated the holder.
+        _job_id_holder: Dict[str, Optional[str]] = {"job_id": None}
+
         def _refresh_worker(progress_callback=None):
             return self._execute_refresh(
                 alias_name,
                 force_reset=force_reset,
                 progress_callback=progress_callback,
                 tracked_by_caller=True,
+                job_id=_job_id_holder.get("job_id"),
             )
 
         job_id: str = self.background_job_manager.submit_job(
@@ -1669,6 +1676,9 @@ class RefreshScheduler:
             is_admin=True,
             repo_alias=alias_name,
         )
+        # EVO-66113: populate the holder so the _refresh_worker closure
+        # can thread the job_id into embed stats env vars.
+        _job_id_holder["job_id"] = str(job_id)
         logger.info(f"Submitted refresh job {job_id} for {alias_name}")
         return job_id
 
@@ -1689,6 +1699,7 @@ class RefreshScheduler:
         force_reset: bool = False,
         progress_callback=None,
         tracked_by_caller: bool = False,
+        job_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Execute refresh for a repository (called by BackgroundJobManager).
@@ -2305,6 +2316,7 @@ class RefreshScheduler:
                             alias_name
                         ),
                         force_reconcile=force_reconcile,
+                        job_id=job_id,
                     )
                     new_index_path = self._create_snapshot(
                         alias_name=alias_name, source_path=source_path
@@ -2437,6 +2449,7 @@ class RefreshScheduler:
         progress_callback=None,
         force_reconcile: bool = False,
         orphan_event_callback: Optional[Any] = None,
+        job_id: Optional[str] = None,
     ) -> None:
         """
         Index the golden repo source in place (Story #229: index-source-first).
@@ -2701,6 +2714,7 @@ class RefreshScheduler:
                 get_config_service().get_config(),
                 base_env=env,
                 golden_repo_alias=alias_name,
+                job_id=job_id,
             )
             # Bug #1388: only pass orphan_event_callback when not None, for
             # the same reason as env above -- several pre-existing tests
