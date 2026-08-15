@@ -1109,17 +1109,26 @@ class SmartIndexer(HighThroughputProcessor):
         # TRACK 2: Filesystem timestamp for uncommitted changes
         working_dir_files = list(self.file_finder.find_modified_files(resume_timestamp))
 
-        # Combine both tracks, removing duplicates
-        all_files_to_index = list(
-            set([str(f) for f in committed_files] + [str(f) for f in working_dir_files])
-        )
-
-        # Convert to Path objects, ensuring absolute paths
+        # Combine both tracks, de-duplicating on the absolutized path.
+        # committed_files (Track 1, git delta) are REPO-RELATIVE strings;
+        # working_dir_files (Track 2, mtime scan) are already ABSOLUTE.
+        # Absolutize every entry FIRST, then de-duplicate -- otherwise the
+        # same physical file reported by both tracks in two different
+        # string formats (e.g. "src/a.py" vs "/repo/src/a.py") survives as
+        # two distinct set members and gets indexed twice (Bug #1574).
+        # NOTE: deliberately NOT calling .resolve() here -- both tracks
+        # already share the same codebase_dir prefix, so plain
+        # absolutization (prefixing with codebase_dir) is sufficient to
+        # unify them. Calling .resolve() would follow symlinks and could
+        # break the downstream relative_to(codebase_dir) computation if
+        # codebase_dir itself is a symlinked path.
         codebase = Path(self.config.codebase_dir)
-        files_to_index = [
+        unique_files_to_index = {
             codebase / f if not Path(f).is_absolute() else Path(f)
-            for f in all_files_to_index
-        ]
+            for f in [str(f) for f in committed_files]
+            + [str(f) for f in working_dir_files]
+        }
+        files_to_index = list(unique_files_to_index)
 
         if not files_to_index and not deleted_files:
             # SAFETY CHECK: Detect corrupted state before marking as completed
