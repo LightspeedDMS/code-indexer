@@ -590,6 +590,17 @@ class FilesystemVectorStore:
         # overwriting the filtered rebuild with all-inclusive (ghost-producing) rebuild.
         self._branch_isolation_did_filtered_rebuild: bool = False
 
+        # Bug #1575 Part B: per-collection SHARDED_JSON scroll-session cache
+        # -- the legacy scroll branch's id_to_file enumeration (rglob +
+        # parse EVERY vector_*.json file) used to be rebuilt on EVERY single
+        # page, ~(N/L) full O(N) rebuilds across one multi-page scroll. A
+        # fresh scroll (offset=None) always rebuilds and write-through
+        # populates this cache; a continuation call (offset given) reuses
+        # it instead. Keyed via _id_cache_key so a nested-subdirectory
+        # collection never collides with a same-named top-level one.
+        self._scroll_sharded_json_index_cache: Dict[str, Dict[str, Path]] = {}
+        self._scroll_sharded_json_index_cache_lock = threading.Lock()
+
         # Story #677: Memoize git repo root — invariant for the lifetime of this instance.
         # _repo_root_cached is the "already ran" sentinel (None is a valid cached value).
         self._cached_repo_root: Optional[Path] = None
@@ -2151,6 +2162,12 @@ class FilesystemVectorStore:
                     changed_points=points,
                     progress_callback=progress_callback,
                 )
+
+        # Codex review Finding 1 (Bug #1575 Part B): a point written here may
+        # be invisible to an already-open scroll session's cached SHARDED_JSON
+        # id_to_file enumeration -- evict it so the NEXT continuation page
+        # observes this write, instead of silently freezing a page-1 snapshot.
+        self._invalidate_scroll_sharded_json_cache(collection_name, subdirectory)
 
         # Return success - index rebuilding now happens in end_indexing() (O(n) not O(n²))
         # This fixes the performance disaster where we rebuilt indexes after EVERY file.
@@ -3910,21 +3927,31 @@ class FilesystemVectorStore:
 
         Bug #1488 (Codex Medium, Messi #13): this CHUNKS_DB branch is now
         EXHAUSTIVELY fail-loud, at parity with the SHARDED_JSON hydration path.
-        (1) An id returned by ``all_point_ids()`` whose row cannot be hydrated
-        (``read`` -> ``None``) is a chunks.db primary-key/row INCONSISTENCY
-        (corruption) -- ``all_point_ids()`` and ``read()`` share ONE main-thread
-        connection with no delete between them, so this is never a normal
-        concurrent-delete state (and CHUNKS_DB is terminal -- there is no flip
-        AWAY from it, so no legitimate migration-vanish story exists here) -- it
-        RAISES rather than silently omitting the id (which would drop a row AND
-        can emit a terminal ``None`` cursor falsely presenting a complete
-        traversal). (2) Under ``with_vectors=True`` a structurally-valid row whose
-        stored vector decodes to a wrong-dimension, 1-element, empty, or
-        non-finite array is validated through the SAME ``_validate_scroll_vector``
-        the SHARDED_JSON path uses (never a divergent validator) and RAISES naming
+        (1) An id returned by ``point_ids_after()`` whose row cannot be
+        hydrated (``read`` -> ``None``) is a chunks.db primary-key/row
+        INCONSISTENCY (corruption) -- both queries run against the SAME
+        main-thread connection, so this is never a normal concurrent-delete
+        state (and CHUNKS_DB is terminal -- there is no flip AWAY from it, so
+        no legitimate migration-vanish story exists here) -- it RAISES rather
+        than silently omitting the id (which would drop a row AND can emit a
+        terminal ``None`` cursor falsely presenting a complete traversal).
+        (2) Under ``with_vectors=True`` a structurally-valid row whose stored
+        vector decodes to a wrong-dimension, 1-element, empty, or non-finite
+        array is validated through the SAME ``_validate_scroll_vector`` the
+        SHARDED_JSON path uses (never a divergent validator) and RAISES naming
         the point-id + ``vector``. The ``with_vectors=False`` path is
-        byte-identical to before -- no ``expected_dim`` lookup, no vector access,
-        no new raises.
+        byte-identical to before -- no ``expected_dim`` lookup, no vector
+        access, no new raises.
+
+        Bug #1575 Part B: this method used to call
+        ``sorted(chunk_store.all_point_ids())`` on EVERY page -- for N points
+        and page size L that is ~(N/L) full O(N log N) Python sorts of N ids
+        across one scroll. It now resolves the cursor
+        (``_resolve_chunks_db_scroll_cursor``) and fetches candidate ids in
+        bounded batches (``_scan_chunks_db_scroll_page``) via
+        ``ChunkStore.point_ids_after()``'s keyset query, so the cost of
+        retrieving ONE page is bounded by the page size, never by the
+        collection's total row count.
         """
         from code_indexer.storage.sqlite_chunk_store import (
             open_chunk_store_for_path,
@@ -3948,99 +3975,408 @@ class FilesystemVectorStore:
             collection_path / "chunks.db", str(collection_path)
         )
         try:
-            all_ids = sorted(chunk_store.all_point_ids())
+            cursor = self._resolve_chunks_db_scroll_cursor(offset, chunk_store)
 
-            # Bug #1488 (Codex Finding B): resume strictly AFTER a stable,
-            # layout-independent REAL point-id cursor via bisect (never the old
-            # "offset in all_ids else restart-at-0" which silently re-emitted
-            # page 1 for a path/token cursor issued under SHARDED_JSON). The
-            # resolver honors a self-describing cursor verbatim (a since-deleted
-            # id then resolves to the first greater id -- correct continuation,
-            # no dup, no gap), translates a legacy path cursor, and fails LOUD on
-            # garbage rather than mis-bisecting to page 1.
-            import bisect
-
-            cursor = self._resolve_scroll_cursor(offset, all_ids)
-            start_idx_cdb = (
-                0 if cursor is None else bisect.bisect_right(all_ids, cursor)
+            cdb_points, last_examined_id_cdb = self._scan_chunks_db_scroll_page(
+                chunk_store,
+                cursor,
+                limit,
+                filter_func_cdb,
+                collection_path,
+                with_payload,
+                with_vectors,
+                expected_dim_cdb,
             )
 
-            # Codex-15 MEDIUM (regression): iterate ids in sorted order until
-            # either ``limit`` MATCHING rows are collected OR ids are exhausted
-            # -- NEVER slice ``all_ids[start:start+limit]`` before filtering,
-            # which returned an EMPTY page with a NON-null cursor when a page's
-            # sliced ids all failed the filter while later ids still matched;
-            # callers treat an empty page as TERMINAL, permanently DROPPING those
-            # matches. The cursor is based on the LAST EXAMINED id, so a
-            # genuinely-empty page always carries a terminal None cursor.
-            cdb_points: List[Dict[str, Any]] = []
-            last_examined_idx_cdb = -1
-            _scan_idx_cdb = start_idx_cdb
-            while _scan_idx_cdb < len(all_ids) and len(cdb_points) < limit:
-                point_id = all_ids[_scan_idx_cdb]
-                last_examined_idx_cdb = _scan_idx_cdb
-                _scan_idx_cdb += 1
-                record = chunk_store.read(point_id)
-                if record is None:
-                    # Bug #1488 (Codex ITEM 2, Messi #13): the id was just
-                    # enumerated by ``all_point_ids()`` on this SAME connection,
-                    # so a ``None`` hydration is a chunks.db primary-key/row
-                    # inconsistency (corruption), never a normal state -- fail
-                    # LOUD naming the id rather than silently omitting it (which
-                    # drops a row AND can emit a terminal ``None`` cursor falsely
-                    # presenting a complete traversal).
-                    raise ScrollDataIntegrityError(
-                        f"chunks.db enumerated point-id {point_id!r} has no "
-                        f"hydratable row (read returned None) in collection "
-                        f"{str(collection_path)!r}; refusing to silently drop an "
-                        f"enumerated primary key from a paginated scroll"
-                    )
-
-                point = {"id": record["id"]}
-                if with_payload:
-                    point["payload"] = record.get("payload", {})
-                if with_vectors:
-                    vector_value = record.get("vector", [])
-                    if hasattr(vector_value, "tolist"):
-                        vector_value = vector_value.tolist()
-                    # Bug #1488 (Codex ITEM 1 parity): validate the decoded vector
-                    # with the SAME gate the SHARDED_JSON path uses so both
-                    # layouts reject an identical malformed shape
-                    # (wrong-dimension, 1-element, empty, non-numeric, NaN/Inf)
-                    # -- never return a silently wrong value. Only reached when
-                    # ``with_vectors=True``, so ``expected_dim_cdb`` is set.
-                    assert expected_dim_cdb is not None
-                    self._validate_scroll_vector(
-                        vector_value,
-                        expected_dim_cdb,
-                        f"{point_id} (chunks.db)",
-                    )
-                    point["vector"] = vector_value
-
-                # Bug #1488 (Codex Medium, Messi #13): evaluate the filter
-                # against the REAL hydrated payload (``record``), never
-                # ``point``'s payload which is OMITTED ({}) when
-                # with_payload=False -- with_payload controls only what is
-                # RETURNED, never what the filter sees. A record whose real
-                # payload matches must not be dropped just because the caller
-                # asked not to return the payload.
-                if filter_func_cdb is not None:
-                    if not filter_func_cdb(record.get("payload", {})):
-                        continue
-
-                cdb_points.append(point)
-
-            # Codex-15 MEDIUM: cursor on the LAST EXAMINED id; only emitted when
-            # a full page of matches was collected AND unexamined ids remain.
+            # Codex-15 MEDIUM: cursor on the LAST EXAMINED id; only emitted
+            # when a full page of matches was collected AND at least one more
+            # id exists beyond it. Bug #1575 Part B: "is there more" is now a
+            # single bounded existence-check keyset query (limit=1) instead
+            # of a Python ``len(all_ids)`` comparison against a pre-sorted
+            # full list.
             next_offset_cdb = None
-            if len(cdb_points) == limit and last_examined_idx_cdb + 1 < len(all_ids):
-                next_offset_cdb = self._encode_scroll_cursor(
-                    all_ids[last_examined_idx_cdb]
-                )
+            if len(cdb_points) == limit and last_examined_id_cdb is not None:
+                trailing_cdb = chunk_store.point_ids_after(last_examined_id_cdb, 1)
+                if trailing_cdb:
+                    next_offset_cdb = self._encode_scroll_cursor(last_examined_id_cdb)
 
             return cdb_points, next_offset_cdb
         finally:
             chunk_store.close()
+
+    def _resolve_chunks_db_scroll_cursor(
+        self, offset: Optional[str], chunk_store: Any
+    ) -> Optional[str]:
+        """Bug #1575 Part B: resolve a scroll cursor WITHOUT a full O(N)
+        enumeration when possible.
+
+        A self-describing cursor (the format this method itself always
+        mints going forward) resolves to its embedded point-id with ZERO
+        query -- ``_resolve_scroll_cursor``'s prefix branch never touches its
+        ``ordered_ids`` argument. Only the rare legacy
+        ``vector_<token>.json`` path-format cursor (pre-#1488, no longer
+        emitted anywhere in this codebase) needs the full id set to
+        disambiguate a hash-prefix/slash-token match -- that ONE case still
+        pays the ``sorted(all_point_ids())`` cost this fix otherwise
+        eliminates, since it cannot be resolved any other way.
+        """
+        if offset is None:
+            return None
+        if offset.startswith(_SCROLL_CURSOR_PREFIX):
+            return self._resolve_scroll_cursor(offset, [])
+        return self._resolve_scroll_cursor(offset, sorted(chunk_store.all_point_ids()))
+
+    def _hydrate_chunks_db_scroll_point(
+        self,
+        chunk_store: Any,
+        point_id: str,
+        collection_path: Path,
+        with_payload: bool,
+        with_vectors: bool,
+        expected_dim: Optional[int],
+    ) -> tuple:
+        """Read + validate ONE chunks.db row for scroll_points hydration.
+
+        Returns ``(point, raw_payload)`` -- ``raw_payload`` is the REAL
+        hydrated payload regardless of ``with_payload`` (the filter must see
+        it even when the caller does not want it returned). Raises
+        ``ScrollDataIntegrityError`` on a missing/corrupt row or a
+        structurally malformed vector -- never silently drops a row.
+        """
+        record = chunk_store.read(point_id)
+        if record is None:
+            raise ScrollDataIntegrityError(
+                f"chunks.db enumerated point-id {point_id!r} has no "
+                f"hydratable row (read returned None) in collection "
+                f"{str(collection_path)!r}; refusing to silently drop an "
+                f"enumerated primary key from a paginated scroll"
+            )
+
+        point: Dict[str, Any] = {"id": record["id"]}
+        if with_payload:
+            point["payload"] = record.get("payload", {})
+        if with_vectors:
+            vector_value = record.get("vector", [])
+            if hasattr(vector_value, "tolist"):
+                vector_value = vector_value.tolist()
+            assert expected_dim is not None
+            self._validate_scroll_vector(
+                vector_value, expected_dim, f"{point_id} (chunks.db)"
+            )
+            point["vector"] = vector_value
+
+        return point, record.get("payload", {})
+
+    def _scan_chunks_db_scroll_page(
+        self,
+        chunk_store: Any,
+        cursor: Optional[str],
+        limit: int,
+        filter_func: Optional[Any],
+        collection_path: Path,
+        with_payload: bool,
+        with_vectors: bool,
+        expected_dim: Optional[int],
+    ) -> tuple:
+        """Bug #1575 Part B: scan forward from ``cursor`` in BOUNDED batches
+        (via ``point_ids_after()``) until either ``limit`` filter-matching
+        rows are collected or ids are exhausted -- NEVER a single upfront
+        full-table fetch. Returns ``(points, last_examined_id)``.
+        """
+        cdb_points: List[Dict[str, Any]] = []
+        last_examined_id: Optional[str] = None
+        current_cursor = cursor
+        exhausted = False
+        while len(cdb_points) < limit and not exhausted:
+            batch_ids = chunk_store.point_ids_after(current_cursor, limit)
+            if not batch_ids:
+                break
+            for point_id in batch_ids:
+                if len(cdb_points) >= limit:
+                    break
+                last_examined_id = point_id
+                point, raw_payload = self._hydrate_chunks_db_scroll_point(
+                    chunk_store,
+                    point_id,
+                    collection_path,
+                    with_payload,
+                    with_vectors,
+                    expected_dim,
+                )
+                if filter_func is not None and not filter_func(raw_payload):
+                    continue
+                cdb_points.append(point)
+            current_cursor = last_examined_id
+            if len(batch_ids) < limit:
+                # Fewer ids than requested means no more rows exist after
+                # the last one in this batch -- exhausted.
+                exhausted = True
+        return cdb_points, last_examined_id
+
+    def _parse_sharded_json_scroll_record_id(self, f: Path) -> str:
+        """Read + validate ONE legacy vector file during enumeration,
+        returning its stored point-id. Extracted from the pre-#1575 inline
+        enumeration loop to keep ``_build_sharded_json_scroll_index``
+        within this file's method-size limits.
+
+        A mid-scan vanish (``FileNotFoundError``, a subclass of
+        ``OSError``) is deliberately NOT caught here -- it must propagate
+        to the Bug #1486 Finding-5 re-dispatch. A file that is genuinely
+        PRESENT but unreadable as a record (bad JSON, non-dict root,
+        missing/invalid ``id``) is a data-integrity fault and fails LOUD
+        (Messi #13) -- never silently skipped.
+        """
+        try:
+            with open(str(f), "r") as _fh:
+                _data: Dict[str, Any] = json.load(_fh)
+        except json.JSONDecodeError as exc:
+            raise ScrollDataIntegrityError(
+                f"legacy vector file {str(f)!r} is not valid JSON "
+                f"({exc}); refusing to silently drop it from a "
+                f"paginated scroll"
+            ) from exc
+        if not isinstance(_data, dict):
+            raise ScrollDataIntegrityError(
+                f"legacy vector file {str(f)!r} has a non-dict JSON root "
+                f"({type(_data).__name__}); refusing to silently drop it "
+                f"from a paginated scroll"
+            )
+        if "id" not in _data:
+            raise ScrollDataIntegrityError(
+                f"legacy vector file {str(f)!r} has no 'id' field; "
+                f"refusing to silently drop it from a paginated scroll"
+            )
+        _pid = _data["id"]
+        if not isinstance(_pid, str) or not _pid:
+            raise ScrollDataIntegrityError(
+                f"legacy vector file {str(f)!r} has an invalid 'id' "
+                f"({_pid!r}); expected a non-empty string point-id"
+            )
+        return _pid
+
+    def _build_sharded_json_scroll_index(
+        self, collection_path: Path
+    ) -> Dict[str, Path]:
+        """Bug #1575 Part B: the O(N) legacy-scroll enumeration, extracted
+        UNCHANGED (behaviorally) from the pre-#1575 inline loop -- rglob +
+        parse EVERY ``vector_*.json`` file to build the id -> file map
+        keyed by each file's STORED point-id (the real point-id in BOTH
+        layouts, per Bug #1488 Finding B).
+
+        This is the exact cost Bug #1575 Part B eliminates from repeating
+        on every scroll page: called via ``_get_sharded_json_scroll_index``
+        ONCE per scroll session (on the first page, or on a cache miss),
+        and once more (bypassing the cache) on the bounded 1-retry
+        stale-cache self-heal path in ``scroll_points``. Propagates
+        ``FileNotFoundError`` (Bug #1486 Finding 5) and
+        ``ScrollDataIntegrityError`` (Messi #13) from
+        ``_parse_sharded_json_scroll_record_id`` unchanged.
+        """
+        id_to_file: Dict[str, Path] = {}
+        for f in collection_path.rglob("*.json"):
+            if "collection_meta" in f.name:
+                continue
+            fname = f.name
+            if not (fname.startswith("vector_") and fname.endswith(".json")):
+                continue
+            pid = self._parse_sharded_json_scroll_record_id(f)
+            if pid in id_to_file:
+                raise ScrollDataIntegrityError(
+                    f"duplicate stored point-id {pid!r} across legacy "
+                    f"vector files {str(id_to_file[pid])!r} and "
+                    f"{str(f)!r}; refusing to silently collapse them"
+                )
+            id_to_file[pid] = f
+        return id_to_file
+
+    def _get_sharded_json_scroll_index(
+        self,
+        collection_name: str,
+        collection_path: Path,
+        subdirectory: Optional[str],
+        *,
+        read_cache: bool,
+    ) -> Tuple[Dict[str, Path], bool]:
+        """Bug #1575 Part B: serve the SHARDED_JSON legacy-scroll id_to_file
+        enumeration from a per-collection session cache when ``read_cache``
+        is True and an entry already exists; otherwise rebuild it fresh via
+        ``_build_sharded_json_scroll_index`` (which may raise
+        ``FileNotFoundError``/``ScrollDataIntegrityError`` -- propagated
+        UNCHANGED) and WRITE-THROUGH the fresh result into the cache so a
+        later continuation page of the SAME scroll session can reuse it.
+
+        A fresh scroll (``scroll_points(offset=None)``) always passes
+        ``read_cache=False``, guaranteeing every NEW scroll observes the
+        CURRENT on-disk state rather than a stale view left over from an
+        earlier, unrelated scroll session on this collection.
+
+        Returns ``(id_to_file, was_cache_hit)`` -- ``was_cache_hit`` tells
+        the caller whether a subsequent hydration ``FileNotFoundError``
+        against this map might be due to STALE cached data (warranting
+        exactly one rebuild-and-retry) or a genuine fresh-scan failure
+        (never retried).
+        """
+        cache_key = self._id_cache_key(collection_name, subdirectory)
+        if read_cache:
+            with self._scroll_sharded_json_index_cache_lock:
+                cached = self._scroll_sharded_json_index_cache.get(cache_key)
+            if cached is not None:
+                return cached, True
+
+        fresh = self._build_sharded_json_scroll_index(collection_path)
+        with self._scroll_sharded_json_index_cache_lock:
+            self._scroll_sharded_json_index_cache[cache_key] = fresh
+        return fresh, False
+
+    def _invalidate_scroll_sharded_json_cache(
+        self, collection_name: str, subdirectory: Optional[str] = None
+    ) -> None:
+        """Codex review Finding 1 (Bug #1575 Part B): evict this
+        collection's cached SHARDED_JSON scroll id_to_file enumeration
+        whenever a mutation (``upsert_points``/``delete_points``) changes
+        which ``vector_*.json`` files exist for it, so a scroll session
+        already in progress observes writes that happen BETWEEN its pages
+        -- preserving the pre-Part-B "every page rebuilds fresh" guarantee
+        instead of silently freezing a page-1 snapshot for the rest of the
+        session.
+
+        Mirrors the existing HNSW/id_index cache invalidation convention
+        (``rebuild_hnsw_filtered``): compose the SAME key used at populate
+        time (``_id_cache_key``, identical to the key
+        ``_get_sharded_json_scroll_index`` reads/writes) and evict
+        immediately after the mutation that invalidated it. A miss (no
+        scroll session currently has this collection cached) is a
+        harmless no-op -- ``dict.pop(..., None)`` never raises.
+        """
+        cache_key = self._id_cache_key(collection_name, subdirectory)
+        with self._scroll_sharded_json_index_cache_lock:
+            self._scroll_sharded_json_index_cache.pop(cache_key, None)
+
+    def _load_sharded_json_scroll_record(self, vector_file: Path) -> Dict[str, Any]:
+        """Read + parse ONE legacy vector_*.json file for scroll hydration,
+        extracted UNCHANGED (behaviorally) from the pre-#1575 inline "Load
+        points" loop.
+
+        A mid-hydration vanish (``FileNotFoundError``, a subclass of
+        ``OSError``) is deliberately NOT caught here -- it signals the Bug
+        #1486 Finding-5 concurrent flip+delete and must propagate to the
+        caller. A file that is genuinely PRESENT but malformed (bad JSON,
+        non-dict root, missing ``id``) is a data-integrity fault and fails
+        LOUD (Messi #13) -- never silently skipped.
+        """
+        try:
+            with open(str(vector_file), "r") as file_handle:
+                data: Dict[str, Any] = json.load(file_handle)
+        except json.JSONDecodeError as exc:
+            raise ScrollDataIntegrityError(
+                f"legacy vector file {str(vector_file)!r} is not valid "
+                f"JSON during scroll hydration ({exc}); refusing to "
+                f"silently drop it from a paginated scroll"
+            ) from exc
+
+        if not isinstance(data, dict):
+            raise ScrollDataIntegrityError(
+                f"legacy vector file {str(vector_file)!r} has a non-dict "
+                f"JSON root ({type(data).__name__}) during scroll "
+                f"hydration; refusing to silently drop it from a "
+                f"paginated scroll"
+            )
+
+        if "id" not in data:
+            raise ScrollDataIntegrityError(
+                f"legacy vector file {str(vector_file)!r} has no 'id' "
+                f"field during scroll hydration; refusing to silently "
+                f"drop it from a paginated scroll"
+            )
+        return data
+
+    def _build_sharded_json_scroll_point(
+        self,
+        vector_file: Path,
+        data: Dict[str, Any],
+        with_payload: bool,
+        with_vectors: bool,
+        expected_dim: Optional[int],
+    ) -> Dict[str, Any]:
+        """Build ONE scroll-result point dict from an already-loaded legacy
+        record, extracted UNCHANGED (behaviorally) from the pre-#1575
+        inline loop.
+        """
+        point: Dict[str, Any] = {"id": data["id"]}
+
+        if with_payload:
+            # Payload should always exist in new format
+            point["payload"] = data.get("payload", {})
+
+        if with_vectors:
+            if "vector" not in data:
+                raise ScrollDataIntegrityError(
+                    f"legacy vector file {str(vector_file)!r} is missing "
+                    f"the required 'vector' field during scroll hydration "
+                    f"(with_vectors=True); refusing to silently drop it "
+                    f"from a paginated scroll"
+                )
+            # Bug #1488 (Codex ITEM 1 tail): the field is PRESENT, but a
+            # present-but-malformed vector (null/string/object/empty,
+            # non-numeric element, NaN/Inf, or wrong dimension) must fail
+            # LOUD too -- never be returned as a silently wrong value.
+            assert expected_dim is not None  # set whenever with_vectors
+            self._validate_scroll_vector(data["vector"], expected_dim, str(vector_file))
+            point["vector"] = data["vector"]
+
+        return point
+
+    def _hydrate_sharded_json_scroll_page(
+        self,
+        id_to_file: Dict[str, Path],
+        sorted_ids: List[str],
+        start_idx: int,
+        limit: int,
+        filter_func: Optional[Any],
+        with_payload: bool,
+        with_vectors: bool,
+        expected_dim: Optional[int],
+    ) -> Tuple[List[Dict[str, Any]], int]:
+        """Bug #1575 Part B: hydrate up to ``limit`` filter-matching legacy
+        vector files starting at ``start_idx`` in ``sorted_ids``.
+
+        Codex-15 MEDIUM (regression, preserved): iterates candidates in
+        sorted-id order until either ``limit`` MATCHING rows are collected
+        OR candidates are exhausted -- NEVER slices before filtering (which
+        previously returned an empty page with a non-null cursor when a
+        page's sliced candidates all failed the filter while later
+        candidates still matched).
+
+        A mid-hydration ``FileNotFoundError`` (Bug #1486 Finding 5) is
+        propagated UNCHANGED -- the caller uses it to detect a possibly
+        stale cached ``id_to_file`` map. Returns
+        ``(points, last_examined_idx)``.
+        """
+        points: List[Dict[str, Any]] = []
+        last_examined_idx = -1
+        _scan_idx = start_idx
+        while _scan_idx < len(sorted_ids) and len(points) < limit:
+            vector_file = id_to_file[sorted_ids[_scan_idx]]
+            last_examined_idx = _scan_idx
+            _scan_idx += 1
+
+            data = self._load_sharded_json_scroll_record(vector_file)
+            point = self._build_sharded_json_scroll_point(
+                vector_file, data, with_payload, with_vectors, expected_dim
+            )
+
+            # Apply pre-parsed filter (compiled once by the caller). Bug
+            # #1488 (Codex Medium, Messi #13): evaluate against the REAL
+            # hydrated payload (``data``), never ``point``'s payload which is
+            # OMITTED ({}) when with_payload=False -- with_payload controls
+            # only what is RETURNED, never what the filter sees.
+            if filter_func is not None:
+                if not filter_func(data.get("payload", {})):
+                    continue
+
+            points.append(point)
+
+        return points, last_examined_idx
 
     def scroll_points(
         self,
@@ -4331,207 +4667,98 @@ class FilesystemVectorStore:
         points: List[Dict[str, Any]] = []
         next_offset: Optional[str] = None
         try:
-            # Bug #1488 (Codex Finding B): paginate by a stable, layout-
-            # INDEPENDENT REAL point-id cursor rather than the filesystem
-            # filename token. The token is NOT the point-id for temporal
-            # collections (the write path names files
-            # ``vector_<sha256(point_id)[:16]>.json``), so ordering/cursoring by
-            # the token diverged from the CHUNKS_DB branch's real-id ordering and
-            # produced duplicate-and-drop pages across a mid-pagination flip.
-            # Build the id -> file map from each file's STORED ``data["id"]`` (the
-            # real point-id in BOTH layouts) so both branches iterate the SAME
-            # sorted real-id order and a cursor is honored verbatim across a flip
-            # in either direction. Opening every file here is the price of
-            # correctness on this legacy fallback path; a FileNotFoundError
-            # (mid-scan vanish) still propagates to the Finding 5 re-dispatch
-            # below, and a malformed/id-less file is skipped (it cannot be
-            # paginated), mirroring the per-file page-load loop.
-            id_to_file: Dict[str, Path] = {}
-            for f in collection_path.rglob("*.json"):
-                if "collection_meta" in f.name:
-                    continue
-                fname = f.name
-                if not (fname.startswith("vector_") and fname.endswith(".json")):
-                    continue
-                # FileNotFoundError (a subclass of OSError) from a mid-scan
-                # vanish is deliberately NOT caught here -- it must propagate to
-                # the outer ``except FileNotFoundError`` (Bug #1486 Finding 5
-                # re-dispatch). A file that is genuinely PRESENT but unreadable
-                # as a record (bad JSON, missing/invalid ``id``, duplicate id)
-                # is a data-integrity fault and fails LOUD (Messi #13) -- never
-                # silently skipped, which would drop rows AND emit a terminal
-                # ``None`` cursor, falsely presenting a complete traversal.
-                try:
-                    with open(str(f), "r") as _fh:
-                        _data: Dict[str, Any] = json.load(_fh)
-                except json.JSONDecodeError as exc:
-                    raise ScrollDataIntegrityError(
-                        f"legacy vector file {str(f)!r} is not valid JSON "
-                        f"({exc}); refusing to silently drop it from a "
-                        f"paginated scroll"
-                    ) from exc
-                # A VALID-JSON but non-dict root (``null``, a list, a number, a
-                # string) is a present-but-malformed record. Fail LOUD naming the
-                # file (Messi #13) rather than letting ``"id" not in _data`` raise
-                # a raw ``TypeError`` on a non-container root. Checked AFTER the
-                # narrow JSONDecodeError try so a mid-scan vanish still surfaces
-                # as FileNotFoundError for the Finding-5 re-dispatch.
-                if not isinstance(_data, dict):
-                    raise ScrollDataIntegrityError(
-                        f"legacy vector file {str(f)!r} has a non-dict JSON root "
-                        f"({type(_data).__name__}); refusing to silently drop it "
-                        f"from a paginated scroll"
-                    )
-                if "id" not in _data:
-                    raise ScrollDataIntegrityError(
-                        f"legacy vector file {str(f)!r} has no 'id' field; "
-                        f"refusing to silently drop it from a paginated scroll"
-                    )
-                _pid = _data["id"]
-                if not isinstance(_pid, str) or not _pid:
-                    raise ScrollDataIntegrityError(
-                        f"legacy vector file {str(f)!r} has an invalid 'id' "
-                        f"({_pid!r}); expected a non-empty string point-id"
-                    )
-                if _pid in id_to_file:
-                    raise ScrollDataIntegrityError(
-                        f"duplicate stored point-id {_pid!r} across legacy "
-                        f"vector files {str(id_to_file[_pid])!r} and "
-                        f"{str(f)!r}; refusing to silently collapse them"
-                    )
-                id_to_file[_pid] = f
-            sorted_ids = sorted(id_to_file)
-
-            # Resume strictly AFTER the resolved real-id cursor via bisect (a
-            # legacy path/token cursor is translated first, garbage fails loud,
-            # and a self-describing cursor whose point was deleted resolves to
-            # the first id greater than it -- correct continuation, no dup, no
-            # gap).
             import bisect
 
-            cursor = self._resolve_scroll_cursor(offset, sorted_ids)
-            start_idx = 0 if cursor is None else bisect.bisect_right(sorted_ids, cursor)
+            # Bug #1575 Part B: a NEW scroll (offset=None) always rebuilds
+            # the id_to_file enumeration fresh (byte-identical cost to
+            # before -- one page, one full scan) and write-through
+            # populates the per-collection session cache; a CONTINUATION
+            # call (offset given) reuses that cache instead of repeating
+            # the O(N) rglob+parse-every-file rebuild on every page. A
+            # cache-derived map that has gone stale (a point deleted, or
+            # the collection migrated, since it was built) is detected as a
+            # FileNotFoundError while hydrating a page SERVED FROM THE
+            # CACHE (``was_cache_hit``) and self-healed by rebuilding fresh
+            # and retrying EXACTLY ONCE: the retry's ``was_cache_hit`` is
+            # always False (a fresh build, never itself a cache hit), so a
+            # second failure always propagates to the unchanged Finding-5
+            # handling below -- this loop can never iterate more than twice.
+            read_cache = offset is not None
+            while True:
+                id_to_file, was_cache_hit = self._get_sharded_json_scroll_index(
+                    collection_name,
+                    collection_path,
+                    subdirectory,
+                    read_cache=read_cache,
+                )
+                sorted_ids = sorted(id_to_file)
 
-            # Fix C: Parse filter ONCE before the loop (was inside per-file loop).
-            # Avoids O(N) repeated filter compilation for collections with thousands of files.
-            filter_func = None
-            if filter_conditions:
-                filter_func = self._parse_filter(filter_conditions)
+                # Resume strictly AFTER the resolved real-id cursor via bisect
+                # (a legacy path/token cursor is translated first, garbage
+                # fails loud, and a self-describing cursor whose point was
+                # deleted resolves to the first id greater than it -- correct
+                # continuation, no dup, no gap).
+                cursor = self._resolve_scroll_cursor(offset, sorted_ids)
+                start_idx = (
+                    0 if cursor is None else bisect.bisect_right(sorted_ids, cursor)
+                )
 
-            # Bug #1488 (Codex ITEM 1 tail): the expected vector dimension for
-            # this collection, read ONLY when vectors are actually returned so
-            # the ``with_vectors=False`` path stays byte-identical (no new I/O).
-            # ``_get_vector_size`` is cached and is the SAME dimension the write
-            # path (upsert_points) validated the stored vector against. The
-            # already-resolved ``subdirectory`` is passed explicitly
-            # (Codex-16 Finding 4) so a nested collection's dimension
-            # resolves correctly outside an active indexing session.
-            expected_dim: Optional[int] = (
-                self._get_vector_size(collection_name, subdirectory)
-                if with_vectors
-                else None
-            )
+                # Fix C: Parse filter ONCE before the loop (was inside
+                # per-file loop). Avoids O(N) repeated filter compilation
+                # for collections with thousands of files.
+                filter_func = None
+                if filter_conditions:
+                    filter_func = self._parse_filter(filter_conditions)
 
-            # Codex-15 MEDIUM (regression): iterate candidates in sorted-id order
-            # until either ``limit`` MATCHING rows are collected OR candidates are
-            # exhausted -- NEVER slice ``sorted_ids[start:start+limit]`` before
-            # filtering. The prior slice-then-filter returned an EMPTY page with a
-            # NON-null cursor when a page's sliced candidates all failed the
-            # filter while later candidates still matched; callers treat an empty
-            # page as TERMINAL, so those matches were permanently DROPPED. Files
-            # are still opened by their real path, preserving the Finding 5
-            # mid-scan-vanish FileNotFoundError re-dispatch below.
-            last_examined_idx = -1
-            _scan_idx = start_idx
-            # Load points
-            while _scan_idx < len(sorted_ids) and len(points) < limit:
-                vector_file = id_to_file[sorted_ids[_scan_idx]]
-                last_examined_idx = _scan_idx
-                _scan_idx += 1
-                # FileNotFoundError (a subclass of OSError) from a mid-HYDRATION
-                # vanish is deliberately NOT caught here -- it signals the Bug
-                # #1486 Finding-5 concurrent flip+delete and must propagate to
-                # the outer ``except FileNotFoundError`` for the CHUNKS_DB
-                # re-dispatch. A file that is genuinely PRESENT but malformed
-                # (bad JSON) or missing a REQUIRED field (``id`` always;
-                # ``vector`` when ``with_vectors=True``) is a data-integrity
-                # fault and fails LOUD (Messi #13) -- never silently ``continue``,
-                # which would drop the row AND emit a terminal ``None`` cursor,
-                # falsely presenting a complete traversal (Codex HIGH).
+                # Bug #1488 (Codex ITEM 1 tail): the expected vector
+                # dimension for this collection, read ONLY when vectors are
+                # actually returned so the ``with_vectors=False`` path stays
+                # byte-identical (no new I/O). ``_get_vector_size`` is cached
+                # and is the SAME dimension the write path (upsert_points)
+                # validated the stored vector against. The already-resolved
+                # ``subdirectory`` is passed explicitly (Codex-16 Finding 4)
+                # so a nested collection's dimension resolves correctly
+                # outside an active indexing session.
+                expected_dim: Optional[int] = (
+                    self._get_vector_size(collection_name, subdirectory)
+                    if with_vectors
+                    else None
+                )
+
                 try:
-                    with open(str(vector_file), "r") as file_handle:
-                        data: Dict[str, Any] = json.load(file_handle)
-                except json.JSONDecodeError as exc:
-                    raise ScrollDataIntegrityError(
-                        f"legacy vector file {str(vector_file)!r} is not valid "
-                        f"JSON during scroll hydration ({exc}); refusing to "
-                        f"silently drop it from a paginated scroll"
-                    ) from exc
-
-                # Non-dict JSON root fails LOUD here too (a file valid during the
-                # inventory scan can become non-dict before this re-read). Checked
-                # AFTER the narrow JSONDecodeError try so a mid-hydration vanish
-                # still surfaces as FileNotFoundError for the Finding-5
-                # re-dispatch, never a raw TypeError from ``"id" not in data``.
-                if not isinstance(data, dict):
-                    raise ScrollDataIntegrityError(
-                        f"legacy vector file {str(vector_file)!r} has a non-dict "
-                        f"JSON root ({type(data).__name__}) during scroll "
-                        f"hydration; refusing to silently drop it from a "
-                        f"paginated scroll"
+                    (
+                        points,
+                        last_examined_idx,
+                    ) = self._hydrate_sharded_json_scroll_page(
+                        id_to_file,
+                        sorted_ids,
+                        start_idx,
+                        limit,
+                        filter_func,
+                        with_payload,
+                        with_vectors,
+                        expected_dim,
                     )
-
-                if "id" not in data:
-                    raise ScrollDataIntegrityError(
-                        f"legacy vector file {str(vector_file)!r} has no 'id' "
-                        f"field during scroll hydration; refusing to silently "
-                        f"drop it from a paginated scroll"
-                    )
-                point = {"id": data["id"]}
-
-                if with_payload:
-                    # Payload should always exist in new format
-                    point["payload"] = data.get("payload", {})
-
-                if with_vectors:
-                    if "vector" not in data:
-                        raise ScrollDataIntegrityError(
-                            f"legacy vector file {str(vector_file)!r} is missing "
-                            f"the required 'vector' field during scroll "
-                            f"hydration (with_vectors=True); refusing to "
-                            f"silently drop it from a paginated scroll"
-                        )
-                    # Bug #1488 (Codex ITEM 1 tail): the field is PRESENT, but a
-                    # present-but-malformed vector (null/string/object/empty,
-                    # non-numeric element, NaN/Inf, or wrong dimension) must fail
-                    # LOUD too -- never be returned as a silently wrong value.
-                    assert expected_dim is not None  # set whenever with_vectors
-                    self._validate_scroll_vector(
-                        data["vector"], expected_dim, str(vector_file)
-                    )
-                    point["vector"] = data["vector"]
-
-                # Apply pre-parsed filter (compiled once above). Bug #1488
-                # (Codex Medium, Messi #13): evaluate against the REAL hydrated
-                # payload (``data``), never ``point``'s payload which is OMITTED
-                # ({}) when with_payload=False -- with_payload controls only what
-                # is RETURNED, never what the filter sees.
-                if filter_func is not None:
-                    if not filter_func(data.get("payload", {})):
+                except FileNotFoundError:
+                    if was_cache_hit:
+                        read_cache = False
                         continue
+                    raise
 
-                points.append(point)
-
-            # Calculate next offset: a self-describing REAL point-id cursor (Bug
-            # #1488), never a filesystem path or filename token, so the next page
-            # resumes correctly even if the collection flips to CHUNKS_DB before
-            # it is requested. Codex-15 MEDIUM: the cursor is based on the LAST
-            # EXAMINED candidate (not a pre-filter slice end) and is only emitted
-            # when a full page of matches was collected AND unexamined candidates
-            # remain -- so a genuinely-empty page always carries a terminal None
-            # cursor.
-            if len(points) == limit and last_examined_idx + 1 < len(sorted_ids):
-                next_offset = self._encode_scroll_cursor(sorted_ids[last_examined_idx])
+                # Calculate next offset: a self-describing REAL point-id
+                # cursor (Bug #1488), never a filesystem path or filename
+                # token, so the next page resumes correctly even if the
+                # collection flips to CHUNKS_DB before it is requested.
+                # Codex-15 MEDIUM: the cursor is based on the LAST EXAMINED
+                # candidate (not a pre-filter slice end) and is only emitted
+                # when a full page of matches was collected AND unexamined
+                # candidates remain -- so a genuinely-empty page always
+                # carries a terminal None cursor.
+                if len(points) == limit and last_examined_idx + 1 < len(sorted_ids):
+                    next_offset = self._encode_scroll_cursor(
+                        sorted_ids[last_examined_idx]
+                    )
+                break
         except FileNotFoundError:
             # A legacy vector_*.json (or a shard subdir walked by rglob) vanished
             # mid-scan. Re-resolve: if the flip has landed, dispatch to the chunk

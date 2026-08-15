@@ -669,6 +669,68 @@ class ChunkStore:
         ).fetchall()
         return {row[0] for row in rows}
 
+    def point_ids_after(self, cursor: Optional[str], limit: int) -> List[str]:
+        """Bug #1575 Part B: keyset-pagination primitive replacing
+        ``sorted(all_point_ids())`` on the scroll-pagination hot path.
+
+        Returns up to ``limit`` point_ids strictly greater than ``cursor``,
+        in ascending (Python-``sorted``-equivalent, since TEXT columns use
+        SQLite's default BINARY collation) order -- via
+        ``WHERE point_id > ? ORDER BY point_id LIMIT ?`` (or the
+        unconditional ``ORDER BY point_id LIMIT ?`` form when ``cursor`` is
+        None). Both forms use the ``point_id`` PRIMARY KEY's own implicit
+        index, but produce two DIFFERENT (and both cheap) query plans --
+        verified via ``EXPLAIN QUERY PLAN`` (Bug #1575 Part B Codex review,
+        Finding 3, correcting an earlier overstated claim that both forms
+        are identical):
+
+        - ``cursor`` given: ``SEARCH TABLE chunks USING COVERING INDEX
+          sqlite_autoindex_chunks_1 (point_id>?)`` -- an index SEARCH driven
+          by the ``WHERE`` clause.
+        - ``cursor`` is ``None``: ``SCAN TABLE chunks USING COVERING INDEX
+          sqlite_autoindex_chunks_1`` -- there is no ``WHERE`` clause to
+          search on, so SQLite reports a SCAN, not a SEARCH.
+
+        Both are index-ONLY (``USING COVERING INDEX``) and never read the
+        ``vector``/``data`` blob columns -- neither form is a full ROW scan.
+        Do not claim they produce the same plan shape; only claim they are
+        both cheap and both avoid a full-row scan. The cost of retrieving
+        ONE page never depends on the total row count either way --
+        unlike ``sorted(chunk_store.all_point_ids())``, which pulls every
+        stored point_id into Python and re-sorts all of them on every call.
+
+        Called by ``FilesystemVectorStore._scroll_points_chunks_db()`` in
+        bounded batches to page through a CHUNKS_DB collection -- see that
+        method for the wiring (Bug #1575 Part B).
+
+        A cursor whose id has since been deleted resolves correctly: SQLite
+        simply returns the next id strictly greater than the (now absent)
+        cursor value -- no crash, no duplicate, no gap, matching the exact
+        semantics ``bisect_right`` provided over the in-memory sorted list.
+
+        Raises:
+            ValueError: if ``limit`` is not a positive integer -- mirrors
+                ``FilesystemVectorStore.scroll_points``'s own ``limit <= 0``
+                guard rather than silently executing a malformed/no-op
+                SQL LIMIT clause.
+        """
+        if limit <= 0:
+            raise ValueError(
+                f"point_ids_after limit must be a positive integer, got {limit!r}"
+            )
+        if cursor is None:
+            rows = self._conn.execute(
+                "SELECT point_id FROM chunks ORDER BY point_id LIMIT ?",
+                (limit,),
+            ).fetchall()
+        else:
+            rows = self._conn.execute(
+                "SELECT point_id FROM chunks WHERE point_id > ? "
+                "ORDER BY point_id LIMIT ?",
+                (cursor, limit),
+            ).fetchall()
+        return [row[0] for row in rows]
+
     def _chunks_table_exists(self) -> bool:
         """2nd Codex review follow-up (Bug #1575 Part A, Gap 1): distinguish
         "the ``chunks`` table does not exist at all" from "the table
