@@ -24,6 +24,15 @@ def build_non_interactive_git_env() -> Dict[str, str]:
       SSH exits immediately with an error instead of prompting for a password or
       blocking on a tty when key authentication fails.
     - Sets GIT_TERMINAL_PROMPT=0 to disable git's own HTTP credential prompt.
+    - Defaults GIT_EDITOR and GIT_SEQUENCE_EDITOR to a non-interactive no-op
+      ("true") via setdefault, so a git operation that must finalize an
+      automatic commit message (e.g. `rebase --continue`, or a merge run
+      with both stdin and stdout attached to a real tty) never blocks
+      waiting on an interactive editor or fails with "Terminal is dumb,
+      but EDITOR unset" (Bug #1578). setdefault is used rather than a hard
+      overwrite so a caller that has deliberately configured its own editor
+      (inherited via os.environ, or merged in by the caller afterward) is
+      not silently clobbered.
 
     Callers receive a fresh dict each time; os.environ is never mutated.
     """
@@ -38,4 +47,6 @@ def build_non_interactive_git_env() -> Dict[str, str]:
         " -o PubkeyAuthentication=yes"
     )
     env["GIT_TERMINAL_PROMPT"] = "0"
+    env.setdefault("GIT_EDITOR", "true")
+    env.setdefault("GIT_SEQUENCE_EDITOR", "true")
     return env
