@@ -8,12 +8,14 @@ from code_indexer.server.services.temporal_legacy_migration.mover import (
 )
 from code_indexer.server.services.temporal_legacy_migration.verification import (
     VerificationError,
+    peek_one_vector_dimension,
     verify_shard_copy,
 )
 from code_indexer.services.temporal.temporal_collection_naming import (
     LEGACY_TEMPORAL_COLLECTION,
 )
 from code_indexer.storage.hnsw_index_manager import HNSWIndexManager
+from code_indexer.storage.shared.chunk_layout import ChunkLayout, resolve_chunk_layout
 from code_indexer.storage.sqlite_chunk_store import ChunkStore
 from code_indexer.storage.temporal_metadata_sqlite_backend import (
     TemporalMetadataSqliteBackend,
@@ -30,13 +32,30 @@ def _write_real_hnsw_index(shard_dir: Path, point_id: str, vector: list) -> None
     manager.build_index(shard_dir, np.array([vector], dtype=np.float32), [point_id])
 
 
-def test_empty_fixed_root_is_published_atomically_and_second_run_is_noop(
+def test_sharded_json_empty_fixed_root_is_published_atomically_and_second_run_is_noop(
     tmp_path: Path,
 ):
+    """SHARDED_JSON-layout-only test (Issue #1581 AC5 relabel).
+
+    This test used to LOOK like it exercised a ``chunks.db``-bearing
+    (``CHUNKS_DB``) shard, but ``(shard / "chunks.db").write_bytes(b"sqlite-
+    data")`` below is NOT a real SQLite database, and ``collection_meta.json``
+    below carries no ``chunks_db`` discriminator key -- per
+    ``resolve_chunk_layout()`` (``storage/shared/chunk_layout.py``), an
+    absent/malformed discriminator ALWAYS resolves to ``SHARDED_JSON``. So
+    this test has always silently run the legacy JSON branch only; the
+    ``chunks.db`` file is an inert fixture byte string, present here purely
+    to prove an arbitrary non-record file also gets copied/preserved during
+    publish -- it is never opened as a real chunk store. Genuine CHUNKS_DB
+    coverage (real discriminator + real ``ChunkStore``-written database +
+    real HNSW index) lives in
+    ``test_chunks_db_shard_migrates_and_converges_issue_1581`` below.
+    """
     legacy = tmp_path / "repo" / ".code-indexer" / "index"
     fixed = tmp_path / ".temporal" / "repo"
     shard = legacy / "code-indexer-temporal-embedder-2026Q1"
     shard.mkdir(parents=True)
+    # Inert fixture byte string -- NOT a real SQLite file. See docstring.
     (shard / "chunks.db").write_bytes(b"sqlite-data")
     (shard / "collection_meta.json").write_text('{"name":"q1"}')
     (shard / "vector_p1.json").write_text(json.dumps({"id": "p1", "vector": [1.0]}))
@@ -422,6 +441,171 @@ def test_genuine_two_pass_migration_converges_via_provenance_digest(tmp_path: Pa
     assert second.failed == 0
     assert not shard.exists()
     assert (fixed / shard.name / "vector_p1.json").exists()
+
+
+def _write_chunks_db_shard(shard_dir: Path, point_id: str, vector: list) -> None:
+    """Build a GENUINE ``CHUNKS_DB``-layout legacy shard end to end (Issue
+    #1581): a real ``{"chunks_db": {"version": 1}}`` discriminator (verified
+    by callers against ``resolve_chunk_layout`` rather than assumed), a real
+    ``chunks.db`` populated via ``ChunkStore.write_batch(...)`` (never a fake
+    byte string), and a real, loadable HNSW index built over that same data
+    via ``HNSWIndexManager`` -- mirroring ``_write_real_hnsw_index``'s intent
+    for the ``CHUNKS_DB`` case. ``HNSWIndexManager._update_metadata`` merges
+    into (rather than overwrites) an existing ``collection_meta.json``, so
+    writing the discriminator first and building the index second preserves
+    the ``chunks_db`` key.
+    """
+    shard_dir.mkdir(parents=True, exist_ok=True)
+    (shard_dir / "collection_meta.json").write_text(
+        json.dumps({"chunks_db": {"version": 1}})
+    )
+    store = ChunkStore(shard_dir / "chunks.db")
+    try:
+        store.write_batch(
+            [{"id": point_id, "vector": vector, "payload": {"source": "legacy"}}]
+        )
+    finally:
+        store.close()
+    _write_real_hnsw_index(shard_dir, point_id, vector)
+
+
+def _pin_failure_to_peek_one_vector_dimension(
+    fixed_shard: Path, point_id: str, vector: list
+) -> None:
+    """Issue #1581: prove the PUBLISHED record's real vector type is
+    ``numpy.ndarray`` (never a ``list``), then show
+    ``peek_one_vector_dimension()`` fails to report its dimension for
+    exactly that reason -- pinning the failure to this specific function
+    rather than an unrelated fixture mistake.
+    """
+    store = ChunkStore(fixed_shard / "chunks.db")
+    try:
+        raw_record = store.read(point_id)
+    finally:
+        store.close()
+    assert raw_record is not None
+    raw_vector = raw_record["vector"]
+    assert isinstance(raw_vector, np.ndarray), (
+        "fixture invalid: ChunkStore must return a numpy.ndarray vector "
+        "for a genuine CHUNKS_DB record -- this test would otherwise be "
+        "repeating the same fixture mistake Issue #1581 documents"
+    )
+    assert not isinstance(raw_vector, list)
+
+    dim = peek_one_vector_dimension(fixed_shard)
+    assert dim == len(vector), (
+        f"peek_one_vector_dimension() returned {dim!r} for a genuine "
+        f"CHUNKS_DB shard whose record's real vector type is "
+        f"{type(raw_vector)!r} -- isinstance(vector, list) unconditionally "
+        f"rejects numpy.ndarray (Issue #1581)"
+    )
+
+
+def test_chunks_db_shard_migrates_and_converges_issue_1581(tmp_path: Path):
+    """Issue #1581 regression: ``peek_one_vector_dimension()`` used
+    ``isinstance(vector, list)``, which is ALWAYS ``False`` for a
+    ``CHUNKS_DB`` shard's record -- ``ChunkStore._row_to_record`` /
+    ``_decode_vector`` always return a ``numpy.ndarray``, never a ``list``.
+    That made ``_hnsw_index_structurally_valid()`` -> ``_target_is_
+    structurally_complete()`` permanently ``False`` for every genuinely
+    valid ``CHUNKS_DB`` shard, so a shard correctly published on pass 1 was
+    reclassified as a ``collision`` (never ``already_complete``) on every
+    subsequent pass, forever -- exactly the confirmed production symptom of
+    19 permanently stuck shards.
+
+    Drives the ACTUAL ``migrate_temporal_shards()`` entry point (not
+    ``verify_shard_copy()`` in isolation) across two passes, mirroring
+    ``test_genuine_two_pass_migration_converges_via_provenance_digest``'s
+    JSON-layout shape exactly, so the SAME test is RED against the current
+    (unpatched) code and GREEN once the fix lands.
+    """
+    legacy = tmp_path / "legacy"
+    fixed = tmp_path / "fixed"
+    shard = legacy / "code-indexer-temporal-e-2026Q1"
+    vector = [1.0, 2.0, 3.0]
+    _write_chunks_db_shard(shard, "p1", vector)
+
+    # Fixture sanity: this MUST resolve to CHUNKS_DB, never SHARDED_JSON --
+    # the exact fixture mistake
+    # test_empty_fixed_root_is_published_atomically_and_second_run_is_noop
+    # made (a fake chunks.db byte string + a discriminator-less meta file).
+    assert resolve_chunk_layout(shard) is ChunkLayout.CHUNKS_DB
+
+    first = migrate_temporal_shards(legacy, fixed, relocation_enabled=True)
+    assert first.published == 1
+    assert first.failed == 0
+    assert shard.exists(), "cleanup was not authorized yet"
+
+    fixed_shard = fixed / shard.name
+    assert resolve_chunk_layout(fixed_shard) is ChunkLayout.CHUNKS_DB
+    _pin_failure_to_peek_one_vector_dimension(fixed_shard, "p1", vector)
+
+    second = migrate_temporal_shards(
+        legacy, fixed, relocation_enabled=True, cleanup_authorized=True
+    )
+    assert second.already_complete == 1
+    assert second.collisions == 0
+    assert second.deleted == 1
+    assert second.failed == 0
+    assert not shard.exists()
+    assert (fixed_shard / "chunks.db").exists()
+
+
+def test_chunks_db_fresh_publish_passes_completeness_gate_under_cleanup_authorized_issue_1581(
+    tmp_path: Path,
+):
+    """Codex review gap on Issue #1581 AC3 (closes it): AC3 requires proof
+    that a CHUNKS_DB shard "publish[es] cleanly, pass[es] the post-publish
+    completeness gate under cleanup_authorized=True (no VerificationError)".
+
+    ``test_chunks_db_shard_migrates_and_converges_issue_1581`` above never
+    actually exercised that gate on a FRESH publish: its first call omits
+    ``cleanup_authorized``, and by the time its second call passes
+    ``cleanup_authorized=True`` the shard is already published, so
+    ``_process_one_shard`` classifies it as ``already_complete`` -- a
+    different code branch that never runs the
+    ``outcome == "published" and cleanup_authorized`` gate in
+    ``mover._process_one_shard`` at all.
+
+    This test calls ``migrate_temporal_shards(..., cleanup_authorized=True)``
+    as the FIRST and ONLY call, so ``cleanup_authorized=True`` is present on
+    the fresh-publish call itself. Under the pre-#1581 bug --
+    ``peek_one_vector_dimension()``'s ``isinstance(vector, list)`` check,
+    which is unconditionally ``False`` for a real ``ChunkStore``-returned
+    ``numpy.ndarray`` -- ``_hnsw_index_structurally_valid`` (and therefore
+    ``_target_is_structurally_complete``) would be ``False`` immediately
+    after a genuinely valid fresh publish, so ``_process_one_shard`` raises
+    ``VerificationError`` for this exact shard; ``_run_shard_pass`` catches
+    it and folds it into ``MigrationResult.failed`` rather than
+    ``published`` -- so this test is RED against the unpatched code (proven
+    below) and GREEN against the fix.
+    """
+    legacy = tmp_path / "legacy"
+    fixed = tmp_path / "fixed"
+    shard = legacy / "code-indexer-temporal-e-2026Q1"
+    vector = [1.0, 2.0, 3.0]
+    _write_chunks_db_shard(shard, "p1", vector)
+
+    # Fixture sanity: must be a genuine CHUNKS_DB shard, not the fake-bytes
+    # SHARDED_JSON fixture mistake documented at the top of this file.
+    assert resolve_chunk_layout(shard) is ChunkLayout.CHUNKS_DB
+
+    result = migrate_temporal_shards(
+        legacy, fixed, relocation_enabled=True, cleanup_authorized=True
+    )
+
+    assert result.published == 1, (
+        "a fresh, genuinely valid CHUNKS_DB publish must pass the "
+        "post-publish completeness gate under cleanup_authorized=True "
+        "without being reclassified as a failure"
+    )
+    assert result.collisions == 0
+    assert result.failed == 0
+    assert result.deleted == 1
+    assert not shard.exists(), "cleanup_authorized=True must delete the source"
+    fixed_shard = fixed / shard.name
+    assert resolve_chunk_layout(fixed_shard) is ChunkLayout.CHUNKS_DB
+    assert (fixed_shard / "chunks.db").exists()
 
 
 def test_forged_sentinel_marker_with_no_matching_digest_is_still_a_collision(

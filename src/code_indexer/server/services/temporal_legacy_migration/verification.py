@@ -314,9 +314,26 @@ def peek_one_vector_dimension(root: Path) -> Optional[int]:
     if not isinstance(record, dict):
         return None
     vector = record.get("vector")
-    if not isinstance(vector, list) or not vector:
+    # Issue #1581 fix: a genuine CHUNKS_DB record's vector is a
+    # ``numpy.ndarray`` (``ChunkStore._decode_vector`` / ``_row_to_record``),
+    # NEVER a ``list`` -- the SHARDED_JSON branch's ``json.load`` always
+    # yields a ``list`` instead. ``isinstance(vector, list)`` unconditionally
+    # rejected every CHUNKS_DB shard regardless of validity, permanently
+    # misclassifying it as incomplete on every completeness check that
+    # depends on this function. Deliberately type-agnostic (accept anything
+    # with a ``len()``, excluding str/bytes/dict which have one but are
+    # never vectors) rather than special-casing ``numpy.ndarray`` alongside
+    # ``list``, so a future array-like storage type does not repeat this
+    # exact bug class a third time.
+    if vector is None or isinstance(vector, (str, bytes, dict)):
         return None
-    return len(vector)
+    try:
+        length = len(vector)
+    except TypeError:
+        return None
+    if not length:
+        return None
+    return length
 
 
 def verify_shard_copy(source: Path, published: Path) -> None:
