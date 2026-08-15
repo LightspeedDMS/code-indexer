@@ -13,6 +13,7 @@ Expected behavior:
 import pytest
 import tempfile
 from pathlib import Path
+from typing import Any, Dict, List
 from unittest.mock import MagicMock, patch, Mock
 from code_indexer.services.high_throughput_processor import HighThroughputProcessor
 from code_indexer.config import Config
@@ -157,7 +158,7 @@ class TestBranchIsolationPerformance:
         - Broken: 500 scroll_points calls + 500+ individual updates = 1000+ total
         """
         # Setup: 1000 files in database
-        all_content_points = []
+        all_content_points: List[Dict[str, Any]] = []
         for i in range(1000):
             all_content_points.append(
                 {
@@ -170,11 +171,26 @@ class TestBranchIsolationPerformance:
                 }
             )
 
-        # Mock scroll_points to return all content points
-        mock_filesystem_client.scroll_points = MagicMock(
-            return_value=(all_content_points, None)
+        # Bug #1575 Part A: mock distinct_content_paths()/fetch_points_for_paths()
+        # -- the store primitives hide_files_not_in_branch_thread_safe() now
+        # calls -- instead of the retired scroll_points()-based
+        # _fetch_all_content_points() path.
+        all_paths = {point["payload"]["path"] for point in all_content_points}
+        mock_filesystem_client.distinct_content_paths = MagicMock(
+            return_value=all_paths
         )
-        mock_filesystem_client._batch_update_points = MagicMock(return_value=True)
+
+        def _fetch_points_for_paths(_collection_name, paths):
+            return [
+                point
+                for point in all_content_points
+                if point["payload"]["path"] in paths
+            ]
+
+        mock_filesystem_client.fetch_points_for_paths = MagicMock(
+            side_effect=_fetch_points_for_paths
+        )
+        mock_filesystem_client._batch_update_payload_only = MagicMock(return_value=True)
 
         # Only 500 files exist in current branch (500 need to be hidden)
         current_files = [f"/path/to/file_{i}.py" for i in range(500)]
@@ -191,10 +207,14 @@ class TestBranchIsolationPerformance:
             progress_callback=None,
         )
 
-        # Verify minimal HTTP requests
+        # Verify minimal HTTP requests: one distinct_content_paths() call,
+        # one targeted fetch_points_for_paths() call, and one batched
+        # _batch_update_payload_only() call for the 500 files being hidden --
+        # never one request per file (the PERFORMANCE BUG this test guards).
         total_http_requests = (
-            mock_filesystem_client.scroll_points.call_count
-            + mock_filesystem_client._batch_update_points.call_count
+            mock_filesystem_client.distinct_content_paths.call_count
+            + mock_filesystem_client.fetch_points_for_paths.call_count
+            + mock_filesystem_client._batch_update_payload_only.call_count
         )
 
         # ASSERTION: Should make <10 total HTTP requests
@@ -202,6 +222,19 @@ class TestBranchIsolationPerformance:
         assert total_http_requests < 10, (
             f"PERFORMANCE BUG: Made {total_http_requests} total HTTP requests "
             f"for hiding 500 files. Should make <10 requests."
+        )
+
+        # Bug #1575 Part A: the targeted fetch must request EXACTLY the
+        # paths absent from the current branch -- never the full
+        # 1000-path collection, and never a wrong subset.
+        fetch_call_args = mock_filesystem_client.fetch_points_for_paths.call_args
+        requested_paths = set(fetch_call_args[0][1])
+        expected_paths = all_paths - set(current_files)
+        assert requested_paths == expected_paths, (
+            f"Expected the targeted fetch to request exactly the paths "
+            f"absent from the current branch ({len(expected_paths)} paths), "
+            f"got {len(requested_paths)} paths -- full collection may have "
+            f"been materialized instead, or the wrong subset targeted."
         )
 
     def test_batch_update_groups_identical_payloads(self, mock_filesystem_client):

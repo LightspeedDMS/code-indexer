@@ -26,6 +26,35 @@ import numpy as np
 
 logger = logging.getLogger(__name__)
 
+
+def _normalize_stored_path_for_visibility(
+    path: Optional[str], project_root: Optional[Path]
+) -> Optional[str]:
+    """Codex review follow-up (Bug #1575 Part A, CRITICAL finding 2):
+    normalize a stored ``payload.path`` value to the relative form used by
+    ``visible_files`` sets, mirroring
+    ``HighThroughputProcessor._normalize_stored_path`` exactly (Bug #1575
+    AC6) -- an ABSOLUTE stored path under ``project_root`` is converted to
+    relative; a path outside ``project_root`` is returned unchanged (with a
+    WARNING); an already-relative path passes through unchanged.
+
+    ``project_root`` is optional: ``None`` (every ``rebuild_from_vectors()``
+    call site that predates this fix) returns ``path`` unchanged, preserving
+    today's raw-comparison behavior byte-for-byte.
+    """
+    if path is None or project_root is None:
+        return path
+    if os.path.isabs(path):
+        try:
+            return str(Path(path).relative_to(project_root))
+        except ValueError:
+            logger.warning(
+                "HNSW rebuild: found path outside project directory: %s", path
+            )
+            return path
+    return path
+
+
 #: Sentinel meaning "caller did not supply cached_meta" to is_stale() --
 #: distinct from an explicitly-passed None (which means "the cache
 #: determined there is no valid metadata"). Story #1492 AC1.
@@ -692,6 +721,7 @@ class HNSWIndexManager:
         current_branch: Optional[str] = None,
         clear_stale: bool = True,
         layout_override: Optional[ChunkLayout] = None,
+        project_root: Optional[Path] = None,
     ) -> int:
         """Rebuild HNSW index by scanning all vector JSON files.
 
@@ -733,6 +763,15 @@ class HNSWIndexManager:
                          None (default) preserves today's resolver-driven
                          behavior exactly; this is NEVER a parallel decision
                          mechanism for any other caller.
+            project_root: Codex review follow-up (Bug #1575 Part A,
+                         CRITICAL finding 2) -- when provided together with
+                         ``visible_files``, an ABSOLUTE stored ``payload.path``
+                         is normalized relative to ``project_root`` before
+                         the ``visible_files`` membership check, mirroring
+                         ``HighThroughputProcessor._normalize_stored_path``
+                         (Bug #1575 AC6). None (default, every pre-existing
+                         caller) preserves today's raw-comparison behavior
+                         byte-for-byte.
 
         Returns:
             Number of vectors indexed
@@ -820,11 +859,19 @@ class HNSWIndexManager:
         # legacy collections keep the exact original rglob-based loading.
         if layout == ChunkLayout.CHUNKS_DB:
             vectors_list, ids_list = self._load_vectors_from_chunks_db(
-                collection_path, expected_dim, visible_files, current_branch
+                collection_path,
+                expected_dim,
+                visible_files,
+                current_branch,
+                project_root,
             )
         else:
             vectors_list, ids_list = self._load_vectors_from_json_files(
-                vector_files, expected_dim, visible_files, current_branch
+                vector_files,
+                expected_dim,
+                visible_files,
+                current_branch,
+                project_root,
             )
 
         if not vectors_list:
@@ -952,6 +999,7 @@ class HNSWIndexManager:
         expected_dim: int,
         visible_files: Optional[Set[str]],
         current_branch: Optional[str],
+        project_root: Optional[Path] = None,
     ) -> Tuple[List[np.ndarray], List[str]]:
         """Story #1456 AC2: stream vector+payload from ``chunks.db`` instead
         of rglob-scanning ``vector_*.json`` files. Preserves the EXACT
@@ -970,6 +1018,11 @@ class HNSWIndexManager:
         visible_files-filtered cases, the top-level indexed ``path`` column
         is used directly and the payload is never decoded. Byte-identical
         result set to the pre-optimization ``stream_all()``-based path.
+
+        Codex review follow-up (Bug #1575 Part A, CRITICAL finding 2):
+        ``project_root`` (optional) normalizes an ABSOLUTE stored ``path``
+        to relative form before the ``visible_files`` membership check --
+        see :func:`_normalize_stored_path_for_visibility`.
         """
         from code_indexer.storage.sqlite_chunk_store import open_chunk_store_for_path
 
@@ -995,7 +1048,10 @@ class HNSWIndexManager:
                     continue  # Skip mismatched dimensions
 
                 if visible_files is not None:
-                    if path not in visible_files:
+                    normalized_path = _normalize_stored_path_for_visibility(
+                        path, project_root
+                    )
+                    if normalized_path not in visible_files:
                         continue  # Skip vectors not in visible set
                 elif current_branch is not None:
                     # Bug #306: branch-aware filter, identical semantics to
@@ -1017,9 +1073,16 @@ class HNSWIndexManager:
         expected_dim: int,
         visible_files: Optional[Set[str]],
         current_branch: Optional[str],
+        project_root: Optional[Path] = None,
     ) -> Tuple[List[np.ndarray], List[str]]:
         """Legacy sharded-JSON vector loading (unchanged behavior, extracted
-        verbatim from the pre-Story #1456 body of ``rebuild_from_vectors``)."""
+        verbatim from the pre-Story #1456 body of ``rebuild_from_vectors``).
+
+        Codex review follow-up (Bug #1575 Part A, CRITICAL finding 2):
+        ``project_root`` (optional) normalizes an ABSOLUTE stored ``path``
+        to relative form before the ``visible_files`` membership check --
+        see :func:`_normalize_stored_path_for_visibility`.
+        """
         vectors_list: List[np.ndarray] = []
         ids_list: List[str] = []
 
@@ -1038,7 +1101,10 @@ class HNSWIndexManager:
                 # Apply visibility filter: skip vectors for hidden files
                 if visible_files is not None:
                     file_path = data.get("payload", {}).get("path")
-                    if file_path not in visible_files:
+                    normalized_path = _normalize_stored_path_for_visibility(
+                        file_path, project_root
+                    )
+                    if normalized_path not in visible_files:
                         continue  # Skip vectors not in visible set
                 elif current_branch is not None:
                     # Branch-aware filter: skip vectors hidden for current_branch

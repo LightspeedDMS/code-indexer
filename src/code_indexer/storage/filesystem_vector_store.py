@@ -299,6 +299,16 @@ class PathIndex:
         """
         return self._path_index.get(file_path, set()).copy()
 
+    def all_paths(self) -> Set[str]:
+        """Return the set of every distinct file path currently tracked by
+        this index (Bug #1575 Part A).
+
+        Used by ``FilesystemVectorStore.distinct_content_paths()`` for the
+        SHARDED_JSON layout -- a lightweight, memory-bounded read of the
+        path set only (never point_ids or payloads).
+        """
+        return set(self._path_index.keys())
+
     def has_other_owner(self, point_id: str) -> bool:
         """Return True if any file in the index references the given point_id.
 
@@ -1357,6 +1367,12 @@ class FilesystemVectorStore:
             visible_files=visible_files,
             current_branch=current_branch,
             layout_override=layout_override,
+            # Codex review follow-up (Bug #1575 Part A, CRITICAL finding
+            # 2): visible_files is always relative -- an absolute stored
+            # payload.path must be normalized against project_root before
+            # the membership check, or it is silently (and incorrectly)
+            # always excluded.
+            project_root=self.project_root,
         )
 
         # Signal end_indexing() to skip its own rebuild (would overwrite filtered rebuild)
@@ -3113,6 +3129,234 @@ class FilesystemVectorStore:
         if flipped:
             return self._get_point_from_chunk_store(collection_path, point_id)
         return None
+
+    def _resolve_authoritative_path_index(
+        self, collection_name: str, subdirectory: Optional[str] = None
+    ) -> PathIndex:
+        """Bug #1575 Part A: return an authoritative PathIndex for a
+        SHARDED_JSON collection.
+
+        Trusts the in-memory ``self._path_indexes`` entry ONLY when
+        ``collection_name in self._indexing_session_changes`` proves an
+        ACTIVE indexing session for THIS collection is currently populating
+        and mutating it (``begin_indexing()`` sets this entry;
+        ``end_indexing()`` clears it) -- that object is provably fresh
+        because every ``upsert_points()`` call this session has kept it in
+        sync via ``add_point``/``remove_point``, at zero extra I/O. Both
+        the session-membership check and the cache lookup are performed
+        together inside ONE ``_path_index_lock`` critical section so they
+        are atomic with each other from this method's perspective.
+
+        A bare "is this cache key present in self._path_indexes" check is
+        NOT sufficient: other call sites (e.g.
+        ``get_existing_content_hashes``) also lazily populate the SAME
+        cache from a plain, unvalidated disk load outside any active
+        session, which is exactly the "path_index.bin is a cache, not an
+        authority" staleness risk this method exists to avoid trusting
+        blindly. Absent a proven active session, this falls back to an
+        authoritative streaming rebuild from disk
+        (``_rebuild_path_index_from_disk``).
+        """
+        cached = self._get_live_session_path_index(collection_name, subdirectory)
+        if cached is not None:
+            return cached
+        return self._rebuild_path_index_from_disk(collection_name, subdirectory)
+
+    def _get_live_session_path_index(
+        self, collection_name: str, subdirectory: Optional[str] = None
+    ) -> Optional[PathIndex]:
+        """Bug #1575 Part A (Codex follow-up, finding 4): the "trust the
+        in-memory PathIndex ONLY under a proven active indexing session"
+        check, extracted so :meth:`_resolve_authoritative_path_index` and
+        :meth:`distinct_content_paths` share ONE implementation. Returns
+        ``None`` when no active session for this collection proves the
+        cached entry fresh (see the sibling docstring for the rationale).
+        """
+        cache_key = self._id_cache_key(collection_name, subdirectory)
+        with self._path_index_lock:
+            has_active_session = collection_name in self._indexing_session_changes
+            return self._path_indexes.get(cache_key) if has_active_session else None
+
+    @staticmethod
+    def _content_scan_integrity_message(vector_file: Path, reason: str) -> str:
+        """Shared ``ScrollDataIntegrityError`` message for
+        :meth:`_stream_authoritative_content_paths_from_disk` (Bug #1575
+        Part A, Gap 2) -- one place naming the offending file.
+        """
+        return (
+            f"legacy vector file {str(vector_file)!r} {reason} during the "
+            f"authoritative content-path scan; refusing to silently drop "
+            f"a present record"
+        )
+
+    @staticmethod
+    def _extract_content_path(data: Dict[str, Any]) -> Optional[str]:
+        """Return the stored path for a ``type == "content"`` record, else
+        None. Missing/non-dict ``payload``/``metadata`` are tolerated
+        defensively (never ``AttributeError``); the type check requires
+        an EXPLICIT "content" match (metadata first, else payload), never
+        defaulted -- the real writer always stamps ``metadata.type``
+        explicitly (``_prepare_vector_data_batch``). Bug #1575 Part A.
+        """
+        payload = data.get("payload")
+        if not isinstance(payload, dict):
+            payload = {}
+        metadata = data.get("metadata")
+        if not isinstance(metadata, dict):
+            metadata = {}
+        record_type = metadata.get("type")
+        if record_type is None:
+            record_type = payload.get("type")
+        if record_type != "content":
+            return None
+        file_path = payload.get("path")
+        return file_path if isinstance(file_path, str) and file_path else None
+
+    def _stream_authoritative_content_paths_from_disk(
+        self, collection_name: str, subdirectory: Optional[str] = None
+    ) -> Set[str]:
+        """Bug #1575 Part A (Codex findings 3+4; Gap 2): memory-bounded,
+        ``type == "content"``-filtered streaming scan of a SHARDED_JSON
+        collection's on-disk ``vector_*.json`` files. Never persists
+        ``path_index.bin``.
+
+        A PRESENT-but-malformed record fails loud via
+        ``ScrollDataIntegrityError``, naming the file. A file that
+        VANISHES between listing and reading (``FileNotFoundError``, Bug
+        #1486 Finding-5) is a different, legitimate race and is skipped.
+        """
+        if subdirectory is None:
+            subdirectory = self._active_subdirectories.get(collection_name)
+        collection_path = self._get_collection_path(collection_name, subdirectory)
+
+        content_paths: Set[str] = set()
+        for vector_file in collection_path.rglob("vector_*.json"):
+            try:
+                with open(str(vector_file), "r") as fh:
+                    data = json.load(fh)
+            except FileNotFoundError:
+                continue
+            except json.JSONDecodeError as exc:
+                raise ScrollDataIntegrityError(
+                    self._content_scan_integrity_message(
+                        vector_file, f"is not valid JSON ({exc})"
+                    )
+                ) from exc
+            except UnicodeDecodeError as exc:
+                raise ScrollDataIntegrityError(
+                    self._content_scan_integrity_message(
+                        vector_file, f"contains undecodable bytes ({exc})"
+                    )
+                ) from exc
+
+            if not isinstance(data, dict):
+                raise ScrollDataIntegrityError(
+                    self._content_scan_integrity_message(
+                        vector_file, "has a non-dict JSON root"
+                    )
+                )
+
+            file_path = self._extract_content_path(data)
+            if file_path:
+                content_paths.add(file_path)
+        return content_paths
+
+    def distinct_content_paths(
+        self, collection_name: str, subdirectory: Optional[str] = None
+    ) -> Set[str]:
+        """Bug #1575 Part A: authoritative, memory-bounded enumeration of
+        distinct content-point stored paths for a collection.
+
+        Replaces materializing every content payload
+        (``_fetch_all_content_points``) just to derive the set of distinct
+        file paths on record. Retains ONLY the path strings -- never a list
+        of payloads.
+        """
+        collection_path = self._get_collection_path(collection_name, subdirectory)
+        if self._is_chunks_db_collection(collection_name, collection_path):
+            from code_indexer.storage.sqlite_chunk_store import (
+                open_chunk_store_for_path,
+            )
+
+            with open_chunk_store_for_path(
+                collection_path / "chunks.db", str(collection_path)
+            ) as chunk_store:
+                return set(chunk_store.distinct_content_paths())
+
+        # SHARDED_JSON, live in-memory session: the cached PathIndex is
+        # authoritative and free (no disk I/O). No per-point type check is
+        # needed here (unlike the disk-fallback below): temporal is the
+        # sole non-"content" writer in this codebase and it never sets
+        # payload.path (uses paths/primary_path instead) AND is exclusively
+        # CHUNKS_DB since Bug #1528, so this SHARDED_JSON PathIndex can only
+        # ever be populated by type=="content" points (Bug #1575
+        # investigation, mirrored in sqlite_chunk_store.py's
+        # _ensure_type_column docstring).
+        cached = self._get_live_session_path_index(collection_name, subdirectory)
+        if cached is not None:
+            # The cached index may be the SHARED, session-live object
+            # another thread's upsert_points() call is concurrently
+            # mutating -- read it under the same lock upsert_points() holds
+            # while mutating it, to avoid a torn read.
+            with self._path_index_lock:
+                return cached.all_paths()
+
+        # Absent an active session, fall back to a dedicated lightweight
+        # scan (Codex findings 3+4) instead of the full point-id-tracking,
+        # path_index.bin-persisting rebuild _resolve_authoritative_path_index
+        # uses for its own (unrelated) targeted-lookup job.
+        return self._stream_authoritative_content_paths_from_disk(
+            collection_name, subdirectory
+        )
+
+    def fetch_points_for_paths(
+        self,
+        collection_name: str,
+        paths: Set[str],
+        subdirectory: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """Bug #1575 Part A: targeted, payload-only fetch of the points
+        stored under ``paths`` -- never a full collection scan.
+
+        Returns ``{"id": ..., "payload": {...}}`` dicts (never vectors,
+        matching the memory-bounded ``with_vectors=False`` contract
+        ``_fetch_all_content_points`` used).
+        """
+        if not paths:
+            return []
+        collection_path = self._get_collection_path(collection_name, subdirectory)
+        if self._is_chunks_db_collection(collection_name, collection_path):
+            from code_indexer.storage.sqlite_chunk_store import (
+                open_chunk_store_for_path,
+            )
+
+            with open_chunk_store_for_path(
+                collection_path / "chunks.db", str(collection_path)
+            ) as chunk_store:
+                # Codex review follow-up (Bug #1575 Part A, finding 6):
+                # this caller only ever needs id/payload -- never the
+                # vector -- so request the payload_only fetch that skips
+                # vector decode entirely.
+                records = chunk_store.fetch_points_for_paths(paths, payload_only=True)
+            return [
+                {"id": record["id"], "payload": record.get("payload", {})}
+                for record in records
+            ]
+
+        path_index = self._resolve_authoritative_path_index(
+            collection_name, subdirectory
+        )
+        point_ids: Set[str] = set()
+        with self._path_index_lock:
+            for path in paths:
+                point_ids.update(path_index.get_point_ids(path))
+
+        points: List[Dict[str, Any]] = []
+        for point_id in point_ids:
+            point = self.get_point(point_id, collection_name, subdirectory)
+            if point is not None:
+                points.append({"id": point["id"], "payload": point.get("payload", {})})
+        return points
 
     def get_existing_content_hashes(
         self, file_path: str, collection_name: str

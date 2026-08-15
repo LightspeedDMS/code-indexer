@@ -31,6 +31,34 @@ def _make_content_points(file_paths: List[str]) -> List[Dict[str, Any]]:
     return points
 
 
+def _configure_content_points_mock(
+    processor: HighThroughputProcessor, content_points: List[Dict[str, Any]]
+) -> None:
+    """Bug #1575 Part A: configure the vector_store_client mock's
+    distinct_content_paths()/fetch_points_for_paths() -- the primitives
+    hide_files_not_in_branch_thread_safe() now calls -- to behave as if
+    ``content_points`` were stored, replacing the retired
+    scroll_points()-based _fetch_all_content_points() mock configuration.
+    """
+    all_paths = {
+        point["payload"]["path"]
+        for point in content_points
+        if "path" in point.get("payload", {})
+    }
+    processor.vector_store_client.distinct_content_paths.return_value = all_paths
+
+    def _fetch_points_for_paths(_collection_name, paths):
+        return [
+            point
+            for point in content_points
+            if point.get("payload", {}).get("path") in paths
+        ]
+
+    processor.vector_store_client.fetch_points_for_paths.side_effect = (
+        _fetch_points_for_paths
+    )
+
+
 def _make_processor(tmp_path: Path) -> HighThroughputProcessor:
     """Create a HighThroughputProcessor with mocked dependencies."""
     mock_embedding_provider = Mock()
@@ -65,10 +93,7 @@ class TestFTSBranchIsolationDeletesDocuments:
         # files_to_hide = file_c.py, file_d.py
 
         content_points = _make_content_points(all_files)
-        processor.vector_store_client.scroll_points.return_value = (
-            content_points,
-            None,
-        )
+        _configure_content_points_mock(processor, content_points)
         processor.vector_store_client._batch_update_points.return_value = None
 
         mock_fts_manager = MagicMock()
@@ -101,10 +126,7 @@ class TestFTSBranchIsolationDeletesDocuments:
         current_files = ["file_a.py"]
 
         content_points = _make_content_points(all_files)
-        processor.vector_store_client.scroll_points.return_value = (
-            content_points,
-            None,
-        )
+        _configure_content_points_mock(processor, content_points)
         processor.vector_store_client._batch_update_points.return_value = None
 
         mock_fts_manager = MagicMock()
@@ -144,10 +166,7 @@ class TestFTSBranchIsolationNoOpsWhenManagerNone:
         current_files = ["file_a.py"]
 
         content_points = _make_content_points(all_files)
-        processor.vector_store_client.scroll_points.return_value = (
-            content_points,
-            None,
-        )
+        _configure_content_points_mock(processor, content_points)
         processor.vector_store_client._batch_update_points.return_value = None
 
         # Should not raise when fts_manager=None
@@ -171,10 +190,7 @@ class TestFTSBranchIsolationNoOpsWhenManagerNone:
         current_files = ["file_a.py"]
 
         content_points = _make_content_points(all_files)
-        processor.vector_store_client.scroll_points.return_value = (
-            content_points,
-            None,
-        )
+        _configure_content_points_mock(processor, content_points)
         processor.vector_store_client._batch_update_payload_only.return_value = None
 
         processor.hide_files_not_in_branch_thread_safe(
@@ -199,10 +215,7 @@ class TestFTSBranchIsolationNoOpsWhenNoFilesToHide:
         current_files = ["file_a.py", "file_b.py"]  # All files visible
 
         content_points = _make_content_points(all_files)
-        processor.vector_store_client.scroll_points.return_value = (
-            content_points,
-            None,
-        )
+        _configure_content_points_mock(processor, content_points)
         processor.vector_store_client._batch_update_points.return_value = None
 
         mock_fts_manager = MagicMock()
@@ -230,10 +243,7 @@ class TestFTSBranchIsolationErrorHandling:
         current_files = ["file_a.py"]  # 3 files to hide
 
         content_points = _make_content_points(all_files)
-        processor.vector_store_client.scroll_points.return_value = (
-            content_points,
-            None,
-        )
+        _configure_content_points_mock(processor, content_points)
         processor.vector_store_client._batch_update_points.return_value = None
 
         mock_fts_manager = MagicMock()
@@ -271,10 +281,7 @@ class TestFTSBranchIsolationErrorHandling:
         current_files = ["file_a.py"]
 
         content_points = _make_content_points(all_files)
-        processor.vector_store_client.scroll_points.return_value = (
-            content_points,
-            None,
-        )
+        _configure_content_points_mock(processor, content_points)
         processor.vector_store_client._batch_update_points.return_value = None
 
         mock_fts_manager = MagicMock()
