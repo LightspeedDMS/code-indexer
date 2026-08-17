@@ -173,8 +173,12 @@ class TestRefreshSchedulerBackgroundJobManagerIntegration:
             call_args = mock_background_job_manager.submit_job.call_args
             submitted_func = call_args.kwargs["func"]
 
-            # Execute the lambda
-            submitted_func()
+            # Execute the lambda. EVO-66113: the worker declares a `job_id`
+            # parameter that BackgroundJobManager._execute_job injects from the
+            # dequeued job tuple (race-free, replacing the removed mutable holder);
+            # simulate that injection and assert job_id is forwarded to
+            # _execute_refresh.
+            submitted_func(job_id="job-abc")
 
             # Verify _execute_refresh was called with correct alias.
             # EVO-64385: the worker runs under the job submit_job already claimed,
@@ -184,6 +188,7 @@ class TestRefreshSchedulerBackgroundJobManagerIntegration:
                 force_reset=False,
                 progress_callback=None,
                 tracked_by_caller=True,
+                job_id="job-abc",
             )
 
     def test_execute_refresh_raises_exception_on_timeout(

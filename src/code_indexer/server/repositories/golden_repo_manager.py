@@ -546,13 +546,11 @@ class GoldenRepoManager:
         # lives in execute_add_golden_repo_work() so any pod's IndexJobClaimLoop
         # can run it from the job row's metadata. This thin wrapper preserves the
         # exact solo/local-pool path.
-        # EVO-66113: mutable holder so the closure can read the job_id
-        # assigned by submit_job() below (which runs AFTER the closure is
-        # defined). By the time the background thread starts, submit_job
-        # has already returned and populated the holder.
-        _job_id_holder: Dict[str, Optional[str]] = {"job_id": None}
-
-        def background_worker(progress_callback=None) -> Dict[str, Any]:
+        # EVO-66113: BackgroundJobManager._execute_job injects the assigned
+        # job_id into any worker whose signature declares a `job_id` param,
+        # straight from the dequeued (job_id, func, args, kwargs) tuple --
+        # race-free, so no post-submit mutable holder is needed.
+        def background_worker(progress_callback=None, job_id=None) -> Dict[str, Any]:
             return self.execute_add_golden_repo_work(
                 repo_url=repo_url,
                 alias=alias,
@@ -562,7 +560,7 @@ class GoldenRepoManager:
                 submitter_username=submitter_username,
                 workspace_id=workspace_id,
                 progress_callback=progress_callback,
-                job_id=_job_id_holder.get("job_id"),
+                job_id=job_id,
             )
 
         # Submit to BackgroundJobManager. EVO-64545: pass reconstruction params
@@ -584,9 +582,6 @@ class GoldenRepoManager:
                 "workspace_id": workspace_id,
             },
         )
-        # EVO-66113: populate the holder so the background_worker closure
-        # can thread the job_id into embed stats env vars.
-        _job_id_holder["job_id"] = str(job_id)
         return cast(str, job_id)
 
     def execute_add_golden_repo_work(
@@ -4156,13 +4151,11 @@ class GoldenRepoManager:
                     f"Invalid index_type: {index_type}. Must be one of: {', '.join(valid_index_types)}"
                 )
 
-        # EVO-66113: mutable holder so the closure can read the job_id
-        # assigned by submit_job() below (which runs AFTER the closure is
-        # defined). By the time the background thread starts, submit_job
-        # has already returned and populated the holder.
-        _job_id_holder: Dict[str, Optional[str]] = {"job_id": None}
-
-        def background_worker(progress_callback=None) -> Dict[str, Any]:
+        # EVO-66113: BackgroundJobManager._execute_job injects the assigned
+        # job_id into any worker whose signature declares a `job_id` param,
+        # straight from the dequeued (job_id, func, args, kwargs) tuple --
+        # race-free, so no post-submit mutable holder is needed.
+        def background_worker(progress_callback=None, job_id=None) -> Dict[str, Any]:
             """Execute add index operations in a single background thread with write lock + CoW."""
             # Acquire write lock (Bug #473 Fix 1)
             scheduler = getattr(self, "_refresh_scheduler", None)
@@ -4270,7 +4263,7 @@ class GoldenRepoManager:
                         _get_config_service_for_stats().get_config(),
                         base_env=env,
                         golden_repo_alias=alias,
-                        job_id=_job_id_holder.get("job_id"),
+                        job_id=job_id,
                     )
                     try:
                         _run_with_popen_progress_shared(**_shared_kwargs)
@@ -4620,10 +4613,6 @@ class GoldenRepoManager:
             is_admin=True,
             repo_alias=alias,
         )
-        # EVO-66113: populate the holder so the background_worker closure
-        # can thread the job_id into embed stats env vars. By the time the
-        # background thread dequeues and starts, this assignment has completed.
-        _job_id_holder["job_id"] = str(job_id)
         return cast(str, job_id)
 
     def _index_exists(self, golden_repo: GoldenRepo, index_type: str) -> bool:
