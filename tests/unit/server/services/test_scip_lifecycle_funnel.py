@@ -204,6 +204,33 @@ class TestFreshness:
         record_scip_build_commit(scip_dir, "sha1")
         assert scip_db_is_fresh(tmp_path, scip_dir) is False
 
+    def test_root_build_repo_stale_nested_only_is_NOT_fresh(
+        self, tmp_path, monkeypatch
+    ):
+        """EVO-66190 2nd gate: a root-buildable repo (root settings.gradle) with only a
+        stale per-subproject DB + a matching marker must NOT read fresh — else the funnel
+        skips the rebuild the reconcile enqueued."""
+        monkeypatch.setattr(scip_lifecycle, "get_current_commit", lambda _p: "sha1")
+        (tmp_path / "settings.gradle").write_text("include 'proj'")  # root build file
+        scip_dir = tmp_path / ".code-indexer" / "scip"
+        (scip_dir / "proj").mkdir(parents=True)
+        (scip_dir / "proj" / "index.scip.db").write_text(
+            "db"
+        )  # nested only, no root DB
+        record_scip_build_commit(scip_dir, "sha1")
+        assert scip_db_is_fresh(tmp_path, scip_dir) is False
+
+    def test_root_build_repo_with_top_level_db_is_fresh(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(scip_lifecycle, "get_current_commit", lambda _p: "sha1")
+        (tmp_path / "settings.gradle").write_text("include 'proj'")
+        scip_dir = tmp_path / ".code-indexer" / "scip"
+        scip_dir.mkdir(parents=True)
+        (scip_dir / "index.scip.db").write_text(
+            "db"
+        )  # root build landed the top-level DB
+        record_scip_build_commit(scip_dir, "sha1")
+        assert scip_db_is_fresh(tmp_path, scip_dir) is True
+
     def test_no_index_marker_is_fresh_without_db(self, tmp_path, monkeypatch):
         """Freshness thrash fix: a build where every project was an unsupported
         language produced no DB and never will. A ``no-index`` marker at HEAD is

@@ -1284,30 +1284,14 @@ class GoldenRepoManager:
 
     @staticmethod
     def _has_root_build_file(repo_dir: "Path") -> bool:
-        """True if the repo has a build file at its ROOT directory.
+        """Whether the repo has a root-level build file (→ discovery emits a ``.`` project
+        whose build lands the top-level ``index.scip.db``). Delegates to the shared
+        :func:`code_indexer.scip.discovery.has_root_build_file` so the reconcile presence
+        check and the funnel freshness check (``scip_lifecycle.scip_db_is_fresh``) stay in
+        lockstep."""
+        from code_indexer.scip.discovery import has_root_build_file
 
-        A root build file means SCIP discovery emits a project at ``relative_path='.'``
-        (a Gradle multi-project via ``settings.gradle``, a Maven/single-Gradle/npm/
-        python/go/C# project at the top level), whose delegated build writes the
-        top-level ``.code-indexer/scip/index.scip.db``. Cheap: root-level ``exists``/
-        ``glob`` checks only, never a tree walk. Reuses the discovery module's build-file
-        set so the two stay in lockstep.
-        """
-        from code_indexer.scip.discovery import (
-            BUILD_FILE_MAPPINGS,
-            GRADLE_SETTINGS_FILES,
-        )
-
-        for name in GRADLE_SETTINGS_FILES:
-            if (repo_dir / name).exists():
-                return True
-        for name in BUILD_FILE_MAPPINGS:
-            if "*" in name:  # glob pattern (e.g. *.sln, *.csproj) — root level only
-                if any(repo_dir.glob(name)):
-                    return True
-            elif (repo_dir / name).exists():
-                return True
-        return False
+        return has_root_build_file(repo_dir)
 
     def _scip_present(self, repo_dir: "Path") -> bool:
         """True if the repo already holds the SCIP index the CURRENT discovery produces.
