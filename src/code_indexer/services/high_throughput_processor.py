@@ -883,6 +883,7 @@ class HighThroughputProcessor(GitAwareDocumentProcessor):
         watch_mode: bool = False,
         fts_manager: Optional[Any] = None,
         skip_branch_isolation: bool = False,
+        defer_finalization: bool = False,
     ):
         """
         Process branch changes using high-throughput parallel processing.
@@ -900,6 +901,20 @@ class HighThroughputProcessor(GitAwareDocumentProcessor):
             vector_thread_count: Number of threads for parallel processing
             watch_mode: If True, skip HNSW rebuild (for watch mode performance)
             skip_branch_isolation: If True, skip branch isolation (used when caller handles it separately or for non-git repos)
+            defer_finalization: Bug #1575 Part C Defect 1 -- if True, skip
+                this method's own end_indexing()/multimodal finalization in
+                its ``finally`` block (see ``_finalize_indexing_session``
+                below, which already implements the shared finalize logic
+                and is what this flag gates). The caller MUST invoke
+                ``self._finalize_indexing_session(collection_name, ...)``
+                itself once it has finished establishing branch-isolation
+                context (e.g. via ``hide_files_not_in_branch_thread_safe()``
+                when ``skip_branch_isolation=True``) -- otherwise that
+                context is registered on a session this method already
+                finalized/discarded, orphaning it (the ghost-vector
+                regression this parameter exists to prevent). Default False
+                preserves byte-identical behavior for every pre-existing
+                caller.
 
         Returns:
             BranchIndexingResult with processing statistics
@@ -1031,45 +1046,82 @@ class HighThroughputProcessor(GitAwareDocumentProcessor):
             result.processing_time = time.time() - start_time
             raise
         finally:
-            # CRITICAL: Always finalize indexes, even on exception
-            # This ensures FilesystemVectorStore rebuilds HNSW/ID indexes
-            if progress_callback:
-                progress_callback(
-                    0,
-                    0,
-                    Path(""),
-                    info="Finalizing indexing session...",
+            # Bug #1575 Part C Defect 1 (dual-review corroborated): when
+            # defer_finalization=True, the CALLER (process_files_incrementally)
+            # still needs to register this refresh's branch-isolation
+            # context (via hide_files_not_in_branch_thread_safe(), called
+            # AFTER this method returns) before the session is finalized --
+            # finalizing here unconditionally closed/discarded the session
+            # before that context ever existed, orphaning it and producing
+            # an unfiltered (ghost-vector) HNSW rebuild. The caller is
+            # responsible for calling self._finalize_indexing_session(...)
+            # itself once branch isolation has run.
+            if not defer_finalization:
+                self._finalize_indexing_session(
+                    collection_name,
+                    progress_callback=progress_callback,
                     slot_tracker=slot_tracker,
+                    watch_mode=watch_mode,
                 )
-            end_result = self.vector_store_client.end_indexing(
-                collection_name, progress_callback, skip_hnsw_rebuild=watch_mode
+
+    def _finalize_indexing_session(
+        self,
+        collection_name: str,
+        progress_callback: Optional[Callable] = None,
+        slot_tracker: Optional[CleanSlotTracker] = None,
+        watch_mode: bool = False,
+    ) -> None:
+        """Bug #1575 Part C Defect 1: finalize (``end_indexing()``) the
+        indexing session for ``collection_name``, plus any active
+        multimodal collection.
+
+        Extracted verbatim from ``process_branch_changes_high_throughput``'s
+        ``finally`` block so a caller using ``defer_finalization=True`` can
+        invoke this itself AFTER establishing branch-isolation context
+        (``hide_files_not_in_branch_thread_safe()``) -- ensuring the SAME
+        finalization pass that closes the session also consumes that
+        session's branch context: never orphaned in a session nothing will
+        finalize, never leaked into a later, unrelated cycle.
+        """
+        # CRITICAL: Always finalize indexes, even on exception
+        # This ensures FilesystemVectorStore rebuilds HNSW/ID indexes
+        if progress_callback:
+            progress_callback(
+                0,
+                0,
+                Path(""),
+                info="Finalizing indexing session...",
+                slot_tracker=slot_tracker,
             )
-            if watch_mode:
-                logger.info("Watch mode: HNSW marked stale")
-            else:
-                logger.info(
-                    f"Index finalization complete: {end_result.get('vectors_indexed', 0)} vectors indexed"
+        end_result = self.vector_store_client.end_indexing(
+            collection_name, progress_callback, skip_hnsw_rebuild=watch_mode
+        )
+        if watch_mode:
+            logger.info("Watch mode: HNSW marked stale")
+        else:
+            logger.info(
+                f"Index finalization complete: {end_result.get('vectors_indexed', 0)} vectors indexed"
+            )
+
+        # CRITICAL: Also finalize multimodal collection if it exists
+        # Multimodal embeddings may be in voyage-multimodal-3 or embed-v4.0-multimodal
+        # Without this, multimodal HNSW index is never built and queries fail
+        from ..config import VOYAGE_MULTIMODAL_MODEL, COHERE_MULTIMODAL_MODEL
+
+        for multimodal_collection in [
+            VOYAGE_MULTIMODAL_MODEL,
+            COHERE_MULTIMODAL_MODEL,
+        ]:
+            if self.vector_store_client.collection_exists(multimodal_collection):
+                multimodal_result = self.vector_store_client.end_indexing(
+                    multimodal_collection,
+                    progress_callback,
+                    skip_hnsw_rebuild=watch_mode,
                 )
-
-            # CRITICAL: Also finalize multimodal collection if it exists
-            # Multimodal embeddings may be in voyage-multimodal-3 or embed-v4.0-multimodal
-            # Without this, multimodal HNSW index is never built and queries fail
-            from ..config import VOYAGE_MULTIMODAL_MODEL, COHERE_MULTIMODAL_MODEL
-
-            for multimodal_collection in [
-                VOYAGE_MULTIMODAL_MODEL,
-                COHERE_MULTIMODAL_MODEL,
-            ]:
-                if self.vector_store_client.collection_exists(multimodal_collection):
-                    multimodal_result = self.vector_store_client.end_indexing(
-                        multimodal_collection,
-                        progress_callback,
-                        skip_hnsw_rebuild=watch_mode,
-                    )
-                    logger.info(
-                        f"Multimodal index finalization complete ({multimodal_collection}): "
-                        f"{multimodal_result.get('vectors_indexed', 0)} vectors indexed"
-                    )
+                logger.info(
+                    f"Multimodal index finalization complete ({multimodal_collection}): "
+                    f"{multimodal_result.get('vectors_indexed', 0)} vectors indexed"
+                )
 
     # =============================================================================
     # THREAD-SAFE GIT-AWARE METHODS
@@ -1759,29 +1811,32 @@ class HighThroughputProcessor(GitAwareDocumentProcessor):
                     slot_tracker=slot_tracker,
                 )
 
-        # P0: HNSW filtered rebuild - rebuild HNSW index with only visible files
-        # This eliminates ghost vectors from search results without deleting vector files.
-        # Always done after semantic hiding (even when files_to_hide is empty) to ensure
-        # the HNSW index reflects the current branch state.
-        if hasattr(self.vector_store_client, "rebuild_hnsw_filtered"):
-            try:
-                self.vector_store_client.rebuild_hnsw_filtered(
-                    collection_name,
-                    visible_files=current_files_set,
-                    progress_callback=progress_callback,
-                    current_branch=branch,
-                )
-                logger.info(
-                    f"HNSW filtered rebuild complete for branch '{branch}': "
-                    f"{len(current_files_set)} visible files"
-                )
-            except Exception as e:
-                logger.warning(
-                    f"HNSW filtered rebuild failed during branch isolation: {e}"
-                )
+        # Bug #1575 Part C item 5: register branch-isolation context on the
+        # vector store's session instead of performing an unconditional
+        # filtered HNSW rebuild here. The SAME begin_indexing()/
+        # end_indexing() bracket's end_indexing() call (later, once per
+        # session) reads this context to decide reuse / incremental /
+        # full-rebuild -- eliminating the whole-index rebuild on every
+        # refresh that this bug reports. Always called after semantic
+        # hiding (even when files_to_hide is empty) to ensure the decision
+        # engine has the current branch state, matching the prior
+        # unconditional-call contract. Failures PROPAGATE to the caller --
+        # no log-and-swallow (the prior try/except silently masked a real
+        # failure to register visibility state, which the caller must be
+        # able to detect and act on).
+        if hasattr(self.vector_store_client, "set_hnsw_branch_context"):
+            self.vector_store_client.set_hnsw_branch_context(
+                collection_name,
+                branch,
+                current_files_set,
+            )
+            logger.info(
+                f"HNSW branch context registered for branch '{branch}': "
+                f"{len(current_files_set)} visible files"
+            )
         else:
             logger.warning(
-                "vector_store_client does not support rebuild_hnsw_filtered - "
+                "vector_store_client does not support set_hnsw_branch_context - "
                 "ghost vectors may persist after branch isolation"
             )
 

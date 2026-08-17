@@ -636,11 +636,19 @@ class ActivatedRepoIndexManager:
         from code_indexer.server.storage.postgres.embedding_stats_child_wiring import (
             build_embedding_stats_child_env,
         )
+        from code_indexer.storage.shared.hnsw_sync_state import (
+            resolve_hnsw_sync_epoch_env_var,
+        )
 
         env_with_stats = build_embedding_stats_child_env(
             get_config_service().get_config(), base_env=env
         )
         resolved_env = build_cidx_subprocess_env(env_with_stats)
+        # Bug #1575 Part C independent re-review: this is the SHARED
+        # convergence point for every `cidx index` spawn in this file
+        # (semantic, fts, temporal), so the postgres-mode signal is
+        # merged in here ONCE.
+        resolved_env.update(resolve_hnsw_sync_epoch_env_var())
         self._seed_telemetry(repo_path)
         try:
             return run_cancellable_subprocess(

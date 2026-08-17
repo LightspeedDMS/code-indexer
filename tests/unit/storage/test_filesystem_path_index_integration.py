@@ -115,7 +115,26 @@ class TestPathIndexLoadSave:
             assert loaded_index.get_point_ids("src/auth.py") == {"point_a1"}
 
     def test_path_index_saved_in_end_indexing(self):
-        """end_indexing should save PathIndex to disk."""
+        """end_indexing should save PathIndex to disk.
+
+        Bug #1575 round 6 factual-record correction: a round-5 agent
+        claimed this test had a "pre-existing bug predating this session."
+        That claim is FALSE, proven via git history -- at development tip
+        ``fa1e104a`` this test directly poked
+        ``store._path_indexes["test_collection"].add_point(...)`` (no real
+        backing ``vector_*.json`` file) and PASSED, because Gap A's
+        authoritative-repair-on-fallback logic did not yet exist to
+        override that unproven in-memory picture. Round 5's own reorder
+        (moving ``_save_path_index`` after
+        ``_calculate_and_save_unique_file_count``) plus Gap A's repair
+        logic together changed this test's real behavior -- a genuine,
+        undocumented behavior change, not a pre-existing defect. The fix
+        below (driving the test through the real ``upsert_points()``
+        write path instead of poking the cache directly) is INTENTIONAL
+        and correct: it exercises the documented, by-design Gap A
+        repair-on-fallback behavior (see ``_rebuild_and_repair_path_index``'s
+        own docstring in ``filesystem_vector_store.py``).
+        """
         with tempfile.TemporaryDirectory() as tmpdir:
             base_path = Path(tmpdir)
             store = FilesystemVectorStore(
@@ -128,8 +147,28 @@ class TestPathIndexLoadSave:
             # Begin indexing (loads empty path index)
             store.begin_indexing("test_collection")
 
-            # Modify the path index
-            store._path_indexes["test_collection"].add_point("src/auth.py", "point_a1")
+            # Add a point via the real production write path (upsert_points)
+            # rather than poking store._path_indexes directly -- poking the
+            # in-memory cache alone leaves no REAL vector_*.json file
+            # backing it, and Bug #1575's authoritative-repair fallback
+            # (triggered here because no path_index.bin existed on disk
+            # when begin_indexing() ran) intentionally replaces an
+            # unproven in-memory PathIndex with the true, disk-scanned
+            # picture -- which would correctly be empty in that scenario.
+            store.upsert_points(
+                "test_collection",
+                [
+                    {
+                        "id": "point_a1",
+                        "vector": np.zeros(1024, dtype=np.float32).tolist(),
+                        "payload": {
+                            "path": "src/auth.py",
+                            "type": "content",
+                            "hidden_branches": [],
+                        },
+                    }
+                ],
+            )
 
             # End indexing (should save)
             store.end_indexing("test_collection")

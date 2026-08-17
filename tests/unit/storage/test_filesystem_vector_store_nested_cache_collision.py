@@ -74,15 +74,19 @@ def _build_collection(
     calling the write-path lifecycle methods with a non-None
     ``subdirectory`` (a combination no production caller ever exercises --
     confirmed by grep: no ``begin_indexing``/``upsert_points`` call site in
-    the codebase passes a non-None ``subdirectory``), which would otherwise
-    hit an unrelated pre-existing gap in
-    ``_apply_incremental_hnsw_batch_update`` (resolves the bare
-    ``self.base_path / collection_name``, ignoring ``subdirectory``) that
-    can segfault when a same-named top-level collection already exists on
-    disk at ``base_path``. Building each collection in total isolation and
-    then copying it sidesteps that gap entirely, keeping this fixture
-    focused purely on the READ-side ``_id_index``/``_vector_size_cache``
-    collision under test.
+    the codebase passes a non-None ``subdirectory``). That untested
+    combination used to also hit a pre-existing gap in the retired
+    ``_apply_incremental_hnsw_batch_update`` (it recomputed a bare
+    ``self.base_path / collection_name``, ignoring ``subdirectory``, and
+    could segfault when a same-named top-level collection already existed
+    on disk at ``base_path``); Bug #1575 Part C's replacement,
+    ``_apply_visibility_aware_incremental_update``, fixes this by
+    construction -- it receives ``collection_path`` as an already-resolved
+    parameter and never recomputes it. The isolation-then-copy approach is
+    kept regardless, since the ``subdirectory`` combination itself remains
+    untested by any production caller -- this fixture stays focused purely
+    on the READ-side ``_id_index``/``_vector_size_cache`` collision under
+    test.
     """
     with TemporaryDirectory() as builder_base_str:
         builder_base = Path(builder_base_str)

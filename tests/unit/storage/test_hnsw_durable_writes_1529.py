@@ -221,7 +221,7 @@ def test_build_index_fsyncs_in_the_order_that_makes_it_durable() -> None:
 def test_save_incremental_update_fsyncs_in_the_order_that_makes_it_durable() -> None:
     """The incremental publisher is a REAL production path, unlike build_index.
 
-    `add_or_update_vector`/`_apply_incremental_hnsw_batch_update` finalize
+    `add_or_update_vector`/`_apply_visibility_aware_incremental_update` finalize
     through here, so a torn `hnsw_index.bin` published from this method is a
     live hazard on a fixed temporal path that is rewritten in place.
     """

@@ -12,6 +12,7 @@ change_branch() AFTER _cb_cow_snapshot(). This method:
 4. Commits the Tantivy index
 """
 
+import contextlib
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -20,6 +21,28 @@ from code_indexer.server.repositories.golden_repo_manager import (
     GoldenRepo,
     GoldenRepoManager,
 )
+
+
+@contextlib.contextmanager
+def _app_state_storage_mode(value):
+    """Real ``app.state.storage_mode`` simulation, used by
+    test_cb_hnsw_branch_cleanup_threads_postgres_storage_mode_to_disable_epoch
+    below (matches the established pattern in
+    test_filesystem_backend_1575_part_c_cluster_gate.py) -- never
+    monkeypatches ``is_postgres_storage_mode`` itself."""
+    from code_indexer.server import app as app_module
+
+    _unset = object()
+    saved = getattr(app_module.app.state, "storage_mode", _unset)
+    try:
+        app_module.app.state.storage_mode = value
+        yield
+    finally:
+        if saved is _unset:
+            if hasattr(app_module.app.state, "storage_mode"):
+                delattr(app_module.app.state, "storage_mode")
+        else:
+            app_module.app.state.storage_mode = saved
 
 
 # ---------------------------------------------------------------------------
@@ -215,14 +238,62 @@ class TestCbHnswBranchCleanup:
 
             manager._cb_hnsw_branch_cleanup(str(snapshot_path), target_branch)
 
-        # FilesystemVectorStore created with the index dir
-        mock_store_cls.assert_called_once_with(index_dir)
+        # FilesystemVectorStore created with the index dir. Bug #1575 Part
+        # C review Defect 3a fix: this call site must ALWAYS explicitly
+        # thread hnsw_sync_epoch_enabled=not is_postgres_storage_mode(),
+        # matching FilesystemBackend.get_vector_store_client()'s existing
+        # pattern -- non-server/non-postgres contexts (this test's default,
+        # no app.state.storage_mode set) resolve to True.
+        mock_store_cls.assert_called_once_with(
+            index_dir, hnsw_sync_epoch_enabled=True
+        )
         # rebuild_hnsw_filtered called for the collection
         mock_store.rebuild_hnsw_filtered.assert_called_once_with(
             "my-collection",
             visible_files={"src/auth.py", "src/user.py"},
             current_branch=target_branch,
         )
+
+    def test_cb_hnsw_branch_cleanup_threads_postgres_storage_mode_to_disable_epoch(
+        self, manager, tmp_path
+    ):
+        """AC46 Defect 3a bypass 1 (Bug #1575 Part C review): this call
+        site must thread hnsw_sync_epoch_enabled=not
+        is_postgres_storage_mode() into its FilesystemVectorStore
+        construction -- otherwise a cluster/postgres-mode server silently
+        defaults the flag to enabled (True) regardless of storage mode,
+        the exact gap the review brief's Defect 3a bypass 1 describes.
+        """
+        snapshot_path = tmp_path / "snapshot_v1"
+        snapshot_path.mkdir()
+        index_dir = snapshot_path / ".code-indexer" / "index"
+        index_dir.mkdir(parents=True)
+        collection_dir = index_dir / "my-collection"
+        collection_dir.mkdir()
+        (collection_dir / "collection_meta.json").write_text('{"vector_size": 1024}')
+
+        mock_store = MagicMock()
+        mock_store.list_collections.return_value = ["my-collection"]
+
+        with (
+            patch("subprocess.run") as mock_run,
+            patch(
+                "code_indexer.storage.filesystem_vector_store.FilesystemVectorStore",
+                return_value=mock_store,
+            ) as mock_store_cls,
+            _app_state_storage_mode("postgres"),
+        ):
+            mock_run.return_value = MagicMock(
+                returncode=0, stdout="src/auth.py\n", stderr=""
+            )
+            manager._cb_hnsw_branch_cleanup(str(snapshot_path), "master")
+
+        # assert_any_call (not assert_called_once_with): importing
+        # code_indexer.server.app (inside _app_state_storage_mode) can
+        # itself construct an unrelated real FilesystemVectorStore as a
+        # side effect of real app module initialization -- irrelevant to
+        # what THIS call site passes, so only this exact call is checked.
+        mock_store_cls.assert_any_call(index_dir, hnsw_sync_epoch_enabled=False)
 
     def test_hnsw_branch_cleanup_called_after_fts_cleanup_in_change_branch(
         self, manager

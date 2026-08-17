@@ -95,6 +95,7 @@ from .verification import (
     manifest_digest,
     peek_one_vector_dimension,
     verify_shard_copy,
+    verify_source_subset_of_target,
 )
 
 logger = logging.getLogger(__name__)
@@ -555,31 +556,24 @@ def _classify_existing_target(source: Path, target: Path) -> str:
     """Return "already_complete" or "collision" for a target that already
     holds verified data (Blocker 1's "new shard wins" policy).
 
-    "already_complete" requires BOTH:
-      1. Content-bound digest proof: a provenance marker at *target* whose
-         recorded digest equals BOTH the current legacy source's manifest
-         digest AND the target's own current manifest digest -- i.e.
-         neither side has changed since a verified publish by THIS
-         migration mechanism, and (since ``manifest_digest`` now covers
-         the full file tree, not just logical records) the target
-         genuinely mirrors the source's complete directory structure.
-      2. A direct, independent completeness proof
-         (``_target_is_structurally_complete``) -- the target must be a
-         real, queryable shard on its own terms, never trusted purely
-         because a digest comparison happened to agree.
-
-    Anything short of both (no marker, a stale marker, content that has
-    since diverged on either side, or a target that is not itself
-    structurally complete) is a collision, even when point-record content
-    happens to match byte-for-byte -- a coincidental match is not proof of
-    provenance.
+    "already_complete" requires: a provenance marker at *target* whose
+    digest matches the CURRENT legacy source (proves THIS mechanism
+    published FOR this exact source); ``_target_is_structurally_complete``
+    (a real, queryable shard on its own terms); and EITHER the marker also
+    still matches the target's current digest (steady state) OR -- Issue
+    #1580 -- the source's originally-verified data is still provably
+    preserved as a SUBSET of the target's current data (see
+    ``_target_converges_via_additive_evolution``). Bug #1529 made the
+    fixed root the live, continuously-refreshed write destination, so a
+    target's digest legitimately moves on after publish; requiring it to
+    stay frozen forever made every migrated shard an unresolvable
+    collision on its very next refresh. Anything short of this -- no
+    marker, a mismatched marker, lost/altered data, or an incomplete
+    target -- is a collision, even on a byte-for-byte coincidental match.
     """
-    # Issue #1548 round-4 exploit fix: check BOTH trees for symlinks before
-    # ever trusting a digest comparison -- a symlinked file resolves
-    # THROUGH to its target's bytes for hashing purposes, so a digest match
-    # alone proves nothing about whether the target genuinely holds its
-    # own independent data. Checked first and unconditionally, so this can
-    # never be bypassed by a marker/digest coincidence on either side.
+    # Issue #1548 round-4 exploit fix: symlinks resolve THROUGH to their
+    # target's bytes, so a digest match alone proves nothing. Checked
+    # first, unconditionally.
     if _contains_symlink(source) or _contains_symlink(target):
         logger.warning(
             "temporal shard collision: symlink detected in %s or %s -- "
@@ -590,13 +584,17 @@ def _classify_existing_target(source: Path, target: Path) -> str:
         )
         return "collision"
     marker_digest = _read_marker_digest(target / _PROVENANCE_MARKER_NAME)
-    verified_prior_publish = (
+    target_complete = _target_is_structurally_complete(target)
+    provably_converged = (
         marker_digest is not None
         and marker_digest == manifest_digest(source)
-        and marker_digest == manifest_digest(target)
-        and _target_is_structurally_complete(target)
+        and target_complete
+        and (
+            marker_digest == manifest_digest(target)
+            or _target_converges_via_additive_evolution(source, target)
+        )
     )
-    if verified_prior_publish:
+    if provably_converged:
         return "already_complete"
     logger.warning(
         "temporal shard collision: fixed root %s already holds data that "
@@ -606,9 +604,31 @@ def _classify_existing_target(source: Path, target: Path) -> str:
         "cleanup pass",
         target,
         marker_digest,
-        _target_is_structurally_complete(target),
+        target_complete,
     )
     return "collision"
+
+
+def _target_converges_via_additive_evolution(source: Path, target: Path) -> bool:
+    """Issue #1580: True iff *target*'s digest no longer matches the
+    publish-time marker but *source*'s originally-verified data is still
+    fully preserved (additively) within *target*'s current data -- new
+    records only, nothing lost or altered. See
+    ``_classify_existing_target`` for why this is safe: the legacy source
+    is dead-end data superseded by the fixed root's own ongoing refreshes.
+    """
+    try:
+        verify_source_subset_of_target(source, target)
+    except VerificationError as exc:
+        logger.debug(
+            "temporal legacy migration: target %s does not (yet) preserve "
+            "all of source %s's originally-verified data -- %s",
+            target,
+            source,
+            exc,
+        )
+        return False
+    return True
 
 
 def _verify_and_delete_source(
@@ -641,15 +661,20 @@ def _verify_and_delete_source(
             f"symlink was detected in {source} or {target} immediately "
             f"before deletion"
         )
-    # Blocker 1: re-verify field-for-field equivalence immediately before
-    # destroying the legacy copy -- never trust the branch above alone.
-    verify_shard_copy(source, target)
+    # Blocker 1 (relaxed by Issue #1580): re-verify immediately before
+    # destroying the legacy copy that source's data is still fully
+    # preserved in target -- never trust the branch above alone. Subset
+    # (not exact-equality) verification: a legitimately-evolved target
+    # (Bug #1529's in-place refreshes) may legally hold MORE than source
+    # ever did; it may never hold LESS or DIFFERENT data for a record
+    # source already has.
+    verify_source_subset_of_target(source, target)
     if pre_delete_hook is not None:
         pre_delete_hook()
-    # Round-5 exploit 2 fix: recheck AGAIN, AFTER verify_shard_copy -- this
-    # is what actually closes Codex's repro, since the exploit planted its
-    # symlink DURING verify_shard_copy's own execution, after the check
-    # above already ran clean.
+    # Round-5 exploit 2 fix: recheck AGAIN, AFTER the verification above --
+    # this is what actually closes Codex's repro, since the exploit
+    # planted its symlink DURING that verification's own execution, after
+    # the check above already ran clean.
     if _contains_symlink(source) or _contains_symlink(target):
         raise VerificationError(
             f"refusing to delete legacy temporal shard {source}: a "

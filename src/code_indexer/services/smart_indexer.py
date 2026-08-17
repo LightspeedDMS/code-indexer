@@ -1709,55 +1709,85 @@ class SmartIndexer(HighThroughputProcessor):
         # Store file list for resumability
         self.progressive_metadata.set_files_to_index(files_to_index)
 
+        # BEGIN INDEXING SESSION (O(n) optimization - defer index rebuilding).
+        # Bug #1575 Fix 4: hoisted BEFORE the non-git modified-file delete
+        # loop below (previously called only after it) so every delete
+        # this loop triggers lands INSIDE the session -- tracked via
+        # _indexing_session_changes and persisted ONCE at end_indexing(),
+        # instead of each delete independently persisting path_index.bin
+        # (and co-persisting the entire id_index.bin) on its own. Measured
+        # 5.6x slower incremental refresh on a 4000-file collection.
+        self.vector_store_client.begin_indexing(collection_name)
+
         # CRITICAL FIX: In non-git mode, delete old chunks for modified files before re-indexing
         # This ensures old content doesn't persist alongside new content
-        if not self.is_git_aware() and files_to_index:
-            collection_name = self.vector_store_client.resolve_collection_name(
-                self.config, self.embedding_provider
-            )
+        #
+        # Bug #1575 round 6, item 2: this whole section runs AFTER
+        # begin_indexing() opened a session but BEFORE the BranchAwareIndexer
+        # try/finally below (whose finally calls end_indexing()) starts. An
+        # exception here (delete_by_filter() or progress_callback() raising)
+        # used to propagate WITHOUT ever finalizing the session --
+        # permanently leaking it (self._indexing_session_changes and this
+        # collection's cached PathIndex/id_index stay open until process
+        # restart, disabling out-of-session Gap D/B persistence). Wrapped in
+        # its own try/except so end_indexing() always runs before any
+        # exception from this section propagates.
+        try:
+            if not self.is_git_aware() and files_to_index:
+                # Get relative paths that are being modified (not newly added)
+                modified_relative_files = []
+                for file_path in files_to_index:
+                    try:
+                        # Check if this file was previously indexed (exists in database)
+                        # indexed_files_with_timestamps has Path objects as keys
+                        if file_path in indexed_files_with_timestamps:
+                            if file_path.is_absolute():
+                                relative_path = str(
+                                    file_path.relative_to(self.config.codebase_dir)
+                                )
+                            else:
+                                relative_path = str(file_path)
+                            modified_relative_files.append(relative_path)
+                    except ValueError:
+                        continue
 
-            # Get relative paths that are being modified (not newly added)
-            modified_relative_files = []
-            for file_path in files_to_index:
-                try:
-                    # Check if this file was previously indexed (exists in database)
-                    # indexed_files_with_timestamps has Path objects as keys
-                    if file_path in indexed_files_with_timestamps:
-                        if file_path.is_absolute():
-                            relative_path = str(
-                                file_path.relative_to(self.config.codebase_dir)
-                            )
-                        else:
-                            relative_path = str(file_path)
-                        modified_relative_files.append(relative_path)
-                except ValueError:
-                    continue
+                # Delete old chunks for modified files
+                if modified_relative_files:
+                    deleted_count = 0
+                    for relative_file_path in modified_relative_files:
+                        # Bug #1575 Fix 4 investigation: was previously called
+                        # as (filter_dict, collection_name) -- the WRONG order
+                        # against the real FilesystemVectorStore.delete_by_filter
+                        # (self, collection_name, filter_conditions) signature.
+                        # Confirmed live: the swapped call raised TypeError
+                        # inside scroll_points, caught by delete_by_filter's own
+                        # broad except-Exception and silently turned into
+                        # `return False` -- this cleanup had never actually
+                        # deleted anything. Fixed to the correct order.
+                        success = self.vector_store_client.delete_by_filter(
+                            collection_name,
+                            {
+                                "must": [
+                                    {
+                                        "key": "path",
+                                        "match": {"value": relative_file_path},
+                                    }
+                                ]
+                            },
+                        )
+                        if success:
+                            deleted_count += 1
 
-            # Delete old chunks for modified files
-            if modified_relative_files:
-                deleted_count = 0
-                for relative_file_path in modified_relative_files:
-                    success = self.vector_store_client.delete_by_filter(
-                        {
-                            "must": [
-                                {"key": "path", "match": {"value": relative_file_path}}
-                            ]
-                        },
-                        collection_name,
-                    )
-                    if success:
-                        deleted_count += 1
-
-                if progress_callback and deleted_count > 0:
-                    progress_callback(
-                        0,
-                        0,
-                        Path(""),
-                        info=f"🗑️  Cleaned up old content for {deleted_count} modified files",
-                    )
-
-        # BEGIN INDEXING SESSION (O(n) optimization - defer index rebuilding)
-        self.vector_store_client.begin_indexing(collection_name)
+                    if progress_callback and deleted_count > 0:
+                        progress_callback(
+                            0,
+                            0,
+                            Path(""),
+                            info=f"🗑️  Cleaned up old content for {deleted_count} modified files",
+                        )
+        except Exception:
+            self.vector_store_client.end_indexing(collection_name, progress_callback)
+            raise
 
         # Use BranchAwareIndexer for git-aware processing with parallel embeddings (SINGLE PROCESSING PATH)
         try:
@@ -2171,9 +2201,17 @@ class SmartIndexer(HighThroughputProcessor):
                 relative_path = str(file_path)
 
             # Delete all existing chunks for this file
+            # Bug #1575 follow-up: was previously called as
+            # (filter_dict, collection_name) -- the WRONG order against the
+            # real FilesystemVectorStore.delete_by_filter(self,
+            # collection_name, filter_conditions) signature. The swapped
+            # call raised TypeError inside scroll_points, caught by
+            # delete_by_filter's own broad except-Exception and silently
+            # turned into `return False` -- this cleanup had never actually
+            # deleted anything. Fixed to the correct order.
             success = self.vector_store_client.delete_by_filter(
-                {"must": [{"key": "path", "match": {"value": relative_path}}]},
                 collection_name,
+                {"must": [{"key": "path", "match": {"value": relative_path}}]},
             )
             if success:
                 files_cleaned += 1
@@ -2385,6 +2423,7 @@ class SmartIndexer(HighThroughputProcessor):
 
             if absolute_paths:
                 # Use BranchAwareIndexer for git-aware processing with parallel embeddings (SINGLE PROCESSING PATH)
+                collection_name = None
                 try:
                     # Get current branch for indexing
                     current_branch = (
@@ -2397,6 +2436,21 @@ class SmartIndexer(HighThroughputProcessor):
                     )
 
                     # Use high-throughput parallel processing for incremental files (4-8x faster)
+                    # Bug #1575 Part C Defect 1 (dual-review corroborated):
+                    # defer_finalization=True -- this method (not
+                    # process_branch_changes_high_throughput itself) applies
+                    # branch isolation below via
+                    # hide_files_not_in_branch_thread_safe(), which is what
+                    # registers the branch-visibility context
+                    # end_indexing()'s decision engine needs. Finalizing
+                    # INSIDE process_branch_changes_high_throughput's own
+                    # finally block (the pre-fix behavior) closed the
+                    # indexing session BEFORE that context existed,
+                    # orphaning it -- exactly the ghost-vector regression
+                    # this fix closes. The SAME finalization pass that
+                    # closes this session now happens in THIS method's own
+                    # finally block below, AFTER
+                    # hide_files_not_in_branch_thread_safe runs.
                     branch_result = self.process_branch_changes_high_throughput(
                         old_branch="",  # No old branch for process files incrementally
                         new_branch=current_branch,
@@ -2408,6 +2462,7 @@ class SmartIndexer(HighThroughputProcessor):
                         watch_mode=watch_mode,  # Pass through watch_mode
                         fts_manager=fts_manager,  # type: ignore[name-defined]  # noqa: F821 (lazy-loaded FTS manager)
                         skip_branch_isolation=True,  # Branch isolation handled separately below
+                        defer_finalization=True,  # Bug #1575 Part C Defect 1
                     )
 
                     # For incremental file processing, also ensure branch isolation
@@ -2448,6 +2503,24 @@ class SmartIndexer(HighThroughputProcessor):
                         f"Git-aware incremental processing failed and fallbacks are disabled. "
                         f"Original error: {e}"
                     ) from e
+                finally:
+                    # Bug #1575 Part C Defect 1: finalize (end_indexing) the
+                    # SAME indexing session process_branch_changes_high_throughput
+                    # began (defer_finalization=True above), now that
+                    # branch-isolation context has been established by
+                    # hide_files_not_in_branch_thread_safe(). Guarded on
+                    # collection_name being resolved -- if
+                    # resolve_collection_name() itself raised,
+                    # begin_indexing() was never called and there is
+                    # nothing to finalize. Runs on the exception path too,
+                    # matching the pre-fix "always finalize indexes, even
+                    # on exception" contract.
+                    if collection_name is not None:
+                        self._finalize_indexing_session(
+                            collection_name,
+                            progress_callback=None,
+                            watch_mode=watch_mode,
+                        )
 
                 if not quiet:
                     logger.info(
@@ -2975,10 +3048,18 @@ class SmartIndexer(HighThroughputProcessor):
         else:
             # DEADLOCK FIX: Use hard delete without verification
             # Trust synchronous operations - verification was causing 5+ minute hangs
+            # Bug #1575 follow-up: was previously called as
+            # (filter_dict, collection_name) -- the WRONG order against the
+            # real FilesystemVectorStore.delete_by_filter(self,
+            # collection_name, filter_conditions) signature. The swapped
+            # call raised TypeError inside scroll_points, caught by
+            # delete_by_filter's own broad except-Exception and silently
+            # turned into `return False` -- this cleanup had never actually
+            # deleted anything. Fixed to the correct order.
             success = bool(
                 self.vector_store_client.delete_by_filter(
-                    {"must": [{"key": "path", "match": {"value": file_path}}]},
                     collection_name,
+                    {"must": [{"key": "path", "match": {"value": file_path}}]},
                 )
             )
             if success:

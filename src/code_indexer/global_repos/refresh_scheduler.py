@@ -1134,7 +1134,10 @@ class RefreshScheduler:
     # ------------------------------------------------------------------
 
     def acquire_write_lock(
-        self, alias: str, owner_name: str = "refresh_scheduler"
+        self,
+        alias: str,
+        owner_name: str = "refresh_scheduler",
+        ttl_seconds: Optional[int] = None,
     ) -> bool:
         """
         Non-blocking acquire of the write lock for a repo alias.
@@ -1148,10 +1151,25 @@ class RefreshScheduler:
                         Defaults to "refresh_scheduler" for internal scheduler use.
                         Pass the actual service name when calling from other services
                         (e.g., "dependency_map_service", "langfuse_trace_sync").
+            ttl_seconds: Bug #1580 follow-up (adversarial review) -- optional
+                explicit lock TTL forwarded to WriteLockManager.acquire().
+                `None` (the default) preserves byte-identical behavior for
+                every existing caller: WriteLockManager.acquire()'s own
+                1-hour default applies. Callers guarding a genuinely
+                long-running operation (e.g. golden_repo_write_lock_guard
+                around a `cidx index --index-commits` subprocess, which
+                this project's indexing-path invariant documents as having
+                NO job/subprocess timeout) MUST pass an explicit,
+                sufficiently long TTL -- otherwise the lock silently
+                expires mid-run and stops protecting anything.
 
         Returns:
             True if lock was acquired, False if already held
         """
+        if ttl_seconds is not None:
+            return self.write_lock_manager.acquire(
+                alias, owner_name=owner_name, ttl_seconds=ttl_seconds
+            )
         return self.write_lock_manager.acquire(alias, owner_name=owner_name)
 
     def release_write_lock(
@@ -1159,7 +1177,7 @@ class RefreshScheduler:
         alias: str,
         owner_name: str = "refresh_scheduler",
         owner_token: Optional[str] = None,
-    ) -> None:
+    ) -> bool:
         """
         Release the write lock for a repo alias.
 
@@ -1173,6 +1191,16 @@ class RefreshScheduler:
                 ``WriteLockManager.release()`` unchanged. `None` (the
                 default) preserves byte-identical behavior for every
                 existing caller that does not pass this argument.
+
+        Returns:
+            True if the lock was released (or was not held at all), False
+            on an owner/owner_token mismatch (also logged as a WARNING
+            here). Bug #1580 follow-up (adversarial review): returning
+            this result -- instead of discarding it -- lets a caller like
+            golden_repo_write_lock_guard detect and surface a failed
+            release rather than silently continuing. Every pre-existing
+            caller that ignores the return value (the vast majority) is
+            unaffected -- Python callers routinely discard return values.
         """
         result = self.write_lock_manager.release(
             alias, owner_name=owner_name, owner_token=owner_token
@@ -1181,6 +1209,7 @@ class RefreshScheduler:
             logger.warning(
                 f"Attempted to release write lock for '{alias}' but owner mismatch"
             )
+        return result
 
     def is_write_locked(self, alias: str) -> bool:
         """
@@ -3347,11 +3376,21 @@ class RefreshScheduler:
         logger.info(
             f"Running cidx index on source for {alias_name}: {' '.join(index_command)}"
         )
+        # Bug #1575 Part C independent re-review: this is THE dominant,
+        # steady-state production `cidx index` spawn (runs on every golden
+        # repo, every refresh cycle) and previously never signaled
+        # postgres/cluster mode to the child at all.
+        from code_indexer.storage.shared.hnsw_sync_state import (
+            resolve_hnsw_sync_epoch_env_var,
+        )
+
+        _semantic_env = build_cidx_subprocess_env()
+        _semantic_env.update(resolve_hnsw_sync_epoch_env_var())
         _run_popen_c_with_telemetry(
             index_command,
             phase_name="semantic",
             error_label=f"indexing on source for {alias_name}",
-            env=build_cidx_subprocess_env(),
+            env=_semantic_env,
         )
         logger.info(f"cidx index on source completed successfully for {alias_name}")
 
@@ -3400,6 +3439,18 @@ class RefreshScheduler:
                 if _temporal_env is not None
                 else None
             )
+            # Bug #1575 Part C independent re-review: temporal collections
+            # build/rebuild an HNSW graph via the SAME machinery as
+            # semantic collections, so this child needs the same
+            # postgres-mode signal -- merged AFTER the above so it can
+            # never be clobbered by build_temporal_child_env()/
+            # build_cidx_subprocess_env().
+            if _temporal_env is not None:
+                from code_indexer.storage.shared.hnsw_sync_state import (
+                    resolve_hnsw_sync_epoch_env_var,
+                )
+
+                _temporal_env.update(resolve_hnsw_sync_epoch_env_var())
 
             logger.info(
                 f"Running cidx index (temporal) on source for {alias_name}: {' '.join(temporal_command)}"

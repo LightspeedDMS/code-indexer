@@ -25,8 +25,10 @@ from code_indexer.storage.shared.chunk_layout import (
     resolve_chunk_layout,
 )
 from code_indexer.storage.shared.collection_migration import (
+    ConsolidationCleanupError,
     ConsolidationResult,
     ConsolidationVerificationError,
+    _is_migration_cleanup_completed,
     consolidate_collection_in_place,
 )
 from code_indexer.storage.sqlite_chunk_store import ChunkStore
@@ -945,7 +947,19 @@ class TestContentIntegrityManifest:
     compressed payload/vector would pass forever. A crash-durable content
     manifest, persisted BEFORE the legacy source is deleted, closes this
     gap by giving post-cleanup verification something real to compare
-    stored content against."""
+    stored content against.
+
+    Bug #1584 superseded part of this premise: comparing the live store
+    against the frozen manifest is only sound until the FIRST write
+    happens after cleanup completes, because any further write (genuine
+    corruption or an ordinary incremental re-index touching the same
+    point_id) is structurally identical -- doing so forever misclassified
+    every legitimate post-migration write as unrecoverable corruption in
+    production. The manifest is therefore retired the moment cleanup
+    durably completes (see ``_is_migration_cleanup_completed``), not just
+    after the first subsequent write. The four tests below whose names
+    end in ``_bug_1584`` cover this corrected behavior; the remaining
+    tests in this class (manifest writing/streaming) are unaffected."""
 
     def test_manifest_written_after_fresh_consolidation(self, tmp_path: Path) -> None:
         _write_collection_meta(tmp_path)
@@ -1042,15 +1056,36 @@ class TestContentIntegrityManifest:
         )
         assert len(manifest["records"]) == 50
 
-    def test_post_cleanup_content_corruption_is_detected_and_raises(
+    @staticmethod
+    def _rewrite_chunks_db_record(
+        collection_dir: Path, point_id: str, vector: list, chunk_text: str
+    ) -> None:
+        """Bug #1584: overwrite ``point_id``'s stored content in an
+        existing chunks.db via a plain ``write_batch`` (INSERT OR
+        REPLACE) -- the same primitive an ordinary incremental re-index
+        uses to re-embed a point_id, and therefore structurally
+        indistinguishable from it. Shared by the two tests below to
+        avoid duplicating the arrange/rewrite mechanics."""
+        with ChunkStore(collection_dir / "chunks.db") as store:
+            store.write_batch(
+                [
+                    {
+                        "id": point_id,
+                        "vector": vector,
+                        "metadata": {"language": "python"},
+                        "payload": {"path": "src/foo.py", "language": "python"},
+                        "chunk_text": chunk_text,
+                        "indexed_with_uncommitted_changes": True,
+                    }
+                ]
+            )
+
+    def test_post_cleanup_content_corruption_is_not_detected_bug_1584_accepted_tradeoff(
         self, tmp_path: Path
     ) -> None:
-        """The CRITICAL scenario: legacy source is ALREADY GONE (cleanup
-        fully completed), then chunks.db's stored content is corrupted
-        (valid key, wrong payload/vector) -- e.g. bit rot, a bad manual
-        edit. Key-presence-only verification would miss this forever;
-        content-manifest verification must catch it and refuse to
-        silently treat the collection as still-good."""
+        """Bug #1584 accepted tradeoff (see class docstring): a
+        post-cleanup content rewrite is structurally indistinguishable
+        from an ordinary re-index and must not raise."""
         _write_collection_meta(tmp_path)
         _write_vector_json(
             tmp_path, "mm003333", [1.0, 2.0, 3.0, 4.0], chunk_text="original"
@@ -1060,44 +1095,23 @@ class TestContentIntegrityManifest:
         assert result.status == "consolidated"
         assert not (tmp_path / "vector_mm003333.json").exists()  # legacy gone
 
-        # Simulate post-migration corruption: overwrite the stored record's
-        # content in place (same id, different payload) -- INSERT OR
-        # REPLACE, exactly what silent on-disk corruption would produce.
-        with ChunkStore(tmp_path / "chunks.db") as store:
-            store.write_batch(
-                [
-                    {
-                        "id": "mm003333",
-                        "vector": [9.0, 9.0, 9.0, 9.0],
-                        "metadata": {},
-                        "payload": {"path": "src/foo.py", "language": "python"},
-                        "chunk_text": "CORRUPTED",
-                        "indexed_with_uncommitted_changes": True,
-                    }
-                ]
-            )
-
-        # Bug #1486: this record has NO remaining legacy source, so a
-        # content-digest mismatch here is UNRECOVERABLE, not a bare
-        # retryable verification failure.
-        from code_indexer.storage.shared.collection_migration import (
-            UnrecoverableConsolidationCorruptionError,
+        self._rewrite_chunks_db_record(
+            tmp_path, "mm003333", [9.0, 9.0, 9.0, 9.0], "CORRUPTED"
         )
 
-        with pytest.raises(UnrecoverableConsolidationCorruptionError):
-            consolidate_collection_in_place(tmp_path)
+        result2 = consolidate_collection_in_place(tmp_path)
+        assert result2.status == "already_consolidated", (
+            "Bug #1584: a post-cleanup content rewrite must never be "
+            "misreported as unrecoverable corruption -- it is "
+            "structurally indistinguishable from ordinary re-indexing."
+        )
 
-    def test_digest_detects_corruption_of_a_middle_element_in_a_realistic_dimension_vector(
+    def test_digest_mismatch_of_middle_vector_element_not_detected_after_cleanup_bug_1584(
         self, tmp_path: Path
     ) -> None:
-        """Codex CRITICAL finding (round 5): json.dumps(..., default=str)
-        on a NumPy array calls str(ndarray), which for arrays past
-        NumPy's print-summarization threshold (a 1024-dim embedding
-        vector qualifies) produces a TRUNCATED repr with an ellipsis
-        (e.g. '[0.1, 0.2, ..., 0.9]') -- interior-element corruption is
-        completely undetectable. A 4-element toy vector never hits this
-        threshold, which is why the earlier corruption test passed
-        without proving anything about real embedding dimensions."""
+        """Bug #1584 accepted tradeoff (see class docstring), exercised
+        against a realistic (1024-dim) vector so a truncation artifact in
+        digest computation itself cannot hide behind a toy vector."""
         _write_collection_meta(tmp_path)
         dim = 1024
         original_vector = [float(i) / 1000.0 for i in range(dim)]
@@ -1106,43 +1120,28 @@ class TestContentIntegrityManifest:
         result = consolidate_collection_in_place(tmp_path)
         assert result.status == "consolidated"
 
-        # Corrupt ONLY element 500 -- deep inside NumPy's truncated middle
+        # Rewrite ONLY element 500 -- deep inside NumPy's truncated middle
         # region for a 1024-element array -- everything else identical.
         corrupted_vector = list(original_vector)
         corrupted_vector[500] = corrupted_vector[500] + 100.0
-        with ChunkStore(tmp_path / "chunks.db") as store:
-            store.write_batch(
-                [
-                    {
-                        "id": "pp001111",
-                        "vector": corrupted_vector,
-                        "metadata": {"language": "python"},
-                        "payload": {"path": "src/foo.py", "language": "python"},
-                        "chunk_text": "original",
-                        "indexed_with_uncommitted_changes": True,
-                    }
-                ]
-            )
-
-        # Bug #1486: this record has NO remaining legacy source, so a
-        # content-digest mismatch here is UNRECOVERABLE, not a bare
-        # retryable verification failure.
-        from code_indexer.storage.shared.collection_migration import (
-            UnrecoverableConsolidationCorruptionError,
+        self._rewrite_chunks_db_record(
+            tmp_path, "pp001111", corrupted_vector, "original"
         )
 
-        with pytest.raises(UnrecoverableConsolidationCorruptionError):
-            consolidate_collection_in_place(tmp_path)
+        result2 = consolidate_collection_in_place(tmp_path)
+        assert result2.status == "already_consolidated", (
+            "Bug #1584: a post-cleanup vector rewrite must never be "
+            "misreported as unrecoverable corruption."
+        )
 
-    def test_detects_a_row_silently_deleted_from_chunks_db(
+    def test_row_deleted_after_cleanup_is_not_flagged_as_corruption_bug_1584(
         self, tmp_path: Path
     ) -> None:
-        """Codex CRITICAL finding (round 5): per-key digest verification
-        only iterates over ids CURRENTLY present in chunks.db -- a row
-        that vanishes entirely (deleted) is simply absent from that
-        iteration, so its disappearance goes completely unnoticed unless
-        the manifest's own key SET is compared against chunks.db's actual
-        row-id set."""
+        """Bug #1584 accepted tradeoff (see class docstring): a row
+        deleted from chunks.db after cleanup completed is structurally
+        identical to an ordinary incremental refresh removing a point
+        whose source file was deleted or changed -- must not be flagged
+        as corruption."""
         from code_indexer.storage.shared.collection_migration import (
             verify_collection_fully_migrated,
         )
@@ -1155,25 +1154,24 @@ class TestContentIntegrityManifest:
         assert result.status == "consolidated"
         assert verify_collection_fully_migrated(tmp_path) is True
 
-        # Silently delete ONE row -- the legacy source is long gone, so
-        # this is unrecoverable and must be detected.
         with ChunkStore(tmp_path / "chunks.db") as store:
             deleted_count = store.delete(["qq002222"])
         assert deleted_count == 1
 
-        assert verify_collection_fully_migrated(tmp_path) is False, (
-            "Bug: a row silently deleted from chunks.db (with its legacy "
-            "source long gone) was NOT detected -- verification only "
-            "checked ids CURRENTLY present, never the manifest's full "
-            "key set."
+        assert verify_collection_fully_migrated(tmp_path) is True, (
+            "Bug #1584: a row removed by ordinary post-cleanup activity "
+            "must not be misreported as unrecoverable corruption -- the "
+            "frozen manifest is retired once cleanup completes."
         )
 
-    def test_detects_manifest_file_deleted_entirely(self, tmp_path: Path) -> None:
-        """Codex CRITICAL finding (round 5): if ALL still-present-legacy
-        coverage is gone AND the manifest file itself is deleted, there
-        is nothing left in the 'currently present but wrong' iteration to
-        flag -- the collection must still be reported as NOT verified,
-        never silently trusted."""
+    def test_manifest_file_deletion_after_cleanup_has_no_effect_bug_1584(
+        self, tmp_path: Path
+    ) -> None:
+        """Bug #1584 accepted tradeoff (see class docstring): once
+        cleanup has durably completed, the content manifest has
+        discharged its only purpose and is no longer consulted --
+        deleting it must have zero effect on the already-migrated
+        collection's verified status."""
         from code_indexer.storage.shared.collection_migration import (
             verify_collection_fully_migrated,
         )
@@ -1187,12 +1185,324 @@ class TestContentIntegrityManifest:
 
         (tmp_path / "chunks_db_content_manifest.json").unlink()
 
-        assert verify_collection_fully_migrated(tmp_path) is False, (
-            "Bug: the content-integrity manifest was deleted entirely, "
-            "but the collection still reported as fully verified -- the "
-            "chunks_db discriminator being set does not itself prove "
-            "content integrity without the manifest."
+        assert verify_collection_fully_migrated(tmp_path) is True, (
+            "Bug #1584: the content manifest is retired once cleanup "
+            "durably completes -- its deletion must not affect the "
+            "verified status of an already-migrated collection."
         )
+
+    @staticmethod
+    def _setup_pre_cleanup_two_record_state(
+        tmp_path: Path,
+        kept_id: str,
+        kept_vector: list,
+        gone_id: str,
+        gone_vector: list,
+    ) -> None:
+        """Shared PRE-cleanup resume-state setup for the two tests below:
+        two legacy records migrate into a manifest-backed chunks.db, then
+        ``gone_id``'s legacy source is removed (as if its own cleanup
+        already ran on a prior pass) while ``kept_id``'s remains present
+        -- so still_present_id_map stays non-empty and the marker-gated
+        crash-window self-heal fast path is never taken. The manifest
+        always reflects the CORRECT (pre-mutation) content for both
+        records; callers mutate the LIVE chunks.db afterward."""
+        from code_indexer.storage.shared.chunk_layout import (
+            write_chunks_db_discriminator,
+        )
+
+        vfile_kept = _write_vector_json(
+            tmp_path, kept_id, kept_vector, chunk_text="kept"
+        )
+        vfile_gone = _write_vector_json(
+            tmp_path, gone_id, gone_vector, chunk_text="original"
+        )
+        record_kept = json.loads(vfile_kept.read_text())
+        record_gone = json.loads(vfile_gone.read_text())
+        with ChunkStore(tmp_path / "chunks.db") as store:
+            store.write_batch([record_kept, record_gone])
+        _write_manifest_for_records(
+            tmp_path, {kept_id: record_kept, gone_id: record_gone}
+        )
+        write_chunks_db_discriminator(tmp_path)
+        vfile_gone.unlink()
+        assert vfile_kept.exists()
+
+    def test_pre_cleanup_digest_mismatch_of_middle_vector_element_still_detected(
+        self, tmp_path: Path
+    ) -> None:
+        """Dual-review finding (Bug #1584 rewrite, MEDIUM): the four
+        _bug_1584 tests above cover the POST-cleanup-completion window,
+        where digest verification is INTENTIONALLY retired. This proves
+        the SAME mechanism is still authoritative PRE-cleanup, against a
+        realistic 1024-dim vector so the Codex round-5 finding
+        (json.dumps truncating a >1000-element array) cannot hide.
+        Both records share this collection's single fixed vector
+        dimension (ChunkStore enforces one dimension per collection)."""
+        dim = 1024
+        (tmp_path / "collection_meta.json").write_text(
+            json.dumps({"name": "coll", "vector_size": dim})
+        )
+        original_vector = [float(i) / 1000.0 for i in range(dim)]
+        kept_vector = [0.001] * dim
+        self._setup_pre_cleanup_two_record_state(
+            tmp_path, "rr001111", kept_vector, "rr002222", original_vector
+        )
+        corrupted_vector = list(original_vector)
+        corrupted_vector[500] = corrupted_vector[500] + 100.0
+        self._rewrite_chunks_db_record(
+            tmp_path, "rr002222", corrupted_vector, "original"
+        )
+
+        from code_indexer.storage.shared.collection_migration import (
+            UnrecoverableConsolidationCorruptionError,
+        )
+
+        with pytest.raises(UnrecoverableConsolidationCorruptionError):
+            consolidate_collection_in_place(tmp_path)
+
+    def test_pre_cleanup_silently_deleted_unrecoverable_row_still_detected(
+        self, tmp_path: Path
+    ) -> None:
+        """Dual-review finding (Bug #1584 rewrite, MEDIUM): the row-SET
+        (as opposed to content-digest) manifest comparison is likewise
+        still authoritative PRE-cleanup -- a legacy record silently
+        DELETED from chunks.db entirely (never merely mismatched), with
+        no remaining legacy source, must still be flagged unrecoverable
+        while another legacy file remains present on disk."""
+        _write_collection_meta(tmp_path)
+        self._setup_pre_cleanup_two_record_state(
+            tmp_path,
+            "ss001111",
+            [1.0, 2.0, 3.0, 4.0],
+            "ss002222",
+            [5.0, 6.0, 7.0, 8.0],
+        )
+        with ChunkStore(tmp_path / "chunks.db") as store:
+            assert store.delete(["ss002222"]) == 1
+
+        from code_indexer.storage.shared.collection_migration import (
+            UnrecoverableConsolidationCorruptionError,
+        )
+
+        with pytest.raises(UnrecoverableConsolidationCorruptionError):
+            consolidate_collection_in_place(tmp_path)
+
+
+class TestMigrationCleanupCompletedMarkerContract:
+    """Dual-review finding (Bug #1584, MEDIUM, opus F2): zero test
+    coverage existed for the `chunks_db_migration_cleanup_completed`
+    marker mechanism's OWN read/write contract.
+
+    Count history (verify with ``pytest --collect-only -q`` on this
+    class rather than trusting a hand count -- it has drifted twice
+    already): the original opus-F2 pass was described as 12 test cases;
+    a fresh collect-only run showed 13 (6 methods, one --
+    ``test_read_check_boolean_strictness`` -- parametrized over 8
+    stored-value cases). This final follow-up round added 2 shared
+    setup staticmethods (not collected as tests) plus 4 new test
+    methods covering the marker-consumer safety combinations below, for
+    13 + 4 = 17 collected items today.
+
+    Combinations added this round, per Codex's finding that nothing in
+    this codebase enforces the marker is mutually exclusive with either
+    anomaly below -- both marker-consumers
+    (``verify_collection_fully_migrated``,
+    ``consolidate_collection_in_place``) must independently re-verify
+    reality rather than trusting the marker alone:
+      - marker True but ``chunks.db`` itself missing entirely
+      - marker True but a legacy ``vector_*.json`` file is ALSO still
+        present on disk
+    """
+
+    def test_marker_not_set_when_cleanup_fails_partway_and_clean_retry_converges(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        _write_collection_meta(tmp_path)
+        vfile = _write_vector_json(
+            tmp_path, "mk001111", [1.0, 2.0, 3.0, 4.0], chunk_text="x"
+        )
+
+        original_unlink = Path.unlink
+
+        def _failing_unlink(self, *args, **kwargs):
+            if self == vfile:
+                raise PermissionError(f"simulated permission denied for {self}")
+            return original_unlink(self, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "unlink", _failing_unlink)
+
+        with pytest.raises(ConsolidationCleanupError):
+            consolidate_collection_in_place(tmp_path)
+
+        assert _is_migration_cleanup_completed(tmp_path) is False, (
+            "the marker must NOT be set when cleanup genuinely fails "
+            "partway -- meta must stay unchanged"
+        )
+        assert vfile.exists()
+
+        monkeypatch.undo()
+
+        result = consolidate_collection_in_place(tmp_path)
+        assert result.status == "already_consolidated"
+        assert not vfile.exists()
+        assert _is_migration_cleanup_completed(tmp_path) is True
+
+    @pytest.mark.parametrize(
+        "stored_value,expected",
+        [
+            (True, True),
+            (1, False),
+            ("true", False),
+            ("yes", False),
+            ("True", False),
+            (1.0, False),
+            ([True], False),
+            ({"x": True}, False),
+        ],
+    )
+    def test_read_check_boolean_strictness(
+        self, tmp_path: Path, stored_value, expected: bool
+    ) -> None:
+        _write_collection_meta(tmp_path)
+        meta = json.loads((tmp_path / "collection_meta.json").read_text())
+        meta["chunks_db_migration_cleanup_completed"] = stored_value
+        (tmp_path / "collection_meta.json").write_text(json.dumps(meta))
+
+        assert _is_migration_cleanup_completed(tmp_path) is expected, (
+            f"stored value {stored_value!r} must resolve to {expected}"
+        )
+
+    def test_read_check_fail_safe_on_corrupt_json(self, tmp_path: Path) -> None:
+        (tmp_path / "collection_meta.json").write_text("{not valid json::")
+
+        assert _is_migration_cleanup_completed(tmp_path) is False
+
+    def test_read_check_fail_safe_on_non_dict_json(self, tmp_path: Path) -> None:
+        (tmp_path / "collection_meta.json").write_text(json.dumps([1, 2, 3]))
+
+        assert _is_migration_cleanup_completed(tmp_path) is False
+
+    def test_read_check_fail_safe_on_missing_key(self, tmp_path: Path) -> None:
+        _write_collection_meta(tmp_path)
+
+        assert _is_migration_cleanup_completed(tmp_path) is False
+
+    def test_read_check_fail_safe_on_missing_file(self, tmp_path: Path) -> None:
+        assert _is_migration_cleanup_completed(tmp_path) is False
+
+    @staticmethod
+    def _setup_marker_true_chunks_db_missing(tmp_path: Path) -> None:
+        """Shared setup for the 2 tests below: the completion marker is
+        recorded True while chunks.db itself was never created -- these
+        are two independent facts (a JSON key vs. a file), and nothing
+        enforces they can never disagree."""
+        from code_indexer.storage.shared.chunk_layout import (
+            write_chunks_db_discriminator,
+        )
+        from code_indexer.storage.shared.collection_migration import (
+            _mark_migration_cleanup_completed,
+        )
+
+        _write_collection_meta(tmp_path)
+        write_chunks_db_discriminator(tmp_path)
+        _mark_migration_cleanup_completed(tmp_path)
+        assert not (tmp_path / "chunks.db").exists()
+
+    def test_marker_true_but_chunks_db_missing_is_not_trusted_by_verify(
+        self, tmp_path: Path
+    ) -> None:
+        """If the marker is somehow True while chunks.db itself is
+        missing entirely, verify_collection_fully_migrated must not
+        trust the marker blindly -- it must still prove the store opens
+        cleanly and report False when it cannot."""
+        from code_indexer.storage.shared.collection_migration import (
+            verify_collection_fully_migrated,
+        )
+
+        self._setup_marker_true_chunks_db_missing(tmp_path)
+
+        assert verify_collection_fully_migrated(tmp_path) is False
+
+    def test_marker_true_but_chunks_db_missing_raises_via_consolidate(
+        self, tmp_path: Path
+    ) -> None:
+        """Same anomalous state exercised through the destructive entry
+        point: consolidate_collection_in_place must fail LOUDLY -- never
+        silently report 'already_consolidated' over a chunks.db that
+        does not exist."""
+        from code_indexer.storage.shared.collection_migration import (
+            UnrecoverableConsolidationCorruptionError,
+            consolidate_collection_in_place,
+        )
+
+        self._setup_marker_true_chunks_db_missing(tmp_path)
+
+        with pytest.raises(UnrecoverableConsolidationCorruptionError):
+            consolidate_collection_in_place(tmp_path)
+
+    @staticmethod
+    def _setup_marker_true_legacy_file_reappeared(
+        tmp_path: Path, point_id: str, vector: list, chunk_text: str
+    ) -> Path:
+        """Shared setup for the 2 tests below: fully migrate one record
+        (marker set True), then re-materialize its legacy
+        vector_*.json file -- an artificial, worst-case reconstruction
+        of 'marker set while a legacy file is present'. The marker
+        records a PAST fact ('cleanup completed as of then'); it is
+        never re-verified against the live filesystem on every read."""
+        from code_indexer.storage.shared.collection_migration import (
+            consolidate_collection_in_place,
+        )
+
+        _write_collection_meta(tmp_path)
+        _write_vector_json(tmp_path, point_id, vector, chunk_text=chunk_text)
+
+        result = consolidate_collection_in_place(tmp_path)
+        assert result.status == "consolidated"
+        assert _is_migration_cleanup_completed(tmp_path) is True
+
+        return _write_vector_json(tmp_path, point_id, vector, chunk_text=chunk_text)
+
+    def test_marker_true_but_legacy_file_still_present_is_not_trusted_by_verify(
+        self, tmp_path: Path
+    ) -> None:
+        """If a legacy vector_*.json file is somehow present again,
+        verify_collection_fully_migrated must not report 'fully
+        migrated' just because the marker says so -- the
+        still-present-on-disk gate must win regardless of the marker."""
+        from code_indexer.storage.shared.collection_migration import (
+            verify_collection_fully_migrated,
+        )
+
+        self._setup_marker_true_legacy_file_reappeared(
+            tmp_path, "mkgap01", [1.0, 2.0, 3.0, 4.0], "x"
+        )
+
+        assert verify_collection_fully_migrated(tmp_path) is False
+
+    def test_marker_true_but_legacy_file_still_present_consolidate_still_cleans_up(
+        self, tmp_path: Path
+    ) -> None:
+        """Same anomalous state through the destructive entry point:
+        consolidate_collection_in_place must NOT take the marker's fast
+        path (which would report 'already_consolidated' without ever
+        touching the reappeared file) -- it must fall through to the
+        real resume-verification-and-cleanup path and actually delete
+        it."""
+        from code_indexer.storage.shared.collection_migration import (
+            consolidate_collection_in_place,
+        )
+
+        vfile = self._setup_marker_true_legacy_file_reappeared(
+            tmp_path, "mkgap02", [5.0, 6.0, 7.0, 8.0], "y"
+        )
+        assert vfile.exists()
+
+        result = consolidate_collection_in_place(tmp_path)
+
+        assert result.status == "already_consolidated"
+        assert not vfile.exists()
 
 
 class TestCleanupTOCTOUProbeRemoved:

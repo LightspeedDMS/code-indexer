@@ -680,15 +680,30 @@ class GitSyncExecutor:
             # Bug #899: pass http_client_factory from app.state so FaultInjectingSyncTransport
             # can intercept indexing-time embedding HTTP calls when fault injection is active.
             # app.state.http_client_factory is guaranteed set by lifespan on every startup path.
-            from ...app import app as _app
+            # Bug #1575 Part C review incidental fix: this module's package
+            # is code_indexer.server.git, so reaching code_indexer.server.app
+            # requires exactly 2 leading dots, not 3 (3 dots resolved to the
+            # nonexistent code_indexer.app, confirmed via direct import --
+            # previously unreachable since this class/method is documented
+            # as never externally instantiated in production today).
+            from ..app import app as _app
+            from ..utils.registry_factory import is_postgres_storage_mode
 
             embedding_provider = EmbeddingProviderFactory.create(
                 config, http_client_factory=_app.state.http_client_factory
             )
             # Initialize vector store (Story #505 - FilesystemVectorStore)
             index_dir = Path(config.codebase_dir) / ".code-indexer" / "index"
+            # Bug #1575 Part C review fix (Defect 3a bypass 2): thread the
+            # postgres/cluster-mode signal, matching
+            # FilesystemBackend.get_vector_store_client()'s existing
+            # pattern -- otherwise this in-process indexing trigger
+            # silently defaults the epoch-sync mechanism to enabled
+            # regardless of storage mode.
             vector_store_client = FilesystemVectorStore(
-                base_path=index_dir, project_root=Path(config.codebase_dir)
+                base_path=index_dir,
+                project_root=Path(config.codebase_dir),
+                hnsw_sync_epoch_enabled=not is_postgres_storage_mode(),
             )
 
             # Health checks

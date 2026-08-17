@@ -10,6 +10,7 @@ import json
 import os
 import random
 import subprocess
+import tempfile
 from pathlib import Path
 from typing import List, Dict, Any, Optional, Tuple, Union, Set, TYPE_CHECKING
 from datetime import datetime
@@ -27,7 +28,16 @@ from .vector_quantizer import VectorQuantizer
 from .projection_matrix_manager import ProjectionMatrixManager
 from .temporal_metadata_store import TemporalMetadataStore
 from .hnsw_stale_logger import log_hnsw_stale
-from code_indexer.utils.file_locking import nfs_safe_fsync
+from code_indexer.utils.file_locking import fsync_directory, nfs_safe_fsync
+from code_indexer.storage.shared.hnsw_sync_state import (
+    HNSW_SYNC_SCHEMA_VERSION,
+    HNSWSyncSession,
+    HNSWSyncState,
+    compute_dirty_transition,
+    read_hnsw_sync_state,
+    write_hnsw_sync_state,
+)
+from code_indexer.storage.shared.chunk_layout import ChunkLayout
 
 
 class LocalIndexNotFoundError(RuntimeError):
@@ -75,6 +85,16 @@ class ScrollDataIntegrityError(RuntimeError):
 # offset 0. The token is deliberately not a real directory/point-id shape so a
 # genuine point-id can never be mistaken for a cursor and vice-versa.
 _SCROLL_CURSOR_PREFIX = "__cidx_scroll_v1__:"
+
+#: Bug #1575 Part C: how often (in processed-point counts) the
+#: visibility-aware incremental update reports progress.
+_INCREMENTAL_PROGRESS_INTERVAL = 10
+
+#: Bug #1575 Part C: named result-dict "action" values for
+#: _resolve_and_publish_hnsw_sync(), replacing hard-coded literal strings.
+_ACTION_REUSED = "reused"
+_ACTION_INCREMENTAL = "incremental"
+_ACTION_FULL_REBUILD = "full_rebuild"
 
 
 def hnsw_cache_key_for_collection_path(
@@ -356,6 +376,95 @@ class PathIndex:
             for point_id in point_ids:
                 self.add_point(file_path, point_id)
 
+    def snapshot(self) -> Dict[str, Set[str]]:
+        """Return a copy of the internal path->point_ids mapping (each
+        set copied too), safe to iterate WITHOUT racing concurrent
+        add_point()/remove_point() mutations against the live object.
+
+        Bug #1575 (unlocked-save race, dual-review Fix 3): ``save()``'s
+        dict-comprehension iteration over the LIVE ``self._path_index``
+        dict/sets could observe a concurrent mutation mid-iteration
+        (``RuntimeError: dictionary changed size during iteration``) when
+        the ``PathIndex`` object is saved by one thread while another
+        thread mutates it. Copying under the caller's lock (this method
+        does no locking itself) and iterating the COPY afterward
+        eliminates the torn read.
+
+        Thread safety: callers MUST hold the enclosing ``_path_index_lock``
+        while calling this (same contract as ``has_other_owner``/
+        ``merge_from``) -- it is the act of copying that must be atomic
+        with respect to concurrent mutation, not anything the returned
+        copy does afterward.
+        """
+        return {
+            file_path: set(point_ids)
+            for file_path, point_ids in self._path_index.items()
+        }
+
+    @staticmethod
+    def _durable_msgpack_write(data: Dict[str, Any], path: Path) -> None:
+        """Write ``data`` to ``path`` atomically AND durably: temp file +
+        fsync + ``os.replace`` + parent-directory fsync (Bug #1407's
+        established pattern, e.g. ``HNSWIndexManager.
+        _atomic_write_metadata_durable``). Bug #1575 round 6 item 3: a
+        bare ``open()``+``dump()`` left the target file vulnerable to
+        truncation on a crash mid-write.
+        """
+        tmp_fd, tmp_path_str = tempfile.mkstemp(dir=str(path.parent), suffix=".tmp")
+        fd_owned = False
+        try:
+            try:
+                tmp_f = os.fdopen(tmp_fd, "wb")
+                fd_owned = True
+                with tmp_f:
+                    msgpack.dump(data, tmp_f)
+                    tmp_f.flush()
+                    nfs_safe_fsync(tmp_f.fileno())
+                os.replace(tmp_path_str, str(path))
+            finally:
+                if not fd_owned:
+                    try:
+                        os.close(tmp_fd)
+                    except OSError as close_err:
+                        logging.getLogger(__name__).warning(
+                            "Failed to close unwritten temp fd %s: %s",
+                            tmp_fd,
+                            close_err,
+                        )
+        except Exception:
+            try:
+                os.unlink(tmp_path_str)
+            except OSError as cleanup_err:
+                # Best-effort cleanup -- log and discard so the ORIGINAL
+                # exception propagates.
+                logging.getLogger(__name__).warning(
+                    "Failed to clean up temp file %s: %s",
+                    tmp_path_str,
+                    cleanup_err,
+                )
+            raise
+        fsync_directory(path.parent)
+
+    @staticmethod
+    def save_snapshot(snapshot: Dict[str, Set[str]], path: Path) -> None:
+        """Save a PRE-CAPTURED snapshot (see :meth:`snapshot`) to disk
+        using msgpack, durably (Bug #1575 round 6 item 3 -- see
+        :meth:`_durable_msgpack_write`). Never touches any live
+        ``PathIndex`` state, so it may safely be called without holding
+        any lock -- the snapshot is already a private, non-shared copy.
+
+        Args:
+            snapshot: The result of a prior ``snapshot()`` call.
+            path: File path to save to (will create parent directories).
+        """
+        path.parent.mkdir(parents=True, exist_ok=True)
+
+        # Convert sets to lists for msgpack serialization
+        serializable_data = {
+            file_path: list(point_ids) for file_path, point_ids in snapshot.items()
+        }
+        PathIndex._durable_msgpack_write(serializable_data, path)
+
     def save(self, path: Path) -> None:
         """Save path index to disk using msgpack.
 
@@ -363,39 +472,53 @@ class PathIndex:
             path: File path to save to (will create parent directories)
 
         Note:
-            Sets are serialized as lists in msgpack format.
+            Sets are serialized as lists in msgpack format. This method
+            takes its OWN snapshot (no external lock coordination), so it
+            is only safe to call when no concurrent mutator can be
+            racing this SAME PathIndex instance (e.g. a private,
+            not-yet-shared object, or a test). Code that saves a LIVE,
+            SHARED PathIndex object (registered in
+            ``FilesystemVectorStore._path_indexes``) must snapshot under
+            ``_path_index_lock`` explicitly and call
+            :meth:`save_snapshot` instead -- see
+            ``FilesystemVectorStore._save_path_index``.
         """
-        path.parent.mkdir(parents=True, exist_ok=True)
-
-        # Convert sets to lists for msgpack serialization
-        serializable_data = {
-            file_path: list(point_ids)
-            for file_path, point_ids in self._path_index.items()
-        }
-
-        with open(path, "wb") as f:
-            msgpack.dump(serializable_data, f)
+        self.save_snapshot(self.snapshot(), path)
 
     @classmethod
     def load(cls, path: Path) -> "PathIndex":
-        """Load path index from disk.
+        """Load path index from disk. Returns an empty ``PathIndex`` if
+        the file is missing OR corrupt/truncated (Bug #1575 round 6 item
+        3: never raise uncaught -- a bad bin must not brick
+        ``begin_indexing()``; every caller's own "proven complete"
+        machinery correctly triggers an authoritative rebuild instead).
 
         Args:
             path: File path to load from
-
-        Returns:
-            PathIndex instance with loaded data (empty if file doesn't exist)
-
-        Note:
-            Lists are converted back to sets after deserialization.
         """
         instance = cls()
 
         if not path.exists():
             return instance
 
-        with open(path, "rb") as f:
-            serialized_data = msgpack.load(f)
+        try:
+            with open(path, "rb") as f:
+                serialized_data = msgpack.load(f)
+        except (ValueError, msgpack.exceptions.UnpackException, OSError) as exc:
+            logging.getLogger(__name__).warning(
+                "Corrupt/unreadable path_index.bin at %s -- treating as absent (%s)",
+                path,
+                exc,
+            )
+            return instance
+
+        if not isinstance(serialized_data, dict):
+            logging.getLogger(__name__).warning(
+                "path_index.bin at %s did not deserialize to a dict -- "
+                "treating as absent",
+                path,
+            )
+            return instance
 
         # Convert lists back to sets
         instance._path_index = {
@@ -435,6 +558,12 @@ class FilesystemVectorStore:
         # lazy-load discipline).
         chunk_store_cache: Optional[Any] = None,
         hnsw_num_threads: Optional[int] = None,
+        # hnsw_sync_epoch_enabled: fail-closed gate, defaulting to True for
+        # every existing CLI/solo/daemon caller. The server's storage-client
+        # factory passes False in postgres/cluster storage mode, where
+        # cross-node mutual exclusion for the mechanism this flag guards
+        # could not be confirmed for every mutation entry point.
+        hnsw_sync_epoch_enabled: bool = True,
     ):
         # collection_meta_cache: Story #1492 AC1 -- optional injected
         # CollectionMetaCache (server mode: a shared, cross-request
@@ -519,6 +648,19 @@ class FilesystemVectorStore:
         self._id_index: Dict[str, Dict[str, Path]] = {}
         self._id_index_lock = threading.Lock()
 
+        # Bug #1583: cache_keys for which get_point()'s reactive stale-index
+        # rebuild has already been attempted this process. id_index.bin is a
+        # CACHE, not an authority -- a vector_*.json file written outside the
+        # normal write path (or a crash between writing the vector file and
+        # persisting the updated id_index.bin) can leave it silently missing
+        # an entry that genuinely exists on disk. get_point() heals this
+        # REACTIVELY (only on an actual lookup miss, never on every load --
+        # see get_point()'s docstring/comments for why an eager per-load scan
+        # was rejected) and records the attempt here so a lookup for a
+        # point_id that genuinely never existed triggers at most ONE full
+        # disk rebuild per collection per process, not one per miss.
+        self._id_index_reactive_rebuild_done: Set[str] = set()
+
         # File path cache: {collection_name: set of file paths}
         self._file_path_cache: Dict[str, set] = {}
 
@@ -567,6 +709,14 @@ class FilesystemVectorStore:
         # Story #540: Path-to-point_ids reverse index for duplicate prevention
         # Structure: {collection_name: PathIndex}
         self._path_indexes: Dict[str, PathIndex] = {}
+        # Bug #1575 Finding-1-regression fix: records, per cache key, whether
+        # path_index.bin ACTUALLY EXISTED ON DISK the last time
+        # begin_indexing() populated self._path_indexes for it -- an empty
+        # PathIndex built from scratch (file missing) only ever learns
+        # about the files THIS session touches, so it must never be
+        # trusted as a complete picture of the whole collection. See
+        # _get_live_session_path_index().
+        self._path_index_loaded_from_file: Dict[str, bool] = {}
         # LOCK ORDER INVARIANT (B1): _id_index_lock and _path_index_lock must
         # NEVER be held simultaneously by delete_points.  delete_points collects
         # path-index work under _id_index_lock and applies it sequentially after
@@ -584,11 +734,15 @@ class FilesystemVectorStore:
         # Structure: {collection_name: subdirectory_or_none}
         self._active_subdirectories: Dict[str, Optional[str]] = {}
 
-        # Branch isolation: Flag set by rebuild_hnsw_filtered() to signal that
-        # a filtered HNSW rebuild was already performed during branch isolation.
-        # end_indexing() checks this flag and skips its own full rebuild to avoid
-        # overwriting the filtered rebuild with all-inclusive (ghost-producing) rebuild.
-        self._branch_isolation_did_filtered_rebuild: bool = False
+        # Bug #1575 Part C: replaces the bare, PER-STORE (not per-collection)
+        # _branch_isolation_did_filtered_rebuild boolean -- a real, documented
+        # scoping hazard (a sentinel set for collection A could be consumed by
+        # collection B's still-pending end_indexing). Keyed by the RESOLVED
+        # PHYSICAL collection path so one collection's rebuild/skip decision
+        # is structurally unable to affect another's.
+        self._hnsw_sync_sessions: Dict[str, "HNSWSyncSession"] = {}
+        self._hnsw_sync_sessions_lock = threading.Lock()
+        self._hnsw_sync_epoch_enabled: bool = hnsw_sync_epoch_enabled
 
         # Bug #1575 Part B: per-collection SHARDED_JSON scroll-session cache
         # -- the legacy scroll branch's id_to_file enumeration (rglob +
@@ -770,6 +924,149 @@ class FilesystemVectorStore:
             chunk_layout_token=resolve_chunk_layout(collection_path).value,
         )
 
+    def _hnsw_sync_session_key(self, collection_path: Path) -> str:
+        """Bug #1575 Part C: the RESOLVED PHYSICAL collection path is the
+        sole key for ``self._hnsw_sync_sessions`` -- this is what makes one
+        collection's rebuild/skip decision structurally unable to affect a
+        different collection's (the exact scoping hazard the old bare
+        ``_branch_isolation_did_filtered_rebuild`` boolean had).
+        """
+        return str(Path(collection_path).resolve())
+
+    def _get_or_create_hnsw_sync_session(
+        self, collection_path: Path, collection_name: str
+    ) -> HNSWSyncSession:
+        """Bug #1575 Part C: lazily create (or return the existing)
+        per-physical-collection-path ``HNSWSyncSession``.
+
+        When ``self._indexing_session_changes`` already has a live entry for
+        ``collection_name`` (an active ``begin_indexing()``...
+        ``end_indexing()`` bracket), the session's ``added``/``updated``/
+        ``deleted`` sets are the SAME set objects (aliased, not copied) as
+        that dict's -- so every ``upsert_points()``/``delete_points()`` call
+        that already populates ``_indexing_session_changes`` is transitively
+        tracked here with zero duplicate bookkeeping.
+
+        When no such tracking exists (a mutation call outside any
+        ``begin_indexing()`` bracket -- e.g. watch mode calling
+        ``upsert_points()`` directly), the session gets fresh empty sets and
+        ``complete_change_tracking`` is immediately set False: a mutation
+        this store cannot precisely attribute must never be silently
+        skipped at ``end_indexing()`` time, so it forces a full rebuild.
+        """
+        key = self._hnsw_sync_session_key(collection_path)
+        with self._hnsw_sync_sessions_lock:
+            session = self._hnsw_sync_sessions.get(key)
+            if session is not None:
+                return session
+
+            layout = (
+                ChunkLayout.CHUNKS_DB
+                if self._is_chunks_db_collection(collection_name, collection_path)
+                else ChunkLayout.SHARDED_JSON
+            )
+            prior = read_hnsw_sync_state(collection_path)
+            start_epoch = prior.mutation_epoch if prior is not None else 0
+
+            session = HNSWSyncSession(
+                collection_path=collection_path,
+                collection_name=collection_name,
+                layout=layout,
+                start_epoch=start_epoch,
+            )
+
+            tracked = self._indexing_session_changes.get(collection_name)
+            if tracked is not None:
+                session.added = tracked["added"]
+                session.updated = tracked["updated"]
+                session.deleted = tracked["deleted"]
+            else:
+                session.complete_change_tracking = False
+
+            self._hnsw_sync_sessions[key] = session
+            return session
+
+    def abort_indexing(
+        self, collection_name: str, subdirectory: Optional[str] = None
+    ) -> None:
+        """Bug #1575 Part C: discard THIS process's in-memory
+        ``HNSWSyncSession``/session-change tracking for ``collection_name``
+        -- called when an indexing session is aborted (e.g. an exception
+        propagates before ``end_indexing()`` runs).
+
+        Deliberately does NOT touch the durable ``hnsw_sync`` state on disk:
+        it correctly remains "dirty" from whatever mutations were already
+        performed, so the next ``end_indexing()`` attempt (in this process
+        or another) safely performs a full rebuild rather than trusting an
+        abandoned in-memory session's incomplete tracking.
+        """
+        collection_path = self._get_collection_path(collection_name, subdirectory)
+        key = self._hnsw_sync_session_key(collection_path)
+        with self._hnsw_sync_sessions_lock:
+            self._hnsw_sync_sessions.pop(key, None)
+        if collection_name in self._indexing_session_changes:
+            del self._indexing_session_changes[collection_name]
+        if collection_name in self._active_subdirectories:
+            del self._active_subdirectories[collection_name]
+
+    def _mark_hnsw_dirty_before_mutation(
+        self, collection_path: Path, collection_name: str
+    ) -> None:
+        """Bug #1575 Part C mutation protocol (dirty-before-write): acquire
+        ``.index_rebuild.lock`` -> read+validate the current ``hnsw_sync``
+        state -> durably write a "dirty" epoch transition BEFORE the caller
+        performs its own storage mutation.
+
+        No-op when ``self._hnsw_sync_epoch_enabled`` is False (AC46 cluster
+        fail-closed gate) -- no session is created, so ``end_indexing()``
+        observes "session missing" and always performs a full rebuild,
+        byte-identical to pre-Part-C behavior.
+
+        If the durable write fails, the exception propagates. Every caller
+        of this method invokes it BEFORE its own storage mutation, so that
+        propagation alone is sufficient to satisfy "if the dirty write
+        fails, the mutation MUST NOT proceed".
+
+        The lock is held ONLY for this read-decide-write sequence -- it is
+        released (context manager exit) before this method returns, well
+        before any embedding-provider call or other long-running work the
+        caller might perform next.
+        """
+        if not self._hnsw_sync_epoch_enabled:
+            return
+
+        session = self._get_or_create_hnsw_sync_session(
+            collection_path, collection_name
+        )
+
+        from .background_index_rebuilder import BackgroundIndexRebuilder
+
+        rebuilder = BackgroundIndexRebuilder(collection_path)
+        with rebuilder.acquire_lock():
+            prior = read_hnsw_sync_state(collection_path)
+            next_mutation, published = compute_dirty_transition(prior)
+
+            branch = session.current_branch
+            if branch is None and prior is not None:
+                branch = prior.current_branch
+
+            new_state = HNSWSyncState(
+                schema_version=HNSW_SYNC_SCHEMA_VERSION,
+                mutation_epoch=next_mutation,
+                published_epoch=published,
+                status="dirty",
+                current_branch=branch,
+                layout=session.layout.value,
+            )
+            write_hnsw_sync_state(collection_path, new_state)
+            # Bug #1575 Part C review fix (Defect 2): record that THIS
+            # session personally caused this exact epoch advancement --
+            # the decision engine compares this count against the on-disk
+            # epoch delta since the session started to detect a mutation
+            # this session never observed (a different session/process
+            # advanced the epoch independently).
+            session.own_mutation_count += 1
+
     def _get_collection_path(
         self, collection_name: str, subdirectory: Optional[str] = None
     ) -> Path:
@@ -869,8 +1166,23 @@ class FilesystemVectorStore:
         # subdirectory build) so a nested create_collection() never resets
         # the top-level collection's in-memory _id_index entry (Codex NEW
         # Finding 1).
+        #
+        # Dual-review correction (Fix 3, Codex 95%): also discard any
+        # pre-existing _id_index_reactive_rebuild_done marker for this SAME
+        # cache_key. Without this, a collection whose marker was already set
+        # (e.g. from an earlier confirmed-negative reactive scan, or --
+        # pre-Fix-2 -- an earlier successful heal) would have its in-memory
+        # _id_index reset to {} here while the marker stayed set, silently
+        # suppressing every future lookup for a point that genuinely exists
+        # on disk. Not reachable via any live production call site today
+        # (every real caller guards with collection_exists() first), but
+        # closed anyway for correctness/defense-in-depth.
         with self._id_index_lock:
-            self._id_index[self._id_cache_key(collection_name, subdirectory)] = {}
+            _create_collection_cache_key = self._id_cache_key(
+                collection_name, subdirectory
+            )
+            self._id_index[_create_collection_cache_key] = {}
+            self._id_index_reactive_rebuild_done.discard(_create_collection_cache_key)
 
         # Story #1456: record CHUNKS_DB build intent for THIS session. The
         # on-disk discriminator is committed later (end_indexing), only
@@ -1013,6 +1325,22 @@ class FilesystemVectorStore:
             _begin_indexing_cache_key = self._id_cache_key(
                 collection_name, subdirectory
             )
+            # Bug #1575 Finding-1-regression fix: record whether
+            # path_index.bin actually exists on disk RIGHT NOW, regardless
+            # of whether the in-memory entry below is reused or freshly
+            # loaded -- this is the "was the picture ever proven complete"
+            # signal _get_live_session_path_index() gates its cache-trust
+            # decision on (used by distinct_content_paths()/
+            # fetch_points_for_paths() -- Part A. NOT by
+            # _calculate_and_save_unique_file_count(), whose SHARDED_JSON
+            # branch abandoned this fast-path trust entirely). A cheap
+            # single stat() call.
+            _begin_indexing_collection_path = self._get_collection_path(
+                collection_name, subdirectory
+            )
+            self._path_index_loaded_from_file[_begin_indexing_cache_key] = (
+                _begin_indexing_collection_path / "path_index.bin"
+            ).exists()
             if _begin_indexing_cache_key not in self._path_indexes:
                 self._path_indexes[_begin_indexing_cache_key] = self._load_path_index(
                     collection_name
@@ -1079,6 +1407,15 @@ class FilesystemVectorStore:
         collection_path = self._get_collection_path(collection_name, subdirectory)
 
         if not self.collection_exists(collection_name, subdirectory):
+            # Bug #1575 Part C: a stale in-memory HNSWSyncSession for this
+            # exact collection path (created by an earlier upsert_points()/
+            # delete_points() this same process) must never survive a
+            # failed end_indexing() attempt -- discard it here so the next
+            # begin_indexing()/mutation for this collection starts with a
+            # fresh session rather than reusing stale added/updated/deleted
+            # tracking sets against a collection that is about to be (or
+            # was already) recreated from scratch.
+            self._discard_hnsw_sync_session(collection_path)
             raise ValueError(f"Collection '{collection_name}' does not exist")
 
         self.logger.info(f"Finalizing indexes for collection '{collection_name}'...")
@@ -1096,121 +1433,55 @@ class FilesystemVectorStore:
             ChunkLayout.CHUNKS_DB if _end_indexing_is_chunks_db else None
         )
 
-        # Get vector size from cache (avoids file I/O)
-        vector_size = self._get_vector_size(collection_name)
-
-        # Conditional HNSW rebuild based on watch mode
-        from .hnsw_index_manager import HNSWIndexManager
-
-        # Story #1493 flakiness investigation: self._hnsw_num_threads is
-        # None for every existing caller, resolving to HNSWIndexManager's
-        # own DEFAULT_HNSW_NUM_THREADS (-1) -- byte-identical to today.
-        hnsw_manager = HNSWIndexManager(
-            vector_dim=vector_size, space="cosine", num_threads=self._hnsw_num_threads
-        )
+        # Bug #1575 Part C: the visibility-epoch decision engine replaces
+        # the old sentinel/session-change-based incremental-vs-full-rebuild
+        # logic entirely.
         hnsw_skipped = False
+        hnsw_action: Optional[str] = None
 
-        # HNSW-002: Auto-detection for incremental vs full rebuild
-        incremental_update_result: Optional[Dict[str, Any]] = None
+        if skip_hnsw_rebuild:
+            # Watch mode: preserve existing behavior EXACTLY -- defer
+            # rebuild to query time via staleness marking. hnsw_sync stays
+            # dirty on disk (the dirty-before-mutation protocol already
+            # wrote it at each upsert/delete call within this session), so
+            # the NEXT end_indexing() call correctly forces a full rebuild.
+            from .hnsw_index_manager import HNSWIndexManager
 
-        if force_full_rebuild:
-            # Amendment 3: precedence over the sentinel/skip/session-change
-            # branches below, WITHOUT reading or resetting
-            # _branch_isolation_did_filtered_rebuild (it may belong to a
-            # different collection's still-pending end_indexing).
-            if (
-                hasattr(self, "_indexing_session_changes")
-                and collection_name in self._indexing_session_changes
-            ):
-                del self._indexing_session_changes[collection_name]
-            hnsw_manager.rebuild_from_vectors(
-                collection_path=collection_path,
+            vector_size = self._get_vector_size(collection_name)
+            hnsw_manager = HNSWIndexManager(
+                vector_dim=vector_size,
+                space="cosine",
+                num_threads=self._hnsw_num_threads,
+            )
+            hnsw_manager.mark_stale(collection_path)
+            hnsw_skipped = True
+            self.logger.info(
+                f"HNSW rebuild skipped for '{collection_name}' (watch mode), "
+                f"marked as stale for query-time rebuild"
+            )
+            # Bug #1575 Part C review finding: this in-memory session must
+            # be discarded here too, exactly like every other terminal path
+            # in this method -- otherwise it survives (still aliased to
+            # THIS session's now-frozen added/updated/deleted sets) into
+            # the NEXT begin_indexing()/end_indexing() cycle for this same
+            # collection, where it would be wrongly reused instead of a
+            # fresh session correctly aliased to that next cycle's own
+            # tracking sets (silently omitting that next cycle's real
+            # mutations from a "trusted" incremental update).
+            self._discard_hnsw_sync_session(collection_path)
+        else:
+            sync_result = self._resolve_and_publish_hnsw_sync(
+                collection_name,
+                subdirectory=subdirectory,
                 progress_callback=progress_callback,
+                force_full_rebuild=force_full_rebuild,
                 clear_stale=clear_stale,
-                layout_override=_end_indexing_layout_override,
             )
+            hnsw_action = sync_result["action"]
             self.logger.info(
-                f"Full HNSW rebuild forced for '{collection_name}' "
-                f"(temporal was_stale shard repair)"
+                f"HNSW sync for '{collection_name}': {hnsw_action} "
+                f"({sync_result['reason']})"
             )
-            incremental_update_result = {}  # sentinel: already handled
-        # #941: When branch isolation already performed a filtered HNSW rebuild,
-        # skip the incremental path entirely so it cannot undo the filtered result.
-        elif self._branch_isolation_did_filtered_rebuild:
-            self._branch_isolation_did_filtered_rebuild = False
-            self.logger.info(
-                f"Incremental HNSW update skipped for '{collection_name}' "
-                f"(filtered rebuild already performed during branch isolation)"
-            )
-            # Clear stale session change tracking so the fallback path is also skipped.
-            if (
-                hasattr(self, "_indexing_session_changes")
-                and collection_name in self._indexing_session_changes
-            ):
-                del self._indexing_session_changes[collection_name]
-            # Signal "handled" so the fallback full-rebuild path (line ~559) is skipped.
-            incremental_update_result = {}  # sentinel: filtered rebuild already handled
-        elif (
-            hasattr(self, "_indexing_session_changes")
-            and collection_name in self._indexing_session_changes
-        ):
-            changes = self._indexing_session_changes[collection_name]
-            has_changes = changes["added"] or changes["updated"] or changes["deleted"]
-
-            if has_changes and not skip_hnsw_rebuild:
-                # INCREMENTAL UPDATE PATH
-                self.logger.info(
-                    f"Applying incremental HNSW update for '{collection_name}': "
-                    f"{len(changes['added'])} added, {len(changes['updated'])} updated, "
-                    f"{len(changes['deleted'])} deleted"
-                )
-                incremental_update_result = self._apply_incremental_hnsw_batch_update(
-                    collection_name=collection_name,
-                    changes=changes,
-                    progress_callback=progress_callback,
-                    clear_stale=clear_stale,
-                    subdirectory=subdirectory,
-                )
-
-                # Clear session changes after applying
-                del self._indexing_session_changes[collection_name]
-
-                self.logger.info(
-                    f"Incremental HNSW update complete for '{collection_name}'"
-                )
-
-        # Fallback to original logic if no incremental update was applied
-        if incremental_update_result is None:
-            # Branch isolation check: if a filtered rebuild was already done,
-            # skip the full rebuild to avoid overwriting it with ghost vectors.
-            did_filtered_rebuild = self._branch_isolation_did_filtered_rebuild
-            self._branch_isolation_did_filtered_rebuild = False  # Always reset
-
-            if did_filtered_rebuild:
-                # A filtered HNSW rebuild was performed during branch isolation.
-                # Do NOT overwrite it with a full rebuild (which would restore ghost vectors).
-                hnsw_skipped = True
-                self.logger.info(
-                    f"HNSW rebuild skipped for '{collection_name}' "
-                    f"(filtered rebuild already performed during branch isolation)"
-                )
-            elif skip_hnsw_rebuild:
-                # Watch mode: Mark index as stale, defer rebuild to query time
-                hnsw_manager.mark_stale(collection_path)
-                hnsw_skipped = True
-                self.logger.info(
-                    f"HNSW rebuild skipped for '{collection_name}' (watch mode), "
-                    f"marked as stale for query-time rebuild"
-                )
-            else:
-                # Normal mode: Rebuild HNSW index from ALL vectors on disk (ONCE)
-                hnsw_manager.rebuild_from_vectors(
-                    collection_path=collection_path,
-                    progress_callback=progress_callback,
-                    clear_stale=clear_stale,
-                    layout_override=_end_indexing_layout_override,
-                )
-                self.logger.info(f"HNSW index rebuilt for '{collection_name}'")
 
         # Story #1456 AC7: CHUNKS_DB collections never load or write
         # id_index.bin here -- point-id resolution is exclusively via the
@@ -1258,16 +1529,45 @@ class FilesystemVectorStore:
 
             vector_count = len(self._id_index.get(_end_indexing_id_cache_key, {}))
 
+        # Bug #1575 Part A Round 3, Fix A: calculate (and durably persist to
+        # collection_meta.json) the unique file count BEFORE saving
+        # path_index.bin below. This method's fallback path (taken when no
+        # active-session PathIndex is trusted, e.g. this session's
+        # path_index.bin did not exist at begin_indexing() time) REPAIRS
+        # self._path_indexes[cache_key] in place with the complete,
+        # authoritative picture it was forced to compute
+        # (_rebuild_and_repair_path_index, via _resolve_authoritative_path_
+        # index) -- so the path_index.bin save immediately below this
+        # persists that repaired, complete PathIndex rather than the
+        # partial, session-own one that would otherwise be saved as-is.
+        # Reordered from AFTER the path_index.bin save (its pre-fix
+        # position) to BEFORE it: computing this count never depended on
+        # path_index.bin already being saved, so this is a pure reorder,
+        # not a new dependency.
+        unique_file_count = self._calculate_and_save_unique_file_count(
+            collection_name, collection_path, subdirectory=subdirectory
+        )
+
         # Story #540: Save path index to disk. Keyed via _id_cache_key using
         # the EXPLICIT subdirectory parameter (Codex NEW Finding 2).
+        # Bug #1575 Fix 3: the membership check + live-reference lookup is
+        # done under a quick _path_index_lock scope, but _save_path_index()
+        # itself is now called OUTSIDE the lock -- it acquires
+        # _path_index_lock internally to take its own snapshot before
+        # writing (see _save_path_index's docstring), and this is a plain
+        # (non-reentrant) threading.Lock, so holding it here across that
+        # call would deadlock the same thread trying to re-acquire it.
         _end_indexing_path_cache_key = self._id_cache_key(collection_name, subdirectory)
         with self._path_index_lock:
-            if _end_indexing_path_cache_key in self._path_indexes:
-                self._save_path_index(
-                    collection_name,
-                    self._path_indexes[_end_indexing_path_cache_key],
-                    subdirectory=subdirectory,
-                )
+            _end_indexing_live_path_index = self._path_indexes.get(
+                _end_indexing_path_cache_key
+            )
+        if _end_indexing_live_path_index is not None:
+            self._save_path_index(
+                collection_name,
+                _end_indexing_live_path_index,
+                subdirectory=subdirectory,
+            )
 
         # Story #1456 AC1 (mandatory FINAL step): chunks.db + HNSW +
         # path_index are all durable above -- ONLY NOW is it safe to commit
@@ -1281,11 +1581,6 @@ class FilesystemVectorStore:
             )
 
             write_chunks_db_discriminator(collection_path)
-
-        # Calculate and update unique file count in metadata
-        unique_file_count = self._calculate_and_save_unique_file_count(
-            collection_name, collection_path, subdirectory=subdirectory
-        )
 
         self.logger.info(
             f"Indexing finalized for '{collection_name}': {vector_count} vectors indexed "
@@ -1303,14 +1598,513 @@ class FilesystemVectorStore:
         # Add HNSW update type if incremental was used. force_full_rebuild
         # reuses the "already handled" {} sentinel but ran a full rebuild,
         # not an incremental update -- must not be mislabeled (Bug #1407).
-        if incremental_update_result is not None and not force_full_rebuild:
+        if hnsw_action == _ACTION_INCREMENTAL:
             result["hnsw_update"] = "incremental"
 
         # Clean up active subdirectory tracking
         if collection_name in self._active_subdirectories:
             del self._active_subdirectories[collection_name]
 
+        # Bug #1575 Part C: this tracking dict must always be reset at the
+        # end of an indexing session regardless of which decision-engine
+        # path ran (reuse/incremental/full-rebuild) -- pre-Part-C behavior
+        # only cleared it inside the old incremental-update branch, but
+        # every path now needs a fresh dict for the NEXT session. Guarded
+        # by _id_index_lock, matching upsert_points()/delete_points()'s own
+        # locking convention for this exact dict.
+        with self._id_index_lock:
+            if collection_name in self._indexing_session_changes:
+                del self._indexing_session_changes[collection_name]
+
         return result
+
+    def set_hnsw_branch_context(
+        self,
+        collection_name: str,
+        current_branch: Optional[str],
+        visible_files: Set[str],
+        subdirectory: Optional[str] = None,
+    ) -> None:
+        """Bug #1575 Part C item 5: register branch-isolation context for
+        THIS collection's session WITHOUT performing any rebuild --
+        ``end_indexing()``'s decision engine reads ``current_branch`` /
+        ``visible_files`` from the session to decide reuse / incremental /
+        full-rebuild.
+
+        A branch switch (``current_branch`` differing from the currently
+        PUBLISHED ``hnsw_sync.current_branch``) always forces a full
+        filtered rebuild at ``end_indexing()`` time -- even when
+        ``visible_files`` is byte-for-byte identical to the previous
+        branch's -- because the comparison happens on ``current_branch``
+        itself, never on a bare path-set fingerprint (AC48).
+
+        No-op when ``self._hnsw_sync_epoch_enabled`` is False (AC46 cluster
+        fail-closed gate) -- performs ZERO work in that case, including no
+        collection_path resolution.
+        """
+        if not self._hnsw_sync_epoch_enabled:
+            return
+        collection_path = self._get_collection_path(collection_name, subdirectory)
+        session = self._get_or_create_hnsw_sync_session(
+            collection_path, collection_name
+        )
+        session.current_branch = current_branch
+        session.visible_files = set(visible_files)
+        session.branch_context_set = True
+
+    def _resolve_hnsw_rebuild_reason(
+        self,
+        prior: Optional[HNSWSyncState],
+        session: Optional[HNSWSyncSession],
+    ) -> Optional[str]:
+        """Bug #1575 Part C decision algorithm, first branch: returns a
+        non-None reason string when a FULL filtered rebuild is required
+        (fail-safe), or None when the epoch/session state is well-formed
+        enough to consider reuse-or-incremental instead. Never called for
+        the separate, unconditional ``force_full_rebuild=True`` path (see
+        ``_resolve_and_publish_hnsw_sync``), which always short-circuits
+        before this method is reached.
+        """
+        if prior is None:
+            return (
+                "no valid hnsw_sync state (missing/malformed/pre-existing collection)"
+            )
+        if session is None:
+            return "no in-memory session tracked for this indexing run"
+        if not session.complete_change_tracking:
+            return "incomplete change tracking for this session"
+        if session.current_branch != prior.current_branch:
+            return (
+                f"branch changed ({prior.current_branch!r} -> "
+                f"{session.current_branch!r})"
+            )
+        # Bug #1575 Part C review fix (Defect 2): a session must never be
+        # trusted as a COMPLETE record of every mutation since the last
+        # clean publish unless BOTH of the following hold. Each guards a
+        # distinct, independently-reproduced failure sequence -- neither
+        # implies the other, both are required.
+        #
+        # (1) This session started tracking from the exact epoch that is
+        #     CURRENTLY still the published (durable-clean) one. If it
+        #     started already-dirty (e.g. resuming after a DIFFERENT,
+        #     since-discarded/aborted session already advanced
+        #     mutation_epoch beyond published_epoch), this session has no
+        #     knowledge of that earlier session's mutations.
+        if session.start_epoch != prior.published_epoch:
+            return (
+                f"session start_epoch ({session.start_epoch}) does not "
+                f"match the currently published epoch "
+                f"({prior.published_epoch}) -- a different session's "
+                "mutations may never have been applied to the HNSW graph"
+            )
+        # (2) Every epoch increment since this session started is fully
+        #     accounted for by this session's OWN mutation calls. A
+        #     foreign session/process (a different in-process session, or
+        #     a completely separate FilesystemVectorStore instance/process
+        #     against the same on-disk collection) that mutated
+        #     concurrently would advance mutation_epoch without ever
+        #     going through THIS session's tracking -- check (1) alone
+        #     cannot detect that, since it only inspects the epoch value
+        #     at THIS session's start, not what happened during its
+        #     lifetime.
+        epoch_delta_since_start = prior.mutation_epoch - session.start_epoch
+        if epoch_delta_since_start != session.own_mutation_count:
+            return (
+                f"epoch advanced by {epoch_delta_since_start} since this "
+                f"session started, but this session only tracked "
+                f"{session.own_mutation_count} of its own mutations -- a "
+                "concurrent mutation this session never observed occurred"
+            )
+        return None
+
+    def _publish_clean_hnsw_sync(
+        self,
+        collection_path: Path,
+        epoch: int,
+        current_branch: Optional[str],
+        layout: ChunkLayout,
+    ) -> None:
+        """Bug #1575 Part C: durably publish a CLEAN hnsw_sync state
+        (``mutation_epoch == published_epoch``) after a successful
+        rebuild/reuse/incremental decision.
+
+        No-op when ``self._hnsw_sync_epoch_enabled`` is False (AC46
+        cluster fail-closed gate, review Defect 3b) -- the rebuild itself
+        already ran (correct, safe, full/unfiltered), but the mechanism is
+        not supposed to be active at all in this mode, so no ``hnsw_sync``
+        bookkeeping key is ever written. Leaving one behind would be
+        wrongly trusted as authoritative by any reader that later (or
+        incorrectly) believes the mechanism IS active for this collection.
+        """
+        if not self._hnsw_sync_epoch_enabled:
+            return
+        write_hnsw_sync_state(
+            collection_path,
+            HNSWSyncState(
+                schema_version=HNSW_SYNC_SCHEMA_VERSION,
+                mutation_epoch=epoch,
+                published_epoch=epoch,
+                status="clean",
+                current_branch=current_branch,
+                layout=layout.value,
+            ),
+        )
+
+    def _discard_hnsw_sync_session(self, collection_path: Path) -> None:
+        """Bug #1575 Part C: drop THIS process's in-memory session for
+        ``collection_path`` after a decision has been fully published --
+        the next ``end_indexing()`` call for this collection starts fresh,
+        re-reading the (now clean) durable state.
+        """
+        key = self._hnsw_sync_session_key(collection_path)
+        with self._hnsw_sync_sessions_lock:
+            self._hnsw_sync_sessions.pop(key, None)
+
+    def _read_published_hnsw_vector_count(self, collection_path: Path) -> int:
+        """Bug #1575 Part C: the vector count currently published in the
+        HNSW artifact (used for the "reused byte-for-byte" result), read
+        directly from ``collection_meta.json['hnsw_index']['vector_count']``.
+        Fail-safe: returns 0 on any read/parse/shape error (never raises) --
+        acceptable here because this is purely a REPORTING value; the
+        artifact's actual validity was already proven by
+        ``validate_hnsw_artifact_for_reuse`` before this is called.
+        """
+        meta_file = collection_path / "collection_meta.json"
+        try:
+            with open(meta_file) as f:
+                metadata = json.load(f)
+            if not isinstance(metadata, dict):
+                raise ValueError("collection_meta.json did not parse to a dict")
+            hnsw_info = metadata.get("hnsw_index")
+            if not isinstance(hnsw_info, dict):
+                raise ValueError("hnsw_index metadata section is not a dict")
+            return int(hnsw_info.get("vector_count", 0))
+        except (
+            OSError,
+            json.JSONDecodeError,
+            TypeError,
+            ValueError,
+            AttributeError,
+        ) as exc:
+            self.logger.debug(
+                "Could not read published HNSW vector_count for %s: %s (reporting 0)",
+                collection_path,
+                exc,
+            )
+            return 0
+
+    def _perform_full_filtered_rebuild(
+        self,
+        # Any: HNSWIndexManager itself types its hnswlib.Index handle as
+        # Any (a C extension with no Python type stubs) -- matching that
+        # existing convention rather than inventing a narrower type here.
+        hnsw_manager: Any,
+        collection_path: Path,
+        session: Optional[HNSWSyncSession],
+        progress_callback: Optional[Any],
+        clear_stale: bool,
+        layout_override: Optional[ChunkLayout],
+    ) -> int:
+        """Bug #1575 Part C: perform a full rebuild using the SESSION's
+        branch-filter context when available (a "full FILTERED rebuild",
+        the decision algorithm's fail-safe branch) -- ``lock_already_held``
+        because the caller already holds ``.index_rebuild.lock`` for the
+        whole decision.
+        """
+        visible_files = None
+        current_branch = None
+        if session is not None and session.branch_context_set:
+            visible_files = session.visible_files
+            current_branch = session.current_branch
+        return int(
+            hnsw_manager.rebuild_from_vectors(
+                collection_path=collection_path,
+                progress_callback=progress_callback,
+                visible_files=visible_files,
+                current_branch=current_branch,
+                clear_stale=clear_stale,
+                layout_override=layout_override,
+                project_root=self.project_root,
+                lock_already_held=True,
+            )
+        )
+
+    def _finish_full_rebuild(
+        self,
+        # Any: HNSWIndexManager types its hnswlib.Index handle as Any (a C
+        # extension with no Python type stubs) -- matching that convention.
+        hnsw_manager: Any,
+        collection_path: Path,
+        collection_name: str,
+        session: Optional[HNSWSyncSession],
+        prior: Optional[HNSWSyncState],
+        progress_callback: Optional[Any],
+        clear_stale: bool,
+        layout_override: Optional[ChunkLayout],
+        layout: ChunkLayout,
+        reason: str,
+        force_unfiltered: bool = False,
+    ) -> Dict[str, Any]:
+        """Bug #1575 Part C: full rebuild -- UNFILTERED when
+        ``force_unfiltered`` (Bug #1407 Amendment 3 parity), else
+        session-FILTERED -- then publish a clean epoch and discard the
+        session.
+        """
+        if force_unfiltered:
+            with self._id_index_lock:
+                if collection_name in self._indexing_session_changes:
+                    del self._indexing_session_changes[collection_name]
+            count = hnsw_manager.rebuild_from_vectors(
+                collection_path=collection_path,
+                progress_callback=progress_callback,
+                clear_stale=clear_stale,
+                layout_override=layout_override,
+                lock_already_held=True,
+            )
+            current_branch = None
+        else:
+            count = self._perform_full_filtered_rebuild(
+                hnsw_manager,
+                collection_path,
+                session,
+                progress_callback,
+                clear_stale,
+                layout_override,
+            )
+            current_branch = session.current_branch if session else None
+
+        new_epoch = prior.mutation_epoch if prior is not None else 1
+        self._publish_clean_hnsw_sync(
+            collection_path, new_epoch, current_branch, layout
+        )
+        self._discard_hnsw_sync_session(collection_path)
+        return {
+            "vector_count": count,
+            "action": _ACTION_FULL_REBUILD,
+            "reason": reason,
+        }
+
+    def _try_reuse_clean_epoch(
+        self,
+        collection_path: Path,
+        hnsw_manager: Any,
+        session: Optional[HNSWSyncSession],
+    ) -> Optional[Dict[str, Any]]:
+        """Bug #1575 Part C: attempt byte-for-byte reuse for a clean epoch.
+        Never propagates an unexpected exception from the validator --
+        treated as "cannot prove reusable" (the uniform fail-safe contract).
+        Returns None to signal the caller must fall back to a full rebuild.
+        """
+        expected_branch = session.current_branch if session else None
+        expected_filtered = bool(session and session.branch_context_set)
+        try:
+            ok, why = hnsw_manager.validate_hnsw_artifact_for_reuse(
+                collection_path,
+                expected_branch=expected_branch,
+                expected_filtered=expected_filtered,
+            )
+        except Exception as exc:
+            ok, why = False, f"validation raised: {exc}"
+        if not ok:
+            self.logger.info("HNSW reuse rejected for %s: %s", collection_path, why)
+            return None
+        vector_count = self._read_published_hnsw_vector_count(collection_path)
+        self._discard_hnsw_sync_session(collection_path)
+        return {
+            "vector_count": vector_count,
+            "action": _ACTION_REUSED,
+            "reason": "clean epoch, valid artifact",
+        }
+
+    def _try_incremental_dirty_epoch(
+        self,
+        collection_name: str,
+        collection_path: Path,
+        session: Optional[HNSWSyncSession],
+        prior: HNSWSyncState,
+        progress_callback: Optional[Any],
+        clear_stale: bool,
+        layout_override: Optional[ChunkLayout],
+        layout: ChunkLayout,
+        subdirectory: Optional[str],
+    ) -> Optional[Dict[str, Any]]:
+        """Bug #1575 Part C: attempt the visibility-aware incremental
+        update for a dirty epoch. Returns None (fall back to full rebuild)
+        on any failure -- AC27b: never publish a partial index.
+        """
+        if session is None:
+            return None  # unreachable in practice; fail safe, never crash
+        try:
+            incremental_result = self._apply_visibility_aware_incremental_update(
+                collection_name=collection_name,
+                collection_path=collection_path,
+                session=session,
+                progress_callback=progress_callback,
+                clear_stale=clear_stale,
+                layout_override=layout_override,
+                subdirectory=subdirectory,
+            )
+        except Exception as exc:
+            self.logger.info(
+                "Visibility-aware incremental update raised for %s: %s",
+                collection_name,
+                exc,
+            )
+            return None
+        if incremental_result is None:
+            return None
+        self._publish_clean_hnsw_sync(
+            collection_path, prior.mutation_epoch, session.current_branch, layout
+        )
+        self._discard_hnsw_sync_session(collection_path)
+        return {
+            "vector_count": incremental_result["vectors"],
+            "action": _ACTION_INCREMENTAL,
+            "reason": "visibility-aware incremental update",
+        }
+
+    def _prepare_hnsw_sync_context(
+        self, collection_name: str, subdirectory: Optional[str]
+    ) -> Tuple[Path, Any, Any, ChunkLayout, Optional[ChunkLayout]]:
+        """Bug #1575 Part C: resolve the layout/manager/rebuilder context
+        shared by every branch of the decision engine.
+
+        The two ``Any``-typed return slots are ``HNSWIndexManager`` and
+        ``BackgroundIndexRebuilder`` instances -- typed ``Any`` here purely
+        because both classes are constructed via LAZY imports (two lines
+        below) to avoid an eager module-level import, not because a
+        concrete type is unavailable.
+        """
+        collection_path = self._get_collection_path(collection_name, subdirectory)
+        vector_size = self._get_vector_size(collection_name, subdirectory)
+        is_chunks_db = self._is_chunks_db_collection(collection_name, collection_path)
+        layout = ChunkLayout.CHUNKS_DB if is_chunks_db else ChunkLayout.SHARDED_JSON
+        layout_override = layout if is_chunks_db else None
+
+        from .hnsw_index_manager import HNSWIndexManager
+        from .background_index_rebuilder import BackgroundIndexRebuilder
+
+        hnsw_manager = HNSWIndexManager(
+            vector_dim=vector_size, space="cosine", num_threads=self._hnsw_num_threads
+        )
+        rebuilder = BackgroundIndexRebuilder(collection_path)
+        return collection_path, hnsw_manager, rebuilder, layout, layout_override
+
+    def _attempt_reuse_or_incremental(
+        self,
+        hnsw_manager: Any,
+        collection_path: Path,
+        collection_name: str,
+        session: Optional[HNSWSyncSession],
+        prior: HNSWSyncState,
+        progress_callback: Optional[Any],
+        clear_stale: bool,
+        layout_override: Optional[ChunkLayout],
+        layout: ChunkLayout,
+        subdirectory: Optional[str],
+    ) -> Optional[Dict[str, Any]]:
+        """Bug #1575 Part C: tiny dispatcher -- a clean epoch tries reuse, a
+        dirty epoch tries the visibility-aware incremental update. Returns
+        None (caller falls back to a full rebuild) when the attempted path
+        fails.
+        """
+        if prior.mutation_epoch == prior.published_epoch:
+            return self._try_reuse_clean_epoch(collection_path, hnsw_manager, session)
+        return self._try_incremental_dirty_epoch(
+            collection_name,
+            collection_path,
+            session,
+            prior,
+            progress_callback,
+            clear_stale,
+            layout_override,
+            layout,
+            subdirectory,
+        )
+
+    def _resolve_and_publish_hnsw_sync(
+        self,
+        collection_name: str,
+        subdirectory: Optional[str] = None,
+        # progress_callback: Optional[Any] matches this file's existing
+        # established convention for this exact parameter name (see the
+        # pre-existing rebuild_hnsw_filtered/end_indexing signatures).
+        progress_callback: Optional[Any] = None,
+        force_full_rebuild: bool = False,
+        clear_stale: bool = True,
+    ) -> Dict[str, Any]:
+        """Bug #1575 Part C -- the visibility-epoch decision engine. Called
+        by both ``end_indexing()`` and ``rebuild_hnsw_filtered()``. Acquires
+        ``.index_rebuild.lock`` ONCE for the whole decision (AC24/AC45).
+        """
+        collection_path, hnsw_manager, rebuilder, layout, layout_override = (
+            self._prepare_hnsw_sync_context(collection_name, subdirectory)
+        )
+
+        with rebuilder.acquire_lock():
+            prior = read_hnsw_sync_state(collection_path)
+            session_key = self._hnsw_sync_session_key(collection_path)
+            with self._hnsw_sync_sessions_lock:
+                session = self._hnsw_sync_sessions.get(session_key)
+
+            try:
+                if force_full_rebuild:
+                    return self._finish_full_rebuild(
+                        hnsw_manager,
+                        collection_path,
+                        collection_name,
+                        session,
+                        prior,
+                        progress_callback,
+                        clear_stale,
+                        layout_override,
+                        layout,
+                        "force_full_rebuild requested (unfiltered)",
+                        force_unfiltered=True,
+                    )
+
+                reason = self._resolve_hnsw_rebuild_reason(prior, session)
+                if reason is None:
+                    assert prior is not None
+                    result = self._attempt_reuse_or_incremental(
+                        hnsw_manager,
+                        collection_path,
+                        collection_name,
+                        session,
+                        prior,
+                        progress_callback,
+                        clear_stale,
+                        layout_override,
+                        layout,
+                        subdirectory,
+                    )
+                    if result is not None:
+                        return result
+                    reason = "reuse/incremental attempt failed"
+
+                return self._finish_full_rebuild(
+                    hnsw_manager,
+                    collection_path,
+                    collection_name,
+                    session,
+                    prior,
+                    progress_callback,
+                    clear_stale,
+                    layout_override,
+                    layout,
+                    reason,
+                )
+            except Exception:
+                # A failure anywhere in the decision/build/publish sequence
+                # must not leave a stale in-memory session lingering for a
+                # SUBSEQUENT begin_indexing() call in the SAME process (it
+                # would otherwise reference sets from an abandoned
+                # _indexing_session_changes generation). The durable
+                # on-disk hnsw_sync state is unaffected -- already dirty
+                # from the mutation -- so the next attempt safely forces a
+                # full rebuild via the "no session tracked" fail-safe path.
+                self._discard_hnsw_sync_session(collection_path)
+                raise
 
     def rebuild_hnsw_filtered(
         self,
@@ -1320,90 +2114,41 @@ class FilesystemVectorStore:
         progress_callback: Optional[Any] = None,
         current_branch: Optional[str] = None,
     ) -> int:
-        """Rebuild HNSW index with only visible files (branch isolation).
+        """Bug #1575 Part C: thin compatibility wrapper. Registers branch
+        context via ``set_hnsw_branch_context()`` then IMMEDIATELY resolves
+        and publishes via the SAME decision engine ``end_indexing()`` uses
+        -- required for standalone callers with NO surrounding
+        ``begin_indexing()``/``end_indexing()`` bracket (e.g. the
+        golden-repo post-CoW-branch belt-and-suspenders cleanup), which
+        still expect this call to perform the decision synchronously and
+        return the resulting vector count.
 
-        Called during branch isolation to eliminate ghost vectors from the HNSW
-        index WITHOUT deleting the underlying vector JSON files. This preserves
-        expensive VoyageAI embeddings on disk while ensuring only visible-branch
-        vectors appear in search results.
-
-        Sets _branch_isolation_did_filtered_rebuild=True so that end_indexing()
-        skips its own full rebuild (which would restore ghost vectors).
-
-        Args:
-            collection_name: Name of the collection to rebuild
-            visible_files: Set of file paths (payload.path values) to include.
-                          Vectors for files NOT in this set are excluded from HNSW.
-            subdirectory: Optional subdirectory for the collection
-            progress_callback: Optional progress callback
-            current_branch: Optional branch name (Bug #306). When provided, stored
-                           in HNSW metadata so query-time rebuilds after CoW snapshot
-                           can use hidden_branches filtering instead of rebuilding
-                           from all vectors.
-
-        Returns:
-            Number of vectors included in the filtered index
-
-        Note:
-            NEVER deletes vector JSON files. Only filters which vectors appear
-            in the HNSW index used for search. Vector files remain intact for
-            when those branches are switched back to.
+        The git-aware refresh path (``hide_files_not_in_branch_thread_safe``)
+        no longer calls this method directly -- it calls
+        ``set_hnsw_branch_context()`` and lets the SAME
+        ``begin_indexing()``/``end_indexing()`` bracket's ``end_indexing()``
+        call decide.
         """
-        from .hnsw_index_manager import HNSWIndexManager
-
         collection_path = self._get_collection_path(collection_name, subdirectory)
-        vector_size = self._get_vector_size(collection_name, subdirectory)
 
-        # Story #1456 AC1: this runs BEFORE end_indexing() commits the
-        # discriminator (branch isolation fires ahead of finalization), so
-        # the bare resolver alone would still see SHARDED_JSON during a
-        # fresh CHUNKS_DB build -- must use the combined
-        # _is_chunks_db_collection authority via an explicit override,
-        # exactly like end_indexing()'s own rebuild_from_vectors() calls.
-        from code_indexer.storage.shared.chunk_layout import (
-            ChunkLayout,
-            resolve_chunk_layout,
+        self.set_hnsw_branch_context(
+            collection_name, current_branch, visible_files, subdirectory=subdirectory
         )
 
-        layout_override = (
-            ChunkLayout.CHUNKS_DB
-            if self._is_chunks_db_collection(collection_name, collection_path)
-            else None
-        )
-
-        hnsw_manager = HNSWIndexManager(vector_dim=vector_size, space="cosine")
-        count = hnsw_manager.rebuild_from_vectors(
-            collection_path=collection_path,
+        result = self._resolve_and_publish_hnsw_sync(
+            collection_name,
+            subdirectory=subdirectory,
             progress_callback=progress_callback,
-            visible_files=visible_files,
-            current_branch=current_branch,
-            layout_override=layout_override,
-            # Codex review follow-up (Bug #1575 Part A, CRITICAL finding
-            # 2): visible_files is always relative -- an absolute stored
-            # payload.path must be normalized against project_root before
-            # the membership check, or it is silently (and incorrectly)
-            # always excluded.
-            project_root=self.project_root,
         )
+        count = int(result["vector_count"])
 
-        # Signal end_indexing() to skip its own rebuild (would overwrite filtered rebuild)
-        self._branch_isolation_did_filtered_rebuild = True
+        from code_indexer.storage.shared.chunk_layout import resolve_chunk_layout
 
         # Story #1458 AC11: invalidate() must target the EXACT key search()'s
-        # get_or_load() stored the entry under, which embeds the freshly
-        # (uncached) resolved chunks_db layout token -- NOT the in-memory
-        # layout_override computed above (that reflects THIS session's
-        # fresh-build intent, which can diverge from the on-disk resolver
-        # search() actually keys against). Using a mismatched key here would
-        # make invalidate() a silent no-op once the key format includes the
-        # layout token.
+        # get_or_load() stored the entry under, freshly resolved (not an
+        # in-session build-intent value, which can diverge from what
+        # search() actually keys against).
         _invalidate_layout_token = resolve_chunk_layout(collection_path).value
-
-        # Invalidate HNSW cache if present (server-side cache must be refreshed)
-        # Codex Finding #9 (MEDIUM): .resolve() here, matching search()'s
-        # OWN key composition -- a non-canonical (e.g. symlinked) base_path
-        # would otherwise make invalidate() compose a DIFFERENT key than
-        # search() stored under, a silent no-op eviction.
         if self.hnsw_index_cache is not None:
             self.hnsw_index_cache.invalidate(
                 self._activation_scoped_cache_key(
@@ -1411,7 +2156,6 @@ class FilesystemVectorStore:
                     chunk_layout_token=_invalidate_layout_token,
                 )
             )
-        # Bug #1078: invalidate id_index cache in lockstep with HNSW (same rebuild event)
         if self.id_index_cache is not None:
             self.id_index_cache.invalidate(
                 self._activation_scoped_cache_key(
@@ -1421,8 +2165,9 @@ class FilesystemVectorStore:
             )
 
         self.logger.info(
-            f"Filtered HNSW rebuild complete for '{collection_name}': "
-            f"{count} visible vectors (from {len(visible_files)} visible files)"
+            f"HNSW filtered rebuild (compat wrapper) complete for "
+            f"'{collection_name}': {count} vectors "
+            f"({result['action']}: {result['reason']})"
         )
 
         return count
@@ -1638,8 +2383,10 @@ class FilesystemVectorStore:
         orphan_ids: List[str] = []
         with self._path_index_lock:
             if _upsert_cdb_path_cache_key not in self._path_indexes:
-                self._path_indexes[_upsert_cdb_path_cache_key] = self._load_path_index(
-                    collection_name
+                self._path_indexes[_upsert_cdb_path_cache_key] = (
+                    self._lazy_load_path_index_tracked(
+                        collection_name, _upsert_cdb_path_cache_key
+                    )
                 )
             path_index = self._path_indexes[_upsert_cdb_path_cache_key]
 
@@ -1740,6 +2487,25 @@ class FilesystemVectorStore:
                 orphan_ids
             )
 
+        # Bug #1575 round 6, item 4 (Codex claim, confirmed real by
+        # investigation): this method returns directly from
+        # upsert_points()'s early CHUNKS_DB dispatch, so it never reaches
+        # the SHARDED_JSON-only Gap D persist further down in
+        # upsert_points() itself. An out-of-session upsert here (e.g.
+        # watch mode) mutates the live in-memory PathIndex for orphan/dedup
+        # detection but, pre-fix, never persisted that update to
+        # path_index.bin -- leaving the on-disk bin stale across a process
+        # boundary exactly like the SHARDED_JSON/delete-side gaps this
+        # story already closed. Gated via
+        # _persist_out_of_session_path_index() (same provenance discipline
+        # as Gap D/B): never blindly persists an unproven/partial picture.
+        if points and collection_name not in self._indexing_session_changes:
+            self._persist_out_of_session_path_index(
+                collection_name,
+                _upsert_cdb_path_cache_key,
+                subdirectory,
+            )
+
         return {"status": "ok", "count": len(points)}
 
     def upsert_points(
@@ -1793,6 +2559,10 @@ class FilesystemVectorStore:
 
         if not self.collection_exists(collection_name, subdirectory):
             raise ValueError(f"Collection '{collection_name}' does not exist")
+
+        # Bug #1575 Part C: dirty-before-write -- durably mark the hnsw_sync
+        # epoch dirty BEFORE any of this call's storage mutations happen.
+        self._mark_hnsw_dirty_before_mutation(collection_path, collection_name)
 
         # Story #1456: CHUNKS_DB collections take a completely separate,
         # simpler write path (no quantization/hex-path directory sharding
@@ -1915,8 +2685,10 @@ class FilesystemVectorStore:
             # CRITICAL FIX (Story #540 Code Review): Lazy-load path index if not already loaded
             # This handles watch mode scenario where upsert_points can be called WITHOUT begin_indexing()
             if _upsert_cache_key not in self._path_indexes:
-                self._path_indexes[_upsert_cache_key] = self._load_path_index(
-                    collection_name
+                self._path_indexes[_upsert_cache_key] = (
+                    self._lazy_load_path_index_tracked(
+                        collection_name, _upsert_cache_key
+                    )
                 )
 
             path_index = self._path_indexes[_upsert_cache_key]
@@ -2113,6 +2885,23 @@ class FilesystemVectorStore:
                 # Check if point existed before (for change tracking)
                 point_existed = point_id in self._id_index.get(_upsert_cache_key, {})
 
+                # Bug #1579: capture the point's PREVIOUS on-disk vector_file
+                # path BEFORE it gets overwritten below. The directory a
+                # point_id lands in is derived from its VECTOR (quantized
+                # projection), while the filename is derived from the
+                # point_id itself -- so a re-upsert of the same point_id with
+                # a marginally different vector can quantize to a DIFFERENT
+                # directory, leaving the OLD file behind as a "shifted
+                # duplicate" sharing the same point_id. This is distinct from
+                # the orphan-cleanup mechanism above (STEP 1-3): that only
+                # fires when a point_id vanishes entirely from a file's chunk
+                # set (in old_point_ids but not new_point_ids) -- a
+                # persisting-but-relocated point_id is never in
+                # orphan_point_ids since it stays in new_point_ids.
+                previous_vector_file = self._id_index.get(_upsert_cache_key, {}).get(
+                    point_id
+                )
+
                 self._id_index[_upsert_cache_key][point_id] = vector_file
 
                 # Update file path cache.
@@ -2134,6 +2923,18 @@ class FilesystemVectorStore:
                         self._indexing_session_changes[collection_name]["added"].add(
                             point_id
                         )
+
+            # Bug #1579: delete the stale prior-location file for a relocated
+            # point_id OUTSIDE the id_index lock (I/O should not happen while
+            # holding _id_index_lock, matching this file's lock-minimizing
+            # convention used above for orphan-cleanup deletions).
+            if previous_vector_file is not None and previous_vector_file != vector_file:
+                try:
+                    if previous_vector_file.exists():
+                        previous_vector_file.unlink()
+                except FileNotFoundError:
+                    # File already deleted by another thread - safe to ignore
+                    pass
 
             # Story #540: Update path index with new point_id
             with self._path_index_lock:
@@ -2168,6 +2969,36 @@ class FilesystemVectorStore:
         # id_to_file enumeration -- evict it so the NEXT continuation page
         # observes this write, instead of silently freezing a page-1 snapshot.
         self._invalidate_scroll_sharded_json_cache(collection_name, subdirectory)
+
+        # Bug #1575 Gap D: mirrors delete_points()'s Round 3 Fix B for the
+        # insertion side. An upsert with NO active indexing session for
+        # this collection (e.g. watch mode, or any other out-of-session
+        # upsert_points() call) is never followed by an end_indexing()
+        # call that would otherwise persist this update to
+        # path_index.bin -- leaving the on-disk bin stale across a process
+        # boundary, exactly like the delete-side gap. Persist immediately
+        # so a LATER session's begin_indexing() loads an accurate picture
+        # for Part B's (Story #540) cross-session duplicate-prevention
+        # (_calculate_and_save_unique_file_count() no longer consults this
+        # cache at all -- that fast-path trust was abandoned entirely).
+        # Called OUTSIDE _path_index_lock: _save_path_index() nests
+        # _id_index_lock for this (SHARDED_JSON) layout, and the B1
+        # lock-order invariant requires this method to never hold both
+        # locks simultaneously.
+        #
+        # Round 6 (opus/Codex CRITICAL finding): the live in-memory
+        # PathIndex here is only safe to persist AS-IS when it was proven
+        # complete (loaded from an existing bin, or previously repaired) --
+        # _persist_out_of_session_path_index() gates on
+        # self._path_index_loaded_from_file and forces an authoritative
+        # rebuild-and-repair otherwise, never blindly writing an
+        # unproven/partial picture that could undercount the collection.
+        if points and collection_name not in self._indexing_session_changes:
+            self._persist_out_of_session_path_index(
+                collection_name,
+                _upsert_cache_key,
+                subdirectory,
+            )
 
         # Return success - index rebuilding now happens in end_indexing() (O(n) not O(n²))
         # This fixes the performance disaster where we rebuilt indexes after EVERY file.
@@ -2256,6 +3087,21 @@ class FilesystemVectorStore:
         # resolver) so this is correct even mid-build, before end_indexing()
         # commits the discriminator.
         collection_path = self._get_collection_path(collection_name)
+
+        # Bug #1575 Part C: dirty-before-write -- durably mark the hnsw_sync
+        # epoch dirty BEFORE any of this call's storage mutations happen.
+        self._mark_hnsw_dirty_before_mutation(collection_path, collection_name)
+
+        # Resolved via _active_subdirectories (this method has no
+        # subdirectory param) so a nested collection's delete targets its
+        # OWN _id_index/_path_indexes cache entry, never a bare-name
+        # top-level collision. Computed ONCE, shared by both the CHUNKS_DB
+        # and SHARDED_JSON branches below.
+        _delete_points_subdirectory = self._active_subdirectories.get(collection_name)
+        _delete_points_cache_key = self._id_cache_key(
+            collection_name, _delete_points_subdirectory
+        )
+
         if self._is_chunks_db_collection(collection_name, collection_path):
             from code_indexer.storage.sqlite_chunk_store import (
                 open_chunk_store_for_path,
@@ -2264,14 +3110,67 @@ class FilesystemVectorStore:
             chunk_store = open_chunk_store_for_path(
                 collection_path / "chunks.db", str(collection_path)
             )
+            path_idx = None
             try:
-                deleted_count = chunk_store.delete(point_ids)
+                # Bug #1575 Finding-1-regression fix: a point's path is
+                # unrecoverable once its row is deleted, so it MUST be
+                # resolved BEFORE calling delete() -- never after -- to
+                # keep the live in-memory PathIndex in sync (mirroring
+                # what the SHARDED_JSON branch below already does).
+                point_paths = chunk_store.get_paths_for_points(point_ids)
+                # Bug #1575 Part A Round 3, Fix C: hold _path_index_lock
+                # across BOTH the SQLite delete commit and the in-memory
+                # PathIndex removal so a concurrent upsert_points() call
+                # for the SAME collection (which holds this SAME lock
+                # while mutating self._path_indexes -- see
+                # _upsert_points_chunks_db) can never interleave between
+                # the DB delete committing and the cache reflecting it.
+                # Reproduced without this: the DB and the live PathIndex
+                # briefly disagreeing on the same point_id.
+                with self._path_index_lock:
+                    deleted_count = chunk_store.delete(point_ids)
+                    if point_paths:
+                        if _delete_points_cache_key not in self._path_indexes:
+                            self._path_indexes[_delete_points_cache_key] = (
+                                self._lazy_load_path_index_tracked(
+                                    collection_name, _delete_points_cache_key
+                                )
+                            )
+                        path_idx = self._path_indexes[_delete_points_cache_key]
+                        for point_id, file_path in point_paths.items():
+                            path_idx.remove_point(file_path, point_id)
             finally:
                 chunk_store.close()
 
             if deleted_count > 0 and collection_name in self._indexing_session_changes:
                 self._indexing_session_changes[collection_name]["deleted"].update(
                     point_ids
+                )
+
+            # Bug #1575 Part A Round 3, Fix B: a delete with NO active
+            # indexing session for this collection is never followed by an
+            # end_indexing() call that would otherwise persist this update
+            # to path_index.bin (e.g. smart_indexer.py's reconcile path and
+            # watch-mode deletion-only batch handling, both of which call
+            # delete_file_branch_aware() -> delete_by_filter() ->
+            # delete_points() and return BEFORE begin_indexing() is ever
+            # called). Persist immediately so the on-disk bin never goes
+            # stale across a process boundary. Called OUTSIDE
+            # _path_index_lock: _save_path_index() nests _id_index_lock for
+            # the SHARDED_JSON layout, and the B1 lock-order invariant
+            # above requires delete_points() to never hold both locks
+            # simultaneously.
+            #
+            # Round 6: gated via _persist_out_of_session_path_index() --
+            # see the identical rationale at Gap D's upsert-side persist.
+            if (
+                path_idx is not None
+                and collection_name not in self._indexing_session_changes
+            ):
+                self._persist_out_of_session_path_index(
+                    collection_name,
+                    _delete_points_cache_key,
+                    _delete_points_subdirectory,
                 )
 
             return {"status": "ok", "deleted": deleted_count}
@@ -2281,15 +3180,6 @@ class FilesystemVectorStore:
         # Applied AFTER releasing _id_index_lock to avoid nesting
         # _path_index_lock inside _id_index_lock (ABBA deadlock risk — B1).
         path_index_removals = []
-
-        # Resolved via _active_subdirectories (this method has no
-        # subdirectory param) so a nested collection's delete targets its
-        # OWN _id_index/_path_indexes cache entry, never a bare-name
-        # top-level collision.
-        _delete_points_subdirectory = self._active_subdirectories.get(collection_name)
-        _delete_points_cache_key = self._id_cache_key(
-            collection_name, _delete_points_subdirectory
-        )
 
         with self._id_index_lock:
             if _delete_points_cache_key not in self._id_index:
@@ -2344,10 +3234,41 @@ class FilesystemVectorStore:
         # This eliminates the nested lock acquisition that caused the ABBA deadlock.
         if path_index_removals:
             with self._path_index_lock:
-                if _delete_points_cache_key in self._path_indexes:
-                    path_idx = self._path_indexes[_delete_points_cache_key]
-                    for file_path, point_id in path_index_removals:
-                        path_idx.remove_point(file_path, point_id)
+                # Bug #1575 Finding-1-regression fix: a bare "is the cache
+                # key already present" check silently SKIPPED the update
+                # when delete_points() is called with no prior lazy
+                # population (e.g. delete_by_filter()'s real call pattern,
+                # which never calls begin_indexing()/upsert_points() first)
+                # -- leaving the stale on-disk path_index.bin to resurface
+                # the deleted file on the next session. Load it first
+                # instead, mirroring the SAME lazy-population idiom
+                # upsert_points()/begin_indexing() already use.
+                if _delete_points_cache_key not in self._path_indexes:
+                    self._path_indexes[_delete_points_cache_key] = (
+                        self._lazy_load_path_index_tracked(
+                            collection_name, _delete_points_cache_key
+                        )
+                    )
+                path_idx = self._path_indexes[_delete_points_cache_key]
+                for file_path, point_id in path_index_removals:
+                    path_idx.remove_point(file_path, point_id)
+
+            # Bug #1575 Part A Round 3, Fix B: persist immediately when
+            # there is no active indexing session for this collection --
+            # see the CHUNKS_DB branch above for the full rationale. Called
+            # OUTSIDE _path_index_lock (already released by this point) to
+            # respect the B1 lock-order invariant: _save_path_index() nests
+            # _id_index_lock for this (SHARDED_JSON) layout, and
+            # delete_points() must never hold both locks simultaneously.
+            #
+            # Round 6: gated via _persist_out_of_session_path_index() --
+            # see the identical rationale at Gap D's upsert-side persist.
+            if collection_name not in self._indexing_session_changes:
+                self._persist_out_of_session_path_index(
+                    collection_name,
+                    _delete_points_cache_key,
+                    _delete_points_subdirectory,
+                )
 
         return {"status": "ok", "deleted": deleted}
 
@@ -2718,7 +3639,23 @@ class FilesystemVectorStore:
         collection_path = self._get_collection_path(collection_name, subdirectory)
         path_index_file = collection_path / "path_index.bin"
 
-        path_index.save(path_index_file)
+        # Bug #1575 unlocked-save race (dual-review Fix 3, both Claude
+        # opus and Codex independently reproduced): path_index is
+        # frequently the SAME live, still-mutable object registered in
+        # self._path_indexes -- PathIndex.save() iterated its internal
+        # dict/sets directly, so a concurrent add_point()/remove_point()
+        # call (from another upsert_points()/delete_points() call for the
+        # SAME collection, arriving after this method's caller released
+        # _path_index_lock) could mutate the dict/set mid-iteration,
+        # raising "RuntimeError: dictionary changed size during
+        # iteration". Snapshotting under _path_index_lock first --
+        # mirroring this SAME method's own id_index_copy idiom a few
+        # lines below -- then writing the snapshot outside the lock
+        # preserves the B1 lock-ordering invariant (no lock held during
+        # I/O) while eliminating the torn read.
+        with self._path_index_lock:
+            path_index_snapshot = path_index.snapshot()
+        PathIndex.save_snapshot(path_index_snapshot, path_index_file)
 
         # Story #1456 AC7: CHUNKS_DB collections never write id_index.bin --
         # path_index.bin above is unaffected/preserved, but the legacy
@@ -3028,6 +3965,8 @@ class FilesystemVectorStore:
         # Uses the combined _is_chunks_db_collection authority (not the bare
         # resolver) so this is correct even mid-build, before end_indexing()
         # commits the discriminator.
+        from .id_index_manager import IDIndexManager
+
         collection_path = self._get_collection_path(collection_name, subdirectory)
         if self._is_chunks_db_collection(collection_name, collection_path):
             return self._get_point_from_chunk_store(collection_path, point_id)
@@ -3052,6 +3991,91 @@ class FilesystemVectorStore:
             index = self._id_index[cache_key]
 
             vector_file = index.get(point_id)
+            if (
+                vector_file is None
+                and cache_key not in self._id_index_reactive_rebuild_done
+            ):
+                # Bug #1583: id_index.bin is a CACHE, not an authority -- a
+                # vector_*.json file written outside the normal
+                # upsert_points()/end_indexing() write path (or a crash
+                # between writing the vector file and persisting the
+                # updated id_index.bin) can leave a genuinely-present point
+                # invisible to this lookup. Detected REACTIVELY here, only
+                # on an actual miss, rather than eagerly inside
+                # _load_id_index() on every load: an eager per-load
+                # directory scan was tried first and rejected during
+                # review -- it broke Bug #677's zero-rglob-on-the-fast-path
+                # invariant (test_path_index_fast_path_after_reload, which
+                # resolves point data via this SAME get_point() call from
+                # scroll_points()'s PathIndex fast path) and, at fleet
+                # scale (some repos have hundreds of thousands of
+                # vector_*.json files -- see the Chunk Storage Layout
+                # notes), would have turned every single cold collection
+                # load into a full directory walk. This reactive form pays
+                # the rebuild cost only on a genuine miss, and the
+                # _id_index_reactive_rebuild_done marker caps that cost at
+                # ONE rebuild per collection per process, so a lookup for a
+                # point_id that legitimately never existed does not
+                # re-trigger it on every call.
+                #
+                # Dual-review correction (Fix 1, opus HIGH/HIGH): the
+                # original fix called ``rebuild_from_vectors()``, which
+                # DURABLY WRITES ``id_index.bin`` and takes
+                # ``.index_rebuild.lock`` -- turning this READ-path method
+                # into a WRITE. On an immutable ``.versioned/`` snapshot
+                # (this project's hard invariant: NEVER modify
+                # ``.versioned/`` paths) that write can corrupt the
+                # snapshot. Use the side-effect-free
+                # ``scan_vectors_for_id_map()`` instead -- it NEVER reads or
+                # writes ``id_index.bin``. Any exception it raises (e.g.
+                # ``DuplicateSourceIdError`` from a genuine duplicate-source
+                # condition, or a ``PermissionError`` from a non-writable/
+                # unreadable directory) is caught here and degraded to a
+                # plain miss -- ``get_point()`` never raised on a simple
+                # miss before this mechanism existed, and it must not start
+                # now.
+                #
+                # Dual-review correction (Fix 2, Codex 99%): the marker is
+                # added to ``_id_index_reactive_rebuild_done`` ONLY AFTER
+                # the scan completes, and ONLY when the scan still does NOT
+                # find ``point_id`` -- never before the scan runs, and never
+                # on a successful heal. A FAILED scan (exception) must not
+                # permanently mark the collection done (the underlying
+                # problem may later be corrected), and a SUCCESSFUL heal for
+                # one point must not permanently disarm reactive rebuild for
+                # a DIFFERENT point written out-of-band later in the same
+                # process (proven by
+                # test_two_successive_bypass_writes_both_heal_in_same_process).
+                # Residual limitation, stated precisely: the marker is
+                # PER-COLLECTION (``cache_key``), not per-point_id. Once a
+                # scan has run and genuinely NOT found the requested
+                # point_id (a confirmed-negative outcome), the marker is set
+                # and NO further reactive scan runs for this cache_key in
+                # this process -- including for a DIFFERENT point later
+                # written out-of-band. Only a scan that FINDS the requested
+                # point_id, or a scan that FAILS (exception), leaves the
+                # marker unset and the collection eligible for a future
+                # reactive scan.
+                try:
+                    rebuilt_index = IDIndexManager().scan_vectors_for_id_map(
+                        collection_path
+                    )
+                except Exception as scan_exc:
+                    self.logger.warning(
+                        "get_point(): reactive id-index scan failed for "
+                        "collection %r (point_id=%r): %s -- degrading to a "
+                        "plain miss; a later lookup may retry once the "
+                        "underlying condition is corrected",
+                        collection_name,
+                        point_id,
+                        scan_exc,
+                    )
+                else:
+                    self._id_index[cache_key] = rebuilt_index
+                    index = rebuilt_index
+                    vector_file = index.get(point_id)
+                    if vector_file is None:
+                        self._id_index_reactive_rebuild_done.add(cache_key)
             if vector_file is not None and vector_file.exists():
                 try:
                     with open(vector_file) as f:
@@ -3177,7 +4201,170 @@ class FilesystemVectorStore:
         cached = self._get_live_session_path_index(collection_name, subdirectory)
         if cached is not None:
             return cached
-        return self._rebuild_path_index_from_disk(collection_name, subdirectory)
+        return self._rebuild_and_repair_path_index(collection_name, subdirectory)
+
+    def _rebuild_and_repair_path_index(
+        self, collection_name: str, subdirectory: Optional[str] = None
+    ) -> PathIndex:
+        """Bug #1575 Part A Round 3, Fix A: build the authoritative
+        PathIndex from disk (``_rebuild_path_index_from_disk`` already
+        persists it to ``path_index.bin``) AND repair the LIVE in-memory
+        ``self._path_indexes`` entry with that same complete result,
+        marking it ``_path_index_loaded_from_file = True``.
+
+        Closes Gap A (Codex, round 3): without this repair, a session that
+        starts with no ``path_index.bin`` on disk correctly falls back to
+        this same full scan for ITS OWN answer, but its own live
+        ``self._path_indexes`` entry is left as whatever THIS session's own
+        mutations happened to touch (empty, then only the files this
+        session's upserts/deletes touched) -- NOT the complete picture just
+        computed here. ``end_indexing()`` then unconditionally persists
+        that still-partial live entry to ``path_index.bin``, and a LATER
+        session sees the bin now exists and wrongly trusts it via the fast
+        path.
+
+        Repairing here means: whenever this (already expensive, O(N))
+        fallback runs, its result becomes the new live picture too -- so
+        any SAVE that happens afterwards (in this session or a later one)
+        persists the complete, correct picture instead of a partial one.
+        This mirrors the codebase's established self-healing philosophy
+        (Part C's hnsw_sync fail-safe design, the #1583 id_index reactive
+        rebuild): use the result of forced authoritative work to fix the
+        cache, don't just answer the immediate question and leave the
+        cache broken for next time.
+
+        Bug #1575 round 7 (opus dual-review, confirmed real): the repair
+        used to unconditionally SWAP ``self._path_indexes[cache_key]`` with
+        the freshly-rebuilt-from-disk object. If another thread/process
+        held a reference to the OLD live object and added a point to it
+        around the same time this method ran (e.g. a concurrent
+        out-of-session ``upsert_points()`` for the same collection), that
+        addition was silently discarded the instant the swap replaced the
+        dict entry -- the disk rescan can never see a point that was only
+        ever added in-memory (or whose file write is still in flight), so
+        the freshly-rebuilt object never carries it. Fixed by MERGING the
+        rebuilt picture INTO the existing live object (when one already
+        exists) instead of replacing it -- mirroring the PRE-EXISTING M2
+        fix's merge-not-swap approach already applied to
+        ``scroll_points()``'s lazy rebuild (that parity claim covers ONLY
+        the merge; see that method's own comment for the DISTINCT
+        before/after-snapshot prune mirror added there for THIS round-7
+        follow-up, and its documented residual gap -- the two mirrors were
+        not both true until then):
+        ``merge_from`` uses ``add_point`` (set semantics), so re-adding an
+        entry the live object already has is a safe no-op, while anything
+        the live object gained concurrently survives because the object's
+        IDENTITY in ``self._path_indexes`` is never replaced.
+
+        Bug #1575 round 7 follow-up (empirically caught by repeatedly
+        running ``test_filesystem_vector_store_1575_round3_gap_c_
+        concurrency.py``): a PURE union merge introduces the mirror-image
+        defect -- ``_rebuild_path_index_from_disk``'s scan runs WITHOUT
+        holding ``_path_index_lock``, so it can observe a STALE,
+        pre-deletion snapshot of disk if a concurrent ``delete_points()``
+        commits (DB row delete + in-memory ``remove_point``, atomic under
+        this same lock per Fix C) while the scan is in flight. Merging
+        that stale snapshot in afterwards would silently RESURRECT a point
+        this process just correctly deleted, disagreeing with the very
+        chunk store this scan just read.
+
+        Fixed by snapshotting the live object TWICE -- once immediately
+        before the disk scan starts, once immediately after it completes
+        (both under ``_path_index_lock``) -- and treating any point present
+        in the "before" snapshot but absent from the "after" snapshot as a
+        genuine concurrent deletion that must be pruned back out even if
+        the (possibly stale) disk scan still has it. Both snapshots are of
+        the SAME live object, and every production mutation of that object
+        (``add_point``/``remove_point``) is itself lock-protected, so any
+        mutation that ran during the scan window is captured EXACTLY by
+        this before/after delta, regardless of what the unlocked disk scan
+        happened to observe. A point added during the window is preserved
+        by the merge (already reflected in "after"); a point removed
+        during the window is pruned by this explicit step; anything
+        untouched during the window is answered correctly by the scan
+        itself, since a lock-protected mutation cannot straddle across
+        either lock acquisition here undetected.
+        """
+        cache_key = self._id_cache_key(collection_name, subdirectory)
+        with self._path_index_lock:
+            _pre_scan_live_index = self._path_indexes.get(cache_key)
+            before_snapshot = (
+                _pre_scan_live_index.snapshot()
+                if _pre_scan_live_index is not None
+                else None
+            )
+
+        rebuilt = self._rebuild_path_index_from_disk(collection_name, subdirectory)
+
+        with self._path_index_lock:
+            live_index = self._path_indexes.get(cache_key)
+            if live_index is None:
+                self._path_indexes[cache_key] = rebuilt
+            else:
+                self._merge_rebuilt_path_index_with_prune(
+                    cache_key, before_snapshot, rebuilt
+                )
+            self._path_index_loaded_from_file[cache_key] = True
+        # Deliberately return the PURE disk-authoritative `rebuilt` object,
+        # never the merged/cache-repaired `live_index` -- both existing
+        # callers (`_resolve_authoritative_path_index`,
+        # `_calculate_and_save_unique_file_count`'s SHARDED_JSON branch)
+        # invoke this method SPECIFICALLY because the live cache is not
+        # (or cannot be) trusted, and need an answer immune to whatever a
+        # stale/corrupted live entry might contain (project-owner decision,
+        # 6 dual-review rounds -- see
+        # ``test_filesystem_vector_store_1575_sharded_json_shortcut_
+        # abandoned.py``). The cache-side merge+prune above is a SEPARATE
+        # concern: it keeps ``self._path_indexes[cache_key]`` (consulted by
+        # Part B/Story #540's duplicate-prevention and other cache readers)
+        # from losing a genuine concurrent mutation to a swap, without
+        # letting that same cache leak into this method's own answer.
+        return rebuilt
+
+    def _merge_rebuilt_path_index_with_prune(
+        self,
+        cache_key: str,
+        before_snapshot: Optional[Dict[str, Set[str]]],
+        rebuilt: "PathIndex",
+    ) -> "PathIndex":
+        """Bug #1575 round 7 shared merge+prune step, extracted out of
+        :meth:`_rebuild_and_repair_path_index` so ``scroll_points()``'s
+        lazy-rebuild fast path (Bug #1575 Part 2) can reuse the identical
+        mechanism instead of duplicating it (Messi Rule #4).
+
+        Merges ``rebuilt`` (a freshly disk-scanned ``PathIndex``, whose
+        UNLOCKED scan may have observed a stale, pre-deletion view of disk)
+        into the LIVE ``self._path_indexes[cache_key]`` object, then prunes
+        any (path, point_id) pair present in ``before_snapshot`` but absent
+        from a freshly-recaptured "after" snapshot -- a point legitimately
+        removed by a concurrent ``delete_points()`` while the scan was in
+        flight. See :meth:`_rebuild_and_repair_path_index`'s own docstring
+        for the full round-7 rationale this mirrors exactly.
+
+        ``before_snapshot`` of ``None`` skips pruning entirely (mirrors
+        :meth:`_rebuild_and_repair_path_index`'s own
+        ``before_snapshot is not None`` guard -- there is nothing to prune
+        against when the caller had no live entry to snapshot before
+        starting the scan).
+
+        Must be called while holding ``_path_index_lock``, with
+        ``self._path_indexes[cache_key]`` already populated -- every
+        current call site guarantees this (this helper does not replicate
+        ``_rebuild_and_repair_path_index``'s separate ``live_index is
+        None`` branch).
+
+        Returns the same live object (mutated in place), for caller
+        convenience.
+        """
+        live_index = self._path_indexes[cache_key]
+        after_snapshot = live_index.snapshot()
+        live_index.merge_from(rebuilt)
+        if before_snapshot is not None:
+            for path, point_ids in before_snapshot.items():
+                removed_during_scan = point_ids - after_snapshot.get(path, set())
+                for point_id in removed_during_scan:
+                    live_index.remove_point(path, point_id)
+        return live_index
 
     def _get_live_session_path_index(
         self, collection_name: str, subdirectory: Optional[str] = None
@@ -3188,11 +4375,119 @@ class FilesystemVectorStore:
         :meth:`distinct_content_paths` share ONE implementation. Returns
         ``None`` when no active session for this collection proves the
         cached entry fresh (see the sibling docstring for the rationale).
+
+        NOT used by :meth:`_calculate_and_save_unique_file_count` -- that
+        method's SHARDED_JSON branch abandoned this fast-path trust
+        entirely (project-owner final decision, matching CHUNKS_DB's own
+        earlier revert) and always calls
+        :meth:`_rebuild_and_repair_path_index` unconditionally instead.
+
+        Bug #1575 Finding-1-regression fix (opus, reproduced): an ACTIVE
+        session alone is not sufficient. If ``path_index.bin`` did not
+        exist on disk when ``begin_indexing()`` ran, the in-memory
+        PathIndex was built EMPTY and only ever learns about the files
+        THIS session happens to touch -- trusting it as the whole
+        collection's picture produced a catastrophic undercount (a 10-file
+        collection with a missing path_index.bin reported
+        ``unique_file_count == 1`` after a session that touched only one
+        file). ``self._path_index_loaded_from_file`` (set unconditionally
+        by ``begin_indexing()``) is the "was this ever proven complete"
+        signal; absent a True value here, this returns ``None`` exactly
+        like the "no active session" case, and every caller already falls
+        back to a full, authoritative disk scan.
         """
         cache_key = self._id_cache_key(collection_name, subdirectory)
         with self._path_index_lock:
             has_active_session = collection_name in self._indexing_session_changes
-            return self._path_indexes.get(cache_key) if has_active_session else None
+            if not has_active_session:
+                return None
+            if not self._path_index_loaded_from_file.get(cache_key, False):
+                return None
+            return self._path_indexes.get(cache_key)
+
+    def _lazy_load_path_index_tracked(
+        self, collection_name: str, cache_key: str
+    ) -> PathIndex:
+        """Bug #1575 round 6 (opus/Codex dual review, CRITICAL item 1):
+        lazy-load ``path_index.bin`` for an OUT-OF-SESSION mutation (watch
+        mode, ``delete_by_filter()``'s reconcile path, or any other
+        ``upsert_points()``/``delete_points()`` call with no active
+        ``begin_indexing()`` session for this collection), recording
+        whether the bin actually existed on disk -- mirroring
+        ``begin_indexing()``'s own provenance bookkeeping into
+        ``self._path_index_loaded_from_file``.
+
+        Without this, every out-of-session lazy-load site left
+        ``_path_index_loaded_from_file`` unset for its cache_key (that dict
+        is otherwise populated ONLY by ``begin_indexing()`` and
+        ``_rebuild_and_repair_path_index()``), so Gap D's/Gap B's
+        out-of-session persist could not tell a genuinely complete,
+        freshly-loaded picture apart from one built EMPTY because
+        ``path_index.bin`` was missing -- and blindly persisting the
+        latter is the exact mechanism that reintroduced the round-2
+        catastrophic-undercount bug (a 25-file collection reduced to a
+        1-file ``path_index.bin`` after a single out-of-session upsert).
+
+        Must be called while already holding ``_path_index_lock`` (same
+        contract as ``_load_path_index``, which performs no locking of its
+        own).
+        """
+        subdirectory = self._active_subdirectories.get(collection_name)
+        collection_path = self._get_collection_path(collection_name, subdirectory)
+        bin_existed = (collection_path / "path_index.bin").exists()
+        self._path_index_loaded_from_file[cache_key] = bin_existed
+        return self._load_path_index(collection_name)
+
+    def _persist_out_of_session_path_index(
+        self,
+        collection_name: str,
+        cache_key: str,
+        subdirectory: Optional[str],
+    ) -> None:
+        """Bug #1575 round 6, item 1: the single shared decision for
+        persisting an out-of-session PathIndex mutation (Gap D's
+        upsert-side persist and Gap B's delete-side persist, both
+        SHARDED_JSON and CHUNKS_DB layouts).
+
+        Only persists the live in-memory PathIndex DIRECTLY when
+        ``self._path_index_loaded_from_file`` proves it was actually
+        loaded from an existing, presumed-complete bin (or previously
+        repaired by ``_rebuild_and_repair_path_index``) -- otherwise the
+        picture was never proven complete and forcing an authoritative
+        rebuild-and-repair is the only safe option: it streams the TRUE
+        on-disk picture (including whatever this call just wrote), persists
+        it, and marks this cache_key proven-complete so later out-of-session
+        calls in this same process can trust and persist directly without
+        repeating the full rescan.
+
+        Bug #1575 round 7 (opus review, confirmed real, distinct from the
+        swap-vs-merge defect fixed in ``_rebuild_and_repair_path_index``):
+        this method used to accept the live PathIndex as a caller-supplied
+        parameter -- every real call site captured it under its OWN
+        ``_path_index_lock`` acquisition and then released that lock
+        BEFORE calling in here. Between that capture and the
+        ``_save_path_index`` call below, a concurrent mutation for the
+        SAME ``cache_key`` (another out-of-session call, or a
+        ``_rebuild_and_repair_path_index`` repair) could have moved
+        ``self._path_indexes[cache_key]`` forward -- persisting the
+        caller's now-stale snapshot would silently regress
+        ``path_index.bin`` to an older picture. Fixed by re-reading
+        ``self._path_indexes[cache_key]`` here, under the SAME lock
+        acquisition used to read ``self._path_index_loaded_from_file``,
+        immediately before deciding what (if anything) to persist --
+        never trusting a reference captured across an already-released
+        lock boundary.
+        """
+        with self._path_index_lock:
+            loaded_from_file = self._path_index_loaded_from_file.get(cache_key, False)
+            current_path_index = self._path_indexes.get(cache_key)
+        if loaded_from_file:
+            if current_path_index is not None:
+                self._save_path_index(
+                    collection_name, current_path_index, subdirectory=subdirectory
+                )
+        else:
+            self._rebuild_and_repair_path_index(collection_name, subdirectory)
 
     @staticmethod
     def _content_scan_integrity_message(vector_file: Path, reason: str) -> str:
@@ -4471,21 +5766,49 @@ class FilesystemVectorStore:
                 path_index = self._path_indexes[_scroll_path_cache_key]
                 # Detect legacy collection: PathIndex empty but collection may have files
                 needs_rebuild = not path_index._path_index
+                # Bug #1575 round 7 structural mirror of
+                # _rebuild_and_repair_path_index()'s before/after-snapshot
+                # prune fix: snapshot the live object NOW, under the SAME
+                # lock acquisition as the needs_rebuild check, so a point
+                # removed by a concurrent delete_points() while the
+                # (unlocked) disk scan below runs can be pruned back out
+                # even if the scan's possibly-stale view still has it.
+                #
+                # KNOWN RESIDUAL GAP (deliberately not closed by this
+                # mirror, empirically verified -- see
+                # test_filesystem_vector_store_1575_scroll_points_rebuild_
+                # merge_prune.py): needs_rebuild is True ONLY when
+                # path_index._path_index is EMPTY at this exact moment, so
+                # before_snapshot below is ALWAYS {} for every real firing
+                # of this branch -- there is nothing in it for the prune
+                # step to ever find. A point that is added to the live
+                # object AND removed again entirely within the scan
+                # window -- starting from this genuinely-empty cache --
+                # can therefore still be resurrected by a stale disk read;
+                # a before/after delta rooted at an empty T0 cannot detect
+                # a removal of something it never saw exist. This mirror
+                # is still worth having: it is correct in general (closes
+                # the race for a live object that is non-empty when the
+                # scan starts) and makes real if this gate's precondition
+                # ever changes.
+                before_snapshot = path_index.snapshot() if needs_rebuild else None
 
             # Release lock before any I/O; rebuild walks disk only on first call
             if needs_rebuild:
                 rebuilt = self._rebuild_path_index_from_disk(
                     collection_name, subdirectory
                 )
-                # M2 fix: merge rebuilt entries INTO the live index instead of
-                # replacing it.  Any upsert_points calls that ran concurrently
-                # during the rglob walk added to the live PathIndex; a swap
-                # would discard those additions.  merge_from uses add_point
-                # (set semantics) so re-adding existing entries is a no-op.
+                # M2 fix (merge, not swap) + round-7 prune mirror -- shared
+                # with _rebuild_and_repair_path_index() via
+                # _merge_rebuilt_path_index_with_prune(). Any upsert_points
+                # calls that ran concurrently during the rglob walk added to
+                # the live PathIndex; a swap would discard those additions.
+                # merge_from uses add_point (set semantics) so re-adding
+                # existing entries is a no-op.
                 with self._path_index_lock:
-                    live_index = self._path_indexes[_scroll_path_cache_key]
-                    live_index.merge_from(rebuilt)
-                    path_index = live_index
+                    path_index = self._merge_rebuilt_path_index_with_prune(
+                        _scroll_path_cache_key, before_snapshot, rebuilt
+                    )
 
             # Get point IDs for the requested path (copy under lock for safety)
             with self._path_index_lock:
@@ -4684,13 +6007,49 @@ class FilesystemVectorStore:
             # second failure always propagates to the unchanged Finding-5
             # handling below -- this loop can never iterate more than twice.
             read_cache = offset is not None
+            # Bug #1579: a pre-existing on-disk shifted/duplicate point_id
+            # (two vector_*.json files sharing the same stored id, e.g. from
+            # a collection built before the upsert_points write-path fix)
+            # makes _build_sharded_json_scroll_index raise
+            # ScrollDataIntegrityError. Rather than permanently failing the
+            # scroll (which propagates through smart_indexer.py's fail-fast
+            # reconcile and kills `cidx index --reconcile` for the repo
+            # forever), attempt ONE self-heal via
+            # repair_duplicate_and_shifted_points before giving up -- bounded
+            # exactly like the FileNotFoundError self-heal above (the retry
+            # always rebuilds fresh, so a second failure always propagates).
+            dedup_repair_attempted = False
             while True:
-                id_to_file, was_cache_hit = self._get_sharded_json_scroll_index(
-                    collection_name,
-                    collection_path,
-                    subdirectory,
-                    read_cache=read_cache,
-                )
+                try:
+                    id_to_file, was_cache_hit = self._get_sharded_json_scroll_index(
+                        collection_name,
+                        collection_path,
+                        subdirectory,
+                        read_cache=read_cache,
+                    )
+                except ScrollDataIntegrityError:
+                    if dedup_repair_attempted:
+                        raise
+                    from code_indexer.storage.shared.collection_dedup_repair import (
+                        repair_duplicate_and_shifted_points,
+                    )
+
+                    self.logger.warning(
+                        "Bug #1579: scroll_points hit a duplicate/malformed "
+                        "point_id while enumerating collection %r -- "
+                        "attempting a one-shot dedup repair before failing "
+                        "the scroll.",
+                        collection_name,
+                    )
+                    # DedupRepairAmbiguousError (e.g. a malformed record the
+                    # repair refuses to touch) is deliberately NOT caught
+                    # here -- it is a more specific, more actionable error
+                    # than the ScrollDataIntegrityError it would otherwise
+                    # mask, and must propagate to the caller unchanged.
+                    repair_duplicate_and_shifted_points(collection_path)
+                    dedup_repair_attempted = True
+                    read_cache = False
+                    continue
                 sorted_ids = sorted(id_to_file)
 
                 # Resume strictly AFTER the resolved real-id cursor via bisect
@@ -5870,6 +7229,9 @@ class FilesystemVectorStore:
             with self._id_index_lock:
                 if collection_name in self._id_index:
                     del self._id_index[collection_name]
+                # Bug #1583: a cleared-and-recreated collection must be
+                # eligible for the reactive stale-index rebuild again.
+                self._id_index_reactive_rebuild_done.discard(collection_name)
 
             # Restore projection matrix and metadata if they were preserved
             if matrix_data is not None or metadata_data is not None:
@@ -5910,6 +7272,9 @@ class FilesystemVectorStore:
                     del self._id_index[collection_name]
                 if collection_name in self._file_path_cache:
                     del self._file_path_cache[collection_name]
+                # Bug #1583: a deleted-and-recreated collection must be
+                # eligible for the reactive stale-index rebuild again.
+                self._id_index_reactive_rebuild_done.discard(collection_name)
 
             return True
 
@@ -6100,6 +7465,11 @@ class FilesystemVectorStore:
         # resolver) so this is correct even mid-build, before end_indexing()
         # commits the discriminator.
         collection_path = self._get_collection_path(collection_name)
+
+        # Bug #1575 Part C: dirty-before-write -- durably mark the hnsw_sync
+        # epoch dirty BEFORE any of this call's storage mutations happen.
+        self._mark_hnsw_dirty_before_mutation(collection_path, collection_name)
+
         if self._is_chunks_db_collection(collection_name, collection_path):
             from code_indexer.storage.sqlite_chunk_store import (
                 open_chunk_store_for_path,
@@ -6111,9 +7481,25 @@ class FilesystemVectorStore:
                 )
                 try:
                     updates = [(point["id"], point["payload"]) for point in points]
-                    chunk_store.update_payload_fields_batch(updates)
+                    # Bug #1575 Part C (AC12/AC43): the diff-returning
+                    # variant lets us register EXACTLY which points had a
+                    # real visibility-relevant change (path or
+                    # hidden_branches), instead of only a row count.
+                    changes = chunk_store.update_payload_fields_batch_with_diff(updates)
                 finally:
                     chunk_store.close()
+
+                if self._hnsw_sync_epoch_enabled:
+                    session = self._get_or_create_hnsw_sync_session(
+                        collection_path, collection_name
+                    )
+                    for change in changes:
+                        if (
+                            change.old_path != change.new_path
+                            or change.old_hidden_branches != change.new_hidden_branches
+                        ):
+                            session.visibility_changed.add(change.point_id)
+
                 return True
             except Exception as e:
                 self.logger.warning(
@@ -6122,6 +7508,11 @@ class FilesystemVectorStore:
                     e,
                     exc_info=True,
                 )
+                if self._hnsw_sync_epoch_enabled:
+                    session = self._get_or_create_hnsw_sync_session(
+                        collection_path, collection_name
+                    )
+                    session.complete_change_tracking = False
                 return False
 
         try:
@@ -6162,9 +7553,24 @@ class FilesystemVectorStore:
 
                 # Merge only the specified payload fields (preserve all others)
                 existing_payload = data.get("payload", {})
+                # Bug #1575 Part C (AC12): capture old path/hidden_branches
+                # BEFORE merging so a real visibility-relevant change can be
+                # detected afterward.
+                old_path = existing_payload.get("path")
+                old_hidden_branches = tuple(existing_payload.get("hidden_branches", []))
                 for key, value in new_payload_fields.items():
                     existing_payload[key] = value
                 data["payload"] = existing_payload
+
+                new_path = existing_payload.get("path")
+                new_hidden_branches = tuple(existing_payload.get("hidden_branches", []))
+                if self._hnsw_sync_epoch_enabled and (
+                    old_path != new_path or old_hidden_branches != new_hidden_branches
+                ):
+                    session = self._get_or_create_hnsw_sync_session(
+                        collection_path, collection_name
+                    )
+                    session.visibility_changed.add(point_id)
 
                 # Direct JSON write (atomic via _atomic_write_json)
                 self._atomic_write_json(vector_file, data)
@@ -6178,6 +7584,11 @@ class FilesystemVectorStore:
                 e,
                 exc_info=True,
             )
+            if self._hnsw_sync_epoch_enabled:
+                session = self._get_or_create_hnsw_sync_session(
+                    collection_path, collection_name
+                )
+                session.complete_change_tracking = False
             return False
 
     def rebuild_payload_indexes(self, collection_name: str) -> bool:
@@ -6371,57 +7782,76 @@ class FilesystemVectorStore:
         """
         if subdirectory is None:
             subdirectory = self._active_subdirectories.get(collection_name)
-        _unique_count_cache_key = self._id_cache_key(collection_name, subdirectory)
         import json
 
         from code_indexer.utils.file_locking import nfs_safe_flock, nfs_safe_funlock
 
         # fcntl imported at module level for lock flag constants
 
-        # Story #1456 AC3/AC7: CHUNKS_DB collections derive the unique-path
-        # set directly from chunks.db (indexed column, no data/vector
-        # decode) instead of opening per-point files via id_index.bin.
+        # Bug #1575 -- project-owner FINAL architectural decision, after 6
+        # consecutive dual-review rounds each found a NEW distinct
+        # correctness bug in the live-session PathIndex-cache fast-path
+        # shortcut (catastrophic undercount, session leaks, non-atomic
+        # writes, TOCTOU races, corrupt-file trust, write-ordering races,
+        # logical lost-updates, an object-swap silently discarding
+        # concurrent mutations, and a stale-multi-writer gap with no
+        # self-healing): the shortcut is ABANDONED ENTIRELY for SHARDED_JSON
+        # too, matching the treatment already given to CHUNKS_DB in round
+        # 5's Fix 1 below. Neither layout ever consults
+        # _get_live_session_path_index()/self._path_indexes to shortcut this
+        # computation any more -- both ALWAYS compute the authoritative,
+        # from-storage answer.
+        #
+        # For CHUNKS_DB: a CHUNKS_DB collection's direct query -- one
+        # `SELECT DISTINCT path FROM chunks` via chunk_store.distinct_paths()
+        # -- was measured at ~4.5ms even on a 24,000-row collection, so the
+        # shortcut never bought anything meaningful for this layout while
+        # introducing a real regression: a killed/crashed indexing session
+        # leaves self._path_indexes' in-memory entry (and/or an on-disk
+        # path_index.bin written by an earlier, unrelated call)
+        # present-but-stale, and the shortcut would trust it forever for
+        # this layout. Always computing the direct, authoritative chunks.db
+        # query removes that staleness risk entirely, at negligible cost.
+        collection_path_str = str(collection_path)
         if self._is_chunks_db_collection(collection_name, collection_path):
             from code_indexer.storage.sqlite_chunk_store import (
                 open_chunk_store_for_path,
             )
 
             chunk_store = open_chunk_store_for_path(
-                collection_path / "chunks.db", str(collection_path)
+                collection_path / "chunks.db", collection_path_str
             )
             try:
-                unique_files = chunk_store.distinct_paths()
+                unique_files: Set[str] = chunk_store.distinct_paths()
             finally:
                 chunk_store.close()
         else:
-            # Calculate unique file count from vectors
-            unique_files = set()
-
-            # Use cached id_index for speed (already loaded during indexing)
-            with self._id_index_lock:
-                if _unique_count_cache_key not in self._id_index:
-                    self._id_index[_unique_count_cache_key] = self._load_id_index(
-                        collection_name, subdirectory
-                    )
-
-                id_index = self._id_index[_unique_count_cache_key]
-
-            # Parse each vector to extract source file path
-            for point_id, vector_file in id_index.items():
-                try:
-                    with open(vector_file) as f:
-                        vector_data = json.load(f)
-
-                    # Extract source file path from payload
-                    file_path = vector_data.get("payload", {}).get("path")
-                    if file_path:
-                        unique_files.add(file_path)
-
-                except (json.JSONDecodeError, OSError) as e:
-                    self.logger.warning(
-                        f"Failed to read vector file {vector_file} for file count: {e}"
-                    )
-                    continue
+            # For SHARDED_JSON: ALWAYS force the authoritative, from-disk
+            # rebuild via _rebuild_and_repair_path_index() -- never consult
+            # _get_live_session_path_index()'s "trust the live session"
+            # shortcut, regardless of whether an active session exists or
+            # whether path_index.bin was proven complete at begin_indexing()
+            # time. This accepts the O(N) rescan cost on every
+            # end_indexing() call as the deliberate, accepted trade-off of
+            # this decision -- correctness over speed, after 6 rounds of
+            # confirmed bugs in the machinery that tried to avoid it.
+            #
+            # The rebuild-and-repair call (rather than a bare, side-effect-
+            # free disk scan) is deliberately retained: it is ALSO the
+            # mechanism that repairs self._path_indexes[cache_key] in place
+            # (Bug #1575 Part A Round 3, Fix A) so end_indexing()'s own
+            # subsequent path_index.bin save immediately after this call
+            # persists the complete, correct picture -- not a partial,
+            # session-own one. That repair is Part B's (Story #540)
+            # duplicate-prevention persistence correctness, orthogonal to
+            # (and NOT part of) the fast-path optimization being abandoned
+            # here; removing it would reintroduce the separate,
+            # already-fixed "Gap A" catastrophic-undercount regression.
+            authoritative_path_index = self._rebuild_and_repair_path_index(
+                collection_name, subdirectory
+            )
+            with self._path_index_lock:
+                unique_files = authoritative_path_index.all_paths()
 
         unique_file_count = len(unique_files)
 
@@ -6750,11 +8180,44 @@ class FilesystemVectorStore:
             AC2 (Concurrent Query Support): Uses readers-writer lock pattern
             AC3 (Daemon Cache Updates): Detects daemon mode and updates cache in-memory
             AC4 (Standalone Persistence): Falls back to disk persistence when no daemon
+
+        Bug #1575 Part C review fix (Finding 2): this method's own
+        metadata write (inside ``HNSWIndexManager.save_incremental_update``)
+        used to be guarded ONLY by the independent ``.metadata.lock``,
+        providing NO mutual exclusion against a concurrent full/incremental
+        Part C rebuild or another dirty-before-write, both of which hold
+        ONLY ``.index_rebuild.lock`` -- two different lock files guarding
+        the same ``collection_meta.json`` is a genuine lost-update hazard.
+        This wrapper acquires ``.index_rebuild.lock`` (the SAME lock every
+        other writer of that file in this class uses) for the WHOLE
+        real-time update, delegating the actual work (unchanged, moved
+        verbatim) to ``_update_hnsw_incrementally_realtime_locked`` below.
         """
         if not changed_points:
             return
 
         collection_path = self.base_path / collection_name
+
+        from .background_index_rebuilder import BackgroundIndexRebuilder
+
+        rebuilder = BackgroundIndexRebuilder(collection_path)
+        with rebuilder.acquire_lock():
+            self._update_hnsw_incrementally_realtime_locked(
+                collection_name, collection_path, changed_points, progress_callback
+            )
+
+    def _update_hnsw_incrementally_realtime_locked(
+        self,
+        collection_name: str,
+        collection_path: Path,
+        changed_points: List[Dict[str, Any]],
+        progress_callback: Optional[Any] = None,
+    ) -> None:
+        """The real-time HNSW update's actual implementation (daemon-mode
+        and standalone-mode branches, unchanged) -- ALWAYS called with
+        ``.index_rebuild.lock`` already held by the caller
+        (``_update_hnsw_incrementally_realtime`` above).
+        """
         vector_size = self._get_vector_size(collection_name)
 
         from .hnsw_index_manager import HNSWIndexManager
@@ -6913,120 +8376,123 @@ class FilesystemVectorStore:
                 f"{processed} points updated, total vectors: {total_vectors}"
             )
 
-    def _apply_incremental_hnsw_batch_update(
+    def _load_and_validate_incremental_record(
         self,
+        point_id: str,
         collection_name: str,
-        changes: Dict[str, set],
-        progress_callback: Optional[Any] = None,
-        clear_stale: bool = True,
-        subdirectory: Optional[str] = None,
-    ) -> Optional[Dict[str, Any]]:
-        """Apply incremental HNSW update for batch of changes.
-
-        Args:
-            collection_name: Name of the collection
-            changes: Dictionary with 'added', 'updated', 'deleted' sets
-            progress_callback: Optional progress callback
-            clear_stale: Bug #1407 Amendment 1/2 -- forwarded to
-                         save_incremental_update(); True (default) preserves
-                         today's behavior for the whole fleet.
-            subdirectory: Optional explicit subdirectory (e.g.
-                "multimodal_index"), threaded from end_indexing()'s own
-                explicit subdirectory parameter. ``None`` (every existing
-                caller) is byte-identical to the pre-fix bare
-                ``self.base_path / collection_name`` resolution.
-
-        Returns:
-            Dictionary with update results, or None if no existing index (fallback to full rebuild)
-
-        Note:
-            HNSW-002: Batch incremental updates at end of indexing session.
-            Applies all accumulated changes in one batch operation,
-            significantly faster than full rebuild.
+        subdirectory: Optional[str],
+        vector_size: int,
+    ) -> Optional[Tuple[Dict[str, Any], np.ndarray]]:
+        """Bug #1575 Part C: load+validate ONE point for the visibility-aware
+        incremental path. Returns ``None`` (never raises) on a missing
+        record or a dimension mismatch -- the caller treats ``None`` as
+        "abort this incremental attempt", never "skip and continue".
         """
-        collection_path = self._get_collection_path(collection_name, subdirectory)
-        vector_size = self._get_vector_size(collection_name, subdirectory)
-        # Keyed via _id_cache_key so this method reads the SAME _id_index
-        # entry upsert_points() wrote to for the SAME physical collection
-        # (Codex NEW Finding 1).
-        _incremental_cache_key = self._id_cache_key(collection_name, subdirectory)
-
-        from .hnsw_index_manager import HNSWIndexManager
-
-        hnsw_manager = HNSWIndexManager(vector_dim=vector_size, space="cosine")
-
-        # DEBUG: Mark that we're entering incremental update path
-        self.logger.info(
-            f"⚡ ENTERING INCREMENTAL HNSW UPDATE PATH for '{collection_name}'"
-        )
-
-        # Load existing index for incremental update
-        index, id_to_label, label_to_id, next_label = (
-            hnsw_manager.load_for_incremental_update(collection_path)
-        )
-
-        if index is None:
-            # No existing index - return None to trigger full rebuild fallback
+        record = self.get_point(point_id, collection_name, subdirectory)
+        if record is None:
             self.logger.info(
-                f"🔨 No existing HNSW index for '{collection_name}', "
-                f"falling back to FULL REBUILD"
+                "Visibility-aware incremental update: point '%s' not found "
+                "in collection (falling back to full rebuild)",
+                point_id,
             )
             return None
 
-        # Process additions and updates.
-        # #941: Points that appear in both added/updated and deleted were added then
-        # immediately removed in the same session — treat them as no-ops so they don't
-        # trigger "Vector file not found" warnings.
-        deleted_set = changes["deleted"]
-        effective_added = changes["added"] - deleted_set
-        effective_updated = changes["updated"] - deleted_set
-        total_changes = len(effective_added) + len(effective_updated) + len(deleted_set)
+        vector = np.array(record["vector"], dtype=np.float32)
+        if vector.shape[0] != vector_size:
+            self.logger.info(
+                "Visibility-aware incremental update: point '%s' has vector "
+                "dimension %d, expected %d (falling back to full rebuild)",
+                point_id,
+                vector.shape[0],
+                vector_size,
+            )
+            return None
+
+        return record, vector
+
+    def _compute_effective_visibility(
+        self, payload: Dict[str, Any], session: HNSWSyncSession
+    ) -> bool:
+        """Bug #1575 Part C: whether a point's stored payload is
+        EFFECTIVELY visible under ``session``'s current branch context.
+
+        Unconditionally visible when ``session.branch_context_set`` is
+        False (``set_hnsw_branch_context()`` was never called this run --
+        no filtering active, matching the legacy unfiltered incremental
+        path's semantics). Otherwise: the stored path (normalized
+        absolute-vs-relative, Bug #1575 AC6) must be in
+        ``session.visible_files`` AND the current branch must NOT be
+        listed in the point's ``hidden_branches``.
+        """
+        from .hnsw_index_manager import _normalize_stored_path_for_visibility
+
+        if not session.branch_context_set:
+            return True
+
+        normalized_path = _normalize_stored_path_for_visibility(
+            payload.get("path"), self.project_root
+        )
+        hidden_branches = payload.get("hidden_branches", [])
+        hidden = session.current_branch in hidden_branches
+        return normalized_path in session.visible_files and not hidden
+
+    def _apply_visibility_aware_incremental_update(
+        self,
+        collection_name: str,
+        collection_path: Path,
+        session: HNSWSyncSession,
+        progress_callback: Optional[Any] = None,
+        clear_stale: bool = True,
+        layout_override: Optional[ChunkLayout] = None,
+        subdirectory: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Bug #1575 Part C item 7: visibility-aware incremental HNSW
+        update, used by the decision engine's "mutation_epoch !=
+        published_epoch" branch instead of a full rebuild.
+
+        ANY failure (missing record, dimension mismatch, unexpected
+        exception) ABORTS this attempt immediately by returning ``None`` --
+        never a ``logger.warning(...); continue``. The caller (the decision
+        engine) is responsible for falling back to a fresh full rebuild
+        under the SAME lock when this returns ``None``, so a
+        partially-applied incremental index is never published.
+
+        Returns ``None`` when there is no existing HNSW index to update
+        incrementally (falls back to full rebuild), or a dict with the
+        resulting ``vectors`` count on success.
+        """
+        from .hnsw_index_manager import HNSWIndexManager
+
+        vector_size = self._get_vector_size(collection_name, subdirectory)
+        hnsw_manager = HNSWIndexManager(
+            vector_dim=vector_size, space="cosine", num_threads=self._hnsw_num_threads
+        )
+
+        index, id_to_label, label_to_id, next_label = (
+            hnsw_manager.load_for_incremental_update(collection_path)
+        )
+        if index is None:
+            return None
+
+        to_process = (
+            session.added | session.updated | session.visibility_changed
+        ) - session.deleted
+        total_changes = len(to_process) + len(session.deleted)
         processed = 0
 
-        # Story #1456 AC7: CHUNKS_DB collections resolve each point's vector
-        # via the chunk store (opened ONCE before the loop) instead of the
-        # retired id_index.bin / vector_<id>.json file map.
-        _is_chunks_db = self._is_chunks_db_collection(collection_name, collection_path)
-        _incremental_chunk_store: Optional[Any] = None
-        if _is_chunks_db:
-            from code_indexer.storage.sqlite_chunk_store import (
-                open_chunk_store_for_path,
-            )
-
-            _incremental_chunk_store = open_chunk_store_for_path(
-                collection_path / "chunks.db", str(collection_path)
-            )
-
         try:
-            for point_id in effective_added | effective_updated:
-                # Load vector from disk (or chunk store, for CHUNKS_DB)
-                try:
-                    if _is_chunks_db:
-                        assert _incremental_chunk_store is not None
-                        record = _incremental_chunk_store.read(point_id)
-                        if record is None:
-                            self.logger.warning(
-                                f"Chunk-store record not found for point '{point_id}', skipping"
-                            )
-                            continue
-                        vector = np.array(record["vector"], dtype=np.float32)
-                    else:
-                        vector_file = self._id_index[_incremental_cache_key].get(
-                            point_id
-                        )
-                        if not vector_file or not Path(vector_file).exists():
-                            self.logger.warning(
-                                f"Vector file not found for point '{point_id}', skipping"
-                            )
-                            continue
+            for point_id in to_process:
+                loaded = self._load_and_validate_incremental_record(
+                    point_id, collection_name, subdirectory, vector_size
+                )
+                if loaded is None:
+                    return None
+                record, vector = loaded
 
-                        with open(vector_file) as f:
-                            data = json.load(f)
-
-                        vector = np.array(data["vector"], dtype=np.float32)
-
-                    # Add or update in HNSW
-                    label, id_to_label, label_to_id, next_label = (
+                if self._compute_effective_visibility(
+                    record.get("payload", {}), session
+                ):
+                    _, id_to_label, label_to_id, next_label = (
                         hnsw_manager.add_or_update_vector(
                             index,
                             point_id,
@@ -7036,43 +8502,40 @@ class FilesystemVectorStore:
                             next_label,
                         )
                     )
-
-                    processed += 1
-
-                    # Report progress periodically
-                    if progress_callback and processed % 10 == 0:
-                        progress_callback(
-                            processed,
-                            total_changes,
-                            Path(""),
-                            info=f"🔄 Incremental HNSW update: {processed}/{total_changes} changes",
-                        )
-
-                except (json.JSONDecodeError, KeyError, ValueError) as e:
-                    self.logger.warning(
-                        f"Failed to process point '{point_id}': {e}, skipping"
+                else:
+                    hnsw_manager.remove_vector(
+                        index, point_id, id_to_label, label_to_id
                     )
-                    continue
-        finally:
-            if _incremental_chunk_store is not None:
-                _incremental_chunk_store.close()
 
-        # Process deletions
-        for point_id in changes["deleted"]:
-            hnsw_manager.remove_vector(index, point_id, id_to_label, label_to_id)
-            processed += 1
+                processed += 1
+                if (
+                    progress_callback
+                    and processed % _INCREMENTAL_PROGRESS_INTERVAL == 0
+                ):
+                    progress_callback(
+                        processed,
+                        total_changes,
+                        Path(""),
+                        info=(
+                            f"Visibility-aware incremental HNSW update: "
+                            f"{processed}/{total_changes} changes"
+                        ),
+                    )
 
-            # Report progress periodically
-            if progress_callback and processed % 10 == 0:
-                progress_callback(
-                    processed,
-                    total_changes,
-                    Path(""),
-                    info=f"🔄 Incremental HNSW update: {processed}/{total_changes} changes",
-                )
+            for point_id in session.deleted:
+                hnsw_manager.remove_vector(index, point_id, id_to_label, label_to_id)
+                processed += 1
+        except Exception as exc:
+            self.logger.info(
+                "Visibility-aware incremental update aborted for '%s': %s "
+                "(falling back to full rebuild)",
+                collection_name,
+                exc,
+            )
+            return None
 
-        # Save updated index
         total_vectors = len(id_to_label)
+        filtered = session.branch_context_set
         hnsw_manager.save_incremental_update(
             index,
             collection_path,
@@ -7080,29 +8543,20 @@ class FilesystemVectorStore:
             label_to_id,
             total_vectors,
             clear_stale=clear_stale,
+            filtered=filtered,
+            current_branch=session.current_branch,
+            visible_count=total_vectors if filtered else None,
         )
 
-        # Final progress report
         if progress_callback:
             progress_callback(
                 total_changes,
                 total_changes,
                 Path(""),
-                info=f"✓ Incremental HNSW update complete: {total_changes} changes applied",
+                info=(
+                    f"Visibility-aware incremental update complete: "
+                    f"{total_changes} changes applied"
+                ),
             )
 
-        self.logger.info(
-            f"Incremental HNSW update complete for '{collection_name}': "
-            f"{len(changes['added'])} added, {len(changes['updated'])} updated, "
-            f"{len(changes['deleted'])} deleted, total vectors: {total_vectors}"
-        )
-
-        return {
-            "status": "incremental_update_applied",
-            "vectors": total_vectors,
-            "changes_applied": {
-                "added": len(changes["added"]),
-                "updated": len(changes["updated"]),
-                "deleted": len(changes["deleted"]),
-            },
-        }
+        return {"vectors": total_vectors}

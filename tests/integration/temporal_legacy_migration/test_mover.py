@@ -1,15 +1,20 @@
 import json
 from pathlib import Path
+from typing import Tuple
 
 import numpy as np
+import pytest
 
 from code_indexer.server.services.temporal_legacy_migration.mover import (
+    MigrationResult,
     migrate_temporal_shards,
 )
 from code_indexer.server.services.temporal_legacy_migration.verification import (
     VerificationError,
+    _is_expected_churn_file,
     peek_one_vector_dimension,
     verify_shard_copy,
+    verify_source_subset_of_target,
 )
 from code_indexer.services.temporal.temporal_collection_naming import (
     LEGACY_TEMPORAL_COLLECTION,
@@ -22,6 +27,36 @@ from code_indexer.storage.temporal_metadata_sqlite_backend import (
 )
 
 
+def _publish_single_point_shard(
+    legacy: Path, fixed: Path, name: str = "code-indexer-temporal-e-2026Q1"
+) -> Tuple[Path, Path]:
+    """Write a single-point SHARDED_JSON legacy shard and publish it via a
+    first ``migrate_temporal_shards`` pass. Shared setup for several Issue
+    #1580 churn-allowlist tests below, which all start from an
+    already-published shard and then plant a foreign file at the
+    fixed-root target before running a second, cleanup-authorized pass.
+
+    Returns ``(shard, fixed_shard)``.
+    """
+    shard = legacy / name
+    _write_vector_shard(shard, "p1", "legacy")
+    first = migrate_temporal_shards(legacy, fixed, relocation_enabled=True)
+    assert first.published == 1
+    assert first.failed == 0
+    return shard, fixed / name
+
+
+def _assert_is_unresolved_collision(result: MigrationResult, shard: Path) -> None:
+    """Shared assertion for the Issue #1580 churn-allowlist tests: a
+    planted foreign file must force an unresolved collision -- never
+    ``already_complete``, never a deletion of the legacy source.
+    """
+    assert result.collisions == 1
+    assert result.already_complete == 0
+    assert result.deleted == 0
+    assert shard.exists(), "legacy data must survive an unverified target addition"
+
+
 def _write_real_hnsw_index(shard_dir: Path, point_id: str, vector: list) -> None:
     """Issue #1548 round-4 fix: ``_target_is_structurally_complete`` now
     attempts a genuine ``hnswlib`` load, so test fixtures claiming to be
@@ -30,6 +65,19 @@ def _write_real_hnsw_index(shard_dir: Path, point_id: str, vector: list) -> None
     """
     manager = HNSWIndexManager(vector_dim=len(vector), space="cosine")
     manager.build_index(shard_dir, np.array([vector], dtype=np.float32), [point_id])
+
+
+def _write_real_hnsw_index_for_points(shard_dir: Path, points: list) -> None:
+    """Issue #1580: rebuild a REAL, loadable HNSW index covering MULTIPLE
+    points at once -- used to simulate the ordinary temporal write path
+    refreshing an already-published fixed-root shard IN PLACE (Bug #1529)
+    with a newly-indexed commit, without ever losing coverage of the
+    points already present. ``points`` is a list of ``(point_id, vector)``.
+    """
+    ids = [point_id for point_id, _ in points]
+    vectors = np.array([vector for _, vector in points], dtype=np.float32)
+    manager = HNSWIndexManager(vector_dim=vectors.shape[1], space="cosine")
+    manager.build_index(shard_dir, vectors, ids)
 
 
 def test_sharded_json_empty_fixed_root_is_published_atomically_and_second_run_is_noop(
@@ -663,6 +711,152 @@ def test_metadata_cleanup_refuses_when_repo_has_zero_shards_and_never_relocated(
     )
 
 
+def test_target_legitimately_refreshed_in_place_converges_instead_of_permanent_collision_1580(
+    tmp_path: Path,
+):
+    """Issue #1580 regression: post-Bug #1529, the fixed-root target is
+    refreshed IN PLACE by the ordinary temporal write path -- new commits
+    keep landing there after this mechanism's original verified publish.
+    Any such legitimate refresh changes ``manifest_digest(target)``, so the
+    OLD classification rule (marker digest must equal BOTH the source's
+    AND the target's CURRENT digest) permanently reclassified an
+    already-published, fully-preserved shard as a "collision" forever --
+    confirmed in production as 293 WARNINGs/23h for one repo (69 shards,
+    zero progress across every pass). A target that still contains
+    EVERYTHING this mechanism verified at publish time (additive evolution
+    only -- nothing lost or altered) must converge instead of colliding
+    forever.
+    """
+    legacy = tmp_path / "legacy"
+    fixed = tmp_path / "fixed"
+    shard = legacy / "code-indexer-temporal-e-2026Q1"
+    _write_vector_shard(shard, "p1", "legacy")
+
+    first = migrate_temporal_shards(legacy, fixed, relocation_enabled=True)
+    assert first.published == 1
+    assert first.failed == 0
+    assert shard.exists(), "cleanup was not authorized yet"
+
+    # Simulate a legitimate in-place refresh: the ordinary temporal write
+    # path indexed a NEW commit at the fixed root, adding point p2 --
+    # p1 (the data this migration already verified) is untouched.
+    fixed_shard = fixed / shard.name
+    (fixed_shard / "vector_p2.json").write_text(
+        json.dumps({"id": "p2", "vector": [2.0], "payload": {"source": "refresh"}})
+    )
+    _write_real_hnsw_index_for_points(fixed_shard, [("p1", [1.0]), ("p2", [2.0])])
+
+    second = migrate_temporal_shards(
+        legacy, fixed, relocation_enabled=True, cleanup_authorized=True
+    )
+    assert second.collisions == 0, (
+        "a legitimately-evolved target (source data fully preserved) must "
+        "never be classified as an unresolvable collision"
+    )
+    assert second.already_complete == 1
+    assert second.deleted == 1
+    assert second.failed == 0
+    assert not shard.exists(), "the stale legacy source must be reclaimed"
+    # The evolved target's data (both the original and the new point) must
+    # survive untouched -- this migration only ever deletes the legacy
+    # source, never rewrites the fixed-root target.
+    assert (fixed_shard / "vector_p1.json").exists()
+    assert (fixed_shard / "vector_p2.json").exists()
+
+    # A THIRD pass over the (now nonexistent) legacy source must be a
+    # true no-op -- genuine convergence, not merely "one pass got lucky".
+    third = migrate_temporal_shards(
+        legacy, fixed, relocation_enabled=True, cleanup_authorized=True
+    )
+    assert third.collisions == 0
+    assert third.failed == 0
+
+
+def test_target_missing_previously_verified_record_is_still_a_collision_1580(
+    tmp_path: Path,
+):
+    """Issue #1580 fix guard-rail: the relaxation above must be strictly
+    ADDITIVE. A target that has LOST or ALTERED a record this mechanism
+    already verified at publish time must still be treated as an
+    unresolvable collision -- never silently authorized for legacy-source
+    deletion just because it currently looks structurally complete.
+    """
+    legacy = tmp_path / "legacy"
+    fixed = tmp_path / "fixed"
+    shard = legacy / "code-indexer-temporal-e-2026Q1"
+    _write_vector_shard(shard, "p1", "legacy")
+
+    first = migrate_temporal_shards(legacy, fixed, relocation_enabled=True)
+    assert first.published == 1
+    assert first.failed == 0
+
+    # The fixed-root target's own p1 record is altered post-publish (data
+    # loss/corruption at the target, not an additive refresh) while still
+    # remaining a structurally-complete, loadable shard on its own terms.
+    fixed_shard = fixed / shard.name
+    (fixed_shard / "vector_p1.json").write_text(
+        json.dumps({"id": "p1", "vector": [1.0], "payload": {"source": "altered"}})
+    )
+
+    second = migrate_temporal_shards(
+        legacy, fixed, relocation_enabled=True, cleanup_authorized=True
+    )
+    assert second.collisions == 1
+    assert second.already_complete == 0
+    assert second.deleted == 0
+    assert shard.exists(), "legacy data must survive an unproven target"
+
+
+def test_evolved_target_no_longer_withholds_metadata_scope_copy_1580(tmp_path: Path):
+    """Issue #1580 item 3 corollary: since a legitimately-evolved target is
+    no longer counted as a collision (see the two tests above), the
+    shared per-repo metadata scope must no longer be withheld on its
+    account -- ``withhold_copy`` is derived from ``counts["collision"]``,
+    which now correctly excludes this case.
+    """
+    legacy = tmp_path / "legacy"
+    fixed = tmp_path / "fixed"
+    shard = legacy / "code-indexer-temporal-e-2026Q1"
+    _write_vector_shard(shard, "p1", "legacy")
+    meta_dir = legacy / LEGACY_TEMPORAL_COLLECTION
+    backend = TemporalMetadataSqliteBackend(meta_dir)
+    backend.save_metadata("p1", {"commit_hash": "abc", "path": "f.py"})
+
+    first = migrate_temporal_shards(
+        legacy,
+        fixed,
+        relocation_enabled=True,
+        metadata_backend_factory=lambda path: TemporalMetadataSqliteBackend(path),
+    )
+    assert first.published == 1
+    assert first.failed == 0
+
+    fixed_shard = fixed / shard.name
+    (fixed_shard / "vector_p2.json").write_text(
+        json.dumps({"id": "p2", "vector": [2.0], "payload": {"source": "refresh"}})
+    )
+    _write_real_hnsw_index_for_points(fixed_shard, [("p1", [1.0]), ("p2", [2.0])])
+
+    second = migrate_temporal_shards(
+        legacy,
+        fixed,
+        relocation_enabled=True,
+        cleanup_authorized=True,
+        metadata_backend_factory=lambda path: TemporalMetadataSqliteBackend(path),
+    )
+
+    assert second.collisions == 0
+    assert second.deleted == 1
+    assert second.failed == 0
+    assert not shard.exists()
+    assert not (meta_dir / TemporalMetadataSqliteBackend.METADATA_DB_NAME).exists(), (
+        "metadata scope must be relocated+deleted once cleanup converges -- "
+        "not withheld on account of a non-existent collision"
+    )
+    fixed_meta = TemporalMetadataSqliteBackend(fixed / LEGACY_TEMPORAL_COLLECTION)
+    assert fixed_meta.count_entries() == 1
+
+
 def test_shard_collision_withholds_metadata_scope_copy(tmp_path: Path):
     """Issue #1548 review finding 2: when a shard collision is detected,
     the shared per-repo metadata scope must NOT be copied at all this pass
@@ -694,3 +888,178 @@ def test_shard_collision_withholds_metadata_scope_copy(tmp_path: Path):
         / (TemporalMetadataSqliteBackend.METADATA_DB_NAME)
     )
     assert not fixed_meta_db.exists(), "metadata copy must be withheld on collision"
+
+
+def test_nested_hnsw_index_bin_is_not_recognized_as_churn_1580(tmp_path: Path):
+    """Issue #1580 adversarial-review round-2 critical finding:
+    ``_is_expected_churn_file`` matched by bare basename, unanchored to
+    location -- so ``nested/hnsw_index.bin`` (or ``collection_meta.json``
+    or ``chunks.db`` at any depth) was silently accepted as legitimate
+    refresh churn. A foreign file planted at a nested location using an
+    allowed basename must force a collision, not silently authorize
+    legacy-source deletion.
+    """
+    legacy = tmp_path / "legacy"
+    fixed = tmp_path / "fixed"
+    shard, fixed_shard = _publish_single_point_shard(legacy, fixed)
+
+    # Legitimate in-place refresh (Bug #1529): a new commit adds p2.
+    (fixed_shard / "vector_p2.json").write_text(
+        json.dumps({"id": "p2", "vector": [2.0], "payload": {"source": "refresh"}})
+    )
+    _write_real_hnsw_index_for_points(fixed_shard, [("p1", [1.0]), ("p2", [2.0])])
+    # Foreign file planted at a NESTED location using an allowed basename.
+    nested_dir = fixed_shard / "nested"
+    nested_dir.mkdir()
+    (nested_dir / "hnsw_index.bin").write_bytes(b"attacker-controlled bytes")
+
+    result = migrate_temporal_shards(
+        legacy, fixed, relocation_enabled=True, cleanup_authorized=True
+    )
+    _assert_is_unresolved_collision(result, shard)
+
+
+def test_foreign_chunks_db_at_sharded_json_root_is_rejected_1580(tmp_path: Path):
+    """Issue #1580 adversarial-review round-2 critical finding: ``chunks.db``
+    was accepted as expected churn purely by basename, regardless of the
+    target's actual resolved chunk layout. A SHARDED_JSON-layout target
+    never legitimately owns a ``chunks.db`` artifact -- planting one at
+    the shard root must force a collision.
+    """
+    legacy = tmp_path / "legacy"
+    fixed = tmp_path / "fixed"
+    shard, fixed_shard = _publish_single_point_shard(legacy, fixed)
+    assert resolve_chunk_layout(shard) is ChunkLayout.SHARDED_JSON
+    assert resolve_chunk_layout(fixed_shard) is ChunkLayout.SHARDED_JSON
+
+    (fixed_shard / "chunks.db").write_bytes(b"attacker-controlled bytes")
+
+    result = migrate_temporal_shards(
+        legacy, fixed, relocation_enabled=True, cleanup_authorized=True
+    )
+    _assert_is_unresolved_collision(result, shard)
+
+
+def test_target_deleted_previously_verified_record_is_still_a_collision_1580(
+    tmp_path: Path,
+):
+    """Issue #1580 test-gap guard-rail (adversarial review round 2, already
+    passing before AND after this session's allowlist fix): the
+    pre-existing "missing record" test above actually ALTERS p1's
+    content, which fails identically under both the OLD exact-digest
+    -equality rule and the NEW additive-evolution rule -- it never
+    discriminated between them. This test instead DELETES p1 outright
+    while keeping the target structurally complete via a different
+    record (p2). A deleted record always changes
+    ``manifest_digest(target)``, so the OLD exact-match rule already
+    rejected this case too -- this test exists to positively confirm the
+    additive-evolution relaxation stayed strictly additive, never
+    silently tolerating a subtractive change, rather than to reproduce a
+    bug.
+    """
+    legacy = tmp_path / "legacy"
+    fixed = tmp_path / "fixed"
+    shard, fixed_shard = _publish_single_point_shard(legacy, fixed)
+
+    (fixed_shard / "vector_p1.json").unlink()
+    (fixed_shard / "vector_p2.json").write_text(
+        json.dumps({"id": "p2", "vector": [2.0], "payload": {"source": "refresh"}})
+    )
+    _write_real_hnsw_index_for_points(fixed_shard, [("p2", [2.0])])
+
+    result = migrate_temporal_shards(
+        legacy, fixed, relocation_enabled=True, cleanup_authorized=True
+    )
+    _assert_is_unresolved_collision(result, shard)
+
+
+def test_chunks_db_target_planted_extra_vector_json_is_rejected_1580(tmp_path: Path):
+    """Issue #1580 adversarial-review round-2 critical finding: for a
+    CHUNKS_DB target, an added vector_*.json file is not even included in
+    _manifest() (it takes the SQLite branch) -- so it bypasses LOGICAL
+    verification entirely. The old basename-only structural churn check
+    also silently accepted it regardless of layout. It must instead be
+    rejected for a CHUNKS_DB target, where such a file can never be
+    verified.
+    """
+    legacy = tmp_path / "legacy"
+    fixed = tmp_path / "fixed"
+    shard = legacy / "code-indexer-temporal-e-2026Q1"
+    vector = [1.0, 2.0, 3.0]
+    _write_chunks_db_shard(shard, "p1", vector)
+    assert resolve_chunk_layout(shard) is ChunkLayout.CHUNKS_DB
+
+    first = migrate_temporal_shards(legacy, fixed, relocation_enabled=True)
+    assert first.published == 1
+    assert first.failed == 0
+
+    fixed_shard = fixed / shard.name
+    assert resolve_chunk_layout(fixed_shard) is ChunkLayout.CHUNKS_DB
+    # Planted foreign vector JSON -- invisible to _manifest() for this
+    # layout, so unless the structural churn check is layout-aware it
+    # bypasses inspection entirely.
+    (fixed_shard / "vector_planted.json").write_text(
+        json.dumps({"id": "planted", "vector": [9.9]})
+    )
+
+    result = migrate_temporal_shards(
+        legacy, fixed, relocation_enabled=True, cleanup_authorized=True
+    )
+    _assert_is_unresolved_collision(result, shard)
+
+
+def test_is_expected_churn_file_rejects_directory_with_allowed_basename_1580(
+    tmp_path: Path,
+):
+    """Issue #1580 adversarial-review round-2 critical finding: a
+    DIRECTORY using one of the allowed churn filenames must never be
+    treated as a valid churn artifact -- ``_is_expected_churn_file`` must
+    positively confirm the candidate is a real regular file, not merely
+    match on name.
+    """
+    target = tmp_path / "target"
+    target.mkdir()
+    (target / "hnsw_index.bin").mkdir()
+
+    assert not _is_expected_churn_file(
+        target, "hnsw_index.bin", ChunkLayout.SHARDED_JSON
+    )
+
+
+def test_is_expected_churn_file_rejects_symlink_with_allowed_basename_1580(
+    tmp_path: Path,
+):
+    """Issue #1580 adversarial-review round-2 critical finding: a SYMLINK
+    using one of the allowed churn filenames must never be treated as a
+    valid churn artifact -- matches the existing Issue #1548 round-4
+    symlink-rejection discipline used elsewhere in this module.
+    """
+    target = tmp_path / "target"
+    target.mkdir()
+    real_file = tmp_path / "real_target.bin"
+    real_file.write_bytes(b"data")
+    (target / "hnsw_index.bin").symlink_to(real_file)
+
+    assert not _is_expected_churn_file(
+        target, "hnsw_index.bin", ChunkLayout.SHARDED_JSON
+    )
+
+
+def test_empty_source_manifest_never_authorizes_convergence_1580(tmp_path: Path):
+    """Issue #1580 test gap (adversarial review round 2): an empty source
+    point-record manifest must never vacuously satisfy subset
+    verification. An empty source proves nothing was ever verified there
+    in the first place, so it can never be positive proof that "nothing
+    was lost" during a legitimate refresh -- it must be refused, not
+    silently treated as trivially converged/safe to delete.
+    """
+    source = tmp_path / "source"
+    target = tmp_path / "target"
+    source.mkdir()
+    target.mkdir()
+    # Both sides genuinely hold zero point records.
+    (source / "collection_meta.json").write_text('{"name":"q1"}')
+    (target / "collection_meta.json").write_text('{"name":"q1"}')
+
+    with pytest.raises(VerificationError):
+        verify_source_subset_of_target(source, target)

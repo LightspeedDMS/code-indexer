@@ -54,8 +54,9 @@ import json
 import logging
 import os
 import sqlite3
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Literal, Optional, Sequence, Union
+from typing import Any, Dict, Iterable, List, Literal, Optional, Sequence, Tuple, Union
 
 import numpy as np
 import zstandard
@@ -63,6 +64,26 @@ import zstandard
 from code_indexer.utils.file_locking import nfs_safe_fsync
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class PayloadChange:
+    """Bug #1575 Part C: old-vs-new diff for ONE payload-only update applied
+    via :meth:`ChunkStore.update_payload_fields_batch_with_diff`.
+
+    ``update_payload_fields_batch`` returns only a row count -- a visibility
+    change (path or ``hidden_branches``) is invisible to any change tracker
+    without this diff. ``old_hidden_branches``/``new_hidden_branches`` are
+    always tuples (hashable, orderable) even though the stored payload field
+    is a JSON list.
+    """
+
+    point_id: str
+    old_path: Optional[str]
+    new_path: Optional[str]
+    old_hidden_branches: Tuple[str, ...]
+    new_hidden_branches: Tuple[str, ...]
+
 
 _VECTOR_DTYPE = "<f4"  # little-endian float32, per AC3
 
@@ -998,11 +1019,103 @@ class ChunkStore:
         self._conn.commit()
         return updated_count
 
+    def update_payload_fields_batch_with_diff(
+        self, updates: List[Tuple[str, dict]]
+    ) -> List[PayloadChange]:
+        """Bug #1575 Part C: same batch payload-merge as
+        :meth:`update_payload_fields_batch` (ONE transaction, ONE commit,
+        points not found skipped gracefully) but additionally returns the
+        old-vs-new diff for every row actually updated, so a caller can
+        register precisely which point_ids had a VISIBILITY-relevant change
+        (path or ``hidden_branches``) without a second read pass.
+
+        A no-op merge (new value equals the old one) still produces a
+        ``PayloadChange`` entry with ``old_* == new_*`` -- it is the
+        CALLER's responsibility to decide whether that counts as a real
+        change (e.g. only registering ``visibility_changed`` when they
+        differ), mirroring how the SHARDED_JSON path's own comparison
+        works.
+        """
+        self._require_mutable()
+        if not updates:
+            return []
+
+        changes: List[PayloadChange] = []
+        for point_id, fields in updates:
+            row = self._conn.execute(
+                "SELECT data FROM chunks WHERE point_id = ?", (point_id,)
+            ).fetchone()
+            if row is None:
+                continue
+
+            record = self._decode_data(row[0])
+            existing_payload = record.get("payload", {})
+            old_path = existing_payload.get("path")
+            old_hidden_branches = tuple(existing_payload.get("hidden_branches", []))
+
+            for key, value in fields.items():
+                existing_payload[key] = value
+            record["payload"] = existing_payload
+
+            new_path = existing_payload.get("path")
+            new_hidden_branches = tuple(existing_payload.get("hidden_branches", []))
+
+            new_data_blob = self._compressor.compress(
+                json.dumps(record).encode("utf-8")
+            )
+            self._conn.execute(
+                "UPDATE chunks SET path = ?, data = ? WHERE point_id = ?",
+                (new_path, new_data_blob, point_id),
+            )
+            changes.append(
+                PayloadChange(
+                    point_id=point_id,
+                    old_path=old_path,
+                    new_path=new_path,
+                    old_hidden_branches=old_hidden_branches,
+                    new_hidden_branches=new_hidden_branches,
+                )
+            )
+
+        self._conn.commit()
+        return changes
+
     # ------------------------------------------------------------------
     # Delete (AC4: mirrors FilesystemVectorStore.delete_points)
     # ------------------------------------------------------------------
 
     _DELETE_CHUNK_SIZE = 500  # stay well under SQLite's ~999 variable limit
+
+    def get_paths_for_points(self, point_ids: list) -> Dict[str, str]:
+        """Return a ``{point_id: path}`` mapping for the given point_ids.
+
+        Bug #1575 Finding-1-regression fix: a point's stored ``path`` is
+        unrecoverable once the row is deleted, so callers that need to keep
+        an in-memory ``PathIndex`` in sync on delete (mirroring what the
+        SHARDED_JSON delete path already does) MUST resolve paths BEFORE
+        calling :meth:`delete`, never after. Points with no path (NULL) or
+        that do not exist are simply absent from the returned mapping --
+        never an error, matching :meth:`delete`'s own silent-skip semantics
+        for non-existent ids. Read-only: safe on an immutable connection.
+        Chunked to respect SQLite's bound on the number of host parameters
+        per statement (Messi Rule #14: bounded loops only), reusing the
+        same chunk size as :meth:`delete`.
+        """
+        if not point_ids:
+            return {}
+
+        result: Dict[str, str] = {}
+        for start in range(0, len(point_ids), self._DELETE_CHUNK_SIZE):
+            chunk = point_ids[start : start + self._DELETE_CHUNK_SIZE]
+            placeholders = ",".join("?" for _ in chunk)
+            rows = self._conn.execute(
+                f"SELECT point_id, path FROM chunks "
+                f"WHERE point_id IN ({placeholders}) AND path IS NOT NULL",
+                chunk,
+            ).fetchall()
+            for point_id, path in rows:
+                result[point_id] = path
+        return result
 
     def delete(self, point_ids: list) -> int:
         """Delete a batch of points by id. Returns the number deleted.

@@ -37,12 +37,9 @@ import logging
 from pathlib import Path
 from unittest.mock import MagicMock
 
-import pytest
-
 from code_indexer.server.services.fleet_migration.quarantine import (
     FLEET_MIGRATION_FAILURE_QUARANTINE_THRESHOLD,
 )
-from code_indexer.storage.id_index_manager import DuplicateSourceIdError
 
 from tests.unit.server.services.fleet_migration.test_scheduler_1458 import (
     _FakeGoldenRepoManager,
@@ -101,8 +98,8 @@ def _quarantine_click(tmp_path: Path):
     )
 
     for _ in range(FLEET_MIGRATION_FAILURE_QUARANTINE_THRESHOLD):
-        with pytest.raises(DuplicateSourceIdError):
-            scheduler._run_next_candidate()
+        result = scheduler._run_next_candidate()
+        assert result["status"] == "dedup_gate_rejected"
 
     return scheduler, backend
 
@@ -135,8 +132,8 @@ def _quarantine_two_repos(tmp_path: Path):
     )
 
     for _ in range(FLEET_MIGRATION_FAILURE_QUARANTINE_THRESHOLD):
-        with pytest.raises(DuplicateSourceIdError):
-            scheduler._run_next_candidate()
+        result = scheduler._run_next_candidate()
+        assert result["status"] == "dedup_gate_rejected"
 
     return scheduler, backend
 
@@ -270,8 +267,8 @@ class TestQuarantineSkipPerAliasIndependence:
             # First re-observation of "aaa-click" post-quarantine (WARNING
             # expected) interleaved with the FIRST of several failing
             # attempts against "bbb-django" (not yet quarantined).
-            with pytest.raises(DuplicateSourceIdError):
-                scheduler._run_next_candidate()
+            result = scheduler._run_next_candidate()
+            assert result["status"] == "dedup_gate_rejected"
             aaa_first_records = _quarantine_records_for(caplog, "aaa-click")
             assert aaa_first_records and any(
                 r.levelno == logging.WARNING for r in aaa_first_records
@@ -286,8 +283,8 @@ class TestQuarantineSkipPerAliasIndependence:
             # these calls ALSO re-observes "aaa-click" -- which must stay
             # demoted throughout, since it is well within its own window.
             for _ in range(FLEET_MIGRATION_FAILURE_QUARANTINE_THRESHOLD - 1):
-                with pytest.raises(DuplicateSourceIdError):
-                    scheduler._run_next_candidate()
+                result = scheduler._run_next_candidate()
+                assert result["status"] == "dedup_gate_rejected"
             interleaved_aaa_records = _quarantine_records_for(caplog, "aaa-click")
             assert interleaved_aaa_records and all(
                 r.levelno < logging.WARNING for r in interleaved_aaa_records

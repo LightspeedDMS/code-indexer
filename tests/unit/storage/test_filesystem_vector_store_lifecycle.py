@@ -114,6 +114,9 @@ class TestFilesystemVectorStoreLifecycle:
             def track_rebuild(*args, **kwargs):
                 nonlocal rebuild_count
                 rebuild_count += 1
+                return (
+                    0  # match HNSWIndexManager.rebuild_from_vectors's -> int contract
+                )
 
             mock_hnsw_instance.rebuild_from_vectors.side_effect = track_rebuild
 
@@ -180,6 +183,9 @@ class TestFilesystemVectorStoreLifecycle:
             def track_rebuild(*args, **kwargs):
                 nonlocal rebuild_count
                 rebuild_count += 1
+                return (
+                    0  # match HNSWIndexManager.rebuild_from_vectors's -> int contract
+                )
 
             mock_hnsw_instance.rebuild_from_vectors.side_effect = track_rebuild
 
@@ -460,6 +466,9 @@ class TestFilesystemVectorStoreWatchModeOptimization:
             def track_rebuild(*args, **kwargs):
                 nonlocal rebuild_called
                 rebuild_called = True
+                return (
+                    0  # match HNSWIndexManager.rebuild_from_vectors's -> int contract
+                )
 
             def track_mark_stale(*args, **kwargs):
                 nonlocal mark_stale_called
@@ -528,6 +537,9 @@ class TestFilesystemVectorStoreWatchModeOptimization:
             def track_rebuild(*args, **kwargs):
                 nonlocal rebuild_called
                 rebuild_called = True
+                return (
+                    0  # match HNSWIndexManager.rebuild_from_vectors's -> int contract
+                )
 
             def track_mark_stale(*args, **kwargs):
                 nonlocal mark_stale_called
@@ -594,6 +606,9 @@ class TestFilesystemVectorStoreWatchModeOptimization:
             def track_rebuild(*args, **kwargs):
                 nonlocal rebuild_called
                 rebuild_called = True
+                return (
+                    0  # match HNSWIndexManager.rebuild_from_vectors's -> int contract
+                )
 
             mock_hnsw_instance.rebuild_from_vectors.side_effect = track_rebuild
 
