@@ -2,7 +2,8 @@
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Dict, Tuple
+from typing import List, Dict, Set, Tuple
+from xml.etree import ElementTree
 
 
 # Build file mappings: filename/pattern -> (language, build_system)
@@ -24,6 +25,12 @@ BUILD_FILE_MAPPINGS: Dict[str, Tuple[str, str]] = {
 # Build file priority: lower number = higher priority
 # Used for deduplication when multiple build files exist in same directory
 BUILD_FILE_PRIORITY: Dict[str, int] = {
+    # EVO-66190: a multi-module build root (Gradle settings file) is emitted as a synthetic
+    # project keyed on its settings file. Give it top priority so a co-located non-JVM build
+    # file (e.g. a root package.json for tooling) can NOT silently overwrite the root project
+    # in the per-directory dedup below (without this it would default to priority 999).
+    "settings.gradle": 1,
+    "settings.gradle.kts": 1,
     "pyproject.toml": 1,
     "setup.py": 2,
     "requirements.txt": 3,
@@ -35,6 +42,31 @@ BUILD_FILE_PRIORITY: Dict[str, int] = {
     "*.csproj": 2,
     "go.mod": 1,
 }
+
+
+# EVO-66190: a Gradle multi-project build is driven by a single settings file at the
+# root (it declares the `include`d subprojects). The subprojects' own build.gradle files
+# are NOT independently buildable — shared plugins/versions/inter-module deps live at the
+# root — so scip-java must run once at the root, not per subproject.
+GRADLE_SETTINGS_FILES: Tuple[str, ...] = ("settings.gradle", "settings.gradle.kts")
+
+
+def _is_maven_aggregator(pom_path: Path) -> bool:
+    """Return True if a ``pom.xml`` declares a ``<modules>`` reactor.
+
+    An aggregator/parent pom builds its child modules as one reactor, so scip-java must
+    run at the aggregator, not per child module. Namespace-agnostic (Maven poms carry an
+    xmlns); falls back to a cheap substring check on a malformed/partial pom.
+    """
+    try:
+        text = pom_path.read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return False
+    try:
+        root = ElementTree.fromstring(text)
+    except ElementTree.ParseError:
+        return "<modules>" in text or "<modules " in text
+    return any(el.tag.rsplit("}", 1)[-1] == "modules" for el in root.iter())
 
 
 @dataclass
@@ -83,12 +115,40 @@ class ProjectDiscovery:
 
         return filename  # Fallback to filename itself
 
+    def _gradle_roots(self) -> Set[Path]:
+        """Directories that own a Gradle settings file (multi-project build roots)."""
+        roots: Set[Path] = set()
+        for name in GRADLE_SETTINGS_FILES:
+            for settings_file in self.repo_root.rglob(name):
+                roots.add(settings_file.parent)
+        return roots
+
+    def _maven_aggregator_roots(self) -> Set[Path]:
+        """Directories whose pom.xml is a Maven aggregator (declares ``<modules>``)."""
+        roots: Set[Path] = set()
+        for pom in self.repo_root.rglob("pom.xml"):
+            if _is_maven_aggregator(pom):
+                roots.add(pom.parent)
+        return roots
+
+    @staticmethod
+    def _under_a_root(directory: Path, roots: Set[Path]) -> bool:
+        """True if a strict ancestor of *directory* is one of *roots*."""
+        return any(ancestor in roots for ancestor in directory.parents)
+
     def discover(self) -> List[DiscoveredProject]:
         """
         Discover all buildable projects in the repository.
 
-        Scans for known build files (pom.xml, package.json, pyproject.toml, etc.)
-        and creates DiscoveredProject instances for each found project.
+        Scans for known build files (pom.xml, package.json, pyproject.toml, etc.) and
+        creates one DiscoveredProject per project.
+
+        EVO-66190: a Gradle multi-project (a ``settings.gradle[.kts]`` root) or a Maven
+        aggregator (a pom declaring ``<modules>``) is a SINGLE build — scip-java runs once
+        at the root and indexes every subproject into one top-level index. Such a root
+        therefore yields exactly one project and its JVM subprojects are suppressed (they
+        are not independently buildable). Non-JVM build files (package.json, go.mod, ...)
+        inside a JVM monorepo remain their own projects.
 
         When multiple build files exist in the same directory, only the highest
         priority build file is used (based on BUILD_FILE_PRIORITY).
@@ -96,13 +156,59 @@ class ProjectDiscovery:
         Returns:
             List of DiscoveredProject instances
         """
+        gradle_roots = self._gradle_roots()
+        maven_roots = self._maven_aggregator_roots()
+        build_roots = gradle_roots | maven_roots
+
         seen_dirs: Dict[Path, DiscoveredProject] = {}
 
-        # Scan for all build files
+        # 1. One project per TOP-LEVEL multi-module build root. A nested root (composite
+        #    build / nested aggregator) is built by its outer root, so skip it.
+        for root in gradle_roots:
+            if self._under_a_root(root, build_roots):
+                continue
+            settings_file = next(
+                (
+                    root / name
+                    for name in GRADLE_SETTINGS_FILES
+                    if (root / name).exists()
+                ),
+                root / GRADLE_SETTINGS_FILES[0],
+            )
+            seen_dirs[root] = DiscoveredProject(
+                relative_path=root.relative_to(self.repo_root),
+                language="java",  # scip-java indexes java + kotlin subprojects
+                build_system="gradle",
+                build_file=settings_file.relative_to(self.repo_root),
+            )
+        for root in maven_roots:
+            if root in seen_dirs or self._under_a_root(root, build_roots):
+                continue
+            seen_dirs[root] = DiscoveredProject(
+                relative_path=root.relative_to(self.repo_root),
+                language="java",
+                build_system="maven",
+                build_file=(root / "pom.xml").relative_to(self.repo_root),
+            )
+
+        # 2. Scan build files; suppress JVM subprojects that belong to a build root above.
         for build_file_name, (language, build_system) in BUILD_FILE_MAPPINGS.items():
             for build_file in self.repo_root.rglob(build_file_name):
                 # Get project directory (parent of build file)
                 project_dir = build_file.parent
+
+                # EVO-66190: a gradle/maven build file at-or-under a multi-module root is
+                # a subproject of that root's single build — never index it standalone.
+                if build_file_name in ("build.gradle", "build.gradle.kts") and (
+                    project_dir in gradle_roots
+                    or self._under_a_root(project_dir, gradle_roots)
+                ):
+                    continue
+                if build_file_name == "pom.xml" and (
+                    project_dir in maven_roots
+                    or self._under_a_root(project_dir, maven_roots)
+                ):
+                    continue
 
                 # Check if we've already seen this directory
                 if project_dir in seen_dirs:

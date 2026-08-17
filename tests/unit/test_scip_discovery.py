@@ -267,3 +267,104 @@ class TestProjectDiscovery:
         assert go_service.build_system == "module"
         assert go_service.relative_path == Path("go-service")
         assert go_service.build_file == Path("go-service/go.mod")
+
+    # ------------------------------------------------------------------ #
+    # EVO-66190: multi-module build roots (Gradle settings / Maven <modules>)
+    # ------------------------------------------------------------------ #
+
+    def test_gradle_multiproject_builds_once_at_root(self, tmp_path):
+        """A Gradle multi-project (root settings.gradle, no root build.gradle, N
+        subproject build.gradle) is a single build -> exactly one project at the root,
+        subprojects suppressed. This is the evolution monolith shape."""
+        (tmp_path / "settings.gradle").write_text("include 'code:a', 'code:b'")
+        (tmp_path / "code" / "a").mkdir(parents=True)
+        (tmp_path / "code" / "a" / "build.gradle").write_text("// module a")
+        (tmp_path / "code" / "b").mkdir(parents=True)
+        (tmp_path / "code" / "b" / "build.gradle").write_text("// module b")
+
+        projects = ProjectDiscovery(tmp_path).discover()
+
+        assert len(projects) == 1
+        root = projects[0]
+        assert root.relative_path == Path(".")
+        assert root.language == "java"
+        assert root.build_system == "gradle"
+        assert root.build_file == Path("settings.gradle")
+
+    def test_gradle_root_not_overwritten_by_colocated_build_file(self, tmp_path):
+        """A Gradle multi-project root that also has a co-located non-JVM build file at
+        the root (e.g. a root package.json for lint/tooling) must NOT be silently
+        replaced by that file in the per-directory dedup — the root stays the Gradle
+        build. (Regression: settings.gradle now carries a real BUILD_FILE_PRIORITY.)"""
+        (tmp_path / "settings.gradle").write_text("include 'code:a'")
+        (tmp_path / "code" / "a").mkdir(parents=True)
+        (tmp_path / "code" / "a" / "build.gradle").write_text("// module a")
+        (tmp_path / "package.json").write_text('{"name": "root-tooling"}')
+
+        projects = ProjectDiscovery(tmp_path).discover()
+
+        assert len(projects) == 1
+        assert projects[0].relative_path == Path(".")
+        assert projects[0].build_system == "gradle"
+        assert projects[0].build_file == Path("settings.gradle")
+
+    def test_single_gradle_project_with_settings_not_double_counted(self, tmp_path):
+        """A single Gradle project that has both settings.gradle and build.gradle in the
+        same dir yields exactly one project (the root), not two."""
+        (tmp_path / "settings.gradle").write_text("rootProject.name = 'svc'")
+        (tmp_path / "build.gradle").write_text("// root build")
+
+        projects = ProjectDiscovery(tmp_path).discover()
+
+        assert len(projects) == 1
+        assert projects[0].relative_path == Path(".")
+        assert projects[0].build_system == "gradle"
+
+    def test_maven_aggregator_builds_once_at_root(self, tmp_path):
+        """A Maven aggregator (root pom with <modules>) builds its child modules as one
+        reactor -> one project at the root, child module poms suppressed."""
+        (tmp_path / "pom.xml").write_text(
+            '<project xmlns="http://maven.apache.org/POM/4.0.0">'
+            "<modules><module>svc-a</module><module>svc-b</module></modules></project>"
+        )
+        (tmp_path / "svc-a").mkdir()
+        (tmp_path / "svc-a" / "pom.xml").write_text("<project><artifactId>a</artifactId></project>")
+        (tmp_path / "svc-b").mkdir()
+        (tmp_path / "svc-b" / "pom.xml").write_text("<project><artifactId>b</artifactId></project>")
+
+        projects = ProjectDiscovery(tmp_path).discover()
+
+        assert len(projects) == 1
+        assert projects[0].relative_path == Path(".")
+        assert projects[0].language == "java"
+        assert projects[0].build_system == "maven"
+
+    def test_nested_non_jvm_project_inside_gradle_monorepo_is_kept(self, tmp_path):
+        """A nested TS project (package.json) inside a Gradle monorepo stays its own
+        project — only JVM subprojects are folded into the root build."""
+        (tmp_path / "settings.gradle").write_text("include 'code:a'")
+        (tmp_path / "code" / "a").mkdir(parents=True)
+        (tmp_path / "code" / "a" / "build.gradle").write_text("// module a")
+        (tmp_path / "webapp").mkdir()
+        (tmp_path / "webapp" / "package.json").write_text('{"name": "webapp"}')
+
+        projects = ProjectDiscovery(tmp_path).discover()
+
+        paths = {p.relative_path for p in projects}
+        assert paths == {Path("."), Path("webapp")}
+        webapp = next(p for p in projects if p.relative_path == Path("webapp"))
+        assert webapp.language == "typescript"
+        assert webapp.build_system == "npm"
+
+    def test_standalone_maven_pom_without_modules_unchanged(self, tmp_path):
+        """A plain single-module pom (no <modules>) is NOT treated as an aggregator — it
+        stays a standalone project at its own dir (regression guard; the phoenix shape)."""
+        (tmp_path / "pom.xml").write_text(
+            '<project><artifactId>svc</artifactId></project>'
+        )
+
+        projects = ProjectDiscovery(tmp_path).discover()
+
+        assert len(projects) == 1
+        assert projects[0].relative_path == Path(".")
+        assert projects[0].build_system == "maven"
