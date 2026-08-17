@@ -1654,19 +1654,17 @@ class RefreshScheduler:
         # worker must NOT register a second job for the same pair or it collides
         # with its own parent row and the refresh is marked failed before it
         # starts.
-        # EVO-66113: mutable holder so the closure can read the job_id
-        # assigned by submit_job() below (which runs AFTER the closure is
-        # defined). By the time the background thread starts, submit_job
-        # has already returned and populated the holder.
-        _job_id_holder: Dict[str, Optional[str]] = {"job_id": None}
-
-        def _refresh_worker(progress_callback=None):
+        # EVO-66113: BackgroundJobManager._execute_job injects the assigned
+        # job_id into any worker whose signature declares a `job_id` param,
+        # straight from the dequeued (job_id, func, args, kwargs) tuple --
+        # race-free, so no post-submit mutable holder is needed.
+        def _refresh_worker(progress_callback=None, job_id=None):
             return self._execute_refresh(
                 alias_name,
                 force_reset=force_reset,
                 progress_callback=progress_callback,
                 tracked_by_caller=True,
-                job_id=_job_id_holder.get("job_id"),
+                job_id=job_id,
             )
 
         job_id: str = self.background_job_manager.submit_job(
@@ -1676,9 +1674,6 @@ class RefreshScheduler:
             is_admin=True,
             repo_alias=alias_name,
         )
-        # EVO-66113: populate the holder so the _refresh_worker closure
-        # can thread the job_id into embed stats env vars.
-        _job_id_holder["job_id"] = str(job_id)
         logger.info(f"Submitted refresh job {job_id} for {alias_name}")
         return job_id
 
