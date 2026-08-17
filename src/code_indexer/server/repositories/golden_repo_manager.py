@@ -1282,11 +1282,34 @@ class GoldenRepoManager:
         )
         return counts
 
+    @staticmethod
+    def _has_root_build_file(repo_dir: "Path") -> bool:
+        """Whether the repo has a root-level build file (→ discovery emits a ``.`` project
+        whose build lands the top-level ``index.scip.db``). Delegates to the shared
+        :func:`code_indexer.scip.discovery.has_root_build_file` so the reconcile presence
+        check and the funnel freshness check (``scip_lifecycle.scip_db_is_fresh``) stay in
+        lockstep."""
+        from code_indexer.scip.discovery import has_root_build_file
+
+        return has_root_build_file(repo_dir)
+
     def _scip_present(self, repo_dir: "Path") -> bool:
-        """True if any ``.scip.db`` exists under the repo's ``.code-indexer/scip``."""
+        """True if the repo already holds the SCIP index the CURRENT discovery produces.
+
+        EVO-66190: a repo with a ROOT build file is indexed as a single root project
+        whose build lands the TOP-LEVEL ``scip/index.scip.db`` — so for those, presence
+        REQUIRES that top-level DB. This stops a STALE per-subproject layout (nested DBs
+        left by the old per-subproject discovery, with no root DB — e.g. a JVM monolith
+        that pre-dates the root-collapse) from being counted "present" and never rebuilt,
+        which left the query with only the handful of subprojects that happened to build.
+        A repo with NO root build file is indexed per-subproject (nested by design), so
+        any ``.scip.db`` under the scip dir counts (original behavior, unchanged).
+        """
         scip_dir = repo_dir / ".code-indexer" / "scip"
         if not scip_dir.is_dir():
             return False
+        if self._has_root_build_file(repo_dir):
+            return (scip_dir / "index.scip.db").is_file()
         for _ in scip_dir.rglob("*.scip.db"):
             return True
         return False

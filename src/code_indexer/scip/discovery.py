@@ -69,6 +69,28 @@ def _is_maven_aggregator(pom_path: Path) -> bool:
     return any(el.tag.rsplit("}", 1)[-1] == "modules" for el in root.iter())
 
 
+def has_root_build_file(repo_dir: Path) -> bool:
+    """True if *repo_dir* has a build file at its ROOT directory.
+
+    A root build file means :meth:`ProjectDiscovery.discover` emits a project at
+    ``relative_path='.'`` (a Gradle multi-project via ``settings.gradle``, or a Maven/
+    single-Gradle/npm/python/go/C# project at the top level), whose delegated build writes
+    the TOP-LEVEL ``.code-indexer/scip/index.scip.db``. Cheap: root-level ``exists``/
+    ``glob`` checks only, never a tree walk. Shared by the reconcile's presence check and
+    the funnel's freshness check so both agree on when a top-level index is required.
+    """
+    for name in GRADLE_SETTINGS_FILES:
+        if (repo_dir / name).exists():
+            return True
+    for name in BUILD_FILE_MAPPINGS:
+        if "*" in name:  # glob pattern (e.g. *.sln, *.csproj) — root level only
+            if any(repo_dir.glob(name)):
+                return True
+        elif (repo_dir / name).exists():
+            return True
+    return False
+
+
 @dataclass
 class DiscoveredProject:
     """Represents a discovered project with its metadata."""

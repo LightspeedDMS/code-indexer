@@ -121,6 +121,15 @@ def scip_db_is_fresh(repo_root: Path, scip_dir: Path) -> bool:
     if no_index:
         # Expected-empty build already done at this commit — nothing to rebuild.
         return True
+    # EVO-66190: a root-buildable repo's build lands the TOP-LEVEL index.scip.db. A stale
+    # per-subproject layout (nested DBs only, no root DB) must NOT read as fresh — else the
+    # funnel answers FRESH off the old partial build and skips the rebuild that the
+    # reconcile's (now shape-aware) _scip_present correctly enqueues, silently no-op'ing it.
+    # Mirror that shape-awareness here so both gates agree on when a top-level DB is required.
+    from code_indexer.scip.discovery import has_root_build_file
+
+    if has_root_build_file(repo_root):
+        return (scip_dir / "index.scip.db").is_file()
     # bool() guards warn_return_any: _scip_db_exists returns a plain bool.
     return bool(_scip_db_exists(scip_dir))
 
