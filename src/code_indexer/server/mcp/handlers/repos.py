@@ -1920,6 +1920,7 @@ def _run_provider_subprocess(
     index_types: list,
     progress_callback,
     golden_repo_alias: Optional[str] = None,
+    job_id: Optional[str] = None,
 ) -> tuple:
     """Run cidx index subprocess with progress reporting.
 
@@ -1971,6 +1972,7 @@ def _run_provider_subprocess(
         get_config_service().get_config(),
         base_env=env,
         golden_repo_alias=golden_repo_alias,
+        job_id=job_id,
     )
     sanitized_env = build_cidx_subprocess_env(env_with_stats)
 
@@ -2022,6 +2024,9 @@ def _provider_index_job(
         }
 
     repo_alias = kwargs.get("repo_alias", "")
+    # EVO-66105: pick up job_id from kwargs (injected by IndexJobClaimLoop
+    # into metadata, or passed explicitly by submit_job callers).
+    job_id = kwargs.get("job_id")
     actual_path, repo_alias, is_versioned, error = _resolve_versioned_to_base_clone(
         repo_path, repo_alias
     )
@@ -2048,6 +2053,7 @@ def _provider_index_job(
         ["semantic"],
         progress_callback,
         golden_repo_alias=repo_alias,
+        job_id=job_id,
     )
 
     if success and is_versioned and actual_path != repo_path:
@@ -2088,6 +2094,8 @@ def _provider_temporal_index_job(
         }
 
     repo_alias = kwargs.get("repo_alias", "")
+    # EVO-66105: pick up job_id from kwargs for embedding stats correlation.
+    job_id = kwargs.get("job_id")
     actual_path, repo_alias, is_versioned = _resolve_provider_job_repo_path(
         repo_path, repo_alias
     )
@@ -2156,6 +2164,7 @@ def _provider_temporal_index_job(
         ["temporal"],
         progress_callback,
         golden_repo_alias=repo_alias,
+        job_id=job_id,
     )
 
     if success:

@@ -42,7 +42,8 @@ class TestClaimAndDispatch:
 
         loop = _loop(claimer, {"add_golden_repo": executor})
         assert loop._process_one_job() is True
-        assert seen == {"alias": "a"}
+        # EVO-66105: job_id is injected into metadata for embed stats
+        assert seen == {"alias": "a", "job_id": "j1"}
         claimer.complete_job.assert_called_once_with("j1", {"success": True})
         claimer.fail_job.assert_not_called()
 

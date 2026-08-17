@@ -476,7 +476,7 @@ class ClaudeCliManager:
 
         # Single commit and re-index after all swaps
         if processed:
-            self._commit_and_reindex(processed)
+            self._commit_and_reindex(processed, job_id=tracked_job_id)
 
         logger.info(
             f"Catch-up complete: {len(processed)} files processed",
@@ -522,12 +522,17 @@ class ClaudeCliManager:
             )
             return False
 
-    def _commit_and_reindex(self, processed: List[str]) -> None:
+    def _commit_and_reindex(
+        self,
+        processed: List[str],
+        job_id: Optional[str] = None,
+    ) -> None:
         """
         Commit changes and trigger re-index.
 
         Args:
             processed: List of processed aliases
+            job_id: EVO-66105 -- optional job_id for embed stats correlation
         """
         if not self._meta_dir:
             return
@@ -573,7 +578,11 @@ class ClaudeCliManager:
                 cwd=str(self._meta_dir),
                 capture_output=True,
                 env=build_cidx_subprocess_env(
-                    build_embedding_stats_child_env(get_config_service().get_config())
+                    build_embedding_stats_child_env(
+                        get_config_service().get_config(),
+                        golden_repo_alias="cidx-meta",
+                        job_id=job_id,
+                    )
                 ),
                 check=False,
             )

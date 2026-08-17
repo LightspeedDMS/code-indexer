@@ -542,11 +542,15 @@ class ActivatedRepoIndexManager:
             Result dictionary
         """
         if index_type == "semantic":
-            return self._execute_semantic_indexing(repo_path, clear)
+            return self._execute_semantic_indexing(
+                repo_path, clear, repo_alias=repo_alias
+            )
         elif index_type == "fts":
-            return self._execute_fts_indexing(repo_path, clear)
+            return self._execute_fts_indexing(repo_path, clear, repo_alias=repo_alias)
         elif index_type == "temporal":
-            return self._execute_temporal_indexing(repo_path, clear)
+            return self._execute_temporal_indexing(
+                repo_path, clear, repo_alias=repo_alias
+            )
         elif index_type == "scip":
             return self._execute_scip_indexing(repo_path, clear, repo_alias=repo_alias)
         else:
@@ -589,6 +593,7 @@ class ActivatedRepoIndexManager:
         env: Optional[dict] = None,
         cancel_check: Optional[Callable[[], bool]] = None,
         poll_interval: float = SHORT_POLL_SECONDS,
+        golden_repo_alias: Optional[str] = None,
     ) -> "subprocess.CompletedProcess[str]":
         """Run a cidx subprocess with provider-config seeding and health-event draining.
 
@@ -631,13 +636,19 @@ class ActivatedRepoIndexManager:
         CIDX_EMBEDDING_STATS_BOOTSTRAP_DIR is merged in here ONCE,
         unconditionally (both storage modes), before the existing
         build_cidx_subprocess_env() PYTHONPATH sanitization.
+
+        EVO-66105: golden_repo_alias is threaded through to
+        build_embedding_stats_child_env for per-repo VoyageAI cost
+        correlation. node_id is auto-resolved from server_config.
         """
         from code_indexer.server.storage.postgres.embedding_stats_child_wiring import (
             build_embedding_stats_child_env,
         )
 
         env_with_stats = build_embedding_stats_child_env(
-            get_config_service().get_config(), base_env=env
+            get_config_service().get_config(),
+            base_env=env,
+            golden_repo_alias=golden_repo_alias,
         )
         resolved_env = build_cidx_subprocess_env(env_with_stats)
         self._seed_telemetry(repo_path)
@@ -679,6 +690,7 @@ class ActivatedRepoIndexManager:
         repo_path: str,
         clear: bool,
         cancel_check: Optional[Callable[[], bool]] = None,
+        repo_alias: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Execute semantic indexing using SmartIndexer.
 
@@ -710,6 +722,7 @@ class ActivatedRepoIndexManager:
                 ["cidx", "index"],
                 repo_path,
                 cancel_check=cancel_check,
+                golden_repo_alias=repo_alias,
             )
 
             if result.returncode != 0:
@@ -765,7 +778,12 @@ class ActivatedRepoIndexManager:
                 f"Branch-delta reindex failed for '{repo_path}': {error_detail}"
             )
 
-    def _execute_fts_indexing(self, repo_path: str, clear: bool) -> Dict[str, Any]:
+    def _execute_fts_indexing(
+        self,
+        repo_path: str,
+        clear: bool,
+        repo_alias: Optional[str] = None,
+    ) -> Dict[str, Any]:
         """Execute FTS indexing using TantivyIndexManager.
 
         Bug #1419: guards against running on a repo with no
@@ -784,6 +802,7 @@ class ActivatedRepoIndexManager:
             result = self._run_subprocess_with_telemetry(
                 args,
                 repo_path,
+                golden_repo_alias=repo_alias,
             )
 
             if result.returncode != 0:
@@ -797,7 +816,12 @@ class ActivatedRepoIndexManager:
         except Exception as e:
             return {"success": False, "error": f"FTS indexing error: {str(e)}"}
 
-    def _execute_temporal_indexing(self, repo_path: str, clear: bool) -> Dict[str, Any]:
+    def _execute_temporal_indexing(
+        self,
+        repo_path: str,
+        clear: bool,
+        repo_alias: Optional[str] = None,
+    ) -> Dict[str, Any]:
         """Execute temporal indexing using GitCommitIndexer.
 
         Bug #1313 round-4 (Finding 3): in postgres/cluster mode, hand the
@@ -833,6 +857,7 @@ class ActivatedRepoIndexManager:
                 args,
                 repo_path,
                 env=_temporal_env,
+                golden_repo_alias=repo_alias,
             )
 
             if result.returncode != 0:
