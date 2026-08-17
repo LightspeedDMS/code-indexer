@@ -10,7 +10,7 @@ job_id env var is present.
 
 from __future__ import annotations
 
-from unittest.mock import Mock, patch
+from unittest.mock import patch
 
 import pytest
 
