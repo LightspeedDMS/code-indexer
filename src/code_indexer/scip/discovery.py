@@ -1,9 +1,16 @@
 """SCIP project auto-discovery module."""
 
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Dict, Set, Tuple
 from xml.etree import ElementTree
+
+
+# EVO-66190: directories that never hold a real project root. Pruned during the single
+# discovery walk so a large repo's VCS/index internals aren't traversed (a .git tree can
+# itself be tens of thousands of files). Safe: no build file inside these is a project.
+_PRUNE_DIRS: frozenset = frozenset({".git", ".code-indexer"})
 
 
 # Build file mappings: filename/pattern -> (language, build_system)
@@ -137,21 +144,65 @@ class ProjectDiscovery:
 
         return filename  # Fallback to filename itself
 
-    def _gradle_roots(self) -> Set[Path]:
-        """Directories that own a Gradle settings file (multi-project build roots)."""
-        roots: Set[Path] = set()
-        for name in GRADLE_SETTINGS_FILES:
-            for settings_file in self.repo_root.rglob(name):
-                roots.add(settings_file.parent)
-        return roots
+    def _walk_build_files(
+        self,
+    ) -> Tuple[List[Path], List[Path], Dict[str, List[Path]]]:
+        """Collect every recognized build file in a SINGLE filesystem traversal.
 
-    def _maven_aggregator_roots(self) -> Set[Path]:
+        EVO-66190: discovery previously ran ~13 independent ``rglob`` passes — Gradle
+        settings (×2), ``pom.xml``, and one per :data:`BUILD_FILE_MAPPINGS` pattern — each
+        a FULL walk of the repo tree. On a large monolith over NFS that was minutes (a
+        ~75k-file repo measured ~80 s *per* pass, ~5.8 min total) and, worse, ``rglob``
+        raised ``FileNotFoundError`` when a directory vanished mid-walk on a live golden
+        tree. One ``os.walk`` collects them all instead, prunes VCS/index dirs
+        (:data:`_PRUNE_DIRS`), and swallows per-directory errors so a concurrent mutation
+        can't abort the whole discovery.
+
+        Returns ``(settings_files, pom_files, files_by_pattern)`` where ``files_by_pattern``
+        maps each ``BUILD_FILE_MAPPINGS`` key to its matching paths in walk order.
+        """
+        exact_names = {name for name in BUILD_FILE_MAPPINGS if "*" not in name}
+        glob_patterns = [
+            (name, name[1:]) for name in BUILD_FILE_MAPPINGS if name.startswith("*")
+        ]  # e.g. ("*.sln", ".sln")
+        settings_names = frozenset(GRADLE_SETTINGS_FILES)
+
+        settings_files: List[Path] = []
+        pom_files: List[Path] = []
+        files_by_pattern: Dict[str, List[Path]] = {
+            name: [] for name in BUILD_FILE_MAPPINGS
+        }
+
+        for dirpath, dirnames, filenames in os.walk(
+            self.repo_root, onerror=lambda _e: None
+        ):
+            # Prune in place so os.walk does not descend into VCS/index internals.
+            dirnames[:] = [d for d in dirnames if d not in _PRUNE_DIRS]
+            base = Path(dirpath)
+            for filename in filenames:
+                path = base / filename
+                if filename in settings_names:
+                    settings_files.append(path)
+                if filename == "pom.xml":
+                    pom_files.append(path)
+                if filename in exact_names:
+                    files_by_pattern[filename].append(path)
+                else:
+                    for pattern, suffix in glob_patterns:
+                        if filename.endswith(suffix):
+                            files_by_pattern[pattern].append(path)
+                            break
+        return settings_files, pom_files, files_by_pattern
+
+    @staticmethod
+    def _gradle_roots(settings_files: List[Path]) -> Set[Path]:
+        """Directories that own a Gradle settings file (multi-project build roots)."""
+        return {settings_file.parent for settings_file in settings_files}
+
+    @staticmethod
+    def _maven_aggregator_roots(pom_files: List[Path]) -> Set[Path]:
         """Directories whose pom.xml is a Maven aggregator (declares ``<modules>``)."""
-        roots: Set[Path] = set()
-        for pom in self.repo_root.rglob("pom.xml"):
-            if _is_maven_aggregator(pom):
-                roots.add(pom.parent)
-        return roots
+        return {pom.parent for pom in pom_files if _is_maven_aggregator(pom)}
 
     @staticmethod
     def _under_a_root(directory: Path, roots: Set[Path]) -> bool:
@@ -178,8 +229,9 @@ class ProjectDiscovery:
         Returns:
             List of DiscoveredProject instances
         """
-        gradle_roots = self._gradle_roots()
-        maven_roots = self._maven_aggregator_roots()
+        settings_files, pom_files, files_by_pattern = self._walk_build_files()
+        gradle_roots = self._gradle_roots(settings_files)
+        maven_roots = self._maven_aggregator_roots(pom_files)
         build_roots = gradle_roots | maven_roots
 
         seen_dirs: Dict[Path, DiscoveredProject] = {}
@@ -215,7 +267,7 @@ class ProjectDiscovery:
 
         # 2. Scan build files; suppress JVM subprojects that belong to a build root above.
         for build_file_name, (language, build_system) in BUILD_FILE_MAPPINGS.items():
-            for build_file in self.repo_root.rglob(build_file_name):
+            for build_file in files_by_pattern[build_file_name]:
                 # Get project directory (parent of build file)
                 project_dir = build_file.parent
 
