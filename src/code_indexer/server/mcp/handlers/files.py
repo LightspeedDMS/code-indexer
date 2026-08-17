@@ -1012,7 +1012,29 @@ def browse_directory(params: Dict[str, Any], user: User) -> Dict[str, Any]:
             sort_by=bp["sort_by"],
         )
 
-        if is_global_repo:
+        # Perf fast-path: a NON-recursive browse of a subdirectory only needs that one
+        # directory's entries. Scan it directly (os.scandir) instead of the full-tree
+        # rglob in _collect_files, which on a large golden repo over NFS costs tens of
+        # seconds for what is an `ls` of one folder. Scoped to -global golden repos
+        # (immutable, path-resolved) and the single-level pattern the non-recursive
+        # branch of _build_browse_path_pattern produces ({path}/* or {path}/<glob>); a
+        # cross-directory user pattern (contains '/' or '**') keeps the full-walk path.
+        user_pat = bp["user_path_pattern"]
+        cross_dir_pattern = bool(
+            user_pat and ("/" in user_pat or user_pat.startswith("**"))
+        )
+        if (
+            is_global_repo
+            and not bp["recursive"]
+            and bp["path"]
+            and not cross_dir_pattern
+        ):
+            result = _utils.app_module.file_service.list_directory_level(
+                repo_path=repository_alias,
+                subdir=bp["path"],
+                query_params=query_params,
+            )
+        elif is_global_repo:
             result = _utils.app_module.file_service.list_files_by_path(
                 repo_path=repository_alias,
                 query_params=query_params,

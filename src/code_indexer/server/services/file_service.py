@@ -213,6 +213,106 @@ class FileListingService:
         )
         return FileListResponse(files=paginated_files, pagination=pagination_info)
 
+    def list_directory_level(
+        self, repo_path: str, subdir: str, query_params: FileListQueryParams
+    ) -> FileListResponse:
+        """List the files directly under a single directory (one level, non-recursive).
+
+        A single-directory browse only needs the entries of ``<repo>/<subdir>``, but
+        :meth:`list_files_by_path` reaches it via :meth:`_collect_files`, which
+        ``rglob``s the ENTIRE repo tree (stat per file) and then filters down to the
+        one directory. On a large golden repo over NFS that is tens of seconds for
+        what is an ``ls`` of one folder. This scans just the target directory instead
+        — O(entries-in-dir) rather than O(files-in-repo) — and then runs the identical
+        filter/sort/paginate pipeline, so results match the full-walk path exactly.
+        """
+        files = self._collect_single_level(repo_path, subdir)
+        filtered_files = self._apply_filters(files, query_params)
+        sorted_files = self._apply_sorting(filtered_files, query_params.sort_by)
+        paginated_files, pagination_info = self._apply_pagination(
+            sorted_files, query_params.page, query_params.limit
+        )
+        return FileListResponse(files=paginated_files, pagination=pagination_info)
+
+    def _collect_single_level(self, repo_path: str, subdir: str) -> List[FileInfo]:
+        """Collect FileInfo for the files directly inside ``<repo_path>/<subdir>``.
+
+        Parity with :meth:`_collect_files_uncached` for the entries it returns: same
+        excluded-dir skip, same root ``.gitignore`` filtering, same FileInfo fields —
+        only the traversal is scoped to one directory (``os.scandir``) instead of a
+        whole-tree ``rglob``. Returns ``[]`` for a path that escapes the repo, does not
+        exist, is not a directory, or is itself excluded.
+        """
+        repo_root = Path(repo_path)
+        root_resolved = repo_root.resolve()
+        target = (repo_root / subdir).resolve() if subdir else root_resolved
+
+        # Refuse a subdir that resolves outside the repo (e.g. via ``..`` or a symlink).
+        if target != root_resolved and root_resolved not in target.parents:
+            return []
+        if not target.is_dir():
+            return []
+
+        rel_base = target.relative_to(root_resolved)
+        # The directory being browsed is itself under .git/.code-indexer -> nothing.
+        if str(rel_base) != "." and self._is_in_excluded_dir(rel_base):
+            return []
+
+        gitignore_spec = self._load_gitignore_spec(repo_root)
+        indexable_extensions = self._get_indexable_extensions()
+
+        files: List[FileInfo] = []
+        try:
+            with os.scandir(target) as it:
+                for entry in it:
+                    try:
+                        # is_file() follows symlinks, matching the rglob+is_file() path.
+                        if not entry.is_file():
+                            continue
+
+                        relative_path = (
+                            Path(entry.name)
+                            if str(rel_base) == "."
+                            else rel_base / entry.name
+                        )
+                        relative_path_str = str(relative_path)
+
+                        if self._is_in_excluded_dir(relative_path):
+                            continue
+                        if gitignore_spec and gitignore_spec.match_file(
+                            relative_path_str
+                        ):
+                            continue
+
+                        stat_info = entry.stat()
+                        files.append(
+                            FileInfo(
+                                path=relative_path_str,
+                                size_bytes=stat_info.st_size,
+                                modified_at=datetime.fromtimestamp(
+                                    stat_info.st_mtime, tz=timezone.utc
+                                ),
+                                language=self._detect_language(Path(entry.path)),
+                                is_indexed=Path(entry.name).suffix.lower()
+                                in indexable_extensions,
+                            )
+                        )
+                    except (OSError, PermissionError) as e:
+                        logger.warning(
+                            format_error_log(
+                                "CACHE-GENERAL-012",
+                                "Cannot access file",
+                                file_path=str(getattr(entry, "path", "")),
+                                error=str(e),
+                            ),
+                            extra=get_log_extra("CACHE-GENERAL-012"),
+                        )
+                        continue
+        except (FileNotFoundError, NotADirectoryError):
+            return []
+
+        return files
+
     def _get_repository_path(self, repo_id: str, username: str) -> str:
         """
         Get file system path for repository from activated repositories.
