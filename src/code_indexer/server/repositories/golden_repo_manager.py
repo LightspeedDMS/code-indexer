@@ -1282,11 +1282,50 @@ class GoldenRepoManager:
         )
         return counts
 
+    @staticmethod
+    def _has_root_build_file(repo_dir: "Path") -> bool:
+        """True if the repo has a build file at its ROOT directory.
+
+        A root build file means SCIP discovery emits a project at ``relative_path='.'``
+        (a Gradle multi-project via ``settings.gradle``, a Maven/single-Gradle/npm/
+        python/go/C# project at the top level), whose delegated build writes the
+        top-level ``.code-indexer/scip/index.scip.db``. Cheap: root-level ``exists``/
+        ``glob`` checks only, never a tree walk. Reuses the discovery module's build-file
+        set so the two stay in lockstep.
+        """
+        from code_indexer.scip.discovery import (
+            BUILD_FILE_MAPPINGS,
+            GRADLE_SETTINGS_FILES,
+        )
+
+        for name in GRADLE_SETTINGS_FILES:
+            if (repo_dir / name).exists():
+                return True
+        for name in BUILD_FILE_MAPPINGS:
+            if "*" in name:  # glob pattern (e.g. *.sln, *.csproj) — root level only
+                if any(repo_dir.glob(name)):
+                    return True
+            elif (repo_dir / name).exists():
+                return True
+        return False
+
     def _scip_present(self, repo_dir: "Path") -> bool:
-        """True if any ``.scip.db`` exists under the repo's ``.code-indexer/scip``."""
+        """True if the repo already holds the SCIP index the CURRENT discovery produces.
+
+        EVO-66190: a repo with a ROOT build file is indexed as a single root project
+        whose build lands the TOP-LEVEL ``scip/index.scip.db`` — so for those, presence
+        REQUIRES that top-level DB. This stops a STALE per-subproject layout (nested DBs
+        left by the old per-subproject discovery, with no root DB — e.g. a JVM monolith
+        that pre-dates the root-collapse) from being counted "present" and never rebuilt,
+        which left the query with only the handful of subprojects that happened to build.
+        A repo with NO root build file is indexed per-subproject (nested by design), so
+        any ``.scip.db`` under the scip dir counts (original behavior, unchanged).
+        """
         scip_dir = repo_dir / ".code-indexer" / "scip"
         if not scip_dir.is_dir():
             return False
+        if self._has_root_build_file(repo_dir):
+            return (scip_dir / "index.scip.db").is_file()
         for _ in scip_dir.rglob("*.scip.db"):
             return True
         return False
