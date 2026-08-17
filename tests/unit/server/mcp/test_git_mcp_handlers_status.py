@@ -17,10 +17,16 @@ All tests use mocked GitOperationsService to avoid real git operations.
 import json
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, Any, cast
+from typing import Any, Dict, cast
 from unittest.mock import patch
+
 import pytest
 
+# Import the handlers package at module load so the fixtures' string-target
+# patches (e.g. "code_indexer.server.mcp.handlers.git_operations_service") resolve
+# even when this file is run in isolation — otherwise the submodule isn't registered
+# on `code_indexer.server.mcp` until some other test imports it.
+import code_indexer.server.mcp.handlers  # noqa: F401
 from code_indexer.server.auth.user_manager import User, UserRole
 from code_indexer.server.services.git_operations_service import GitCommandError
 
@@ -128,6 +134,150 @@ class TestGitStatusHandler:
         assert data["error_type"] == "GitCommandError"
         assert data["stderr"] == "fatal: not a git repository"
         assert data["command"] == ["git", "status"]
+
+    def test_git_status_global_golden_short_circuits_without_subprocess(
+        self, mock_user, mock_git_service
+    ):
+        """EVO-66189: a read-only ``-global`` golden repo that is NOT in write mode
+        returns clean *without* shelling out to git — the real ``git status`` over the
+        shared NFS working tree costs ~30s on a large monolith (killed at the
+        git_local_timeout), and golden repos are always clean at their pinned snapshot.
+
+        The short-circuit must run *after* the resolver validates the repo exists,
+        isn't ``local://``-backed, and is accessible to the user — see the regression
+        guard tests below for those cases. Here the resolver is mocked to succeed so
+        we can assert it still runs before the short-circuit kicks in.
+        """
+        from code_indexer.server.mcp import handlers
+        from code_indexer.server.mcp.handlers import _legacy, files
+
+        with patch.object(
+            _legacy, "_resolve_git_repo_path", return_value=("/tmp/evolution", None)
+        ) as mock_resolve, patch.object(
+            files, "_is_write_mode_active", return_value=False
+        ):
+            mcp_response = handlers.git_status(
+                {"repository_alias": "evolution-global"}, mock_user
+            )
+        data = _extract_response_data(mcp_response)
+
+        assert data["success"] is True
+        assert data["staged"] == []
+        assert data["unstaged"] == []
+        assert data["untracked"] == []
+        # The resolver still ran (existence / local:// / access-control checks)...
+        mock_resolve.assert_called_once_with("evolution-global", "testuser")
+        # ...but the actual git subprocess is skipped.
+        mock_git_service.git_status.assert_not_called()
+
+    def test_git_status_global_nonexistent_repo_still_errors(
+        self, mock_user, mock_git_service
+    ):
+        """EVO-66189 regression guard: the short-circuit must not bypass the
+        repo-existence check normally enforced by ``_resolve_git_repo_path`` — a
+        nonexistent ``-global`` alias still returns the "not found" error instead of a
+        fake clean status."""
+        from code_indexer.server.mcp import handlers
+        from code_indexer.server.mcp.handlers import _legacy, files
+
+        with patch.object(
+            _legacy,
+            "_resolve_git_repo_path",
+            return_value=(None, "Repository 'nonexistent-global' not found."),
+        ), patch.object(files, "_is_write_mode_active") as mock_write_mode:
+            mcp_response = handlers.git_status(
+                {"repository_alias": "nonexistent-global"}, mock_user
+            )
+        data = _extract_response_data(mcp_response)
+
+        assert data["success"] is False
+        assert data["error"] == "Repository 'nonexistent-global' not found."
+        # Never reached the write-mode / short-circuit check — the resolver's error
+        # short-circuits first.
+        mock_write_mode.assert_not_called()
+        mock_git_service.git_status.assert_not_called()
+
+    def test_git_status_global_local_repo_still_errors(
+        self, mock_user, mock_git_service
+    ):
+        """EVO-66189 regression guard: a ``local://``-backed golden repo still returns
+        the "does not support git operations" error instead of a fake clean status."""
+        from code_indexer.server.mcp import handlers
+        from code_indexer.server.mcp.handlers import _legacy, files
+
+        with patch.object(
+            _legacy,
+            "_resolve_git_repo_path",
+            return_value=(
+                None,
+                "Repository 'cidx-meta-global' is a local repository and does not "
+                "support git operations.",
+            ),
+        ), patch.object(files, "_is_write_mode_active") as mock_write_mode:
+            mcp_response = handlers.git_status(
+                {"repository_alias": "cidx-meta-global"}, mock_user
+            )
+        data = _extract_response_data(mcp_response)
+
+        assert data["success"] is False
+        assert "does not support git operations" in data["error"]
+        mock_write_mode.assert_not_called()
+        mock_git_service.git_status.assert_not_called()
+
+    def test_git_status_global_unauthorized_user_still_errors(
+        self, mock_user, mock_git_service
+    ):
+        """EVO-66189 regression guard: the Story #387 access-control denial (the
+        resolver returns "not found" for repos outside the user's accessible set, by
+        design, to avoid leaking existence to unauthorized users) still produces an
+        error instead of a fake clean status."""
+        from code_indexer.server.mcp import handlers
+        from code_indexer.server.mcp.handlers import _legacy, files
+
+        with patch.object(
+            _legacy,
+            "_resolve_git_repo_path",
+            return_value=(None, "Repository 'secret-global' not found."),
+        ) as mock_resolve, patch.object(
+            files, "_is_write_mode_active"
+        ) as mock_write_mode:
+            mcp_response = handlers.git_status(
+                {"repository_alias": "secret-global"}, mock_user
+            )
+        data = _extract_response_data(mcp_response)
+
+        assert data["success"] is False
+        assert data["error"] == "Repository 'secret-global' not found."
+        mock_resolve.assert_called_once_with("secret-global", "testuser")
+        mock_write_mode.assert_not_called()
+        mock_git_service.git_status.assert_not_called()
+
+    def test_git_status_global_in_write_mode_falls_through_to_git(
+        self, mock_user, mock_git_service
+    ):
+        """A ``-global`` repo currently in write mode (a golden refresh is in flight) is
+        NOT read-only, so it must skip the short-circuit and run the real git status."""
+        from code_indexer.server.mcp import handlers
+        from code_indexer.server.mcp.handlers import _legacy, files
+
+        mock_git_service.git_status.return_value = {
+            "staged": [],
+            "unstaged": ["x.py"],
+            "untracked": [],
+        }
+        with patch.object(
+            files, "_is_write_mode_active", return_value=True
+        ), patch.object(
+            _legacy, "_resolve_git_repo_path", return_value=("/tmp/test-repo", None)
+        ):
+            mcp_response = handlers.git_status(
+                {"repository_alias": "evolution-global"}, mock_user
+            )
+        data = _extract_response_data(mcp_response)
+
+        assert data["success"] is True
+        assert data["unstaged"] == ["x.py"]
+        mock_git_service.git_status.assert_called_once_with(Path("/tmp/test-repo"))
 
 
 class TestGitDiffHandler:

@@ -1163,6 +1163,26 @@ def git_status(args: Dict[str, Any], user: User) -> Dict[str, Any]:
             return _mcp_response({"success": False, "error": error_msg})
         assert repo_path is not None  # narrowed by error_msg check above
 
+        # EVO-66189: golden `-global` repos are read-only pinned snapshots, so a real
+        # `git status` over the shared NFS working tree is pure cost — ~30s on a large
+        # monolith (killed at git_local_timeout). When not in write mode they are always
+        # clean (cidx's own `.code-indexer/` artifacts are not meaningful repo status), so
+        # return clean without shelling out to git. Write-mode golden repos (a refresh is
+        # in flight) fall through to the real status below. This check runs *after*
+        # _resolve_git_repo_path above, so repo-existence, `local://`, and Story #387
+        # access-control checks still apply before the short-circuit — only the actual
+        # `git status` subprocess call is skipped, not the validation.
+        if isinstance(repository_alias, str) and repository_alias.endswith("-global"):
+            from .files import _is_write_mode_active
+
+            golden_repos_dir = getattr(
+                _utils.app_module.app.state, "golden_repos_dir", None
+            )
+            if not _is_write_mode_active(repository_alias, golden_repos_dir):
+                return _mcp_response(
+                    {"success": True, "staged": [], "unstaged": [], "untracked": []}
+                )
+
         result = git_operations_service.git_status(Path(repo_path))
         result["success"] = True
         return _mcp_response(result)
