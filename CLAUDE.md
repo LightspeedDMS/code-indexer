@@ -256,6 +256,44 @@ defect regardless of how fast it looks locally.
 
 This rule applies to ALL contexts: main context, subagents, tdd-engineer, code-reviewer. A code reviewer who approves a module-level dict used as cross-request server state has missed a critical cluster bug.
 
+### Shared-Storage Protocol Is Pinned to NFSv3 — NFSv4 Is Off The Table
+
+The cluster's shared mounts are NFSv3 (`vers=3,nolock` + `hard` on golden-repos, `soft,timeo=30,retrans=3`
+on cow-storage). **This is not a default that was never revisited — NFSv4 was deployed, failed three
+separate ways in production-like use, and was deliberately rolled back.** Do NOT propose NFSv4 as an
+improvement without addressing all three failures below; they are live-reproduced, not theoretical.
+
+| Failure | Version | Symptom | Cause |
+|---------|---------|---------|-------|
+| Bug #1510 | v4.1 (cow-storage) | `dmesg: NFS: <server>: lost N locks` -> SQLite `disk I/O error` during golden-repo refresh | Periodic server-side lock-manager state loss. `chunks.db` writes need real OS byte-range locks |
+| `docs/cluster-setup.md:474` | v4.x (golden-repos) | `git index-pack`: `fatal: write error: Bad file descriptor` -> `fatal: fetch-pack: invalid index-pack output` | NFSv4 locking + mmap semantics vs git's pack writing |
+| memory `reference_staging_nfs_wedge_recovery` (2026-07-26) | v4.2 | Mount persistently hung on a recovered node; `vers=4.1` and `vers=3` both mounted fine | NFSv4.2 state-RECOVERY hang, node<->server-pair specific |
+
+**`nolock` cannot rescue NFSv4** — it was tried on the v4.1 mount alone and had empirically ZERO effect.
+`nolock` disables the separate NLM protocol, which is NFSv3-only; NFSv4 integrates locking into its own
+OPEN/LOCK state machine and therefore has no client-side-only locking mode at all. The mount had to be
+downgraded to v3, where `nolock` is a real option. `vers=3`/`nolock` and `soft`/`hard` are ORTHOGONAL;
+do not conflate them.
+
+**The generalized rule, which is the part worth carrying forward**: on this deployment, coherence or
+locking purchased via **server-held protocol state** has a bad empirical record, and the failure mode is
+**state recovery**, not steady-state operation. NFSv4 delegations, byte-range locks and open state all
+live in that same state machine — so "v4 gives better cache coherence via delegations" and "v4's stateful
+protocol is what breaks here" are one fact seen from two sides. This filter also applies to SMB3 (leases,
+oplocks, durable handles are the same class of server-held state). NFSv3's statelessness is the property
+being bought, not a limitation being tolerated.
+
+**The strategic direction is to need LESS from the filesystem, not to find a better one.** Story #1546
+moved alias locking off the filesystem to PostgreSQL (DB-backed is the default as of 12.9.0); Bug #1538
+solved read freshness with an explicit inode-identity fingerprint rather than trusting the protocol. The
+filesystem is deliberately demoted to bulk-data transport that supports `cp --reflink` — coordination
+lives in PostgreSQL, where state recovery is a solved problem. Any storage proposal must preserve reflink
+support (the CoW daemon reflinks LOCALLY on XFS/Btrfs; the clone never crosses the wire), which is why
+CephFS/GlusterFS are non-starters — they replace the filesystem rather than the access protocol, leaving
+nothing underneath to reflink on.
+
+-> Detail: docs/cluster-setup.md (lines 52, 465-474) | docs/cow-storage-setup.md#294
+
 ### Query Is Everything
 
 Query capability is the core product value. NEVER remove or break: query functionality, git-awareness, branch-processing optimization, relationship tracking, deduplication of indexing. If refactoring removes any of these, STOP. See memory: `project_query_is_everything.md`.
