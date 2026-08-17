@@ -121,7 +121,7 @@ class DeterministicHashEmbeddingProvider(EmbeddingProvider):
         return FAKE_MAX_TOKENS
 
 
-def _run_git(repo: Path, *args: str) -> subprocess.CompletedProcess:
+def _run_git(repo: Path, *args: str) -> subprocess.CompletedProcess[str]:
     """Run a real git subcommand against ``repo`` (real subprocess, no
     mocking) -- used to build a real two-branch repository below.
     """

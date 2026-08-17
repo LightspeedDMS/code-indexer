@@ -13,7 +13,7 @@ import importlib.util
 import json
 import sys
 from pathlib import Path
-from typing import Any, List
+from typing import Any, List, cast
 
 import numpy as np
 
@@ -43,7 +43,9 @@ def load_measurement_module() -> Any:
 
 def make_vector(seed: int) -> List[float]:
     rng = np.random.default_rng(seed)
-    return rng.standard_normal(VECTOR_DIM).astype(np.float32).tolist()
+    return cast(
+        List[float], rng.standard_normal(VECTOR_DIM).astype(np.float32).tolist()
+    )
 
 
 def read_unique_file_count(base_path: Path, collection_name: str) -> int:

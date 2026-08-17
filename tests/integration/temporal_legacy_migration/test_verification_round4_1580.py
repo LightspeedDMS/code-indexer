@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any, Dict
 
 import numpy as np
 import pytest
@@ -92,8 +93,11 @@ def test_sharded_json_digest_distinguishes_values_that_collapse_under_float32():
     both values round to the same float32 bit pattern and the two digests
     were IDENTICAL -- this assertion fails on the unpatched module.
     """
-    record_a = {"id": "p1", "vector": [1.0]}
-    record_b = {"id": "p1", "vector": [1.0000000000000002]}
+    # Dict[str, Any]: mirrors _digest()'s own untyped `record` parameter --
+    # these fixtures intentionally hold a heterogeneous point-record shape
+    # (str id + float-list vector), the same shape production records have.
+    record_a: Dict[str, Any] = {"id": "p1", "vector": [1.0]}
+    record_b: Dict[str, Any] = {"id": "p1", "vector": [1.0000000000000002]}
     # Sanity: these two floats really are distinct at float64 precision but
     # collapse to the identical float32 bit pattern.
     assert record_a["vector"][0] != record_b["vector"][0]
