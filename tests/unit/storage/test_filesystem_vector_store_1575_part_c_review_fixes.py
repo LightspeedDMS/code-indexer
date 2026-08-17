@@ -173,9 +173,7 @@ def test_defect2_abort_resume_sequence_never_publishes_clean_over_untracked_muta
     _ = store.end_indexing("coll")
 
     store.begin_indexing("coll")
-    aborted_points = [
-        _point(f"abort{i}", f"src/abort{i}.py", 10 + i) for i in range(5)
-    ]
+    aborted_points = [_point(f"abort{i}", f"src/abort{i}.py", 10 + i) for i in range(5)]
     _ = store.upsert_points("coll", aborted_points)
     assert _hnsw_sync(collection_path)["status"] == "dirty"
     store.abort_indexing("coll")

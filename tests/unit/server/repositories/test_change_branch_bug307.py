@@ -244,9 +244,7 @@ class TestCbHnswBranchCleanup:
         # matching FilesystemBackend.get_vector_store_client()'s existing
         # pattern -- non-server/non-postgres contexts (this test's default,
         # no app.state.storage_mode set) resolve to True.
-        mock_store_cls.assert_called_once_with(
-            index_dir, hnsw_sync_epoch_enabled=True
-        )
+        mock_store_cls.assert_called_once_with(index_dir, hnsw_sync_epoch_enabled=True)
         # rebuild_hnsw_filtered called for the collection
         mock_store.rebuild_hnsw_filtered.assert_called_once_with(
             "my-collection",

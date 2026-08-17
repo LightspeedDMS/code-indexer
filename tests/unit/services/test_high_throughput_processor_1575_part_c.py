@@ -112,9 +112,9 @@ def test_defect1_branch_context_registered_after_finalization_orphans_session(
         precomputed_query_vector=old_only_vector,
         limit=5,
     )
-    assert any(
-        r["id"] == "old_only_chunk" for r in baseline_results
-    ), "test setup invalid: seed point not found in baseline HNSW search"
+    assert any(r["id"] == "old_only_chunk" for r in baseline_results), (
+        "test setup invalid: seed point not found in baseline HNSW search"
+    )
 
     processor = _make_processor(tmp_path)
     processor.vector_store_client = store

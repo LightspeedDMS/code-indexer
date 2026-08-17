@@ -1344,9 +1344,7 @@ def repair_duplicate_and_shifted_points(
         return DedupRepairResult(
             records_scanned=len(id_to_paths),
             gate_passed=False,
-            duplicate_groups=sum(
-                1 for paths in id_to_paths.values() if len(paths) > 1
-            ),
+            duplicate_groups=sum(1 for paths in id_to_paths.values() if len(paths) > 1),
         )
 
     duplicated = {pid: paths for pid, paths in id_to_paths.items() if len(paths) > 1}

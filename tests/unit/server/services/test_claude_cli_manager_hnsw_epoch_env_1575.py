@@ -64,9 +64,7 @@ def _run_commit_and_reindex_and_capture_index_env(tmp_path, server_config):
     ],
 )
 def test_hnsw_epoch_env_matches_storage_mode(tmp_path, storage_mode, expected_var):
-    kwargs = dict(
-        server_dir=str(tmp_path / "cidx-server"), storage_mode=storage_mode
-    )
+    kwargs = dict(server_dir=str(tmp_path / "cidx-server"), storage_mode=storage_mode)
     if storage_mode == "postgres":
         kwargs["postgres_dsn"] = _FAKE_POSTGRES_DSN
     server_config = ServerConfig(**kwargs)

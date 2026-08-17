@@ -196,9 +196,7 @@ class TestResetFiresForGateRejectedDuplicateQuarantine:
         collection (a missing-unique_key record sits elsewhere in it).
         This models a LEGACY/GENERIC-cause quarantine (e.g. from a
         pre-Bug-1579 crash) getting its one fair re-evaluation."""
-        candidate = _make_candidate(
-            tmp_path, with_duplicate=True, gate_rejected=True
-        )
+        candidate = _make_candidate(tmp_path, with_duplicate=True, gate_rejected=True)
         manager = _FakeGoldenRepoManagerWithBackend(backend)
         _quarantine_with_generic_cause(
             backend,
@@ -225,9 +223,7 @@ class TestResetFiresForGateRejectedDuplicateQuarantine:
         duplicate anywhere must still correctly report no reset -- the
         gate-agnostic predicate is broader for DUPLICATES, not a signal
         that fires unconditionally whenever the gate merely rejects."""
-        candidate = _make_candidate(
-            tmp_path, with_duplicate=False, gate_rejected=True
-        )
+        candidate = _make_candidate(tmp_path, with_duplicate=False, gate_rejected=True)
         manager = _FakeGoldenRepoManagerWithBackend(backend)
         _quarantine_with_generic_cause(
             backend,
@@ -260,7 +256,9 @@ class TestDedupGateRejectedCauseNeverResets:
             "manual review, will count toward quarantine"
         )
 
-        assert classify_failure_cause(detail=detail) == DEDUP_GATE_REJECTED_FAILURE_CAUSE
+        assert (
+            classify_failure_cause(detail=detail) == DEDUP_GATE_REJECTED_FAILURE_CAUSE
+        )
 
     def test_no_reset_when_cause_is_dedup_gate_rejected(
         self, tmp_path, backend
@@ -270,9 +268,7 @@ class TestDedupGateRejectedCauseNeverResets:
         reset -- unlike the GENERIC-cause case above, this cause is a
         KNOWN, confirmed gate rejection: retrying is futile and would
         only starve other candidates."""
-        candidate = _make_candidate(
-            tmp_path, with_duplicate=True, gate_rejected=True
-        )
+        candidate = _make_candidate(tmp_path, with_duplicate=True, gate_rejected=True)
         manager = _FakeGoldenRepoManagerWithBackend(backend)
         _quarantine_with_dedup_gate_rejected_cause(
             backend,

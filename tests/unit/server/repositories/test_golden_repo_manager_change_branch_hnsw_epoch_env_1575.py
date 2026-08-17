@@ -28,7 +28,9 @@ def mock_repo_manager(tmp_path):
     return GoldenRepoManager(data_dir=str(tmp_path))
 
 
-def _run_cb_cidx_index_and_capture_env(mock_repo_manager, base_clone_path, server_config):
+def _run_cb_cidx_index_and_capture_env(
+    mock_repo_manager, base_clone_path, server_config
+):
     captured = {}
 
     def _fake_subprocess_run(command, **kwargs):

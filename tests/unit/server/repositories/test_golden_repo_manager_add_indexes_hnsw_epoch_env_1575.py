@@ -86,9 +86,7 @@ def _make_capturing_subprocess_run(captured_fts_env: dict):
     return _run
 
 
-def _run_add_indexes_and_capture(
-    manager, index_types, server_config, captured_fts_env
-):
+def _run_add_indexes_and_capture(manager, index_types, server_config, captured_fts_env):
     calls = []
 
     def _fake_run_with_popen_progress(*, command, phase_name, env=None, **kwargs):
@@ -135,13 +133,13 @@ class TestAddIndexesSemanticGetsHnswEpochPostgresEnv:
 
     def test_omits_postgres_mode_var_when_sqlite(self, tmp_path):
         manager, _ = _make_manager(tmp_path)
-        server_config = ServerConfig(server_dir="/opt/cidx-server", storage_mode="sqlite")
+        server_config = ServerConfig(
+            server_dir="/opt/cidx-server", storage_mode="sqlite"
+        )
         by_phase = _run_add_indexes_and_capture(
             manager, ["semantic"], server_config, {}
         )
-        assert_env_absent(
-            by_phase["semantic"], CIDX_HNSW_SYNC_EPOCH_POSTGRES_MODE_ENV
-        )
+        assert_env_absent(by_phase["semantic"], CIDX_HNSW_SYNC_EPOCH_POSTGRES_MODE_ENV)
 
 
 class TestAddIndexesTemporalGetsHnswEpochPostgresEnv:
@@ -163,13 +161,13 @@ class TestAddIndexesTemporalGetsHnswEpochPostgresEnv:
 
     def test_omits_postgres_mode_var_when_sqlite(self, tmp_path):
         manager, _ = _make_manager(tmp_path)
-        server_config = ServerConfig(server_dir="/opt/cidx-server", storage_mode="sqlite")
+        server_config = ServerConfig(
+            server_dir="/opt/cidx-server", storage_mode="sqlite"
+        )
         by_phase = _run_add_indexes_and_capture(
             manager, ["temporal"], server_config, {}
         )
-        assert_env_absent(
-            by_phase["temporal"], CIDX_HNSW_SYNC_EPOCH_POSTGRES_MODE_ENV
-        )
+        assert_env_absent(by_phase["temporal"], CIDX_HNSW_SYNC_EPOCH_POSTGRES_MODE_ENV)
 
 
 class TestAddIndexesFtsRebuildGetsHnswEpochPostgresEnv:
@@ -191,7 +189,9 @@ class TestAddIndexesFtsRebuildGetsHnswEpochPostgresEnv:
 
     def test_omits_postgres_mode_var_when_sqlite(self, tmp_path):
         manager, _ = _make_manager(tmp_path)
-        server_config = ServerConfig(server_dir="/opt/cidx-server", storage_mode="sqlite")
+        server_config = ServerConfig(
+            server_dir="/opt/cidx-server", storage_mode="sqlite"
+        )
         captured_fts_env: dict = {}
         _run_add_indexes_and_capture(manager, ["fts"], server_config, captured_fts_env)
         assert captured_fts_env.get("env") is not None

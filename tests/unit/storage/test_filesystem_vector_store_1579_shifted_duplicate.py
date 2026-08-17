@@ -79,7 +79,9 @@ def _build_shifted_pair(store, collection_path):
     )
 
 
-def _perturb_vector_with_same_prefix(store, collection_path, base_vector, target_prefix):
+def _perturb_vector_with_same_prefix(
+    store, collection_path, base_vector, target_prefix
+):
     """Return a vector that DIFFERS from base_vector in content but quantizes
     to the SAME directory prefix. A tiny perturbation of base_vector is
     overwhelmingly likely to land in the same (wide) quantization bucket for
