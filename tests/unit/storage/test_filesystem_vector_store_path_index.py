@@ -19,7 +19,7 @@ correctness, and consistency under deletion.
 import queue
 import threading
 from pathlib import Path
-from typing import Dict, List
+from typing import Any, Dict, List, Tuple
 from unittest.mock import patch
 
 import numpy as np
@@ -38,15 +38,20 @@ def _make_vector() -> np.ndarray:
     return np.random.rand(VECTOR_SIZE).astype(np.float32)
 
 
-def _upsert_file_points(
-    store: FilesystemVectorStore,
-    collection_name: str,
+def _build_file_points(
     file_path: str,
     num_chunks: int,
-) -> List[str]:
-    """Upsert num_chunks points for a file and return the list of point IDs."""
-    points = []
-    point_ids = []
+) -> Tuple[List[str], List[Dict[str, Any]]]:
+    """Build (point_ids, point_dicts) for a file WITHOUT upserting.
+
+    Shared by _upsert_file_points (one upsert_points() call per file --
+    used directly by the concurrency tests below, which deliberately want
+    per-file-call granularity to exercise concurrent upserts) and
+    _populate_store (bulk setup, which batches every file's points into a
+    single upsert_points() call -- see that function's docstring for why).
+    """
+    point_ids: List[str] = []
+    points: List[Dict[str, Any]] = []
     for i in range(num_chunks):
         pid = f"{file_path.replace('/', '_')}__chunk{i}"
         point_ids.append(pid)
@@ -62,6 +67,17 @@ def _upsert_file_points(
                 },
             }
         )
+    return point_ids, points
+
+
+def _upsert_file_points(
+    store: FilesystemVectorStore,
+    collection_name: str,
+    file_path: str,
+    num_chunks: int,
+) -> List[str]:
+    """Upsert num_chunks points for a file and return the list of point IDs."""
+    point_ids, points = _build_file_points(file_path, num_chunks)
     store.upsert_points(collection_name, points)
     return point_ids
 
@@ -72,12 +88,29 @@ def _populate_store(
     num_files: int,
     chunks_per_file: int,
 ) -> Dict[str, List[str]]:
-    """Populate store and return {file_path: [point_ids]}."""
+    """Populate store and return {file_path: [point_ids]}.
+
+    Batches every file's points into ONE upsert_points() call instead of
+    one call per file. _mark_hnsw_dirty_before_mutation (Bug #1575 Part C)
+    performs a synchronous, durable fsync-based write on EVERY
+    upsert_points() call unconditionally, regardless of indexing-session
+    state -- so num_files separate calls pay that fixed per-call
+    durability cost num_files times. At num_files=100 this measured
+    14-15s in isolation under fast-automation.sh's actual `--timeout=15`,
+    which is what made this bulk-setup helper (not the PathIndex
+    fast-path logic under test) trip the per-test timeout. Batching pays
+    the per-call cost once instead of num_files times without changing
+    what any caller of this helper asserts (returned point ids are
+    identical either way).
+    """
     file_to_ids: Dict[str, List[str]] = {}
+    all_points: List[Dict[str, Any]] = []
     for i in range(num_files):
         fp = f"src/module_{i:04d}/file.py"
-        ids = _upsert_file_points(store, collection_name, fp, chunks_per_file)
-        file_to_ids[fp] = ids
+        point_ids, points = _build_file_points(fp, chunks_per_file)
+        file_to_ids[fp] = point_ids
+        all_points.extend(points)
+    store.upsert_points(collection_name, all_points)
     return file_to_ids
 
 
