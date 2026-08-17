@@ -64,6 +64,7 @@
 - [feedback_progress_reporting_delicate.md](feedback_progress_reporting_delicate.md) - Ask confirmation before ANY changes to progress reporting
 - [feedback_targeted_scope_discipline.md](feedback_targeted_scope_discipline.md) - Targeted requests must NOT trigger UI rewrites or unrelated styling changes
 - [feedback_use_code_reviewer.md](feedback_use_code_reviewer.md) - Use code-reviewer (opus) for all reviews — Codex credits running low
+- [feedback_default_agents_to_sonnet5.md](feedback_default_agents_to_sonnet5.md) - Opus OK for code-reviewer dispatches only; tdd-engineer/implementation dispatches always stay on Sonnet 5 (no model override)
 - [feedback_dual_review_claude_and_codex.md](feedback_dual_review_claude_and_codex.md) - Standing rule: dual review (Claude + independent Codex) for every review gate
 - [feedback_opus_arbiter_of_codex_nitpicking.md](feedback_opus_arbiter_of_codex_nitpicking.md) - After 2-3 Codex REJECT rounds on the same fix, dispatch Opus to judge materiality before another round
 - [feedback_trust_codex_first_pass.md](feedback_trust_codex_first_pass.md) - When codex flags over-engineering, SIMPLIFY — don't commission counter-reviews
