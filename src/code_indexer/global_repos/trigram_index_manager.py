@@ -292,6 +292,14 @@ class TrigramIndexManager:
         ph_all = ",".join("?" for _ in tris)
         try:
             with sqlite3.connect(f"file:{self._db_path}?mode=ro", uri=True) as conn:
+                # EVO-66189: the trigram DB is ~1.2 GB on shared NFS; cold queries were
+                # dominated by NFS page seeks (measured 4-9s cold vs ~0.2s warm). mmap it
+                # so cold pages fault through the OS page cache (shared across queries, no
+                # per-read() syscall), and give the connection a larger page cache. The
+                # rarest-first intersection's temp table is kept in RAM (below) rather than
+                # written back to NFS.
+                conn.execute("PRAGMA mmap_size=2147483648")  # 2 GiB: map the whole DB
+                conn.execute("PRAGMA cache_size=-65536")  # ~64 MB page cache
                 # Order the required trigrams rarest-first (df 0 == absent).
                 df_map = {t: 0 for t in tris}
                 for t, df in conn.execute(
@@ -310,8 +318,9 @@ class TrigramIndexManager:
                 if df_map[ordered[0]] == 0:
                     return always
 
-                # Rarest-first intersection in a connection-local temp table.
-                conn.execute("PRAGMA temp_store=FILE")
+                # Rarest-first intersection in a connection-local temp table, kept in RAM
+                # (temp_store=MEMORY) instead of written back to shared NFS (temp_store=FILE).
+                conn.execute("PRAGMA temp_store=MEMORY")
                 conn.execute("CREATE TEMP TABLE cand (id INTEGER PRIMARY KEY)")
                 try:
                     conn.execute(
