@@ -373,6 +373,10 @@ class TestProviderTemporalIndexJobCommand:
                 "code_indexer.services.progress_subprocess_runner.gather_repo_metrics",
                 return_value=(10, 5),
             ),
+            patch(
+                "code_indexer.server.mcp.handlers._utils._get_app_refresh_scheduler",
+                return_value=None,
+            ),
         ):
             mock_cfg_svc.return_value.get_config.return_value = _mock_server_config()
 
@@ -419,6 +423,10 @@ class TestProviderTemporalIndexJobCommand:
             patch(
                 "code_indexer.services.progress_subprocess_runner.gather_repo_metrics",
                 return_value=(10, 5),
+            ),
+            patch(
+                "code_indexer.server.mcp.handlers._utils._get_app_refresh_scheduler",
+                return_value=None,
             ),
         ):
             mock_cfg_svc.return_value.get_config.return_value = _mock_server_config()
