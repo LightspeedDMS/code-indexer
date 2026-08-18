@@ -140,3 +140,32 @@ class TestScipReconcile:
             counts = m.reconcile_scip_from_filesystem()
         funnel.assert_not_called()
         assert counts["cooldown_skipped"] == 1
+
+    def test_cooldown_skips_discovery_walk(self, tmp_path):
+        """EVO-66188: a repo in attempt-cooldown must NOT be re-discovered — the cooldown
+        check now runs BEFORE ProjectDiscovery, so the NFS walk is skipped, not just the
+        enqueue."""
+        m, gr = _mgr(tmp_path)
+        repo = gr / "repoA"
+        (repo / ".code-indexer").mkdir(parents=True)
+        (repo / ".code-indexer" / ".scip_reconcile_attempt").touch()  # fresh marker
+        disc = mock.MagicMock()
+        disc.return_value.discover.return_value = [_proj("python")]
+        funnel = mock.MagicMock(return_value=type("O", (), {"value": "enqueued"})())
+        cfg = mock.MagicMock()
+        cfg.get_config.return_value = object()
+        with (
+            mock.patch.dict(os.environ, {"CIDX_SCIP_AUTO_RECONCILE_ENABLED": "true"}),
+            mock.patch("code_indexer.scip.discovery.ProjectDiscovery", disc),
+            mock.patch(
+                "code_indexer.server.services.scip_lifecycle.funnel_golden_scip", funnel
+            ),
+            mock.patch(
+                "code_indexer.server.services.config_service.get_config_service",
+                return_value=cfg,
+            ),
+        ):
+            counts = m.reconcile_scip_from_filesystem()
+        assert counts["cooldown_skipped"] == 1
+        disc.return_value.discover.assert_not_called()  # the walk was skipped
+        funnel.assert_not_called()
