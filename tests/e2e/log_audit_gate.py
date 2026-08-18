@@ -377,6 +377,38 @@ LOG_AUDIT_ALLOWLIST: List[str] = [
     # uses different wording ("reassembly failed after %d attempts") and is
     # unaffected by this entry.
     "concurrent checkpoint rewrite detected during reassembly",
+    # Bug #1534 (golden_repo_manager.py:_detect_checked_out_branch): after a
+    # plain filesystem copy, _establish_local_git_remote_and_upstream tries to
+    # configure origin/upstream tracking for the golden clone; when the copied
+    # clone's checked-out branch cannot be determined because HEAD is detached,
+    # it logs this WARNING and returns, skipping upstream configuration --
+    # registration still succeeds (this whole step is documented best-effort).
+    # The markupsafe golden-repo fixture used across many E2E tests is copied
+    # with a detached HEAD, so this fires routinely and is permanently benign.
+    # Anchored on the exact static suffix of the f-string template (the
+    # variable clone_path sits BEFORE this text, so the pattern intentionally
+    # starts after it); the sibling "was copied from a git WORKTREE" and other
+    # Bug #1534 WARNINGs use different wording and are NOT suppressed by this
+    # entry -- confirmed via `grep -n skipping golden_repo_manager.py`, this
+    # exact phrase appears nowhere else in the codebase.
+    "has detached HEAD; skipping upstream configuration",
+    # Story #1131/#980 (test_12_totp_elevation_real_endpoint.py::
+    # test_kill_switch_returns_503_not_403): deliberately disables TOTP
+    # elevation enforcement and asserts POST /auth/elevate returns HTTP 503
+    # (elevation_enforcement_disabled) -- this IS the kill-switch's designed
+    # behavior (elevation_routes.py), not a service failure. The response
+    # never raises an HTTPException the middleware's except-block can see
+    # (Bug #1566: ExceptionMiddleware converts it first), so it is logged via
+    # error_handler.py's response-side path (dispatch(): status >= 500 and
+    # not already logged -> msg=f"HTTP {status_code}", error_type=
+    # "HTTPException" -> WARNING under log code REPO-GENERAL-017). The joined
+    # log line is "... | HTTP 503 | Request: POST /auth/elevate ...". Anchored
+    # on that exact contiguous substring (status code + endpoint, no variable
+    # correlation-id/timestamp content in between) -- a distinct sub-case of
+    # the SAME REPO-GENERAL-017 code already allowlisted above for 422
+    # ValidationError; a genuine 503 on any OTHER endpoint, or any other
+    # status on /auth/elevate, would use different text and NOT be suppressed.
+    "HTTP 503 | Request: POST /auth/elevate",
 ]
 
 
