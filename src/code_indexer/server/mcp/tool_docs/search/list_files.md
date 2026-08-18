@@ -41,6 +41,13 @@ inputSchema:
       default: flat
       description: 'Multi-repo result format. ''flat'' (default): single array with source_repo field per result. ''grouped'':
         results organized under results_by_repo by repository.'
+    indexed_only:
+      type: boolean
+      description: Fast path — serve the listing from the index (indexed source files only)
+        instead of walking the working tree over NFS; much faster on large repos. size and
+        modified_at are not populated in this mode. Falls back to the full walk when the repo
+        has no index.
+      default: false
   required:
   - repository_alias
 outputSchema:

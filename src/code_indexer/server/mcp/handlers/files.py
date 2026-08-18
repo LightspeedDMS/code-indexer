@@ -738,6 +738,7 @@ def list_files(params: Dict[str, Any], user: User) -> Dict[str, Any]:
             page=_DEFAULT_PAGE,
             limit=_MAX_MCP_FILE_LIMIT,
             path_pattern=final_path_pattern,
+            indexed_only=bool(params.get("indexed_only", False)),
         )
 
         if repository_alias and repository_alias.endswith("-global"):
@@ -957,6 +958,7 @@ def _normalize_browse_params(params: Dict[str, Any]) -> Dict[str, Any]:
         "language": params.get("language"),
         "limit": limit,
         "sort_by": sort_by,
+        "indexed_only": bool(params.get("indexed_only", False)),
     }
 
 
@@ -1010,6 +1012,7 @@ def browse_directory(params: Dict[str, Any], user: User) -> Dict[str, Any]:
             path_pattern=final_path_pattern,
             language=bp["language"],
             sort_by=bp["sort_by"],
+            indexed_only=bp["indexed_only"],
         )
 
         # Perf fast-path: a NON-recursive browse of a subdirectory only needs that one
