@@ -1413,6 +1413,34 @@ class TestGetContextMethod:
             assert result["total_files"] == 1
             assert len(result["files"]) == 1
 
+    def test_get_context_scopes_scip_dir_to_alias(self):
+        """EVO-66189: get_context must scope the composite's scip_dir to the alias's own
+        .code-indexer/scip (like get_impact), NOT the whole golden-repos root — otherwise
+        get_smart_context globs every repo's *.scip.db over NFS and blows the watchdog."""
+        import tempfile
+        from unittest.mock import patch
+        from code_indexer.server.services.scip_query_service import SCIPQueryService
+        from code_indexer.scip.query.composites import SmartContextResult
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            golden_repos = Path(tmpdir) / "golden-repos"
+            scip = golden_repos / "repo" / ".code-indexer" / "scip"
+            scip.mkdir(parents=True)
+            (scip / "index.scip.db").touch()
+
+            service = SCIPQueryService(str(golden_repos), None)
+            with patch(
+                "code_indexer.scip.query.composites.get_smart_context",
+                return_value=SmartContextResult("Sym", "", [], 0, 0, 0.0),
+            ) as mock_ctx:
+                service.get_context("Sym", repository_alias="repo")
+
+            # get_smart_context(symbol, scip_dir, ...) — arg[1] must be the repo's own
+            # scip dir, not the golden-repos root.
+            called_scip_dir = Path(mock_ctx.call_args.args[1])
+            assert called_scip_dir == scip
+            assert called_scip_dir != golden_repos
+
     def test_get_context_with_limit_and_min_score(self):
         """Passes limit and min_score parameters."""
         import tempfile

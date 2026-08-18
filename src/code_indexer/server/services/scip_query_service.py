@@ -647,8 +647,16 @@ class SCIPQueryService:
                 "avg_relevance": 0.0,
             }
 
-        # Get the scip directory from golden_repos_dir
-        scip_dir = self.get_golden_repos_dir()
+        # Point the composite at the project's own ".code-indexer/scip" dir so its
+        # recursive glob crosses only this repo's indexes. Without this, get_context
+        # ignored the alias and globbed **/*.scip.db over EVERY golden repo's tree on
+        # NFS, blowing the whole 30s watchdog before opening a single DB (mirrors the
+        # same fix already in get_impact). Fall back to the full golden-repos dir only
+        # when no alias was requested (cross-repo scan).
+        if repository_alias is not None:
+            scip_dir = self._scip_dir_for_files(scip_files)
+        else:
+            scip_dir = self.get_golden_repos_dir()
 
         result = get_smart_context(
             symbol,
