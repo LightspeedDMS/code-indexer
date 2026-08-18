@@ -2249,6 +2249,15 @@ def _handle_provider_index_action(
         repo_path=repo_path,
         provider_name=provider_name,
         clear=clear,
+        # Pod-pull: reconstruction params for _provider_index_job.
+        # repo_alias is needed so the child subprocess can tag embed
+        # stats records (EVO-66105 follow-up).
+        metadata={
+            "repo_path": repo_path,
+            "provider_name": provider_name,
+            "clear": clear,
+            "repo_alias": repo_alias,
+        },
     )
     return _mcp_response(
         {
@@ -2395,10 +2404,12 @@ def bulk_add_provider_index(params: Dict[str, Any], user: User) -> Dict[str, Any
                 provider_name=provider_name,
                 clear=False,
                 # Pod-pull: reconstruction params for _provider_index_job.
+                # repo_alias needed for embed stats tagging (EVO-66105).
                 metadata={
                     "repo_path": repo_path,
                     "provider_name": provider_name,
                     "clear": False,
+                    "repo_alias": alias,
                 },
             )
             job_ids.append({"alias": alias, "job_id": job_id})

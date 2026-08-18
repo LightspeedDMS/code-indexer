@@ -577,6 +577,7 @@ def register_admin_ops_routes(
                         "provider_name": request.providers[0],
                         "clear": False,
                         "temporal_options": _temporal_opts,
+                        "repo_alias": alias,
                     },
                 )
                 job_ids.append(provider_job_id)
