@@ -681,9 +681,11 @@ Four modules (mcp_parser, parser_tables, parser_hygiene, parser_graph); anomalie
 
 -> Detail: docs/architecture-invariants.md#dep-map-and-cidx-meta | Full reference: docs/depmap-parser-architecture.md
 
-### cidx-meta backup contract (Story #926)
+### cidx-meta backup contract (Story #926, superseded by Bug #1555)
 
-Sync runs BEFORE indexing; all git ops on the mutable base path only (`get_cidx_meta_path()`), NEVER inside `.versioned/`. Push failures deferred, conflict failures short-circuit (Claude-CLI conflict resolution). `XrayPatternService` (Bug #1037) shares the coarse `cidx-meta` write lock. Cluster git-remote auth resolves the deploy key via node-local `~/.ssh/config` materialized from PG by `SSHKeySyncService.sync()`.
+Sync runs BEFORE indexing; all git ops on the mutable base path only (`get_cidx_meta_path()`), NEVER inside `.versioned/`. `XrayPatternService` (Bug #1037) shares the coarse `cidx-meta` write lock. Cluster git-remote auth resolves the deploy key via node-local `~/.ssh/config` materialized from PG by `SSHKeySyncService.sync()`.
+
+**Bug #1555 (commit 6a46c996) removed rebase + Claude-CLI conflict resolution entirely.** The remote is a passive BACKUP MIRROR, never a peer whose independent history must be preserved -- `sync()` no longer fetches-then-rebases onto `origin/{branch}`. It commits local changes and publishes local HEAD directly via `git push --force-with-lease`, unconditionally overwriting whatever the remote holds; a diverged remote self-heals on the next cycle with zero conflict-resolution step. `conflict_resolver.py`, its MCP prompt, the quarantine-bookkeeping methods/tables' CRUD paths, and the `/health` quarantine surface were deleted as part of this fix (quarantine tables remain per never-drop-tables, but stay empty). See `src/code_indexer/server/services/cidx_meta_backup/sync.py`'s module docstring for the full rationale.
 
 -> Detail: docs/architecture-invariants.md#dep-map-and-cidx-meta | Full reference: docs/cidx-meta-backup.md
 
