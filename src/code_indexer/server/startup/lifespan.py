@@ -2504,6 +2504,30 @@ def make_lifespan(
                 except Exception as _eoe:
                     logger.warning("Startup: orphaned export cleanup failed: %s", _eoe)
 
+            # Self-heal: repair cidx-meta's "-global" registry entry if the
+            # very first bootstrap (initialize_services(), called before the
+            # FastAPI `app` object -- and therefore app.state.backend_registry
+            # -- exists) wrote it to the wrong (per-node SQLite) backend.
+            # See repair_cidx_meta_global_registration()'s docstring for the
+            # full root-cause explanation. Must run HERE -- after
+            # app.state.backend_registry was set above -- so
+            # GlobalActivator.registry resolves the correct shared backend
+            # this time. Idempotent/O(1); fail-soft, never blocks startup.
+            if golden_repo_manager is not None:
+                try:
+                    from code_indexer.server.startup.bootstrap import (
+                        repair_cidx_meta_global_registration,
+                    )
+
+                    repair_cidx_meta_global_registration(
+                        golden_repo_manager, str(golden_repos_dir)
+                    )
+                except Exception as _cmgr_repair_err:
+                    logger.warning(
+                        "Startup: cidx-meta global-registration repair failed: %s",
+                        _cmgr_repair_err,
+                    )
+
             # Bug #1317: reconcile golden_repos registry-orphans (rows with
             # no on-disk clone -- can arise from a provisioning failure that
             # predates the atomicity guard, a manually-deleted clone
