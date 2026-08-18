@@ -3370,7 +3370,12 @@ def make_lifespan(
         if storage_mode == "postgres" and backend_registry is not None:
             try:
                 _pg_dsn = ""
-                _configured_node_id = ""
+                # Bug (E2E Phase 6 discovery): holds the raw parsed
+                # config.json dict so _node_id below can resolve via the
+                # SAME resolve_cluster_node_id() helper service_init.py
+                # uses for JobTracker's node_id -- see that call site for
+                # why the two must never diverge.
+                _cfg_data: Optional[Dict[str, Any]] = None
                 _sharding_enabled = False
                 _shard_replicas = 1
                 try:
@@ -3394,7 +3399,6 @@ def make_lifespan(
                             _cfg_data = _json.load(_f)
                             _pg_dsn = _cfg_data.get("postgres_dsn", "")
                             _cluster_cfg = _cfg_data.get("cluster", {})
-                            _configured_node_id = _cluster_cfg.get("node_id", "")
                             _sharding_enabled = bool(
                                 _cluster_cfg.get("sharding_enabled", False)
                             )
@@ -3412,11 +3416,22 @@ def make_lifespan(
                         backend_registry.critical_connection_pool
                         or backend_registry.connection_pool
                     )
-                    _node_id = (
-                        _configured_node_id
-                        if _configured_node_id
-                        else f"{os.uname().nodename}-cidx"
+                    # Bug (E2E Phase 6 discovery): resolve via the SAME
+                    # shared helper service_init.py uses for JobTracker's
+                    # node_id (see that call site for the full defect
+                    # explanation) -- a prior independent computation here
+                    # defaulted to f"{hostname}-cidx" while service_init.py
+                    # defaulted to "local", so a job's executing_node stamp
+                    # (from JobTracker) could never match this node's own
+                    # identity in get_active_nodes() (from
+                    # NodeHeartbeatService, wired a few lines below), and
+                    # JobReconciliationService's dead-node reclaim wrongly
+                    # treated a live, still-running job as abandoned.
+                    from code_indexer.server.utils.cluster_node_id import (
+                        resolve_cluster_node_id,
                     )
+
+                    _node_id = resolve_cluster_node_id(_cfg_data)
 
                     # Story #501 AC3: Tag log records with the cluster node ID so
                     # the admin UI can aggregate and filter logs per node.

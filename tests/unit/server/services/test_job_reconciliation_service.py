@@ -13,6 +13,7 @@ Mock hierarchy (no real PostgreSQL required):
 
 from __future__ import annotations
 
+import socket
 from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock
 
@@ -998,3 +999,125 @@ class TestSweepBug1312BehavioralPoolExhaustion:
         assert table.rows[0]["status"] == "pending"
         assert table.rows[0]["executing_node"] is None
         assert count == 1
+
+
+# ---------------------------------------------------------------------------
+# sweep() — node-id resolution mismatch regression (E2E Phase 6 discovery)
+# ---------------------------------------------------------------------------
+
+
+def _sweep_fresh_lifecycle_registration_job(executing_node, active_node):
+    """
+    Shared setup for the node-id mismatch regression tests below: builds a
+    single job row shaped exactly like a `lifecycle_registration` job
+    (status='running', started 2 seconds ago, claimed_at NEVER set —
+    matching GoldenRepoManager._register_lifecycle_after_registration's
+    real in-process execution, which transitions status via
+    JobTracker.update_status and never sets claimed_at), runs sweep()
+    against a heartbeat reporting a single active_node, and returns
+    (count, reclaimed_row).
+    """
+    now = datetime(2026, 8, 18, tzinfo=timezone.utc)
+    fresh = now - timedelta(seconds=2)
+    rows = [
+        {
+            "job_id": "lifecycle-registration-job",
+            "status": "running",
+            "executing_node": executing_node,
+            "started_at": fresh,
+            "claimed_at": None,
+            "created_at": fresh,
+            "repo_alias": "some-golden-repo",
+        }
+    ]
+    pool, _, cur, table = _make_behavioral_pool(rows, now)
+    hb = _make_heartbeat(active_nodes=[active_node])
+    svc = JobReconciliationService(pool, hb, max_execution_time=1800)
+
+    count = svc.sweep()
+    return count, table.rows[0]
+
+
+class TestNodeIdMismatchLifecycleRegistrationRegression:
+    """
+    Real e2e-automation.sh Phase 6 (PostgreSQL Parity) discovery: two
+    independent call sites resolved "this node's identity" from the same
+    config.json shape but disagreed on the fallback used when
+    config.json has no `cluster` section (a legitimate, supported
+    single-node storage_mode=postgres deployment):
+
+    - startup/service_init.py's JobTracker(node_id=...) -- stamped onto
+      every job row's executing_node column -- defaulted to the literal
+      string "local".
+    - startup/lifespan.py's cluster-services block -- what
+      NodeHeartbeatService registers into cluster_nodes, i.e. what
+      get_active_nodes() returns -- defaulted to f"{hostname}-cidx".
+
+    A `lifecycle_registration` job (GoldenRepoManager.
+    _register_lifecycle_after_registration) transitions its own row to
+    status='running' synchronously in-process and NEVER sets claimed_at.
+    JobReconciliationService._reclaim_dead_node_jobs's grace-period guard
+    (claimed_at IS NULL OR claimed_at < NOW() - grace) is unconditionally
+    satisfied when claimed_at is NULL -- so with the two defaults
+    disagreeing, the job's own executing_node stamp could never match its
+    own node in active_nodes, and it was reclaimed to pending on the very
+    next sweep even though the node was alive and the job genuinely,
+    correctly still running (started mere SECONDS ago -- this is not a
+    stuck/abandoned job by any age measure).
+
+    Fixed by routing BOTH call sites through the shared
+    resolve_cluster_node_id() helper (code_indexer.server.utils.
+    cluster_node_id) so they can never diverge again.
+    """
+
+    def test_mismatched_node_id_defaults_wrongly_reclaims_fresh_lifecycle_registration_job(
+        self,
+    ):
+        """
+        Reproduces the exact pre-fix mechanism: a job stamped with the OLD
+        service_init.py default ("local") sitting alongside a heartbeat
+        registered under the OLD lifespan.py default (f"{hostname}-cidx")
+        is wrongly reclaimed -- even though it started only 2 seconds ago,
+        proving this is a node-identity mismatch, not a genuine
+        stuck/abandoned-job timeout.
+        """
+        old_service_init_default = "local"
+        old_lifespan_default = f"{socket.gethostname()}-cidx"
+
+        count, reclaimed_row = _sweep_fresh_lifecycle_registration_job(
+            executing_node=old_service_init_default,
+            active_node=old_lifespan_default,
+        )
+
+        assert count == 1, (
+            "expected the mismatched-default scenario to reproduce the "
+            "false reclaim of a fresh, genuinely-live job"
+        )
+        assert reclaimed_row["status"] == "pending"
+        assert reclaimed_row["executing_node"] is None
+
+    def test_unified_resolver_prevents_the_false_reclaim(self):
+        """
+        Same job shape as above, but both executing_node and the
+        heartbeat's active_nodes entry are now derived from the SAME
+        resolve_cluster_node_id() call (as service_init.py and
+        lifespan.py both do after the fix) -- the job must survive.
+        """
+        from code_indexer.server.utils.cluster_node_id import (
+            resolve_cluster_node_id,
+        )
+
+        unified_node_id = resolve_cluster_node_id(None)
+
+        count, surviving_row = _sweep_fresh_lifecycle_registration_job(
+            executing_node=unified_node_id,
+            active_node=unified_node_id,
+        )
+
+        assert count == 0, (
+            "the unified resolver must make executing_node agree with "
+            "active_nodes, so a fresh, genuinely-live job must NOT be "
+            "reclaimed"
+        )
+        assert surviving_row["status"] == "running"
+        assert surviving_row["executing_node"] == unified_node_id
