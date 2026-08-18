@@ -400,8 +400,15 @@ class FileListingService:
         """
         from code_indexer.storage.filesystem_vector_store import PathIndex
 
-        index_root = Path(repo_path) / ".code-indexer" / "index"
-        path_index_files = sorted(index_root.glob("*/path_index.bin"))
+        # Current per-model layout (.code-indexer/index/<model>/) plus the legacy sibling
+        # multimodal layout (.code-indexer/multimodal_index/<collection>/) that
+        # multi_index_query_service still supports for repos not yet re-indexed — otherwise
+        # indexed_only would silently omit files indexed only under the legacy path.
+        ci_dir = Path(repo_path) / ".code-indexer"
+        path_index_files = sorted(
+            list((ci_dir / "index").glob("*/path_index.bin"))
+            + list((ci_dir / "multimodal_index").glob("*/path_index.bin"))
+        )
         if not path_index_files:
             return None
 

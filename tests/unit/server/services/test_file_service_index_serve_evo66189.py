@@ -51,6 +51,17 @@ class TestIndexServe:
         )
         assert "walk_only.py" in walk
 
+    def test_includes_legacy_multimodal_index_layout(self, tmp_path):
+        """Repos not yet re-indexed keep a legacy sibling layout at
+        .code-indexer/multimodal_index/<collection>/path_index.bin — it must be included."""
+        _write_path_index(tmp_path, "voyage-code-3", ["a.py"])
+        legacy = tmp_path / ".code-indexer" / "multimodal_index" / "voyage-multimodal-3"
+        legacy.mkdir(parents=True)
+        with open(legacy / "path_index.bin", "wb") as f:
+            msgpack.dump({"legacy_img.png": ["pt"]}, f)
+        files = _svc()._collect_files_from_index(str(tmp_path))
+        assert sorted(f.path for f in files) == ["a.py", "legacy_img.png"]
+
     def test_indexed_only_falls_back_to_walk_when_no_index(self, tmp_path):
         (tmp_path / "only.py").write_text("x = 1")
         # No index present → indexed_only gracefully falls back to the walk.
