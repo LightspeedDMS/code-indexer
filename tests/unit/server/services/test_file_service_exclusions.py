@@ -459,3 +459,13 @@ class TestCollectFilesPruneWalk:
         # the .code-indexer/ and src/.git/ subtrees are pruned; deep.py proves recursion.
         # The exact set is the assertion — it proves both the inclusions and exclusions.
         assert paths == [".gitignore", "a/b/c/deep.py", "root.md"]
+
+    def test_follows_symlinked_directories(self, service, tmp_path):
+        """Pre-3.13 Path.rglob('*') follows symlinked directories; os.walk must use
+        followlinks=True to keep the output identical — files under a symlinked subdir
+        are still listed (via the symlinked path)."""
+        (tmp_path / "real").mkdir()
+        (tmp_path / "real" / "mod.py").write_text("x = 1")
+        (tmp_path / "link").symlink_to(tmp_path / "real", target_is_directory=True)
+        paths = sorted(f.path for f in service._collect_files(str(tmp_path)))
+        assert paths == ["link/mod.py", "real/mod.py"]

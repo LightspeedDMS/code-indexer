@@ -449,12 +449,15 @@ class FileListingService:
         # a large golden repo — over NFS, then discarded them. Pruning never descends the
         # excluded subtrees, so the output set is identical but those stats disappear.
         # onerror re-raises so an inaccessible repo dir still surfaces exactly as before.
+        # followlinks=True matches pre-3.13 Path.rglob("*") semantics (this repo targets
+        # <3.13, where rglob unconditionally follows symlinked directories): without it,
+        # files under a symlinked subdirectory would be silently dropped.
         def _walk_onerror(err: OSError) -> None:
             raise err
 
         try:
             for dirpath, dirnames, filenames in os.walk(
-                repo_root, onerror=_walk_onerror
+                repo_root, onerror=_walk_onerror, followlinks=True
             ):
                 dirnames[:] = [
                     d for d in dirnames if d not in self.ALWAYS_EXCLUDED_DIRS
