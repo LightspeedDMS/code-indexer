@@ -1124,6 +1124,33 @@ class GoldenRepoMetadataPostgresBackend:
                 )
             conn.commit()
 
+    def clear_all_dedup_states(self, reason: str) -> int:
+        """Story #1589: bulk-clear EVERY currently-active (uncleared)
+        dedup-outcome row in one shot -- the Diagnostics tab's "Clear All
+        Dedup Warnings" action. Mirrors clear_dedup_state's semantics
+        (counts are never erased, only marked cleared) but scoped to
+        `WHERE cleared_at IS NULL` instead of a single golden_alias, so an
+        already-cleared row is left completely untouched (never
+        double-counted). Returns the number of rows actually cleared.
+
+        Raises:
+            ValueError: reason is not a non-empty (non-whitespace) string.
+        """
+        if not isinstance(reason, str) or not reason.strip():
+            raise ValueError(f"reason must be a non-empty string, got {reason!r}")
+        now = datetime.now(timezone.utc)
+
+        with self._pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE fleet_migration_dedup_state SET cleared_at = %s, "
+                    "cleared_reason = %s WHERE cleared_at IS NULL",
+                    (now, reason),
+                )
+                cleared_count = int(cur.rowcount)
+            conn.commit()
+        return cleared_count
+
     # ------------------------------------------------------------------
     # Cleanup pending-deletion queue (Bug #1567)
     # ------------------------------------------------------------------
