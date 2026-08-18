@@ -424,3 +424,38 @@ class TestListFilesByPath:
 
         # Verify source files ARE included
         assert "src/main.py" in file_paths
+
+
+class TestCollectFilesPruneWalk:
+    """EVO-66189: _collect_files uses os.walk with in-place pruning of excluded dirs
+    (not rglob + post-hoc filter). Verify full recursion into real dirs and that the
+    excluded subtrees are never surfaced — the same output, minus the wasted stats."""
+
+    @pytest.fixture
+    def service(self):
+        service = FileListingService.__new__(FileListingService)
+        service.activated_repo_manager = None  # type: ignore[assignment]
+        return service
+
+    def test_deep_recursion_and_pruning(self, service, tmp_path):
+        # A deeply nested REAL source file must be collected (os.walk recurses fully).
+        deep = tmp_path / "a" / "b" / "c"
+        deep.mkdir(parents=True)
+        (deep / "deep.py").write_text("x = 1")
+        (tmp_path / "root.md").write_text("# r")
+        # Deeply nested excluded subtrees must be pruned (never surfaced), incl. nested.
+        ci = tmp_path / ".code-indexer" / "index" / "collection"
+        ci.mkdir(parents=True)
+        (ci / "vector.json").write_text("{}")
+        (tmp_path / "src").mkdir()
+        (tmp_path / "src" / ".git").mkdir()
+        (tmp_path / "src" / ".git" / "HEAD").write_text("ref: x")
+        # A gitignored file is still excluded.
+        (tmp_path / ".gitignore").write_text("*.log\n")
+        (tmp_path / "a" / "debug.log").write_text("noise")
+
+        paths = sorted(f.path for f in service._collect_files(str(tmp_path)))
+        # .gitignore itself is a real file (listed); a/debug.log is gitignored (excluded);
+        # the .code-indexer/ and src/.git/ subtrees are pruned; deep.py proves recursion.
+        # The exact set is the assertion — it proves both the inclusions and exclusions.
+        assert paths == [".gitignore", "a/b/c/deep.py", "root.md"]

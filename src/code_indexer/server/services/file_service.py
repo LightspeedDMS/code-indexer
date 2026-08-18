@@ -443,14 +443,35 @@ class FileListingService:
         # (it was one get_config() call PER FILE via _is_file_indexed()).
         indexable_extensions = self._get_indexable_extensions()
 
+        # EVO-66189: os.walk with in-place pruning of ALWAYS_EXCLUDED_DIRS, replacing
+        # rglob("*") + a post-hoc _is_in_excluded_dir filter. The old walk stat'd EVERY
+        # entry — including the ~57k vector files under this repo's own .code-indexer/ on
+        # a large golden repo — over NFS, then discarded them. Pruning never descends the
+        # excluded subtrees, so the output set is identical but those stats disappear.
+        # onerror re-raises so an inaccessible repo dir still surfaces exactly as before.
+        def _walk_onerror(err: OSError) -> None:
+            raise err
+
         try:
-            for file_path in repo_root.rglob("*"):
-                if file_path.is_file():
+            for dirpath, dirnames, filenames in os.walk(
+                repo_root, onerror=_walk_onerror
+            ):
+                dirnames[:] = [
+                    d for d in dirnames if d not in self.ALWAYS_EXCLUDED_DIRS
+                ]
+                for filename in filenames:
+                    file_path = Path(dirpath) / filename
                     try:
+                        # is_file() follows symlinks — preserve the old rglob+is_file()
+                        # filter (regular files + symlinks-to-regular only).
+                        if not file_path.is_file():
+                            continue
+
                         relative_path = file_path.relative_to(repo_root)
                         relative_path_str = str(relative_path)
 
-                        # Skip files in always-excluded directories
+                        # Belt-and-suspenders: pruning already skips excluded subtrees;
+                        # this also catches a plain FILE named .git/.code-indexer.
                         if self._is_in_excluded_dir(relative_path):
                             continue
 
