@@ -1396,6 +1396,14 @@ class GoldenRepoManager:
             if self._scip_present(entry):
                 counts["scip_present"] += 1
                 continue
+            # EVO-66188: check the attempt cooldown BEFORE the (NFS os.walk) discovery,
+            # so a repo whose build was attempted within the cooldown window isn't
+            # re-walked every cycle only to be skipped. The marker path depends solely
+            # on ``entry``.
+            marker = entry / ".code-indexer" / ".scip_reconcile_attempt"
+            if self._scip_attempt_cooldown_active(marker, cooldown):
+                counts["cooldown_skipped"] += 1
+                continue
             try:
                 projects = ProjectDiscovery(entry).discover()
             except Exception as exc:  # noqa: BLE001
@@ -1409,10 +1417,6 @@ class GoldenRepoManager:
                 continue
             if not ({p.language.lower() for p in projects} & enabled_langs):
                 counts["language_skipped"] += 1
-                continue
-            marker = entry / ".code-indexer" / ".scip_reconcile_attempt"
-            if self._scip_attempt_cooldown_active(marker, cooldown):
-                counts["cooldown_skipped"] += 1
                 continue
             try:
                 marker.parent.mkdir(parents=True, exist_ok=True)

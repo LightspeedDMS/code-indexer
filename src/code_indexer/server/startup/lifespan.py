@@ -1035,15 +1035,27 @@ def make_lifespan(
 
                     while True:
                         try:
-                            _c = await _to_thread.run_sync(
-                                lambda: _grm_for_reconcile.reconcile_scip_from_filesystem(
-                                    _scip_max
+                            # EVO-66188: this loop is created once per uvicorn worker, so
+                            # in cluster mode (postgres) workers×pods copies run it — each
+                            # scanning hundreds of golden repos over NFS every cycle, a
+                            # redundant metadata storm (~12× on a 6-pod/2-worker cluster)
+                            # that contends with the query path. Unlike the registry
+                            # reconcile it is NOT idempotent-cheap, so gate the WORK to the
+                            # elected leader. When there is no leader election (single-node
+                            # / sqlite) run as before.
+                            _le = getattr(app.state, "leader_election", None)
+                            if _le is None or _le.is_leader:
+                                _c = await _to_thread.run_sync(
+                                    lambda: (
+                                        _grm_for_reconcile.reconcile_scip_from_filesystem(
+                                            _scip_max
+                                        )
+                                    )
                                 )
-                            )
-                            if _c.get("enqueued") or _c.get("errors"):
-                                logger.info(
-                                    "EVO-65484: periodic SCIP reconcile: %s", _c
-                                )
+                                if _c.get("enqueued") or _c.get("errors"):
+                                    logger.info(
+                                        "EVO-65484: periodic SCIP reconcile: %s", _c
+                                    )
                         except asyncio.CancelledError:
                             raise
                         except Exception as _scip_err:  # noqa: BLE001 — safety
@@ -4758,9 +4770,7 @@ def make_lifespan(
                     "DependencyLatencyTracker stopped successfully",
                     extra={"correlation_id": get_correlation_id()},
                 )
-            except (
-                Exception
-            ) as e:  # broad catch intentional: shutdown must not abort remaining cleanup chain
+            except Exception as e:  # broad catch intentional: shutdown must not abort remaining cleanup chain
                 logger.error(
                     format_error_log(
                         "APP-GENERAL-027",
