@@ -603,7 +603,6 @@ class XrayPatternService:
             sync = CidxMetaBackupSync(
                 cidx_meta_path=str(self._cidx_meta),
                 branch=branch,
-                claude_resolver=None,
             )
             result = sync.sync()
             if result.sync_failure:

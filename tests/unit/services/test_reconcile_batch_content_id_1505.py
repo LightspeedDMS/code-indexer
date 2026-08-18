@@ -160,7 +160,7 @@ class FakeVectorStoreClient:
     def collection_exists(self, collection_name):
         return False
 
-    def delete_by_filter(self, filter_conditions, collection_name):
+    def delete_by_filter(self, collection_name, filter_conditions):
         return True
 
     def scroll_points(

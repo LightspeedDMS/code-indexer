@@ -26,6 +26,35 @@ import numpy as np
 
 logger = logging.getLogger(__name__)
 
+
+def _normalize_stored_path_for_visibility(
+    path: Optional[str], project_root: Optional[Path]
+) -> Optional[str]:
+    """Codex review follow-up (Bug #1575 Part A, CRITICAL finding 2):
+    normalize a stored ``payload.path`` value to the relative form used by
+    ``visible_files`` sets, mirroring
+    ``HighThroughputProcessor._normalize_stored_path`` exactly (Bug #1575
+    AC6) -- an ABSOLUTE stored path under ``project_root`` is converted to
+    relative; a path outside ``project_root`` is returned unchanged (with a
+    WARNING); an already-relative path passes through unchanged.
+
+    ``project_root`` is optional: ``None`` (every ``rebuild_from_vectors()``
+    call site that predates this fix) returns ``path`` unchanged, preserving
+    today's raw-comparison behavior byte-for-byte.
+    """
+    if path is None or project_root is None:
+        return path
+    if os.path.isabs(path):
+        try:
+            return str(Path(path).relative_to(project_root))
+        except ValueError:
+            logger.warning(
+                "HNSW rebuild: found path outside project directory: %s", path
+            )
+            return path
+    return path
+
+
 #: Sentinel meaning "caller did not supply cached_meta" to is_stale() --
 #: distinct from an explicitly-passed None (which means "the cache
 #: determined there is no valid metadata"). Story #1492 AC1.
@@ -692,6 +721,8 @@ class HNSWIndexManager:
         current_branch: Optional[str] = None,
         clear_stale: bool = True,
         layout_override: Optional[ChunkLayout] = None,
+        project_root: Optional[Path] = None,
+        lock_already_held: bool = False,
     ) -> int:
         """Rebuild HNSW index by scanning all vector JSON files.
 
@@ -733,6 +764,26 @@ class HNSWIndexManager:
                          None (default) preserves today's resolver-driven
                          behavior exactly; this is NEVER a parallel decision
                          mechanism for any other caller.
+            project_root: Codex review follow-up (Bug #1575 Part A,
+                         CRITICAL finding 2) -- when provided together with
+                         ``visible_files``, an ABSOLUTE stored ``payload.path``
+                         is normalized relative to ``project_root`` before
+                         the ``visible_files`` membership check, mirroring
+                         ``HighThroughputProcessor._normalize_stored_path``
+                         (Bug #1575 AC6). None (default, every pre-existing
+                         caller) preserves today's raw-comparison behavior
+                         byte-for-byte.
+            lock_already_held: Bug #1575 Part C -- when True, the caller
+                         already holds ``.index_rebuild.lock`` (end_indexing()'s
+                         decision engine acquires it once for the whole
+                         rebuild-or-reuse decision) and this method must NOT
+                         try to acquire it again via
+                         ``BackgroundIndexRebuilder.rebuild_with_lock()``
+                         (``flock()`` is per open file description, not
+                         per-process -- a second acquisition from the same
+                         process would self-deadlock). Default False
+                         preserves today's behavior for every pre-existing
+                         caller (acquires the lock as before).
 
         Returns:
             Number of vectors indexed
@@ -820,11 +871,19 @@ class HNSWIndexManager:
         # legacy collections keep the exact original rglob-based loading.
         if layout == ChunkLayout.CHUNKS_DB:
             vectors_list, ids_list = self._load_vectors_from_chunks_db(
-                collection_path, expected_dim, visible_files, current_branch
+                collection_path,
+                expected_dim,
+                visible_files,
+                current_branch,
+                project_root,
             )
         else:
             vectors_list, ids_list = self._load_vectors_from_json_files(
-                vector_files, expected_dim, visible_files, current_branch
+                vector_files,
+                expected_dim,
+                visible_files,
+                current_branch,
+                project_root,
             )
 
         if not vectors_list:
@@ -901,8 +960,13 @@ class HNSWIndexManager:
             if progress_callback:
                 progress_callback(0, 0, Path(""), info="🔧 HNSW index built ✓")
 
-        # Rebuild with lock (entire rebuild duration)
-        rebuilder.rebuild_with_lock(build_hnsw_index_to_temp, index_file)
+        # Rebuild with lock (entire rebuild duration) -- Bug #1575 Part C:
+        # lock_already_held lets end_indexing()'s decision engine (which
+        # already holds .index_rebuild.lock for the whole decision) delegate
+        # here without a nested self-deadlock.
+        rebuilder.rebuild_with_lock(
+            build_hnsw_index_to_temp, index_file, lock_already_held=lock_already_held
+        )
 
         # Update metadata AFTER atomic swap
         # When visible_files is provided, write filtered metadata fields
@@ -952,6 +1016,7 @@ class HNSWIndexManager:
         expected_dim: int,
         visible_files: Optional[Set[str]],
         current_branch: Optional[str],
+        project_root: Optional[Path] = None,
     ) -> Tuple[List[np.ndarray], List[str]]:
         """Story #1456 AC2: stream vector+payload from ``chunks.db`` instead
         of rglob-scanning ``vector_*.json`` files. Preserves the EXACT
@@ -970,6 +1035,11 @@ class HNSWIndexManager:
         visible_files-filtered cases, the top-level indexed ``path`` column
         is used directly and the payload is never decoded. Byte-identical
         result set to the pre-optimization ``stream_all()``-based path.
+
+        Codex review follow-up (Bug #1575 Part A, CRITICAL finding 2):
+        ``project_root`` (optional) normalizes an ABSOLUTE stored ``path``
+        to relative form before the ``visible_files`` membership check --
+        see :func:`_normalize_stored_path_for_visibility`.
         """
         from code_indexer.storage.sqlite_chunk_store import open_chunk_store_for_path
 
@@ -995,7 +1065,10 @@ class HNSWIndexManager:
                     continue  # Skip mismatched dimensions
 
                 if visible_files is not None:
-                    if path not in visible_files:
+                    normalized_path = _normalize_stored_path_for_visibility(
+                        path, project_root
+                    )
+                    if normalized_path not in visible_files:
                         continue  # Skip vectors not in visible set
                 elif current_branch is not None:
                     # Bug #306: branch-aware filter, identical semantics to
@@ -1017,9 +1090,16 @@ class HNSWIndexManager:
         expected_dim: int,
         visible_files: Optional[Set[str]],
         current_branch: Optional[str],
+        project_root: Optional[Path] = None,
     ) -> Tuple[List[np.ndarray], List[str]]:
         """Legacy sharded-JSON vector loading (unchanged behavior, extracted
-        verbatim from the pre-Story #1456 body of ``rebuild_from_vectors``)."""
+        verbatim from the pre-Story #1456 body of ``rebuild_from_vectors``).
+
+        Codex review follow-up (Bug #1575 Part A, CRITICAL finding 2):
+        ``project_root`` (optional) normalizes an ABSOLUTE stored ``path``
+        to relative form before the ``visible_files`` membership check --
+        see :func:`_normalize_stored_path_for_visibility`.
+        """
         vectors_list: List[np.ndarray] = []
         ids_list: List[str] = []
 
@@ -1038,7 +1118,10 @@ class HNSWIndexManager:
                 # Apply visibility filter: skip vectors for hidden files
                 if visible_files is not None:
                     file_path = data.get("payload", {}).get("path")
-                    if file_path not in visible_files:
+                    normalized_path = _normalize_stored_path_for_visibility(
+                        file_path, project_root
+                    )
+                    if normalized_path not in visible_files:
                         continue  # Skip vectors not in visible set
                 elif current_branch is not None:
                     # Branch-aware filter: skip vectors hidden for current_branch
@@ -1320,6 +1403,115 @@ class HNSWIndexManager:
             return False  # Filtered rebuild is fresh
 
         return False  # Fresh index
+
+    def validate_hnsw_artifact_for_reuse(
+        self,
+        collection_path: Path,
+        *,
+        expected_branch: Optional[str],
+        expected_filtered: bool,
+    ) -> Tuple[bool, str]:
+        """Bug #1575 Part C: validate that the currently-published HNSW
+        artifact for ``collection_path`` can be safely REUSED byte-for-byte
+        -- the "mutation_epoch == published_epoch" fast path in
+        ``end_indexing()``'s decision algorithm must never trust a clean
+        epoch blindly; it must prove the artifact itself is still valid.
+
+        Checks, in order (first failure wins, each with a specific reason
+        string so the caller can log WHY it fell back to a full rebuild):
+
+        1. ``collection_meta.json`` is readable and has an ``hnsw_index``
+           section.
+        2. ``is_stale()`` reports False.
+        3. ``hnsw_index.bin`` exists and is a genuine REGULAR file (never a
+           symlink, directory, or missing path).
+        4. Stored ``vector_dim``/``space`` match this manager's configured
+           values.
+        5. Stored ``filtered`` flag matches ``expected_filtered`` exactly.
+        6. Stored ``current_branch`` matches ``expected_branch`` exactly
+           (``None`` means "no branch filtering was active" and must match
+           ``None`` too -- a stale filtered-branch artifact must never be
+           reused for an unfiltered or different-branch decision).
+        7. The index actually LOADS without raising.
+
+        Returns ``(True, "ok")`` when every check passes; otherwise
+        ``(False, "<human-readable reason>")``. Never raises -- any
+        unexpected failure while probing the artifact is treated as "cannot
+        prove this artifact is reusable" (fail-safe -> full rebuild).
+        """
+        meta_file = collection_path / "collection_meta.json"
+        if not meta_file.exists():
+            return False, "collection_meta.json missing"
+
+        try:
+            with open(meta_file) as f:
+                metadata = json.load(f)
+        except (OSError, json.JSONDecodeError) as exc:
+            return False, f"collection_meta.json unreadable/corrupt: {exc}"
+
+        if not isinstance(metadata, dict) or "hnsw_index" not in metadata:
+            return False, "hnsw_index metadata section missing"
+
+        hnsw_info = metadata["hnsw_index"]
+        if not isinstance(hnsw_info, dict):
+            return False, "hnsw_index metadata section malformed"
+
+        if self.is_stale(collection_path, cached_meta=metadata):
+            return False, "hnsw_index is stale"
+
+        index_file = collection_path / self.INDEX_FILENAME
+        try:
+            file_exists_as_regular_file = (
+                index_file.exists()
+                and not index_file.is_symlink()
+                and index_file.is_file()
+            )
+        except OSError as exc:
+            return False, f"could not stat hnsw_index.bin: {exc}"
+        if not file_exists_as_regular_file:
+            return False, "hnsw_index.bin missing or not a regular file"
+
+        stored_dim = hnsw_info.get("vector_dim")
+        if stored_dim != self.vector_dim:
+            return (
+                False,
+                f"vector_dim mismatch (stored={stored_dim}, expected={self.vector_dim})",
+            )
+
+        stored_space = hnsw_info.get("space")
+        if stored_space != self.space:
+            return (
+                False,
+                f"space/metric mismatch (stored={stored_space}, expected={self.space})",
+            )
+
+        stored_filtered = bool(hnsw_info.get("filtered", False))
+        if stored_filtered != expected_filtered:
+            return (
+                False,
+                f"filtered flag mismatch (stored={stored_filtered}, "
+                f"expected={expected_filtered})",
+            )
+
+        stored_branch = hnsw_info.get("current_branch")
+        if stored_branch != expected_branch:
+            return (
+                False,
+                f"current_branch mismatch (stored={stored_branch!r}, "
+                f"expected={expected_branch!r})",
+            )
+
+        try:
+            index = self.load_index(
+                collection_path,
+                max_elements=max(1, hnsw_info.get("vector_count", 1) or 1),
+            )
+        except Exception as exc:
+            return False, f"hnsw_index.bin failed to load: {exc}"
+        if index is None:
+            return False, "hnsw_index.bin failed to load (returned None)"
+
+        return True, "ok"
 
     def _update_metadata(
         self,
@@ -1635,6 +1827,10 @@ class HNSWIndexManager:
         label_to_id: Dict[int, str],
         vector_count: int,
         clear_stale: bool = True,
+        filtered: Optional[bool] = None,
+        current_branch: Optional[str] = None,
+        visible_count: Optional[int] = None,
+        total_on_disk: Optional[int] = None,
     ) -> None:
         """Save HNSW index after incremental updates.
 
@@ -1650,6 +1846,21 @@ class HNSWIndexManager:
                          the PRIOR is_stale/last_marked_stale (defaulting
                          stale=True for a virgin shard) so only the caller's
                          explicit clear_stale() call can mark it fresh.
+            filtered: Bug #1575 Part C -- when explicitly given (not None),
+                         overrides the stored ``filtered`` flag. When None
+                         (default), the PRIOR value already recorded by a
+                         full/filtered rebuild is preserved instead of being
+                         silently dropped (the verified gap this fix closes:
+                         this method used to replace ``metadata["hnsw_index"]``
+                         wholesale, discarding filtered/current_branch/
+                         visible_count/total_on_disk on every incremental
+                         publish that followed a filtered rebuild).
+            current_branch: Bug #1575 Part C -- same override-or-preserve
+                         contract as ``filtered``.
+            visible_count: Bug #1575 Part C -- same override-or-preserve
+                         contract as ``filtered``.
+            total_on_disk: Bug #1575 Part C -- same override-or-preserve
+                         contract as ``filtered``.
 
         Note:
             Updates both index file and metadata with new mappings.
@@ -1764,6 +1975,42 @@ class HNSWIndexManager:
                     # Virgin-shard opt-out default: never fabricate fresh.
                     new_hnsw["is_stale"] = True
                     new_hnsw["last_marked_stale"] = None
+
+                # Bug #1575 Part C: resolve filtered/current_branch/
+                # visible_count/total_on_disk from the explicit override when
+                # given, else PRESERVE whatever a prior full/filtered rebuild
+                # already recorded -- never silently drop them. Each field is
+                # added to new_hnsw only when the resolved value is not None,
+                # so an incremental publish on a collection that was NEVER
+                # filtered stays byte-identical (no spontaneous
+                # filtered/current_branch/... keys appear).
+                _resolved_filtered = (
+                    filtered if filtered is not None else existing_hnsw.get("filtered")
+                )
+                _resolved_branch = (
+                    current_branch
+                    if current_branch is not None
+                    else existing_hnsw.get("current_branch")
+                )
+                _resolved_visible_count = (
+                    visible_count
+                    if visible_count is not None
+                    else existing_hnsw.get("visible_count")
+                )
+                _resolved_total_on_disk = (
+                    total_on_disk
+                    if total_on_disk is not None
+                    else existing_hnsw.get("total_on_disk")
+                )
+                if _resolved_filtered is not None:
+                    new_hnsw["filtered"] = _resolved_filtered
+                if _resolved_branch is not None:
+                    new_hnsw["current_branch"] = _resolved_branch
+                if _resolved_visible_count is not None:
+                    new_hnsw["visible_count"] = _resolved_visible_count
+                if _resolved_total_on_disk is not None:
+                    new_hnsw["total_on_disk"] = _resolved_total_on_disk
+
                 metadata["hnsw_index"] = new_hnsw
 
                 # Bug #1529 finding #7(a): route through the ONE durable

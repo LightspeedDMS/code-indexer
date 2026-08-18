@@ -23,7 +23,18 @@ class GenericQueryService:
             project_dir: The project directory path
             config: Optional configuration object
         """
-        self.project_dir = project_dir
+        # Bug #1582 hardening (Codex dual-review follow-up): resolve to an
+        # absolute path. `_is_result_current_branch()` passes
+        # `self.project_dir` as the `project_root` argument to the shared
+        # `_normalize_stored_path_for_visibility()` helper, which computes
+        # `Path(absolute_stored_path).relative_to(project_root)` -- if
+        # `project_root` itself were relative, that call raises
+        # `ValueError` for an absolute stored path (an absolute path can
+        # never be "under" a relative root), silently returning the path
+        # unchanged and defeating the #1582 fix for that input shape.
+        # Every current call site already passes an absolute
+        # `config.codebase_dir` in practice, so this is a no-op there.
+        self.project_dir = Path(project_dir).resolve()
         self.config = config
         self.file_identifier = FileIdentifier(project_dir, config)
 
@@ -146,6 +157,14 @@ class GenericQueryService:
             True if result is from current branch
         """
         try:
+            # Bug #1582: function-local import mirrors the exact pattern
+            # ``HighThroughputProcessor._normalize_stored_path`` already
+            # uses to reuse this SAME shared helper (Bug #1575 Part A),
+            # rather than a module-level cross-package import.
+            from code_indexer.storage.hnsw_index_manager import (
+                _normalize_stored_path_for_visibility,
+            )
+
             # Extract metadata from result
             metadata = result.get("payload", {}) if "payload" in result else result
 
@@ -153,9 +172,22 @@ class GenericQueryService:
             if not metadata.get("git_available", False):
                 return True
 
-            # Check if file exists in current branch
+            # Check if file exists in current branch.
+            #
+            # Bug #1582: ``branch_context["files"]`` is always repo-relative
+            # (sourced from ``git ls-tree``), but a collection's stored
+            # ``payload.path`` may be absolute -- a raw membership check
+            # then never matches, silently dropping an otherwise-current
+            # result. Reuse the SAME shared normalization helper Bug #1575
+            # Part A introduced for the two sibling path-comparison sites
+            # (``high_throughput_processor.py``'s branch-hide matching and
+            # ``hnsw_index_manager.py``'s ``visible_files`` filter) rather
+            # than writing a third, potentially-divergent reimplementation.
             file_path = metadata.get("path", "")
-            if file_path in branch_context["files"]:
+            normalized_file_path = _normalize_stored_path_for_visibility(
+                file_path, self.project_dir
+            )
+            if normalized_file_path in branch_context["files"]:
                 return True
 
             # For git-based results, also check if the commit is reachable

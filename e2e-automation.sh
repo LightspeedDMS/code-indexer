@@ -344,17 +344,20 @@ copy_seed_repo() {
 wait_for_server() {
     local health_url="http://${E2E_SERVER_HOST}:${E2E_SERVER_PORT}/health"
     local login_url="http://${E2E_SERVER_HOST}:${E2E_SERVER_PORT}/auth/login"
-    local elapsed=0
+    # Deadline-based (not an accumulated "elapsed" counter): bash $(( )) is
+    # integer-only and a fractional POLL previously crashed this loop.
+    local start_time
+    start_time=$(date +%s)
+    local deadline=$((start_time + E2E_SERVER_READINESS_TIMEOUT))
 
     _yellow "  Waiting for server at $health_url (timeout ${E2E_SERVER_READINESS_TIMEOUT}s)..."
     _yellow "  Readiness requires: /health non-5xx AND /auth/login returns 200+token"
-    while [[ $elapsed -lt $E2E_SERVER_READINESS_TIMEOUT ]]; do
+    while [[ $(date +%s) -lt $deadline ]]; do
         # Step 1: health check
         local health_code
         health_code=$(curl -s -o /dev/null -w "%{http_code}" "$health_url" 2>/dev/null || echo "000")
         if [[ "$health_code" == "000" ]] || [[ "$health_code" -ge 500 ]]; then
             sleep "$E2E_SERVER_READINESS_POLL"
-            elapsed=$((elapsed + E2E_SERVER_READINESS_POLL))
             continue
         fi
 
@@ -371,14 +374,13 @@ wait_for_server() {
         login_body=$(echo "$login_response" | head -n-1)
 
         if [[ "$login_code" == "200" ]] && echo "$login_body" | grep -q "access_token"; then
-            _green "  Server ready after ${elapsed}s (health=$health_code, auth=200+token)"
+            _green "  Server ready after $(( $(date +%s) - start_time ))s (health=$health_code, auth=200+token)"
             return 0
         fi
 
         logger_hint="health=$health_code auth=$login_code"
         _yellow "    Not ready yet (${logger_hint}) — retrying..."
         sleep "$E2E_SERVER_READINESS_POLL"
-        elapsed=$((elapsed + E2E_SERVER_READINESS_POLL))
     done
 
     _red "ERROR: Server did not become ready within ${E2E_SERVER_READINESS_TIMEOUT}s"
@@ -530,17 +532,20 @@ start_fault_server() {
 wait_for_fault_server() {
     local health_url="http://${E2E_FAULT_SERVER_HOST}:${E2E_FAULT_SERVER_PORT}/health"
     local login_url="http://${E2E_FAULT_SERVER_HOST}:${E2E_FAULT_SERVER_PORT}/auth/login"
-    local elapsed=0
+    # Deadline-based (not an accumulated "elapsed" counter): bash $(( )) is
+    # integer-only and a fractional POLL previously crashed this loop.
+    local start_time
+    start_time=$(date +%s)
+    local deadline=$((start_time + E2E_FAULT_SERVER_READINESS_TIMEOUT))
 
     _yellow "  Waiting for fault server at $health_url (timeout ${E2E_FAULT_SERVER_READINESS_TIMEOUT}s)..."
     _yellow "  Readiness requires: /health non-5xx AND /auth/login returns 200+token"
-    while [[ $elapsed -lt $E2E_FAULT_SERVER_READINESS_TIMEOUT ]]; do
+    while [[ $(date +%s) -lt $deadline ]]; do
         # Step 1: health check
         local health_code
         health_code=$(curl -s -o /dev/null -w "%{http_code}" "$health_url" 2>/dev/null || echo "000")
         if [[ "$health_code" == "000" ]] || [[ "$health_code" -ge 500 ]]; then
             sleep "$E2E_SERVER_READINESS_POLL"
-            elapsed=$((elapsed + E2E_SERVER_READINESS_POLL))
             continue
         fi
 
@@ -557,13 +562,12 @@ wait_for_fault_server() {
         login_body=$(echo "$login_response" | head -n-1)
 
         if [[ "$login_code" == "200" ]] && echo "$login_body" | grep -q "access_token"; then
-            _green "  Fault server ready after ${elapsed}s (health=$health_code, auth=200+token)"
+            _green "  Fault server ready after $(( $(date +%s) - start_time ))s (health=$health_code, auth=200+token)"
             return 0
         fi
 
         _yellow "    Not ready yet (health=$health_code auth=$login_code) — retrying..."
         sleep "$E2E_SERVER_READINESS_POLL"
-        elapsed=$((elapsed + E2E_SERVER_READINESS_POLL))
     done
 
     _red "ERROR: Fault server did not become ready within ${E2E_FAULT_SERVER_READINESS_TIMEOUT}s"
@@ -701,17 +705,20 @@ start_pg_server() {
 wait_for_pg_server() {
     local health_url="http://${E2E_PG_SERVER_HOST}:${E2E_PG_SERVER_PORT}/health"
     local login_url="http://${E2E_PG_SERVER_HOST}:${E2E_PG_SERVER_PORT}/auth/login"
-    local elapsed=0
+    # Deadline-based (not an accumulated "elapsed" counter): bash $(( )) is
+    # integer-only and a fractional POLL previously crashed this loop.
+    local start_time
+    start_time=$(date +%s)
+    local deadline=$((start_time + E2E_PG_SERVER_READINESS_TIMEOUT))
 
     _yellow "  Waiting for PG server at $health_url (timeout ${E2E_PG_SERVER_READINESS_TIMEOUT}s)..."
     _yellow "  Readiness requires: /health non-5xx AND /auth/login returns 200+token"
-    while [[ $elapsed -lt $E2E_PG_SERVER_READINESS_TIMEOUT ]]; do
+    while [[ $(date +%s) -lt $deadline ]]; do
         # Step 1: health check
         local health_code
         health_code=$(curl -s -o /dev/null -w "%{http_code}" "$health_url" 2>/dev/null || echo "000")
         if [[ "$health_code" == "000" ]] || [[ "$health_code" -ge 500 ]]; then
             sleep "$E2E_SERVER_READINESS_POLL"
-            elapsed=$((elapsed + E2E_SERVER_READINESS_POLL))
             continue
         fi
 
@@ -728,13 +735,12 @@ wait_for_pg_server() {
         login_body=$(echo "$login_response" | head -n-1)
 
         if [[ "$login_code" == "200" ]] && echo "$login_body" | grep -q "access_token"; then
-            _green "  PG server ready after ${elapsed}s (health=$health_code, auth=200+token)"
+            _green "  PG server ready after $(( $(date +%s) - start_time ))s (health=$health_code, auth=200+token)"
             return 0
         fi
 
         _yellow "    Not ready yet (health=$health_code auth=$login_code) — retrying..."
         sleep "$E2E_SERVER_READINESS_POLL"
-        elapsed=$((elapsed + E2E_SERVER_READINESS_POLL))
     done
 
     _red "ERROR: PG server did not become ready within ${E2E_PG_SERVER_READINESS_TIMEOUT}s"

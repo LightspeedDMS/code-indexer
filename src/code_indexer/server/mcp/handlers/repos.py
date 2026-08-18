@@ -36,7 +36,8 @@ from ._utils import (
     _get_available_repos,
     _error_with_suggestions,
 )
-from ._temporal_index_cmd import _build_temporal_index_cmd
+from ._temporal_index_cmd import _build_temporal_index_cmd  # noqa: F401
+from ._provider_temporal_job import _provider_temporal_index_job  # noqa: F401
 
 # _GLOBAL_SUFFIX is used in _resolve_branch_repo_path to strip the alias-manager
 # suffix before passing the base alias to golden_repo_manager.get_actual_repo_path().
@@ -1972,11 +1973,18 @@ def _run_provider_subprocess(
     from code_indexer.server.storage.postgres.embedding_stats_child_wiring import (
         build_embedding_stats_child_env,
     )
+    from code_indexer.storage.shared.hnsw_sync_state import (
+        resolve_hnsw_sync_epoch_env_var,
+    )
 
     env_with_stats = build_embedding_stats_child_env(
         get_config_service().get_config(), base_env=env
     )
     sanitized_env = build_cidx_subprocess_env(env_with_stats)
+    # Bug #1575 Part C independent re-review: this is the SHARED
+    # convergence point for both provider-index job types (semantic and
+    # temporal), so the postgres-mode signal is merged in here ONCE.
+    sanitized_env.update(resolve_hnsw_sync_epoch_env_var())
 
     try:
         run_with_popen_progress(
@@ -2073,122 +2081,6 @@ def _provider_index_job(
 
     return {
         "success": success,
-        "stdout": stdout_out[-_PROVIDER_JOB_OUTPUT_TAIL_CHARS:] if stdout_out else "",
-        "stderr": stderr_out[-_PROVIDER_JOB_OUTPUT_TAIL_CHARS:] if stderr_out else "",
-    }
-
-
-def _provider_temporal_index_job(
-    repo_path: str,
-    provider_name: str,
-    clear: bool = False,
-    progress_callback=None,
-    **kwargs,
-) -> Dict[str, Any]:
-    """Background job for per-provider temporal index (Story #641).
-
-    Called externally from inline_admin_ops.py via __init__.py re-exports.
-    """
-    if not repo_path or not provider_name:
-        return {
-            "success": False,
-            "error": "Missing repo_path or provider_name",
-            "provider": provider_name,
-        }
-
-    repo_alias = kwargs.get("repo_alias", "")
-    actual_path, repo_alias, is_versioned = _resolve_provider_job_repo_path(
-        repo_path, repo_alias
-    )
-    # Bug #1084 B1: refuse when a versioned snapshot could not be redirected to an
-    # existing base clone. The resolver now returns the (non-existent) base_clone
-    # path rather than the snapshot path, so check existence of actual_path
-    # directly -- the snapshot itself is NEVER indexed.
-    if is_versioned and not Path(actual_path).exists():
-        return {
-            "success": False,
-            "error": f"Base clone not found for {repo_path}",
-            "provider": provider_name,
-        }
-
-    env = _build_provider_api_key_env(provider_name)
-
-    # Bug #1313 round-4 (Codex Finding 2): in postgres/cluster mode, merge
-    # CIDX_TEMPORAL_PG_BOOTSTRAP_DIR into the provider env so the child
-    # subprocess installs the PostgreSQL temporal-metadata backend instead
-    # of silently falling back to SQLite-on-NFS. build_temporal_child_env
-    # returns a NEW dict (base_env=env, so the provider API key is
-    # preserved) in postgres mode, or None in sqlite mode -- fall back to
-    # the unmodified env in that case (byte-unchanged existing behavior).
-    # get_config_service().get_config() (not ServerConfigManager().load_config())
-    # per CLAUDE.md Config Bootstrap vs Runtime -- this module already uses
-    # get_config_service() as the sole config-read path.
-    from code_indexer.server.storage.postgres.temporal_child_wiring import (
-        build_temporal_child_env,
-    )
-
-    _server_config = get_config_service().get_config()
-    _merged_env = build_temporal_child_env(_server_config, base_env=env)
-    if _merged_env is not None:
-        env = _merged_env
-
-    # Story #1412: golden/server temporal all-branches indexing is gated
-    # behind a server-wide runtime flag, shipped OFF by default. Reuse the
-    # config already fetched above rather than a second get_config_service()
-    # call.
-    _all_branches_gate_enabled = bool(
-        getattr(_server_config.indexing_config, "temporal_all_branches_enabled", False)
-    )
-
-    # Story #1404: global temporal indexing floor date, reusing the config
-    # already fetched above rather than a second get_config_service() call
-    # (mirrors the _all_branches_gate_enabled reuse pattern immediately
-    # above).
-    _global_floor_date = getattr(
-        _server_config.temporal_indexing_config, "index_floor_date", None
-    )
-
-    temporal_options = kwargs.get("temporal_options", {}) or {}
-    cmd = _build_temporal_index_cmd(
-        clear,
-        temporal_options,
-        all_branches_gate_enabled=_all_branches_gate_enabled,
-        alias=repo_alias,
-        global_floor_date=_global_floor_date,
-    )
-
-    success, stdout_out, stderr_out = _run_provider_subprocess(
-        cmd,
-        actual_path,
-        env,
-        "temporal",
-        ["temporal"],
-        progress_callback,
-    )
-
-    if success:
-        if is_versioned and actual_path != repo_path:
-            try:
-                _post_provider_index_snapshot(
-                    repo_alias=repo_alias,
-                    base_clone_path=actual_path,
-                    old_snapshot_path=repo_path,
-                )
-            except Exception as exc:
-                logger.warning(
-                    "Post-temporal-index snapshot failed for %s: %s", repo_alias, exc
-                )
-        _set_enable_temporal_flag(repo_alias)
-    else:
-        logger.warning(
-            "Temporal provider index failed for provider=%s repo=%s",
-            provider_name,
-            repo_path,
-        )
-
-    return {
-        "success": success,
-        "provider": provider_name,
         "stdout": stdout_out[-_PROVIDER_JOB_OUTPUT_TAIL_CHARS:] if stdout_out else "",
         "stderr": stderr_out[-_PROVIDER_JOB_OUTPUT_TAIL_CHARS:] if stderr_out else "",
     }

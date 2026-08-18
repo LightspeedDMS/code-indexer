@@ -984,6 +984,22 @@ GENERIC_FAILURE_CAUSE = "generic"
 #: this module).
 UNRECOVERABLE_FAILURE_CAUSE = "unrecoverable_corruption"
 
+#: Bug #1579: a distinct failure-cause value for a collection the
+#: whole-collection identity gate REJECTED while genuine duplicate
+#: point_id group(s) were present (`consolidate_collection_in_place`'s
+#: `"dedup_gate_rejected"` status). Unlike `GENERIC_FAILURE_CAUSE`, this
+#: is a CONFIRMED, specific diagnosis: a bare retry cannot possibly
+#: succeed until the gate-breaking record (missing/foreign `unique_key`)
+#: is fixed by a human or an unrelated re-index. Deliberately excluded
+#: from `reset_duplicate_caused_quarantine_if_resolved`'s scope (see
+#: that function) -- resetting a repo known to be stuck for THIS reason
+#: would reset, immediately re-attempt, immediately re-fail identically,
+#: and re-quarantine on every tick, hogging the scheduler and starving
+#: every alphabetically-later fleet-migration candidate (Bug #1477's
+#: starvation failure mode). Clears only via manual review / an explicit
+#: reset, exactly like UNRECOVERABLE_FAILURE_CAUSE.
+DEDUP_GATE_REJECTED_FAILURE_CAUSE = "dedup_gate_rejected"
+
 
 def record_unrecoverable_corruption(
     golden_repo_manager: Any, golden_alias: str, detail: str
@@ -1078,7 +1094,7 @@ def reset_duplicate_caused_quarantine_if_resolved(
     below `threshold` or quarantined for `UNRECOVERABLE_FAILURE_CAUSE`
     (permanent data loss has no duplicate-resolution fix).
 
-    Resets WHEN `collection_has_duplicate_point_ids()` finds a
+    Resets WHEN `collection_has_any_duplicate_point_ids()` finds a
     duplicate STILL present -- this is intentional, not inverted: prior
     to this story, a duplicate point_id made the repair step raise
     `DuplicateSourceIdError`, which is why the repo was quarantined in
@@ -1089,7 +1105,28 @@ def reset_duplicate_caused_quarantine_if_resolved(
     handles; the DATA itself is resolved on the very next migration
     attempt this reset unblocks, not before.
 
-    Reuses `collection_has_duplicate_point_ids` (read-only) and
+    Bug #1579: this MUST use the GATE-AGNOSTIC
+    `collection_has_any_duplicate_point_ids`, never the gate-aware
+    `collection_has_duplicate_point_ids` (scoped to "duplicates THIS
+    REPAIR WOULD AUTO-RESOLVE"). A collection can carry a genuine
+    duplicate point_id pair AND, elsewhere in the same collection, one
+    unrelated record whose unique_key is missing/foreign -- which makes
+    the whole-collection identity gate reject the ENTIRE collection. The
+    gate-aware predicate reports "no duplicate" for that shape even
+    though one genuinely exists, so this reset could never fire and the
+    repo stayed quarantined forever -- unlike every other cause this
+    module handles. Using the gate-agnostic predicate means this reset
+    ALSO fires for that case, giving the repo a fair renewed retry. That
+    retry is bounded and non-silent, never an infinite reset loop that
+    pretends to succeed: post Bug #1579 Part 3,
+    `consolidate_collection_in_place` returns the honest, distinguishable
+    "dedup_gate_rejected" status again (instead of crashing) if the
+    underlying data/schema issue is still unresolved, and that status
+    counts toward quarantine again via the normal fail-conservative
+    default (`status_counts_as_quarantine_failure`) -- so a genuinely
+    unresolvable repo re-quarantines rather than looping here forever.
+
+    Reuses `collection_has_any_duplicate_point_ids` (read-only) and
     `_clear_quarantine_after_detected_repair` (existing reset/fallback
     logic) rather than reimplementing either. Returns True iff reset.
 
@@ -1106,25 +1143,39 @@ def reset_duplicate_caused_quarantine_if_resolved(
     # unblock either. is_quarantined() already has its own correct
     # disk-headroom auto-clear (based on the preflight re-passing); this
     # function must not duplicate or override that separate mechanism.
+    #
+    # Bug #1579: a DEDUP_GATE_REJECTED_FAILURE_CAUSE quarantine is a
+    # CONFIRMED gate rejection -- unlike a bare GENERIC-cause quarantine
+    # (which might be a legacy crash whose collection would now pass the
+    # gate), this cause means we already KNOW a bare retry will fail
+    # identically. Resetting it anyway would reset, immediately
+    # re-attempt, immediately re-fail, and re-quarantine on every single
+    # tick -- hogging the scheduler and starving every alphabetically-
+    # later fleet-migration candidate (Bug #1477's starvation failure
+    # mode, empirically reproduced while building this fix). Excluded
+    # here exactly like the two causes above; clears only via manual
+    # review after the underlying data/schema issue is fixed.
     if state.get("failure_cause") in (
         UNRECOVERABLE_FAILURE_CAUSE,
         DISK_HEADROOM_FAILURE_CAUSE,
+        DEDUP_GATE_REJECTED_FAILURE_CAUSE,
     ):
         return False
     if int(state.get("consecutive_failure_count", 0)) < threshold:
         return False
 
     from code_indexer.storage.shared.collection_dedup_repair import (
-        collection_has_duplicate_point_ids,
+        collection_has_any_duplicate_point_ids,
     )
 
     for collection_dir in candidate.semantic_collection_dirs:
-        if collection_has_duplicate_point_ids(collection_dir):
+        if collection_has_any_duplicate_point_ids(collection_dir):
             logger.info(
-                "Story #1560: repo %r is quarantined and %s currently "
-                "has duplicate point_id(s) -- this is now a resolvable "
-                "cause (auto-delete, no longer a raised exception) -- "
-                "resetting quarantine so the next attempt can succeed.",
+                "Story #1560/Bug #1579: repo %r is quarantined and %s "
+                "currently has duplicate point_id(s) (gate-agnostic "
+                "detection) -- this is now a resolvable cause (auto-"
+                "delete, no longer a raised exception) -- resetting "
+                "quarantine so the next attempt can succeed.",
                 candidate.golden_alias,
                 collection_dir,
             )
@@ -1144,6 +1195,13 @@ def reset_duplicate_caused_quarantine_if_resolved(
 #: produces that maps to `DISK_HEADROOM_FAILURE_CAUSE`.
 _DISK_HEADROOM_DETAIL_MARKER = "insufficient disk headroom"
 
+#: Bug #1579: substring `orchestrator.py`'s `_run_migration_sequence()`
+#: uses verbatim in `FleetMigrationRepoResult.detail` for the
+#: `"dedup_gate_rejected"` status (the whole-collection identity gate
+#: rejected a collection while genuine duplicate point_id group(s) were
+#: present).
+_DEDUP_GATE_REJECTED_DETAIL_MARKER = "rejected by the whole-collection identity gate"
+
 
 def classify_failure_cause(*, detail: Optional[str] = None) -> str:
     """Classify a fleet-migration failure's cause (Finding I, Codex
@@ -1153,12 +1211,17 @@ def classify_failure_cause(*, detail: Optional[str] = None) -> str:
     `detail=None`, since an exception carries no `FleetMigrationRepoResult
     .detail`) is always `GENERIC_FAILURE_CAUSE`. A non-raising
     "incomplete" status whose `detail` names the disk-headroom skip is
-    `DISK_HEADROOM_FAILURE_CAUSE`; every other detail (including
-    "residual in-repo temporal directories remain") is
+    `DISK_HEADROOM_FAILURE_CAUSE`; one whose `detail` names the Bug
+    #1579 whole-collection identity gate rejection is
+    `DEDUP_GATE_REJECTED_FAILURE_CAUSE` (this constant, already defined
+    above alongside `UNRECOVERABLE_FAILURE_CAUSE`); every other detail
+    (including "residual in-repo temporal directories remain") is
     `GENERIC_FAILURE_CAUSE`.
     """
     if detail and _DISK_HEADROOM_DETAIL_MARKER in detail:
         return DISK_HEADROOM_FAILURE_CAUSE
+    if detail and _DEDUP_GATE_REJECTED_DETAIL_MARKER in detail:
+        return DEDUP_GATE_REJECTED_FAILURE_CAUSE
     return GENERIC_FAILURE_CAUSE
 
 

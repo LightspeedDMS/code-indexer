@@ -2504,6 +2504,30 @@ def make_lifespan(
                 except Exception as _eoe:
                     logger.warning("Startup: orphaned export cleanup failed: %s", _eoe)
 
+            # Self-heal: repair cidx-meta's "-global" registry entry if the
+            # very first bootstrap (initialize_services(), called before the
+            # FastAPI `app` object -- and therefore app.state.backend_registry
+            # -- exists) wrote it to the wrong (per-node SQLite) backend.
+            # See repair_cidx_meta_global_registration()'s docstring for the
+            # full root-cause explanation. Must run HERE -- after
+            # app.state.backend_registry was set above -- so
+            # GlobalActivator.registry resolves the correct shared backend
+            # this time. Idempotent/O(1); fail-soft, never blocks startup.
+            if golden_repo_manager is not None:
+                try:
+                    from code_indexer.server.startup.bootstrap import (
+                        repair_cidx_meta_global_registration,
+                    )
+
+                    repair_cidx_meta_global_registration(
+                        golden_repo_manager, str(golden_repos_dir)
+                    )
+                except Exception as _cmgr_repair_err:
+                    logger.warning(
+                        "Startup: cidx-meta global-registration repair failed: %s",
+                        _cmgr_repair_err,
+                    )
+
             # Bug #1317: reconcile golden_repos registry-orphans (rows with
             # no on-disk clone -- can arise from a provisioning failure that
             # predates the atomicity guard, a manually-deleted clone
@@ -3346,7 +3370,12 @@ def make_lifespan(
         if storage_mode == "postgres" and backend_registry is not None:
             try:
                 _pg_dsn = ""
-                _configured_node_id = ""
+                # Bug (E2E Phase 6 discovery): holds the raw parsed
+                # config.json dict so _node_id below can resolve via the
+                # SAME resolve_cluster_node_id() helper service_init.py
+                # uses for JobTracker's node_id -- see that call site for
+                # why the two must never diverge.
+                _cfg_data: Optional[Dict[str, Any]] = None
                 _sharding_enabled = False
                 _shard_replicas = 1
                 try:
@@ -3370,7 +3399,6 @@ def make_lifespan(
                             _cfg_data = _json.load(_f)
                             _pg_dsn = _cfg_data.get("postgres_dsn", "")
                             _cluster_cfg = _cfg_data.get("cluster", {})
-                            _configured_node_id = _cluster_cfg.get("node_id", "")
                             _sharding_enabled = bool(
                                 _cluster_cfg.get("sharding_enabled", False)
                             )
@@ -3388,11 +3416,22 @@ def make_lifespan(
                         backend_registry.critical_connection_pool
                         or backend_registry.connection_pool
                     )
-                    _node_id = (
-                        _configured_node_id
-                        if _configured_node_id
-                        else f"{os.uname().nodename}-cidx"
+                    # Bug (E2E Phase 6 discovery): resolve via the SAME
+                    # shared helper service_init.py uses for JobTracker's
+                    # node_id (see that call site for the full defect
+                    # explanation) -- a prior independent computation here
+                    # defaulted to f"{hostname}-cidx" while service_init.py
+                    # defaulted to "local", so a job's executing_node stamp
+                    # (from JobTracker) could never match this node's own
+                    # identity in get_active_nodes() (from
+                    # NodeHeartbeatService, wired a few lines below), and
+                    # JobReconciliationService's dead-node reclaim wrongly
+                    # treated a live, still-running job as abandoned.
+                    from code_indexer.server.utils.cluster_node_id import (
+                        resolve_cluster_node_id,
                     )
+
+                    _node_id = resolve_cluster_node_id(_cfg_data)
 
                     # Story #501 AC3: Tag log records with the cluster node ID so
                     # the admin UI can aggregate and filter logs per node.

@@ -2966,6 +2966,27 @@ def _resolve_new_collection_layout(choice: Optional[str]) -> Optional[bool]:
     return choice == "chunks_db"
 
 
+def _resolve_hnsw_sync_epoch_enabled_for_cli() -> bool:
+    """Bug #1575 Part C review fix (Defect 3a, temporal-path bypass): a
+    standalone CLI process has no ``app.state`` to inspect via
+    ``is_postgres_storage_mode()`` -- when this CLI is actually a child
+    spawned by the server (e.g. `cidx index --index-commits`), the parent
+    signals postgres/cluster mode via ``CIDX_HNSW_SYNC_EPOCH_POSTGRES_MODE``
+    (the SAME env var ``FilesystemBackend.get_vector_store_client()``
+    already honors for the semantic `--fts` path, via the ``os`` module
+    already imported at the top of this file). Mirrors that check exactly
+    so the temporal construction below fails closed identically.
+
+    Returns True (mechanism enabled -- standalone CLI / non-cluster server
+    default) unless the env var is explicitly set to "1".
+    """
+    from .storage.shared.hnsw_sync_state import (
+        CIDX_HNSW_SYNC_EPOCH_POSTGRES_MODE_ENV,
+    )
+
+    return os.environ.get(CIDX_HNSW_SYNC_EPOCH_POSTGRES_MODE_ENV) != "1"
+
+
 @cli.command()
 @click.option(
     "--clear", "-c", is_flag=True, help="Clear existing index and perform full reindex"
@@ -3541,6 +3562,7 @@ def index(
                     use_chunks_db_for_new_collections=_resolve_new_collection_layout(
                         new_collection_layout
                     ),
+                    hnsw_sync_epoch_enabled=_resolve_hnsw_sync_epoch_enabled_for_cli(),
                 )
 
                 # Check if --clear flag is set for temporal collection

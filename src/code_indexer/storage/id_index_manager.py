@@ -188,43 +188,42 @@ class IDIndexManager:
             return id_index
 
     def save_index(self, collection_path: Path, id_index: Dict[str, Path]) -> None:
-        """Save ID index to disk using an atomic temp-file + os.replace pattern.
+        """Save ID index to disk atomically (temp-file + os.replace).
 
-        Writes to a .bin.tmp side-car, fsyncs it, then uses os.replace() to
-        atomically swap it into place.  A directory fsync follows so the rename
-        survives a crash.  The original id_index.bin is never truncated until
-        the new file is fully written and fsynced.
-
-        Args:
-            collection_path: Path to collection directory
-            id_index: Dictionary mapping point IDs to file paths
+        Bug #1575 round 6 item 3b: per-call-unique temp filename (pid +
+        thread-id) -- a fixed name raced across the fresh
+        ``IDIndexManager()`` instance every call site constructs.
         """
         index_file = collection_path / self.INDEX_FILENAME
-        temp_file = index_file.with_suffix(".bin.tmp")
+        temp_file = index_file.with_name(
+            f"{index_file.stem}.{os.getpid()}.{threading.get_ident()}.tmp"
+        )
 
         with self._lock:
-            with open(temp_file, "wb") as f:
-                f.write(struct.pack("<I", len(id_index)))
-
-                for point_id, file_path in id_index.items():
-                    try:
-                        relative_path = file_path.relative_to(collection_path)
-                        path_str = str(relative_path)
-                    except ValueError:
-                        path_str = str(file_path)
-
-                    id_bytes = point_id.encode("utf-8")
-                    path_bytes = path_str.encode("utf-8")
-
-                    f.write(struct.pack("<H", len(id_bytes)))
-                    f.write(id_bytes)
-                    f.write(struct.pack("<H", len(path_bytes)))
-                    f.write(path_bytes)
-
-                f.flush()
-                nfs_safe_fsync(f.fileno())
-
-            os.replace(temp_file, index_file)
+            try:
+                with open(temp_file, "wb") as f:
+                    f.write(struct.pack("<I", len(id_index)))
+                    for point_id, file_path in id_index.items():
+                        try:
+                            relative_path = file_path.relative_to(collection_path)
+                            path_str = str(relative_path)
+                        except ValueError:
+                            path_str = str(file_path)
+                        id_bytes = point_id.encode("utf-8")
+                        path_bytes = path_str.encode("utf-8")
+                        f.write(struct.pack("<H", len(id_bytes)))
+                        f.write(id_bytes)
+                        f.write(struct.pack("<H", len(path_bytes)))
+                        f.write(path_bytes)
+                    f.flush()
+                    nfs_safe_fsync(f.fileno())
+                os.replace(temp_file, index_file)
+            except Exception:
+                try:
+                    temp_file.unlink(missing_ok=True)
+                except OSError as cleanup_err:
+                    logger.warning("Cleanup failed for %s: %s", temp_file, cleanup_err)
+                raise
 
             dir_fd = os.open(str(collection_path), os.O_RDONLY)
             try:
@@ -353,6 +352,24 @@ class IDIndexManager:
             except json.JSONDecodeError as exc:
                 logger.warning(
                     "scan_vectors_for_id_map: skipping %s — JSON parse error: %s",
+                    json_file,
+                    exc,
+                )
+                rejected_count += 1
+                continue
+            except OSError as exc:
+                # Bug #1583 dual-review follow-up (opus LOW): a single
+                # unreadable file (PermissionError -- e.g. a foreign-owned
+                # file left behind under this project's documented
+                # dual-OS-user server/auto-updater deployment, Bug #879)
+                # must not abort the ENTIRE scan. Treated exactly like a
+                # malformed record: logged, counted as a rejection, and
+                # scanning continues over the rest of the collection.
+                # json.JSONDecodeError (caught above) is a ValueError
+                # subclass, never an OSError, so this clause cannot shadow
+                # it.
+                logger.warning(
+                    "scan_vectors_for_id_map: skipping %s — unreadable: %s",
                     json_file,
                     exc,
                 )

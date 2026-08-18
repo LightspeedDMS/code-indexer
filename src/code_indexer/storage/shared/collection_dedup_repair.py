@@ -711,6 +711,33 @@ def collection_has_duplicate_point_ids(collection_dir: "Path | str") -> bool:
     return any(len(paths) > 1 for paths in id_to_paths.values())
 
 
+def collection_has_any_duplicate_point_ids(collection_dir: "Path | str") -> bool:
+    """Bug #1579: cheap, READ-ONLY predicate -- True iff `collection_dir`
+    currently has AT LEAST ONE duplicated point_id on disk, PERIOD --
+    regardless of whether repair_duplicate_and_shifted_points' whole-
+    collection identity gate would currently act on it.
+
+    Deliberately BROADER than :func:`collection_has_duplicate_point_ids`,
+    which is scoped to "duplicates THIS REPAIR WOULD AUTO-RESOLVE" (i.e.
+    the gate must also pass). This function answers a different question:
+    "are there ANY duplicate point_ids on disk right now", which is what
+    Bug #1579's quarantine-reset fix needs -- a gate-rejected collection
+    that genuinely has duplicates is exactly the case
+    ``collection_has_duplicate_point_ids`` cannot see (it returns False
+    for ANY gate failure), permanently defeating the quarantine auto-reset
+    for that collection even though duplicates are still present.
+
+    Still False for malformed records or an empty collection (the scan
+    itself found nothing trustworthy to judge). Performs zero disk
+    mutation.
+    """
+    collection_dir = Path(collection_dir)
+    id_to_paths, malformed, _identity_by_path = _scan_raw_records(collection_dir)
+    if malformed or not id_to_paths:
+        return False
+    return any(len(paths) > 1 for paths in id_to_paths.values())
+
+
 def clear_stale_repair_marker(collection_dir: Path) -> bool:
     """Idempotently remove a stale ``.dedup-repair-pending`` marker if
     present. Intended for ``consolidate_collection_in_place``'s RESUME
@@ -1314,7 +1341,11 @@ def repair_duplicate_and_shifted_points(
             "as before).",
             collection_dir,
         )
-        return DedupRepairResult(records_scanned=len(id_to_paths), gate_passed=False)
+        return DedupRepairResult(
+            records_scanned=len(id_to_paths),
+            gate_passed=False,
+            duplicate_groups=sum(1 for paths in id_to_paths.values() if len(paths) > 1),
+        )
 
     duplicated = {pid: paths for pid, paths in id_to_paths.items() if len(paths) > 1}
     collection_total = sum(len(paths) for paths in id_to_paths.values())

@@ -54,8 +54,9 @@ import json
 import logging
 import os
 import sqlite3
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Literal, Optional, Sequence, Union
+from typing import Any, Dict, Iterable, List, Literal, Optional, Sequence, Tuple, Union
 
 import numpy as np
 import zstandard
@@ -63,6 +64,26 @@ import zstandard
 from code_indexer.utils.file_locking import nfs_safe_fsync
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class PayloadChange:
+    """Bug #1575 Part C: old-vs-new diff for ONE payload-only update applied
+    via :meth:`ChunkStore.update_payload_fields_batch_with_diff`.
+
+    ``update_payload_fields_batch`` returns only a row count -- a visibility
+    change (path or ``hidden_branches``) is invisible to any change tracker
+    without this diff. ``old_hidden_branches``/``new_hidden_branches`` are
+    always tuples (hashable, orderable) even though the stored payload field
+    is a JSON list.
+    """
+
+    point_id: str
+    old_path: Optional[str]
+    new_path: Optional[str]
+    old_hidden_branches: Tuple[str, ...]
+    new_hidden_branches: Tuple[str, ...]
+
 
 _VECTOR_DTYPE = "<f4"  # little-endian float32, per AC3
 
@@ -118,6 +139,17 @@ CREATE TABLE IF NOT EXISTS chunk_store_meta (
 """
 
 _RESERVED_KEYS = ("id", "vector")
+
+# Bug #1575 Part A: chunked "WHERE ... IN (...)" batch size, kept well
+# under SQLite's ~999-host-parameter limit (mirrors _DELETE_CHUNK_SIZE's
+# existing rationale, reused here for a query rather than a delete).
+_QUERY_IN_CHUNK_SIZE = 500
+
+# Bug #1575 Part A (AC5): the canonical "content point" type value, matching
+# `_prepare_vector_data_batch`'s `metadata.type` default (also see
+# `GitAwareMetadataSchema.create_git_aware_metadata`, which stamps every
+# semantic/multimodal record with `"type": "content"`).
+_CONTENT_TYPE = "content"
 
 
 class ChunkStore:
@@ -245,7 +277,83 @@ class ChunkStore:
 
     def _ensure_schema(self) -> None:
         self._conn.executescript(_SCHEMA_SQL)
+        self._ensure_type_column()
         self._conn.commit()
+
+    def _ensure_type_column(self) -> None:
+        """Bug #1575 Part A (AC5): backward-compatible migration adding an
+        indexed ``type`` column to ``chunks``.
+
+        The original schema had no ``type`` column -- a record's ``type``
+        (the SAME value ``_prepare_vector_data_batch`` stores under
+        ``metadata.type``, defaulting to ``"content"``) lived only inside
+        the compressed, opaque ``data`` blob, unqueryable without decoding
+        every row. ``ALTER TABLE ADD COLUMN`` is this project's established
+        backward-compatible migration primitive (never DROP/RENAME/type
+        change) -- idempotent via ``PRAGMA table_info`` so a database that
+        already has the column (every open after the first, on any given
+        collection) never re-runs ``ALTER``/backfill. The index creation
+        itself stays unconditional (``CREATE INDEX IF NOT EXISTS``,
+        idempotent on its own) so a database that already has the column
+        but was somehow left without the index still gets it.
+
+        Investigation (Bug #1575 issue text, "Part A" scope): every current
+        production writer that ever sets ``payload.path`` also sets
+        ``type == "content"`` (semantic AND multimodal content records,
+        both built via ``GitAwareMetadataSchema.create_git_aware_metadata``);
+        the ONE writer that uses a different ``type`` value
+        (``"commit_chunk"``, temporal per-commit chunks built by
+        ``temporal_point_builder.build_chunk_payload``) never sets
+        ``payload.path`` at all (it uses ``paths``/``primary_path``
+        instead) -- proven directly against that real writer code in
+        ``tests/unit/storage/test_chunk_storage_1575_part_a_temporal_invariant.py``.
+        A column is still added (rather than trusting that whole-codebase
+        invariant indefinitely) because nothing enforces it against a
+        FUTURE writer -- an indexed, authoritative ``type`` column is the
+        durable, provable mechanism AC5 calls for.
+
+        Two connections can race to migrate the same fresh database, and
+        the loser's ``ALTER`` then raises ``duplicate column name``. This
+        is recovered below as benign, deliberately skipping the loser's
+        own backfill since the winner's backfill already covers it.
+        """
+        cols = {row[1] for row in self._conn.execute("PRAGMA table_info(chunks)")}
+        column_added = "type" not in cols
+        if column_added:
+            try:
+                self._conn.execute("ALTER TABLE chunks ADD COLUMN type TEXT")
+            except sqlite3.OperationalError as exc:
+                if "duplicate column name" not in str(exc).lower():
+                    raise
+                column_added = False
+
+        self._conn.execute("CREATE INDEX IF NOT EXISTS idx_chunks_type ON chunks(type)")
+
+        if column_added:
+            self._backfill_type_column()
+
+    def _backfill_type_column(self) -> None:
+        """One-time backfill of the newly-added ``type`` column from each
+        existing row's decoded payload/metadata -- runs only immediately
+        after :meth:`_ensure_type_column` adds the column to a
+        pre-existing database (a fresh/empty table backfills nothing).
+
+        Codex review follow-up (Bug #1575 Part A, finding 5): streams rows
+        via a cursor instead of ``fetchall()`` so a large pre-migration
+        collection's compressed payloads are not all held in memory at
+        once during backfill.
+        """
+        cursor = self._conn.execute("SELECT point_id, data FROM chunks")
+        try:
+            for point_id, data_blob in cursor:
+                record = self._decode_data(data_blob)
+                record_type = self._record_type(record)
+                self._conn.execute(
+                    "UPDATE chunks SET type = ? WHERE point_id = ?",
+                    (record_type, point_id),
+                )
+        finally:
+            cursor.close()
 
     def close(self) -> None:
         self._conn.close()
@@ -398,6 +506,20 @@ class ChunkStore:
         result: Dict[str, Any] = json.loads(raw.decode("utf-8"))
         return result
 
+    @staticmethod
+    def _record_type(record: Dict[str, Any]) -> str:
+        """Return the canonical ``type`` value for a full record dict, using
+        the SAME resolution order as ``_prepare_vector_data_batch``'s
+        writer default: ``metadata.type`` first, else ``payload.type``,
+        else the module-level ``_CONTENT_TYPE`` constant ("content").
+        Defensively tolerates a missing/``None`` ``metadata``/``payload``
+        key, and a falsy (``None``/empty-string) stored ``type`` value.
+        """
+        metadata = record.get("metadata") or {}
+        payload = record.get("payload") or {}
+        record_type = metadata.get("type") or payload.get("type") or _CONTENT_TYPE
+        return str(record_type)
+
     # ------------------------------------------------------------------
     # Write
     # ------------------------------------------------------------------
@@ -414,7 +536,11 @@ class ChunkStore:
         """Upsert a batch of chunk records in a single transaction.
 
         Each record must contain at least ``id`` and ``vector``. Every other
-        key is preserved verbatim (passthrough by construction).
+        key is preserved verbatim (passthrough by construction). Bug #1575
+        Part A: the record's ``type`` (mirroring the writer's own
+        ``metadata.type``/``payload.type`` convention, default
+        ``"content"``) is ALSO persisted into the indexed ``type`` column so
+        ``distinct_content_paths()`` can filter without decoding every row.
         """
         self._require_mutable()
         if not records:
@@ -426,11 +552,12 @@ class ChunkStore:
             vector_blob = self._encode_vector(point_id, record["vector"])
             data_blob = self._encode_data(record)
             path = record.get("payload", {}).get("path")
-            rows.append((point_id, path, vector_blob, data_blob))
+            record_type = self._record_type(record)
+            rows.append((point_id, path, record_type, vector_blob, data_blob))
 
         self._conn.executemany(
-            "INSERT OR REPLACE INTO chunks (point_id, path, vector, data) "
-            "VALUES (?, ?, ?, ?)",
+            "INSERT OR REPLACE INTO chunks (point_id, path, type, vector, data) "
+            "VALUES (?, ?, ?, ?, ?)",
             rows,
         )
         self._conn.commit()
@@ -573,6 +700,262 @@ class ChunkStore:
         ).fetchall()
         return {row[0] for row in rows}
 
+    def point_ids_after(self, cursor: Optional[str], limit: int) -> List[str]:
+        """Bug #1575 Part B: keyset-pagination primitive replacing
+        ``sorted(all_point_ids())`` on the scroll-pagination hot path.
+
+        Returns up to ``limit`` point_ids strictly greater than ``cursor``,
+        in ascending (Python-``sorted``-equivalent, since TEXT columns use
+        SQLite's default BINARY collation) order -- via
+        ``WHERE point_id > ? ORDER BY point_id LIMIT ?`` (or the
+        unconditional ``ORDER BY point_id LIMIT ?`` form when ``cursor`` is
+        None). Both forms use the ``point_id`` PRIMARY KEY's own implicit
+        index, but produce two DIFFERENT (and both cheap) query plans --
+        verified via ``EXPLAIN QUERY PLAN`` (Bug #1575 Part B Codex review,
+        Finding 3, correcting an earlier overstated claim that both forms
+        are identical):
+
+        - ``cursor`` given: ``SEARCH TABLE chunks USING COVERING INDEX
+          sqlite_autoindex_chunks_1 (point_id>?)`` -- an index SEARCH driven
+          by the ``WHERE`` clause.
+        - ``cursor`` is ``None``: ``SCAN TABLE chunks USING COVERING INDEX
+          sqlite_autoindex_chunks_1`` -- there is no ``WHERE`` clause to
+          search on, so SQLite reports a SCAN, not a SEARCH.
+
+        Both are index-ONLY (``USING COVERING INDEX``) and never read the
+        ``vector``/``data`` blob columns -- neither form is a full ROW scan.
+        Do not claim they produce the same plan shape; only claim they are
+        both cheap and both avoid a full-row scan. The cost of retrieving
+        ONE page never depends on the total row count either way --
+        unlike ``sorted(chunk_store.all_point_ids())``, which pulls every
+        stored point_id into Python and re-sorts all of them on every call.
+
+        Called by ``FilesystemVectorStore._scroll_points_chunks_db()`` in
+        bounded batches to page through a CHUNKS_DB collection -- see that
+        method for the wiring (Bug #1575 Part B).
+
+        A cursor whose id has since been deleted resolves correctly: SQLite
+        simply returns the next id strictly greater than the (now absent)
+        cursor value -- no crash, no duplicate, no gap, matching the exact
+        semantics ``bisect_right`` provided over the in-memory sorted list.
+
+        Raises:
+            ValueError: if ``limit`` is not a positive integer -- mirrors
+                ``FilesystemVectorStore.scroll_points``'s own ``limit <= 0``
+                guard rather than silently executing a malformed/no-op
+                SQL LIMIT clause.
+        """
+        if limit <= 0:
+            raise ValueError(
+                f"point_ids_after limit must be a positive integer, got {limit!r}"
+            )
+        if cursor is None:
+            rows = self._conn.execute(
+                "SELECT point_id FROM chunks ORDER BY point_id LIMIT ?",
+                (limit,),
+            ).fetchall()
+        else:
+            rows = self._conn.execute(
+                "SELECT point_id FROM chunks WHERE point_id > ? "
+                "ORDER BY point_id LIMIT ?",
+                (cursor, limit),
+            ).fetchall()
+        return [row[0] for row in rows]
+
+    def _chunks_table_exists(self) -> bool:
+        """2nd Codex review follow-up (Bug #1575 Part A, Gap 1): distinguish
+        "the ``chunks`` table does not exist at all" from "the table
+        exists but the ``type`` column is absent" -- ``PRAGMA
+        table_info(chunks)`` (see :meth:`_has_type_column`) returns an
+        EMPTY result set for BOTH cases, so it cannot tell them apart on
+        its own.
+
+        A genuinely virgin immutable snapshot (a ``chunks.db`` file that
+        exists but was never populated -- immutable open skips
+        ``_ensure_schema()`` entirely, see ``__init__``) has no ``chunks``
+        table. That is a legitimately EMPTY collection, not an error, and
+        callers must not let a query against a nonexistent table raise
+        ``sqlite3.OperationalError: no such table: chunks``.
+
+        Queries ``sqlite_master`` directly -- a pure, read-only metadata
+        read, safe on an immutable connection (never ``CREATE TABLE``/
+        ``ALTER TABLE`` here).
+        """
+        row = self._conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'chunks'"
+        ).fetchone()
+        return row is not None
+
+    def _has_type_column(self) -> bool:
+        """Codex review follow-up (Bug #1575 Part A, CRITICAL finding 1):
+        an IMMUTABLE open skips ``_ensure_schema()`` entirely (see
+        ``__init__``'s ``if not immutable:`` guard) -- so a pre-migration
+        chunks.db (created before the ``type`` column migration landed)
+        opened with ``immutable=1`` has no ``type`` column. ``PRAGMA
+        table_info`` is a pure metadata read, safe on an immutable
+        connection -- never attempt ``ALTER TABLE`` here.
+        """
+        cursor = self._conn.execute("PRAGMA table_info(chunks)")
+        try:
+            cols = {row[1] for row in cursor.fetchall()}
+        finally:
+            cursor.close()
+        return "type" in cols
+
+    def distinct_content_paths(self) -> "set[str]":
+        """Bug #1575 Part A (AC5): return the set of distinct non-null
+        ``path`` values belonging ONLY to ``type == "content"`` rows.
+
+        Replaces materializing every content payload
+        (``_fetch_all_content_points``) just to derive the set of distinct
+        file paths on record -- this reads the indexed ``path``/``type``
+        columns only, never decoding ``data``, and retains ONLY the path
+        strings (never a list of payloads).
+
+        Codex review follow-up (CRITICAL finding 1): a pre-migration
+        immutable-mode store (no ``type`` column, see :meth:`_has_type_column`)
+        cannot run the indexed query -- it falls back to a decode-based
+        content-type check via :meth:`_record_type`, streamed via a cursor
+        (never ``fetchall()``) so a large legacy collection is not fully
+        materialized in memory at once. This fallback NEVER attempts
+        ``ALTER TABLE`` against what may be an immutable connection.
+
+        2nd Codex review follow-up (Gap 1): a genuinely virgin immutable
+        snapshot has NO ``chunks`` table at all (see
+        :meth:`_chunks_table_exists`) -- that is a legitimately empty
+        collection and returns an empty set, never
+        ``sqlite3.OperationalError: no such table: chunks``.
+        """
+        if not self._chunks_table_exists():
+            return set()
+
+        if not self._has_type_column():
+            result: "set[str]" = set()
+            cursor = self._conn.execute(
+                "SELECT path, data FROM chunks WHERE path IS NOT NULL"
+            )
+            try:
+                for path, data_blob in cursor:
+                    record = self._decode_data(data_blob)
+                    if self._record_type(record) == _CONTENT_TYPE:
+                        result.add(path)
+            finally:
+                cursor.close()
+            return result
+
+        cursor = self._conn.execute(
+            "SELECT DISTINCT path FROM chunks WHERE path IS NOT NULL AND type = ?",
+            (_CONTENT_TYPE,),
+        )
+        try:
+            rows = cursor.fetchall()
+        finally:
+            cursor.close()
+        return {row[0] for row in rows}
+
+    def fetch_points_for_paths(
+        self, paths: Iterable[str], *, payload_only: bool = False
+    ) -> List[Dict[str, Any]]:
+        """Bug #1575 Part A: batched, targeted fetch of full records for the
+        given stored ``paths`` -- a ``WHERE path IN (...)`` lookup via the
+        indexed ``path`` column, chunked to respect SQLite's ~999
+        host-parameter limit (Messi Rule #14: bounded loops only). NEVER a
+        full-table scan.
+
+        Args:
+            paths: Stored path values (RAW, exact form -- callers are
+                responsible for any absolute/relative normalization before
+                calling this method; the underlying column is an exact
+                string match).
+            payload_only: Codex review follow-up (Bug #1575 Part A, finding
+                6) -- when True, the SQL query selects ``point_id, data``
+                ONLY (never ``vector``) and each row is decoded via
+                ``_row_to_payload_only_record`` -- the ``vector`` blob is
+                neither selected nor decoded, and returned records have no
+                ``vector`` key at all. For the ``FilesystemVectorStore``
+                caller, which immediately discards the vector and only
+                needs ``id``/``payload``. Default False preserves today's
+                byte-identical full-record behavior for every other caller.
+
+        Returns:
+            Full decoded records (``id``, ``vector``, ``payload``, and
+            every other passthrough field) for every row whose ``path``
+            matches one of ``paths`` when ``payload_only=False``; the same
+            records minus ``vector`` when ``payload_only=True``. Empty
+            list for an empty/no-match input.
+
+        Raises:
+            ValueError: If ``paths`` is ``None`` -- an empty iterable
+                (``set()``/``[]``) is the correct way to request "nothing",
+                never ``None``.
+        """
+        if paths is None:
+            raise ValueError(
+                "fetch_points_for_paths: paths must not be None -- pass an "
+                "empty set()/[] to request zero results"
+            )
+
+        # 2nd Codex review follow-up (Bug #1575 Part A, Gap 1): a genuinely
+        # virgin immutable snapshot has no `chunks` table at all -- that is
+        # a legitimately empty collection (no matches possible), never
+        # `sqlite3.OperationalError: no such table: chunks`.
+        if not self._chunks_table_exists():
+            return []
+
+        paths_list = list(paths)
+        if not paths_list:
+            return []
+
+        results: List[Dict[str, Any]] = []
+        for start in range(0, len(paths_list), _QUERY_IN_CHUNK_SIZE):
+            batch = paths_list[start : start + _QUERY_IN_CHUNK_SIZE]
+            placeholders = ",".join("?" for _ in batch)
+            if payload_only:
+                rows = self._conn.execute(
+                    f"SELECT point_id, data FROM chunks WHERE path IN ({placeholders})",
+                    batch,
+                ).fetchall()
+                for point_id, data_blob in rows:
+                    results.append(
+                        self._row_to_payload_only_record(point_id, data_blob)
+                    )
+            else:
+                rows = self._conn.execute(
+                    f"SELECT point_id, vector, data FROM chunks WHERE path IN ({placeholders})",
+                    batch,
+                ).fetchall()
+                for point_id, vector_blob, data_blob in rows:
+                    results.append(
+                        self._row_to_record(point_id, vector_blob, data_blob)
+                    )
+        return results
+
+    def _row_to_payload_only_record(
+        self, point_id: str, data_blob: bytes
+    ) -> Dict[str, Any]:
+        """Codex review follow-up (Bug #1575 Part A, finding 6): decode
+        ONLY the ``data`` blob -- never touches/decodes the ``vector``
+        blob at all. Used by :meth:`fetch_points_for_paths`'s
+        ``payload_only=True`` path for callers (``FilesystemVectorStore``)
+        that immediately discard the vector.
+        """
+        try:
+            record = self._decode_data(data_blob)
+        except (
+            zstandard.ZstdError,
+            json.JSONDecodeError,
+            UnicodeDecodeError,
+            ValueError,
+            TypeError,
+        ) as exc:
+            raise CorruptChunkDataError(
+                f"Chunk store at {self.db_path}: point {point_id!r} has a "
+                f"corrupt 'data' blob that could not be decoded "
+                f"({type(exc).__name__}: {exc})"
+            ) from exc
+        record["id"] = point_id
+        return record
+
     # ------------------------------------------------------------------
     # Payload-only update (AC4: mirrors
     # FilesystemVectorStore._batch_update_payload_only -- merge only the
@@ -646,11 +1029,103 @@ class ChunkStore:
         self._conn.commit()
         return updated_count
 
+    def update_payload_fields_batch_with_diff(
+        self, updates: List[Tuple[str, dict]]
+    ) -> List[PayloadChange]:
+        """Bug #1575 Part C: same batch payload-merge as
+        :meth:`update_payload_fields_batch` (ONE transaction, ONE commit,
+        points not found skipped gracefully) but additionally returns the
+        old-vs-new diff for every row actually updated, so a caller can
+        register precisely which point_ids had a VISIBILITY-relevant change
+        (path or ``hidden_branches``) without a second read pass.
+
+        A no-op merge (new value equals the old one) still produces a
+        ``PayloadChange`` entry with ``old_* == new_*`` -- it is the
+        CALLER's responsibility to decide whether that counts as a real
+        change (e.g. only registering ``visibility_changed`` when they
+        differ), mirroring how the SHARDED_JSON path's own comparison
+        works.
+        """
+        self._require_mutable()
+        if not updates:
+            return []
+
+        changes: List[PayloadChange] = []
+        for point_id, fields in updates:
+            row = self._conn.execute(
+                "SELECT data FROM chunks WHERE point_id = ?", (point_id,)
+            ).fetchone()
+            if row is None:
+                continue
+
+            record = self._decode_data(row[0])
+            existing_payload = record.get("payload", {})
+            old_path = existing_payload.get("path")
+            old_hidden_branches = tuple(existing_payload.get("hidden_branches", []))
+
+            for key, value in fields.items():
+                existing_payload[key] = value
+            record["payload"] = existing_payload
+
+            new_path = existing_payload.get("path")
+            new_hidden_branches = tuple(existing_payload.get("hidden_branches", []))
+
+            new_data_blob = self._compressor.compress(
+                json.dumps(record).encode("utf-8")
+            )
+            self._conn.execute(
+                "UPDATE chunks SET path = ?, data = ? WHERE point_id = ?",
+                (new_path, new_data_blob, point_id),
+            )
+            changes.append(
+                PayloadChange(
+                    point_id=point_id,
+                    old_path=old_path,
+                    new_path=new_path,
+                    old_hidden_branches=old_hidden_branches,
+                    new_hidden_branches=new_hidden_branches,
+                )
+            )
+
+        self._conn.commit()
+        return changes
+
     # ------------------------------------------------------------------
     # Delete (AC4: mirrors FilesystemVectorStore.delete_points)
     # ------------------------------------------------------------------
 
     _DELETE_CHUNK_SIZE = 500  # stay well under SQLite's ~999 variable limit
+
+    def get_paths_for_points(self, point_ids: list) -> Dict[str, str]:
+        """Return a ``{point_id: path}`` mapping for the given point_ids.
+
+        Bug #1575 Finding-1-regression fix: a point's stored ``path`` is
+        unrecoverable once the row is deleted, so callers that need to keep
+        an in-memory ``PathIndex`` in sync on delete (mirroring what the
+        SHARDED_JSON delete path already does) MUST resolve paths BEFORE
+        calling :meth:`delete`, never after. Points with no path (NULL) or
+        that do not exist are simply absent from the returned mapping --
+        never an error, matching :meth:`delete`'s own silent-skip semantics
+        for non-existent ids. Read-only: safe on an immutable connection.
+        Chunked to respect SQLite's bound on the number of host parameters
+        per statement (Messi Rule #14: bounded loops only), reusing the
+        same chunk size as :meth:`delete`.
+        """
+        if not point_ids:
+            return {}
+
+        result: Dict[str, str] = {}
+        for start in range(0, len(point_ids), self._DELETE_CHUNK_SIZE):
+            chunk = point_ids[start : start + self._DELETE_CHUNK_SIZE]
+            placeholders = ",".join("?" for _ in chunk)
+            rows = self._conn.execute(
+                f"SELECT point_id, path FROM chunks "
+                f"WHERE point_id IN ({placeholders}) AND path IS NOT NULL",
+                chunk,
+            ).fetchall()
+            for point_id, path in rows:
+                result[point_id] = path
+        return result
 
     def delete(self, point_ids: list) -> int:
         """Delete a batch of points by id. Returns the number deleted.

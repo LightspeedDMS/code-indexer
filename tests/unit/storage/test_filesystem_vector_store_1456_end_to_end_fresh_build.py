@@ -75,7 +75,7 @@ class TestFreshChunksDbBuildEndToEnd:
     def test_second_indexing_session_incrementally_updates(self, tmp_path):
         """A second cidx index invocation on the SAME collection (adding
         more points) must correctly extend the HNSW index via the
-        incremental path -- proving _apply_incremental_hnsw_batch_update is
+        incremental path -- proving _apply_visibility_aware_incremental_update is
         CHUNKS_DB-aware, not just the first-build full-rebuild path."""
         store = FilesystemVectorStore(
             base_path=tmp_path, use_chunks_db_for_new_collections=True

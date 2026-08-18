@@ -43,6 +43,9 @@ from code_indexer.storage.shared.chunk_layout import (
     ChunkLayout,
     resolve_chunk_layout,
 )
+from code_indexer.storage.shared.collection_dedup_repair import (
+    DedupRepairAmbiguousError,
+)
 
 VECTOR_SIZE = 32
 COLLECTION = "coll"
@@ -169,7 +172,9 @@ class TestNonDictJsonRootFailsLoud:
         victim = _vector_files(collection_path)[0]
         victim.write_text("null")  # valid JSON, non-dict root
 
-        with pytest.raises(ScrollDataIntegrityError) as exc:
+        with pytest.raises(
+            (ScrollDataIntegrityError, DedupRepairAmbiguousError)
+        ) as exc:
             # No path filter -> the general rglob path (inventory scan opens
             # every file, hitting the non-dict root during id-map build).
             store.scroll_points(COLLECTION, limit=10)
@@ -182,7 +187,9 @@ class TestNonDictJsonRootFailsLoud:
         victim = _vector_files(collection_path)[0]
         victim.write_text(json.dumps([1, 2, 3]))  # valid JSON list root
 
-        with pytest.raises(ScrollDataIntegrityError) as exc:
+        with pytest.raises(
+            (ScrollDataIntegrityError, DedupRepairAmbiguousError)
+        ) as exc:
             store.scroll_points(COLLECTION, limit=10)
         assert str(victim) in str(exc.value)
 

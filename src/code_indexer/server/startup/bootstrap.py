@@ -19,6 +19,7 @@ from code_indexer.utils.subprocess_env import build_cidx_subprocess_env
 
 if TYPE_CHECKING:
     from code_indexer.server.repositories.golden_repo_manager import GoldenRepoManager
+    from code_indexer.global_repos.global_activation import GlobalActivator
 
 logger = logging.getLogger(__name__)
 
@@ -363,6 +364,70 @@ def bootstrap_cidx_meta(
 
     # Always patch excludes — runs on fresh installs and on already-registered upgrades.
     _patch_cidx_meta_override_yaml(cidx_meta_path)
+
+
+# Self-heal for a confirmed bootstrap-timing gap: bootstrap_cidx_meta() above
+# runs inside initialize_services(), called at code_indexer.server.app MODULE
+# level -- before the FastAPI `app` object is assigned. At that point
+# GlobalActivator.registry cannot detect postgres/cluster mode (no app.state
+# to inspect yet) and silently falls back to a per-node SQLite GlobalRegistry,
+# so cidx-meta's first-ever global activation lands in the wrong backend on
+# every fresh postgres/cluster install. Every later reader correctly resolves
+# the shared PostgreSQL registry and finds nothing there, forever (observed
+# live: "Repository 'cidx-meta-global' not found in global registry" from
+# both the dep-map trigger and meta-description refresh). Call this ONLY
+# after app.state.backend_registry is guaranteed populated (lifespan.py,
+# well after initialize_services() returns), so the registry check below is
+# trustworthy. Wired from lifespan.py's startup sequence (see the Bug #1317
+# golden-repo-reconcile call site) immediately after backend_registry is set.
+def repair_cidx_meta_global_registration(
+    golden_repo_manager: "GoldenRepoManager", golden_repos_dir: str
+) -> bool:
+    """Repair cidx-meta's "-global" registry entry if it went missing.
+
+    Idempotent, O(1). Returns True if a repair was performed, False if
+    nothing needed repair (cidx-meta not registered yet, or already
+    globally active).
+    """
+    if golden_repo_manager is None:
+        raise ValueError("golden_repo_manager must not be None")
+    if not golden_repos_dir:
+        raise ValueError("golden_repos_dir must not be empty")
+
+    if not golden_repo_manager.golden_repo_exists("cidx-meta"):
+        return False
+
+    activator = _build_cidx_meta_global_activator(golden_repos_dir)
+    if activator.registry.get_global_repo("cidx-meta-global") is not None:
+        return False
+
+    _activate_cidx_meta_globally(activator, golden_repos_dir)
+    logger.warning(
+        "Repaired cidx-meta global registration: 'cidx-meta-global' was "
+        "missing from the registry (early-bootstrap resolution gap), now "
+        "re-activated",
+        extra={"correlation_id": get_correlation_id()},
+    )
+    return True
+
+
+def _build_cidx_meta_global_activator(golden_repos_dir: str) -> "GlobalActivator":
+    from code_indexer.global_repos.global_activation import GlobalActivator
+
+    return GlobalActivator(golden_repos_dir)
+
+
+def _activate_cidx_meta_globally(
+    activator: "GlobalActivator", golden_repos_dir: str
+) -> None:
+    cidx_meta_path = Path(golden_repos_dir) / "cidx-meta"
+    activator.activate_golden_repo(
+        repo_name="cidx-meta",
+        repo_url="local://cidx-meta",
+        clone_path=str(cidx_meta_path),
+        enable_temporal=False,
+        temporal_options=None,
+    )
 
 
 def register_langfuse_golden_repos(

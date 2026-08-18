@@ -213,6 +213,12 @@ class FleetMigrationRepoResult:
         - "refused_immutable_path": defense-in-depth -- base_clone_path
           resolves into the IMMUTABLE .versioned/ snapshot tree; the base
           clone was NOT touched and the write lock was NEVER acquired.
+        - "dedup_gate_rejected" (Bug #1579): the whole-collection identity
+          gate rejected at least one collection WHILE genuine duplicate
+          point_id group(s) are present there -- requires manual review
+          (a data/schema fix), not an operator flag flip. UNLIKE
+          "dedup_deletion_gated", this status counts toward the
+          quarantine breaker (fail-conservative default).
     """
 
     status: str
@@ -243,9 +249,9 @@ def _consolidate_collections(
     progress_base: int = 0,
     progress_span: int = 100,
     phase_prefix: str = "consolidating semantic collection",
-) -> Tuple[int, int, int]:
+) -> Tuple[int, int, int, int]:
     """AC1 step (1). Returns (consolidated_count, skipped_disk_count,
-    dedup_gated_count).
+    dedup_gated_count, dedup_gate_rejected_count).
 
     Bug #1528: kind-agnostic. TEMPORAL shard directories now flow through
     this SAME helper -- and therefore the same symlink/immutable-path
@@ -256,6 +262,17 @@ def _consolidate_collections(
     ``deletion_authorized`` is Story #1460's AC1/AC2 rollout-safety gate,
     threaded straight through to ``consolidate_collection_in_place`` --
     see that function's own docstring for the full semantics.
+
+    Bug #1579: ``dedup_gate_rejected_count`` counts collections whose
+    ``consolidate_collection_in_place`` call returned status
+    "dedup_gate_rejected" -- the whole-collection identity gate rejected
+    the collection WHILE genuine duplicate point_id group(s) are present.
+    Deliberately a SEPARATE counter from ``dedup_gated_count`` (Story
+    #1460's rollout-safety gate, which resolves on its own): this one
+    reflects a genuine data/schema problem requiring manual review, so it
+    is NOT added to quarantine.py's exempt-transient-status set and counts
+    toward the quarantine breaker by that module's own fail-conservative
+    default.
 
     Codex review Finding F4: ``query_tracker``/``refcount_key`` (the
     real, shared ``RefreshScheduler.query_tracker`` and the repo's own
@@ -281,6 +298,7 @@ def _consolidate_collections(
     consolidated_count = 0
     skipped_disk_count = 0
     dedup_gated_count = 0
+    dedup_gate_rejected_count = 0
     for item_index, collection_dir in enumerate(collection_dirs):
         # Codex round-6 CRITICAL finding #4 (TOCTOU): discovery.py's own
         # is_symlink() rejection only proves this path was safe AT
@@ -327,7 +345,18 @@ def _consolidate_collections(
             # -- which counts toward the quarantine breaker, violating
             # Design decision 7 ("this cause must NEVER quarantine").
             dedup_gated_count += 1
-    return consolidated_count, skipped_disk_count, dedup_gated_count
+        elif result.status == "dedup_gate_rejected":
+            # Bug #1579: same "previously silently dropped" hazard as
+            # dedup_deletion_gated above, but the OPPOSITE quarantine
+            # direction is correct here -- see the docstring note on
+            # dedup_gate_rejected_count.
+            dedup_gate_rejected_count += 1
+    return (
+        consolidated_count,
+        skipped_disk_count,
+        dedup_gated_count,
+        dedup_gate_rejected_count,
+    )
 
 
 def _consolidate_temporal_namespaces(
@@ -343,7 +372,7 @@ def _consolidate_temporal_namespaces(
     progress_callback: Optional[ProgressCallback] = None,
     progress_base: int = 0,
     progress_span: int = 100,
-) -> Tuple[int, int, int]:
+) -> Tuple[int, int, int, int]:
     """AC1 step (2), Bug #1528 revision: consolidate every in-repo temporal
     shard IN PLACE, synchronously, inside THIS same write-lock hold, as a
     literal sub-step of this job.
@@ -358,9 +387,10 @@ def _consolidate_temporal_namespaces(
     directory, discriminator flip, legacy files deleted only after a
     verified durable write.
 
-    Returns ``(consolidated_count, skipped_disk_count, dedup_gated_count)``
-    from that shared helper (Codex review Finding F3 added the third
-    element); ``deletion_authorized`` is Story #1460's AC1/AC2 rollout-safety
+    Returns ``(consolidated_count, skipped_disk_count, dedup_gated_count,
+    dedup_gate_rejected_count)`` from that shared helper (Codex review
+    Finding F3 added the third element; Bug #1579 added the fourth);
+    ``deletion_authorized`` is Story #1460's AC1/AC2 rollout-safety
     gate, threaded straight through to ``consolidate_collection_in_place``.
     ``query_tracker``/``refcount_key`` (Codex review Finding F4) are
     likewise threaded straight through, so a temporal shard's deletion is
@@ -486,21 +516,25 @@ def _run_migration_sequence(
         int(100 * len(semantic_collection_dirs) / total_items) if total_items else 0
     )
     temporal_span = 100 - semantic_span if total_items else 0
-    consolidated_count, skipped_disk_count, dedup_gated_count = (
-        _consolidate_collections(
-            semantic_collection_dirs,
-            deletion_authorized=deletion_authorized,
-            query_tracker=query_tracker,
-            refcount_key=refcount_key,
-            progress_callback=progress_callback,
-            progress_base=0,
-            progress_span=semantic_span,
-        )
+    (
+        consolidated_count,
+        skipped_disk_count,
+        dedup_gated_count,
+        dedup_gate_rejected_count,
+    ) = _consolidate_collections(
+        semantic_collection_dirs,
+        deletion_authorized=deletion_authorized,
+        query_tracker=query_tracker,
+        refcount_key=refcount_key,
+        progress_callback=progress_callback,
+        progress_base=0,
+        progress_span=semantic_span,
     )
     (
         temporal_consolidated,
         temporal_skipped_disk,
         temporal_dedup_gated,
+        temporal_dedup_gate_rejected,
     ) = _consolidate_temporal_namespaces(
         temporal_namespaces,
         sister_alias_manager,
@@ -515,6 +549,7 @@ def _run_migration_sequence(
     consolidated_count += temporal_consolidated
     skipped_disk_count += temporal_skipped_disk
     dedup_gated_count += temporal_dedup_gated
+    dedup_gate_rejected_count += temporal_dedup_gate_rejected
 
     # Codex review Finding F3: a distinct, explicitly retryable status --
     # never the generic "incomplete" the fresh-verification-failure
@@ -534,6 +569,30 @@ def _run_migration_sequence(
                 f"point_id group(s) detected but deletion_authorized="
                 f"False (Story #1460 rollout gate closed) -- will retry "
                 f"automatically once the gate opens"
+            ),
+        )
+
+    # Bug #1579: a DIFFERENT cause from dedup_deletion_gated above --
+    # here the whole-collection identity gate rejected the collection
+    # while genuine duplicate point_id group(s) are present, which needs
+    # an actual data/schema fix (not an operator flag flip) to resolve.
+    # Checked BEFORE the disk/temporal-completeness gate, same as
+    # dedup_gated_count above, but this status is deliberately NOT added
+    # to quarantine.py's _QUARANTINE_EXEMPT_TRANSIENT_STATUSES -- it
+    # counts toward quarantine via that module's fail-conservative
+    # default (status_counts_as_quarantine_failure), since it will not
+    # resolve on its own.
+    if dedup_gate_rejected_count > 0:
+        return FleetMigrationRepoResult(
+            status="dedup_gate_rejected",
+            collections_consolidated=consolidated_count,
+            collections_skipped_disk=skipped_disk_count,
+            temporal_namespaces_processed=len(temporal_namespaces),
+            detail=(
+                f"{dedup_gate_rejected_count} collection(s) rejected by "
+                f"the whole-collection identity gate with duplicate "
+                f"point_id group(s) present -- requires manual review, "
+                f"will count toward quarantine"
             ),
         )
 

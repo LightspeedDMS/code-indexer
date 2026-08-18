@@ -21,12 +21,17 @@ nested collection sharing the same bare name, then proves a top-level
 by the nested write). ``end_indexing`` is deliberately never called in this
 test -- it is not needed to reproduce or observe the ``_id_index`` bug
 (vector JSON files and the in-memory ``_id_index`` entry are both written
-synchronously by ``upsert_points``), and calling it would incidentally
-exercise ``_apply_incremental_hnsw_batch_update``'s SEPARATE, already known,
-pre-existing physical-path bug (documented in
-``test_filesystem_vector_store_nested_cache_collision.py``), which is
-unrelated to what this test is proving and would risk a real hnswlib
-dimension-mismatch crash if left unpatched.
+synchronously by ``upsert_points``), and calling it would pull in the
+untested top-level/nested subdirectory-plus-full-write-lifecycle
+combination documented in
+``test_filesystem_vector_store_nested_cache_collision.py`` (no production
+caller exercises it), which is unrelated to what this test is proving.
+Bug #1575 Part C retired the OLD incremental-HNSW-update method that once
+had a SEPARATE physical-path bug reachable via that same combination
+(see that sibling file's history); its replacement,
+``_apply_visibility_aware_incremental_update``, fixes it by construction,
+but this test still stays out of that untested combination to keep its
+own scope narrow.
 
 Test 2 (``_path_indexes``, Codex NEW Finding 2): builds a top-level and a
 nested collection independently (via isolated throwaway builder stores,

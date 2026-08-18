@@ -17,7 +17,9 @@ The five known spawn sites (per the story's AC6 Finding-1 text):
   2. server/repositories/golden_repo_manager.py     (registration)
   3. server/repositories/golden_repo_manager.py     (add-index / reindex)
   4. server/services/activated_repo_index_manager.py (activated-repo temporal)
-  5. server/mcp/handlers/repos.py                   (MCP provider indexing)
+  5. server/mcp/handlers/_provider_temporal_job.py   (MCP provider indexing --
+     extracted out of repos.py; repos.py keeps only a `# noqa: F401`
+     re-export of `_provider_temporal_index_job` for backward compatibility)
 
 golden_repo_manager.py hosts TWO of the five (registration AND
 add-index/reindex), so it must show >= 2 distinct call sites.
@@ -38,7 +40,7 @@ _MODULES_WITH_MIN_CALL_COUNT = [
     ("code_indexer.global_repos.refresh_scheduler", 1),
     ("code_indexer.server.repositories.golden_repo_manager", 2),
     ("code_indexer.server.services.activated_repo_index_manager", 1),
-    ("code_indexer.server.mcp.handlers.repos", 1),
+    ("code_indexer.server.mcp.handlers._provider_temporal_job", 1),
 ]
 
 

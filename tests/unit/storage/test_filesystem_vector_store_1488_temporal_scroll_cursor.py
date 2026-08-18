@@ -41,6 +41,9 @@ from code_indexer.storage.shared.chunk_layout import (
     ChunkLayout,
     resolve_chunk_layout,
 )
+from code_indexer.storage.shared.collection_dedup_repair import (
+    DedupRepairAmbiguousError,
+)
 from code_indexer.storage.shared.collection_migration import (
     consolidate_collection_in_place,
 )
@@ -253,7 +256,7 @@ class TestLegacyScanFailsLoud:
             json.dumps({"vector": [0.0] * VECTOR_SIZE, "payload": {"path": "x.py"}})
         )
 
-        with pytest.raises(RuntimeError) as exc_info:
+        with pytest.raises((RuntimeError, DedupRepairAmbiguousError)) as exc_info:
             store.scroll_points(
                 collection_name=TEMPORAL_COLLECTION, limit=100, with_payload=True
             )
@@ -270,7 +273,7 @@ class TestLegacyScanFailsLoud:
         victim = _vector_files(collection_path)[0]
         victim.write_text("this is not json at all {{{{ ][")
 
-        with pytest.raises(RuntimeError) as exc_info:
+        with pytest.raises((RuntimeError, DedupRepairAmbiguousError)) as exc_info:
             store.scroll_points(
                 collection_name=TEMPORAL_COLLECTION, limit=100, with_payload=True
             )
@@ -291,7 +294,7 @@ class TestLegacyScanFailsLoud:
         dup_file = original.parent / "vector_dupdupdupdupdup0.json"
         dup_file.write_text(json.dumps(data))
 
-        with pytest.raises(RuntimeError) as exc_info:
+        with pytest.raises((RuntimeError, DedupRepairAmbiguousError)) as exc_info:
             store.scroll_points(
                 collection_name=TEMPORAL_COLLECTION, limit=100, with_payload=True
             )

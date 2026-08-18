@@ -340,6 +340,75 @@ def _is_natively_built_chunks_db(collection_dir: Path) -> bool:
     return next(collection_dir.rglob("vector_*.json"), None) is None
 
 
+# Bug #1584: the content-integrity manifest's stated purpose is narrow --
+# prove the consolidated chunks.db is intact BEFORE the legacy sharded
+# source is destroyed. Once that destructive deletion has genuinely
+# completed (every verified legacy record removed), the manifest has
+# discharged its only purpose: it is a FROZEN, migration-time snapshot
+# that ordinary post-migration indexing (row adds/updates/deletes) makes
+# stale by design, so it can never again be a valid oracle for the live,
+# mutating chunks.db. This key is a POSITIVE, durably-recorded completion
+# proof -- written ONLY by _cleanup_old_sharded_files() at the exact
+# moment cleanup finishes -- deliberately NOT inferred from the
+# manifest's mere absence (a manifest that goes missing mid-migration,
+# before cleanup ever completed, must keep failing loudly; see
+# _is_natively_built_chunks_db's own reasoning for why "absent" is
+# ambiguous and a positive record is required instead).
+_MIGRATION_CLEANUP_COMPLETED_KEY = "chunks_db_migration_cleanup_completed"
+
+
+def _is_migration_cleanup_completed(collection_dir: Path) -> bool:
+    """Bug #1584: True iff a PRIOR call to :func:`_cleanup_old_sharded_files`
+    durably recorded that legacy-file cleanup for this collection has
+    fully completed. Read-only and treats any read/parse failure
+    (missing/corrupt collection_meta.json, undecodable bytes) as "not
+    proven complete" -- which safely falls through to the pre-existing,
+    stricter manifest-based verification path rather than ever
+    fabricating a false "complete" answer. Requires the marker to be the
+    literal JSON boolean ``true`` (``is True``, never a bare truthy
+    value such as ``1`` or ``"false"``).
+    """
+    meta_path = collection_dir / _COLLECTION_META_FILENAME
+    try:
+        with open(meta_path) as f:
+            meta = json.load(f)
+    except (OSError, ValueError, UnicodeDecodeError):
+        return False
+    if not isinstance(meta, dict):
+        return False
+    return meta.get(_MIGRATION_CLEANUP_COMPLETED_KEY) is True
+
+
+def _mark_migration_cleanup_completed(collection_dir: Path) -> None:
+    """Bug #1584: durably record that legacy-file cleanup has fully
+    completed for this collection, reusing :func:`_atomic_write_json`'s
+    durable write pattern. Idempotent -- a no-op write is skipped when
+    the key is already set, so a later no-op cleanup call (nothing left
+    to delete) never re-writes this file. Called ONLY from
+    :func:`_cleanup_old_sharded_files`, and only after every legacy file
+    has been verified deleted with zero failures -- never on a
+    partial/failed cleanup.
+    """
+    meta_path = collection_dir / _COLLECTION_META_FILENAME
+    try:
+        with open(meta_path) as f:
+            meta = json.load(f)
+    except (OSError, ValueError, UnicodeDecodeError) as exc:
+        raise ConsolidationVerificationError(
+            f"Cleanup-completion marker refused for {collection_dir}: "
+            f"could not read {meta_path} ({exc})"
+        ) from exc
+    if not isinstance(meta, dict):
+        raise ConsolidationVerificationError(
+            f"Cleanup-completion marker refused for {collection_dir}: "
+            f"{meta_path} does not contain a JSON object"
+        )
+    if meta.get(_MIGRATION_CLEANUP_COMPLETED_KEY) is True:
+        return
+    meta[_MIGRATION_CLEANUP_COMPLETED_KEY] = True
+    _atomic_write_json(meta_path, meta)
+
+
 def _atomic_write_json(target_path: Path, data: Dict[str, Any]) -> None:
     """Atomic + durable JSON write (temp file in the SAME directory,
     flush+fsync, ``os.replace``, then an ``nfs_safe_fsync`` of the
@@ -376,6 +445,38 @@ def _atomic_write_json(target_path: Path, data: Dict[str, Any]) -> None:
         nfs_safe_fsync(dir_fd)
     finally:
         os.close(dir_fd)
+
+
+def _best_effort_remove_content_manifest(collection_dir: Path) -> None:
+    """Bug #1584 dual-review finding (MEDIUM, Codex finding 3): once
+    legacy-file cleanup completion is (re-)confirmed, the content
+    manifest has discharged its ONLY purpose (proving the now-deleted
+    legacy source's migrated copy was correct at migration time) and is
+    a permanently retired artifact -- it must not accumulate on disk
+    forever across the ~900-repo fleet (a single fleet repo's manifest
+    can run tens of megabytes, per Bug #1562's own real numbers).
+
+    Called ONLY from the crash-window self-heal branch in
+    :func:`consolidate_collection_in_place`, AFTER the marker is durably
+    set AND a fresh integrity check has already passed -- by that point
+    the marker + a clean chunks.db are the durable, authoritative
+    completion proof, so a failure removing this now-vestigial file is
+    purely a disk-space nicety, never a correctness concern. Best-effort
+    and non-fatal: never raises.
+    """
+    manifest_path = _content_manifest_path(collection_dir)
+    try:
+        manifest_path.unlink()
+    except FileNotFoundError:
+        pass
+    except OSError as exc:
+        logger.warning(
+            "consolidate_collection_in_place: could not remove the retired "
+            "content-integrity manifest %s (%s) -- harmless, it will be "
+            "retried on a later pass",
+            manifest_path,
+            exc,
+        )
 
 
 def _write_content_manifest(
@@ -1156,6 +1257,14 @@ class ConsolidationResult:
         - "skipped_insufficient_disk": the disk-headroom preflight failed;
           the collection was left completely untouched in its legacy
           sharded state.
+        - "dedup_gate_rejected" (Bug #1579): repair_duplicate_and_shifted_
+          points' whole-collection identity gate rejected this collection
+          (a missing/foreign/self-inconsistent unique_key was found on at
+          least one record) WHILE genuine duplicate point_id group(s) are
+          also present -- repair cannot safely act, so consolidation is
+          rejected rather than falling through to Step 1's scan (which
+          would otherwise crash with DuplicateSourceIdError). The
+          collection is left completely untouched; requires manual review.
     """
 
     status: str
@@ -2336,8 +2445,6 @@ def _cleanup_old_sharded_files(
         )
         failed_paths.append(id_index_bin)
 
-    _remove_empty_subdirs(collection_dir)
-
     if failed_paths:
         sample = [str(p) for p in failed_paths[:_MAX_MISSING_SAMPLE_SIZE]]
         raise ConsolidationCleanupError(
@@ -2346,6 +2453,44 @@ def _cleanup_old_sharded_files(
             f"refusing to silently report success; will be retried on a "
             f"later pass"
         )
+
+    # Bug #1584: every verified legacy record was deleted with zero
+    # failures -- legacy-file cleanup for this collection has now fully
+    # completed (this call is also reached, as a no-op, when there was
+    # nothing left to delete -- idempotently re-confirming the same
+    # fact). Durably record it so a later resume/verify pass never
+    # re-litigates the frozen manifest against a chunks.db that ordinary
+    # post-migration indexing has since mutated.
+    #
+    # Dual-review finding (HIGH, opus F1): this write is placed BEFORE
+    # _remove_empty_subdirs's directory-tree walk, not after it, closing
+    # the specific crash window this finding named -- a crash during
+    # that walk (which can be genuinely slow on a large fleet repo's
+    # deep hash-shard tree) no longer leaves deletion complete with the
+    # marker unrecorded. Still strictly gated on `not failed_paths`
+    # above, so a genuine per-file deletion failure never sets the
+    # marker (Bug #1584 dual-review finding, MEDIUM, opus F2).
+    #
+    # Accepted residual (Bug #1584 final follow-up round, Codex-confirmed):
+    # this reordering shrinks the crash window from O(number of files/
+    # directories) -- potentially minutes on a large NFS-backed fleet
+    # repo -- down to O(1): just this call's own atomic write
+    # (_atomic_write_json's flush + fsync + os.replace + directory-fsync
+    # sequence). A crash DURING that single write -- after the last
+    # legacy file was deleted but before the marker becomes durable --
+    # can still reproduce the original #1584 false-positive on the very
+    # next pass. This is accepted as a narrow, single-write-operation
+    # residual, not eliminated: a full two-phase-completion redesign to
+    # close it entirely was considered and rejected as disproportionate
+    # engineering for an already dramatically-narrowed edge case (mirrors
+    # the accepted, documented NFS client-revalidation residual recorded
+    # for Bug #1538 in this project's CLAUDE.md).
+    _mark_migration_cleanup_completed(collection_dir)
+
+    # Best-effort directory-tree tidy-up, deliberately AFTER the marker
+    # is already durably in place -- a failure or crash here can never
+    # again cost this collection its completion record.
+    _remove_empty_subdirs(collection_dir)
 
     return deleted
 
@@ -2534,6 +2679,18 @@ def _write_manifest_and_count_or_clean(
         ) from exc
 
 
+def _fresh_chunks_db_integrity_ok(collection_dir: Path) -> bool:
+    """Shared by both of :func:`verify_collection_fully_migrated`'s
+    manifest-bypass fast paths (native-build and, Bug #1584, migration-
+    cleanup-completed): proves chunks.db itself opens cleanly via a fresh
+    connection, discarding the (irrelevant in both cases) detail string.
+    """
+    integrity_ok, _detail = _check_integrity_fresh_connection(
+        collection_dir / CHUNKS_DB_FILENAME
+    )
+    return integrity_ok
+
+
 def verify_collection_fully_migrated(collection_dir: Union[str, Path]) -> bool:
     """Codex CRITICAL Finding #2 (round 2): the reusable, side-effect-free
     completeness oracle fleet-migration discovery MUST invoke -- never
@@ -2553,6 +2710,13 @@ def verify_collection_fully_migrated(collection_dir: Union[str, Path]) -> bool:
           that wrote it" standard). With zero legacy files left there is
           nothing left to compare record-for-record against, but this
           still proves chunks.db itself is not corrupt/missing.
+
+    Bug #1584: once legacy-file cleanup has durably completed (see
+    :func:`_is_migration_cleanup_completed`), (c) above is proven via
+    :func:`_fresh_chunks_db_integrity_ok` alone -- the frozen content
+    manifest has discharged its only purpose and is never consulted
+    again, since ordinary post-migration indexing makes it stale by
+    design.
 
     NEVER raises: an unreadable/malformed legacy record (Finding #4) or
     any verification failure is treated as "not yet fully migrated" (safe
@@ -2579,10 +2743,18 @@ def verify_collection_fully_migrated(collection_dir: Union[str, Path]) -> bool:
         # verifier below would reject a perfectly consolidated collection.
         # Still PROVE the store itself is intact, via the same
         # fresh-connection integrity check the resume path relies on.
-        integrity_ok, _detail = _check_integrity_fresh_connection(
-            collection_dir / CHUNKS_DB_FILENAME
-        )
-        return integrity_ok
+        return _fresh_chunks_db_integrity_ok(collection_dir)
+
+    if _is_migration_cleanup_completed(collection_dir):
+        # Bug #1584: legacy-file cleanup for this collection already
+        # completed durably (in this or a prior call) -- the manifest has
+        # discharged its only purpose (proving the now-deleted legacy
+        # source's migrated copy was correct) and is a FROZEN snapshot
+        # that ordinary post-migration indexing has since made stale by
+        # design. Re-litigating the entire live chunks.db against it
+        # would misclassify legitimate drift as unrecoverable corruption
+        # (the exact false-positive this bug reports).
+        return _fresh_chunks_db_integrity_ok(collection_dir)
 
     try:
         # Bug #1486 Codex Finding #3: this predicate is side-effect-free and
@@ -2698,6 +2870,63 @@ def consolidate_collection_in_place(
         # Resume path. Finding #4: fail loudly on any rejected legacy
         # record found during the fresh re-scan (never silently proceed).
         still_present_id_map = _scan_or_fail_on_rejected_records(collection_dir)
+
+        if not still_present_id_map and _is_migration_cleanup_completed(collection_dir):
+            # Bug #1584: legacy-file cleanup for this collection already
+            # completed durably (in this or a prior call) -- the manifest
+            # has discharged its only purpose (proving the now-deleted
+            # legacy source's migrated copy was correct) and is a FROZEN
+            # snapshot that ordinary post-migration indexing has since
+            # made stale by design. Re-litigating the entire live
+            # chunks.db against it via _verify_chunks_db_before_resume_
+            # cleanup() would misclassify legitimate drift as
+            # unrecoverable corruption -- the exact false-positive this
+            # bug reports (FleetMigrationScheduler calls this function on
+            # every tick). Mirrors the native-build branch immediately
+            # above: still PROVE the store is intact first, via the same
+            # fresh-connection integrity check.
+            #
+            # Dual-review finding (HIGH, opus F1): this fast path
+            # REQUIRES the marker to already be durably set -- it does
+            # NOT self-heal purely from still_present_id_map being empty.
+            # Trusting emptiness alone was tried and reverted: it bypasses
+            # the Issue #1503/#1486 manifest corruption-detection pipeline
+            # (phantom keys, wrong digests, row-set mismatches) for any
+            # hand-constructed/legacy state that never went through a
+            # real, marker-recording cleanup -- structurally
+            # indistinguishable, from stored data alone, from a genuine
+            # crash-lost-marker collection. The crash window that
+            # motivated this finding is instead closed narrowly, at the
+            # SOURCE, by _cleanup_old_sharded_files writing the marker
+            # BEFORE its own slow _remove_empty_subdirs walk rather than
+            # after it (see that function).
+            integrity_ok, integrity_detail = _check_integrity_fresh_connection(
+                collection_dir / CHUNKS_DB_FILENAME
+            )
+            if not integrity_ok:
+                raise UnrecoverableConsolidationCorruptionError(
+                    f"Refusing to treat {collection_dir} as consolidated: "
+                    f"legacy-file cleanup completed but chunks.db does NOT "
+                    f"open cleanly -- {integrity_detail}"
+                )
+            # Codex dual-review finding (MEDIUM, finding 3): the manifest
+            # has discharged its only purpose now that completion is
+            # (re-)confirmed -- retire it rather than letting it
+            # accumulate on disk forever across the fleet.
+            _best_effort_remove_content_manifest(collection_dir)
+            if clear_stale_repair_marker(collection_dir):
+                logger.info(
+                    "consolidate_collection_in_place: cleared a stale Bug "
+                    "#1502 repair marker for %s on the Bug #1584 "
+                    "cleanup-completed fast path",
+                    collection_dir,
+                )
+            return ConsolidationResult(
+                status="already_consolidated",
+                old_files_deleted=0,
+                deletion_gated=False,
+            )
+
         # Bug #1562: a resume attempt can legitimately have a large number
         # of still-present legacy files (a crash between the durable flip
         # and cleanup completing) -- emit a checkpoint here so this is
@@ -2822,6 +3051,39 @@ def consolidate_collection_in_place(
                 f"{repair_result.duplicate_groups} duplicate point_id "
                 f"group(s) detected; deletion withheld pending "
                 f"deletion_authorized=True"
+            ),
+            extra={"dedup_repair": repair_result},
+        )
+
+    if not repair_result.gate_passed and repair_result.duplicate_groups > 0:
+        # Bug #1579: a gate rejection with GENUINE duplicate point_id
+        # group(s) present must NOT fall through to Step 1 below -- that
+        # scan hard-raises DuplicateSourceIdError for exactly this
+        # collection shape, an uncaught, unhelpful crash for a state this
+        # repair already detected and deliberately left untouched. Report
+        # a distinct, honest, explicitly-retryable status instead (mirrors
+        # the dedup_deletion_gated pattern immediately above) -- never
+        # "consolidated"/"already_consolidated" (a false claim of success),
+        # and never silently falling through.
+        logger.warning(
+            "consolidate_collection_in_place: Bug #1579 -- %s has %d "
+            "duplicate point_id group(s) but the whole-collection identity "
+            "gate rejected it (a record with a missing/foreign/self-"
+            "inconsistent unique_key was found) -- repair cannot safely "
+            "act; consolidation REJECTED, no mutation performed. This "
+            "collection requires manual review.",
+            collection_dir,
+            repair_result.duplicate_groups,
+        )
+        return ConsolidationResult(
+            status="dedup_gate_rejected",
+            detail=(
+                f"{repair_result.duplicate_groups} duplicate point_id "
+                f"group(s) detected but the whole-collection identity gate "
+                f"rejected this collection (a record with a missing/"
+                f"foreign/self-inconsistent unique_key was found) -- "
+                f"repair cannot safely act; this collection requires "
+                f"manual review"
             ),
             extra={"dedup_repair": repair_result},
         )

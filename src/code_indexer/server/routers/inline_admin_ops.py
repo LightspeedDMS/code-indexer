@@ -534,11 +534,19 @@ def register_admin_ops_routes(
                     temporal_options=_temporal_opts,
                     # Pod-pull: reconstruction params for
                     # _provider_temporal_index_job (temporal_options → **kwargs).
+                    # Bug (Round 3, Finding 1): repo_alias MUST be included --
+                    # a different cluster node reconstructing this job purely
+                    # from this dict (lifespan.py's _pp_provider_temporal ->
+                    # _provider_temporal_index_job(**metadata, ...)) reads
+                    # kwargs.get("repo_alias", "") and passes it into
+                    # golden_repo_write_lock_guard, which raises ValueError
+                    # on a blank alias whenever a RefreshScheduler is wired.
                     metadata={
                         "repo_path": repo_path,
                         "provider_name": request.providers[0],
                         "clear": False,
                         "temporal_options": _temporal_opts,
+                        "repo_alias": alias,
                     },
                 )
                 job_ids.append(provider_job_id)

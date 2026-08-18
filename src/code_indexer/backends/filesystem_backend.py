@@ -190,6 +190,10 @@ class FilesystemBackend(VectorStoreBackend):
         collection_meta_cache = None
         chunk_store_cache = None
         skip_staleness = False
+        # Bug #1575 Part C AC46: default True (mechanism enabled) unless
+        # this is a server running in postgres/cluster storage mode, where
+        # it fails closed to always-full-rebuild -- resolved below.
+        hnsw_sync_epoch_enabled = True
         if self.hnsw_index_cache is not None:
             from ..server.cache.id_index_cache import get_global_id_index_cache
 
@@ -219,6 +223,34 @@ class FilesystemBackend(VectorStoreBackend):
 
             skip_staleness = is_immutable_versioned_snapshot(str(self.project_root))
 
+            # Bug #1575 Part C AC46: .index_rebuild.lock provides NO
+            # cross-node exclusion on the documented vers=3,nolock,hard
+            # golden-repos NFS mount, and fleet-wide DB-backed job-level
+            # serialization coverage of EVERY mutation entry point (not
+            # just the flagship golden-repo refresh path) could not be
+            # exhaustively confirmed -- fail closed in postgres/cluster
+            # storage mode.
+            from ..server.utils.registry_factory import is_postgres_storage_mode
+
+            hnsw_sync_epoch_enabled = not is_postgres_storage_mode()
+        else:
+            # Bug #1575 Part C review fix (Defect 3a bypass 3): a spawned
+            # `cidx index` CLI child process (e.g. the server's own `cidx
+            # index --fts` subprocess) has no app.state to inspect via
+            # is_postgres_storage_mode() -- that probe always returns
+            # False here regardless of the PARENT server's actual storage
+            # mode. Fall back to an explicit env var the parent sets when
+            # it knows it is running in postgres/cluster mode. Absent
+            # (every standalone CLI invocation) keeps the enabled default.
+            import os
+
+            from ..storage.shared.hnsw_sync_state import (
+                CIDX_HNSW_SYNC_EPOCH_POSTGRES_MODE_ENV,
+            )
+
+            if os.environ.get(CIDX_HNSW_SYNC_EPOCH_POSTGRES_MODE_ENV) == "1":
+                hnsw_sync_epoch_enabled = False
+
         return FilesystemVectorStore(
             base_path=self.vectors_dir,
             project_root=self.project_root,
@@ -230,6 +262,7 @@ class FilesystemBackend(VectorStoreBackend):
             use_chunks_db_for_new_collections=self.use_chunks_db_for_new_collections,
             collection_meta_cache=collection_meta_cache,
             chunk_store_cache=chunk_store_cache,
+            hnsw_sync_epoch_enabled=hnsw_sync_epoch_enabled,
         )
 
     def health_check(self) -> bool:

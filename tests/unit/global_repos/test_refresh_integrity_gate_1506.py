@@ -89,16 +89,67 @@ def _real_records(count: int) -> list:
     return records
 
 
+# SQLite stores a page size of 65536 as 1 in its 16-bit header field
+# (0x10000 does not fit in 16 bits), per the SQLite file format spec.
+_SQLITE_HEADER_PAGE_SIZE_64K_SENTINEL = 1
+_SQLITE_PAGE_SIZE_64K = 65536
+_SQLITE_MIN_PAGE_SIZE = 512
+_SQLITE_MAX_PAGE_SIZE = 65536
+# SQLite file header: page size lives at byte offset 16-17 (big-endian
+# uint16), so the header must be at least 18 bytes long to read it.
+_SQLITE_HEADER_PAGE_SIZE_OFFSET_START = 16
+_SQLITE_HEADER_PAGE_SIZE_OFFSET_END = 18
+_SQLITE_MIN_HEADER_LENGTH = _SQLITE_HEADER_PAGE_SIZE_OFFSET_END
+_FIRST_INTERIOR_PAGE_INDEX = 1  # page 0 is the header/schema page
+_BYTE_FLIP_XOR_MASK = 0xFF
+
+
+def _is_valid_sqlite_page_size(page_size: int) -> bool:
+    """SQLite page sizes are a power of two between 512 and 65536,
+    inclusive, per the SQLite file format spec."""
+    in_range = _SQLITE_MIN_PAGE_SIZE <= page_size <= _SQLITE_MAX_PAGE_SIZE
+    is_power_of_two = (page_size & (page_size - 1)) == 0
+    return in_range and is_power_of_two
+
+
 def _flip_bytes_at_midpoint(path: Path, span: int = 200) -> None:
-    """Corrupt bytes at the file's midpoint -- empirically confirmed (Bug
-    #1486's test suite) to produce a database that still OPENS fine, while
-    PRAGMA integrity_check genuinely detects the corruption."""
+    """Corrupt real table/index B-tree content so PRAGMA integrity_check
+    reliably detects it, while the database still OPENS fine (Bug #1486's
+    original empirical finding).
+
+    Flips a span at the midpoint of EVERY interior page (skipping page 0,
+    the header/schema page) instead of a single file-midpoint offset -- a
+    single offset stopped being reliable once Bug #1575 Part A's indexed
+    ``type`` column shifted page packing, sometimes landing the flip on
+    unused padding. Hitting every interior page guarantees at least one
+    flip lands inside real content. Page size is read from the file's own
+    header (bytes 16-17, big-endian) rather than assumed."""
+    if span <= 0:
+        raise ValueError(f"span must be positive, got {span}")
+
+    raw = path.read_bytes()
+    if len(raw) < _SQLITE_MIN_HEADER_LENGTH:
+        raise ValueError(f"{path} is too small to be a valid SQLite file")
+
+    page_size = int.from_bytes(
+        raw[_SQLITE_HEADER_PAGE_SIZE_OFFSET_START:_SQLITE_HEADER_PAGE_SIZE_OFFSET_END],
+        "big",
+    )
+    if page_size == _SQLITE_HEADER_PAGE_SIZE_64K_SENTINEL:
+        page_size = _SQLITE_PAGE_SIZE_64K
+    if not _is_valid_sqlite_page_size(page_size):
+        raise ValueError(f"{path} has an invalid SQLite page size: {page_size}")
+
     size = path.stat().st_size
     with open(path, "r+b") as f:
-        f.seek(size // 2)
-        data = f.read(span)
-        f.seek(size // 2)
-        f.write(bytes(b ^ 0xFF for b in data))
+        page = _FIRST_INTERIOR_PAGE_INDEX
+        while page * page_size < size:
+            offset = page * page_size + (page_size // 2)
+            f.seek(offset)
+            data = f.read(min(span, size - offset))
+            f.seek(offset)
+            f.write(bytes(b ^ _BYTE_FLIP_XOR_MASK for b in data))
+            page += 1
 
 
 class TestDiscoverChunksDbCollectionDirs:

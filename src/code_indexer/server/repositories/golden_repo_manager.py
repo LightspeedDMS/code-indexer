@@ -2655,6 +2655,28 @@ class GoldenRepoManager:
             from code_indexer.server.utils.index_command_layout import (
                 append_server_layout_args,
             )
+            from code_indexer.storage.shared.hnsw_sync_state import (
+                CIDX_HNSW_SYNC_EPOCH_POSTGRES_MODE_ENV,
+                resolve_hnsw_sync_epoch_env_var,
+            )
+
+            # Bug #1575 Part C review fix (Defect 3a bypass 3): this
+            # spawned child has no app.state to inspect via
+            # is_postgres_storage_mode() -- signal postgres/cluster mode
+            # explicitly via env var so it can resolve
+            # hnsw_sync_epoch_enabled=False (FilesystemBackend's
+            # CLI-mode fallback check). Bug #1575 Part C independent
+            # re-review: resolution now goes through the ONE shared
+            # resolve_hnsw_sync_epoch_env_var() helper (identical
+            # mechanism/fail-safe semantics as before) so every other
+            # server-side `cidx index` spawn site can reuse it instead of
+            # reimplementing this check. The var is popped from the
+            # inherited environment FIRST so this process's own ambient
+            # environment can never leak a stale value through -- only
+            # THIS call's own fresh resolution ever sets it.
+            _semantic_env_base = dict(os.environ)
+            _semantic_env_base.pop(CIDX_HNSW_SYNC_EPOCH_POSTGRES_MODE_ENV, None)
+            _semantic_env_base.update(resolve_hnsw_sync_epoch_env_var())
 
             # Story #1488: server states the new-collection layout explicitly
             # (CHUNKS_DB) rather than inheriting the CLI SHARDED_JSON default.
@@ -2664,7 +2686,7 @@ class GoldenRepoManager:
                 ),
                 phase_name="semantic",
                 error_label="semantic+FTS indexing",
-                env=build_cidx_subprocess_env(),
+                env=build_cidx_subprocess_env(_semantic_env_base),
             )
             logging.info(f"cidx index --fts completed for {clone_path}")
 
@@ -2686,6 +2708,18 @@ class GoldenRepoManager:
                 _temporal_env = build_temporal_child_env(
                     get_config_service().get_config()
                 )
+                # Bug #1575 Part C review fix (Defect 3a bypass 3,
+                # temporal half): temporal collections build/rebuild an
+                # HNSW graph via the SAME FilesystemVectorStore/
+                # HNSWIndexManager machinery as semantic collections (Bug
+                # #1529), so this child needs the SAME postgres-mode
+                # signal the semantic `--fts` Popen call above already
+                # sets. build_temporal_child_env() never sets this var
+                # itself (it is temporal-metadata-specific), so it is
+                # merged in here via the shared resolve_hnsw_sync_epoch_env_var()
+                # helper (Bug #1575 Part C independent re-review).
+                if _temporal_env is not None:
+                    _temporal_env.update(resolve_hnsw_sync_epoch_env_var())
                 _temporal_env = (
                     build_cidx_subprocess_env(_temporal_env)
                     if _temporal_env is not None
@@ -3414,16 +3448,26 @@ class GoldenRepoManager:
             from code_indexer.server.utils.index_command_layout import (
                 append_server_layout_args,
             )
+            from code_indexer.storage.shared.hnsw_sync_state import (
+                resolve_hnsw_sync_epoch_env_var,
+            )
 
             # Story #1488: server states the new-collection layout explicitly
             # (CHUNKS_DB) rather than inheriting the CLI SHARDED_JSON default.
+            # Bug #1575 Part C independent re-review: this spawn previously
+            # never set CIDX_HNSW_SYNC_EPOCH_POSTGRES_MODE_ENV at all, so it
+            # silently inherited the unsafe enabled default in postgres/
+            # cluster mode. Merged via the shared resolver used by every
+            # other server-side `cidx index` spawn site.
+            _cb_env = build_cidx_subprocess_env()
+            _cb_env.update(resolve_hnsw_sync_epoch_env_var())
             result = subprocess.run(
                 append_server_layout_args(["cidx", "index", "--fts"]),
                 cwd=base_clone_path,
                 capture_output=True,
                 text=True,
                 check=True,
-                env=build_cidx_subprocess_env(),
+                env=_cb_env,
             )
             if result.stdout:
                 logger.debug(
@@ -3610,6 +3654,9 @@ class GoldenRepoManager:
             from code_indexer.storage.filesystem_vector_store import (
                 FilesystemVectorStore,
             )
+            from code_indexer.server.utils.registry_factory import (
+                is_postgres_storage_mode,
+            )
 
             # Get list of files in target branch via git ls-files on the snapshot
             result = subprocess.run(
@@ -3628,7 +3675,15 @@ class GoldenRepoManager:
 
             branch_files = set(result.stdout.splitlines())
 
-            store = FilesystemVectorStore(index_dir)
+            # Bug #1575 Part C review fix (Defect 3a bypass 1): thread the
+            # postgres/cluster-mode signal, matching
+            # FilesystemBackend.get_vector_store_client()'s existing
+            # pattern -- otherwise this belt-and-suspenders rebuild path
+            # silently defaults the epoch-sync mechanism to enabled
+            # regardless of storage mode.
+            store = FilesystemVectorStore(
+                index_dir, hnsw_sync_epoch_enabled=not is_postgres_storage_mode()
+            )
             collections = store.list_collections()
 
             for collection_name in collections:
@@ -4137,6 +4192,9 @@ class GoldenRepoManager:
                     from code_indexer.server.services.config_service import (
                         get_config_service as _get_config_service_for_stats,
                     )
+                    from code_indexer.storage.shared.hnsw_sync_state import (
+                        resolve_hnsw_sync_epoch_env_var,
+                    )
 
                     _shared_kwargs: dict = dict(
                         command=command,
@@ -4151,6 +4209,11 @@ class GoldenRepoManager:
                     _shared_kwargs["env"] = build_embedding_stats_child_env(
                         _get_config_service_for_stats().get_config(), base_env=env
                     )
+                    # Bug #1575 Part C independent re-review: this closure
+                    # is the SHARED convergence point for the semantic and
+                    # temporal spawns in this workflow, so the postgres-
+                    # mode signal is merged in here ONCE.
+                    _shared_kwargs["env"].update(resolve_hnsw_sync_epoch_env_var())
                     try:
                         _run_with_popen_progress_shared(**_shared_kwargs)
                     except IndexingSubprocessError as e:
@@ -4225,12 +4288,21 @@ class GoldenRepoManager:
                         command = append_server_layout_args(
                             ["cidx", "index", "--rebuild-fts-index"]
                         )
+                        from code_indexer.storage.shared.hnsw_sync_state import (
+                            resolve_hnsw_sync_epoch_env_var as _resolve_fts_hnsw_epoch,
+                        )
+
+                        # Bug #1575 Part C independent re-review: this
+                        # spawn previously never set
+                        # CIDX_HNSW_SYNC_EPOCH_POSTGRES_MODE_ENV at all.
+                        _fts_env = build_cidx_subprocess_env()
+                        _fts_env.update(_resolve_fts_hnsw_epoch())
                         result = subprocess.run(
                             command,
                             cwd=repo_path,
                             capture_output=True,
                             text=True,
-                            env=build_cidx_subprocess_env(),
+                            env=_fts_env,
                         )
                         all_stdout += result.stdout or ""
                         all_stderr += result.stderr or ""

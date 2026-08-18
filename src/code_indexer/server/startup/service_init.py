@@ -282,12 +282,19 @@ def initialize_services() -> Dict[str, Any]:
         DependencyLatencyTracker,
     )
 
-    _cluster_cfg = _raw_config.get("cluster") if _raw_config else None
-    _node_id = (
-        _cluster_cfg.get("node_id", "local")
-        if isinstance(_cluster_cfg, dict)
-        else "local"
-    )
+    # Bug (E2E Phase 6 discovery): _node_id MUST be resolved via the shared
+    # resolve_cluster_node_id() helper -- it is threaded into
+    # JobTracker(node_id=_node_id) below, which stamps every job's
+    # executing_node column. That value must agree with the identity
+    # NodeHeartbeatService/get_active_nodes() use in lifespan.py's cluster
+    # block, or JobReconciliationService's dead-node reclaim wrongly treats
+    # a live, in-process-running job (e.g. lifecycle_registration, which
+    # never sets claimed_at) as abandoned on its very next sweep. A
+    # previous inline default of the literal string "local" here diverged
+    # from lifespan.py's f"{hostname}-cidx" default, causing exactly that.
+    from code_indexer.server.utils.cluster_node_id import resolve_cluster_node_id
+
+    _node_id = resolve_cluster_node_id(_raw_config)
     _latency_backend = DependencyLatencyBackend(str(db_path))
     latency_tracker = DependencyLatencyTracker(
         backend=_latency_backend, node_id=_node_id

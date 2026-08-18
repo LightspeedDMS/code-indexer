@@ -7,6 +7,87 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [12.21.0] - 2026-08-18
+
+### Fixed
+
+Twelve bugs closed (#1574, #1576-#1585, #1587), plus four additional defects found while
+driving the fixes through the full local regression-gate hierarchy (`fast-automation.sh`,
+`server-fast-automation.sh`, `e2e-automation.sh` -- all 6 phases). Each was reproduced with
+real evidence before being fixed; none were dismissed as "pre-existing" without proof.
+
+- **Bug #1574**: incremental indexing's change-detection merge de-duplicated by comparing
+  raw relative-vs-absolute path strings, so any file discovered by both the git-delta and
+  filesystem-scan tracks was indexed twice in the same run.
+- **Bug #1575** (three parts): incremental refresh rebuilt the ENTIRE HNSW index and
+  materialized ALL payloads regardless of change size, for both storage layouts. Part A
+  (authoritative content enumeration + targeted fetches), Part B (quadratic `scroll_points`
+  pagination), Part C (Visibility Epoch + complete affected-ID tracking) -- plus the
+  SHARDED_JSON PathIndex "fast path" for `unique_file_count` was ultimately abandoned after
+  a multi-round investigation surfaced a recurring class of correctness bugs; SHARDED_JSON now
+  always does the authoritative disk scan, matching CHUNKS_DB's pre-existing behavior.
+- **Bug #1576**: deleted three stale `cidx-meta-backup` integration test files exercising a
+  retired API shape, invisible to all CI gates.
+- **Bug #1577**: `store_xray_pattern` MCP tool crashed with a `TypeError` when cidx-meta backup
+  was enabled (a stale 3-argument `CidxMetaBackupSync` call).
+- **Bug #1578**: `build_non_interactive_git_env()` never set `GIT_EDITOR`, leaving `git merge`
+  exposed to the same EDITOR-unset failure class Bug #1573 fixed for other git subcommands.
+- **Bug #1579**: duplicate "shifted" point_id vector files permanently broke semantic refresh
+  for golden repos and deadlocked fleet migration in a quarantine loop.
+- **Bug #1580**: temporal legacy migration shard collisions never converged -- a promised
+  "later, separate cleanup pass" that never existed.
+- **Bug #1581**: temporal legacy migration permanently misclassified CHUNKS_DB shards as
+  collisions (a `numpy.ndarray` vector rejected by an `isinstance(vector, list)` check).
+- **Bug #1582**: `GenericQueryService._is_result_current_branch` compared a raw absolute
+  `payload.path` against a relative `git ls-files` set at a third un-normalized call site.
+- **Bug #1583**: SHARDED_JSON's `_load_id_index()` never rescanned disk once `id_index.bin`
+  existed, found during Bug #1575 Part C crash-recovery testing.
+- **Bug #1584**: fleet migration falsely reported UNRECOVERABLE data corruption on healthy
+  migrated collections -- the `chunks.db` content manifest was a frozen migration-time
+  snapshot that ordinary re-indexing invalidated.
+- **Bug #1585**: temporal indexing raced on `chunks.db`'s schema migration under concurrent
+  `ChunkStore` opens (`temporal_indexer.py`'s `ThreadPoolExecutor`), producing a real
+  `sqlite3.OperationalError: duplicate column name: type` that aborted a whole
+  `cidx index --index-commits` run. Discovered live via `e2e-automation.sh` Phase 1.
+- **Bug #1587**: server-triggered temporal indexing (dual-embedder) silently produced zero
+  indexed collections -- a stale E2E test fixture, from before an earlier session's Bug #1529
+  relocated server-context temporal reads to a fixed path outside the repo clone, never
+  updated to seed data at the new location. Discovered live via `e2e-automation.sh` Phase 3.
+- **cidx-meta global registration under postgres/cluster mode**: on every fresh
+  postgres/cluster install, cidx-meta's `-global` registry entry was written to a per-node
+  SQLite fallback instead of the shared PostgreSQL registry, because the write happens before
+  `app.state` exists to resolve the correct backend. Every later reader (description-refresh,
+  dep-map background analysis) then found nothing there, forever. Fixed with an idempotent
+  self-heal wired into server startup, immediately after the backend registry is populated.
+  Discovered live via `e2e-automation.sh` Phase 6.
+- **Cluster node-identity divergence**: two independent startup call sites derived "this
+  node's cluster identity" with different fallback defaults (`"local"` vs
+  `f"{hostname}-cidx"`) when no explicit `cluster.node_id` was configured -- a legitimate,
+  supported single-node `storage_mode=postgres` deployment. The mismatch caused
+  `JobReconciliationService` to misclassify genuinely live, still-running `lifecycle_registration`
+  jobs as abandoned-by-a-dead-node on the very next sweep, wrongly failing them. Unified behind
+  one shared resolver. Discovered live via `e2e-automation.sh` Phase 6.
+- Cross-module locking gap between the temporal legacy migration mover and a
+  provider-triggered admin temporal-index job, closed via a new write-lock guard.
+- A genuine, pre-existing bash integer-arithmetic bug in `e2e-automation.sh`'s readiness-probe
+  helpers (`wait_for_server`/`wait_for_fault_server`/`wait_for_pg_server`): fractional poll
+  intervals crashed the accumulator under `set -euo pipefail`. Predates this release; found
+  while triaging `fast-automation.sh` failures.
+- A test-topology defect in the Phase 6 E2E harness: a throwaway server sharing the main
+  session server's PostgreSQL database was given a disjoint filesystem `golden_repos_dir` -- a
+  topology no real cluster has -- tripping the Bug #1317 security-violation guard as a false
+  positive. Fixed by symlinking the throwaway server's golden-repos subtree onto the main
+  server's own.
+
+### Changed
+
+- `RefreshScheduler.acquire_write_lock()` gained an optional `ttl_seconds` parameter;
+  `release_write_lock()` now returns `bool` instead of `None`.
+- `cidx-meta` backup's rebase + Claude-CLI conflict-resolution mechanism (Story #926 AC8) was
+  confirmed retired (superseded by an earlier session's Bug #1555 mirror-semantics fix); the
+  one E2E test still asserting the removed behavior was rewritten to assert the current,
+  intentional contract instead.
+
 ## [12.20.0] - 2026-08-13
 
 ### Fixed

@@ -66,7 +66,6 @@ from code_indexer.server.storage.sqlite_backends import (
 from code_indexer.server.storage.shared.snapshot_manager import (
     VersionedSnapshotManager,
 )
-from code_indexer.storage.id_index_manager import DuplicateSourceIdError
 from code_indexer.storage.shared.chunk_layout import (
     ChunkLayout,
     resolve_chunk_layout,
@@ -761,8 +760,8 @@ class TestFleetMigrationFailureQuarantine:
         )
 
         for _ in range(FLEET_MIGRATION_FAILURE_QUARANTINE_THRESHOLD - 1):
-            with pytest.raises(DuplicateSourceIdError):
-                scheduler._run_next_candidate()
+            result = scheduler._run_next_candidate()
+            assert result["status"] == "dedup_gate_rejected"
 
         state = backend.get_fleet_migration_failure_state("click")
         assert state is not None
@@ -798,8 +797,8 @@ class TestFleetMigrationFailureQuarantine:
         )
 
         for _ in range(FLEET_MIGRATION_FAILURE_QUARANTINE_THRESHOLD):
-            with pytest.raises(DuplicateSourceIdError):
-                scheduler._run_next_candidate()
+            result = scheduler._run_next_candidate()
+            assert result["status"] == "dedup_gate_rejected"
 
         # "click" is now quarantined -- the NEXT call must skip it and
         # migrate "evolution" instead of raising the identical error again.
@@ -836,8 +835,8 @@ class TestFleetMigrationFailureQuarantine:
 
         # Two failures (below threshold).
         for _ in range(2):
-            with pytest.raises(DuplicateSourceIdError):
-                scheduler._run_next_candidate()
+            result = scheduler._run_next_candidate()
+            assert result["status"] == "dedup_gate_rejected"
         assert (
             backend.get_fleet_migration_failure_state("click")[
                 "consecutive_failure_count"
@@ -878,8 +877,8 @@ class TestFleetMigrationFailureQuarantine:
         )
 
         for _ in range(FLEET_MIGRATION_FAILURE_QUARANTINE_THRESHOLD):
-            with pytest.raises(DuplicateSourceIdError):
-                scheduler._run_next_candidate()
+            result = scheduler._run_next_candidate()
+            assert result["status"] == "dedup_gate_rejected"
 
         # Quarantined: a further call with NO on-disk change returns
         # nothing_to_migrate (the only candidate is skipped) rather than
@@ -903,8 +902,8 @@ class TestFleetMigrationFailureQuarantine:
         # (covered by quarantine.py's own dedicated throttle tests).
         monkeypatch.setattr(quarantine_module, "_SIGNATURE_RECHECK_INTERVAL_SECONDS", 0)
 
-        with pytest.raises(DuplicateSourceIdError):
-            scheduler._run_next_candidate()
+        result = scheduler._run_next_candidate()
+        assert result["status"] == "dedup_gate_rejected"
 
         # The retry's own failure was recorded fresh (count reset to 1,
         # not accumulated on top of the old quarantine-triggering count).
@@ -936,8 +935,8 @@ class TestFleetMigrationFailureQuarantine:
         )
 
         for _ in range(FLEET_MIGRATION_FAILURE_QUARANTINE_THRESHOLD):
-            with pytest.raises(DuplicateSourceIdError):
-                scheduler._run_next_candidate()
+            result = scheduler._run_next_candidate()
+            assert result["status"] == "dedup_gate_rejected"
 
         stats = scheduler.get_stats()
 
@@ -970,8 +969,8 @@ class TestFleetMigrationFailureQuarantine:
         )
 
         for _ in range(FLEET_MIGRATION_FAILURE_QUARANTINE_THRESHOLD):
-            with pytest.raises(DuplicateSourceIdError):
-                scheduler._run_next_candidate()
+            result = scheduler._run_next_candidate()
+            assert result["status"] == "dedup_gate_rejected"
 
         # Quarantined -- confirm skip with no on-disk change.
         assert scheduler._run_next_candidate() == {"status": "nothing_to_migrate"}
@@ -1149,8 +1148,8 @@ class TestGetStatsScopedToPendingCandidates:
         )
 
         for _ in range(FLEET_MIGRATION_FAILURE_QUARANTINE_THRESHOLD):
-            with pytest.raises(DuplicateSourceIdError):
-                scheduler._run_next_candidate()
+            result = scheduler._run_next_candidate()
+            assert result["status"] == "dedup_gate_rejected"
 
         assert scheduler.get_stats()["quarantined_repos"] == 1
 
@@ -1405,8 +1404,8 @@ class TestQuarantineWriteOutagePreflightProbe:
         # Next tick: the probe succeeds -- migration resumes normally
         # (attempted for the first time, fails for the SAME underlying
         # corruption, and bookkeeping succeeds this time).
-        with pytest.raises(DuplicateSourceIdError):
-            scheduler._run_next_candidate()
+        result = scheduler._run_next_candidate()
+        assert result["status"] == "dedup_gate_rejected"
         assert call_count["n"] == 1
 
         recorded_state = backend.get_fleet_migration_failure_state("click")
@@ -1479,8 +1478,8 @@ class TestQuarantineWriteOutagePreflightProbe:
         # is visible through the SHARED backend alone, never through any
         # scheduler-instance's own memory.
         scheduler_node_c = _make_fresh_scheduler()
-        with pytest.raises(DuplicateSourceIdError):
-            scheduler_node_c._run_next_candidate()
+        result = scheduler_node_c._run_next_candidate()
+        assert result["status"] == "dedup_gate_rejected"
         assert call_count["n"] == 1
 
 

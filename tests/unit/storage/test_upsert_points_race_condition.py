@@ -183,7 +183,7 @@ class TestNoHnswWarningWhenSharedPointId:
 
     The warning that must NOT appear:
         'Vector file not found for point <id>, skipping'
-    emitted by _apply_incremental_hnsw_batch_update when a point_id appears
+    emitted by _apply_visibility_aware_incremental_update when a point_id appears
     in changes["added"] but its vector file is absent from _id_index.
     """
 

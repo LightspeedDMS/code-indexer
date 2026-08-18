@@ -15,9 +15,35 @@ ONE scan implementation, never two divergent copies).
 
 import json
 import logging
+import stat
 from pathlib import Path
+from typing import Callable, List, Tuple
+
+import pytest
 
 from code_indexer.storage.id_index_manager import IDIndexManager
+
+
+@pytest.fixture
+def make_unreadable(request) -> Callable[[Path], None]:
+    """Chmod a given path to 0o000 (genuinely unreadable, even to its own
+    owner, since this process runs as a non-root uid) and restore its
+    ORIGINAL mode on teardown -- never a hardcoded value, so this fixture
+    never depends on assuming any particular starting mode.
+    """
+    originals: List[Tuple[Path, int]] = []
+
+    def _apply(path: Path) -> None:
+        original_mode = stat.S_IMODE(path.stat().st_mode)
+        originals.append((path, original_mode))
+        path.chmod(0o000)
+
+    def _restore() -> None:
+        for path, mode in originals:
+            path.chmod(mode)
+
+    request.addfinalizer(_restore)
+    return _apply
 
 
 class TestScanVectorsForIdMapSideEffectFree:
@@ -362,3 +388,55 @@ class TestScanVectorsForIdMapNonDuplicateIdsUnaffected:
         result = manager.scan_vectors_for_id_map(tmp_path)
 
         assert result == {"point-1": v1, "point-2": v2}
+
+
+class TestScanVectorsForIdMapUnreadableFile:
+    """Bug #1583 dual-review follow-up (opus LOW): a single unreadable file
+    (PermissionError/OSError from open(), e.g. a foreign-owned file under a
+    collection -- realistic given this project's documented dual-OS-user
+    server/auto-updater deployment, Bug #879) must not abort the ENTIRE
+    scan. It must be treated the same way a malformed record already is:
+    logged, counted as a rejection, and scanning continues over the REST of
+    the collection.
+
+    Uses REAL chmod(0o000) via the make_unreadable fixture -- genuine
+    OS-level permission denial, not a simulated/mocked exception (this
+    process runs as a non-root uid, so chmod 000 genuinely blocks even the
+    owner's own open()).
+    """
+
+    def test_unreadable_file_is_skipped_others_still_found(
+        self, tmp_path: Path, make_unreadable
+    ) -> None:
+        manager = IDIndexManager()
+        ok1 = tmp_path / "vector_ok1.json"
+        ok2 = tmp_path / "vector_ok2.json"
+        unreadable = tmp_path / "vector_unreadable.json"
+        ok1.write_text(json.dumps({"id": "point-1", "vector": [0.1]}))
+        ok2.write_text(json.dumps({"id": "point-2", "vector": [0.2]}))
+        unreadable.write_text(json.dumps({"id": "point-3", "vector": [0.3]}))
+        make_unreadable(unreadable)
+
+        result = manager.scan_vectors_for_id_map(tmp_path)
+
+        assert result == {"point-1": ok1, "point-2": ok2}, (
+            "an unreadable file must not abort the whole scan -- the OTHER "
+            "genuinely-valid points must still be found"
+        )
+
+    def test_unreadable_file_is_counted_as_rejected_via_verbose(
+        self, tmp_path: Path, caplog, make_unreadable
+    ) -> None:
+        manager = IDIndexManager()
+        ok1 = tmp_path / "vector_ok1.json"
+        unreadable = tmp_path / "vector_unreadable.json"
+        ok1.write_text(json.dumps({"id": "point-1", "vector": [0.1]}))
+        unreadable.write_text(json.dumps({"id": "point-2", "vector": [0.2]}))
+        make_unreadable(unreadable)
+
+        with caplog.at_level(logging.WARNING):
+            id_map, rejected_count = manager.scan_vectors_for_id_map_verbose(tmp_path)
+
+        assert id_map == {"point-1": ok1}
+        assert rejected_count == 1
+        assert "vector_unreadable.json" in caplog.text

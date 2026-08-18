@@ -11,6 +11,7 @@ import difflib
 import json
 import logging
 import pathspec
+from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Dict, Any, Optional, List, Union, TYPE_CHECKING
 
@@ -346,6 +347,128 @@ def _get_app_refresh_scheduler():
     if lifecycle_manager is None:
         return None
     return getattr(lifecycle_manager, "refresh_scheduler", None)
+
+
+#: Bug #1580 follow-up (adversarial review, HIGH severity): this guard
+#: wraps a `cidx index --index-commits` subprocess, which this project's
+#: indexing-path invariant (CLAUDE.md) documents as having NO
+#: job/subprocess timeout -- a large repo can legitimately take hours.
+#: WriteLockManager.acquire()'s own DEFAULT TTL is 1 hour, so acquiring
+#: without an explicit override would silently expire mid-run and defeat
+#: the lock. Matches the SAME 24-hour convention already established by
+#: temporal_legacy_migration/locking.py's
+#: TEMPORAL_LEGACY_MIGRATION_LOCK_TTL_SECONDS and
+#: refresh_scheduler.py's own fleet-migration-derived
+#: _REFRESH_PUBLISH_LOCK_TTL_SECONDS / MIGRATION_LOCK_TTL_SECONDS --
+#: reusing the same justified value rather than inventing a new one.
+#:
+#: Accepted residual (Round 3 adversarial review, simplification pass):
+#: a run that genuinely exceeds 24 hours outlives this TTL and loses lock
+#: protection for the remainder of its run -- there is deliberately NO
+#: renewal/heartbeat mechanism here. One was built, mirroring
+#: temporal_legacy_migration/locking.py's own heartbeat pattern, and went
+#: through three adversarial review rounds, each surfacing a NEW,
+#: strictly worse HIGH-severity bug than the one before it: (a) a failed
+#: renew() was only logged, never signaled to the guarded operation, so
+#: the caller kept running believing it was still locked when it might
+#: not be; (b) a bounded join-on-release could itself time out against
+#: this project's hard-NFS mount (which can block I/O indefinitely) and
+#: let the heartbeat fire one more renew() AFTER release() had already
+#: deleted the lock file -- recreating a fresh 24-hour "ghost lock" that
+#: would block all future legitimate work on that alias; and (c) every
+#: provider-temporal job shares the literal owner_name
+#: "provider_temporal_index" with no per-acquisition generation token, so
+#: an orphaned heartbeat thread from a lock-losing job could renew what
+#: it believes is "its" lock but is actually a LATER, different job's
+#: lock on the same alias. Removed rather than patched a fourth time,
+#: because: (a) the underlying cross-process race this guard closes (the
+#: temporal-legacy-migration mover vs. in-place consolidation racing on
+#: the same shard tree) was independently characterized as narrow,
+#: low-probability, and bounded to loud/safe/recoverable failures even
+#: before any lock coordination existed here; (b) a heartbeat mechanism
+#: was attempted and repeatedly produced new, worse bugs across review
+#: rounds instead of converging; and (c) a 24-hour TTL WITHOUT renewal is
+#: still a large improvement over the pre-existing baseline of ZERO lock
+#: coordination between these two code paths. Mirrors the same
+#: accept-the-narrow-residual-over-endless-patching judgment call already
+#: recorded for Bug #1584's crash-window residual in
+#: storage/shared/collection_migration.py and Bug #1538's NFS
+#: client-revalidation residual documented in this project's CLAUDE.md.
+GOLDEN_REPO_WRITE_LOCK_GUARD_TTL_SECONDS = 24 * 60 * 60
+
+
+@contextmanager
+def golden_repo_write_lock_guard(alias: str, owner_name: str):
+    """Acquire the golden repo's RefreshScheduler write lock for *alias*
+    (bare alias, no "-global" suffix) for the duration of the `with` block.
+
+    Cross-process race investigation (deferred from Bug #1580): the
+    temporal-legacy-migration mover (TemporalLegacyMigrationScheduler)
+    relocates legacy temporal shards under this SAME write lock
+    (locking.guarded_by_refresh_lock). Any other writer that mutates the
+    same golden repo's temporal storage while mover.py is mid-relocation
+    must hold this lock too, mirroring add_indexes_to_golden_repo's own
+    acquire/finally-release pattern.
+
+    Acquired with GOLDEN_REPO_WRITE_LOCK_GUARD_TTL_SECONDS (24 hours), NOT
+    WriteLockManager's 1-hour default -- see that constant's docstring,
+    including the accepted no-heartbeat residual for runs that outlive
+    the 24-hour TTL.
+
+    Yields True when the lock is held for the duration of the block --
+    either because it was genuinely acquired, or because no
+    RefreshScheduler is wired at all (a legitimate no-op, e.g. solo/CLI
+    mode with no scheduler, byte-identical-when-unavailable, matching
+    every other caller of _get_app_refresh_scheduler() in this package).
+    Yields False when another writer already holds a genuine, non-empty
+    alias's lock -- the caller MUST check this and skip its own work
+    rather than proceed.
+
+    Raises:
+        ValueError: a RefreshScheduler IS wired but *alias* is empty or
+            whitespace-only. This is deliberately NOT treated as a
+            no-op: every real writer (mover.py included) always locks a
+            real, non-empty alias, so a blank alias while a scheduler is
+            wired indicates a genuine upstream wiring gap (e.g.
+            _resolve_provider_job_repo_path leaving repo_alias empty for
+            a real, non-versioned repo path) rather than an absent lock
+            mechanism -- silently proceeding unlocked here would reopen
+            the exact cross-process race this guard exists to close.
+            Never raised when no scheduler is wired at all (see above).
+    """
+    scheduler = _get_app_refresh_scheduler()
+    acquired = False
+    try:
+        if scheduler is not None:
+            if not alias or not alias.strip():
+                raise ValueError(
+                    "golden_repo_write_lock_guard: a RefreshScheduler is "
+                    f"wired but alias={alias!r} is blank/whitespace-only "
+                    f"for owner_name={owner_name!r} -- refusing to proceed "
+                    "unlocked. A real writer always locks a non-empty "
+                    "alias; this indicates a genuine upstream wiring gap, "
+                    "not a legitimate no-op."
+                )
+            acquired = scheduler.acquire_write_lock(
+                alias,
+                owner_name=owner_name,
+                ttl_seconds=GOLDEN_REPO_WRITE_LOCK_GUARD_TTL_SECONDS,
+            )
+            if not acquired:
+                yield False
+                return
+        yield True
+    finally:
+        if acquired:
+            released = scheduler.release_write_lock(alias, owner_name=owner_name)
+            if not released:
+                logger.error(
+                    "golden_repo_write_lock_guard: failed to release write "
+                    "lock for alias=%r owner_name=%r -- lock may be left "
+                    "behind for staleness eviction to reclaim",
+                    alias,
+                    owner_name,
+                )
 
 
 def _get_access_filtering_service():
