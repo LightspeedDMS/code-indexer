@@ -58,6 +58,25 @@ class TestLifespanScipReconcileWiringSourceGuard:
             "anyio.to_thread.run_sync so the NFS scan does not block the event loop."
         )
 
+    def test_scip_reconcile_waits_for_leader_gate_readiness_in_postgres(self):
+        source = _LIFESPAN_PATH.read_text()
+        marker = "async def _run_scip_reconcile"
+        start = source.find(marker)
+        assert start != -1, "EVO-66188: _run_scip_reconcile helper is missing"
+        body = source[start : source.find("app.state.scip_reconcile_task", start)]
+        assert "scip_reconcile_leader_gate_ready" in source, (
+            "EVO-66188: startup must initialize scip_reconcile_leader_gate_ready "
+            "to prevent first-cycle leader-election races."
+        )
+        assert "if not _leader_gate_ready:" in body and "await asyncio.sleep(1)" in body, (
+            "EVO-66188: SCIP reconcile must wait briefly when leader-gate wiring "
+            "is not ready in postgres mode."
+        )
+        assert "app.state.scip_reconcile_leader_gate_ready = True" in source, (
+            "EVO-66188: cluster-service startup must release the SCIP leader-gate "
+            "hold when initialization completes."
+        )
+
     def test_scip_reconcile_cancelled_on_shutdown(self):
         source = _LIFESPAN_PATH.read_text()
         assert 'getattr(app.state, "scip_reconcile_task"' in source, (

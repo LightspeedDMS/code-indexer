@@ -1030,6 +1030,14 @@ def make_lifespan(
                 except ValueError:
                     _scip_max = 5
 
+                # EVO-66188: avoid startup race where this task's first cycle can
+                # run before cluster leader-election wiring completes. In postgres
+                # mode, hold SCIP reconcile until cluster-service init marks the
+                # gate ready (set in the cluster-services startup block below).
+                app.state.scip_reconcile_leader_gate_ready = (
+                    storage_mode != "postgres" or backend_registry is None
+                )
+
                 async def _run_scip_reconcile() -> None:
                     import anyio.to_thread as _to_thread
 
@@ -1043,6 +1051,13 @@ def make_lifespan(
                             # reconcile it is NOT idempotent-cheap, so gate the WORK to the
                             # elected leader. When there is no leader election (single-node
                             # / sqlite) run as before.
+                            _leader_gate_ready = getattr(
+                                app.state, "scip_reconcile_leader_gate_ready", True
+                            )
+                            if not _leader_gate_ready:
+                                await asyncio.sleep(1)
+                                continue
+
                             _le = getattr(app.state, "leader_election", None)
                             if _le is None or _le.is_leader:
                                 _c = await _to_thread.run_sync(
@@ -4101,6 +4116,10 @@ def make_lifespan(
                     f"Failed to start cluster services: {e}",
                     extra={"correlation_id": get_correlation_id()},
                 )
+            finally:
+                # EVO-66188: release SCIP reconcile's startup hold once cluster
+                # service initialization has completed (success, no-op, or error).
+                app.state.scip_reconcile_leader_gate_ready = True
 
         # Story #492: Start NodeMetricsWriterService (always on, SQLite or postgres)
         # When backend_registry is available (postgres/cluster mode), use its node_metrics
