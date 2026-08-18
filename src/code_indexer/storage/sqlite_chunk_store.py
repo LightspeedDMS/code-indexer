@@ -311,11 +311,21 @@ class ChunkStore:
         invariant indefinitely) because nothing enforces it against a
         FUTURE writer -- an indexed, authoritative ``type`` column is the
         durable, provable mechanism AC5 calls for.
+
+        Two connections can race to migrate the same fresh database, and
+        the loser's ``ALTER`` then raises ``duplicate column name``. This
+        is recovered below as benign, deliberately skipping the loser's
+        own backfill since the winner's backfill already covers it.
         """
         cols = {row[1] for row in self._conn.execute("PRAGMA table_info(chunks)")}
         column_added = "type" not in cols
         if column_added:
-            self._conn.execute("ALTER TABLE chunks ADD COLUMN type TEXT")
+            try:
+                self._conn.execute("ALTER TABLE chunks ADD COLUMN type TEXT")
+            except sqlite3.OperationalError as exc:
+                if "duplicate column name" not in str(exc).lower():
+                    raise
+                column_added = False
 
         self._conn.execute("CREATE INDEX IF NOT EXISTS idx_chunks_type ON chunks(type)")
 
