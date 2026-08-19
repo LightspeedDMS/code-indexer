@@ -334,6 +334,7 @@ class TestMachineMetricsCallbacks:
 
         observations = list(exporter._cpu_callback(None))
         attributes = observations[0].attributes
+        assert attributes is not None
 
         assert "host.name" in attributes
         assert "service.name" in attributes
