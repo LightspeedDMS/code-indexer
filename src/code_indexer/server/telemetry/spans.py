@@ -73,11 +73,12 @@ def get_tracer(name: str = "cidx.spans") -> Optional["Tracer"]:
 def _get_correlation_id() -> Optional[str]:
     """Get current correlation ID from context."""
     try:
-        from src.code_indexer.server.telemetry.correlation_bridge import (
+        from code_indexer.server.telemetry.correlation_bridge import (
             get_current_correlation_id,
         )
 
-        return get_current_correlation_id()
+        correlation_id: Optional[str] = get_current_correlation_id()
+        return correlation_id
     except ImportError:
         return None
     except Exception:

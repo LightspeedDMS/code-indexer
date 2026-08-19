@@ -64,6 +64,15 @@ from code_indexer.server.storage.shared.nfs_visibility import (
 from code_indexer.server.utils.config_manager import ServerResourceConfig
 from code_indexer.utils.subprocess_env import build_cidx_subprocess_env
 
+# Story #1586 AC4: cidx.repos.refresh.duration OTEL metric -- peek_telemetry_
+# manager() (never get_telemetry_manager()) for the same reason job_tracker.py
+# uses it: _execute_refresh runs on a background pool worker thread that can
+# race the main lifespan coroutine's own telemetry-init block, and
+# get_telemetry_manager()'s "first call wins, disabled fallback if no config"
+# contract would let that early caller permanently disable telemetry.
+from code_indexer.server.telemetry.manager import peek_telemetry_manager
+from code_indexer.server.telemetry.job_metrics import get_job_metrics
+
 if TYPE_CHECKING:
     from code_indexer.server.repositories.background_jobs import BackgroundJobManager
     from code_indexer.server.services.job_tracker import JobTracker
@@ -72,6 +81,33 @@ if TYPE_CHECKING:
     )
 
 logger = logging.getLogger(__name__)
+
+
+def _record_refresh_duration_metric(
+    repository: str, duration_seconds: float, status: str
+) -> None:
+    """Record a cidx.repos.refresh.duration OTEL metric for one
+    RefreshScheduler._execute_refresh() completion (Story #1586 AC4).
+
+    No-op when telemetry is disabled or not yet initialized this process
+    (peek_telemetry_manager() returns None); never raises into the refresh
+    completion path.
+    """
+    try:
+        telemetry_manager = peek_telemetry_manager()
+        if telemetry_manager is None:
+            return
+        job_metrics = get_job_metrics(telemetry_manager)
+        if not job_metrics.is_active:
+            return
+        job_metrics.record_repository_refresh(
+            repository=repository,
+            duration_seconds=duration_seconds,
+            status=status,
+        )
+    except Exception as exc:  # noqa: BLE001 -- must never break a refresh
+        logger.debug("Failed to record repository refresh metrics: %s", exc)
+
 
 # Git URL prefixes — any repo_url NOT starting with one of these is treated as
 # a local repo and is completely excluded from the scheduled auto-refresh cycle.
@@ -1879,6 +1915,49 @@ class RefreshScheduler:
         progress_callback=None,
         tracked_by_caller: bool = False,
     ) -> Dict[str, Any]:
+        """Thin wrapper around _execute_refresh_impl(): times the call and
+        records cidx.repos.refresh.duration via _record_refresh_duration_metric()
+        in `finally`, exactly once regardless of outcome (Story #1586 AC4).
+
+        Story #1586 Finding 2 fix: status is derived from the IMPL'S
+        RETURNED DICT's "success" key, never from whether an exception was
+        raised. A real failure path can return {"success": False, ...}
+        WITHOUT raising (e.g. Bug #1253's local-repo repair failure, or an
+        integrity-gate failure) -- deriving status purely from "did an
+        exception propagate" silently mislabeled those as status="success".
+
+        Deliberate scope decision (documented per Story #1586 remediation):
+        skip/no-op early returns (alias not found, write-lock held, no
+        changes detected, etc.) already set "success": True by original
+        design -- they are genuinely non-failure outcomes, not errors, so
+        this wrapper keeps recording them as status="success" rather than
+        introducing a third "skipped" status value.
+        """
+        _refresh_start_monotonic = time.monotonic()
+        _status = "error"
+        try:
+            result = self._execute_refresh_impl(
+                alias_name,
+                force_reset=force_reset,
+                progress_callback=progress_callback,
+                tracked_by_caller=tracked_by_caller,
+            )
+            _status = "success" if result.get("success") else "error"
+            return result
+        finally:
+            _record_refresh_duration_metric(
+                alias_name,
+                time.monotonic() - _refresh_start_monotonic,
+                _status,
+            )
+
+    def _execute_refresh_impl(
+        self,
+        alias_name: str,
+        force_reset: bool = False,
+        progress_callback=None,
+        tracked_by_caller: bool = False,
+    ) -> Dict[str, Any]:
         """
         Execute refresh for a repository (called by BackgroundJobManager).
 
@@ -2712,6 +2791,10 @@ class RefreshScheduler:
                     )
 
         finally:
+            # Story #1586 AC4/Finding 2: cidx.repos.refresh.duration is now
+            # recorded exactly once by the _execute_refresh() thin wrapper
+            # above (which derives status from this method's returned dict,
+            # not from _tracker_raised) -- never duplicate that call here.
             # Bug #935: always unregister from JobTracker (finally runs on return AND raise).
             # EVO-64385: only for the job WE registered. When tracked_by_caller,
             # `refresh-{alias}` was never inserted by us and the outer

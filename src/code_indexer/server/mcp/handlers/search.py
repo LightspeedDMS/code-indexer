@@ -20,6 +20,14 @@ from code_indexer.server.telemetry.correlation_bridge import (
     get_current_correlation_id as get_correlation_id,
 )
 
+# Story #1586 AC1: cidx.search.*/cidx.fts.* OTEL metrics -- no-op when
+# telemetry is disabled (ApplicationMetrics.is_active gates every record_*
+# call internally).
+from code_indexer.server.telemetry.manager import peek_telemetry_manager
+from code_indexer.server.telemetry.metrics_instrumentation import (
+    get_application_metrics,
+)
+
 import asyncio
 import logging
 import socket
@@ -989,6 +997,37 @@ def _build_search_kwargs(
     )
 
 
+def _record_search_metric(
+    params: Dict[str, Any],
+    user_repos: list,
+    duration_ms: int,
+    results: list,
+    status: str,
+) -> None:
+    """Record a cidx.search.* OTEL metric for one _execute_tracked_search call
+    (Story #1586 AC1). No-op when telemetry is disabled (ApplicationMetrics
+    early-returns internally); never raises into the search call path.
+    """
+    try:
+        telemetry_manager = peek_telemetry_manager()
+        if telemetry_manager is None:
+            return
+        app_metrics = get_application_metrics(telemetry_manager)
+        if not app_metrics.is_active:
+            return
+        search_type = params.get("search_mode", "semantic")
+        repository = user_repos[0]["user_alias"] if user_repos else "unknown"
+        app_metrics.record_search_request(
+            search_type=search_type,
+            repository=repository,
+            duration_seconds=duration_ms / 1000,
+            results_count=len(results),
+            status=status,
+        )
+    except Exception as e:
+        logger.debug(f"Failed to record search metrics: {e}")
+
+
 def _execute_tracked_search(
     params: Dict[str, Any],
     user: User,
@@ -1019,6 +1058,10 @@ def _execute_tracked_search(
     timeout_occurred = False
     ref_incremented = False
     effective_strategy: str = params.get("query_strategy") or "primary_only"
+    # Story #1586 AC1: defaults cover the exception-before-assignment path so
+    # the metric recorded in `finally` always has a results list to measure.
+    results: list = []
+    search_status = "error"
     try:
         if query_tracker is not None and index_path:
             query_tracker.increment_ref(index_path)
@@ -1030,6 +1073,7 @@ def _execute_tracked_search(
             results, effective_strategy = _raw
         else:
             results = _raw
+        search_status = "success"
     except TimeoutError as e:
         timeout_occurred = True
         raise Exception(f"Query timed out: {e}") from e
@@ -1041,6 +1085,9 @@ def _execute_tracked_search(
         execution_time_ms = int((time.time() - start_time) * 1000)
         if ref_incremented and query_tracker is not None and index_path:
             query_tracker.decrement_ref(index_path)
+        _record_search_metric(
+            params, user_repos, execution_time_ms, results, search_status
+        )
 
     return results, execution_time_ms, timeout_occurred, effective_strategy
 
@@ -1771,7 +1818,76 @@ def _validate_regex_args(args: Dict[str, Any]) -> tuple:
     return repository_alias, None
 
 
-async def _execute_regex_search(
+def _build_and_enrich_matches(search_result, repository_alias: str) -> list:
+    """Build match dicts from a RegexSearchResult and enrich with wiki URLs.
+
+    Extracted from the former body of _execute_regex_search (Story #1586
+    AC1 split) so no single function there exceeds the method-length limit.
+    """
+    matches = [
+        {
+            "file_path": m.file_path,
+            "line_number": m.line_number,
+            "column": m.column,
+            "line_content": m.line_content,
+            "context_before": m.context_before,
+            "context_after": m.context_after,
+        }
+        for m in search_result.matches
+    ]
+
+    wiki_enabled_repos = _get_wiki_enabled_repos()
+    for match in matches:
+        _enrich_with_wiki_url(
+            match,
+            match.get("file_path", ""),
+            repository_alias,
+            wiki_enabled_repos,
+        )
+
+    return matches
+
+
+async def _rerank_truncate_and_filter_regex_matches(
+    matches: list,
+    args: Dict[str, Any],
+    repository_alias: str,
+    user: User,
+) -> tuple:
+    """Rerank, truncate, and (for cidx-meta repos) access-filter matches.
+
+    Extracted from the former body of _execute_regex_search (Story #1586
+    AC1 split).
+
+    Returns:
+        (matches, rerank_meta)
+    """
+    regex_limit = _coerce_int(args.get("max_results"), len(matches))
+    rerank_kwargs = dict(
+        results=matches,
+        rerank_query=args.get("rerank_query"),
+        rerank_instruction=args.get("rerank_instruction"),
+        content_extractor=lambda r: r.get("line_content", "") or "",
+        requested_limit=regex_limit,
+        config_service=get_config_service(),
+    )
+    matches, rerank_meta = await asyncio.get_event_loop().run_in_executor(
+        None, lambda: _mcp_reranking._apply_reranking_sync(**rerank_kwargs)
+    )
+
+    matches = _apply_regex_payload_truncation(matches)
+
+    if repository_alias and "cidx-meta" in repository_alias:
+        access_svc = _get_access_filtering_service()
+        if access_svc:
+            filenames = [Path(m["file_path"]).name for m in matches]
+            allowed = set(access_svc.filter_cidx_meta_files(filenames, user.username))
+            matches = [m for m in matches if Path(m["file_path"]).name in allowed]
+
+    return matches, rerank_meta
+
+
+async def _execute_regex_search_impl(
     args: Dict[str, Any],
     repo_path: Path,
     repository_alias: str,
@@ -1811,50 +1927,70 @@ async def _execute_regex_search(
         pcre2=args.get("pcre2", False),
     )
 
-    matches = [
-        {
-            "file_path": m.file_path,
-            "line_number": m.line_number,
-            "column": m.column,
-            "line_content": m.line_content,
-            "context_before": m.context_before,
-            "context_after": m.context_after,
-        }
-        for m in search_result.matches
-    ]
-
-    wiki_enabled_repos = _get_wiki_enabled_repos()
-    for match in matches:
-        _enrich_with_wiki_url(
-            match,
-            match.get("file_path", ""),
-            repository_alias,
-            wiki_enabled_repos,
-        )
-
-    regex_limit = _coerce_int(args.get("max_results"), len(matches))
-    rerank_kwargs = dict(
-        results=matches,
-        rerank_query=args.get("rerank_query"),
-        rerank_instruction=args.get("rerank_instruction"),
-        content_extractor=lambda r: r.get("line_content", "") or "",
-        requested_limit=regex_limit,
-        config_service=get_config_service(),
+    matches = _build_and_enrich_matches(search_result, repository_alias)
+    matches, rerank_meta = await _rerank_truncate_and_filter_regex_matches(
+        matches, args, repository_alias, user
     )
-    matches, rerank_meta = await asyncio.get_event_loop().run_in_executor(
-        None, lambda: _mcp_reranking._apply_reranking_sync(**rerank_kwargs)
-    )
-
-    matches = _apply_regex_payload_truncation(matches)
-
-    if repository_alias and "cidx-meta" in repository_alias:
-        access_svc = _get_access_filtering_service()
-        if access_svc:
-            filenames = [Path(m["file_path"]).name for m in matches]
-            allowed = set(access_svc.filter_cidx_meta_files(filenames, user.username))
-            matches = [m for m in matches if Path(m["file_path"]).name in allowed]
 
     return matches, rerank_meta, search_result
+
+
+def _record_fts_metric(
+    repository_alias: str,
+    duration_seconds: float,
+    matches_count: int,
+    status: str,
+) -> None:
+    """Record a cidx.fts.* OTEL metric for one _execute_regex_search call
+    (Story #1586 AC1). No-op when telemetry is disabled (ApplicationMetrics
+    early-returns internally); never raises into the regex search call path.
+    """
+    try:
+        telemetry_manager = peek_telemetry_manager()
+        if telemetry_manager is None:
+            return
+        app_metrics = get_application_metrics(telemetry_manager)
+        if not app_metrics.is_active:
+            return
+        app_metrics.record_fts_request(
+            repository=repository_alias,
+            duration_seconds=duration_seconds,
+            matches_count=matches_count,
+            status=status,
+        )
+    except Exception as e:
+        logger.debug(f"Failed to record FTS metrics: {e}")
+
+
+async def _execute_regex_search(
+    args: Dict[str, Any],
+    repo_path: Path,
+    repository_alias: str,
+    user: User,
+) -> tuple:
+    """Execute regex search and record its cidx.fts.* OTEL metric (AC1).
+
+    Thin wrapper around _execute_regex_search_impl(): times the call and
+    records success/error via _record_fts_metric() in `finally`, so the
+    metric is recorded exactly once regardless of outcome.
+    """
+    _fts_metric_start = time.monotonic()
+    matches_count = 0
+    fts_status = "error"
+    try:
+        matches, rerank_meta, search_result = await _execute_regex_search_impl(
+            args, repo_path, repository_alias, user
+        )
+        matches_count = len(matches)
+        fts_status = "success"
+        return matches, rerank_meta, search_result
+    finally:
+        _record_fts_metric(
+            repository_alias,
+            time.monotonic() - _fts_metric_start,
+            matches_count,
+            fts_status,
+        )
 
 
 async def handle_regex_search(args: Dict[str, Any], user: User) -> Dict[str, Any]:

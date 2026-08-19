@@ -250,7 +250,37 @@ class CohereMultimodalClient:
             _response.raise_for_status()
             return _response
 
+        def _count_multimodal_tokens() -> int:
+            """Text-block token count for this request (Story #1586 AC2).
+
+            Images consume a different, provider-defined token budget the
+            embedded text tokenizer cannot compute; only the text block
+            _build_content_blocks() always places first is counted.
+            """
+            total = 0
+            for inp in inputs:
+                content = inp.get("content") or []
+                if content and content[0].get("type") == "text":
+                    total += self._count_tokens(content[0].get("text", ""))
+            return total
+
+        # Story #1586 AC2: cidx.embedding.* OTEL metrics -- one event per
+        # real outbound HTTP attempt, the same boundary instrument_call()
+        # already wraps.
+        from code_indexer.services.embedding_metrics_telemetry import (
+            record_embedding_provider_call,
+        )
+
+        def _record_error_metric() -> None:
+            record_embedding_provider_call(
+                model=self.config.model,
+                duration_seconds=time.monotonic() - _embed_metric_start,
+                status="error",
+                count_tokens=lambda: 0,
+            )
+
         for attempt in range(max_attempts):
+            _embed_metric_start = time.monotonic()
             try:
                 _start = time.time()
                 response = instrument_call(
@@ -263,9 +293,16 @@ class CohereMultimodalClient:
                     purpose="index",
                     fn=_do_post_and_validate,
                 )
+                record_embedding_provider_call(
+                    model=self.config.model,
+                    duration_seconds=time.monotonic() - _embed_metric_start,
+                    status="success",
+                    count_tokens=_count_multimodal_tokens,
+                )
                 return dict(response.json())
 
             except httpx.HTTPStatusError as http_exc:
+                _record_error_metric()
                 last_error = http_exc
                 status_code = http_exc.response.status_code
 
@@ -319,6 +356,7 @@ class CohereMultimodalClient:
                 break
 
             except Exception as exc:
+                _record_error_metric()
                 last_error = exc
                 if attempt < max_retries:
                     delay = retry_delay * (2**attempt if exponential_backoff else 1)

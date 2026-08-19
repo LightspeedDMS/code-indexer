@@ -49,6 +49,11 @@ from .jittered_dispatcher import (
 from .metadata_reader import read_current_commit
 from .shared_job_sentinel import AnalysisAlreadyRunningError, SharedJobSentinel
 
+# Story #1586 AC5: custom span around delta dependency-map analysis.
+# create_span() no-ops (yields a _NoOpSpan) when OTEL tracing is
+# unavailable/uninitialized.
+from code_indexer.server.telemetry.spans import create_span
+
 logger = logging.getLogger(__name__)
 
 # Constants
@@ -3138,6 +3143,22 @@ class DependencyMapService:
             )
 
     def run_delta_analysis(
+        self, job_id: Optional[str] = None, pre_claimed: bool = False
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Run delta analysis to refresh only affected domains (Story #193, AC1-8).
+
+        Thin span-wrapping public entry point (Story #1586 AC5) -- the full
+        implementation lives in _run_delta_analysis_impl(), unchanged, so
+        wrapping it in a custom span never requires re-indenting that body.
+        """
+        with create_span(
+            "cidx.depmap.run_delta_analysis",
+            attributes={"job_id": job_id or "auto"},
+        ):
+            return self._run_delta_analysis_impl(job_id=job_id, pre_claimed=pre_claimed)
+
+    def _run_delta_analysis_impl(
         self, job_id: Optional[str] = None, pre_claimed: bool = False
     ) -> Optional[Dict[str, Any]]:
         """

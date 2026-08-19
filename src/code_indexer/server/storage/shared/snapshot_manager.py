@@ -29,6 +29,11 @@ import time
 from pathlib import Path
 from typing import TYPE_CHECKING, List, Optional, Tuple
 
+# Story #1586 AC5: custom span around golden-repo CoW snapshot creation.
+# create_span() no-ops (yields a _NoOpSpan) when OTEL tracing is
+# unavailable/uninitialized.
+from code_indexer.server.telemetry.spans import create_span
+
 from .snapshot_paths import is_versioned_snapshot as _is_versioned_snapshot
 
 if TYPE_CHECKING:
@@ -214,12 +219,26 @@ class VersionedSnapshotManager:
         """
         timestamp = int(time.time())
 
-        if self._clone_backend is not None:
-            return self._create_clone_backend_snapshot(alias, source_path, timestamp)
+        # Story #1586 AC5 remediation (Finding 1): the span used to wrap
+        # only _create_cow_snapshot, a fallback branch production never
+        # reaches (every real deployment constructs this manager WITH a
+        # clone_backend, so create_snapshot() always dispatches through
+        # _create_clone_backend_snapshot instead) -- making the span
+        # structurally dead in production. Wrapping the public dispatch
+        # point itself covers all three real branches (clone_backend,
+        # FlexClone, and the CoW fallback) with one span.
+        with create_span(
+            "cidx.snapshot_manager.create_cow_snapshot",
+            attributes={"alias": alias},
+        ):
+            if self._clone_backend is not None:
+                return self._create_clone_backend_snapshot(
+                    alias, source_path, timestamp
+                )
 
-        if self._flexclone is not None:
-            return self._create_flexclone_snapshot(alias, timestamp)
-        return self._create_cow_snapshot(alias, source_path, timestamp)
+            if self._flexclone is not None:
+                return self._create_flexclone_snapshot(alias, timestamp)
+            return self._create_cow_snapshot(alias, source_path, timestamp)
 
     def _create_clone_backend_snapshot(
         self, alias: str, source_path: str, timestamp: int

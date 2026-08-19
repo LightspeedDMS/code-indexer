@@ -2,12 +2,13 @@
 
 import os
 from pathlib import Path
-from typing import Dict, Any, List, Optional, Union
+from typing import Dict, Any, List, Optional, Union, cast
 import httpx
 from rich.console import Console
 
 from ..config import VoyageAIConfig
 from .multimodal_utils import encode_image_to_base64
+from .voyage_ai import SyncClientFactory
 
 
 class VoyageMultimodalClient:
@@ -24,18 +25,36 @@ class VoyageMultimodalClient:
     - Rate limit handling
     """
 
-    def __init__(self, config: VoyageAIConfig, console: Optional[Console] = None):
+    def __init__(
+        self,
+        config: VoyageAIConfig,
+        console: Optional[Console] = None,
+        http_client_factory: Optional[SyncClientFactory] = None,
+    ):
         """Initialize VoyageMultimodalClient.
 
         Args:
             config: VoyageAI configuration (model, endpoint, timeouts, retries)
             console: Optional Rich console for logging
+            http_client_factory: An object satisfying the SyncClientFactory
+                Protocol (typically HttpClientFactory or NullFaultFactory),
+                mirroring VoyageAIClient's own constructor. Normalized to
+                NullFaultFactory() when omitted so call sites never need an
+                if-None branch.
 
         Raises:
             ValueError: If VOYAGE_API_KEY environment variable is not set
         """
         self.config = config
         self.console = console or Console()
+
+        if http_client_factory is None:
+            from code_indexer.server.fault_injection.null_factory import (
+                NullFaultFactory,
+            )
+
+            http_client_factory = NullFaultFactory()
+        self._http_client_factory: SyncClientFactory = http_client_factory
 
         # Override API endpoint for multimodal embeddings
         # VoyageAIConfig defaults to /v1/embeddings, but multimodal needs /v1/multimodalembeddings
@@ -91,7 +110,7 @@ class VoyageMultimodalClient:
             """The smallest unit including BOTH the network call and its
             status validation -- a vendor 4xx/5xx here must be recorded as
             success=False, never success=True (Story #1418)."""
-            with httpx.Client(
+            with self._http_client_factory.create_sync_client(
                 headers={
                     "Authorization": f"Bearer {self.api_key}",
                     "Content-Type": "application/json",
@@ -100,21 +119,35 @@ class VoyageMultimodalClient:
             ) as client:
                 _response = client.post(self.config.api_endpoint, json=payload)
                 _response.raise_for_status()
-            return _response
+            return cast(httpx.Response, _response)
+
+        def _count_single_text_tokens() -> int:
+            from .embedded_voyage_tokenizer import VoyageTokenizer
+
+            return VoyageTokenizer.count_tokens([text], self.config.model)
 
         from code_indexer.server.services.embedding_call_instrumentation import (
             instrument_call,
         )
+        from code_indexer.services.embedding_metrics_telemetry import (
+            time_and_record_embedding_call,
+        )
 
-        response = instrument_call(
-            provider="voyageai",
-            call_type="embed_multimodal",
+        # Story #1586 AC2: cidx.embedding.* OTEL metrics -- no internal
+        # retry loop here, so wrapping this method boundary is per-attempt.
+        response = time_and_record_embedding_call(
             model=self.config.model,
-            item_count=1,
-            token_count=0,
-            batch_size=1,
-            purpose="query" if input_type == "query" else "index",
-            fn=_do_post_and_validate,
+            count_tokens=_count_single_text_tokens,
+            call_fn=lambda: instrument_call(
+                provider="voyageai",
+                call_type="embed_multimodal",
+                model=self.config.model,
+                item_count=1,
+                token_count=0,
+                batch_size=1,
+                purpose="query" if input_type == "query" else "index",
+                fn=_do_post_and_validate,
+            ),
         )
 
         result = response.json()
@@ -291,7 +324,7 @@ class VoyageMultimodalClient:
             """The smallest unit including BOTH the network call and its
             status validation -- a vendor 4xx/5xx here must be recorded as
             success=False, never success=True (Story #1418)."""
-            with httpx.Client(
+            with self._http_client_factory.create_sync_client(
                 headers={
                     "Authorization": f"Bearer {self.api_key}",
                     "Content-Type": "application/json",
@@ -300,21 +333,32 @@ class VoyageMultimodalClient:
             ) as client:
                 _response = client.post(self.config.api_endpoint, json=payload)
                 _response.raise_for_status()
-            return _response
+            return cast(httpx.Response, _response)
 
         from code_indexer.server.services.embedding_call_instrumentation import (
             instrument_call,
         )
+        from code_indexer.services.embedding_metrics_telemetry import (
+            time_and_record_embedding_call,
+        )
 
-        response = instrument_call(
-            provider="voyageai",
-            call_type="embed_multimodal",
+        # Story #1586 AC2: cidx.embedding.* OTEL metrics -- no internal
+        # retry loop here, so wrapping this method boundary is per-attempt.
+        response = time_and_record_embedding_call(
             model=self.config.model,
-            item_count=len(items),
-            token_count=0,
-            batch_size=len(items),
-            purpose="query" if input_type == "query" else "index",
-            fn=_do_post_and_validate,
+            count_tokens=lambda: sum(
+                self._count_tokens_accurately(item["text"]) for item in items
+            ),
+            call_fn=lambda: instrument_call(
+                provider="voyageai",
+                call_type="embed_multimodal",
+                model=self.config.model,
+                item_count=len(items),
+                token_count=0,
+                batch_size=len(items),
+                purpose="query" if input_type == "query" else "index",
+                fn=_do_post_and_validate,
+            ),
         )
 
         result = response.json()

@@ -50,6 +50,21 @@ _SCIP_CONTEXT_TIMEOUT_SECONDS = 30
 _MIN_AUDIT_LIMIT = 1
 _MAX_AUDIT_LIMIT = 1000
 
+# Depth bounds shared by scip_impact, scip_callchain, scip_dependents, and
+# scip_dependencies (Bug #1599 / Bug #1602 / Bug #1604). An out-of-range
+# depth otherwise reaches a deeper ValueError guard in
+# queries.py/DatabaseBackend that gets silently swallowed into a
+# success:true/total_results:0 response instead of clamping.
+_MIN_SCIP_DEPTH = 1
+_MAX_SCIP_DEPTH = 10
+
+# Limit bounds for scip_references (scip depth-clamp remediation family,
+# Bugs #1599/#1602/#1604). Mirrors the REST sibling GET /scip/references
+# route's Query(..., ge=1, le=10000) bound. queries.py/find_references
+# treats limit<=0 as UNLIMITED, a live resource-exhaustion gap otherwise.
+_MIN_SCIP_LIMIT = 1
+_MAX_SCIP_LIMIT = 10000
+
 # Maximum chains returned from scip_callchain
 _MAX_CALL_CHAINS_RETURNED = 100
 
@@ -345,6 +360,14 @@ def scip_references(params: Dict[str, Any], user: User) -> Dict[str, Any]:
     try:
         symbol = params.get("symbol")
         requested_limit = _coerce_int(params.get("limit"), 100)
+
+        # scip depth-clamp remediation family (Bugs #1599/#1602/#1604):
+        # clamp limit to a safe [1, 10000] range, mirroring the REST
+        # sibling GET /scip/references route and the depth-clamp idiom
+        # used elsewhere in this file. Unclamped, find_references treats
+        # limit<=0 as UNLIMITED -- a live resource-exhaustion gap.
+        requested_limit = max(_MIN_SCIP_LIMIT, min(_MAX_SCIP_LIMIT, requested_limit))
+
         exact = params.get("exact", False)
         project = params.get("project")
         repository_alias = params.get("repository_alias")
@@ -459,6 +482,11 @@ def scip_dependencies(params: Dict[str, Any], user: User) -> Dict[str, Any]:
     try:
         symbol = params.get("symbol")
         depth = _coerce_int(params.get("depth"), 1)
+
+        # Bug #1604: clamp depth to a safe range, mirroring the clamp used
+        # by scip_impact, scip_callchain, and scip_dependents.
+        depth = max(_MIN_SCIP_DEPTH, min(_MAX_SCIP_DEPTH, depth))
+
         exact = params.get("exact", False)
         project = params.get("project")
         repository_alias = params.get("repository_alias")
@@ -543,6 +571,14 @@ def scip_dependents(params: Dict[str, Any], user: User) -> Dict[str, Any]:
     try:
         symbol = params.get("symbol")
         depth = _coerce_int(params.get("depth"), 1)
+
+        # Bug #1602: clamp depth to a safe range, mirroring the clamp used
+        # by scip_impact and scip_callchain. Without this, an out-of-range
+        # depth reaches a deeper ValueError guard in queries.py/DatabaseBackend
+        # that gets swallowed into a silently-wrong success:true/
+        # total_results:0 response instead of clamping.
+        depth = max(_MIN_SCIP_DEPTH, min(_MAX_SCIP_DEPTH, depth))
+
         exact = params.get("exact", False)
         project = params.get("project")
         repository_alias = params.get("repository_alias")
@@ -626,6 +662,10 @@ def scip_impact(params: Dict[str, Any], user: User) -> Dict[str, Any]:
         symbol = params.get("symbol")
         depth = _coerce_int(params.get("depth"), 3)
         repository_alias = params.get("repository_alias")
+
+        # Bug #1599: clamp depth to a safe range, mirroring the clamp used
+        # by scip_callchain below.
+        depth = max(_MIN_SCIP_DEPTH, min(_MAX_SCIP_DEPTH, depth))
 
         if not symbol:
             return _mcp_response(
@@ -727,11 +767,9 @@ def scip_callchain(params: Dict[str, Any], user: User) -> Dict[str, Any]:
                 }
             )
 
-        # Validate and clamp max_depth to safe range [1, 10]
-        if max_depth < 1:
-            max_depth = 1
-        elif max_depth > 10:
-            max_depth = 10
+        # Validate and clamp max_depth to a safe range, mirroring the clamp
+        # used by scip_impact, scip_dependents, and scip_dependencies.
+        max_depth = max(_MIN_SCIP_DEPTH, min(_MAX_SCIP_DEPTH, max_depth))
 
         # Story #1039: bare-to-global alias fallback (read-only handler).
         if isinstance(repository_alias, str) and not repository_alias.endswith(

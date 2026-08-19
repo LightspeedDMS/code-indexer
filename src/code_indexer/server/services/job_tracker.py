@@ -22,7 +22,19 @@ from typing import Any, Dict, List, Optional
 
 from code_indexer.server.storage.database_manager import DatabaseConnectionManager
 
+# Story #1586 AC3: cidx.jobs.* OTEL metrics -- no-op when telemetry is
+# disabled (JobMetrics.is_active gates every record_* call internally).
+# peek_telemetry_manager (not get_telemetry_manager) avoids winning the
+# "first call creates a disabled fallback" race from a background thread.
+from code_indexer.server.telemetry.manager import peek_telemetry_manager
+from code_indexer.server.telemetry.job_metrics import get_job_metrics
+
 logger = logging.getLogger(__name__)
+
+# Fallback error_type bucket used when a fail_job() caller does not pass one
+# (backward compatible -- existing callers only ever passed a free-text
+# error string, never a typed category).
+_UNKNOWN_ERROR_TYPE = "unknown"
 
 
 # ---------------------------------------------------------------------------
@@ -54,6 +66,53 @@ class TrackedJob:
     error: Optional[str] = None
     result: Optional[Dict[str, Any]] = None
     actor_username: Optional[str] = None
+
+
+def _job_duration_seconds(job: "TrackedJob", now: datetime) -> float:
+    """Compute elapsed seconds for a terminating job (Story #1586 AC3).
+
+    Prefers started_at (set when the job transitioned to "running"); falls
+    back to created_at when the job never reached "running" (e.g. failed
+    while still pending) so a duration is always available.
+    """
+    reference = job.started_at or job.created_at
+    return max(0.0, (now - reference).total_seconds())
+
+
+def _record_job_metric(
+    job: "TrackedJob",
+    duration_seconds: float,
+    *,
+    error_type: Optional[str] = None,
+) -> None:
+    """Record a cidx.jobs.completed/failed + cidx.jobs.duration OTEL metric
+    for one JobTracker.complete_job()/fail_job() call (Story #1586 AC3).
+
+    error_type is None for the completion path and a (possibly defaulted)
+    string for the failure path. No-op when telemetry is disabled OR not
+    yet initialized this process; never raises into the job-completion/
+    failure path.
+    """
+    try:
+        telemetry_manager = peek_telemetry_manager()
+        if telemetry_manager is None:
+            return
+        job_metrics = get_job_metrics(telemetry_manager)
+        if not job_metrics.is_active:
+            return
+        if error_type is None:
+            job_metrics.record_job_completed(
+                job_type=job.operation_type,
+                duration_seconds=duration_seconds,
+            )
+        else:
+            job_metrics.record_job_failed(
+                job_type=job.operation_type,
+                error_type=error_type,
+                duration_seconds=duration_seconds,
+            )
+    except Exception as e:
+        logger.debug(f"Failed to record job metrics: {e}")
 
 
 # ---------------------------------------------------------------------------
@@ -582,10 +641,16 @@ class JobTracker:
         if result is not None:
             job.result = result
 
+        # Story #1586 AC3: record cidx.jobs.completed/duration BEFORE the
+        # persistence write below.
+        _record_job_metric(job, _job_duration_seconds(job, now))
+
         self._upsert_job(job)
         logger.debug(f"JobTracker: completed job {job_id}")
 
-    def fail_job(self, job_id: str, error: str) -> None:
+    def fail_job(
+        self, job_id: str, error: str, error_type: Optional[str] = None
+    ) -> None:
         """
         Mark job as failed.
 
@@ -595,6 +660,11 @@ class JobTracker:
         Args:
             job_id: Job to fail.
             error: Human-readable error description.
+            error_type: Optional typed error category (e.g. the failing
+                exception's class name) for the cidx.jobs.failed OTEL metric
+                (Story #1586 AC3). Defaults to "unknown" when omitted, so
+                existing callers that only ever passed a free-text error
+                string keep working unchanged (no new required field).
         """
         now = datetime.now(timezone.utc)
 
@@ -610,6 +680,14 @@ class JobTracker:
         job.status = "failed"
         job.completed_at = now
         job.error = error
+
+        # Story #1586 AC3: record cidx.jobs.failed/duration BEFORE the
+        # persistence write below.
+        _record_job_metric(
+            job,
+            _job_duration_seconds(job, now),
+            error_type=error_type or _UNKNOWN_ERROR_TYPE,
+        )
 
         self._upsert_job(job)
         logger.debug(f"JobTracker: failed job {job_id}: {error}")
@@ -1690,7 +1768,14 @@ class TrackedOperation:
         exc_tb: Any,
     ) -> None:
         if exc_type is not None:
-            self.tracker.fail_job(self.job_id, error=str(exc_val))
+            # Story #1586 code-review round 2: a real exception object is
+            # always available here (the context manager protocol hands it
+            # to us directly), so derive error_type from its class name
+            # rather than leaving fail_job() to fall back to "unknown".
+            error_type = type(exc_val).__name__ if exc_val is not None else None
+            self.tracker.fail_job(
+                self.job_id, error=str(exc_val), error_type=error_type
+            )
             return  # Do not suppress exception
         self.tracker.complete_job(self.job_id)
         return  # implicit None — do not suppress exceptions

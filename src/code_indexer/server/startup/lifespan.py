@@ -8,6 +8,7 @@ from fastapi import FastAPI
 import anyio.to_thread
 import logging
 import os
+import threading
 import time
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional
@@ -72,6 +73,193 @@ def _make_dep_map_repair_invoker_fn(
         )
 
     return _invoker
+
+
+def _build_job_counts_callback(job_tracker: Any) -> Callable[[], Dict[str, int]]:
+    """Build the JobMetrics observable-gauge callback for
+    cidx.jobs.active/cidx.jobs.queued (Story #1586 AC3/AC6).
+
+    Extracted as a module-level factory so the wiring can be tested directly
+    (same pattern as _make_dep_map_repair_invoker_fn above). Composes
+    JobTracker's OWN get_active_job_count()/get_queued_jobs_count() --
+    never reimplements the counting logic (Messi Rule #4 anti-duplication).
+    """
+
+    def _callback() -> Dict[str, int]:
+        return {
+            "active": job_tracker.get_active_job_count(),
+            "queued": job_tracker.get_queued_jobs_count(),
+        }
+
+    return _callback
+
+
+_REPO_COUNTS_DEFAULT_REFRESH_INTERVAL_SECONDS = 900.0
+# Poll interval for _RepositoryCountsCache.wait_for_idle()'s bounded busy-wait.
+_REPO_COUNTS_WAIT_FOR_IDLE_POLL_SECONDS = 0.01
+
+
+class _RepositoryCountsCache:
+    """Background-refreshed, single-flighted, non-blocking cache for the
+    cidx.repos.total/cidx.repos.indexed observable-gauge values (Story
+    #1586 code-review Finding 1, BLOCKING).
+
+    OTEL's SynchronousMeasurementConsumer.collect() holds a lock across ALL
+    registered observable-gauge callbacks and enforces export_timeout_millis
+    (default 30s) -- checked only BETWEEN callbacks, never DURING one. The
+    repo-counts computation is an O(fleet) filesystem/NFS walk
+    (list_golden_repos() + per-repo _index_exists()) that can legitimately
+    take tens of seconds at production scale (~900 repos, this project's
+    documented design target -- CLAUDE.md) and can block FOREVER if a
+    `hard` NFSv3 mount wedges. JobMetrics also registers TWO separate
+    callbacks that each read this same value, so an unpaced walk ran twice
+    per collection cycle.
+
+    This cache makes the read path O(1): get() ALWAYS returns the
+    last-computed value immediately and never runs the compute function
+    itself. A background daemon thread (started by _maybe_start_refresh)
+    performs the actual computation, at most once per
+    `refresh_interval_seconds`, single-flighted (only one refresh in
+    flight at a time). A stalled/hung refresh simply means the served
+    value goes stale -- it never blocks a caller or the OTEL exporter
+    thread, and it never blocks MeterProvider.shutdown() (which also calls
+    collect()).
+    """
+
+    def __init__(
+        self,
+        compute_fn: Callable[[], Dict[str, int]],
+        refresh_interval_seconds: float = _REPO_COUNTS_DEFAULT_REFRESH_INTERVAL_SECONDS,
+    ) -> None:
+        if refresh_interval_seconds <= 0:
+            raise ValueError(
+                f"refresh_interval_seconds must be positive, got "
+                f"{refresh_interval_seconds}"
+            )
+        self._compute_fn = compute_fn
+        self._refresh_interval_seconds = refresh_interval_seconds
+        self._lock = threading.Lock()
+        self._value: Dict[str, int] = {"total": 0, "indexed": 0}
+        self._last_refresh_at: Optional[float] = None
+        self._refresh_in_flight = False
+        # Immediately kick off a background priming refresh so the first
+        # real OTEL scrape (after machine_metrics_interval_seconds, default
+        # 60s) is very likely already populated -- but this constructor,
+        # and every get() call, NEVER blocks waiting for it.
+        self._maybe_start_refresh(force=True)
+
+    def get(self) -> Dict[str, int]:
+        """Return the last-computed counts immediately (O(1), never
+        blocks); opportunistically triggers a background refresh if due."""
+        self._maybe_start_refresh(force=False)
+        with self._lock:
+            return dict(self._value)
+
+    def wait_for_idle(self, timeout: float) -> bool:
+        """Test-only: block (bounded by `timeout`) until no refresh is in
+        flight. Returns True if idle was reached, False on timeout.
+        """
+        if timeout < 0:
+            raise ValueError(f"timeout must be non-negative, got {timeout}")
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            with self._lock:
+                if not self._refresh_in_flight:
+                    return True
+            time.sleep(_REPO_COUNTS_WAIT_FOR_IDLE_POLL_SECONDS)
+        with self._lock:
+            return not self._refresh_in_flight
+
+    def _maybe_start_refresh(self, *, force: bool) -> None:
+        """Start a background refresh thread if none is in flight and
+        either `force` is True or the refresh interval has elapsed. The
+        actual compute+store work is a nested closure (not a separate
+        method) run on a dedicated daemon thread.
+
+        If starting the thread itself fails (e.g. RuntimeError from the
+        OS/interpreter under resource exhaustion), _refresh_in_flight is
+        reset under the lock so a start failure never permanently wedges
+        all future refreshes behind a phantom in-flight flag.
+        """
+        now = time.monotonic()
+        with self._lock:
+            if self._refresh_in_flight:
+                return
+            if (
+                not force
+                and self._last_refresh_at is not None
+                and now - self._last_refresh_at < self._refresh_interval_seconds
+            ):
+                return
+            self._refresh_in_flight = True
+
+        def _do_refresh() -> None:
+            result: Optional[Dict[str, int]] = None
+            try:
+                result = self._compute_fn()
+            except Exception as exc:
+                logger.warning(f"Repository counts background refresh failed: {exc}")
+            with self._lock:
+                if result is not None:
+                    self._value = result
+                self._last_refresh_at = time.monotonic()
+                self._refresh_in_flight = False
+
+        try:
+            threading.Thread(
+                target=_do_refresh, name="cidx-repo-counts-refresh", daemon=True
+            ).start()
+        except Exception as exc:
+            logger.warning(f"Failed to start repository counts refresh thread: {exc}")
+            with self._lock:
+                self._refresh_in_flight = False
+
+
+def _build_repository_counts_callback(
+    golden_repo_manager: Any,
+    refresh_interval_seconds: float = _REPO_COUNTS_DEFAULT_REFRESH_INTERVAL_SECONDS,
+) -> Callable[[], Dict[str, int]]:
+    """Build the JobMetrics observable-gauge callback for
+    cidx.repos.total/cidx.repos.indexed (Story #1586 AC3/AC6).
+
+    Extracted as a module-level factory so the wiring can be tested directly
+    (same pattern as _make_dep_map_repair_invoker_fn above). total is
+    len(golden_repo_manager.list_golden_repos()); indexed is the count of
+    those repos where golden_repo_manager._index_exists(golden_repo,
+    "semantic") is True -- the existing predicate reused exactly as-is
+    (never a new bare glob/existence check).
+
+    Story #1586 Finding 1 fix (BLOCKING): the O(fleet) walk below now runs
+    on a background daemon thread inside a _RepositoryCountsCache, never
+    directly on the calling (OTEL exporter) thread -- see that class's
+    docstring. The returned callback exposes its backing cache as
+    `.cache` for tests that need to observe/await background-refresh state.
+    """
+
+    def _compute() -> Dict[str, int]:
+        repo_dicts = golden_repo_manager.list_golden_repos()
+        total = len(repo_dicts)
+        indexed = 0
+        for repo_dict in repo_dicts:
+            alias = repo_dict.get("alias")
+            if not alias:
+                continue
+            golden_repo = golden_repo_manager.get_golden_repo(alias)
+            if golden_repo is not None and golden_repo_manager._index_exists(
+                golden_repo, "semantic"
+            ):
+                indexed += 1
+        return {"total": total, "indexed": indexed}
+
+    cache = _RepositoryCountsCache(
+        _compute, refresh_interval_seconds=refresh_interval_seconds
+    )
+
+    def _callback() -> Dict[str, int]:
+        return cache.get()
+
+    _callback.cache = cache  # type: ignore[attr-defined]
+    return _callback
 
 
 def _apply_fault_injection_state(app: Any, startup_config: Any) -> None:
@@ -3024,6 +3212,50 @@ def make_lifespan(
                     extra={"correlation_id": get_correlation_id()},
                 )
 
+                # Story #1586 AC6: construct ApplicationMetrics (Story #698's
+                # search/FTS/embedding counters+histograms) and JobMetrics
+                # (Story #699's job/repo counters+gauges) alongside the
+                # other telemetry primitives -- gated identically (enabled +
+                # export_metrics).
+                if server_config.telemetry_config.export_metrics:
+                    from code_indexer.server.telemetry.metrics_instrumentation import (
+                        get_application_metrics,
+                    )
+                    from code_indexer.server.telemetry.job_metrics import (
+                        get_job_metrics,
+                    )
+
+                    application_metrics = get_application_metrics(telemetry_manager)
+                    app.state.application_metrics = application_metrics
+
+                    logger.info(
+                        f"ApplicationMetrics initialized: active="
+                        f"{application_metrics.is_active}",
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+
+                    job_metrics = get_job_metrics(telemetry_manager)
+                    job_metrics.set_job_counts_callback(
+                        _build_job_counts_callback(job_tracker)
+                    )
+                    job_metrics.set_repository_counts_callback(
+                        _build_repository_counts_callback(golden_repo_manager)
+                    )
+                    app.state.job_metrics = job_metrics
+
+                    logger.info(
+                        f"JobMetrics initialized: active={job_metrics.is_active}",
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                else:
+                    app.state.application_metrics = None
+                    app.state.job_metrics = None
+                    logger.info(
+                        "ApplicationMetrics/JobMetrics: export_metrics disabled "
+                        "in configuration",
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+
                 # Initialize MachineMetricsExporter for OTEL (Story #696)
                 if server_config.telemetry_config.machine_metrics_enabled:
                     from code_indexer.server.telemetry.machine_metrics import (
@@ -3069,6 +3301,8 @@ def make_lifespan(
                 # Telemetry disabled - set to None
                 app.state.telemetry_manager = None
                 app.state.machine_metrics_exporter = None
+                app.state.application_metrics = None
+                app.state.job_metrics = None
                 logger.info(
                     "TelemetryManager: Telemetry disabled in configuration",
                     extra={"correlation_id": get_correlation_id()},
@@ -3086,6 +3320,8 @@ def make_lifespan(
             )
             app.state.telemetry_manager = None
             app.state.machine_metrics_exporter = None
+            app.state.application_metrics = None
+            app.state.job_metrics = None
 
         # Startup: Initialize OIDC authentication if configured
         logger.info(

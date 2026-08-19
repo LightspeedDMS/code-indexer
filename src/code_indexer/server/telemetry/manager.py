@@ -314,12 +314,33 @@ def get_telemetry_manager(
 
         if config is None:
             # Create disabled config as fallback
-            from src.code_indexer.server.utils.config_manager import TelemetryConfig
+            from code_indexer.server.utils.config_manager import TelemetryConfig
 
             config = TelemetryConfig(enabled=False)
 
         _telemetry_manager = TelemetryManager(config)
         return _telemetry_manager
+
+
+def peek_telemetry_manager() -> Optional[TelemetryManager]:
+    """
+    Return the current TelemetryManager singleton WITHOUT creating one
+    (Story #1586 AC3).
+
+    Unlike get_telemetry_manager(), this never instantiates a disabled
+    fallback on a cache miss -- it simply reports "not yet initialized" as
+    None. Needed by call sites that can legitimately run BEFORE the real
+    startup config is loaded (e.g. a background thread's job-completion
+    callback racing the main lifespan coroutine's own telemetry-init
+    block): such a caller must never win the get_telemetry_manager()
+    "first call wins" race and permanently lock in a disabled config for
+    the rest of the process.
+
+    Returns:
+        The TelemetryManager singleton if get_telemetry_manager() has
+        already been called at least once this process, else None.
+    """
+    return _telemetry_manager
 
 
 def reset_telemetry_manager() -> None:

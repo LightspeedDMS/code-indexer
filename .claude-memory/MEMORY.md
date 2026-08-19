@@ -92,6 +92,7 @@
 - [project_config_default_flip_is_inert.md](project_config_default_flip_is_inert.md) - Changing a dataclass default is INERT on existing deployments — needs a marker-presence promotion
 - [project_chunk_storage_write_mode_context.md](project_chunk_storage_write_mode_context.md) - Chunk-storage write mode is context-dependent (server=sqlite, CLI/daemon=json); conversion always explicit
 - [project_shadow_mode_not_used_in_production.md](project_shadow_mode_not_used_in_production.md) - query-embedding cache "shadow" mode is NOT what production runs — assume `on` semantics
+- [project_staging_solo_concurrent_chaos_test.md](project_staging_solo_concurrent_chaos_test.md) - Another agent chaos-testing staging solo concurrently (as of 2026-08-18) — check before assuming clean baseline
 
 ## External References
 - [reference_staging_totp_programmatic_auth.md](reference_staging_totp_programmatic_auth.md) - Headless MFA: `.local-testing` TOTP is a shell command, eval for live code, then two-step login

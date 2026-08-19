@@ -141,6 +141,18 @@ class TestReferencesEndpoint:
                 assert len(data["results"]) >= 1
                 assert data["results"][0]["kind"] == "reference"
 
+    def test_references_endpoint_rejects_out_of_range_limit_with_422(self, test_client):
+        """limit=0 must be rejected by FastAPI's Query validation with HTTP
+        422. Downstream, find_references (scip/database/queries.py) treats
+        limit=0 as "unlimited" (conditionally omits the SQL LIMIT clause),
+        so an unbounded limit parameter at this REST front door is a live
+        resource-exhaustion gap -- found during the #1599/#1602/#1604
+        remediation review, fixed now per this project's no-deferral
+        practice."""
+        response = test_client.get("/scip/references?symbol=UserService&limit=0")
+
+        assert response.status_code == 422
+
 
 class TestDependenciesEndpoint:
     """Tests for /scip/dependencies endpoint."""
@@ -186,6 +198,18 @@ class TestDependenciesEndpoint:
                 assert len(data["results"]) >= 1
                 assert data["results"][0]["kind"] == "dependency"
 
+    def test_dependencies_endpoint_rejects_out_of_range_depth_with_422(
+        self, test_client
+    ):
+        """depth=0 (below the [1, 10] bound) must be rejected by FastAPI's
+        Query validation with HTTP 422, matching the /scip/impact route's
+        existing ge=1,le=10 convention. Without this bound, an out-of-range
+        depth silently reaches the same swallowed-ValueError defect fixed
+        at the MCP handler layer for Bug #1599/#1602/#1604."""
+        response = test_client.get("/scip/dependencies?symbol=UserService&depth=0")
+
+        assert response.status_code == 422
+
 
 class TestDependentsEndpoint:
     """Tests for /scip/dependents endpoint."""
@@ -228,6 +252,16 @@ class TestDependentsEndpoint:
                 assert data["total_results"] >= 1
                 assert len(data["results"]) >= 1
                 assert data["results"][0]["kind"] == "dependent"
+
+    def test_dependents_endpoint_rejects_out_of_range_depth_with_422(self, test_client):
+        """depth=0 (below the [1, 10] bound) must be rejected by FastAPI's
+        Query validation with HTTP 422, matching the /scip/impact route's
+        existing ge=1,le=10 convention. Without this bound, an out-of-range
+        depth silently reaches the same swallowed-ValueError defect fixed
+        at the MCP handler layer for Bug #1599/#1602/#1604."""
+        response = test_client.get("/scip/dependents?symbol=UserService&depth=0")
+
+        assert response.status_code == 422
 
 
 class TestImpactEndpoint:
@@ -315,6 +349,22 @@ class TestCallChainEndpoint:
             assert data["total_chains_found"] == 1
             assert "chains" in data
             assert len(data["chains"]) == 1
+
+    def test_callchain_endpoint_rejects_out_of_range_max_depth_with_422(
+        self, test_client
+    ):
+        """max_depth=11 (above the [1, 10] convention shared by /scip/impact
+        and the MCP scip_callchain handler's _MIN_SCIP_DEPTH/_MAX_SCIP_DEPTH)
+        must be rejected by FastAPI's Query validation with HTTP 422. Prior to
+        this fix the route's bound was le=20, which let 11-20 through even
+        though the real supported range is [1, 10] -- the REST contract
+        promised depths the backend does not actually honor as requested
+        (Bug #1599/#1602/#1604 REST-boundary follow-up)."""
+        response = test_client.get(
+            "/scip/callchain?from_symbol=Controller&to_symbol=Database&max_depth=11"
+        )
+
+        assert response.status_code == 422
 
 
 class TestContextEndpoint:

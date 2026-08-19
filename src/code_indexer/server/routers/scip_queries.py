@@ -25,6 +25,14 @@ from code_indexer.server.logging_utils import format_error_log
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/scip", tags=["SCIP Queries"])
 
+# Depth bounds for dependency/dependent traversal queries (Bug #1604 REST
+# audit). Used as the ge/le bounds on the depth Query parameters below, so
+# the HTTP boundary itself rejects an out-of-range depth rather than
+# relying on the downstream MCP-handler-layer clamp (scip.py's
+# _MIN_SCIP_DEPTH/_MAX_SCIP_DEPTH).
+_MIN_SCIP_DEPTH = 1
+_MAX_SCIP_DEPTH = 10
+
 
 # Response Models
 
@@ -178,7 +186,12 @@ def get_definition(
 def get_references(
     request: Request,
     symbol: str = Query(..., description="Symbol name to search for"),
-    limit: int = Query(100, description="Maximum number of results to return"),
+    limit: int = Query(
+        100,
+        ge=1,
+        le=10000,
+        description="Maximum number of results to return (default 100, max 10000)",
+    ),
     exact: bool = Query(False, description="If True, match exact symbol name"),
     project: Optional[str] = Query(None, description="Filter by specific project"),
     current_user: User = Depends(get_current_user),
@@ -233,7 +246,12 @@ def get_references(
 def get_dependencies(
     request: Request,
     symbol: str = Query(..., description="Symbol name to analyze"),
-    depth: int = Query(1, description="Depth of transitive dependencies"),
+    depth: int = Query(
+        _MIN_SCIP_DEPTH,
+        ge=_MIN_SCIP_DEPTH,
+        le=_MAX_SCIP_DEPTH,
+        description="Depth of transitive dependencies (default 1, max 10)",
+    ),
     exact: bool = Query(False, description="If True, match exact symbol name"),
     project: Optional[str] = Query(None, description="Filter by specific project"),
     current_user: User = Depends(get_current_user),
@@ -288,7 +306,12 @@ def get_dependencies(
 def get_dependents(
     request: Request,
     symbol: str = Query(..., description="Symbol name to analyze"),
-    depth: int = Query(1, description="Depth of transitive dependents"),
+    depth: int = Query(
+        _MIN_SCIP_DEPTH,
+        ge=_MIN_SCIP_DEPTH,
+        le=_MAX_SCIP_DEPTH,
+        description="Depth of transitive dependents (default 1, max 10)",
+    ),
     exact: bool = Query(False, description="If True, match exact symbol name"),
     project: Optional[str] = Query(None, description="Filter by specific project"),
     current_user: User = Depends(get_current_user),
@@ -396,7 +419,10 @@ def get_callchain(
     from_symbol: str = Query(..., description="Starting symbol"),
     to_symbol: str = Query(..., description="Target symbol"),
     max_depth: int = Query(
-        10, ge=1, le=20, description="Maximum chain length (default 10, max 20)"
+        10,
+        ge=_MIN_SCIP_DEPTH,
+        le=_MAX_SCIP_DEPTH,
+        description="Maximum chain length (default 10, max 10)",
     ),
     project: Optional[str] = Query(None, description="Filter by specific project"),
     current_user: User = Depends(get_current_user),
@@ -407,7 +433,7 @@ def get_callchain(
     Args:
         from_symbol: Starting symbol
         to_symbol: Target symbol
-        max_depth: Maximum chain length (default 10, max 20)
+        max_depth: Maximum chain length (default 10, max 10)
         project: Optional project filter (repository alias)
         current_user: Authenticated user (injected by dependency)
 

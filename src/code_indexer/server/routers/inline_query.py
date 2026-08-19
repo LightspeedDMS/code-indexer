@@ -47,6 +47,17 @@ from code_indexer.server.services.temporal_live_dispatch import (
     execute_live_temporal_search,
 )
 
+# Story #1586 Finding 2 remediation: this REST route calls
+# query_user_repositories()/TantivyIndexManager.search() directly rather
+# than through server/mcp/handlers/search.py's AC1-instrumented
+# _execute_tracked_search/_execute_regex_search, so it needs its own
+# cidx.search.*/cidx.fts.* recording -- see _record_rest_search_metric/
+# _record_rest_fts_metric below. No-op when telemetry is disabled.
+from code_indexer.server.telemetry.manager import peek_telemetry_manager
+from code_indexer.server.telemetry.metrics_instrumentation import (
+    get_application_metrics,
+)
+
 # Bug #1209: default overfetch multiplier when rerank config is unavailable.
 _REST_DEFAULT_OVERFETCH_MULTIPLIER = 5
 
@@ -66,6 +77,68 @@ _TEMPORAL_REQUEST_FIELDS = (
     "diff_type",
     "author",
 )
+
+
+def _record_rest_search_metric(
+    search_type: str,
+    repository: str,
+    duration_seconds: float,
+    results_count: int,
+    status: str,
+) -> None:
+    """Record a cidx.search.* OTEL metric for one REST /api/query semantic/
+    hybrid search call (Story #1586 Finding 2). Mirrors
+    server/mcp/handlers/search.py's _record_search_metric -- this REST
+    route calls query_user_repositories() directly rather than through
+    _execute_tracked_search, so AC1's instrumentation never covered it.
+    No-op when telemetry is disabled; never raises into the query path.
+    """
+    try:
+        telemetry_manager = peek_telemetry_manager()
+        if telemetry_manager is None:
+            return
+        app_metrics = get_application_metrics(telemetry_manager)
+        if not app_metrics.is_active:
+            return
+        app_metrics.record_search_request(
+            search_type=search_type,
+            repository=repository,
+            duration_seconds=duration_seconds,
+            results_count=results_count,
+            status=status,
+        )
+    except Exception as e:
+        logger.debug(f"Failed to record REST search metrics: {e}")
+
+
+def _record_rest_fts_metric(
+    repository: str,
+    duration_seconds: float,
+    matches_count: int,
+    status: str,
+) -> None:
+    """Record a cidx.fts.* OTEL metric for one REST /api/query FTS/hybrid
+    search call (Story #1586 Finding 2). Mirrors
+    server/mcp/handlers/search.py's _record_fts_metric -- this REST route
+    reads the Tantivy index directly rather than through
+    _execute_regex_search, so AC1's instrumentation never covered it.
+    No-op when telemetry is disabled; never raises into the query path.
+    """
+    try:
+        telemetry_manager = peek_telemetry_manager()
+        if telemetry_manager is None:
+            return
+        app_metrics = get_application_metrics(telemetry_manager)
+        if not app_metrics.is_active:
+            return
+        app_metrics.record_fts_request(
+            repository=repository,
+            duration_seconds=duration_seconds,
+            matches_count=matches_count,
+            status=status,
+        )
+    except Exception as e:
+        logger.debug(f"Failed to record REST FTS metrics: {e}")
 
 
 def _is_temporal_query_request(request: "SemanticQueryRequest") -> bool:
@@ -605,6 +678,14 @@ def register_query_routes(
                         current_user.username,
                         fts_repo_alias,
                     ):
+                        # Story #1586 Finding 2: time this real Tantivy call
+                        # and record cidx.fts.* in `finally` (success or
+                        # error) -- this REST path reads the index
+                        # directly, so it needs its own metric recording
+                        # instead of inheriting AC1's MCP-side one.
+                        _fts_metric_start = time.monotonic()
+                        _fts_status = "error"
+                        _fts_matches_count = 0
                         try:
                             # repo_path is guaranteed to be set if fts_available is True
                             if repo_path is None:
@@ -666,6 +747,9 @@ def register_query_routes(
                                     )
                                 )
 
+                            _fts_status = "success"
+                            _fts_matches_count = len(fts_raw_results)
+
                         except Exception as e:
                             logger.error(
                                 format_error_log(
@@ -679,6 +763,15 @@ def register_query_routes(
                                     status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                                     detail=f"FTS search failed: {str(e)}",
                                 )
+                        finally:
+                            _record_rest_fts_metric(
+                                repository=fts_repo_alias
+                                or request.repository_alias
+                                or "unknown",
+                                duration_seconds=time.monotonic() - _fts_metric_start,
+                                matches_count=_fts_matches_count,
+                                status=_fts_status,
+                            )
                             # For hybrid mode, continue with semantic only
                             search_mode_actual = "semantic"
 
@@ -823,35 +916,54 @@ def register_query_routes(
 
             # Codex Finding #7: wire the SAME activated-repo QueryTracker
             # refcount protection MCP search.py already has.
-            with track_activated_repo_query(
-                getattr(app.state, "query_tracker", None),
-                activated_repo_manager,
-                current_user.username,
-                request.repository_alias,
-            ):
-                results = semantic_query_manager.query_user_repositories(
-                    username=current_user.username,
-                    query_text=request.query_text,
-                    repository_alias=request.repository_alias,
-                    limit=_fetch_limit,
-                    min_score=request.min_score,
-                    file_extensions=request.file_extensions,
-                    # Phase 1 parameters (Story #503)
-                    exclude_language=request.exclude_language,
-                    exclude_path=request.exclude_path,
-                    accuracy=request.accuracy,
-                    # Temporal parameters (Story #446)
-                    time_range=request.time_range,
-                    time_range_all=request.time_range_all,
-                    at_commit=request.at_commit,
-                    # Phase 3 temporal filtering parameters (Story #503)
-                    diff_type=request.diff_type,
-                    author=request.author,
-                    chunk_type=request.chunk_type,
-                    # Story #1108 (S4): per-request cache bypass
-                    no_embedding_cache_shortcut=request.no_embedding_cache_shortcut,
-                    # Story #1291 AC7/AC8: explicit embedder override
-                    temporal_embedder=request.temporal_embedder,
+            #
+            # Story #1586 Finding 2: time this call and record cidx.search.*
+            # in `finally` (success or error) -- this REST path calls
+            # query_user_repositories() directly, so it needs its own
+            # metric recording instead of inheriting AC1's MCP-side one.
+            _search_metric_start = time.monotonic()
+            _search_status = "error"
+            _search_results_count = 0
+            try:
+                with track_activated_repo_query(
+                    getattr(app.state, "query_tracker", None),
+                    activated_repo_manager,
+                    current_user.username,
+                    request.repository_alias,
+                ):
+                    results = semantic_query_manager.query_user_repositories(
+                        username=current_user.username,
+                        query_text=request.query_text,
+                        repository_alias=request.repository_alias,
+                        limit=_fetch_limit,
+                        min_score=request.min_score,
+                        file_extensions=request.file_extensions,
+                        # Phase 1 parameters (Story #503)
+                        exclude_language=request.exclude_language,
+                        exclude_path=request.exclude_path,
+                        accuracy=request.accuracy,
+                        # Temporal parameters (Story #446)
+                        time_range=request.time_range,
+                        time_range_all=request.time_range_all,
+                        at_commit=request.at_commit,
+                        # Phase 3 temporal filtering parameters (Story #503)
+                        diff_type=request.diff_type,
+                        author=request.author,
+                        chunk_type=request.chunk_type,
+                        # Story #1108 (S4): per-request cache bypass
+                        no_embedding_cache_shortcut=request.no_embedding_cache_shortcut,
+                        # Story #1291 AC7/AC8: explicit embedder override
+                        temporal_embedder=request.temporal_embedder,
+                    )
+                _search_status = "success"
+                _search_results_count = len(results.get("results") or [])
+            finally:
+                _record_rest_search_metric(
+                    search_type="semantic",
+                    repository=request.repository_alias or "unknown",
+                    duration_seconds=time.monotonic() - _search_metric_start,
+                    results_count=_search_results_count,
+                    status=_search_status,
                 )
 
             # Apply access filtering based on user's group membership (Story #707)
