@@ -293,13 +293,23 @@ class FileFinder:
             for file_name in files:
                 file_path = root_path / file_name
 
+                # Skip dangling symlinks — e.g. Node cpSync converts
+                # relative symlinks to absolute ones pointing at a now-
+                # deleted temp clone dir. stat()/read() on these raises
+                # FileNotFoundError which crashed the entire indexing job.
+                if file_path.is_symlink() and not file_path.exists():
+                    continue
+
                 # Debug: Log file being checked
-                if file_name == "ruff_output.json" or file_path.stat().st_size > 500000:
-                    with open(debug_file, "a") as f:
-                        f.write(
-                            f"[{datetime.datetime.now().isoformat()}] Checking large file: {file_path} ({file_path.stat().st_size} bytes)\n"
-                        )
-                        f.flush()
+                try:
+                    if file_name == "ruff_output.json" or file_path.stat().st_size > 500000:
+                        with open(debug_file, "a") as f:
+                            f.write(
+                                f"[{datetime.datetime.now().isoformat()}] Checking large file: {file_path} ({file_path.stat().st_size} bytes)\n"
+                            )
+                            f.flush()
+                except OSError:
+                    pass
 
                 if self._should_include_file(file_path):
                     yield file_path
