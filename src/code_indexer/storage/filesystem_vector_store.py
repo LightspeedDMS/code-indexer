@@ -303,6 +303,15 @@ class PathIndex:
 
         return instance
 
+    def file_paths(self) -> List[str]:
+        """Repo-relative paths of every indexed file (the reverse-index keys).
+
+        EVO-66189: a cheap file listing that avoids stat-walking the working tree over
+        NFS — the keys are exactly the indexed source files (already excludes .code-indexer/
+        .git/gitignored). Caller holds no lock: read-only snapshot of the loaded index.
+        """
+        return list(self._path_index.keys())
+
 
 class FilesystemVectorStore:
     """Filesystem-based vector storage with git-aware optimization.

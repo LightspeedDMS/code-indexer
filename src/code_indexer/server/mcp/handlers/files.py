@@ -738,6 +738,7 @@ def list_files(params: Dict[str, Any], user: User) -> Dict[str, Any]:
             page=_DEFAULT_PAGE,
             limit=_MAX_MCP_FILE_LIMIT,
             path_pattern=final_path_pattern,
+            indexed_only=bool(params.get("indexed_only", False)),
         )
 
         if repository_alias and repository_alias.endswith("-global"):
@@ -957,6 +958,7 @@ def _normalize_browse_params(params: Dict[str, Any]) -> Dict[str, Any]:
         "language": params.get("language"),
         "limit": limit,
         "sort_by": sort_by,
+        "indexed_only": bool(params.get("indexed_only", False)),
     }
 
 
@@ -1010,6 +1012,7 @@ def browse_directory(params: Dict[str, Any], user: User) -> Dict[str, Any]:
             path_pattern=final_path_pattern,
             language=bp["language"],
             sort_by=bp["sort_by"],
+            indexed_only=bp["indexed_only"],
         )
 
         # Perf fast-path: a NON-recursive browse of a subdirectory only needs that one
@@ -1019,6 +1022,9 @@ def browse_directory(params: Dict[str, Any], user: User) -> Dict[str, Any]:
         # (immutable, path-resolved) and the single-level pattern the non-recursive
         # branch of _build_browse_path_pattern produces ({path}/* or {path}/<glob>); a
         # cross-directory user pattern (contains '/' or '**') keeps the full-walk path.
+        # indexed_only must serve from the index (placeholder metadata, index-membership
+        # semantics); the scandir fast-path can't honor it, so keep it out of this branch
+        # and let it flow through list_files_by_path -> _collect_listing -> the index.
         user_pat = bp["user_path_pattern"]
         cross_dir_pattern = bool(
             user_pat and ("/" in user_pat or user_pat.startswith("**"))
@@ -1028,6 +1034,7 @@ def browse_directory(params: Dict[str, Any], user: User) -> Dict[str, Any]:
             and not bp["recursive"]
             and bp["path"]
             and not cross_dir_pattern
+            and not bp["indexed_only"]
         ):
             result = _utils.app_module.file_service.list_directory_level(
                 repo_path=repository_alias,

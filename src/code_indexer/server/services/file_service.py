@@ -168,7 +168,7 @@ class FileListingService:
             raise FileNotFoundError(f"Repository {repo_id} not found")
 
         # Collect all files
-        all_files = self._collect_files(repo_path)
+        all_files = self._collect_listing(repo_path, query_params.indexed_only)
 
         # Apply filters
         filtered_files = self._apply_filters(all_files, query_params)
@@ -205,7 +205,7 @@ class FileListingService:
         if not os.path.exists(repo_path):
             raise FileNotFoundError(f"Path {repo_path} not found")
 
-        all_files = self._collect_files(repo_path)
+        all_files = self._collect_listing(repo_path, query_params.indexed_only)
         filtered_files = self._apply_filters(all_files, query_params)
         sorted_files = self._apply_sorting(filtered_files, query_params.sort_by)
         paginated_files, pagination_info = self._apply_pagination(
@@ -374,6 +374,74 @@ class FileListingService:
                 extra=get_log_extra("CACHE-GENERAL-011"),
             )
             raise RuntimeError(f"Unable to access repository {repo_id}: {e}")
+
+    def _collect_listing(self, repo_path: str, indexed_only: bool) -> List[FileInfo]:
+        """Return the file listing, preferring the index fast-path when requested.
+
+        EVO-66189: with ``indexed_only`` set, serve from the index's ``path_index`` (an
+        O(ms) msgpack read) instead of stat-walking the working tree over NFS. Falls back
+        to the full walk when the repo has no index, so ``indexed_only`` is a safe hint.
+        """
+        if indexed_only:
+            from_index = self._collect_files_from_index(repo_path)
+            if from_index is not None:
+                return from_index
+        return self._collect_files(repo_path)
+
+    def _collect_files_from_index(self, repo_path: str) -> Optional[List[FileInfo]]:
+        """Build the listing from the index's ``path_index.bin`` — no NFS stat walk.
+
+        Returns ``None`` when the repo has no index (caller falls back to the walk). The
+        path-index keys are exactly the indexed source files (already excluding
+        ``.code-indexer``/``.git``/gitignored), so no exclusion filtering is needed.
+        ``size_bytes``/``modified_at`` are placeholders (0 / epoch): this mode trades that
+        per-file metadata for avoiding the O(files) NFS stat cost (~50s on the evolution
+        monolith → an ~ms msgpack read). A corrupt/unreadable index also falls back.
+        """
+        from code_indexer.storage.filesystem_vector_store import PathIndex
+
+        # Current per-model layout (.code-indexer/index/<model>/) plus the legacy sibling
+        # multimodal layout (.code-indexer/multimodal_index/<collection>/) that
+        # multi_index_query_service still supports for repos not yet re-indexed — otherwise
+        # indexed_only would silently omit files indexed only under the legacy path.
+        ci_dir = Path(repo_path) / ".code-indexer"
+        path_index_files = sorted(
+            list((ci_dir / "index").glob("*/path_index.bin"))
+            + list((ci_dir / "multimodal_index").glob("*/path_index.bin"))
+        )
+        if not path_index_files:
+            return None
+
+        epoch = datetime.fromtimestamp(0, tz=timezone.utc)
+        seen: Set[str] = set()
+        files: List[FileInfo] = []
+        try:
+            for pi_path in path_index_files:
+                for rel in PathIndex.load(pi_path).file_paths():
+                    if rel in seen:
+                        continue
+                    seen.add(rel)
+                    files.append(
+                        FileInfo(
+                            path=rel,
+                            size_bytes=0,
+                            modified_at=epoch,
+                            language=self._detect_language(Path(rel)),
+                            is_indexed=True,
+                        )
+                    )
+        except Exception as e:
+            logger.warning(
+                format_error_log(
+                    "CACHE-GENERAL-014",
+                    "Failed to serve listing from index; falling back to walk",
+                    repo_path=repo_path,
+                    error=str(e),
+                ),
+                extra=get_log_extra("CACHE-GENERAL-014"),
+            )
+            return None
+        return files
 
     def _collect_files(self, repo_path: str) -> List[FileInfo]:
         """Collect all files in the repo, CACHED per repo_path.

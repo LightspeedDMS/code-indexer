@@ -510,3 +510,34 @@ class TestBrowseDirectoryFilterParametersResponseFormat:
             response_data = json.loads(result["content"][0]["text"])
             assert response_data["success"] is True
             assert "files" in response_data["structure"]
+
+
+class TestBrowseDirectoryIndexedOnlyRouting:
+    """EVO-66189: indexed_only must serve from the index even for a non-recursive
+    single-dir browse of a -global repo — it must NOT take the scandir
+    list_directory_level fast-path (which ignores the flag)."""
+
+    def test_indexed_only_bypasses_scandir_fastpath(self, mock_user):
+        mock_fs = MagicMock()
+        mock_fs.list_files_by_path.return_value = Mock(files=[])
+        with (
+            patch("code_indexer.server.mcp.handlers._utils.app_module") as app,
+            patch(
+                "code_indexer.server.mcp.handlers.files._resolve_global_repo_target",
+                return_value=("/tmp/evo", None),
+            ),
+        ):
+            app.file_service = mock_fs
+            browse_directory(
+                {
+                    "repository_alias": "evolution-global",
+                    "path": "code",
+                    "recursive": False,
+                    "indexed_only": True,
+                },
+                mock_user,
+            )
+        mock_fs.list_directory_level.assert_not_called()
+        mock_fs.list_files_by_path.assert_called_once()
+        qp = mock_fs.list_files_by_path.call_args.kwargs["query_params"]
+        assert qp.indexed_only is True
