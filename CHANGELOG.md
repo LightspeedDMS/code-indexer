@@ -7,6 +7,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [12.22.0] - 2026-08-19
+
+### Added
+
+- **Story #1589**: "Clear All Dedup Warnings" action in the Diagnostics tab -- a bulk-clear
+  endpoint (`POST /api/admin/diagnostics/dedup-warnings/clear-all`) and UI button that
+  acknowledges fleet-migration dedup-state warnings across every golden repo in one action,
+  without requiring a full re-index of each affected repo. Both SQLite (solo) and PostgreSQL
+  (cluster) storage backends implemented and tested.
+- **Story #1586**: `ApplicationMetrics` and `JobMetrics` (built in prior stories with zero real
+  call sites) are now wired end-to-end into real OTEL call sites: search/FTS request metrics,
+  embedding-provider metrics (all 4 clients, instrumented at the real HTTP boundary, no
+  double-counting on query-embedding-cache hits), job lifecycle metrics, repository-refresh
+  duration, and 7 custom spans across SCIP/temporal/HNSW/CoW-snapshot/dep-map operations.
+  Verified via real manual E2E testing against a genuine external OTLP receiver (not just unit
+  test doubles), which surfaced and fixed two real gaps unit tests couldn't see: a span that sat
+  on a code path production never reaches, and REST search traffic that bypassed the metrics
+  the story's own documentation claimed covered it.
+
+### Fixed
+
+- **Bug #1599**: `scip_impact` MCP handler applied no clamp on its documented `depth` bound.
+- **Bug #1602**: `scip_dependents` had the same missing clamp -- but with no safety net at any
+  layer, an out-of-range `depth` silently returned a wrong, empty `success: true` result instead
+  of an error.
+- **Bug #1604**: `scip_dependencies` had the identical unclamped-depth defect as #1602.
+- Extended REST front-door audit found and closed two more live gaps in the same family:
+  `/scip/callchain`'s `max_depth` upper bound didn't match what the backend actually honors, and
+  `/scip/references`' `limit` parameter was completely unbounded (`limit=0` meant "unlimited").
+- A pre-existing bug in `MachineMetricsExporter`'s observable-gauge callbacks (yielding plain
+  tuples instead of OTEL `Observation` objects) was fixed opportunistically while validating
+  #1586's telemetry pipeline -- it had been failing on every export cycle.
+
 ## [12.21.0] - 2026-08-18
 
 ### Fixed
