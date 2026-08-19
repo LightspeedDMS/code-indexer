@@ -219,14 +219,15 @@ class VersionedSnapshotManager:
         """
         timestamp = int(time.time())
 
-        # Story #1586 AC5 remediation (Finding 1): the span used to wrap
-        # only _create_cow_snapshot, a fallback branch production never
-        # reaches (every real deployment constructs this manager WITH a
-        # clone_backend, so create_snapshot() always dispatches through
-        # _create_clone_backend_snapshot instead) -- making the span
-        # structurally dead in production. Wrapping the public dispatch
-        # point itself covers all three real branches (clone_backend,
-        # FlexClone, and the CoW fallback) with one span.
+        # Story #1586 AC5 (Finding 1): the span wraps this public dispatch
+        # point -- create_snapshot() itself -- rather than any single
+        # branch below, so it covers all three real branches (clone_backend,
+        # FlexClone, and the CoW fallback) with one instrumentation point.
+        # This matters because every real deployment constructs this
+        # manager WITH a clone_backend, so create_snapshot() always
+        # dispatches through _create_clone_backend_snapshot; a span wired
+        # only around _create_cow_snapshot (a fallback branch production
+        # never reaches) would be structurally dead in production.
         with create_span(
             "cidx.snapshot_manager.create_cow_snapshot",
             attributes={"alias": alias},

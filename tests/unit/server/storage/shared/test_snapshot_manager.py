@@ -713,17 +713,20 @@ def _assert_single_create_cow_snapshot_span(exporter, alias: str) -> None:
 class TestSnapshotManagerCreateCowSnapshotSpanRemediation1586:
     """Story #1586 remediation, Finding 1.
 
-    The ``cidx.snapshot_manager.create_cow_snapshot`` span was originally
-    wired only around ``_create_cow_snapshot`` -- a fallback method that
-    ``create_snapshot()`` only reaches when ``self._clone_backend`` is
-    ``None``. Every real deployment constructs ``VersionedSnapshotManager``
+    The ``cidx.snapshot_manager.create_cow_snapshot`` span wraps
+    ``create_snapshot()``'s public dispatch point itself, rather than any
+    single branch inside it, specifically so it covers the REAL production
+    path: every real deployment constructs ``VersionedSnapshotManager``
     WITH a ``clone_backend`` (see ``_create_clone_backend_snapshot``'s own
-    docstring), so that span could structurally never fire in production.
-    These tests prove the span now fires on the REAL dispatch path
-    (``_create_clone_backend_snapshot``), using a real ``LocalCloneBackend``
-    performing an actual ``cp --reflink=auto`` against ``tmp_path`` -- no
-    mocking of the code under test -- plus a regression check that the
-    no-backend CoW fallback path still emits the span too.
+    docstring), so ``create_snapshot()`` always dispatches through
+    ``_create_clone_backend_snapshot`` -- a span wired only around the
+    no-backend ``_create_cow_snapshot`` fallback would be structurally
+    dead in production. These tests prove the span fires on the REAL
+    dispatch path (``_create_clone_backend_snapshot``), using a real
+    ``LocalCloneBackend`` performing an actual ``cp --reflink=auto``
+    against ``tmp_path`` -- no mocking of the code under test -- plus a
+    regression check that the no-backend CoW fallback path still emits
+    the span too.
     """
 
     def test_create_snapshot_clone_backend_dispatch_emits_span(

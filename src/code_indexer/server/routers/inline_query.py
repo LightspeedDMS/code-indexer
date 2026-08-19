@@ -763,6 +763,8 @@ def register_query_routes(
                                     status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                                     detail=f"FTS search failed: {str(e)}",
                                 )
+                            # For hybrid mode, continue with semantic only
+                            search_mode_actual = "semantic"
                         finally:
                             _record_rest_fts_metric(
                                 repository=fts_repo_alias
@@ -772,11 +774,19 @@ def register_query_routes(
                                 matches_count=_fts_matches_count,
                                 status=_fts_status,
                             )
-                            # For hybrid mode, continue with semantic only
-                            search_mode_actual = "semantic"
 
                 # Execute semantic search for hybrid or degraded mode
                 if search_mode_actual in ["semantic", "hybrid"]:
+                    # Reviewer Finding 2 (Story #1586 remediation): this
+                    # hybrid-mode semantic call is a SEPARATE
+                    # query_user_repositories() call site from the default/
+                    # pure-semantic path below -- it needs its OWN
+                    # cidx.search.* recording, mirroring that path's
+                    # _search_metric_start/_record_rest_search_metric
+                    # pattern exactly (search_type="hybrid").
+                    _hybrid_search_metric_start = time.monotonic()
+                    _hybrid_search_status = "error"
+                    _hybrid_search_results_count = 0
                     try:
                         # Codex Finding #7: wire the SAME activated-repo
                         # QueryTracker refcount protection MCP search.py
@@ -816,6 +826,8 @@ def register_query_routes(
                             QueryResultItem(**result)
                             for result in semantic_results_raw["results"]
                         ]
+                        _hybrid_search_status = "success"
+                        _hybrid_search_results_count = len(semantic_results_list)
                     except ValueError as e:
                         # Surface validation errors as HTTP 400
                         logger.warning(
@@ -842,6 +854,15 @@ def register_query_routes(
                         )
                         if search_mode_actual == "semantic":
                             raise
+                    finally:
+                        _record_rest_search_metric(
+                            search_type="hybrid",
+                            repository=request.repository_alias or "unknown",
+                            duration_seconds=time.monotonic()
+                            - _hybrid_search_metric_start,
+                            results_count=_hybrid_search_results_count,
+                            status=_hybrid_search_status,
+                        )
 
                 # Calculate execution time
                 execution_time_ms = int((time.time() - start_time) * 1000)

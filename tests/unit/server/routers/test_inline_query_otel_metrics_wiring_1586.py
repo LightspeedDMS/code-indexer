@@ -265,3 +265,158 @@ class TestRestFtsQueryEmitsFtsMetric:
         )
         dp = list(requests_metric.data.data_points)[0]
         assert dp.attributes["status"] == "error"
+
+
+def _run_fts_or_hybrid_query(
+    tmp_path: Path,
+    *,
+    request_json: dict,
+    semantic_impl=None,
+):
+    """Like _run_fts_query, but also returns the semantic_query_manager
+    mock so callers can assert whether/how it was invoked -- needed for the
+    finally-block regression tests below, which must prove a pure-FTS
+    request NEVER triggers a (paid) semantic/embedding call, and that a
+    hybrid request's semantic leg is exercised exactly as expected.
+    """
+    activated_repos_dir = _build_real_tantivy_repo(tmp_path, populate=True)
+
+    mock_activated_repo_manager = MagicMock()
+    mock_activated_repo_manager.activated_repos_dir = str(activated_repos_dir)
+    mock_activated_repo_manager.list_activated_repositories.return_value = [
+        {"user_alias": "myrepo", "username": "alice", "is_global": False}
+    ]
+    mock_semantic_query_manager = MagicMock()
+    if semantic_impl is not None:
+        mock_semantic_query_manager.query_user_repositories.side_effect = semantic_impl
+
+    fast_app = _new_app(mock_semantic_query_manager, mock_activated_repo_manager)
+    client = TestClient(fast_app, raise_server_exceptions=False)
+
+    with active_application_metrics_singleton() as (_metrics, reader):
+        response = client.post("/api/query", json=request_json)
+        return response, reader, mock_semantic_query_manager
+
+
+class TestRestQueryFinallyBlockRegression1586:
+    """Regression tests for the critical production bug on commit
+    89e05f87: the AC1 `finally:` block recording cidx.fts.requests was
+    inserted BEFORE (thus swallowing) the two pre-existing statements that
+    must stay inside `except Exception as e:` only --
+    `if request.search_mode == "fts": raise HTTPException(...)` and
+    `search_mode_actual = "semantic"`. That made
+    `search_mode_actual = "semantic"` run UNCONDITIONALLY on every pass
+    through the FTS/hybrid branch, including full success, which:
+
+    1. Opens the `if search_mode_actual in ["semantic", "hybrid"]:` gate
+       for every pure-FTS request, triggering a real, unrequested, PAID
+       embedding-provider call.
+    2. Corrupts the response's search_mode/search_mode_actual fields to
+       always report "semantic", even for fts/hybrid requests.
+    3. Breaks hybrid mode's graceful degradation: the later
+       `if search_mode_actual == "semantic": raise` check always
+       evaluates True, turning a semantic-leg failure that used to
+       degrade gracefully to FTS-only results into an HTTP 500.
+    """
+
+    def test_pure_fts_success_never_calls_semantic_query_manager(self, tmp_path: Path):
+        response, _reader, mock_sqm = _run_fts_or_hybrid_query(
+            tmp_path,
+            request_json={
+                "query_text": "authenticate",
+                "repository_alias": "myrepo",
+                "search_mode": "fts",
+            },
+        )
+        assert response.status_code == 200, response.text
+        body = response.json()
+
+        mock_sqm.query_user_repositories.assert_not_called()
+        assert body["search_mode"] == "fts", (
+            f"REGRESSION: successful FTS query reported search_mode="
+            f"{body['search_mode']!r} instead of 'fts'"
+        )
+        assert body["metadata"]["search_mode_actual"] == "fts"
+
+    def test_successful_hybrid_query_reports_hybrid_not_semantic(self, tmp_path: Path):
+        response, _reader, _mock_sqm = _run_fts_or_hybrid_query(
+            tmp_path,
+            request_json={
+                "query_text": "authenticate",
+                "repository_alias": "myrepo",
+                "search_mode": "hybrid",
+            },
+            semantic_impl=lambda **kwargs: _qm_success_result(),
+        )
+        assert response.status_code == 200, response.text
+        body = response.json()
+
+        assert body["search_mode"] == "hybrid", (
+            f"REGRESSION: successful hybrid query reported search_mode="
+            f"{body['search_mode']!r} instead of 'hybrid'"
+        )
+        assert body["metadata"]["search_mode_actual"] == "hybrid"
+
+    def test_hybrid_semantic_failure_degrades_gracefully(self, tmp_path: Path):
+        def _boom(**kwargs):
+            raise RuntimeError("semantic backend exploded")
+
+        response, _reader, _mock_sqm = _run_fts_or_hybrid_query(
+            tmp_path,
+            request_json={
+                "query_text": "authenticate",
+                "repository_alias": "myrepo",
+                "search_mode": "hybrid",
+            },
+            semantic_impl=_boom,
+        )
+        assert response.status_code == 200, (
+            "REGRESSION: hybrid mode's semantic-leg failure must degrade "
+            f"gracefully to FTS-only results (HTTP 200), got "
+            f"{response.status_code}: {response.text}"
+        )
+        body = response.json()
+        assert len(body["fts_results"]) >= 1, (
+            "graceful degradation must still return the FTS results that "
+            "already succeeded"
+        )
+        assert body["semantic_results"] == []
+
+
+class TestRestHybridSemanticLegMetricsFinding2:
+    """Finding 2 (both reviewers, same pass): the hybrid-mode semantic call
+    site (a SEPARATE query_user_repositories() call from the default/pure-
+    semantic path's) has no _record_rest_search_metric wrapping at all --
+    only the default pure-semantic path got instrumented in the original
+    #1586 REST fix.
+    """
+
+    def test_successful_hybrid_query_emits_both_fts_and_search_metrics(
+        self, tmp_path: Path
+    ):
+        response, reader, _mock_sqm = _run_fts_or_hybrid_query(
+            tmp_path,
+            request_json={
+                "query_text": "authenticate",
+                "repository_alias": "myrepo",
+                "search_mode": "hybrid",
+            },
+            semantic_impl=lambda **kwargs: _qm_success_result(),
+        )
+        assert response.status_code == 200, response.text
+
+        fts_metric = find_metric(reader, "cidx.fts.requests")
+        assert fts_metric is not None, (
+            "cidx.fts.requests was not emitted for a successful hybrid query"
+        )
+        fts_dp = list(fts_metric.data.data_points)[0]
+        assert fts_dp.attributes["status"] == "success"
+
+        search_metric = find_metric(reader, "cidx.search.requests")
+        assert search_metric is not None, (
+            "cidx.search.requests was not emitted for the hybrid-mode "
+            "semantic leg -- this call site was never instrumented"
+        )
+        search_dp = list(search_metric.data.data_points)[0]
+        assert search_dp.attributes["status"] == "success"
+        assert search_dp.attributes["search_type"] == "hybrid"
