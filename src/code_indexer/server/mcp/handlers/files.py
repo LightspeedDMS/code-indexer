@@ -258,10 +258,21 @@ def _resolve_global_repo_target(
             error_envelope.update(extra_error_fields)
         return None, _mcp_response(error_envelope)
 
-    from code_indexer.global_repos.alias_manager import AliasManager
+    from code_indexer.global_repos.alias_manager import (
+        AliasManager,
+        resolve_alias_or_index_path,
+    )
 
+    # Bug #1315 / EVO-66336: fall back to the registry row's own index_path when
+    # the alias pointer file is missing/unreadable, mirroring search.py's resolver
+    # (and the other 5 sites) so file-listing and search behave identically for
+    # -global repos. A golden-repo-seeder refresh can transiently empty
+    # golden-repos/aliases/, which previously 404'd list_files/browse_directory
+    # while search/scip (already using this helper) kept resolving.
     alias_manager = AliasManager(str(Path(golden_repos_dir) / "aliases"))
-    target_path = alias_manager.read_alias(repository_alias)
+    target_path = resolve_alias_or_index_path(
+        alias_manager, alias_name=repository_alias, repo_entry=repo_entry
+    )
 
     if not target_path:
         available_repos = _get_available_repos(user)
