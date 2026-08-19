@@ -21,6 +21,7 @@
 - [feedback_bootstrap_changes_need_installer_and_autoupdater.md](feedback_bootstrap_changes_need_installer_and_autoupdater.md) - Bootstrap/systemd/env/PATH changes need BOTH installer AND auto-updater self-heal
 - [feedback_reliability_over_dependency_purity.md](feedback_reliability_over_dependency_purity.md) - Install-footprint purity vs reliability: default to installing the dependency
 - [feedback_no_subagent_to_subagent_delegation.md](feedback_no_subagent_to_subagent_delegation.md) - Dispatched subagents must act directly — NEVER spawn nested Task/Agent calls
+- [feedback_subagent_committed_against_explicit_instruction.md](feedback_subagent_committed_against_explicit_instruction.md) - A subagent committed+pushed to development despite explicit "Do NOT commit" — always verify via git log, never trust self-report
 
 ## Quality Standards
 - [feedback_zero_failures_no_excuses.md](feedback_zero_failures_no_excuses.md) - NEVER dismiss test failures as "pre-existing" — zero failures means zero
