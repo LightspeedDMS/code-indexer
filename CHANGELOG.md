@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [11.80.0] - 2026-08-20
+
+### Fixed
+
+- **EVO-66445: golden-repo FTS index fleet-wide gap.** Golden repos are indexed
+  in place; registration's `cidx index --fts` runs FTS through `smart_indexer`,
+  which silently degrades to semantic-only on any FTS init/build error. The whole
+  golden fleet therefore had a semantic index but no `tantivy_index`, so
+  `search_code(search_mode="fts")` errored fleet-wide.
+  - **Forward fix:** new `server/services/fts_index_builder.ensure_fts_index()` --
+    a reliable, non-silent FTS build primitive (verify marker, init-guard, rebuild
+    via `cidx index --rebuild-fts-index`, structured outcome; a build failure,
+    including "exit 0 but no index", is always logged at ERROR, never swallowed).
+    Wired into `_execute_post_clone_workflow` so registration self-heals a degraded
+    FTS build and surfaces persistent failures (non-fatal -- semantic is the
+    load-bearing index).
+  - **Reverse fix:** new `server/services/fts_backfill/` paced, cluster-safe sweep
+    that builds FTS on already-registered golden repos. Ships ON by default
+    (`FtsBackfillSweepConfig`), idempotent + re-discovery-based (no durable cursor),
+    FTS-only rebuild (no embedding cost).
+
 ## [11.79.0] - 2026-07-22
 
 ### Fixed

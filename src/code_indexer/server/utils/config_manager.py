@@ -1094,6 +1094,37 @@ class HNSWOrphanRepairSweepConfig:
 
 
 @dataclass
+class FtsBackfillSweepConfig:
+    """EVO-66445: golden-repo FTS backfill sweep configuration.
+
+    Controls the paced background sweep that builds the Tantivy FTS index on
+    golden repos registered before the forward fix existed (the fleet had a
+    semantic index but no ``tantivy_index``, so ``search_mode="fts"`` errored).
+    Ships ON by default with conservative pacing so the backlog pays down
+    automatically after deploy (mirrors the HNSW orphan sweep's settled design);
+    the FTS rebuild is FTS-only, so it performs no embedding calls (no VoyageAI
+    cost). Idempotent + re-discovery-based, so no durable cursor is needed.
+    """
+
+    # Whether the FTS backfill sweep scheduler is active (default: True -- ships ON).
+    enabled: bool = True
+
+    # Golden repos built per tick (default: 10; FTS build is CPU+disk only).
+    batch_size: int = 10
+
+    # Minutes between ticks (default: 15).
+    tick_interval_minutes: int = 15
+
+    # Per-repo wall-clock timeout (seconds) for the sweep's FTS rebuild subprocess
+    # (default: 1800 = 30 min). Unlike the registration path -- which stays
+    # timeout-free per Bug #1218 (indexing has no wall-clock clock) -- the
+    # maintenance sweep bounds each build so one stuck/deadlocked repo can't wedge a
+    # whole tick; a timeout is reported as a FAILED outcome and retried next pass.
+    # FTS is a local text index (no embeddings), so 30 min is generous headroom.
+    build_timeout_seconds: int = 1800
+
+
+@dataclass
 class XRayConfig:
     """
     Configuration for X-Ray precision AST-aware code search (Story #977).
@@ -1581,6 +1612,9 @@ class ServerConfig:
     # Story #1360 (Epic #1333 S3) - HNSW orphan repair fleet sweep configuration
     hnsw_orphan_repair_sweep_config: Optional[HNSWOrphanRepairSweepConfig] = None
 
+    # EVO-66445 - golden-repo FTS backfill sweep configuration
+    fts_backfill_sweep_config: Optional[FtsBackfillSweepConfig] = None
+
     # Story #977 - X-Ray precision AST-aware code search configuration (runtime, not bootstrap)
     xray_config: Optional[XRayConfig] = None
 
@@ -1876,6 +1910,9 @@ class ServerConfig:
         # Story #1360 (Epic #1333 S3) - Initialize HNSW orphan repair sweep config
         if self.hnsw_orphan_repair_sweep_config is None:
             self.hnsw_orphan_repair_sweep_config = HNSWOrphanRepairSweepConfig()
+        # EVO-66445 - Initialize FTS backfill sweep config
+        if self.fts_backfill_sweep_config is None:
+            self.fts_backfill_sweep_config = FtsBackfillSweepConfig()
         # Story #977 - Initialize X-Ray config
         if self.xray_config is None:
             self.xray_config = XRayConfig()
@@ -2613,6 +2650,17 @@ class ServerConfigManager:
                 HNSWOrphanRepairSweepConfig(
                     **{k: v for k, v in _hnsw_dict.items() if k in _hnsw_allowed}
                 )
+            )
+
+        # EVO-66445: Convert fts_backfill_sweep_config dict to FtsBackfillSweepConfig
+        # (fields() filter for rolling-upgrade safety, same pattern as above).
+        if "fts_backfill_sweep_config" in config_dict and isinstance(
+            config_dict["fts_backfill_sweep_config"], dict
+        ):
+            _fts_dict = config_dict["fts_backfill_sweep_config"]
+            _fts_allowed = {f.name for f in fields(FtsBackfillSweepConfig)}
+            config_dict["fts_backfill_sweep_config"] = FtsBackfillSweepConfig(
+                **{k: v for k, v in _fts_dict.items() if k in _fts_allowed}
             )
 
         # Story #977: Convert xray_config dict to XRayConfig
