@@ -2141,6 +2141,44 @@ def make_lifespan(
                 )
             )
 
+        # Startup: Initialize golden-repo FTS backfill sweep scheduler (EVO-66445).
+        # Reverse-fix half of EVO-66445: builds the Tantivy FTS index on golden
+        # repos registered before the forward fix existed (the fleet had a semantic
+        # index but no tantivy_index, so search_mode="fts" errored fleet-wide). On
+        # by default (config-gated), paced, cluster-safe, idempotent (no durable
+        # cursor -- re-discovers repos missing FTS each tick). The FTS rebuild is
+        # FTS-only, so it performs no embedding calls (no VoyageAI cost).
+        fts_backfill_sweep_scheduler = None
+        logger.info(
+            "Server startup: Initializing FTS backfill sweep scheduler",
+            extra={"correlation_id": get_correlation_id()},
+        )
+        try:
+            from code_indexer.server.services.fts_backfill.scheduler import (
+                FtsBackfillSweepScheduler as _FtsBackfillSweepScheduler,
+            )
+            from code_indexer.server.services.config_service import get_config_service
+
+            fts_backfill_sweep_scheduler = _FtsBackfillSweepScheduler(
+                golden_repo_manager=golden_repo_manager,
+                background_job_manager=background_job_manager,
+                config_service=get_config_service(),
+            )
+            fts_backfill_sweep_scheduler.start()
+            app.state.fts_backfill_sweep_scheduler = fts_backfill_sweep_scheduler
+            logger.info(
+                "FTS backfill sweep scheduler started",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        except Exception as e:
+            logger.warning(
+                format_error_log(
+                    "APP-GENERAL-090",
+                    f"Failed to initialize FTS backfill sweep scheduler: {e}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
+
         # Startup: Initialize in-process embedding-stats writer (Story #1418
         # Phase 3). Without this, the live server process never installs a
         # real writer -- every server-side instrumented embedding/reranker
