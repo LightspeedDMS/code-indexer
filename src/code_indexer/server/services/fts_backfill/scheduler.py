@@ -34,6 +34,7 @@ _SLEEP_GRANULARITY_SECONDS = 5
 # Safe fallbacks when config cannot be read.
 _DEFAULT_BATCH_SIZE = 10
 _DEFAULT_TICK_INTERVAL_MINUTES = 15
+_DEFAULT_BUILD_TIMEOUT_SECONDS = 1800
 
 
 class FtsBackfillSweepScheduler:
@@ -83,6 +84,7 @@ class FtsBackfillSweepScheduler:
                 "enabled": bool(cfg.enabled),
                 "batch_size": int(cfg.batch_size),
                 "interval_minutes": int(cfg.tick_interval_minutes),
+                "build_timeout_seconds": int(cfg.build_timeout_seconds),
             }
         except Exception as exc:  # noqa: BLE001 -- never let a config glitch stop the sweep
             logger.warning(
@@ -93,6 +95,7 @@ class FtsBackfillSweepScheduler:
                 "enabled": True,
                 "batch_size": _DEFAULT_BATCH_SIZE,
                 "interval_minutes": _DEFAULT_TICK_INTERVAL_MINUTES,
+                "build_timeout_seconds": _DEFAULT_BUILD_TIMEOUT_SECONDS,
             }
 
     # --------------------------------------------------------------- tick submission
@@ -126,6 +129,7 @@ class FtsBackfillSweepScheduler:
             self._golden_repo_manager,
             batch_size=cfg["batch_size"],
             subprocess_env=self._subprocess_env_provider(),
+            timeout=cfg["build_timeout_seconds"],
         )
         return {
             "total_missing": stats.total_missing,

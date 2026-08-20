@@ -128,3 +128,31 @@ def test_init_failure_is_failed_without_rebuild(tmp_path: Path) -> None:
     assert outcome.status is FtsBuildStatus.FAILED
     assert "init failed" in outcome.detail
     assert not runner.ran("--rebuild-fts-index")  # never attempts rebuild if init fails
+
+
+def test_subprocess_launch_failure_is_failed_not_raised(tmp_path: Path, caplog) -> None:
+    """CRITICAL (MR !69): a subprocess that fails to LAUNCH (cidx not on PATH,
+    permission error) must become a FAILED outcome, never propagate -- else the
+    golden-repo registration's except clauses roll back the whole registration."""
+    repo = _make_repo(tmp_path, config=True, fts=False)
+
+    def boom_runner(cmd, **kwargs):
+        raise FileNotFoundError("cidx not found on PATH")
+
+    with caplog.at_level("ERROR"):
+        outcome = ensure_fts_index(repo, alias="evolution", runner=boom_runner)
+    assert outcome.status is FtsBuildStatus.FAILED
+    assert "subprocess error" in outcome.detail
+    assert "evolution" in caplog.text
+
+
+def test_timeout_expired_is_failed_not_raised(tmp_path: Path) -> None:
+    """A hung build that hits the bounded sweep timeout is FAILED, not an exception."""
+    repo = _make_repo(tmp_path, config=True, fts=False)
+
+    def slow_runner(cmd, **kwargs):
+        raise subprocess.TimeoutExpired(cmd, 30)
+
+    outcome = ensure_fts_index(repo, alias="a", runner=slow_runner, timeout=30)
+    assert outcome.status is FtsBuildStatus.FAILED
+    assert "subprocess error" in outcome.detail

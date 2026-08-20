@@ -82,6 +82,54 @@ def _detail(result: "subprocess.CompletedProcess[str]") -> str:
     return text.strip()[:_DETAIL_MAX]
 
 
+def _run_or_fail(
+    runner: Callable[..., "subprocess.CompletedProcess[str]"],
+    cmd: list,
+    *,
+    cwd: str,
+    env: Optional[dict],
+    timeout: Optional[int],
+    alias: Optional[str],
+    phase: str,
+) -> "tuple[Optional[subprocess.CompletedProcess[str]], Optional[FtsBuildOutcome]]":
+    """Run a ``cidx`` subprocess, converting a LAUNCH failure into a FAILED outcome.
+
+    A subprocess that fails to *start* (``FileNotFoundError`` -- ``cidx`` not on
+    PATH, ``PermissionError``, any other ``OSError``) or that exceeds ``timeout``
+    (``subprocess.TimeoutExpired``, a ``SubprocessError``) must NEVER propagate out
+    of :func:`ensure_fts_index`. The sole registration-path caller
+    (``GoldenRepoManager._execute_post_clone_workflow``) wraps its whole body in
+    ``except (OSError, subprocess.TimeoutExpired, ...)`` -> ``GitOperationError``,
+    which rolls back the entire golden-repo registration (deleting the just-cloned
+    repo) -- the exact opposite of this fix's "non-fatal, semantic is load-bearing"
+    guarantee. So we catch launch failures here and report them as ``FAILED``.
+
+    Returns ``(result, None)`` on a clean launch (caller inspects
+    ``result.returncode``), or ``(None, outcome)`` when the launch itself failed.
+    """
+    try:
+        result = runner(
+            cmd,
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=timeout,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        logger.error(
+            "EVO-66445 FTS %s subprocess did not run for alias=%s at %s: %r",
+            phase,
+            alias,
+            cwd,
+            exc,
+        )
+        return None, FtsBuildOutcome(
+            FtsBuildStatus.FAILED, alias, f"{phase} subprocess error: {exc}"
+        )
+    return result, None
+
+
 def ensure_fts_index(
     repo_path: Path,
     *,
@@ -98,11 +146,15 @@ def ensure_fts_index(
     * index missing -> init-guard (run ``cidx init --no-override-file`` iff
       ``config.json`` is absent), then ``cidx index --rebuild-fts-index``, then
       re-verify the marker -> :attr:`FtsBuildStatus.REBUILT`;
-    * any failure -- init non-zero, rebuild non-zero, or the rebuild exiting 0 but
-      writing no index -- -> :attr:`FtsBuildStatus.FAILED`, logged at ERROR.
+    * any failure -- the subprocess failing to launch / timing out, init non-zero,
+      rebuild non-zero, or the rebuild exiting 0 but writing no index -- ->
+      :attr:`FtsBuildStatus.FAILED`, logged at ERROR.
 
-    The "exit 0 but no index" case is deliberately treated as FAILED: it is exactly
-    the silent degradation this fix exists to eliminate.
+    Crucially this NEVER raises for a build/launch failure: it always returns a
+    structured outcome, so a caller (e.g. golden-repo registration) can treat a
+    failed FTS build as non-fatal without risking an exception that aborts/rolls
+    back unrelated work. The "exit 0 but no index" case is deliberately FAILED --
+    exactly the silent degradation this fix exists to eliminate.
 
     Args:
         repo_path: the in-place golden repo root (parent of ``.code-indexer``).
@@ -110,7 +162,12 @@ def ensure_fts_index(
         subprocess_env: environment for the child ``cidx`` processes (typically
             ``build_cidx_subprocess_env()``); ``None`` inherits the parent env.
         runner: injection seam for tests; defaults to :func:`subprocess.run`.
-        timeout: optional per-subprocess timeout in seconds.
+        timeout: optional per-subprocess wall-clock timeout in seconds. The
+            registration path leaves this ``None`` (Bug #1218: the indexing path
+            carries no wall-clock clock -- a large repo legitimately takes a while,
+            and this mirrors the sibling ``cidx index --fts`` step); the
+            maintenance backfill sweep passes a bounded value so one stuck repo
+            can't wedge a tick. A ``TimeoutExpired`` becomes a ``FAILED`` outcome.
     """
     ci = repo_path / ".code-indexer"
 
@@ -124,14 +181,18 @@ def ensure_fts_index(
     # init-guard: a bare in-place golden dir may lack config.json (observed on the
     # live fleet), and ``cidx index`` refuses to run on an uninitialized project.
     if not (ci / _CONFIG_MARKER).exists():
-        init = runner(
+        init, launch_outcome = _run_or_fail(
+            runner,
             ["cidx", "init", "--no-override-file"],
             cwd=str(repo_path),
-            capture_output=True,
-            text=True,
             env=subprocess_env,
             timeout=timeout,
+            alias=alias,
+            phase="init",
         )
+        if launch_outcome is not None:
+            return launch_outcome
+        assert init is not None  # narrow for mypy: launch_outcome is None here
         if init.returncode != 0:
             detail = _detail(init)
             logger.error(
@@ -144,14 +205,18 @@ def ensure_fts_index(
                 FtsBuildStatus.FAILED, alias, f"init failed: {detail}"
             )
 
-    result = runner(
+    result, launch_outcome = _run_or_fail(
+        runner,
         ["cidx", "index", "--rebuild-fts-index"],
         cwd=str(repo_path),
-        capture_output=True,
-        text=True,
         env=subprocess_env,
         timeout=timeout,
+        alias=alias,
+        phase="rebuild",
     )
+    if launch_outcome is not None:
+        return launch_outcome
+    assert result is not None  # narrow for mypy: launch_outcome is None here
     if result.returncode != 0:
         detail = _detail(result)
         logger.error(

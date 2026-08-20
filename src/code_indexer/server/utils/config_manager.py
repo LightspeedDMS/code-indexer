@@ -1115,6 +1115,14 @@ class FtsBackfillSweepConfig:
     # Minutes between ticks (default: 15).
     tick_interval_minutes: int = 15
 
+    # Per-repo wall-clock timeout (seconds) for the sweep's FTS rebuild subprocess
+    # (default: 1800 = 30 min). Unlike the registration path -- which stays
+    # timeout-free per Bug #1218 (indexing has no wall-clock clock) -- the
+    # maintenance sweep bounds each build so one stuck/deadlocked repo can't wedge a
+    # whole tick; a timeout is reported as a FAILED outcome and retried next pass.
+    # FTS is a local text index (no embeddings), so 30 min is generous headroom.
+    build_timeout_seconds: int = 1800
+
 
 @dataclass
 class XRayConfig:

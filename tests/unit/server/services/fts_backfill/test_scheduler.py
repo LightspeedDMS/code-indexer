@@ -49,17 +49,24 @@ def _scheduler(cfg: Any, bjm: Any, tick_fn: Any) -> FtsBackfillSweepScheduler:
 def test_run_tick_uses_config_batch_size_and_reports_stats() -> None:
     seen: Dict[str, Any] = {}
 
-    def tick_fn(grm, *, batch_size, subprocess_env):
+    def tick_fn(grm, *, batch_size, subprocess_env, timeout):
         seen["batch_size"] = batch_size
         seen["env"] = subprocess_env
+        seen["timeout"] = timeout
         return FtsBackfillTickStats(total_missing=5, attempted=3, rebuilt=2, failed=1)
 
-    cfg = _Cfg(enabled=True, batch_size=3, tick_interval_minutes=15)
+    cfg = _Cfg(
+        enabled=True,
+        batch_size=3,
+        tick_interval_minutes=15,
+        build_timeout_seconds=900,
+    )
     sched = _scheduler(cfg, _BJM(), tick_fn)
     result = sched._run_tick()
 
     assert seen["batch_size"] == 3
     assert seen["env"] == {"ENV": "x"}
+    assert seen["timeout"] == 900  # bounded build timeout threaded from config
     assert result == {
         "total_missing": 5,
         "attempted": 3,
@@ -83,6 +90,7 @@ def test_read_cycle_config_fail_open_on_bad_config() -> None:
     assert cfg["enabled"] is True  # fail-open: never silently stops
     assert cfg["batch_size"] == 10
     assert cfg["interval_minutes"] == 15
+    assert cfg["build_timeout_seconds"] == 1800
 
 
 def test_trigger_now_returns_none_on_duplicate() -> None:
