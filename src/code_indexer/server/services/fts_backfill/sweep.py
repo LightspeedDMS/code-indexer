@@ -39,7 +39,9 @@ def run_fts_backfill_tick(
     batch_size: int,
     subprocess_env: Optional[dict] = None,
     ensure_fn: Callable[..., Any] = ensure_fts_index,
-    discover_fn: Callable[[Any], List[FtsBackfillCandidate]] = discover_repos_missing_fts,
+    discover_fn: Callable[
+        [Any], List[FtsBackfillCandidate]
+    ] = discover_repos_missing_fts,
     timeout: Optional[int] = None,
 ) -> FtsBackfillTickStats:
     """Build FTS for up to ``batch_size`` golden repos that currently lack it.

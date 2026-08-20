@@ -151,7 +151,5 @@ class FtsBackfillSweepScheduler:
             total = max(1, int(cfg["interval_minutes"])) * 60
             waited = 0
             while waited < total and not self._stop_event.is_set():
-                self._stop_event.wait(
-                    min(_SLEEP_GRANULARITY_SECONDS, total - waited)
-                )
+                self._stop_event.wait(min(_SLEEP_GRANULARITY_SECONDS, total - waited))
                 waited += _SLEEP_GRANULARITY_SECONDS
