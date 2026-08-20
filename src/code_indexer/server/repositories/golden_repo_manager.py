@@ -2699,6 +2699,38 @@ class GoldenRepoManager:
             )
             logging.info(f"cidx index --fts completed for {clone_path}")
 
+            # EVO-66445: the `cidx index --fts` above runs FTS through
+            # smart_indexer, which SILENTLY degrades to semantic-only on any FTS
+            # init/build error ("graceful degradation") -- which is how the entire
+            # golden fleet ended up with a semantic index but no tantivy_index
+            # (search_mode="fts" errored fleet-wide). Verify the FTS index actually
+            # materialized and, if not, rebuild it via the reliable FTS-only path;
+            # surface a persistent failure loudly rather than swallowing it.
+            # Non-fatal: semantic is the load-bearing index, so a failed FTS build
+            # is logged at ERROR + reported, never a registration abort. When the
+            # --fts pass already built the index (healthy case) this is a cheap
+            # marker check -- no rebuild, no embedding cost.
+            from ..services.fts_index_builder import ensure_fts_index
+
+            _fts_outcome = ensure_fts_index(
+                Path(clone_path),
+                alias=golden_repo_alias,
+                subprocess_env=build_cidx_subprocess_env(),
+            )
+            if not _fts_outcome.ok:
+                logging.error(
+                    "EVO-66445: FTS index unavailable after registration for "
+                    "alias=%s: %s",
+                    golden_repo_alias,
+                    _fts_outcome.detail,
+                )
+            else:
+                logging.info(
+                    "EVO-66445: FTS index %s for alias=%s",
+                    _fts_outcome.status.value,
+                    golden_repo_alias,
+                )
+
             # Step 3: cidx index --index-commits --progress-json (temporal, if enabled)
             if temporal_command is not None:
                 # Bug #1313 round-3: in postgres/cluster mode, hand the child
