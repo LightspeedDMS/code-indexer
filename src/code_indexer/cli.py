@@ -19683,6 +19683,7 @@ def global_regex_search(
                 ],
                 "total_matches": result.total_matches,
                 "truncated": result.truncated,
+                "read_capped": result.read_capped,
                 "search_engine": result.search_engine,
                 "search_time_ms": result.search_time_ms,
             }
@@ -19695,10 +19696,21 @@ def global_regex_search(
                 )
                 return
 
-            console.print(
-                f"[green]Found {result.total_matches} matches[/green] "
-                f"[dim](showing {len(result.matches)}, {result.search_time_ms:.1f}ms, {result.search_engine})[/dim]"
-            )
+            if result.read_capped:
+                # Issue #1601 Priority 8: a human-readable CLI user has
+                # no other way to know the scan stopped early -- disclose
+                # it explicitly instead of silently implying total_matches
+                # is a complete, exact count.
+                console.print(
+                    f"[yellow]Found at least {result.total_matches} matches "
+                    f"(scan capped)[/yellow] "
+                    f"[dim](showing {len(result.matches)}, {result.search_time_ms:.1f}ms, {result.search_engine})[/dim]"
+                )
+            else:
+                console.print(
+                    f"[green]Found {result.total_matches} matches[/green] "
+                    f"[dim](showing {len(result.matches)}, {result.search_time_ms:.1f}ms, {result.search_engine})[/dim]"
+                )
             console.print()
 
             for match in result.matches:

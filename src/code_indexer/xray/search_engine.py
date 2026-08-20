@@ -707,6 +707,23 @@ class XRaySearchEngine:
                         "hint": hint,
                     }
                 )
+            # Issue #1601 (AC-E): this probe's own ``.*`` pattern is the
+            # broadest possible content search -- surface read_capped
+            # rather than silently dropping it, exactly as the main
+            # content driver does.
+            if probe_result.read_capped:
+                warnings.append(
+                    {
+                        "type": "content_search_read_capped",
+                        "pattern": pat,
+                        "hint": (
+                            "The zero-match probe for this include_pattern "
+                            "hit the byte-size read ceiling before "
+                            "completing; its zero-match determination may "
+                            "be unreliable for this pattern."
+                        ),
+                    }
+                )
 
         return warnings
 
@@ -918,6 +935,25 @@ class XRaySearchEngine:
         if include_patterns:
             self._last_phase1_warnings = self._probe_zero_match_patterns_content(
                 repo_path, include_patterns
+            )
+
+        # Issue #1601 (AC-E): surface the byte-ceiling signal rather than
+        # silently dropping it. Appended (not assigned) so it survives
+        # regardless of whether the zero-match-pattern probe above ran and
+        # reassigned self._last_phase1_warnings.
+        if self._last_phase1_warnings is None:
+            self._last_phase1_warnings = []
+        if search_result.read_capped:
+            self._last_phase1_warnings.append(
+                {
+                    "type": "content_search_read_capped",
+                    "hint": (
+                        "Content search hit the byte-size read ceiling "
+                        "before scanning could complete; results may be a "
+                        "subset of all matches. Narrow the pattern or "
+                        "include_patterns to reduce match volume."
+                    ),
+                }
             )
 
         return candidates

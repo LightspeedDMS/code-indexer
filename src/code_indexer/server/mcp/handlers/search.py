@@ -110,6 +110,25 @@ _DEFAULT_EDIT_DISTANCE = 0
 _DEFAULT_SNIPPET_LINES = 5
 _DEFAULT_REGEX_MAX_RESULTS = 100
 _DEFAULT_REGEX_CONTEXT_LINES = 0
+# Issue #1601 remediation round 5 (Priority 1): matches the documented
+# inputSchema.max_results.maximum in
+# server/mcp/tool_docs/search/regex_search.md. Previously only the LOWER
+# bound was clamped (max(1, ...)); an absurdly large caller-supplied
+# max_results was passed straight through to RegexSearchService.search()
+# unclamped, defeating any per-request memory budget the documented
+# ceiling implies (including the aggregate result-content budget added
+# in this same remediation round).
+_MAX_REGEX_MAX_RESULTS = 1000
+# Issue #1601 remediation round 5 (Codex finding, other half of the
+# multiplicand): matches the documented inputSchema.context_lines.maximum
+# in server/mcp/tool_docs/search/regex_search.md, and mirrors the REST
+# route's Field(default=0, ge=0, le=10) in regex_routes.py. Previously
+# only the LOWER bound was clamped (max(0, ...)); an absurdly large
+# caller-supplied context_lines was passed straight through to
+# RegexSearchService.search(), wasting subprocess I/O/CPU on `rg -C
+# <huge>` even though the aggregate result-content budget (this same
+# remediation round) still bounds the resulting memory.
+_MAX_REGEX_CONTEXT_LINES = 10
 # Filesystem subdirectory name for the memory HNSW index (Story #883).
 _CIDX_META_DIR_NAME = "cidx-meta"
 
@@ -1716,6 +1735,7 @@ async def _omni_regex_search(args: Dict[str, Any], user: User) -> Dict[str, Any]
                 "matches": [],
                 "total_matches": 0,
                 "truncated": False,
+                "read_capped": False,
                 "search_engine": "ripgrep",
                 "search_time_ms": 0,
                 "repos_searched": 0,
@@ -1728,6 +1748,7 @@ async def _omni_regex_search(args: Dict[str, Any], user: User) -> Dict[str, Any]
     errors: dict = {}
     repos_searched = 0
     truncated = False
+    read_capped = False
 
     for repo_alias in repo_aliases:
         try:
@@ -1746,6 +1767,8 @@ async def _omni_regex_search(args: Dict[str, Any], user: User) -> Dict[str, Any]
                     all_matches.extend(matches)
                     if result_data.get("truncated"):
                         truncated = True
+                    if result_data.get("read_capped"):
+                        read_capped = True
                 else:
                     errors[repo_alias] = result_data.get("error", "Unknown error")
         except Exception as e:
@@ -1769,10 +1792,25 @@ async def _omni_regex_search(args: Dict[str, Any], user: User) -> Dict[str, Any]
         errors=errors,
     )
     formatted["truncated"] = truncated
+    formatted["read_capped"] = read_capped
     formatted["search_engine"] = "ripgrep"
     formatted["search_time_ms"] = elapsed_ms
     if response_format == "flat":
         formatted["matches"] = formatted.pop("results")
+        # Issue #1601 Priority 7 (documented deliberate deferral, not an
+        # oversight): this omni-level total_matches stays len(all_matches)
+        # (the sum of returned per-repo PAGES) rather than a sum of
+        # per-repo lower-bound SENTINELS (Priority 7's single-repo fix
+        # above). _format_omni_response is a shared helper also used by
+        # non-regex omni handlers (files.py, git_read.py, semantic
+        # search) with no equivalent sentinel concept, and naively
+        # summing per-repo sentinels here would produce a number that
+        # mixes exact counts with lower bounds inconsistently unless
+        # every constituent additionally reported whether ITS OWN total
+        # was itself a sentinel -- a larger protocol change out of scope
+        # for this remediation. The per-repo read_capped/truncated flags
+        # above are already OR-aggregated and remain the authoritative
+        # "results may be incomplete" signal for the omni response.
         formatted["total_matches"] = formatted.pop("total_results")
         formatted["repos_searched"] = formatted.pop("total_repos_searched")
     return _mcp_response(formatted)
@@ -1860,7 +1898,15 @@ async def _rerank_truncate_and_filter_regex_matches(
     AC1 split).
 
     Returns:
-        (matches, rerank_meta)
+        (matches, rerank_meta). rerank_meta carries an additional
+        "cidx_meta_access_filtered" bool (Bug #337 regression fix) set True
+        only when the cidx-meta access-filtering branch below actually ran
+        with a real access_svc -- the caller (handle_regex_search) uses this
+        to decide whether the raw engine's sr.total_matches (Issue #1601
+        Priority 7's lower-bound sentinel) is still safe to report, or
+        whether it must fall back to the post-filter len(matches) instead
+        because the raw count would otherwise leak the existence of files
+        the requesting user is not authorized to see.
     """
     regex_limit = _coerce_int(args.get("max_results"), len(matches))
     rerank_kwargs = dict(
@@ -1877,12 +1923,15 @@ async def _rerank_truncate_and_filter_regex_matches(
 
     matches = _apply_regex_payload_truncation(matches)
 
+    cidx_meta_access_filtered = False
     if repository_alias and "cidx-meta" in repository_alias:
         access_svc = _get_access_filtering_service()
         if access_svc:
             filenames = [Path(m["file_path"]).name for m in matches]
             allowed = set(access_svc.filter_cidx_meta_files(filenames, user.username))
             matches = [m for m in matches if Path(m["file_path"]).name in allowed]
+            cidx_meta_access_filtered = True
+    rerank_meta["cidx_meta_access_filtered"] = cidx_meta_access_filtered
 
     return matches, rerank_meta
 
@@ -1905,14 +1954,28 @@ async def _execute_regex_search_impl(
     search_limits = config.search_limits_config
     subprocess_max_workers = config.background_jobs_config.subprocess_max_workers
     max_results = max(
-        1, _coerce_int(args.get("max_results"), _DEFAULT_REGEX_MAX_RESULTS)
+        1,
+        min(
+            _MAX_REGEX_MAX_RESULTS,
+            _coerce_int(args.get("max_results"), _DEFAULT_REGEX_MAX_RESULTS),
+        ),
     )
     context_lines = max(
-        0, _coerce_int(args.get("context_lines"), _DEFAULT_REGEX_CONTEXT_LINES)
+        0,
+        min(
+            _MAX_REGEX_CONTEXT_LINES,
+            _coerce_int(args.get("context_lines"), _DEFAULT_REGEX_CONTEXT_LINES),
+        ),
     )
 
     service = RegexSearchService(
-        repo_path, subprocess_max_workers=subprocess_max_workers
+        repo_path,
+        subprocess_max_workers=subprocess_max_workers,
+        # Issue #1601 Priority 9: thread the already-in-scope alias
+        # through so the service's read-capped WARNING log surfaces the
+        # real user-facing alias, not just the (possibly
+        # versioned-snapshot) repo_path.
+        alias=repository_alias,
     )
     search_result = await service.search(
         pattern=args["pattern"],
@@ -2058,12 +2121,31 @@ async def handle_regex_search(args: Dict[str, Any], user: User) -> Dict[str, Any
         matches, rerank_meta, sr = await _execute_regex_search(
             args, Path(resolved), repository_alias, user
         )
+        # Bug #337 regression fix: when cidx-meta access filtering actually
+        # ran (rerank_meta["cidx_meta_access_filtered"], set in
+        # _rerank_truncate_and_filter_regex_matches), sr.total_matches is
+        # the PRE-filter raw engine count -- reporting it would both be
+        # factually wrong for the user and leak the existence-count of
+        # files they are not authorized to see. Fall back to the
+        # post-filter len(matches) in that case. Otherwise (non-cidx-meta
+        # repos, or no filtering applied), Issue #1601 Priority 7's
+        # original behavior is preserved: propagate the service's own
+        # total_matches (a deliberate lower-bound SENTINEL, e.g.
+        # max_results + 1, once truncated/read_capped stopped the scan
+        # early) -- never recompute via len(matches), which would silently
+        # discard that signal.
+        total_matches = (
+            len(matches)
+            if rerank_meta.get("cidx_meta_access_filtered")
+            else sr.total_matches
+        )
         return _mcp_response(
             {
                 "success": True,
                 "matches": matches,
-                "total_matches": len(matches),
+                "total_matches": total_matches,
                 "truncated": sr.truncated,
+                "read_capped": sr.read_capped,
                 "search_engine": sr.search_engine,
                 "search_time_ms": sr.search_time_ms,
                 "query_metadata": {

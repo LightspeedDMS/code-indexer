@@ -389,7 +389,7 @@ class TestScipCallchainFallback:
 
         def _fake_trace_callchain(**kw):
             captured["repository_alias"] = kw.get("repository_alias")
-            return []
+            return ([], [])
 
         mock_service = MagicMock()
         mock_service.trace_callchain.side_effect = _fake_trace_callchain

@@ -107,8 +107,26 @@ outputSchema:
               type: string
     total_matches:
       type: integer
+      description: >-
+        Number of matches found. Exact only when neither truncated nor
+        read_capped is true; otherwise a LOWER BOUND ("at least this many
+        matches exist"), not an exact count.
     truncated:
       type: boolean
+      description: >-
+        True only when the scan affirmatively observed more matches than
+        max_results allowed. Distinct from read_capped -- see that field's
+        description for how the two differ and can both be true at once.
+    read_capped:
+      type: boolean
+      description: >-
+        True when the search hit an internal hard byte-size read ceiling
+        before it could scan all output, independent of max_results. When
+        the byte ceiling is what stopped the scan before max_results would
+        have, truncated is correctly false (the scan cannot know whether
+        more than max_results matches existed) and read_capped signals the
+        incompleteness instead. Both flags may be true simultaneously when
+        the two thresholds are crossed at effectively the same point.
     search_engine:
       type: string
     search_time_ms:

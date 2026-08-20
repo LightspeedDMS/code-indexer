@@ -1905,25 +1905,28 @@ async def test_ac2_regex_search_does_not_block_event_loop(
         "heaviest synchronous line items would go unmeasured"
     )
 
-    # PRECONDITION (review item 2): the baseline must be a genuine event-loop
-    # stall before its comparison against the fixed path means anything.
-    minimum_baseline_stall = _AC2_MIN_BASELINE_STALL_SECONDS
-    assert before_probe >= minimum_baseline_stall, (
-        "NON-DISCRIMINATING MEASUREMENT: the pre-change async-dispatch baseline "
-        f"only stalled the loop for {before_probe:.4f}s, under the "
-        f"{minimum_baseline_stall:.4f}s this test requires before trusting any "
-        "before/after comparison. The corpus is too small (or the pre-filter did "
-        "not run), so a passing 'after' would prove nothing about the fix."
+    # Issue #1601 Priority 3 superseded the original before/after COMPARISON
+    # here: RegexSearchService.search() now offloads the trigram pre-filter
+    # and its Path.resolve() fan-out via anyio.to_thread.run_sync REGARDLESS
+    # of which dispatch path reaches it, so the pre-Story-#1491
+    # directly-awaited ("before") path no longer stalls the loop either --
+    # the exact synchronous section this test used to rely on staying slow
+    # in that path is now off-loop there too. That is a genuine, deeper fix
+    # (Finding B2's heaviest line items are now safe independent of dispatch
+    # mechanism), not a regression, so reconstructing the old stall to keep
+    # a "before vs after" ratio would be measuring a condition that no
+    # longer exists in production. The replacement assertion is STRONGER:
+    # both dispatch paths must keep the loop responsive.
+    assert before_probe < _AC2_PROBE_BUDGET_SECONDS, (
+        "the pre-Story-#1491 async-dispatch path stalled the event loop -- "
+        f"Issue #1601 Priority 3's search()-level offload should keep this "
+        f"path non-blocking too (max probe latency {before_probe:.4f}s, "
+        f"budget {_AC2_PROBE_BUDGET_SECONDS}s)"
     )
-
     assert after_probe < _AC2_PROBE_BUDGET_SECONDS, (
         "a concurrent request was delayed while regex_search ran -- the "
         f"blocking work is still on the event loop (max probe latency "
         f"{after_probe:.4f}s, budget {_AC2_PROBE_BUDGET_SECONDS}s)"
-    )
-    assert after_probe * _MIN_PROBE_IMPROVEMENT_RATIO < before_probe, (
-        "sync dispatch did not measurably free the event loop: probe latency "
-        f"{after_probe:.4f}s vs pre-change async dispatch {before_probe:.4f}s"
     )
 
     # Deterministic dispatch property, independent of any timing: the REGISTERED
