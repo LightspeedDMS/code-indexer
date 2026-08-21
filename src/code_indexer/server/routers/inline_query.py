@@ -43,6 +43,10 @@ from code_indexer.server.mcp.reranking import (
 from code_indexer.server.services.deactivation_query_drain import (
     track_activated_repo_query,
 )
+from code_indexer.server.services.query_admission_gate import (
+    check_query_admission,
+    raise_memory_pressure_http_error,
+)
 from code_indexer.server.services.temporal_live_dispatch import (
     execute_live_temporal_search,
 )
@@ -399,6 +403,10 @@ def register_query_routes(
         Raises:
             HTTPException: If query fails, index missing, or invalid parameters
         """
+        _admission = check_query_admission()
+        if not _admission.allowed:
+            raise_memory_pressure_http_error(_admission)
+
         import socket
         import time
         from pathlib import Path as PathLib

@@ -30,6 +30,10 @@ from code_indexer.xray.search_engine import XRaySearchEngine
 
 from . import _utils
 from ._utils import _mcp_response, _parse_json_string_array
+from code_indexer.server.services.query_admission_gate import (
+    check_query_admission,
+    memory_pressure_mcp_payload,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -461,6 +465,10 @@ def handle_xray_search_batch(
         xray_evaluator_validation_failed — evaluator code fails Rust whitelist.
         no_repositories_resolved       — all aliases unresolvable.
     """
+    _admission = check_query_admission()
+    if not _admission.allowed:
+        return _mcp_response(memory_pressure_mcp_payload(_admission))
+
     # ------------------------------------------------------------------
     # 1. Auth
     # ------------------------------------------------------------------

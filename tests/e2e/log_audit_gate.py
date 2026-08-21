@@ -409,6 +409,17 @@ LOG_AUDIT_ALLOWLIST: List[str] = [
     # ValidationError; a genuine 503 on any OTHER endpoint, or any other
     # status on /auth/elevate, would use different text and NOT be suppressed.
     "HTTP 503 | Request: POST /auth/elevate",
+    # Story #1600 (test_query_admission_gate_e2e_1600.py): the query-path
+    # memory-pressure admission gate deliberately rejects POST /api/query
+    # with HTTP 503 when MemoryGovernor.admission_allowed() denies -- this
+    # is the ASSERTED SIGNAL for the reject->Retry-After workflow test,
+    # forced via MemoryGovernor's injectable readers/time_fn seam (never
+    # organic memory exhaustion). The middleware's generic HTTPException
+    # handler logs every 5xx as a WARNING regardless of cause; anchored on
+    # the exact endpoint so a genuine, unrelated 503 on /api/query (e.g. a
+    # real downstream outage) would still surface via other assertions in
+    # that code path, and a 503 on any OTHER endpoint is NOT suppressed.
+    "HTTP 503 | Request: POST /api/query",
 ]
 
 

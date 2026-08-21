@@ -15,6 +15,10 @@ from code_indexer.server.auth.user_manager import User
 from code_indexer.server.logging_utils import format_error_log
 from code_indexer.server.middleware.correlation import get_correlation_id
 from code_indexer.server.services.config_service import get_config_service
+from code_indexer.server.services.query_admission_gate import (
+    check_query_admission,
+    memory_pressure_mcp_payload,
+)
 from code_indexer.server.repositories.background_jobs import DuplicateJobError
 from code_indexer.server.repositories.golden_repo_manager import GoldenRepoNotFoundError
 from code_indexer.server.services.repository_health_aggregator import (
@@ -505,6 +509,10 @@ def _get_global_repo_status(
 
 def get_all_repositories_status(params: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Get status summary of all repositories."""
+    _admission = check_query_admission()
+    if not _admission.allowed:
+        return _mcp_response(memory_pressure_mcp_payload(_admission))
+
     try:
         repos = _utils.app_module.activated_repo_manager.list_activated_repositories(
             user.username

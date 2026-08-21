@@ -21,6 +21,10 @@ from code_indexer.server.services.dep_map_parser_graph import _aggregate_graph
 
 from . import _utils
 from ._utils import _mcp_response
+from code_indexer.server.services.query_admission_gate import (
+    check_query_admission,
+    memory_pressure_mcp_payload,
+)
 from ._depmap_aliases import (
     apply_consumer_aliases,
     apply_domain_membership_aliases,
@@ -488,6 +492,10 @@ def depmap_get_cross_domain_graph_handler(
         - success=false: {"success": false, "error": "...", "edges": [],
                           "anomalies": [], "parser_anomalies": [], "data_anomalies": []}
     """
+    _admission = check_query_admission()
+    if not _admission.allowed:
+        return _mcp_response(memory_pressure_mcp_payload(_admission))
+
     parser, err = _resolve_parser("depmap_get_cross_domain_graph")
     if err is not None:
         success, resolution = False, "invalid_input"
@@ -693,6 +701,10 @@ def depmap_get_hub_domains_handler(params: Dict[str, Any], user: Any) -> Dict[st
         - invalid_input: unknown by=, invalid/negative top_n, or dep_map_path not a valid Path
         - ok:            hubs computed (may be empty list)
     """
+    _admission = check_query_admission()
+    if not _admission.allowed:
+        return _mcp_response(memory_pressure_mcp_payload(_admission))
+
     is_dict = isinstance(params, dict)
     raw_by = params.get("by", "total_degree") if is_dict else "total_degree"
 

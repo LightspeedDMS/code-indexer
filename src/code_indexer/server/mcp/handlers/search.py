@@ -56,6 +56,10 @@ from code_indexer.server.services.temporal_live_dispatch import (
     execute_live_temporal_search,
 )
 from code_indexer.server.services.config_service import get_config_service
+from code_indexer.server.services.query_admission_gate import (
+    check_query_admission,
+    memory_pressure_mcp_payload,
+)
 from code_indexer.server.services.api_metrics_service import api_metrics_service
 from code_indexer.server.logging_utils import format_error_log
 from code_indexer.server.services.search_event_context import (
@@ -1520,6 +1524,10 @@ def search_code(
     embedding call sites can write cache metadata into it.  Enqueues a
     SearchEventRecord on success only (spec H11).  Resets ContextVar in finally.
     """
+    _admission = check_query_admission()
+    if not _admission.allowed:
+        return _mcp_response(memory_pressure_mcp_payload(_admission))
+
     import json as _json_mod
 
     _search_start = time.monotonic()
@@ -2061,6 +2069,10 @@ async def handle_regex_search(args: Dict[str, Any], user: User) -> Dict[str, Any
 
     Extracted from _legacy.py lines 2044-2220.
     """
+    _admission = check_query_admission()
+    if not _admission.allowed:
+        return _mcp_response(memory_pressure_mcp_payload(_admission))
+
     from code_indexer.server.services.search_error_formatter import SearchErrorFormatter
 
     repository_alias, err = _validate_regex_args(args)
