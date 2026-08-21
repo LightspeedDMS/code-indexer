@@ -43,6 +43,12 @@ def _session_for(store, collection_path):
 
 
 def _read_hnsw_sync(collection_path):
+    """Bug #1619: resolve hnsw_sync the same way production code does --
+    prefer the dedicated hnsw_sync_state.json file, falling back to the
+    legacy embedded collection_meta.json key for pre-migration collections."""
+    sync_file = collection_path / "hnsw_sync_state.json"
+    if sync_file.exists():
+        return json.loads(sync_file.read_text())
     meta = json.loads((collection_path / "collection_meta.json").read_text())
     return meta["hnsw_sync"]
 

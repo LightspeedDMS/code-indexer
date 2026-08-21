@@ -98,9 +98,13 @@ class TestFilesystemVectorStoreCore:
 
         assert result["status"] == "ok", "upsert should succeed"
 
-        # Verify JSON files exist on filesystem
+        # Verify JSON files exist on filesystem. Select by the actual
+        # vector-record naming convention (vector_*.json) rather than a
+        # "not collection_meta" blacklist -- Bug #1619 added a second,
+        # small bookkeeping sidecar (hnsw_sync_state.json) to the
+        # collection root that a blacklist approach would wrongly match.
         json_files = list((tmp_path / "test_coll").rglob("*.json"))
-        vector_files = [f for f in json_files if "collection_meta" not in f.name]
+        vector_files = [f for f in json_files if f.name.startswith("vector_")]
 
         assert len(vector_files) >= 1, "At least one vector file should exist"
 
@@ -145,7 +149,7 @@ class TestFilesystemVectorStoreCore:
 
         # Find all vector JSON files
         vector_files = [
-            f for f in coll_path.rglob("*.json") if "collection_meta" not in f.name
+            f for f in coll_path.rglob("*.json") if f.name.startswith("vector_")
         ]
         assert len(vector_files) == 5, "Should have 5 vector files"
 
@@ -317,7 +321,7 @@ class TestFilesystemVectorStoreCore:
         # No corrupted JSON files
         coll_path = tmp_path / "test_coll"
         for json_file in coll_path.rglob("*.json"):
-            if "collection_meta" in json_file.name:
+            if not json_file.name.startswith("vector_"):
                 continue
             with open(json_file) as f:
                 data = json.load(f)  # Should not raise JSONDecodeError
@@ -358,7 +362,7 @@ class TestFilesystemVectorStoreCore:
         # Verify files actually exist on filesystem
         coll_path = tmp_path / "test_coll"
         json_count = sum(
-            1 for _ in coll_path.rglob("*.json") if "collection_meta" not in _.name
+            1 for _ in coll_path.rglob("*.json") if _.name.startswith("vector_")
         )
         assert json_count == 1000
 
@@ -400,7 +404,7 @@ class TestChunkContentStorageAndRetrieval:
         # Verify JSON DOES contain chunk text (no git fallback)
         coll_path = tmp_path / "test_coll"
         json_files = [
-            f for f in coll_path.rglob("*.json") if "collection_meta" not in f.name
+            f for f in coll_path.rglob("*.json") if f.name.startswith("vector_")
         ]
         with open(json_files[0]) as f:
             data = json.load(f)
@@ -464,7 +468,7 @@ class TestChunkContentStorageAndRetrieval:
         # Verify git_blob_hash stored (no chunk_text)
         coll_path = tmp_path / "test_coll"
         json_files = [
-            f for f in coll_path.rglob("*.json") if "collection_meta" not in f.name
+            f for f in coll_path.rglob("*.json") if f.name.startswith("vector_")
         ]
         with open(json_files[0]) as f:
             data = json.load(f)
@@ -532,7 +536,7 @@ class TestChunkContentStorageAndRetrieval:
         # Verify chunk_text stored (not git_blob_hash)
         coll_path = tmp_path / "test_coll"
         json_files = [
-            f for f in coll_path.rglob("*.json") if "collection_meta" not in f.name
+            f for f in coll_path.rglob("*.json") if f.name.startswith("vector_")
         ]
         with open(json_files[0]) as f:
             data = json.load(f)

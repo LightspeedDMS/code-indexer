@@ -66,8 +66,18 @@ from code_indexer.utils.file_locking import (
 #: guess how to interpret an unknown future/past shape).
 HNSW_SYNC_SCHEMA_VERSION = 1
 
-#: Top-level collection_meta.json key.
+#: Top-level collection_meta.json key. Bug #1619: retained as the READ-side
+#: fallback for pre-#1619 collections; no longer written by current code.
+#: See HNSW_SYNC_STATE_FILENAME for the current, authoritative location.
 HNSW_SYNC_KEY = "hnsw_sync"
+
+#: Bug #1619 fix: dedicated small file (sibling of collection_meta.json)
+#: holding the ENTIRE hnsw_sync payload at its top level. Splitting it out
+#: of collection_meta.json means the per-mutation dirty-marking hot path no
+#: longer has to read-parse and re-serialize+fsync the whole (potentially
+#: multi-MB, id_mapping-holding) collection_meta.json just to flip a few
+#: small fields.
+HNSW_SYNC_STATE_FILENAME = "hnsw_sync_state.json"
 
 #: Sane upper bound for an epoch value. This is a defensive corruption guard,
 #: not a realistic production ceiling (reaching it would require this many
@@ -241,14 +251,55 @@ def read_collection_meta(collection_path: Path) -> Optional[Dict[str, Any]]:
     return meta
 
 
+def _read_hnsw_sync_state_file(collection_path: Path) -> Optional[Dict[str, Any]]:
+    """Read+parse the dedicated ``HNSW_SYNC_STATE_FILENAME`` file.
+
+    Returns ``None`` on ANY read/parse failure (missing file, unreadable,
+    empty, invalid JSON, non-dict root) -- same fail-safe contract as
+    ``read_collection_meta``.
+    """
+    sync_file = collection_path / HNSW_SYNC_STATE_FILENAME
+    try:
+        content = sync_file.read_text()
+    except (OSError, UnicodeDecodeError):
+        return None
+    if not content.strip():
+        return None
+    try:
+        raw = json.loads(content)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(raw, dict):
+        return None
+    return raw
+
+
 def read_hnsw_sync_state(collection_path: Path) -> Optional[HNSWSyncState]:
     """Read and validate the ``hnsw_sync`` state for ``collection_path``.
 
-    Returns ``None`` when ``collection_meta.json`` is missing/unreadable,
-    when it has no ``hnsw_sync`` key (pre-existing collection, AC42), or when
-    the stored value fails validation (AC10) -- every case is the uniform
-    "force a full rebuild" signal.
+    Bug #1619: the dedicated ``HNSW_SYNC_STATE_FILENAME`` file is the
+    authoritative source once it exists -- if it exists but fails to parse
+    or validate, that is treated as "no valid state" WITHOUT falling back
+    to any legacy location (never silently trust a second source once the
+    current one has been established).
+
+    When the dedicated file does not exist at all, falls back to the
+    legacy ``hnsw_sync`` key embedded in ``collection_meta.json`` --
+    backward compatibility for a collection indexed entirely by pre-#1619
+    code, which never gets an eager/forced migration.
+
+    Returns ``None`` when no valid state can be found in either location
+    (missing/unreadable/malformed/inconsistent, AC10) -- every case is the
+    uniform "force a full rebuild" signal.
     """
+    dedicated_raw = _read_hnsw_sync_state_file(collection_path)
+    if dedicated_raw is not None:
+        return parse_hnsw_sync_state(dedicated_raw)
+    if (collection_path / HNSW_SYNC_STATE_FILENAME).exists():
+        # Dedicated file exists but failed to read/parse as a dict -- it is
+        # authoritative once present, so this is corruption, not "absent".
+        return None
+
     meta = read_collection_meta(collection_path)
     if meta is None:
         return None
@@ -261,9 +312,16 @@ def _atomic_write_json_durable(target_path: Path, data: dict) -> None:
     the containing directory so the rename itself survives a crash.
 
     Mirrors ``HNSWIndexManager._atomic_write_metadata_durable`` /
-    ``chunk_layout._atomic_write_json_durable`` -- this file
-    (``collection_meta.json``) holds the load-bearing HNSW
-    ``id_mapping``, so a bare ``write_text()`` is never acceptable here.
+    ``chunk_layout._atomic_write_json_durable``. Bug #1619: this module's
+    sole caller (``write_hnsw_sync_state``) now targets the small
+    dedicated ``HNSW_SYNC_STATE_FILENAME`` sidecar file, NOT
+    ``collection_meta.json`` -- moved out specifically so that this
+    per-mutation hot-path write no longer has to re-serialize
+    ``collection_meta.json``'s own load-bearing, potentially multi-MB HNSW
+    ``id_mapping`` on every call. A bare ``write_text()`` is still never
+    acceptable here: this durable atomic-write discipline is what makes
+    the dirty-marker crash-safe (Bug #1575 Part C's fail-safe contract
+    depends on it never being torn/partially written).
     """
     collection_dir = target_path.parent
     tmp_fd, tmp_path = tempfile.mkstemp(dir=str(collection_dir), suffix=".tmp")
@@ -294,41 +352,48 @@ def _atomic_write_json_durable(target_path: Path, data: dict) -> None:
 
 
 def write_hnsw_sync_state(collection_path: Path, state: HNSWSyncState) -> None:
-    """Durably merge ``{"hnsw_sync": {...}}`` into an EXISTING
-    ``collection_meta.json`` -- additive, preserving every other top-level
-    key untouched.
+    """Durably write ``state`` to the dedicated ``HNSW_SYNC_STATE_FILENAME``
+    file -- a small, standalone file, NOT merged into ``collection_meta.json``.
+
+    Bug #1619: this used to read-merge-write the ENTIRE (potentially
+    multi-MB, ``hnsw_index.id_mapping``-holding) ``collection_meta.json`` on
+    every call -- a severe throughput bottleneck when called before every
+    single ``upsert_points()``/``delete_points()`` mutation (proven live via
+    py-spy against a real stuck indexing run). Moving the payload to its own
+    tiny dedicated file makes this call's cost O(size of the hnsw_sync
+    object) instead of O(collection size).
 
     Raises ``FileNotFoundError`` if ``collection_meta.json`` does not
     already exist -- mirrors ``write_chunks_db_discriminator``'s contract:
     this function never creates the base metadata file from scratch, so an
     out-of-order caller fails loudly instead of masking the ordering bug.
+    This is now a cheap existence check (not a full read+parse) since the
+    write no longer needs that file's content at all.
 
-    Bug #1575 Part C review Finding 2: the read-merge-write below is
-    guarded by ``.metadata.lock`` -- the SAME lock file (and fcntl-based
-    flock pattern) ``HNSWIndexManager._update_metadata`` already uses for
-    every OTHER writer of this same ``collection_meta.json`` file. Without
-    this, a concurrent ``_update_metadata``/``save_incremental_update``
-    call (guarded only by its own ``.metadata.lock`` acquisition) and this
-    function's read-merge-write had no mutual exclusion against each
-    other, allowing either writer's update to be silently lost.
+    Bug #1575 Part C review Finding 2 (PRESERVED): still guarded by
+    ``.metadata.lock`` -- the SAME lock file (and fcntl-based flock pattern)
+    ``HNSWIndexManager._update_metadata``/``_publish_incremental_hnsw_metadata``/
+    ``_write_stale_flag_durably`` use for every writer of
+    ``collection_meta.json``. Keeping this call inside the same lock means
+    every writer of collection state continues to serialize against every
+    other, exactly as before -- the only change is WHAT gets read/written
+    inside the critical section, not the mutual-exclusion contract itself.
     """
     meta_file = collection_path / "collection_meta.json"
+    sync_file = collection_path / HNSW_SYNC_STATE_FILENAME
     lock_file = collection_path / ".metadata.lock"
     lock_file.touch(exist_ok=True)
 
     with open(lock_file, "r+") as lock_f:
         used_lockf = nfs_safe_flock(lock_f.fileno(), fcntl.LOCK_EX)
         try:
-            meta = read_collection_meta(collection_path)
-            if meta is None:
+            if not meta_file.exists():
                 raise FileNotFoundError(
-                    f"Cannot write hnsw_sync state: {meta_file} does not exist or "
-                    f"is unreadable/invalid. write_hnsw_sync_state() must be "
-                    f"called AFTER the base collection_meta.json has already "
-                    f"been written."
+                    f"Cannot write hnsw_sync state: {meta_file} does not exist. "
+                    f"write_hnsw_sync_state() must be called AFTER the base "
+                    f"collection_meta.json has already been written."
                 )
-            meta[HNSW_SYNC_KEY] = state.to_dict()
-            _atomic_write_json_durable(meta_file, meta)
+            _atomic_write_json_durable(sync_file, state.to_dict())
         finally:
             nfs_safe_funlock(lock_f.fileno(), used_lockf)
 

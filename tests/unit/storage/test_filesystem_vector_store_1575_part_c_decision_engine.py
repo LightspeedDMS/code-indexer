@@ -60,7 +60,16 @@ def _query_ids(store, collection_name, seed, limit=50):
 
 
 def _hnsw_sync(collection_path):
-    meta = json.loads((collection_path / "collection_meta.json").read_text())
+    """Bug #1619: resolve hnsw_sync the same way production code does --
+    prefer the dedicated hnsw_sync_state.json file, falling back to the
+    legacy embedded collection_meta.json key for pre-migration collections."""
+    sync_file = collection_path / "hnsw_sync_state.json"
+    if sync_file.exists():
+        return json.loads(sync_file.read_text())
+    meta_file = collection_path / "collection_meta.json"
+    if not meta_file.exists():
+        return None
+    meta = json.loads(meta_file.read_text())
     return meta.get("hnsw_sync")
 
 
@@ -128,12 +137,12 @@ def test_ac42_pre_existing_collection_bootstraps_with_exactly_one_full_rebuild(
     collection_path = tmp_path / "coll"
     assert _hnsw_sync(collection_path) is not None  # created by that first run
 
-    # Simulate a collection indexed by pre-Part-C code: strip the hnsw_sync
-    # key entirely, matching a genuinely pre-existing collection.
-    meta_file = collection_path / "collection_meta.json"
-    meta = json.loads(meta_file.read_text())
-    del meta["hnsw_sync"]
-    meta_file.write_text(json.dumps(meta))
+    # Simulate a collection indexed by pre-Part-C code: remove the hnsw_sync
+    # state entirely, matching a genuinely pre-existing collection. Bug
+    # #1619: hnsw_sync now lives in its own dedicated file (never embedded
+    # in collection_meta.json by current code), so removing it means
+    # deleting that dedicated file.
+    (collection_path / "hnsw_sync_state.json").unlink()
     assert _hnsw_sync(collection_path) is None
 
     identity_before_bootstrap = _hnsw_index_identity(collection_path)
@@ -178,10 +187,11 @@ def test_ac10_malformed_hnsw_sync_forces_full_rebuild_then_reuses(tmp_path):
     store.end_indexing("coll")
 
     collection_path = tmp_path / "coll"
-    meta_file = collection_path / "collection_meta.json"
-    meta = json.loads(meta_file.read_text())
-    meta["hnsw_sync"]["mutation_epoch"] = -5  # malformed: negative epoch
-    meta_file.write_text(json.dumps(meta))
+    # Bug #1619: hnsw_sync now lives in its own dedicated file.
+    sync_file = collection_path / "hnsw_sync_state.json"
+    sync_state = json.loads(sync_file.read_text())
+    sync_state["mutation_epoch"] = -5  # malformed: negative epoch
+    sync_file.write_text(json.dumps(sync_state))
 
     identity_before = _hnsw_index_identity(collection_path)
 
@@ -361,18 +371,22 @@ def test_ac49_epoch_overflow_forces_full_rebuild_with_exact_reset(tmp_path):
     store.end_indexing("coll")
 
     collection_path = tmp_path / "coll"
-    meta_file = collection_path / "collection_meta.json"
-    meta = json.loads(meta_file.read_text())
+    # Bug #1619: hnsw_sync now lives in its own dedicated file, stored at
+    # the file's top level directly (no wrapper key).
+    sync_file = collection_path / "hnsw_sync_state.json"
     overflowing_epoch = _MAX_EPOCH + 1  # beyond the sane bound -> invalid
-    meta["hnsw_sync"] = {
-        "schema_version": HNSW_SYNC_SCHEMA_VERSION,
-        "mutation_epoch": overflowing_epoch,
-        "published_epoch": overflowing_epoch,
-        "status": "clean",
-        "current_branch": None,
-        "layout": "sharded_json",
-    }
-    meta_file.write_text(json.dumps(meta))
+    sync_file.write_text(
+        json.dumps(
+            {
+                "schema_version": HNSW_SYNC_SCHEMA_VERSION,
+                "mutation_epoch": overflowing_epoch,
+                "published_epoch": overflowing_epoch,
+                "status": "clean",
+                "current_branch": None,
+                "layout": "sharded_json",
+            }
+        )
+    )
 
     # The overflowing value must be rejected outright (fail-safe: "no valid
     # state"), never silently trusted as a legitimate huge epoch.

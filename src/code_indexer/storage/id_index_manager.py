@@ -14,6 +14,7 @@ import threading
 from code_indexer.services.temporal.temporal_structure_marker import (
     STRUCTURE_MARKER_FILENAME,
 )
+from code_indexer.storage.shared.hnsw_sync_state import HNSW_SYNC_STATE_FILENAME
 from code_indexer.utils.file_locking import nfs_safe_fsync
 
 logger = logging.getLogger(__name__)
@@ -343,6 +344,11 @@ class IDIndexManager:
                 # Bug #1297: temporal marker/bookkeeping sidecars legitimately
                 # lack an 'id' field -- skip silently, no WARNING, not a
                 # rejection (not a vector record at all).
+                continue
+            if json_file.name == HNSW_SYNC_STATE_FILENAME:
+                # Bug #1619: the dedicated hnsw_sync dirty-marker file lives
+                # alongside collection_meta.json in the collection root --
+                # a bookkeeping sidecar, never a vector record.
                 continue
 
             scanned_count += 1

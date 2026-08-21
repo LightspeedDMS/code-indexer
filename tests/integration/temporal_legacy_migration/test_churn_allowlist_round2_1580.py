@@ -250,3 +250,73 @@ def test_wholesale_churn_filenames_layout_gating_1580_round2(
 
     assert sharded_json_result is True
     assert chunks_db_result is (not layout_gated)
+
+
+def test_hnsw_sync_state_sidecar_altered_in_place_converges_not_collision_1619(
+    tmp_path: Path,
+):
+    """Bug #1619: ``hnsw_sync_state.json`` (the dedicated per-mutation
+    dirty-marker sidecar `_mark_hnsw_dirty_before_mutation()` writes) is
+    the single highest-churn file in a collection root -- rewritten on
+    EVERY ``upsert_points()``/``delete_points()`` call, churnier than
+    ``path_index.bin``/``temporal_progress.json`` (which were already
+    added to ``_ROOT_ONLY_CHURN_FILENAMES`` after a real incident for
+    exactly this reason). A shard that has this sidecar present at
+    publish time, then a real refresh rewrites it in place (a dirty ->
+    clean epoch transition), must still converge -- never be
+    misclassified as a permanent collision.
+    """
+    legacy = tmp_path / "legacy"
+    fixed = tmp_path / "fixed"
+    shard = legacy / "code-indexer-temporal-e-2026Q1"
+    _write_vector_shard(shard, "p1", [1.0])
+    (shard / "hnsw_sync_state.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "mutation_epoch": 1,
+                "published_epoch": 1,
+                "status": "clean",
+                "current_branch": None,
+                "layout": "sharded_json",
+            }
+        )
+    )
+
+    first = migrate_temporal_shards(legacy, fixed, relocation_enabled=True)
+    assert first.published == 1
+    assert first.failed == 0
+    fixed_shard = fixed / shard.name
+
+    # Ordinary in-place refresh: a new commit lands (p2), HNSW rebuilt,
+    # and hnsw_sync_state.json rewritten in place with a new dirty ->
+    # clean epoch transition -- exactly what a real upsert_points() +
+    # end_indexing() cycle does.
+    (fixed_shard / "vector_p2.json").write_text(
+        json.dumps({"id": "p2", "vector": [2.0], "payload": {"source": "refresh"}})
+    )
+    _rebuild_hnsw(fixed_shard, [("p1", [1.0]), ("p2", [2.0])])
+    (fixed_shard / "hnsw_sync_state.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "mutation_epoch": 2,
+                "published_epoch": 2,
+                "status": "clean",
+                "current_branch": None,
+                "layout": "sharded_json",
+            }
+        )
+    )
+
+    second = migrate_temporal_shards(
+        legacy, fixed, relocation_enabled=True, cleanup_authorized=True
+    )
+    assert second.collisions == 0, (
+        "hnsw_sync_state.json being rewritten in place by an ordinary "
+        "refresh must never be misclassified as a permanent collision"
+    )
+    assert second.already_complete == 1
+    assert second.deleted == 1
+    assert second.failed == 0
+    assert not shard.exists()

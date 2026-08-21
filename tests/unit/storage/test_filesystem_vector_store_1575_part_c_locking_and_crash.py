@@ -41,7 +41,16 @@ def _point(point_id, path, seed):
 
 
 def _hnsw_sync(collection_path):
-    meta = json.loads((collection_path / "collection_meta.json").read_text())
+    """Bug #1619: resolve hnsw_sync the same way production code does --
+    prefer the dedicated hnsw_sync_state.json file, falling back to the
+    legacy embedded collection_meta.json key for pre-migration collections."""
+    sync_file = collection_path / "hnsw_sync_state.json"
+    if sync_file.exists():
+        return json.loads(sync_file.read_text())
+    meta_file = collection_path / "collection_meta.json"
+    if not meta_file.exists():
+        return None
+    meta = json.loads(meta_file.read_text())
     return meta.get("hnsw_sync")
 
 
@@ -360,14 +369,15 @@ def test_ac27_hnsw_published_but_sync_still_dirty_self_heals(tmp_path):
     _ = store.end_indexing("coll")
 
     collection_path = tmp_path / "coll"
-    meta_file = collection_path / "collection_meta.json"
-    meta = json.loads(meta_file.read_text())
+    sync_file = collection_path / "hnsw_sync_state.json"
+    sync_state = json.loads(sync_file.read_text())
     # Force the durable state back to "dirty" without touching the (already
     # valid) HNSW artifact -- simulating a crash between HNSW publication
-    # and the clean hnsw_sync write.
-    meta["hnsw_sync"]["status"] = "dirty"
-    meta["hnsw_sync"]["mutation_epoch"] = meta["hnsw_sync"]["published_epoch"] + 1
-    meta_file.write_text(json.dumps(meta))
+    # and the clean hnsw_sync write. Bug #1619: hnsw_sync now lives in its
+    # own dedicated file, not embedded in collection_meta.json.
+    sync_state["status"] = "dirty"
+    sync_state["mutation_epoch"] = sync_state["published_epoch"] + 1
+    sync_file.write_text(json.dumps(sync_state))
 
     identity_before = _hnsw_index_identity(collection_path)
 
