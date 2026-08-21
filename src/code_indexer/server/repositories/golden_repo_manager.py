@@ -1366,9 +1366,15 @@ class GoldenRepoManager:
         if os.getenv("CIDX_SCIP_AUTO_RECONCILE_ENABLED", "false").lower() != "true":
             return counts
 
-        from code_indexer.scip.discovery import ProjectDiscovery
-        from code_indexer.server.services.scip_lifecycle import funnel_golden_scip
+        # EVO-66445: reuse the shared GoldenIndexBackfillReconciler (the DRY scan +
+        # cooldown-marker + per-cycle bound loop, also used by the FTS backfill). The
+        # SCIP-specific present/eligible/enqueue live in ScipBackfillPolicy; the loop,
+        # the ``.scip_reconcile_attempt`` cooldown and the bound are the engine's.
         from code_indexer.server.services.config_service import get_config_service
+        from code_indexer.server.services.golden_index_backfill import (
+            GoldenIndexBackfillReconciler,
+        )
+        from code_indexer.server.services.scip_backfill_policy import ScipBackfillPolicy
 
         enabled_langs = {
             lang.strip().lower()
@@ -1382,59 +1388,20 @@ class GoldenRepoManager:
         except ValueError:
             cooldown = 86400
 
-        root = Path(self.golden_repos_dir)
-        if not root.is_dir():
-            return counts
         cfg = get_config_service().get_config()
-
-        for entry in sorted(root.iterdir(), key=lambda p: p.name):
-            if counts["enqueued"] >= max_enqueue:
-                break
-            if entry.name.startswith(".") or not entry.is_dir():
-                continue
-            counts["scanned"] += 1
-            if self._scip_present(entry):
-                counts["scip_present"] += 1
-                continue
-            # EVO-66188: check the attempt cooldown BEFORE the (NFS os.walk) discovery,
-            # so a repo whose build was attempted within the cooldown window isn't
-            # re-walked every cycle only to be skipped. The marker path depends solely
-            # on ``entry``.
-            marker = entry / ".code-indexer" / ".scip_reconcile_attempt"
-            if self._scip_attempt_cooldown_active(marker, cooldown):
-                counts["cooldown_skipped"] += 1
-                continue
-            try:
-                projects = ProjectDiscovery(entry).discover()
-            except Exception as exc:  # noqa: BLE001
-                counts["errors"] += 1
-                logging.warning(
-                    "EVO-65484: SCIP discover failed for '%s': %s", entry.name, exc
-                )
-                continue
-            if not projects:
-                counts["not_discoverable"] += 1
-                continue
-            if not ({p.language.lower() for p in projects} & enabled_langs):
-                counts["language_skipped"] += 1
-                continue
-            try:
-                marker.parent.mkdir(parents=True, exist_ok=True)
-                marker.touch()
-                outcome = funnel_golden_scip(entry.name, str(entry), cfg)
-                counts["enqueued"] += 1
-                logging.info(
-                    "EVO-65484: enqueued SCIP build for '%s' (outcome=%s)",
-                    entry.name,
-                    getattr(outcome, "value", outcome),
-                )
-            except Exception as exc:  # noqa: BLE001
-                counts["errors"] += 1
-                logging.warning(
-                    "EVO-65484: SCIP reconcile enqueue failed for '%s': %s",
-                    entry.name,
-                    exc,
-                )
+        policy = ScipBackfillPolicy(self, enabled_langs, cfg)
+        result = GoldenIndexBackfillReconciler(self.golden_repos_dir).run_cycle(
+            policy, max_enqueue=max_enqueue, cooldown_seconds=cooldown
+        )
+        # Map the engine's generic counts back to the SCIP reconcile's granular contract
+        # (its callers/tests read scip_present / not_discoverable / language_skipped).
+        counts["scanned"] = result.scanned
+        counts["scip_present"] = result.present
+        counts["not_discoverable"] = policy.not_discoverable
+        counts["language_skipped"] = policy.language_skipped
+        counts["cooldown_skipped"] = result.cooldown_skipped
+        counts["enqueued"] = result.enqueued
+        counts["errors"] = result.errors
 
         logging.info("EVO-65484: SCIP reconcile from filesystem complete: %s", counts)
         return counts

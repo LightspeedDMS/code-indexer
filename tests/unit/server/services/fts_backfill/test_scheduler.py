@@ -12,7 +12,7 @@ from code_indexer.server.services.fts_backfill.scheduler import (
     FtsBackfillSweepScheduler,
     resolve_sweep_leader,
 )
-from code_indexer.server.services.fts_backfill.sweep import FtsBackfillTickStats
+from code_indexer.server.services.golden_index_backfill import BackfillCounts
 
 
 class _Cfg:
@@ -46,37 +46,44 @@ def _scheduler(cfg: Any, bjm: Any, tick_fn: Any) -> FtsBackfillSweepScheduler:
         background_job_manager=bjm,
         config_service=_ConfigService(cfg),
         tick_fn=tick_fn,
-        subprocess_env_provider=lambda: {"ENV": "x"},
     )
 
 
-def test_run_tick_uses_config_batch_size_and_reports_stats() -> None:
+def test_run_tick_enqueues_via_cycle_and_reports_counts() -> None:
+    """The tick delegates to the enqueue cycle with (grm, bjm, batch_size, cooldown)
+    and surfaces the engine's BackfillCounts as a dict (it builds nothing itself)."""
     seen: Dict[str, Any] = {}
+    grm, bjm = object(), _BJM()
 
-    def tick_fn(grm, *, batch_size, subprocess_env, timeout):
+    def tick_fn(grm_arg, bjm_arg, *, batch_size, cooldown_seconds):
+        seen["grm"] = grm_arg
+        seen["bjm"] = bjm_arg
         seen["batch_size"] = batch_size
-        seen["env"] = subprocess_env
-        seen["timeout"] = timeout
-        return FtsBackfillTickStats(total_missing=5, attempted=3, rebuilt=2, failed=1)
+        seen["cooldown_seconds"] = cooldown_seconds
+        return BackfillCounts(scanned=5, present=1, not_eligible=1, enqueued=3)
 
     cfg = _Cfg(
-        enabled=True,
-        batch_size=3,
-        tick_interval_minutes=15,
-        build_timeout_seconds=900,
+        enabled=True, batch_size=3, tick_interval_minutes=15, build_timeout_seconds=900
     )
-    sched = _scheduler(cfg, _BJM(), tick_fn)
+    sched = FtsBackfillSweepScheduler(
+        golden_repo_manager=grm,
+        background_job_manager=bjm,
+        config_service=_ConfigService(cfg),
+        tick_fn=tick_fn,
+    )
     result = sched._run_tick()
 
+    assert seen["grm"] is grm
+    assert seen["bjm"] is bjm  # the cycle needs the BJM to enqueue per-repo build jobs
     assert seen["batch_size"] == 3
-    assert seen["env"] == {"ENV": "x"}
-    assert seen["timeout"] == 900  # bounded build timeout threaded from config
+    assert seen["cooldown_seconds"] > 0  # default per-repo attempt cooldown
     assert result == {
-        "total_missing": 5,
-        "attempted": 3,
-        "rebuilt": 2,
-        "failed": 1,
-        "remaining": 3,
+        "scanned": 5,
+        "present": 1,
+        "not_eligible": 1,
+        "cooldown_skipped": 0,
+        "enqueued": 3,
+        "errors": 0,
     }
 
 

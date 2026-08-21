@@ -21,10 +21,11 @@ import logging
 import threading
 from typing import Any, Callable, Dict, Optional
 
-from code_indexer.server.repositories.background_jobs import DuplicateJobError
-from code_indexer.utils.subprocess_env import build_cidx_subprocess_env
+import os
 
-from .sweep import run_fts_backfill_tick
+from code_indexer.server.repositories.background_jobs import DuplicateJobError
+
+from .sweep import run_fts_backfill_cycle
 
 logger = logging.getLogger(__name__)
 
@@ -61,6 +62,22 @@ _LEADER_POLL_SECONDS = 30
 _DEFAULT_BATCH_SIZE = 10
 _DEFAULT_TICK_INTERVAL_MINUTES = 15
 _DEFAULT_BUILD_TIMEOUT_SECONDS = 1800
+# Per-repo attempt cooldown: a repo whose build was enqueued this recently is not
+# re-enqueued (throttles a repeatedly-failing repo to at most once per window). Env
+# override mirrors the SCIP reconcile's CIDX_SCIP_ATTEMPT_COOLDOWN_SECONDS.
+_DEFAULT_ATTEMPT_COOLDOWN_SECONDS = 3600
+
+
+def _attempt_cooldown_seconds() -> int:
+    try:
+        return int(
+            os.getenv(
+                "CIDX_FTS_ATTEMPT_COOLDOWN_SECONDS",
+                str(_DEFAULT_ATTEMPT_COOLDOWN_SECONDS),
+            )
+        )
+    except ValueError:
+        return _DEFAULT_ATTEMPT_COOLDOWN_SECONDS
 
 
 class FtsBackfillSweepScheduler:
@@ -74,17 +91,13 @@ class FtsBackfillSweepScheduler:
         golden_repo_manager: Any,
         background_job_manager: Optional[Any],
         config_service: Any,
-        tick_fn: Callable[..., Any] = run_fts_backfill_tick,
-        subprocess_env_provider: Callable[
-            [], Optional[dict]
-        ] = build_cidx_subprocess_env,
+        tick_fn: Callable[..., Any] = run_fts_backfill_cycle,
         leader_check: Callable[[], bool] = lambda: True,
     ) -> None:
         self._golden_repo_manager = golden_repo_manager
         self._background_job_manager = background_job_manager
         self._config_service = config_service
         self._tick_fn = tick_fn
-        self._subprocess_env_provider = subprocess_env_provider
         # Gate tick submission to the elected leader. Defaults to "always leader" so
         # single-node / sqlite (and existing tests) behave exactly as before; the
         # composition root injects the real leader check in cluster (postgres) mode.
@@ -155,20 +168,19 @@ class FtsBackfillSweepScheduler:
 
     # --------------------------------------------------------------- tick execution
     def _run_tick(self) -> Dict[str, Any]:
+        """The leader's discovery/enqueue tick: scan missing-FTS repos and enqueue a
+        per-repo POD_PULL ``fts_backfill_build`` for each (bounded). The builds run on
+        whichever pods claim them — this tick never builds anything itself."""
         cfg = self._read_cycle_config()
-        stats = self._tick_fn(
+        counts = self._tick_fn(
             self._golden_repo_manager,
+            self._background_job_manager,
             batch_size=cfg["batch_size"],
-            subprocess_env=self._subprocess_env_provider(),
-            timeout=cfg["build_timeout_seconds"],
+            cooldown_seconds=_attempt_cooldown_seconds(),
         )
-        return {
-            "total_missing": stats.total_missing,
-            "attempted": stats.attempted,
-            "rebuilt": stats.rebuilt,
-            "failed": stats.failed,
-            "remaining": stats.remaining_after_tick,
-        }
+        result = counts.as_dict()
+        logger.info("fts_backfill reconcile: %s", result)
+        return result
 
     def _is_leader(self) -> bool:
         """Whether this node should run the sweep. Fail-open (return True) on a

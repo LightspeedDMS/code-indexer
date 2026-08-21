@@ -3584,12 +3584,22 @@ def make_lifespan(
                             **md, progress_callback=progress_callback
                         )
 
+                    # EVO-66445: the FTS backfill build is a POD_PULL op too — the
+                    # reconcile leader enqueues one per missing repo and every pod
+                    # claims DISTINCT repos to build in parallel. The executor
+                    # reconstructs the build from the row metadata (repo_path + alias).
+                    from code_indexer.server.services.fts_backfill.policy import (
+                        FTS_BACKFILL_BUILD_OP,
+                        fts_backfill_build_executor,
+                    )
+
                     _index_dispatch = {
                         "add_golden_repo": _pp_add_golden_repo,
                         "change_branch": _pp_change_branch,
                         "sync_repository": _pp_sync_repository,
                         "provider_index_add": _pp_provider_index,
                         "provider_temporal_index_rebuild": _pp_provider_temporal,
+                        FTS_BACKFILL_BUILD_OP: fts_backfill_build_executor,
                     }
                     # M3: fail loudly if a pod-pull op ever lacks an executor (or
                     # vice versa) instead of silently claiming an unrunnable row.
