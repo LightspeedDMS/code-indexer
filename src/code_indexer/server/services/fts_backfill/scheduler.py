@@ -58,9 +58,10 @@ _SLEEP_GRANULARITY_SECONDS = 5
 # instead of the full tick interval, so a failover (or leader-election wiring that
 # completes just after startup) is picked up in seconds, not a whole interval.
 _LEADER_POLL_SECONDS = 30
-# Safe fallbacks when config cannot be read.
-_DEFAULT_BATCH_SIZE = 10
-_DEFAULT_TICK_INTERVAL_MINUTES = 15
+# Safe fallbacks when config cannot be read. Kept in sync with FtsBackfillSweepConfig's
+# dataclass defaults (batch enqueued cross-pod per tick; ticks paced for a fast drain).
+_DEFAULT_BATCH_SIZE = 50
+_DEFAULT_TICK_INTERVAL_MINUTES = 5
 _DEFAULT_BUILD_TIMEOUT_SECONDS = 1800
 # Per-repo attempt cooldown: a repo whose build was enqueued this recently is not
 # re-enqueued (throttles a repeatedly-failing repo to at most once per window). Env
