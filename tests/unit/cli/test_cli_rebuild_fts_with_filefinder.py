@@ -196,3 +196,53 @@ class TestRebuildFTSWithFileFinder:
             # This test PASSES because the behavior is already correct in smart_indexer.py
             # The test documents the expected behavior for AC2
             pass
+
+    def test_rebuild_without_progress_file_succeeds(self):
+        """
+        EVO-66445 regression: --rebuild-fts-index must succeed with NO
+        indexing_progress.json.
+
+        The FTS index is built entirely from FileFinder-discovered files on disk, so it
+        does not need the semantic index's progress file. Requiring it made the command
+        exit 1 ("No indexing progress found") on every repo indexed OUT-OF-BAND — i.e.
+        cidx-server / seeder-registered golden repos, whose semantic index lives
+        server-side, not as a local progress file. That is exactly the fleet the
+        on-by-default FTS backfill sweep targets, so the sweep rebuilt=0/failed=N on the
+        whole fleet. NOTE: the sibling tests above each write a mock progress file, which
+        is why this failure mode was never caught before it shipped.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            project_dir = Path(tmpdir)
+            config_dir = project_dir / ".code-indexer"
+            config_dir.mkdir()
+
+            # Real source files, but deliberately NO indexing_progress.json — the
+            # golden-repo condition.
+            (project_dir / "main.py").write_text("def main(): return 42\n")
+            (project_dir / "utils.py").write_text("def helper(x): return x + 1\n")
+
+            result = self.run_cidx_command(
+                ["init", "--vector-store", "filesystem"], cwd=project_dir, timeout=30
+            )
+            assert result.returncode == 0, f"Init failed: {result.stderr}"
+
+            progress_file = config_dir / "indexing_progress.json"
+            assert not progress_file.exists(), "precondition: no local progress file"
+
+            result = self.run_cidx_command(
+                ["index", "--rebuild-fts-index"], cwd=project_dir, timeout=30
+            )
+            output = result.stdout + result.stderr
+
+            # Before the fix this exited 1 with the spurious guard message.
+            assert "No indexing progress found" not in output, (
+                f"the spurious indexing_progress.json guard is still present:\n{output}"
+            )
+            assert result.returncode == 0, (
+                f"rebuild-fts-index should succeed without a progress file, got "
+                f"exit {result.returncode}:\n{output}"
+            )
+            # The Tantivy index was actually built from the discovered files.
+            assert (config_dir / "tantivy_index").exists(), (
+                f"tantivy_index not created:\n{output}"
+            )

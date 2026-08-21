@@ -3732,15 +3732,15 @@ def index(
         try:
             config = config_manager.load()
 
-            # Check if indexing progress file exists
-            progress_file = config_manager.config_path.parent / "indexing_progress.json"
-            if not progress_file.exists():
-                console.print("❌ No indexing progress found", style="red")
-                console.print(
-                    "💡 Run 'cidx index' first to create the semantic index",
-                    style="yellow",
-                )
-                sys.exit(1)
+            # EVO-66445: the FTS index is (re)built ENTIRELY from files discovered on
+            # disk via FileFinder below — it never reads the semantic index or
+            # indexing_progress.json. Requiring that progress file here was a spurious
+            # precondition that made `cidx index --rebuild-fts-index` exit 1 on any
+            # repo indexed OUT-OF-BAND (e.g. cidx server / seeder-registered golden
+            # repos, whose semantic index lives server-side, not as a local progress
+            # file) — which is exactly the fleet the on-by-default FTS backfill sweep
+            # targets. The genuine "nothing to index" case is still handled by the
+            # `no discovered_files` check below.
 
             # Lazy import FTS components
             from .services.tantivy_index_manager import TantivyIndexManager
