@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from typing import Any, Dict
 
 from code_indexer.server.repositories.background_jobs import DuplicateJobError
@@ -104,4 +105,86 @@ def test_trigger_now_submits_tick_job() -> None:
     bjm = _BJM()
     sched = _scheduler(cfg, bjm, lambda *a, **k: None)
     assert sched.trigger_now() == "job-1"
+    assert bjm.submitted[0][0] == "fts_backfill_sweep"
+
+
+# ── EVO-66445 follow-up: leader-gating (single sweep across the cluster) ──
+
+
+def test_is_leader_defaults_true_for_single_node() -> None:
+    """No injected leader_check (single-node/sqlite, and existing behaviour) -> runs."""
+    sched = _scheduler(
+        _Cfg(enabled=True, batch_size=10, tick_interval_minutes=15),
+        _BJM(),
+        lambda *a, **k: None,
+    )
+    assert sched._is_leader() is True
+
+
+def test_is_leader_reflects_injected_check() -> None:
+    cfg = _Cfg(enabled=True, batch_size=10, tick_interval_minutes=15)
+    follower = FtsBackfillSweepScheduler(
+        golden_repo_manager=object(),
+        background_job_manager=_BJM(),
+        config_service=_ConfigService(cfg),
+        leader_check=lambda: False,
+    )
+    leader = FtsBackfillSweepScheduler(
+        golden_repo_manager=object(),
+        background_job_manager=_BJM(),
+        config_service=_ConfigService(cfg),
+        leader_check=lambda: True,
+    )
+    assert follower._is_leader() is False
+    assert leader._is_leader() is True
+
+
+def test_is_leader_fail_open_on_check_error() -> None:
+    """A leader-check glitch must NOT silently stop the sweep -> fail-open (True)."""
+
+    def boom() -> bool:
+        raise RuntimeError("election backend down")
+
+    cfg = _Cfg(enabled=True, batch_size=10, tick_interval_minutes=15)
+    sched = FtsBackfillSweepScheduler(
+        golden_repo_manager=object(),
+        background_job_manager=_BJM(),
+        config_service=_ConfigService(cfg),
+        leader_check=boom,
+    )
+    assert sched._is_leader() is True
+
+
+def test_loop_does_not_submit_when_not_leader() -> None:
+    """A follower node polls leadership but submits NO tick (the whole point)."""
+    cfg = _Cfg(enabled=True, batch_size=10, tick_interval_minutes=15)
+    bjm = _BJM()
+    sched = FtsBackfillSweepScheduler(
+        golden_repo_manager=object(),
+        background_job_manager=bjm,
+        config_service=_ConfigService(cfg),
+        tick_fn=lambda *a, **k: None,
+        leader_check=lambda: False,
+    )
+    sched.start()
+    time.sleep(0.3)  # ample for the loop's first iteration (skip + short poll)
+    sched.stop()
+    assert bjm.submitted == []  # follower never submitted a tick
+
+
+def test_loop_submits_when_leader() -> None:
+    """The leader node submits a tick on its first iteration."""
+    cfg = _Cfg(enabled=True, batch_size=10, tick_interval_minutes=15)
+    bjm = _BJM()
+    sched = FtsBackfillSweepScheduler(
+        golden_repo_manager=object(),
+        background_job_manager=bjm,
+        config_service=_ConfigService(cfg),
+        tick_fn=lambda *a, **k: None,
+        leader_check=lambda: True,
+    )
+    sched.start()
+    time.sleep(0.3)
+    sched.stop()
+    assert len(bjm.submitted) >= 1
     assert bjm.submitted[0][0] == "fts_backfill_sweep"

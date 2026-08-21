@@ -31,6 +31,10 @@ logger = logging.getLogger(__name__)
 # Granularity of the sleep loop: check the stop event this often (seconds) so
 # stop() is responsive even with a multi-minute tick interval.
 _SLEEP_GRANULARITY_SECONDS = 5
+# When this node is NOT the elected leader, re-check leadership on this short poll
+# instead of the full tick interval, so a failover (or leader-election wiring that
+# completes just after startup) is picked up in seconds, not a whole interval.
+_LEADER_POLL_SECONDS = 30
 # Safe fallbacks when config cannot be read.
 _DEFAULT_BATCH_SIZE = 10
 _DEFAULT_TICK_INTERVAL_MINUTES = 15
@@ -52,12 +56,17 @@ class FtsBackfillSweepScheduler:
         subprocess_env_provider: Callable[
             [], Optional[dict]
         ] = build_cidx_subprocess_env,
+        leader_check: Callable[[], bool] = lambda: True,
     ) -> None:
         self._golden_repo_manager = golden_repo_manager
         self._background_job_manager = background_job_manager
         self._config_service = config_service
         self._tick_fn = tick_fn
         self._subprocess_env_provider = subprocess_env_provider
+        # Gate tick submission to the elected leader. Defaults to "always leader" so
+        # single-node / sqlite (and existing tests) behave exactly as before; the
+        # composition root injects the real leader check in cluster (postgres) mode.
+        self._leader_check = leader_check
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
 
@@ -139,21 +148,45 @@ class FtsBackfillSweepScheduler:
             "remaining": stats.remaining_after_tick,
         }
 
+    def _is_leader(self) -> bool:
+        """Whether this node should run the sweep. Fail-open (return True) on a
+        leader-check glitch: a transient error must never silently stop the sweep."""
+        try:
+            return bool(self._leader_check())
+        except Exception:  # noqa: BLE001 -- fail-open, never let a glitch stop the sweep
+            return True
+
+    def _sleep_chunked(self, total_seconds: int) -> None:
+        """Sleep ``total_seconds`` in small chunks so stop() stays responsive."""
+        total = max(1, int(total_seconds))
+        waited = 0
+        while waited < total and not self._stop_event.is_set():
+            self._stop_event.wait(min(_SLEEP_GRANULARITY_SECONDS, total - waited))
+            waited += _SLEEP_GRANULARITY_SECONDS
+
     # ---------------------------------------------------------------------- main loop
     def _loop(self) -> None:
         while not self._stop_event.is_set():
             cfg = self._read_cycle_config()
-            if cfg["enabled"] and self._background_job_manager is not None:
-                try:
-                    self.trigger_now()
-                except Exception:  # noqa: BLE001 -- a tick error must not kill the loop
-                    logger.error(
-                        "FtsBackfillSweepScheduler: tick submission failed",
-                        exc_info=True,
-                    )
-            # Sleep the configured interval in small chunks so stop() is prompt.
-            total = max(1, int(cfg["interval_minutes"])) * 60
-            waited = 0
-            while waited < total and not self._stop_event.is_set():
-                self._stop_event.wait(min(_SLEEP_GRANULARITY_SECONDS, total - waited))
-                waited += _SLEEP_GRANULARITY_SECONDS
+            if not (cfg["enabled"] and self._background_job_manager is not None):
+                self._sleep_chunked(max(1, int(cfg["interval_minutes"])) * 60)
+                continue
+            # Leader-gate the WORK (EVO-66445 follow-up). The sweep spawns
+            # `cidx index --rebuild-fts-index` subprocesses that CLEAR then rewrite each
+            # repo's tantivy_index, so N pods x uvicorn-workers running it concurrently
+            # race on the same repo (`Failed to open file for read`, `cidx init:
+            # Configuration already exists`) and do Nx the work -- the per-job
+            # DuplicateJobError single-flight has a TOCTOU window that lets ticks slip
+            # through. Mirrors the SCIP reconcile's leader gate. Non-leaders poll
+            # leadership on a short interval so failover is picked up promptly.
+            if not self._is_leader():
+                self._sleep_chunked(_LEADER_POLL_SECONDS)
+                continue
+            try:
+                self.trigger_now()
+            except Exception:  # noqa: BLE001 -- a tick error must not kill the loop
+                logger.error(
+                    "FtsBackfillSweepScheduler: tick submission failed",
+                    exc_info=True,
+                )
+            self._sleep_chunked(max(1, int(cfg["interval_minutes"])) * 60)
