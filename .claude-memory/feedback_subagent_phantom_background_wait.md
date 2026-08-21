@@ -4,8 +4,18 @@ description: "Dispatched subagents sometimes end their turn believing an async m
 metadata:
   type: feedback
   originSessionId: ca34043c-b05f-4314-8219-619a25ec9f26
-  modified: 2026-08-17T16:42:49.726Z
+  modified: 2026-08-20T08:16:54.776Z
 ---
+
+**Still recurring as of 2026-08-20**: two more occurrences in a single multi-bug remediation
+session (bug #1601's round-2 remediation agent, and separately bug #1603's remediation
+agent) — both ended their turn after launching `fast-automation.sh` in the background,
+saying they'd "wait for the completion notification." Both times the orchestrator had to
+independently confirm via `ps aux` that the process was still genuinely running, then
+resume the agent via `SendMessage` with an explicit correction. This is not a rare edge
+case — treat it as the DEFAULT failure mode any time a dispatched agent's final message
+mentions launching a long-running background command, and proactively verify+correct
+rather than waiting to see if it recurs.
 
 Dispatched subagents (via the `Agent` tool) repeatedly end their turn believing some
 asynchronous mechanism will wake them up and let them continue — six separate times in one
