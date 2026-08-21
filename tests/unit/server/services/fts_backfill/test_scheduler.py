@@ -6,8 +6,11 @@ import time
 from typing import Any, Dict
 
 from code_indexer.server.repositories.background_jobs import DuplicateJobError
+from types import SimpleNamespace
+
 from code_indexer.server.services.fts_backfill.scheduler import (
     FtsBackfillSweepScheduler,
+    resolve_sweep_leader,
 )
 from code_indexer.server.services.fts_backfill.sweep import FtsBackfillTickStats
 
@@ -188,3 +191,38 @@ def test_loop_submits_when_leader() -> None:
     sched.stop()
     assert len(bjm.submitted) >= 1
     assert bjm.submitted[0][0] == "fts_backfill_sweep"
+
+
+# ── EVO-66445: the ACTUAL production wiring (resolve_sweep_leader on app.state) ──
+
+
+def test_resolve_sweep_leader_holds_until_gate_ready() -> None:
+    """Cluster startup: leader-election wiring not yet ready -> do NOT run (avoid the
+    all-pods-run window before leadership is established)."""
+    st = SimpleNamespace(scip_reconcile_leader_gate_ready=False, leader_election=None)
+    assert resolve_sweep_leader(st) is False
+
+
+def test_resolve_sweep_leader_defers_to_election_once_ready() -> None:
+    leader = SimpleNamespace(
+        scip_reconcile_leader_gate_ready=True,
+        leader_election=SimpleNamespace(is_leader=True),
+    )
+    follower = SimpleNamespace(
+        scip_reconcile_leader_gate_ready=True,
+        leader_election=SimpleNamespace(is_leader=False),
+    )
+    assert resolve_sweep_leader(leader) is True
+    assert resolve_sweep_leader(follower) is False
+
+
+def test_resolve_sweep_leader_single_node_no_election_runs() -> None:
+    """sqlite/single-node: no leader_election object -> always leader (unchanged)."""
+    st = SimpleNamespace(scip_reconcile_leader_gate_ready=True, leader_election=None)
+    assert resolve_sweep_leader(st) is True
+
+
+def test_resolve_sweep_leader_defaults_run_when_attrs_absent() -> None:
+    """A bare app.state with neither attr (e.g. sqlite before any cluster wiring) must
+    default to running, never silently stall the sweep."""
+    assert resolve_sweep_leader(SimpleNamespace()) is True

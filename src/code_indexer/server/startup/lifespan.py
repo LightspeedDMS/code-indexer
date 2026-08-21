@@ -2156,27 +2156,18 @@ def make_lifespan(
         try:
             from code_indexer.server.services.fts_backfill.scheduler import (
                 FtsBackfillSweepScheduler as _FtsBackfillSweepScheduler,
+                resolve_sweep_leader as _resolve_sweep_leader,
             )
             from code_indexer.server.services.config_service import get_config_service
-
-            def _fts_sweep_is_leader() -> bool:
-                # Gate the FTS backfill sweep to the elected leader so the fleet runs
-                # ONE sweep, not one per pod x worker (which race on each repo's
-                # tantivy_index). Read lazily each cycle: leader_election is wired
-                # AFTER this scheduler starts. Hold until leader-election wiring is
-                # ready (the EVO-66188 gate, shared with the SCIP reconcile); once
-                # ready, run only on the leader. Single-node/sqlite has no election ->
-                # always leader (gate defaults True, leader_election stays None).
-                if not getattr(app.state, "scip_reconcile_leader_gate_ready", True):
-                    return False
-                _le = getattr(app.state, "leader_election", None)
-                return _le is None or _le.is_leader
 
             fts_backfill_sweep_scheduler = _FtsBackfillSweepScheduler(
                 golden_repo_manager=golden_repo_manager,
                 background_job_manager=background_job_manager,
                 config_service=get_config_service(),
-                leader_check=_fts_sweep_is_leader,
+                # Gate the sweep to the elected leader so the fleet runs ONE sweep, not
+                # one per pod x worker (which race on each repo's tantivy_index). Read
+                # lazily each cycle since leader_election is wired after this starts.
+                leader_check=lambda: _resolve_sweep_leader(app.state),
             )
             fts_backfill_sweep_scheduler.start()
             app.state.fts_backfill_sweep_scheduler = fts_backfill_sweep_scheduler
