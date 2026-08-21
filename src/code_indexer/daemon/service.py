@@ -1794,13 +1794,14 @@ class CIDXDaemonService(Service):
         from code_indexer.indexing.file_finder import FileFinder
         from code_indexer.services.tantivy_index_manager import TantivyIndexManager
 
-        # Check if indexing progress file exists
-        progress_file = Path(project_path) / ".code-indexer" / "indexing_progress.json"
-        if not progress_file.exists():
-            return {
-                "status": "error",
-                "error": "No indexing progress found. Run 'cidx index' first to create the semantic index.",
-            }
+        # EVO-66445: the FTS index is (re)built ENTIRELY from FileFinder-discovered
+        # files on disk below — it never reads indexing_progress.json. Requiring that
+        # file here (the daemon-RPC twin of the local-mode guard removed in cli.py)
+        # made daemon-delegated rebuilds fail for repos indexed OUT-OF-BAND (cidx
+        # server / seeder-registered golden repos, whose semantic index lives
+        # server-side, not as a local progress file) — the fleet the FTS backfill
+        # sweep targets. The genuine "nothing to index" case is still handled by the
+        # `no discovered_files` check below.
 
         try:
             # Load configuration

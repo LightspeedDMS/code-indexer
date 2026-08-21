@@ -243,3 +243,47 @@ class TestDaemonRebuildFTS:
         )
         assert result.get("files_indexed", 0) >= 1
         assert result.get("files_failed", 0) == 0
+
+    def test_rebuild_without_progress_file_succeeds(self):
+        """
+        EVO-66445 regression (daemon RPC twin of the CLI fix): the daemon FTS rebuild
+        must succeed with NO indexing_progress.json.
+
+        exposed_rebuild_fts_index builds the Tantivy index entirely from
+        FileFinder-discovered files, so it must not require the semantic index's
+        progress file — which cidx-server / seeder-registered golden repos never have
+        locally. The `_make_project` helper (and every sibling test) writes a mock
+        progress file, so this daemon path was never exercised without it.
+        """
+        from code_indexer.daemon.service import CIDXDaemonService
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            project_dir = Path(tmpdir)
+            config_dir = project_dir / ".code-indexer"
+            config_dir.mkdir()
+
+            (project_dir / "main.py").write_text("def main(): return 42\n")
+            config_data = {
+                "codebase_dir": str(project_dir),
+                "embedding_provider": "voyage-ai",
+                "embedding_model": "voyage-code-3",
+                "file_extensions": [".py"],
+                "exclude_dirs": [".git", "node_modules"],
+            }
+            (config_dir / "config.json").write_text(json.dumps(config_data))
+
+            # The golden-repo condition: deliberately NO indexing_progress.json.
+            assert not (config_dir / "indexing_progress.json").exists()
+
+            result = CIDXDaemonService().exposed_rebuild_fts_index(
+                str(project_dir), callback=None
+            )
+
+        # Before the fix this returned {"status": "error", "error": "No indexing
+        # progress found..."}; now it builds FTS from the discovered files.
+        assert result.get("status") == "success", (
+            f"daemon rebuild must succeed without a progress file, got: {result}"
+        )
+        assert result.get("files_indexed", 0) >= 1
+        assert result.get("files_failed", 0) == 0
+        assert "indexing progress" not in (result.get("error") or "").lower()

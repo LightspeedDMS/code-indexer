@@ -603,8 +603,16 @@ class TestExposedRebuildFTSIndex:
         assert hasattr(service, "exposed_rebuild_fts_index")
         assert callable(service.exposed_rebuild_fts_index)
 
-    def test_exposed_rebuild_fts_index_requires_progress_file(self, service, tmp_path):
-        """AC4: Should return error if indexing_progress.json doesn't exist."""
+    def test_exposed_rebuild_fts_index_no_longer_requires_progress_file(
+        self, service, tmp_path
+    ):
+        """EVO-66445: a missing indexing_progress.json must NOT be an error.
+
+        The FTS rebuild is built from FileFinder-discovered files, so it does not need
+        the semantic index's progress file (which cidx-server / seeder-registered golden
+        repos never have locally). The only legitimate failure for a progress-file-less,
+        file-less project is the "no files found" guard — NOT the removed progress guard.
+        """
         project_path = tmp_path / "project"
         project_path.mkdir()
 
@@ -620,5 +628,7 @@ class TestExposedRebuildFTSIndex:
 
         result = service.exposed_rebuild_fts_index(str(project_path))
 
-        assert result["status"] == "error"
-        assert "indexing progress" in result["error"].lower()
+        # The spurious progress-file guard is gone: it must never be the reason.
+        assert "indexing progress" not in (result.get("error") or "").lower(), (
+            f"the removed indexing_progress.json guard still fires: {result}"
+        )
