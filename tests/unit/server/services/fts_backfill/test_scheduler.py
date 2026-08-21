@@ -99,8 +99,8 @@ def test_read_cycle_config_fail_open_on_bad_config() -> None:
     )
     cfg = sched._read_cycle_config()
     assert cfg["enabled"] is True  # fail-open: never silently stops
-    assert cfg["batch_size"] == 10
-    assert cfg["interval_minutes"] == 15
+    assert cfg["batch_size"] == 50
+    assert cfg["interval_minutes"] == 5
     assert cfg["build_timeout_seconds"] == 1800
 
 

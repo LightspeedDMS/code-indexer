@@ -1109,11 +1109,21 @@ class FtsBackfillSweepConfig:
     # Whether the FTS backfill sweep scheduler is active (default: True -- ships ON).
     enabled: bool = True
 
-    # Golden repos built per tick (default: 10; FTS build is CPU+disk only).
-    batch_size: int = 10
+    # Golden repos ENQUEUED per tick (default: 50). EVO-66445: since the DRY-engine
+    # refactor (MR !73), these are per-repo POD_PULL `fts_backfill_build` jobs that every
+    # pod's IndexJobClaimLoop claims and runs in parallel -- so the batch is drained by
+    # the whole cluster, not one pod serially. The bound caps NFS/CPU load per tick, not
+    # per pod; a larger batch is fine because the cheap local tantivy builds fan out. The
+    # scan short-circuits once `batch_size` missing repos are enqueued, so this is also
+    # (present-at-top + batch_size) worth of golden-dir walk per tick.
+    batch_size: int = 50
 
-    # Minutes between ticks (default: 15).
-    tick_interval_minutes: int = 15
+    # Minutes between ticks (default: 5). Paced faster than the original 15 now that the
+    # backlog drains cross-pod (batch_size x cluster) rather than one-pod-serial, so the
+    # existing fleet's FTS backlog pays down in a handful of ticks post-deploy. In steady
+    # state (backlog empty) a tick is a cheap full-dir `is_present` walk that finds nothing
+    # to enqueue. Runtime-tunable via the Config screen if NFS load needs dialing.
+    tick_interval_minutes: int = 5
 
     # Per-repo wall-clock timeout (seconds) for the sweep's FTS rebuild subprocess
     # (default: 1800 = 30 min). Unlike the registration path -- which stays
