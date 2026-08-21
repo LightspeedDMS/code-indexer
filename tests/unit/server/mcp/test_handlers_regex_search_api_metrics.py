@@ -41,6 +41,7 @@ def mock_search_result():
     result.matches = []
     result.total_matches = 0
     result.truncated = False
+    result.read_capped = False
     result.search_engine = "ripgrep"
     result.search_time_ms = 10
     return result

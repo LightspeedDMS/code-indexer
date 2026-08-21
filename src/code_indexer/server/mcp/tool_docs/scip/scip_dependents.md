@@ -13,7 +13,7 @@ inputSchema:
     depth:
       type: integer
       default: 1
-      description: Dependent traversal depth. Default 1 for direct dependents only.
+      description: Dependent traversal depth. Default 1 for direct dependents only. Max 10.
     exact:
       type: boolean
       default: false

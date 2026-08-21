@@ -157,3 +157,145 @@ class TestTelemetryEnvironmentOverrides:
                     )
 
             asyncio.run(check_env_override())
+
+
+@pytest.mark.slow
+class TestApplicationMetricsStartupWiring:
+    """Story #1586 AC6 (partial): ApplicationMetrics is constructed at
+    startup alongside TelemetryManager/MachineMetricsExporter.
+
+    Same ordering constraint as TestTelemetryAppIntegration above: the
+    "disabled" test MUST run first (test_0_) since OTEL's global
+    MeterProvider can only be set once per process.
+    """
+
+    @staticmethod
+    def _app_with_env(tmp_path: Path, extra_env: dict):
+        """Context manager: build a FastAPI app with a disabled-telemetry
+        base config, patched with extra_env, singletons reset. The
+        patch.dict scope stays open around the yielded app so lifespan
+        (triggered later by the caller's own LifespanManager) still sees
+        the env override."""
+        from contextlib import contextmanager
+
+        @contextmanager
+        def _ctx():
+            config_dir = tmp_path / ".cidx-server"
+            config_dir.mkdir(parents=True)
+            (config_dir / "data" / "golden-repos").mkdir(parents=True)
+            config_file = config_dir / "config.json"
+            config_file.write_text(json.dumps({"telemetry_config": {"enabled": False}}))
+
+            env = {"CIDX_SERVER_DATA_DIR": str(config_dir), **extra_env}
+            with patch.dict(os.environ, env):
+                reset_all_singletons()
+                from src.code_indexer.server.app import create_app
+
+                yield create_app()
+
+        return _ctx()
+
+    def test_0_application_metrics_not_initialized_when_disabled(self, tmp_path: Path):
+        from asgi_lifespan import LifespanManager
+        import asyncio
+
+        with self._app_with_env(tmp_path, {}) as app:
+
+            async def check_application_metrics_state():
+                async with LifespanManager(app):
+                    assert hasattr(app.state, "application_metrics"), (
+                        "application_metrics attribute should exist on app.state"
+                    )
+                    assert app.state.application_metrics is None, (
+                        "application_metrics should be None when telemetry disabled"
+                    )
+
+            asyncio.run(check_application_metrics_state())
+
+    def test_1_application_metrics_initialized_when_enabled(self, tmp_path: Path):
+        from asgi_lifespan import LifespanManager
+        import asyncio
+
+        extra_env = {
+            "CIDX_TELEMETRY_ENABLED": "true",
+            "CIDX_OTEL_COLLECTOR_ENDPOINT": "http://localhost:4317",
+        }
+        with self._app_with_env(tmp_path, extra_env) as app:
+
+            async def check_application_metrics_active():
+                async with LifespanManager(app):
+                    assert hasattr(app.state, "application_metrics"), (
+                        "application_metrics attribute should exist on app.state"
+                    )
+                    assert app.state.application_metrics is not None, (
+                        "application_metrics should not be None when telemetry enabled"
+                    )
+                    assert app.state.application_metrics.is_active is True, (
+                        "application_metrics should be active when export_metrics is on"
+                    )
+
+            asyncio.run(check_application_metrics_active())
+
+
+@pytest.mark.slow
+class TestJobMetricsStartupWiring:
+    """Story #1586 AC6 (remainder): JobMetrics is constructed at startup
+    alongside ApplicationMetrics, with its observable-gauge callbacks
+    registered.
+
+    Same ordering constraint as the classes above: the "disabled" test MUST
+    run first (test_0_) since OTEL's global MeterProvider can only be set
+    once per process.
+    """
+
+    def test_0_job_metrics_not_initialized_when_disabled(self, tmp_path: Path):
+        from asgi_lifespan import LifespanManager
+        import asyncio
+
+        with TestApplicationMetricsStartupWiring._app_with_env(tmp_path, {}) as app:
+
+            async def check_job_metrics_state():
+                async with LifespanManager(app):
+                    assert hasattr(app.state, "job_metrics"), (
+                        "job_metrics attribute should exist on app.state"
+                    )
+                    assert app.state.job_metrics is None, (
+                        "job_metrics should be None when telemetry disabled"
+                    )
+
+            asyncio.run(check_job_metrics_state())
+
+    def test_1_job_metrics_initialized_when_enabled(self, tmp_path: Path):
+        from asgi_lifespan import LifespanManager
+        import asyncio
+
+        # Bare (non-"src."-prefixed) import: lifespan.py constructs JobMetrics
+        # via this same module identity, so isinstance() below must compare
+        # against it -- the "src." alias is a DISTINCT class object under
+        # dual PYTHONPATH import identity (same gotcha noted in conftest.py).
+        from code_indexer.server.telemetry.job_metrics import JobMetrics
+
+        extra_env = {
+            "CIDX_TELEMETRY_ENABLED": "true",
+            "CIDX_OTEL_COLLECTOR_ENDPOINT": "http://localhost:4317",
+        }
+        with TestApplicationMetricsStartupWiring._app_with_env(
+            tmp_path, extra_env
+        ) as app:
+
+            async def check_job_metrics_active():
+                async with LifespanManager(app):
+                    assert hasattr(app.state, "job_metrics"), (
+                        "job_metrics attribute should exist on app.state"
+                    )
+                    assert app.state.job_metrics is not None, (
+                        "job_metrics should not be None when telemetry enabled"
+                    )
+                    assert isinstance(app.state.job_metrics, JobMetrics), (
+                        "job_metrics should be a real JobMetrics instance"
+                    )
+                    assert app.state.job_metrics.is_active is True, (
+                        "job_metrics should be active when export_metrics is on"
+                    )
+
+            asyncio.run(check_job_metrics_active())

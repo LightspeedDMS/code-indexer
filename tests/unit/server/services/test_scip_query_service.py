@@ -12,6 +12,8 @@ Following TDD methodology - these tests are written FIRST before implementation.
 from pathlib import Path
 from unittest.mock import MagicMock
 
+import pytest
+
 
 class TestSCIPQueryServiceInitialization:
     """Tests for SCIPQueryService initialization (AC4: Service initialization with configuration)."""
@@ -1227,66 +1229,91 @@ class TestAnalyzeImpactMethod:
 class TestTraceCallchainMethod:
     """Tests for SCIPQueryService.trace_callchain() method."""
 
-    def test_trace_callchain_returns_call_chains(self):
-        """AC: Trace call chain between symbols."""
-        import tempfile
-        from unittest.mock import patch, MagicMock
+    @pytest.fixture
+    def service(self, tmp_path):
+        """SCIPQueryService pointed at a golden-repos dir with one repo
+        carrying an (empty, placeholder) SCIP database -- shared setup for
+        every test in this class."""
         from code_indexer.server.services.scip_query_service import SCIPQueryService
+
+        golden_repos = tmp_path / "golden-repos"
+        scip = golden_repos / "repo" / ".code-indexer" / "scip"
+        scip.mkdir(parents=True)
+        (scip / "index.scip.db").touch()
+        return SCIPQueryService(str(golden_repos), None)
+
+    def test_trace_callchain_returns_call_chains(self, service):
+        """AC: Trace call chain between symbols."""
+        from unittest.mock import patch, MagicMock
         from code_indexer.scip.query.backends import CallChain
 
-        with tempfile.TemporaryDirectory() as tmpdir:
-            golden_repos = Path(tmpdir) / "golden-repos"
-            golden_repos.mkdir()
-            scip = golden_repos / "repo" / ".code-indexer" / "scip"
-            scip.mkdir(parents=True)
-            (scip / "index.scip.db").touch()
-
-            service = SCIPQueryService(str(golden_repos), None)
-            mock_engine = MagicMock()
-            mock_engine.trace_call_chain.return_value = [
-                CallChain(
-                    path=["handleReq", "validate", "sanitize"],
-                    length=3,
-                    has_cycle=False,
-                )
-            ]
-
-            with patch(
-                "code_indexer.scip.query.primitives.SCIPQueryEngine",
-                return_value=mock_engine,
-            ):
-                results = service.trace_callchain("handleReq", "sanitize")
-
-            assert len(results) == 1
-            assert results[0]["path"] == ["handleReq", "validate", "sanitize"]
-            assert results[0]["length"] == 3
-
-    def test_trace_callchain_with_max_depth(self):
-        """Passes max_depth parameter to engine."""
-        import tempfile
-        from unittest.mock import patch, MagicMock
-        from code_indexer.server.services.scip_query_service import SCIPQueryService
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            golden_repos = Path(tmpdir) / "golden-repos"
-            golden_repos.mkdir()
-            scip = golden_repos / "repo" / ".code-indexer" / "scip"
-            scip.mkdir(parents=True)
-            (scip / "index.scip.db").touch()
-
-            service = SCIPQueryService(str(golden_repos), None)
-            mock_engine = MagicMock()
-            mock_engine.trace_call_chain.return_value = []
-
-            with patch(
-                "code_indexer.scip.query.primitives.SCIPQueryEngine",
-                return_value=mock_engine,
-            ):
-                service.trace_callchain("from", "to", max_depth=5)
-
-            mock_engine.trace_call_chain.assert_called_once_with(
-                "from", "to", max_depth=5, limit=100
+        mock_engine = MagicMock()
+        mock_engine.trace_call_chain.return_value = [
+            CallChain(
+                path=["handleReq", "validate", "sanitize"],
+                length=3,
+                has_cycle=False,
             )
+        ]
+
+        with patch(
+            "code_indexer.scip.query.primitives.SCIPQueryEngine",
+            return_value=mock_engine,
+        ):
+            results, timeout_errors = service.trace_callchain("handleReq", "sanitize")
+
+        assert len(results) == 1
+        assert results[0]["path"] == ["handleReq", "validate", "sanitize"]
+        assert results[0]["length"] == 3
+        assert timeout_errors == []
+
+    def test_trace_callchain_with_max_depth(self, service):
+        """Passes max_depth parameter to engine."""
+        from unittest.mock import patch, MagicMock
+
+        mock_engine = MagicMock()
+        mock_engine.trace_call_chain.return_value = []
+
+        with patch(
+            "code_indexer.scip.query.primitives.SCIPQueryEngine",
+            return_value=mock_engine,
+        ):
+            results, timeout_errors = service.trace_callchain("from", "to", max_depth=5)
+
+        assert results == []
+        assert timeout_errors == []
+        _, kwargs = mock_engine.trace_call_chain.call_args
+        assert mock_engine.trace_call_chain.call_args[0] == ("from", "to")
+        assert kwargs["max_depth"] == 5
+        assert kwargs["limit"] == 100
+        assert kwargs["timeout_errors"] == []
+
+    def test_trace_callchain_propagates_timeout_errors(self, service):
+        """Bug #1603 code review (Priority 1): when the underlying engine
+        reports a timeout via the timeout_errors sink, trace_callchain
+        must surface it in its own (chains, timeout_errors) return rather
+        than silently discarding it -- callers need to distinguish a
+        genuine timeout from "no chains found".
+        """
+        from unittest.mock import patch, MagicMock
+
+        mock_engine = MagicMock()
+
+        def _fake_trace_call_chain(*args, timeout_errors=None, **kwargs):
+            if timeout_errors is not None:
+                timeout_errors.append("Query exceeded 30-second timeout.")
+            return []
+
+        mock_engine.trace_call_chain.side_effect = _fake_trace_call_chain
+
+        with patch(
+            "code_indexer.scip.query.primitives.SCIPQueryEngine",
+            return_value=mock_engine,
+        ):
+            results, timeout_errors = service.trace_callchain("from", "to")
+
+        assert results == []
+        assert timeout_errors == ["Query exceeded 30-second timeout."]
 
 
 class TestGetContextMethodFastFail:

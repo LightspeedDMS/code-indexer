@@ -3083,6 +3083,28 @@ class GoldenRepoMetadataSqliteBackend:
 
         self._conn_manager.execute_atomic(operation)
 
+    def clear_all_dedup_states(self, reason: str) -> int:
+        """Story #1589: bulk-clear EVERY currently-active (uncleared)
+        dedup-outcome row in one shot -- the Diagnostics tab's "Clear All
+        Dedup Warnings" action. Mirrors clear_dedup_state's semantics
+        (counts are never erased, only marked cleared) but scoped to
+        `WHERE cleared_at IS NULL` instead of a single golden_alias, so an
+        already-cleared row is left completely untouched (never
+        double-counted). Returns the number of rows actually cleared."""
+        if not isinstance(reason, str) or not reason:
+            raise ValueError("reason must be a non-empty string")
+        now = datetime.now(timezone.utc).isoformat()
+
+        def operation(conn) -> int:
+            cursor = conn.execute(
+                "UPDATE fleet_migration_dedup_state SET cleared_at = ?, "
+                "cleared_reason = ? WHERE cleared_at IS NULL",
+                (now, reason),
+            )
+            return int(cursor.rowcount)
+
+        return self._conn_manager.execute_atomic(operation)
+
     # ------------------------------------------------------------------
     # Cleanup pending-deletion queue (Bug #1567)
     # ------------------------------------------------------------------

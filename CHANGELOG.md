@@ -7,6 +7,69 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [12.23.0] - 2026-08-21
+
+### Fixed
+
+- **Bug #1601**: `regex_search` could read unbounded ripgrep/grep subprocess output into
+  memory and was immune to `max_results`, risking server OOM at production repo counts.
+  Bounded subprocess output read (64 MiB), per-match content (256 KiB), and aggregate
+  response content across all matches in one search (8 MiB). Fixed a stderr-pipe deadlock,
+  file descriptor leaks, and event-loop blocking. Also fixed an access-control leak where
+  cidx-meta-filtered responses reported the raw pre-filter match count.
+- **Bug #1603**: `scip_callchain` was non-functional server-side -- `signal.alarm()` only
+  works on a process's main thread, but the MCP/REST handler stack always invokes it from a
+  worker thread. Replaced with a real cross-thread-cancellable watchdog. Tightened the
+  advertised max depth to a safe combinatorial bound, and closed a "timeout reported as
+  silent success" gap across all five call sites (MCP, single-repo REST, multi-repo REST,
+  local CLI, Web UI).
+- **Bug #1598**: `xray_search`'s `timeout_seconds` was enforced during AST evaluation but
+  never reached candidate-file selection, so a short requested timeout could not bound a
+  slow directory walk or regex scan. Phase 1 now honors the caller's timeout end-to-end,
+  including the zero-match-pattern diagnostic probe, and reports a clean partial/timeout
+  result instead of an unbounded run or a raw traceback failure.
+
+### Added
+
+- **Story #1600**: query-path memory-pressure admission gate -- the 15 identified
+  memory/CPU-unbounded MCP query handlers, plus the REST `/api/query` route, now check the
+  server's existing memory-pressure monitor before executing and cleanly reject with a
+  retry hint under sustained memory pressure, instead of the server driving itself into an
+  OOM/swap death spiral that previously required a manual restart to recover from.
+
+## [12.22.0] - 2026-08-19
+
+### Added
+
+- **Story #1589**: "Clear All Dedup Warnings" action in the Diagnostics tab -- a bulk-clear
+  endpoint (`POST /api/admin/diagnostics/dedup-warnings/clear-all`) and UI button that
+  acknowledges fleet-migration dedup-state warnings across every golden repo in one action,
+  without requiring a full re-index of each affected repo. Both SQLite (solo) and PostgreSQL
+  (cluster) storage backends implemented and tested.
+- **Story #1586**: `ApplicationMetrics` and `JobMetrics` (built in prior stories with zero real
+  call sites) are now wired end-to-end into real OTEL call sites: search/FTS request metrics,
+  embedding-provider metrics (all 4 clients, instrumented at the real HTTP boundary, no
+  double-counting on query-embedding-cache hits), job lifecycle metrics, repository-refresh
+  duration, and 7 custom spans across SCIP/temporal/HNSW/CoW-snapshot/dep-map operations.
+  Verified via real manual E2E testing against a genuine external OTLP receiver (not just unit
+  test doubles), which surfaced and fixed two real gaps unit tests couldn't see: a span that sat
+  on a code path production never reaches, and REST search traffic that bypassed the metrics
+  the story's own documentation claimed covered it.
+
+### Fixed
+
+- **Bug #1599**: `scip_impact` MCP handler applied no clamp on its documented `depth` bound.
+- **Bug #1602**: `scip_dependents` had the same missing clamp -- but with no safety net at any
+  layer, an out-of-range `depth` silently returned a wrong, empty `success: true` result instead
+  of an error.
+- **Bug #1604**: `scip_dependencies` had the identical unclamped-depth defect as #1602.
+- Extended REST front-door audit found and closed two more live gaps in the same family:
+  `/scip/callchain`'s `max_depth` upper bound didn't match what the backend actually honors, and
+  `/scip/references`' `limit` parameter was completely unbounded (`limit=0` meant "unlimited").
+- A pre-existing bug in `MachineMetricsExporter`'s observable-gauge callbacks (yielding plain
+  tuples instead of OTEL `Observation` objects) was fixed opportunistically while validating
+  #1586's telemetry pipeline -- it had been failing on every export cycle.
+
 ## [12.21.0] - 2026-08-18
 
 ### Fixed

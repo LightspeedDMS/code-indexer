@@ -325,7 +325,12 @@ class SCIPQueryEngine:
         return self.backend.analyze_impact(symbol, depth=depth)
 
     def trace_call_chain(
-        self, from_symbol: str, to_symbol: str, max_depth: int = 5, limit: int = 100
+        self,
+        from_symbol: str,
+        to_symbol: str,
+        max_depth: int = 5,
+        limit: int = 100,
+        timeout_errors: Optional[List[str]] = None,
     ) -> List["CallChain"]:
         """
         Trace all call chains from entry point to target function.
@@ -337,8 +342,15 @@ class SCIPQueryEngine:
         Args:
             from_symbol: Entry point symbol name
             to_symbol: Target function symbol name
-            max_depth: Maximum path length in hops (1-10, default 5)
+            max_depth: Maximum path length in hops (default 5). The
+                recursive-CTE query enumerates ALL distinct paths (not
+                shortest-path), so the backend clamps this down to
+                MAX_DEPTH_CAP (3, in scip/database/queries.py) regardless
+                of what is passed here (Bug #1603).
             limit: Maximum number of paths to return (default 100)
+            timeout_errors: Optional list this call appends a message to
+                if the underlying query times out (Bug #1603 code review
+                Priority 1) -- forwarded unchanged to the backend.
 
         Returns:
             List of CallChain objects sorted by length (shortest first).
@@ -354,5 +366,9 @@ class SCIPQueryEngine:
             ...     print(f"Path ({chain.length} hops): {' -> '.join(chain.path)}")
         """
         return self.backend.trace_call_chain(
-            from_symbol, to_symbol, max_depth=max_depth, limit=limit
+            from_symbol,
+            to_symbol,
+            max_depth=max_depth,
+            limit=limit,
+            timeout_errors=timeout_errors,
         )

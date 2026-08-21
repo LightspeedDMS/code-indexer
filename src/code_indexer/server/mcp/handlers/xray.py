@@ -21,6 +21,10 @@ if TYPE_CHECKING:
 
 from code_indexer.server.auth.user_manager import User, UserRole
 from code_indexer.server.services.config_service import get_config_service
+from code_indexer.server.services.query_admission_gate import (
+    check_query_admission,
+    memory_pressure_mcp_payload,
+)
 from code_indexer.xray.sandbox import validate_rust_evaluator
 from code_indexer.xray.search_engine import XRaySearchEngine
 
@@ -401,6 +405,10 @@ async def handle_xray_search(params: Dict[str, Any], user: User) -> Dict[str, An
         xray_extras_not_installed — tree-sitter extras not available.
         xray_evaluator_validation_failed — evaluator AST whitelist violation.
     """
+    _admission = check_query_admission()
+    if not _admission.allowed:
+        return _mcp_response(memory_pressure_mcp_payload(_admission))
+
     # ------------------------------------------------------------------
     # 1. Auth + permission check
     # ------------------------------------------------------------------
@@ -1071,6 +1079,10 @@ async def handle_xray_explore(params: Dict[str, Any], user: User) -> Dict[str, A
         xray_extras_not_installed      — tree-sitter extras not available.
         xray_evaluator_validation_failed — evaluator AST whitelist violation.
     """
+    _admission = check_query_admission()
+    if not _admission.allowed:
+        return _mcp_response(memory_pressure_mcp_payload(_admission))
+
     # ------------------------------------------------------------------
     # 1. Auth + permission check
     # ------------------------------------------------------------------

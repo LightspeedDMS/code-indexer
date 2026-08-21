@@ -66,6 +66,7 @@ def _make_mock_search_result(
     mock_result.matches = []
     mock_result.total_matches = 0
     mock_result.truncated = False
+    mock_result.read_capped = False
     mock_result.search_engine = "ripgrep"
     mock_result.search_time_ms = 42.0
     if matches is not None:
@@ -712,3 +713,61 @@ class TestRequestModelValidation:
             app.dependency_overrides.clear()
 
         assert resp.status_code == 200
+
+
+class TestReadCappedSurfacing1601:
+    """AC-E: read_capped must be surfaced at the REST route, both
+    single-repo and omni -- never silently dropped."""
+
+    @pytest.mark.parametrize("read_capped_value", [True, False])
+    def test_single_repo_read_capped_is_surfaced(self, app, client, read_capped_value):
+        """Single-repo search result's read_capped flag (True or the
+        normal False) is surfaced unchanged in the REST response."""
+        app.dependency_overrides[get_current_user] = lambda: NORMAL_USER
+        mock_result = _make_mock_search_result()
+        mock_result.read_capped = read_capped_value
+
+        try:
+            with (
+                _patch_repo_found(),
+                patch(
+                    "code_indexer.server.routes.regex_routes.RegexSearchService",
+                    return_value=MagicMock(search=AsyncMock(return_value=mock_result)),
+                ),
+                _patch_metrics(),
+                _patch_config_service(),
+            ):
+                resp = client.post("/api/regex/search", json=VALID_SINGLE_BODY)
+        finally:
+            app.dependency_overrides.clear()
+
+        assert resp.status_code == 200
+        assert resp.json()["read_capped"] is read_capped_value
+
+    def test_omni_read_capped_true_when_any_repo_capped(self, app, client):
+        """Omni search reports read_capped=True when only ONE constituent
+        repo was capped (not all) -- proves genuine OR aggregation, not an
+        AND or a first-result default."""
+        app.dependency_overrides[get_current_user] = lambda: NORMAL_USER
+        not_capped = _make_mock_search_result()
+        not_capped.read_capped = False
+        capped = _make_mock_search_result()
+        capped.read_capped = True
+        mock_service = MagicMock(search=AsyncMock(side_effect=[not_capped, capped]))
+
+        try:
+            with (
+                _patch_repo_found(),
+                patch(
+                    "code_indexer.server.routes.regex_routes.RegexSearchService",
+                    return_value=mock_service,
+                ),
+                _patch_metrics(),
+                _patch_config_service(),
+            ):
+                resp = client.post("/api/regex/search", json=VALID_OMNI_BODY)
+        finally:
+            app.dependency_overrides.clear()
+
+        assert resp.status_code == 200
+        assert resp.json()["read_capped"] is True

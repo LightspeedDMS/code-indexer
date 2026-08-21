@@ -494,8 +494,17 @@ class ScipConfig:
     scip_reference_limit: int = 100
     # AC32: SCIP dependency depth (default 3, range 1-20)
     scip_dependency_depth: int = 3
-    # AC33: SCIP callchain max depth (default 10, range 1-50)
-    scip_callchain_max_depth: int = 10
+    # AC33: SCIP callchain max depth (validated range 1-50, kept for
+    # backward compatibility with already-persisted config.json values).
+    # Default changed from 10 to 3 (Bug #1603): the underlying
+    # combinatorial-path query (scip/database/queries.py MAX_DEPTH_CAP,
+    # SCIPMultiService._trace_callchain_in_repo) is unsafe above depth 3
+    # and clamps to 3 regardless of what this setting allows -- 3 is the
+    # honest default for NEW deployments. The 1-50 validation ceiling is
+    # deliberately NOT tightened to avoid breaking startup on any
+    # already-deployed node whose on-disk config.json still has a value
+    # above 3 from before this fix.
+    scip_callchain_max_depth: int = 3
     # AC34: SCIP callchain limit (default 100, range 1-1000)
     scip_callchain_limit: int = 100
     # Story #15 AC2: SCIP workspace retention (moved from ServerConfig, default 7 days)

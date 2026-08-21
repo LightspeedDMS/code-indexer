@@ -31,6 +31,26 @@ from code_indexer.scip.protobuf import scip_pb2
 # ========== SCIP Database Version Schema Tests (Story #609) ==========
 
 
+def test_resolve_db_path_raises_clear_error_for_non_file_backed_connection():
+    """Bug #1603 code review (Priority 4): _resolve_db_path must raise a
+    clear ValueError for a non-file-backed connection (e.g. ':memory:'),
+    instead of silently returning an empty path -- PRAGMA database_list's
+    path column is '' for :memory:, and sqlite3.connect('') downstream in
+    the watchdog worker would silently open a brand-new transient empty
+    database, surfacing as a confusing 'no such table: symbols'
+    OperationalError deep inside the worker rather than a clear error
+    here at the boundary.
+    """
+    from code_indexer.scip.database.queries import _resolve_db_path
+
+    conn = sqlite3.connect(":memory:")
+    try:
+        with pytest.raises(ValueError, match="file-backed"):
+            _resolve_db_path(conn)
+    finally:
+        conn.close()
+
+
 def test_max_depth_cap_at_3(caplog):
     """Test that max_depth is capped at 3 with warning.
 
@@ -4058,4 +4078,614 @@ def test_trace_call_chain_v2_batched_uses_symbol_references():
             f"Expected chain DaemonService#start() -> _is_text_file() not found in: {paths}"
         )
 
+
+# ========== Bug #1603: SIGALRM-in-worker-thread watchdog tests ==========
+
+# Timeout (seconds) used to bound future.result() when a call-chain query is
+# executed inside a ThreadPoolExecutor worker thread in the tests below.
+_WORKER_FUTURE_TIMEOUT_SECONDS = 10
+
+# Fan-out width (see _build_fanout_call_chain_db) empirically measured on dev
+# hardware to make trace_call_chain_v2 / trace_call_chain_v2_batched take
+# real, measurable wall-clock time against _WATCHDOG_TIMEOUT_SECONDS below.
+# Bug #1603 code review (Priority 3): widened from 350 (~2s, ~10x margin)
+# to 500 (~4s, ~20x margin) since query time scales as O(width^2) --
+# doubling the safety margin against faster/slower CI hardware without
+# meaningfully increasing per-test wall-clock cost. The remaining
+# TestTraceCallChainWatchdogTimeout tests still assert only the public
+# (results, error_message) contract, which is inherently timing-based;
+# the newer *_interrupts_worker_connection_on_timeout tests in this same
+# class are the more deterministic check (thread-liveness, not a wall-
+# clock margin) and would catch a real regression even if this margin
+# were ever too tight.
+_FANOUT_WIDTH = 500
+
+# Real, tiny timeout_seconds passed to the public functions in the timeout
+# tests below -- deliberately far shorter than the real query time produced
+# by _FANOUT_WIDTH, so the watchdog's "thread still alive at join deadline"
+# path fires deterministically without mocking anything.
+_WATCHDOG_TIMEOUT_SECONDS = 0.2
+
+
+def _build_single_edge_call_chain_db(tmp_path: Path) -> Path:
+    """Create a minimal file-backed sqlite db with one symbol_references edge.
+
+    Symbol 1 (Service#methodA()) -> Symbol 2 (Service#methodB()), a direct
+    "call" edge, used by the Bug #1603 cross-thread tests below.
+    Uses a real file-backed connection (never :memory:) so that
+    PRAGMA database_list resolves to a real path, matching every other
+    trace_call_chain_v2*/batched test in this file.
+    """
+    db_path = tmp_path / "cross_thread.db"
+    conn = sqlite3.connect(str(db_path))
+    try:
+        conn.execute(
+            "CREATE TABLE symbols (id INTEGER PRIMARY KEY, name TEXT, kind TEXT)"
+        )
+        conn.execute(
+            """CREATE TABLE symbol_references (
+                id INTEGER PRIMARY KEY,
+                from_symbol_id INTEGER,
+                to_symbol_id INTEGER,
+                relationship_type TEXT,
+                occurrence_id INTEGER
+            )"""
+        )
+        conn.executemany(
+            "INSERT INTO symbols VALUES (?, ?, ?)",
+            [
+                (1, "Service#methodA().", "Method"),
+                (2, "Service#methodB().", "Method"),
+            ],
+        )
+        conn.execute(
+            "INSERT INTO symbol_references "
+            "(from_symbol_id, to_symbol_id, relationship_type, occurrence_id) "
+            "VALUES (1, 2, 'call', 1)"
+        )
+        conn.commit()
+    finally:
         conn.close()
+    return db_path
+
+
+def _run_trace_call_chain_in_worker_thread(target_fn, db_path: Path, call_kwargs: dict):
+    """Execute target_fn(conn, **call_kwargs) inside a ThreadPoolExecutor
+    worker thread using its own connection, returning (results, error_msg).
+
+    This is the discriminating mechanism for Bug #1603: pre-fix,
+    target_fn's internal signal.signal(SIGALRM, ...) call raises
+    ValueError when NOT invoked from the main thread -- exactly how a real
+    server request (uvicorn/FastAPI worker thread) always calls it.
+    """
+    from concurrent.futures import ThreadPoolExecutor
+
+    def _run():
+        worker_conn = sqlite3.connect(str(db_path))
+        try:
+            return target_fn(worker_conn, **call_kwargs)
+        finally:
+            worker_conn.close()
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(_run)
+        return future.result(timeout=_WORKER_FUTURE_TIMEOUT_SECONDS)
+
+
+def _assert_no_signal_thread_error_logged(caplog) -> None:
+    """Assert no WARNING/ERROR log record mentions the pre-fix swallowed
+    'signal only works in main thread' defect -- proves a SUCCESSFUL trace
+    genuinely eliminates the defect rather than papering over it."""
+    assert not any(
+        "signal only works" in record.message.lower() for record in caplog.records
+    ), (
+        f"Unexpected signal-in-worker-thread log record found: "
+        f"{[r.message for r in caplog.records]}"
+    )
+
+
+class TestTraceCallChainWorkerThreadSuccess:
+    """Bug #1603: signal.alarm()-based timeout breaks in worker threads.
+
+    POSIX signal handlers only work on the main thread of the main
+    interpreter. Every real server request runs trace_call_chain_v2 /
+    trace_call_chain_v2_batched on a worker thread (uvicorn/FastAPI), so the
+    pre-fix signal.signal(SIGALRM, ...) call raised
+    ``ValueError: signal only works in main thread of the main interpreter``
+    every single time in server mode -- silently swallowed upstream into a
+    ``total_chains_found: 0`` response. The fix replaces signal.alarm() with
+    a threading.Thread + join(timeout=...) watchdog (mirrors
+    get_smart_context in scip/query/composites.py), which works identically
+    regardless of which thread invokes it. No mocking anywhere in this
+    class -- every test calls the real, unmodified production function.
+    """
+
+    def test_trace_call_chain_v2_batched_succeeds_from_worker_thread(
+        self, tmp_path: Path, caplog
+    ):
+        """Discriminating RED test: must genuinely fail pre-fix with the
+        worker-thread ValueError; post-fix, real chains come back."""
+        from code_indexer.scip.database.queries import trace_call_chain_v2_batched
+
+        db_path = _build_single_edge_call_chain_db(tmp_path)
+        with caplog.at_level(logging.WARNING):
+            results, error_msg = _run_trace_call_chain_in_worker_thread(
+                trace_call_chain_v2_batched,
+                db_path,
+                {
+                    "from_symbol_ids": [1],
+                    "to_symbol_ids": [2],
+                    "max_depth": 3,
+                    "limit": 10,
+                },
+            )
+
+        assert error_msg is None, f"Expected no error, got: {error_msg}"
+        assert len(results) >= 1, f"Expected at least 1 chain, got {results}"
+        _assert_no_signal_thread_error_logged(caplog)
+
+    def test_trace_call_chain_v2_succeeds_from_worker_thread(
+        self, tmp_path: Path, caplog
+    ):
+        """Same discriminating test as above, for the non-batched
+        trace_call_chain_v2 (single from/to id) entry point."""
+        from code_indexer.scip.database.queries import trace_call_chain_v2
+
+        db_path = _build_single_edge_call_chain_db(tmp_path)
+        with caplog.at_level(logging.WARNING):
+            results, error_msg = _run_trace_call_chain_in_worker_thread(
+                trace_call_chain_v2,
+                db_path,
+                {"from_symbol_id": 1, "to_symbol_id": 2, "max_depth": 3, "limit": 10},
+            )
+
+        assert error_msg is None, f"Expected no error, got: {error_msg}"
+        assert len(results) >= 1, f"Expected at least 1 chain, got {results}"
+        _assert_no_signal_thread_error_logged(caplog)
+
+    def test_trace_call_chain_v2_batched_succeeds_from_main_thread(
+        self, tmp_path: Path
+    ):
+        """CLI/solo parity guard: the watchdog-thread approach must not
+        regress the pre-existing main-thread (CLI/solo) call path -- a
+        normal within-timeout query from the main thread must still return
+        real results, not a timeout."""
+        from code_indexer.scip.database.queries import trace_call_chain_v2_batched
+
+        db_path = _build_single_edge_call_chain_db(tmp_path)
+        conn = sqlite3.connect(str(db_path))
+        try:
+            results, error_msg = trace_call_chain_v2_batched(
+                conn,
+                from_symbol_ids=[1],
+                to_symbol_ids=[2],
+                max_depth=3,
+                limit=10,
+            )
+        finally:
+            conn.close()
+
+        assert error_msg is None, f"Expected no error, got: {error_msg}"
+        assert len(results) >= 1, f"Expected at least 1 chain, got {results}"
+
+
+def _build_fanout_call_chain_db(tmp_path: Path, width: int) -> tuple:
+    """Create a REAL file-backed sqlite db whose call-chain query is
+    genuinely slow -- no sleep/mock/monkeypatch of any kind.
+
+    Layout: Source(id=0) -> `width` Layer-1 nodes -> `width` Layer-2 nodes
+    -> Target. Distinct path count is width*width, so the real recursive
+    CTE (with string-concatenation path tracking) takes real, measurable
+    wall-clock time proportional to width**2 -- exactly the "path count
+    grows as O(b^depth)" concern the MAX_DEPTH_CAP=3 comment in queries.py
+    documents.
+    """
+    db_path = tmp_path / f"fanout_{width}.db"
+    conn = sqlite3.connect(str(db_path))
+    try:
+        conn.execute(
+            "CREATE TABLE symbols (id INTEGER PRIMARY KEY, name TEXT, kind TEXT)"
+        )
+        conn.execute(
+            """CREATE TABLE symbol_references (
+                id INTEGER PRIMARY KEY,
+                from_symbol_id INTEGER,
+                to_symbol_id INTEGER,
+                relationship_type TEXT,
+                occurrence_id INTEGER
+            )"""
+        )
+        symbols = [(0, "Source#run().", "Method")]
+        symbols.extend((i, f"L1_{i}#m().", "Method") for i in range(1, width + 1))
+        symbols.extend(
+            (width + j, f"L2_{j}#m().", "Method") for j in range(1, width + 1)
+        )
+        target_id = 2 * width + 1
+        symbols.append((target_id, "Target#m().", "Method"))
+        conn.executemany("INSERT INTO symbols VALUES (?, ?, ?)", symbols)
+
+        edges = [(0, i, "call", i) for i in range(1, width + 1)]
+        eid = width + 1
+        for i in range(1, width + 1):
+            for j in range(1, width + 1):
+                edges.append((i, width + j, "call", eid))
+                eid += 1
+        edges.extend(
+            (width + j, target_id, "call", eid + j) for j in range(1, width + 1)
+        )
+
+        conn.executemany(
+            "INSERT INTO symbol_references "
+            "(from_symbol_id, to_symbol_id, relationship_type, occurrence_id) "
+            "VALUES (?, ?, ?, ?)",
+            edges,
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    return db_path, target_id
+
+
+def _assert_timeout_result(results, error_msg) -> None:
+    """Assert the public (results, error_message) timeout contract: empty
+    results, a non-None message mentioning 'timeout', no exception raised
+    (the caller already returned normally by the time this runs)."""
+    assert results == [], f"Expected empty results on timeout, got: {results}"
+    assert error_msg is not None, "Expected a timeout error message, got None"
+    assert "timeout" in error_msg.lower(), (
+        f"Expected 'timeout' in error message, got: {error_msg}"
+    )
+
+
+# Grace period + poll interval used by
+# test_trace_call_chain_v2_batched_interrupts_worker_connection_on_timeout to
+# deterministically confirm the watchdog worker thread was actually
+# cancelled (via conn.interrupt()) rather than left to finish the real
+# ~2s fan-out query naturally.
+_INTERRUPT_GRACE_PERIOD_SECONDS = 1.0
+_INTERRUPT_POLL_INTERVAL_SECONDS = 0.02
+
+
+def _assert_worker_thread_cancelled_promptly(new_threads) -> None:
+    """Poll until every thread in `new_threads` has died, or the grace
+    period elapses -- then assert none are still alive.
+
+    A thread still alive after the grace period means conn.interrupt() did
+    not actually cancel the in-flight query (Bug #1603 code review Priority
+    1 defect: timeout abandons the worker thread with no cancellation).
+    """
+    deadline = time.monotonic() + _INTERRUPT_GRACE_PERIOD_SECONDS
+    while any(t.is_alive() for t in new_threads) and time.monotonic() < deadline:
+        time.sleep(_INTERRUPT_POLL_INTERVAL_SECONDS)
+
+    assert not any(t.is_alive() for t in new_threads), (
+        "Expected the watchdog worker thread to terminate promptly after "
+        "conn.interrupt() on timeout -- it is still running, meaning the "
+        "timeout abandons the thread with no cancellation (Bug #1603 code "
+        "review Priority 1, not fixed)."
+    )
+
+
+class TestTraceCallChainWatchdogTimeout:
+    """Bug #1603: verifies the thread-watchdog replacement for
+    signal.alarm() still enforces timeouts correctly (not just that it
+    avoids the worker-thread ValueError). Uses a REAL, genuinely slow query
+    (combinatorial fan-out graph, see _build_fanout_call_chain_db) against
+    a real, tiny timeout_seconds -- no mocking or monkeypatching of any
+    production code anywhere in this class.
+    """
+
+    def test_trace_call_chain_v2_batched_timeout_still_fires_from_main_thread(
+        self, tmp_path: Path
+    ):
+        from code_indexer.scip.database.queries import trace_call_chain_v2_batched
+
+        db_path, target_id = _build_fanout_call_chain_db(tmp_path, _FANOUT_WIDTH)
+        conn = sqlite3.connect(str(db_path))
+        try:
+            results, error_msg = trace_call_chain_v2_batched(
+                conn,
+                from_symbol_ids=[0],
+                to_symbol_ids=[target_id],
+                max_depth=3,
+                limit=0,
+                timeout_seconds=_WATCHDOG_TIMEOUT_SECONDS,
+            )
+        finally:
+            conn.close()
+
+        _assert_timeout_result(results, error_msg)
+
+    def test_trace_call_chain_v2_timeout_still_fires_from_main_thread(
+        self, tmp_path: Path
+    ):
+        from code_indexer.scip.database.queries import trace_call_chain_v2
+
+        db_path, target_id = _build_fanout_call_chain_db(tmp_path, _FANOUT_WIDTH)
+        conn = sqlite3.connect(str(db_path))
+        try:
+            results, error_msg = trace_call_chain_v2(
+                conn,
+                from_symbol_id=0,
+                to_symbol_id=target_id,
+                max_depth=3,
+                limit=0,
+                timeout_seconds=_WATCHDOG_TIMEOUT_SECONDS,
+            )
+        finally:
+            conn.close()
+
+        _assert_timeout_result(results, error_msg)
+
+    def test_trace_call_chain_v2_batched_interrupts_worker_connection_on_timeout(
+        self, tmp_path: Path
+    ):
+        """Bug #1603 code-review Priority 1 (CRITICAL): a join() timeout
+        must not merely abandon the worker thread while it keeps running
+        the combinatorial CTE (and holding its own sqlite3 connection open)
+        to completion in the background. sqlite3.Connection.interrupt() is
+        documented as safe to call from another thread and reliably makes
+        an in-flight query raise OperationalError, so the worker's own
+        `finally: conn.close()` runs promptly instead of after the full
+        O(width^2) fan-out finishes naturally (~2s here).
+
+        Deliberately asserts on THREAD LIVENESS (a real cancellation
+        post-condition) rather than a wall-clock margin, via the
+        `_assert_worker_thread_cancelled_promptly` helper. If the watchdog
+        thread is no longer discoverable at all by the time this test
+        checks, that is an even stronger proof of cancellation (not a
+        failure) -- only "found but still alive after the grace period" is
+        a genuine defect.
+        """
+        import threading
+
+        from code_indexer.scip.database.queries import trace_call_chain_v2_batched
+
+        db_path, target_id = _build_fanout_call_chain_db(tmp_path, _FANOUT_WIDTH)
+        conn = sqlite3.connect(str(db_path))
+        try:
+            threads_before = set(threading.enumerate())
+
+            results, error_msg = trace_call_chain_v2_batched(
+                conn,
+                from_symbol_ids=[0],
+                to_symbol_ids=[target_id],
+                max_depth=3,
+                limit=0,
+                timeout_seconds=_WATCHDOG_TIMEOUT_SECONDS,
+            )
+            _assert_timeout_result(results, error_msg)
+
+            # Deliberately does NOT filter by thread name here: naming the
+            # watchdog thread is a separate diagnosability nicety (Bug
+            # #1603 code review Priority 3), and requiring a specific name
+            # would make this discriminating test pass vacuously pre-fix
+            # (an unnamed thread would be filtered out, leaving an empty
+            # list and skipping the assertion entirely). Any thread newly
+            # spawned by this call is the query worker, named or not.
+            new_threads = [t for t in threading.enumerate() if t not in threads_before]
+            if new_threads:
+                _assert_worker_thread_cancelled_promptly(new_threads)
+        finally:
+            conn.close()
+
+    def test_trace_call_chain_v2_interrupts_worker_connection_on_timeout(
+        self, tmp_path: Path
+    ):
+        """Same fix as
+        test_trace_call_chain_v2_batched_interrupts_worker_connection_on_timeout,
+        for the non-batched trace_call_chain_v2 (single from/to id) entry
+        point (Bug #1603 code review Priority 1, CRITICAL)."""
+        import threading
+
+        from code_indexer.scip.database.queries import trace_call_chain_v2
+
+        db_path, target_id = _build_fanout_call_chain_db(tmp_path, _FANOUT_WIDTH)
+        conn = sqlite3.connect(str(db_path))
+        try:
+            threads_before = set(threading.enumerate())
+
+            results, error_msg = trace_call_chain_v2(
+                conn,
+                from_symbol_id=0,
+                to_symbol_id=target_id,
+                max_depth=3,
+                limit=0,
+                timeout_seconds=_WATCHDOG_TIMEOUT_SECONDS,
+            )
+            _assert_timeout_result(results, error_msg)
+
+            new_threads = [t for t in threading.enumerate() if t not in threads_before]
+            if new_threads:
+                _assert_worker_thread_cancelled_promptly(new_threads)
+        finally:
+            conn.close()
+
+
+def _delayed_batched_work(
+    db_path, target_id, conn_holder, delay_seconds, outcome_queue
+):
+    """Build a `work` callable for `_run_with_thread_watchdog` that sleeps
+    BEFORE calling the real, unmodified `_trace_call_chain_v2_batched_impl`
+    -- simulating a worker thread whose OS scheduling was delayed past the
+    watchdog's timeout -- then records into `outcome_queue` the wall-clock
+    duration spent INSIDE that real call (excluding the injected sleep),
+    for the test to observe whether it bailed out promptly (fixed) or ran
+    the full combinatorial fan-out query to completion (unfixed)."""
+    from code_indexer.scip.database.queries import _trace_call_chain_v2_batched_impl
+
+    def delayed_work():
+        time.sleep(delay_seconds)
+        impl_start = time.monotonic()
+        try:
+            result = _trace_call_chain_v2_batched_impl(
+                str(db_path), [0], [target_id], 3, 0, conn_holder
+            )
+        except BaseException as e:
+            outcome_queue.put(
+                ("raised", type(e).__name__, time.monotonic() - impl_start)
+            )
+            raise
+        outcome_queue.put(("completed", len(result), time.monotonic() - impl_start))
+        return result
+
+    return delayed_work
+
+
+def _assert_query_bailed_out_promptly(
+    outcome_queue, wait_timeout_seconds, max_impl_duration_seconds
+) -> None:
+    """Assert the delayed work's real-impl call (a) did not raise, and
+    (b) finished quickly rather than running the full ~2s fan-out query
+    to completion -- i.e. it bailed out as soon as it saw the
+    already-fired timeout, instead of ignoring it (Bug #1603 code review
+    round 4 Priority 5 fix)."""
+    import queue
+
+    try:
+        status, detail, impl_duration = outcome_queue.get(timeout=wait_timeout_seconds)
+    except queue.Empty:
+        raise AssertionError(
+            f"Worker never finished within {wait_timeout_seconds}s -- "
+            "cannot confirm the pre-publish race outcome"
+        )
+    assert status == "completed", (
+        f"Expected a normal return, got {status}: {detail} after {impl_duration:.3f}s"
+    )
+    assert impl_duration < max_impl_duration_seconds, (
+        "Expected the query to bail out promptly once it saw the "
+        f"already-fired timeout, but it ran for {impl_duration:.3f}s -- "
+        "close to the full uncancelled fan-out duration. The pre-publish "
+        "race (Bug #1603 code review round 4, Codex) is NOT closed: a "
+        "timeout firing before connect()/publish() lets the query run "
+        "to completion fully uncancelled."
+    )
+
+
+class TestTraceCallChainPrePublishTimeoutRace:
+    """Bug #1603 code review round 4 (Codex): if the watchdog's timeout
+    fires BEFORE the worker thread has called sqlite3.connect() /
+    published its connection into _ConnectionHolder, conn.interrupt()
+    correctly no-ops on the connection (safe, per
+    _ConnectionHolder.interrupt's own docstring) -- but
+    _ConnectionHolder also now records that a timeout occurred at all
+    (is_cancelled()), regardless of publish timing, and both impl
+    functions check it immediately after publish() so the query bails
+    out before running the expensive recursive CTE. Forces this exact
+    race deterministically, with NO monkeypatching of any production
+    code anywhere -- see _delayed_batched_work's docstring for how.
+    """
+
+    _PRE_CONNECT_DELAY_SECONDS = 0.4
+    _RACE_TIMEOUT_SECONDS = 0.05
+    _OUTCOME_WAIT_TIMEOUT_SECONDS = 10.0
+    _MAX_IMPL_DURATION_SECONDS = 1.0
+
+    def test_query_bails_out_promptly_when_timeout_fires_before_connect(
+        self, tmp_path: Path
+    ):
+        import queue
+
+        from code_indexer.scip.database.queries import (
+            _run_with_thread_watchdog,
+            _ConnectionHolder,
+        )
+
+        db_path, target_id = _build_fanout_call_chain_db(tmp_path, _FANOUT_WIDTH)
+        conn_holder = _ConnectionHolder()
+        outcome_queue: "queue.Queue" = queue.Queue()
+        delayed_work = _delayed_batched_work(
+            db_path,
+            target_id,
+            conn_holder,
+            self._PRE_CONNECT_DELAY_SECONDS,
+            outcome_queue,
+        )
+
+        start = time.monotonic()
+        results, error_msg = _run_with_thread_watchdog(
+            delayed_work,
+            self._RACE_TIMEOUT_SECONDS,
+            "test-prepublish-race",
+            conn_holder,
+        )
+        elapsed = time.monotonic() - start
+
+        _assert_timeout_result(results, error_msg)
+        assert elapsed < self._PRE_CONNECT_DELAY_SECONDS, (
+            "Public call should return at the watchdog timeout, not wait "
+            f"for the delayed worker (elapsed={elapsed:.3f}s)"
+        )
+        _assert_query_bailed_out_promptly(
+            outcome_queue,
+            self._OUTCOME_WAIT_TIMEOUT_SECONDS,
+            self._MAX_IMPL_DURATION_SECONDS,
+        )
+
+
+class TestTraceCallChainLegacyWrapperTimeoutPropagation:
+    """Bug #1603 code review round 2 (Priority 2): the legacy
+    trace_call_chain() wrapper (this module's public, non-_v2 helper) used
+    to log a WARNING on timeout and then return the (empty/partial)
+    results anyway -- a caller of this public helper got an
+    indistinguishable partial/empty success on timeout, the same class of
+    bug fixed for the multi-repo path (scip_multi_service.py) in
+    Priority 1. Verifies the fix with a REAL, genuinely slow query (no
+    mocking/monkeypatching of any production code) -- mirrors the
+    fan-out DB + tiny timeout_seconds pattern used by
+    TestTraceCallChainWatchdogTimeout above, plus a real call_graph
+    table/row (matching schema.py's shape) so the wrapper's auto-
+    detection takes the trace_call_chain_v2 fast-path branch under test.
+    """
+
+    def test_trace_call_chain_raises_query_timeout_error_on_real_timeout(
+        self, tmp_path: Path
+    ):
+        from code_indexer.scip.database.queries import (
+            trace_call_chain,
+            QueryTimeoutError,
+        )
+
+        db_path, target_id = _build_fanout_call_chain_db(tmp_path, _FANOUT_WIDTH)
+
+        # _build_fanout_call_chain_db only populates symbol_references
+        # (sufficient for the direct trace_call_chain_v2* tests above).
+        # trace_call_chain()'s own auto-detection additionally requires a
+        # non-empty call_graph table to select its fast path, so add one
+        # here matching schema.py's real shape.
+        setup_conn = sqlite3.connect(str(db_path))
+        try:
+            setup_conn.execute(
+                """
+                CREATE TABLE call_graph (
+                    id INTEGER PRIMARY KEY,
+                    caller_symbol_id INTEGER NOT NULL,
+                    callee_symbol_id INTEGER NOT NULL,
+                    occurrence_id INTEGER,
+                    relationship TEXT,
+                    caller_display_name TEXT,
+                    callee_display_name TEXT
+                )
+                """
+            )
+            setup_conn.execute(
+                "INSERT INTO call_graph (caller_symbol_id, callee_symbol_id, relationship) "
+                "VALUES (0, 1, 'call')"
+            )
+            setup_conn.commit()
+        finally:
+            setup_conn.close()
+
+        conn = sqlite3.connect(str(db_path))
+        try:
+            with pytest.raises(QueryTimeoutError):
+                trace_call_chain(
+                    conn,
+                    from_symbol_id=0,
+                    to_symbol_id=target_id,
+                    max_depth=3,
+                    limit=0,
+                    timeout_seconds=_WATCHDOG_TIMEOUT_SECONDS,
+                )
+        finally:
+            conn.close()

@@ -21,6 +21,7 @@
 - [feedback_bootstrap_changes_need_installer_and_autoupdater.md](feedback_bootstrap_changes_need_installer_and_autoupdater.md) - Bootstrap/systemd/env/PATH changes need BOTH installer AND auto-updater self-heal
 - [feedback_reliability_over_dependency_purity.md](feedback_reliability_over_dependency_purity.md) - Install-footprint purity vs reliability: default to installing the dependency
 - [feedback_no_subagent_to_subagent_delegation.md](feedback_no_subagent_to_subagent_delegation.md) - Dispatched subagents must act directly — NEVER spawn nested Task/Agent calls
+- [feedback_subagent_committed_against_explicit_instruction.md](feedback_subagent_committed_against_explicit_instruction.md) - A subagent committed+pushed to development despite explicit "Do NOT commit" — always verify via git log, never trust self-report
 
 ## Quality Standards
 - [feedback_zero_failures_no_excuses.md](feedback_zero_failures_no_excuses.md) - NEVER dismiss test failures as "pre-existing" — zero failures means zero
@@ -92,6 +93,7 @@
 - [project_config_default_flip_is_inert.md](project_config_default_flip_is_inert.md) - Changing a dataclass default is INERT on existing deployments — needs a marker-presence promotion
 - [project_chunk_storage_write_mode_context.md](project_chunk_storage_write_mode_context.md) - Chunk-storage write mode is context-dependent (server=sqlite, CLI/daemon=json); conversion always explicit
 - [project_shadow_mode_not_used_in_production.md](project_shadow_mode_not_used_in_production.md) - query-embedding cache "shadow" mode is NOT what production runs — assume `on` semantics
+- [project_staging_solo_concurrent_chaos_test.md](project_staging_solo_concurrent_chaos_test.md) - Another agent chaos-testing staging solo concurrently (as of 2026-08-18) — check before assuming clean baseline
 
 ## External References
 - [reference_staging_totp_programmatic_auth.md](reference_staging_totp_programmatic_auth.md) - Headless MFA: `.local-testing` TOTP is a shell command, eval for live code, then two-step login

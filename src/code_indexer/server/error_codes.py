@@ -4439,6 +4439,18 @@ ERROR_REGISTRY: Dict[str, ErrorDefinition] = {
         severity=Severity.WARNING,
         action="TODO",
     ),
+    "STORE-GENERAL-051": ErrorDefinition(
+        code="STORE-GENERAL-051",
+        description="TODO",
+        severity=Severity.WARNING,
+        action="TODO",
+    ),
+    "STORE-GENERAL-052": ErrorDefinition(
+        code="STORE-GENERAL-052",
+        description="TODO",
+        severity=Severity.WARNING,
+        action="TODO",
+    ),
     "SVC-GENERAL-015": ErrorDefinition(
         code="SVC-GENERAL-015",
         description="TODO",

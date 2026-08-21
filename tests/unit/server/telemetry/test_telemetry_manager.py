@@ -490,3 +490,35 @@ class TestTelemetryManagerProtocol:
             assert manager.collector_protocol == "http"
         finally:
             manager.shutdown()
+
+
+class TestGetTelemetryManagerFallbackImportRobustness:
+    """Bug (Story #1586 code-review Finding 9): get_telemetry_manager()'s
+    config=None fallback branch imports TelemetryConfig via the
+    'src.'-prefixed module path, which does not exist in a non-editable
+    production install (setuptools ships only the real 'code_indexer'
+    package, never a top-level 'src' namespace package). Unlike spans.py's
+    sibling bug, this import is NOT wrapped in a try/except at all, so a
+    background scheduler that legitimately calls get_telemetry_manager()
+    with no config before real startup config is loaded would crash with
+    ModuleNotFoundError in production.
+
+    Verified via real source inspection (inspect.getsource) of the actual
+    function under test -- no mocking of the import system or of the
+    function itself.
+    """
+
+    def test_get_telemetry_manager_fallback_does_not_use_broken_src_prefixed_import(
+        self,
+    ):
+        import inspect
+
+        from code_indexer.server.telemetry.manager import get_telemetry_manager
+
+        source = inspect.getsource(get_telemetry_manager)
+
+        assert "from src.code_indexer" not in source
+        assert (
+            "from code_indexer.server.utils.config_manager import TelemetryConfig"
+            in source
+        )

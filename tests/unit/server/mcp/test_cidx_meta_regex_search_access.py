@@ -47,6 +47,7 @@ def make_search_result(matches):
     result.matches = matches
     result.total_matches = len(matches)
     result.truncated = False
+    result.read_capped = False
     result.search_engine = "ripgrep"
     result.search_time_ms = 5
     return result

@@ -115,7 +115,12 @@ class SCIPBackend(ABC):
 
     @abstractmethod
     def trace_call_chain(
-        self, from_symbol: str, to_symbol: str, max_depth: int = 5, limit: int = 100
+        self,
+        from_symbol: str,
+        to_symbol: str,
+        max_depth: int = 5,
+        limit: int = 100,
+        timeout_errors: Optional[List[str]] = None,
     ) -> List[CallChain]:
         """
         Trace all call chains from entry point to target function.
@@ -123,8 +128,16 @@ class SCIPBackend(ABC):
         Args:
             from_symbol: Entry point symbol name
             to_symbol: Target function symbol name
-            max_depth: Maximum path length (1-10, default 5)
+            max_depth: Maximum path length (default 5). The recursive-CTE
+                query enumerates ALL distinct paths (not shortest-path),
+                so DatabaseBackend clamps this down to MAX_DEPTH_CAP (3,
+                in scip/database/queries.py) regardless of what is passed
+                here (Bug #1603).
             limit: Maximum number of paths to return (default 100)
+            timeout_errors: Optional list this call appends a message to
+                if the underlying query times out (Bug #1603 code review
+                Priority 1) -- callers must treat a non-empty list as a
+                genuine failure, not an empty/partial success.
 
         Returns:
             List of CallChain objects with path, length, and has_cycle
@@ -551,7 +564,12 @@ class DatabaseBackend(SCIPBackend):
         return scope_ids if scope_ids else [symbol_id]
 
     def trace_call_chain(
-        self, from_symbol: str, to_symbol: str, max_depth: int = 5, limit: int = 100
+        self,
+        from_symbol: str,
+        to_symbol: str,
+        max_depth: int = 5,
+        limit: int = 100,
+        timeout_errors: Optional[List[str]] = None,
     ) -> List[CallChain]:
         """Trace call chains from entry point to target using database."""
         from ..database.queries import trace_call_chain_v2_batched
@@ -632,11 +650,16 @@ class DatabaseBackend(SCIPBackend):
         )
 
         if error_msg:
-            # Log timeout/error but continue with partial results
+            # Log timeout/error, AND propagate it (Bug #1603 code review
+            # Priority 1) so callers know the (probably empty/partial)
+            # results below do not mean "no chains found" -- they mean the
+            # query was cut off.
             import logging
 
             logger = logging.getLogger(__name__)
             logger.warning(f"trace_call_chain batched query: {error_msg}")
+            if timeout_errors is not None:
+                timeout_errors.append(error_msg)
 
         # Convert to CallChain objects
         all_chains = []

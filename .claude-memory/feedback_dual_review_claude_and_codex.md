@@ -1,12 +1,14 @@
 ---
 name: feedback-dual-review-claude-and-codex
-description: "User wants every code review gate to run BOTH a Claude code-reviewer AND an independent Codex review in parallel, not Claude alone"
+description: "Dual review (Claude + Codex) is the DEFAULT preference when Codex credits are available; CURRENTLY SUSPENDED as of 2026-08-20 (out of Codex credits) — use Claude code-reviewer only until the user says credits are restored"
 metadata: 
   node_type: memory
   type: feedback
   originSessionId: c8988bc3-fd2e-470b-a1f2-9f3d1056dfb2
-  modified: 2026-08-15T04:39:22.812Z
+  modified: 2026-08-20T15:59:15.642Z
 ---
+
+**CURRENT STATE (2026-08-20): SUSPENDED.** User said "stop using codex for code reviews. resort to our own code reviewer. we are out of credits." Do NOT dispatch `codex-code-reviewer` (or any `*-codex-*` agent) for code review gates until the user explicitly says Codex credits are available again. Use `code-reviewer` (Claude opus) alone for every review gate in the meantime — do not silently fall back to dual review out of habit, and do not ask the user to re-confirm each time; this instruction persists across the rest of this work until they say otherwise.
 
 Every story/PR review gate should dispatch a Claude `code-reviewer` AND an independent `codex-code-reviewer` in parallel (independent context, not sharing the Claude reviewer's transcript), then consolidate both sets of findings before relaying to the implementing agent.
 

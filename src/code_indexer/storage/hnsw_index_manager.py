@@ -22,6 +22,12 @@ from code_indexer.utils.file_locking import (
     nfs_safe_fsync,
 )
 
+# Story #1586 AC5: custom span around the HNSW build/rebuild/incremental-
+# update operations. create_span() no-ops (yields a _NoOpSpan) when OTEL
+# tracing is unavailable/uninitialized, so this import is safe on the
+# CLI-only path too (no telemetry ever configured there).
+from code_indexer.server.telemetry.spans import create_span
+
 import numpy as np
 
 logger = logging.getLogger(__name__)
@@ -242,6 +248,13 @@ def discard_corrupt_index(collection_path: Path) -> None:
 #: build-time throughput).
 DEFAULT_HNSW_NUM_THREADS = -1
 
+#: Default HNSW construction parameters (Story #1586 code-review followup):
+#: named so the fallback defaults used when metadata has no prior recorded
+#: values (existing_hnsw.get("M", DEFAULT_HNSW_M) etc.) are self-documenting
+#: rather than bare literals. Matches hnswlib's own conventional defaults.
+DEFAULT_HNSW_M = 16
+DEFAULT_HNSW_EF_CONSTRUCTION = 200
+
 
 class HNSWIndexManager:
     """Manages HNSW index for fast approximate nearest neighbor search.
@@ -454,103 +467,108 @@ class HNSWIndexManager:
         Raises:
             ValueError: If vector dimensions don't match or IDs length doesn't match
         """
-        # Validate inputs
-        if vectors.shape[1] != self.vector_dim:
-            raise ValueError(
-                f"Vector dimension mismatch: expected {self.vector_dim}, "
-                f"got {vectors.shape[1]}"
-            )
 
-        if len(ids) != len(vectors):
-            raise ValueError(
-                f"IDs length ({len(ids)}) doesn't match vectors length ({len(vectors)})"
-            )
-
-        num_vectors = len(vectors)
-
-        # Create HNSW index
-        index = hnswlib.Index(space=self.space, dim=self.vector_dim)
-        index.init_index(
-            max_elements=num_vectors,
-            M=M,
-            ef_construction=ef_construction,
-            allow_replace_deleted=True,
-        )
-
-        # Add vectors to index with labels (use indices as labels)
-        # We'll store the ID mapping separately in metadata
-        labels = np.arange(num_vectors)
-
-        # Report info message at start
-        if progress_callback:
-            progress_callback(0, 0, Path(""), info="🔧 Building HNSW index...")
-            # DEBUG: Mark full build for manual testing
-            progress_callback(
-                0,
-                0,
-                Path(""),
-                info=f"🔨 FULL HNSW INDEX BUILD: Creating index from scratch with {num_vectors} vectors",
-            )
-
-        # Story #1493 flakiness investigation: pass through the (test-only)
-        # deterministic thread-count override instead of relying on
-        # hnswlib's own implicit default.
-        index.add_items(vectors, labels, num_threads=self.num_threads)
-
-        # Story #1359 AC1/AC2: detect + repair orphans BEFORE the index is
-        # persisted, so a freshly-built index never finalizes with orphans.
-        self._detect_and_repair_orphans(
-            index,
-            context=f"build_index:{collection_path}",
-        )
-
-        # Report info message at completion
-        if progress_callback:
-            progress_callback(0, 0, Path(""), info="🔧 HNSW index built ✓")
-
-        # Save index to disk atomically — temp file + rename prevents corruption on crash
-        index_file = collection_path / self.INDEX_FILENAME
-        tmp_hnsw_fd, tmp_hnsw_path = tempfile.mkstemp(
-            dir=str(collection_path),
-            prefix=".tmp_hnsw_",
-            suffix=".tmp",
-        )
-        os.close(tmp_hnsw_fd)  # hnswlib opens by path, not fd
-        try:
-            index.save_index(tmp_hnsw_path)
-            # Bug #1529 finding #7(a): atomic was not enough. A fixed temporal
-            # path means refreshes rewrite this file IN PLACE, so flush the
-            # contents BEFORE publishing them, and fsync the directory AFTER
-            # the rename so the rename itself survives power-loss. The
-            # ordering is the whole point: an fsync on the wrong side of
-            # os.replace provides no durability at all.
-            with open(tmp_hnsw_path, "rb") as saved_index_f:
-                nfs_safe_fsync(saved_index_f.fileno())
-            os.replace(tmp_hnsw_path, str(index_file))
-            fsync_directory(collection_path)
-        except Exception:
-            try:
-                os.unlink(tmp_hnsw_path)
-            except OSError as cleanup_err:
-                # Best-effort cleanup — temp file may already be gone or unlink may
-                # fail on a read-only filesystem. Log and discard so the original
-                # exception propagates unmodified.
-                logger.warning(
-                    "Failed to clean up temp HNSW file %s after write error: %s",
-                    tmp_hnsw_path,
-                    cleanup_err,
+        with create_span(
+            "cidx.hnsw.build_index",
+            attributes={"collection_path": str(collection_path)},
+        ):
+            # Validate inputs
+            if vectors.shape[1] != self.vector_dim:
+                raise ValueError(
+                    f"Vector dimension mismatch: expected {self.vector_dim}, "
+                    f"got {vectors.shape[1]}"
                 )
-            raise
 
-        # Update metadata
-        self._update_metadata(
-            collection_path=collection_path,
-            vector_count=num_vectors,
-            M=M,
-            ef_construction=ef_construction,
-            ids=ids,
-            index_file_size=index_file.stat().st_size,
-        )
+            if len(ids) != len(vectors):
+                raise ValueError(
+                    f"IDs length ({len(ids)}) doesn't match vectors length ({len(vectors)})"
+                )
+
+            num_vectors = len(vectors)
+
+            # Create HNSW index
+            index = hnswlib.Index(space=self.space, dim=self.vector_dim)
+            index.init_index(
+                max_elements=num_vectors,
+                M=M,
+                ef_construction=ef_construction,
+                allow_replace_deleted=True,
+            )
+
+            # Add vectors to index with labels (use indices as labels)
+            # We'll store the ID mapping separately in metadata
+            labels = np.arange(num_vectors)
+
+            # Report info message at start
+            if progress_callback:
+                progress_callback(0, 0, Path(""), info="🔧 Building HNSW index...")
+                # DEBUG: Mark full build for manual testing
+                progress_callback(
+                    0,
+                    0,
+                    Path(""),
+                    info=f"🔨 FULL HNSW INDEX BUILD: Creating index from scratch with {num_vectors} vectors",
+                )
+
+            # Story #1493 flakiness investigation: pass through the (test-only)
+            # deterministic thread-count override instead of relying on
+            # hnswlib's own implicit default.
+            index.add_items(vectors, labels, num_threads=self.num_threads)
+
+            # Story #1359 AC1/AC2: detect + repair orphans BEFORE the index is
+            # persisted, so a freshly-built index never finalizes with orphans.
+            self._detect_and_repair_orphans(
+                index,
+                context=f"build_index:{collection_path}",
+            )
+
+            # Report info message at completion
+            if progress_callback:
+                progress_callback(0, 0, Path(""), info="🔧 HNSW index built ✓")
+
+            # Save index to disk atomically — temp file + rename prevents corruption on crash
+            index_file = collection_path / self.INDEX_FILENAME
+            tmp_hnsw_fd, tmp_hnsw_path = tempfile.mkstemp(
+                dir=str(collection_path),
+                prefix=".tmp_hnsw_",
+                suffix=".tmp",
+            )
+            os.close(tmp_hnsw_fd)  # hnswlib opens by path, not fd
+            try:
+                index.save_index(tmp_hnsw_path)
+                # Bug #1529 finding #7(a): atomic was not enough. A fixed temporal
+                # path means refreshes rewrite this file IN PLACE, so flush the
+                # contents BEFORE publishing them, and fsync the directory AFTER
+                # the rename so the rename itself survives power-loss. The
+                # ordering is the whole point: an fsync on the wrong side of
+                # os.replace provides no durability at all.
+                with open(tmp_hnsw_path, "rb") as saved_index_f:
+                    nfs_safe_fsync(saved_index_f.fileno())
+                os.replace(tmp_hnsw_path, str(index_file))
+                fsync_directory(collection_path)
+            except Exception:
+                try:
+                    os.unlink(tmp_hnsw_path)
+                except OSError as cleanup_err:
+                    # Best-effort cleanup — temp file may already be gone or unlink may
+                    # fail on a read-only filesystem. Log and discard so the original
+                    # exception propagates unmodified.
+                    logger.warning(
+                        "Failed to clean up temp HNSW file %s after write error: %s",
+                        tmp_hnsw_path,
+                        cleanup_err,
+                    )
+                raise
+
+            # Update metadata
+            self._update_metadata(
+                collection_path=collection_path,
+                vector_count=num_vectors,
+                M=M,
+                ef_construction=ef_construction,
+                ids=ids,
+                index_file_size=index_file.stat().st_size,
+            )
 
     def load_index(
         self, collection_path: Path, max_elements: int = 1000000
@@ -714,6 +732,38 @@ class HNSWIndexManager:
             return None
 
     def rebuild_from_vectors(
+        self,
+        collection_path: Path,
+        progress_callback: Optional[Any] = None,
+        visible_files: Optional[Set[str]] = None,
+        current_branch: Optional[str] = None,
+        clear_stale: bool = True,
+        layout_override: Optional[ChunkLayout] = None,
+        project_root: Optional[Path] = None,
+        lock_already_held: bool = False,
+    ) -> int:
+        """Rebuild HNSW index by scanning all vector JSON files.
+
+        Thin span-wrapping public entry point (Story #1586 AC5) -- the full
+        implementation lives in _rebuild_from_vectors_impl(), unchanged, so
+        wrapping it in a custom span never requires re-indenting that body.
+        """
+        with create_span(
+            "cidx.hnsw.rebuild_from_vectors",
+            attributes={"collection_path": str(collection_path)},
+        ):
+            return self._rebuild_from_vectors_impl(
+                collection_path,
+                progress_callback=progress_callback,
+                visible_files=visible_files,
+                current_branch=current_branch,
+                clear_stale=clear_stale,
+                layout_override=layout_override,
+                project_root=project_root,
+                lock_already_held=lock_already_held,
+            )
+
+    def _rebuild_from_vectors_impl(
         self,
         collection_path: Path,
         progress_callback: Optional[Any] = None,
@@ -1832,186 +1882,197 @@ class HNSWIndexManager:
         visible_count: Optional[int] = None,
         total_on_disk: Optional[int] = None,
     ) -> None:
-        """Save HNSW index after incremental updates.
+        """Save HNSW index after incremental updates, then publish metadata.
 
-        Args:
-            index: hnswlib.Index instance with updates
-            collection_path: Path to collection directory
-            id_to_label: Updated id_to_label mapping
-            label_to_id: Updated label_to_id mapping
-            vector_count: Total number of vectors (including deleted)
-            clear_stale: Bug #1407 Amendment 1 -- when True (default,
-                         today's unchanged behavior for the whole fleet),
-                         marks fresh (is_stale=False). When False, preserves
-                         the PRIOR is_stale/last_marked_stale (defaulting
-                         stale=True for a virgin shard) so only the caller's
-                         explicit clear_stale() call can mark it fresh.
-            filtered: Bug #1575 Part C -- when explicitly given (not None),
-                         overrides the stored ``filtered`` flag. When None
-                         (default), the PRIOR value already recorded by a
-                         full/filtered rebuild is preserved instead of being
-                         silently dropped (the verified gap this fix closes:
-                         this method used to replace ``metadata["hnsw_index"]``
-                         wholesale, discarding filtered/current_branch/
-                         visible_count/total_on_disk on every incremental
-                         publish that followed a filtered rebuild).
-            current_branch: Bug #1575 Part C -- same override-or-preserve
-                         contract as ``filtered``.
-            visible_count: Bug #1575 Part C -- same override-or-preserve
-                         contract as ``filtered``.
-            total_on_disk: Bug #1575 Part C -- same override-or-preserve
-                         contract as ``filtered``.
-
-        Note:
-            Updates both index file and metadata with new mappings.
-            Preserves existing HNSW parameters (M, ef_construction).
-
+        See _publish_incremental_hnsw_metadata() for the clear_stale/
+        filtered/current_branch/visible_count/total_on_disk parameter
+        semantics (Bug #1407 Amendment 1, Bug #1575 Part C).
         """
-        # DEBUG: Mark incremental update for manual testing
-        current_index_size = index.get_current_count() if index else 0
-        num_new_vectors = len(id_to_label)
-        # Use INFO level so it's visible in logs
-        logger.info(
-            f"⚡ INCREMENTAL HNSW UPDATE: Adding/updating {num_new_vectors} vectors (total index size: {current_index_size})"
-        )
+        with create_span(
+            "cidx.hnsw.save_incremental_update",
+            attributes={"collection_path": str(collection_path)},
+        ):
+            # DEBUG: Mark incremental update for manual testing
+            current_index_size = index.get_current_count() if index else 0
+            num_new_vectors = len(id_to_label)
+            # Use INFO level so it's visible in logs
+            logger.info(
+                f"⚡ INCREMENTAL HNSW UPDATE: Adding/updating {num_new_vectors} vectors (total index size: {current_index_size})"
+            )
 
-        # Story #1359 AC1/AC2: detect + repair orphans BEFORE the index is
-        # persisted. This is the incremental path's finalize checkpoint --
-        # the two single-point add_items sites in add_or_update_vector()
-        # batch/defer the full-index integrity check to here rather than
-        # running check_integrity() (O(elements)) on every single-point add,
-        # which would be impractical for a per-point incremental operation.
-        self._detect_and_repair_orphans(
-            index,
-            context=f"incremental_update:{collection_path}",
-        )
+            # Story #1359 AC1/AC2: detect + repair orphans BEFORE the index is
+            # persisted. This is the incremental path's finalize checkpoint --
+            # the two single-point add_items sites in add_or_update_vector()
+            # batch/defer the full-index integrity check to here rather than
+            # running check_integrity() (O(elements)) on every single-point add,
+            # which would be impractical for a per-point incremental operation.
+            self._detect_and_repair_orphans(
+                index,
+                context=f"incremental_update:{collection_path}",
+            )
 
-        # Save index to disk atomically — temp file + rename prevents corruption on crash
-        index_file = collection_path / self.INDEX_FILENAME
-        tmp_hnsw_fd, tmp_hnsw_path = tempfile.mkstemp(
-            dir=str(collection_path),
-            prefix=".tmp_hnsw_",
-            suffix=".tmp",
-        )
-        os.close(tmp_hnsw_fd)  # hnswlib opens by path, not fd
-        try:
-            self._save_hnsw_index(index, tmp_hnsw_path)
-            # Bug #1529: atomic was not enough here either. This is the
-            # incremental publisher a real refresh finalizes through, and a
-            # fixed temporal path is rewritten IN PLACE -- flush the contents
-            # BEFORE publishing them, and the directory AFTER the rename so
-            # the rename itself survives power-loss.
-            with open(tmp_hnsw_path, "rb") as saved_index_f:
-                nfs_safe_fsync(saved_index_f.fileno())
-            os.replace(tmp_hnsw_path, str(index_file))
-            fsync_directory(collection_path)
-        except Exception:
+            # Save index to disk atomically — temp file + rename prevents corruption on crash
+            index_file = collection_path / self.INDEX_FILENAME
+            tmp_hnsw_fd, tmp_hnsw_path = tempfile.mkstemp(
+                dir=str(collection_path),
+                prefix=".tmp_hnsw_",
+                suffix=".tmp",
+            )
+            os.close(tmp_hnsw_fd)  # hnswlib opens by path, not fd
             try:
-                os.unlink(tmp_hnsw_path)
-            except OSError as cleanup_err:
-                # Best-effort cleanup — temp file may already be gone or unlink may
-                # fail on a read-only filesystem.  Log and discard so the original
-                # exception propagates unmodified.
-                logger.warning(
-                    "Failed to clean up temp HNSW file %s after write error: %s",
-                    tmp_hnsw_path,
-                    cleanup_err,
-                )
-            raise
+                self._save_hnsw_index(index, tmp_hnsw_path)
+                # Bug #1529: atomic was not enough here either. This is the
+                # incremental publisher a real refresh finalizes through, and a
+                # fixed temporal path is rewritten IN PLACE -- flush the contents
+                # BEFORE publishing them, and the directory AFTER the rename so
+                # the rename itself survives power-loss.
+                with open(tmp_hnsw_path, "rb") as saved_index_f:
+                    nfs_safe_fsync(saved_index_f.fileno())
+                os.replace(tmp_hnsw_path, str(index_file))
+                fsync_directory(collection_path)
+            except Exception:
+                try:
+                    os.unlink(tmp_hnsw_path)
+                except OSError as cleanup_err:
+                    # Best-effort cleanup — temp file may already be gone or unlink may
+                    # fail on a read-only filesystem.  Log and discard so the original
+                    # exception propagates unmodified.
+                    logger.warning(
+                        "Failed to clean up temp HNSW file %s after write error: %s",
+                        tmp_hnsw_path,
+                        cleanup_err,
+                    )
+                raise
 
-        # Update metadata with new mappings
+            self._publish_incremental_hnsw_metadata(
+                collection_path=collection_path,
+                index_file=index_file,
+                label_to_id=label_to_id,
+                vector_count=vector_count,
+                clear_stale=clear_stale,
+                filtered=filtered,
+                current_branch=current_branch,
+                visible_count=visible_count,
+                total_on_disk=total_on_disk,
+            )
+
+    def _build_incremental_hnsw_metadata_dict(
+        self,
+        *,
+        existing_hnsw: Dict[str, Any],
+        index_file: Path,
+        vector_count: int,
+        clear_stale: bool,
+        filtered: Optional[bool],
+        current_branch: Optional[str],
+        visible_count: Optional[int],
+        total_on_disk: Optional[int],
+        id_mapping: Dict[str, str],
+    ) -> Dict[str, Any]:
+        """Build the new_hnsw metadata dict for an incremental publish.
+
+        Pure function, no I/O: resolves HNSW params (M/ef_construction),
+        the stale flag, and the Bug #1575 Part C override-or-preserve
+        fields (filtered/current_branch/visible_count/total_on_disk) --
+        each resolves from the explicit override when given (not None),
+        else PRESERVES whatever a prior full/filtered rebuild already
+        recorded, and is added to the dict only when not None (so a
+        collection never filtered stays byte-identical).
+        """
+        import uuid
+
+        M = existing_hnsw.get("M", DEFAULT_HNSW_M)
+        ef_construction = existing_hnsw.get(
+            "ef_construction", DEFAULT_HNSW_EF_CONSTRUCTION
+        )
+        new_hnsw: Dict[str, Any] = {
+            "version": 1,
+            "index_rebuild_uuid": str(uuid.uuid4()),  # AC12: Track rebuild version
+            "vector_count": vector_count,
+            "vector_dim": self.vector_dim,
+            "M": M,
+            "ef_construction": ef_construction,
+            "space": self.space,
+            "last_rebuild": datetime.now(timezone.utc).isoformat(),
+            "file_size_bytes": index_file.stat().st_size,
+            "id_mapping": id_mapping,
+        }
+        if clear_stale:
+            new_hnsw["is_stale"] = False
+            new_hnsw["last_marked_stale"] = None
+        elif existing_hnsw:
+            new_hnsw["is_stale"] = existing_hnsw.get("is_stale", True)
+            new_hnsw["last_marked_stale"] = existing_hnsw.get("last_marked_stale")
+        else:
+            # Virgin-shard opt-out default: never fabricate fresh.
+            new_hnsw["is_stale"] = True
+            new_hnsw["last_marked_stale"] = None
+
+        for key, override, fallback_key in (
+            ("filtered", filtered, "filtered"),
+            ("current_branch", current_branch, "current_branch"),
+            ("visible_count", visible_count, "visible_count"),
+            ("total_on_disk", total_on_disk, "total_on_disk"),
+        ):
+            resolved = (
+                override if override is not None else existing_hnsw.get(fallback_key)
+            )
+            if resolved is not None:
+                new_hnsw[key] = resolved
+
+        return new_hnsw
+
+    def _publish_incremental_hnsw_metadata(
+        self,
+        *,
+        collection_path: Path,
+        index_file: Path,
+        label_to_id: Dict[int, str],
+        vector_count: int,
+        clear_stale: bool,
+        filtered: Optional[bool],
+        current_branch: Optional[str],
+        visible_count: Optional[int],
+        total_on_disk: Optional[int],
+    ) -> None:
+        """Update collection_meta.json after an incremental HNSW publish.
+
+        Extracted from save_incremental_update() (Story #1586 AC5 code
+        review followup) so that method's own source -- inspected via AST
+        by tests/unit/storage/test_hnsw_durable_writes_1529.py -- stays
+        focused on the durability-critical fsync/rename sequence. This
+        helper contains NO fsync/rename calls itself; it is pure lock/file
+        I/O orchestration -- the actual metadata dict is built by
+        _build_incremental_hnsw_metadata_dict().
+        """
         meta_file = collection_path / "collection_meta.json"
         lock_file = collection_path / ".metadata.lock"
         lock_file.touch(exist_ok=True)
 
         with open(lock_file, "r+") as lock_f:
-            # Acquire exclusive lock
             _used_lockf = nfs_safe_flock(lock_f.fileno(), fcntl.LOCK_EX)
             try:
-                # Load existing metadata
                 if meta_file.exists():
                     with open(meta_file) as f:
                         metadata = json.load(f)
                 else:
                     metadata = {}
 
-                # Get existing HNSW config or use defaults
                 existing_hnsw = metadata.get("hnsw_index", {})
-                M = existing_hnsw.get("M", 16)
-                ef_construction = existing_hnsw.get("ef_construction", 200)
-
-                # Create ID mapping (label -> ID) for metadata
                 id_mapping = {
                     str(label): point_id for label, point_id in label_to_id.items()
                 }
-
-                # Update HNSW index metadata (AC12: preserve or generate new UUID)
-                import uuid
-
-                # Generate new UUID for incremental updates too (version tracking)
-                new_hnsw: Dict[str, Any] = {
-                    "version": 1,
-                    "index_rebuild_uuid": str(
-                        uuid.uuid4()
-                    ),  # AC12: Track rebuild version
-                    "vector_count": vector_count,
-                    "vector_dim": self.vector_dim,
-                    "M": M,
-                    "ef_construction": ef_construction,
-                    "space": self.space,
-                    "last_rebuild": datetime.now(timezone.utc).isoformat(),
-                    "file_size_bytes": index_file.stat().st_size,
-                    "id_mapping": id_mapping,
-                }
-                if clear_stale:
-                    new_hnsw["is_stale"] = False
-                    new_hnsw["last_marked_stale"] = None
-                elif existing_hnsw:
-                    new_hnsw["is_stale"] = existing_hnsw.get("is_stale", True)
-                    new_hnsw["last_marked_stale"] = existing_hnsw.get(
-                        "last_marked_stale"
-                    )
-                else:
-                    # Virgin-shard opt-out default: never fabricate fresh.
-                    new_hnsw["is_stale"] = True
-                    new_hnsw["last_marked_stale"] = None
-
-                # Bug #1575 Part C: resolve filtered/current_branch/
-                # visible_count/total_on_disk from the explicit override when
-                # given, else PRESERVE whatever a prior full/filtered rebuild
-                # already recorded -- never silently drop them. Each field is
-                # added to new_hnsw only when the resolved value is not None,
-                # so an incremental publish on a collection that was NEVER
-                # filtered stays byte-identical (no spontaneous
-                # filtered/current_branch/... keys appear).
-                _resolved_filtered = (
-                    filtered if filtered is not None else existing_hnsw.get("filtered")
+                metadata["hnsw_index"] = self._build_incremental_hnsw_metadata_dict(
+                    existing_hnsw=existing_hnsw,
+                    index_file=index_file,
+                    vector_count=vector_count,
+                    clear_stale=clear_stale,
+                    filtered=filtered,
+                    current_branch=current_branch,
+                    visible_count=visible_count,
+                    total_on_disk=total_on_disk,
+                    id_mapping=id_mapping,
                 )
-                _resolved_branch = (
-                    current_branch
-                    if current_branch is not None
-                    else existing_hnsw.get("current_branch")
-                )
-                _resolved_visible_count = (
-                    visible_count
-                    if visible_count is not None
-                    else existing_hnsw.get("visible_count")
-                )
-                _resolved_total_on_disk = (
-                    total_on_disk
-                    if total_on_disk is not None
-                    else existing_hnsw.get("total_on_disk")
-                )
-                if _resolved_filtered is not None:
-                    new_hnsw["filtered"] = _resolved_filtered
-                if _resolved_branch is not None:
-                    new_hnsw["current_branch"] = _resolved_branch
-                if _resolved_visible_count is not None:
-                    new_hnsw["visible_count"] = _resolved_visible_count
-                if _resolved_total_on_disk is not None:
-                    new_hnsw["total_on_disk"] = _resolved_total_on_disk
-
-                metadata["hnsw_index"] = new_hnsw
 
                 # Bug #1529 finding #7(a): route through the ONE durable
                 # writer instead of re-implementing temp-file+rename a second
@@ -2019,5 +2080,4 @@ class HNSWIndexManager:
                 # the file that holds the load-bearing hnsw_index.id_mapping.
                 self._atomic_write_metadata_durable(collection_path, metadata)
             finally:
-                # Release lock
                 nfs_safe_funlock(lock_f.fileno(), _used_lockf)

@@ -28,6 +28,7 @@ from .scip_models import (
     SCIPMultiMetadata,
 )
 from ...scip.query.primitives import SCIPQueryEngine, QueryResult
+from ...scip.database.queries import MAX_DEPTH_CAP, QueryTimeoutError
 from code_indexer.server.logging_utils import format_error_log
 
 logger = logging.getLogger(__name__)
@@ -324,18 +325,80 @@ class SCIPMultiService:
                 "from_symbol and to_symbol required for callchain operation"
             )
 
+        # Bug #1603 code review Priority 1/Priority 3 (item C): the REAL
+        # callchain depth cap, imported directly from
+        # scip/database/queries.py (single source of truth -- previously
+        # this was an independent local literal `= 3`, the weakest link
+        # in a value duplicated across 4 places). SCIPMultiRequest.max_depth
+        # has NO Pydantic-level upper bound (shared with
+        # dependencies/dependents, which legitimately allow deeper
+        # traversal), so a caller of POST /api/scip/multi/callchain could
+        # request an arbitrarily large (or a <1) max_depth. The underlying
+        # query enumerates ALL distinct paths (not shortest-path), making
+        # depths outside [1, MAX_DEPTH_CAP] combinatorially unsafe
+        # regardless of front door.
+        #
+        # Round-2 code review (Bug #1603): a caller-supplied out-of-range
+        # max_depth was being silently clamped into range with only a
+        # WARNING log -- inconsistent with the MCP handler
+        # (server/mcp/handlers/scip.py's scip_callchain, which REJECTS via
+        # _MAX_CALLCHAIN_DEPTH) and the REST route
+        # (server/routers/scip_queries.py's FastAPI Query(le=3) -> 422).
+        # This now REJECTS (raises ValueError, surfaced into this repo's
+        # entry in the errors map by _execute_parallel_operation) an
+        # explicit caller-supplied out-of-range value instead of rewriting
+        # it. The server-configured fallback (self.callchain_max_depth,
+        # used only when the caller omits max_depth entirely) is left as a
+        # clamp-with-warning safety net -- that is an operator
+        # misconfiguration concern, not the caller-input-abuse vector this
+        # bug is about.
+        if request.max_depth is not None:
+            if request.max_depth < 1 or request.max_depth > MAX_DEPTH_CAP:
+                raise ValueError(
+                    f"max_depth must be between 1 and {MAX_DEPTH_CAP}, "
+                    f"got {request.max_depth}"
+                )
+            max_depth = request.max_depth
+        else:
+            max_depth = self.callchain_max_depth
+            if max_depth > MAX_DEPTH_CAP:
+                logger.warning(
+                    f"Configured callchain_max_depth {max_depth} exceeds cap "
+                    f"of {MAX_DEPTH_CAP}; clamping."
+                )
+                max_depth = MAX_DEPTH_CAP
+            elif max_depth < 1:
+                logger.warning(
+                    f"Configured callchain_max_depth {max_depth} is below "
+                    "the minimum of 1; clamping."
+                )
+                max_depth = 1
+
         try:
             engine = SCIPQueryEngine(scip_file)
             # Bug #83-3 Fix: Use instance variables instead of hardcoded constants
-            max_depth = (
-                request.max_depth
-                if request.max_depth is not None
-                else self.callchain_max_depth
-            )
             limit = request.limit if request.limit is not None else self.callchain_limit
+
+            # Bug #1603 code review round 2 Priority 1: a query timeout
+            # must never be reported as an indistinguishable empty
+            # success on this front door -- mirrors the fix already
+            # applied to the MCP (handlers/scip.py) and REST
+            # (routers/scip_queries.py) callchain paths. timeout_errors is
+            # mutated in place by trace_call_chain -> backend ->
+            # trace_call_chain_v2; a non-empty list means the query was
+            # cut off and any returned chains are incomplete.
+            timeout_errors: List[str] = []
             call_chains = engine.trace_call_chain(
-                request.from_symbol, request.to_symbol, max_depth=max_depth, limit=limit
+                request.from_symbol,
+                request.to_symbol,
+                max_depth=max_depth,
+                limit=limit,
+                timeout_errors=timeout_errors,
             )
+            if timeout_errors:
+                raise QueryTimeoutError(
+                    f"Callchain query timed out: {timeout_errors[0]}"
+                )
 
             # Convert CallChain objects to QueryResult objects
             results = []

@@ -5518,6 +5518,7 @@ def query_submit(
         # Handle SCIP query mode
         if search_mode == "scip":
             from code_indexer.scip.query.primitives import SCIPQueryEngine
+            from code_indexer.scip.database.queries import QueryTimeoutError
             import glob
 
             # Find the username for this repository
@@ -5616,9 +5617,25 @@ def query_submit(
                                     )
                                 scip_file = Path(scip_files[0])
                                 engine = SCIPQueryEngine(scip_file)
-                                chains = engine.trace_call_chain(
-                                    parts[0], parts[1], max_depth=5
+                                from code_indexer.scip.database.queries import (
+                                    MAX_DEPTH_CAP,
                                 )
+
+                                timeout_errors: List[str] = []
+                                chains = engine.trace_call_chain(
+                                    parts[0],
+                                    parts[1],
+                                    max_depth=MAX_DEPTH_CAP,
+                                    timeout_errors=timeout_errors,
+                                )
+                                if timeout_errors:
+                                    # Bug #1603 code review round 4 Priority
+                                    # 1: a timeout must never be reported as
+                                    # the indistinguishable empty-results
+                                    # success rendered below.
+                                    raise QueryTimeoutError(
+                                        f"Callchain query timed out: {timeout_errors[0]}"
+                                    )
                                 for chain in chains:
                                     query_results.append(
                                         QueryResult(
@@ -5701,6 +5718,15 @@ def query_submit(
                                         "scip_kind": result.kind,
                                     }
                                 )
+                        except QueryTimeoutError as e:
+                            logger.warning(
+                                format_error_log(
+                                    "STORE-GENERAL-051",
+                                    f"SCIP callchain query timed out: {e}",
+                                ),
+                                extra={"correlation_id": get_correlation_id()},
+                            )
+                            error_message = f"Callchain query timed out for repository '{user_alias}': {e}. Try a smaller max-depth or narrower symbols."
                         except FileNotFoundError as e:
                             logger.error(
                                 format_error_log(
@@ -5935,6 +5961,7 @@ def _execute_scip_query(
     Returns tuple of (results_list, error_message).
     """
     from code_indexer.scip.query.primitives import SCIPQueryEngine, QueryResult
+    from code_indexer.scip.database.queries import QueryTimeoutError
     import glob
 
     results: List[Dict[str, Any]] = []
@@ -5996,7 +6023,22 @@ def _execute_scip_query(
                     "Call chain requires two symbols: 'from_symbol to_symbol'"
                 )
             engine = SCIPQueryEngine(Path(scip_files[0]))
-            chains = engine.trace_call_chain(parts[0], parts[1], max_depth=5)
+            from code_indexer.scip.database.queries import MAX_DEPTH_CAP
+
+            timeout_errors: List[str] = []
+            chains = engine.trace_call_chain(
+                parts[0],
+                parts[1],
+                max_depth=MAX_DEPTH_CAP,
+                timeout_errors=timeout_errors,
+            )
+            if timeout_errors:
+                # Bug #1603 code review round 4 Priority 1: a timeout must
+                # never be reported as the indistinguishable empty-results
+                # success rendered below.
+                raise QueryTimeoutError(
+                    f"Callchain query timed out: {timeout_errors[0]}"
+                )
             query_results = [
                 QueryResult(
                     symbol=" -> ".join(c.path),
@@ -6066,6 +6108,17 @@ def _execute_scip_query(
                     "scip_kind": result.kind,
                 }
             )
+    except QueryTimeoutError as e:
+        logger.warning(
+            format_error_log(
+                "STORE-GENERAL-052", f"SCIP callchain query timed out: {e}"
+            ),
+            extra={"correlation_id": get_correlation_id()},
+        )
+        return (
+            results,
+            f"Callchain query timed out for repository '{user_alias}': {e}. Try a smaller max-depth or narrower symbols.",
+        )
     except FileNotFoundError as e:
         logger.error(
             format_error_log(

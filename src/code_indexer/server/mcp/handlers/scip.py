@@ -15,7 +15,12 @@ from code_indexer.server.auth.user_manager import User, UserRole
 from code_indexer.server.logging_utils import format_error_log
 from code_indexer.server.middleware.correlation import get_correlation_id
 from code_indexer.server.services.config_service import get_config_service
+from code_indexer.server.services.query_admission_gate import (
+    check_query_admission,
+    memory_pressure_mcp_payload,
+)
 from code_indexer.server.mcp import reranking as _mcp_reranking
+from code_indexer.scip.database.queries import MAX_DEPTH_CAP as _MAX_CALLCHAIN_DEPTH
 
 from . import _utils
 from ._utils import (
@@ -49,6 +54,24 @@ _SCIP_CONTEXT_TIMEOUT_SECONDS = 30
 # Audit log pagination bounds
 _MIN_AUDIT_LIMIT = 1
 _MAX_AUDIT_LIMIT = 1000
+
+# Depth bounds shared by scip_impact, scip_dependents, and
+# scip_dependencies (Bug #1599 / Bug #1602 / Bug #1604). An out-of-range
+# depth otherwise reaches a deeper ValueError guard in
+# queries.py/DatabaseBackend that gets silently swallowed into a
+# success:true/total_results:0 response instead of clamping.
+_MIN_SCIP_DEPTH = 1
+_MAX_SCIP_DEPTH = 10
+
+# _MAX_CALLCHAIN_DEPTH is imported from queries.py's MAX_DEPTH_CAP,
+# ensuring consistent depth limits (Bug #1603 code review Priority 4 / O1).
+
+# Limit bounds for scip_references (scip depth-clamp remediation family,
+# Bugs #1599/#1602/#1604). Mirrors the REST sibling GET /scip/references
+# route's Query(..., ge=1, le=10000) bound. queries.py/find_references
+# treats limit<=0 as UNLIMITED, a live resource-exhaustion gap otherwise.
+_MIN_SCIP_LIMIT = 1
+_MAX_SCIP_LIMIT = 10000
 
 # Maximum chains returned from scip_callchain
 _MAX_CALL_CHAINS_RETURNED = 100
@@ -345,6 +368,14 @@ def scip_references(params: Dict[str, Any], user: User) -> Dict[str, Any]:
     try:
         symbol = params.get("symbol")
         requested_limit = _coerce_int(params.get("limit"), 100)
+
+        # scip depth-clamp remediation family (Bugs #1599/#1602/#1604):
+        # clamp limit to a safe [1, 10000] range, mirroring the REST
+        # sibling GET /scip/references route and the depth-clamp idiom
+        # used elsewhere in this file. Unclamped, find_references treats
+        # limit<=0 as UNLIMITED -- a live resource-exhaustion gap.
+        requested_limit = max(_MIN_SCIP_LIMIT, min(_MAX_SCIP_LIMIT, requested_limit))
+
         exact = params.get("exact", False)
         project = params.get("project")
         repository_alias = params.get("repository_alias")
@@ -459,6 +490,11 @@ def scip_dependencies(params: Dict[str, Any], user: User) -> Dict[str, Any]:
     try:
         symbol = params.get("symbol")
         depth = _coerce_int(params.get("depth"), 1)
+
+        # Bug #1604: clamp depth to a safe range, mirroring the clamp used
+        # by scip_impact, scip_callchain, and scip_dependents.
+        depth = max(_MIN_SCIP_DEPTH, min(_MAX_SCIP_DEPTH, depth))
+
         exact = params.get("exact", False)
         project = params.get("project")
         repository_alias = params.get("repository_alias")
@@ -543,6 +579,14 @@ def scip_dependents(params: Dict[str, Any], user: User) -> Dict[str, Any]:
     try:
         symbol = params.get("symbol")
         depth = _coerce_int(params.get("depth"), 1)
+
+        # Bug #1602: clamp depth to a safe range, mirroring the clamp used
+        # by scip_impact and scip_callchain. Without this, an out-of-range
+        # depth reaches a deeper ValueError guard in queries.py/DatabaseBackend
+        # that gets swallowed into a silently-wrong success:true/
+        # total_results:0 response instead of clamping.
+        depth = max(_MIN_SCIP_DEPTH, min(_MAX_SCIP_DEPTH, depth))
+
         exact = params.get("exact", False)
         project = params.get("project")
         repository_alias = params.get("repository_alias")
@@ -622,10 +666,18 @@ def scip_impact(params: Dict[str, Any], user: User) -> Dict[str, Any]:
     Returns:
         MCP-compliant response with impact analysis results
     """
+    _admission = check_query_admission()
+    if not _admission.allowed:
+        return _mcp_response(memory_pressure_mcp_payload(_admission))
+
     try:
         symbol = params.get("symbol")
         depth = _coerce_int(params.get("depth"), 3)
         repository_alias = params.get("repository_alias")
+
+        # Bug #1599: clamp depth to a safe range, mirroring the clamp used
+        # by scip_callchain below.
+        depth = max(_MIN_SCIP_DEPTH, min(_MAX_SCIP_DEPTH, depth))
 
         if not symbol:
             return _mcp_response(
@@ -689,7 +741,8 @@ def scip_callchain(params: Dict[str, Any], user: User) -> Dict[str, Any]:
         params: Dictionary containing:
             - from_symbol: Starting symbol
             - to_symbol: Target symbol
-            - max_depth: Optional maximum chain length (default 10, max 10)
+            - max_depth: Optional maximum chain length (default 3, max 3;
+              see _MAX_CALLCHAIN_DEPTH -- Bug #1603)
             - repository_alias: Optional repository name to filter SCIP indexes
         user: Authenticated user (for permission checking)
 
@@ -699,7 +752,7 @@ def scip_callchain(params: Dict[str, Any], user: User) -> Dict[str, Any]:
     try:
         from_symbol = params.get("from_symbol")
         to_symbol = params.get("to_symbol")
-        max_depth = params.get("max_depth", 10)
+        max_depth = _coerce_int(params.get("max_depth"), 3)
         repository_alias = params.get("repository_alias")
 
         # Validate symbol formats
@@ -727,11 +780,25 @@ def scip_callchain(params: Dict[str, Any], user: User) -> Dict[str, Any]:
                 }
             )
 
-        # Validate and clamp max_depth to safe range [1, 10]
-        if max_depth < 1:
-            max_depth = 1
-        elif max_depth > 10:
-            max_depth = 10
+        # Reject (not clamp) an out-of-range max_depth -- [1,
+        # _MAX_CALLCHAIN_DEPTH], deliberately narrower than
+        # scip_impact/scip_dependents/scip_dependencies's [1,
+        # _MAX_SCIP_DEPTH]. Bug #1603 code review Priority 2: matches the
+        # REST route's FastAPI Query(le=3) HTTP 422 behavior instead of
+        # silently downgrading with only a server-side WARNING log.
+        if max_depth < _MIN_SCIP_DEPTH or max_depth > _MAX_CALLCHAIN_DEPTH:
+            return _mcp_response(
+                {
+                    "success": False,
+                    "error": (
+                        f"max_depth must be between {_MIN_SCIP_DEPTH} and "
+                        f"{_MAX_CALLCHAIN_DEPTH}, got {max_depth}"
+                    ),
+                    "from_symbol": from_symbol,
+                    "to_symbol": to_symbol,
+                    "chains": [],
+                }
+            )
 
         # Story #1039: bare-to-global alias fallback (read-only handler).
         if isinstance(repository_alias, str) and not repository_alias.endswith(
@@ -756,7 +823,7 @@ def scip_callchain(params: Dict[str, Any], user: User) -> Dict[str, Any]:
 
         # Delegate to SCIPQueryService (Story #40)
         service = _get_scip_query_service()
-        all_chains = service.trace_callchain(
+        all_chains, timeout_errors = service.trace_callchain(
             from_symbol=from_symbol,
             to_symbol=to_symbol,
             max_depth=max_depth,
@@ -764,6 +831,26 @@ def scip_callchain(params: Dict[str, Any], user: User) -> Dict[str, Any]:
             repository_alias=repository_alias,
             username=user.username,
         )
+
+        if timeout_errors:
+            # Bug #1603 code review Priority 1: a timeout must never be
+            # reported as an indistinguishable empty success.
+            logger.warning(
+                f"scip_callchain timeout for {from_symbol!r} -> "
+                f"{to_symbol!r}: {timeout_errors}"
+            )
+            return _mcp_response(
+                {
+                    "success": False,
+                    "error": (
+                        "Query timeout exceeded while tracing call chain: "
+                        f"{timeout_errors[0]}"
+                    ),
+                    "from_symbol": from_symbol,
+                    "to_symbol": to_symbol,
+                    "chains": [],
+                }
+            )
 
         unique_chains = _deduplicate_and_sort_chains(all_chains)
         max_depth_reached = any(

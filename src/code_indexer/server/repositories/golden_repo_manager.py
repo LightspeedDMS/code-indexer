@@ -60,6 +60,11 @@ from code_indexer.services.temporal.temporal_row_existence import (
 from code_indexer.storage.shared.chunk_layout import ChunkLayout, resolve_chunk_layout
 from code_indexer.storage.sqlite_chunk_store import chunk_store_has_real_data
 
+# Story #1586 AC5: custom span around golden-repo CoW snapshot creation.
+# create_span() no-ops (yields a _NoOpSpan) when OTEL tracing is
+# unavailable/uninitialized.
+from code_indexer.server.telemetry.spans import create_span
+
 logger = logging.getLogger(__name__)
 
 
@@ -3487,6 +3492,26 @@ class GoldenRepoManager:
             raise
 
     def _cb_cow_snapshot(
+        self,
+        alias: str,
+        base_clone_path: str,
+        cow_timeout: int,
+        cidx_fix_timeout: int,
+    ) -> str:
+        """Create CoW snapshot and return its path.
+
+        Thin span-wrapping entry point (Story #1586 AC5) -- the full
+        implementation lives in _cb_cow_snapshot_impl(), unchanged, kept
+        as a separate method so wrapping it in a custom span never
+        requires re-indenting that body. Name preserved so this still
+        works as a callback wherever it was previously wired.
+        """
+        with create_span("cidx.golden_repo.cow_snapshot", attributes={"alias": alias}):
+            return self._cb_cow_snapshot_impl(
+                alias, base_clone_path, cow_timeout, cidx_fix_timeout
+            )
+
+    def _cb_cow_snapshot_impl(
         self,
         alias: str,
         base_clone_path: str,

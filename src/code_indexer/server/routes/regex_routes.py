@@ -117,6 +117,7 @@ async def _execute_single_search(
         "matches": matches,
         "total_matches": result.total_matches,
         "truncated": result.truncated,
+        "read_capped": result.read_capped,
         "search_engine": result.search_engine,
         "search_time_ms": result.search_time_ms,
     }
@@ -141,6 +142,7 @@ async def _execute_omni_search(
     errors: Dict[str, str] = {}
     repos_searched = 0
     truncated = False
+    read_capped = False
     search_engine = "ripgrep"
 
     for alias in aliases:
@@ -160,6 +162,8 @@ async def _execute_omni_search(
             all_matches.extend(result["matches"])
             if result.get("truncated"):
                 truncated = True
+            if result.get("read_capped"):
+                read_capped = True
         except Exception as e:
             errors[alias] = str(e)
             logger.warning(
@@ -174,6 +178,7 @@ async def _execute_omni_search(
         "matches": all_matches,
         "total_matches": len(all_matches),
         "truncated": truncated,
+        "read_capped": read_capped,
         "search_engine": search_engine,
         "search_time_ms": elapsed_ms,
         "repos_searched": repos_searched,
@@ -231,7 +236,16 @@ async def regex_search(
     # ------------------------------------------------------------------
     if isinstance(body.repository_alias, list):
         aliases = body.repository_alias
-        # Enforce omni fan-out cap (server invariant: omni_max_repos_per_search=50)
+        # Enforce omni fan-out cap (server invariant: omni_max_repos_per_search=50).
+        # Issue #1601 AC-G2 (documented, deliberate): this REST-path cap is a
+        # hardcoded constant, independent of the MCP path's config-driven
+        # `multi_search_limits_config.omni_max_repos_per_search`
+        # (see `_enforce_repo_count_cap` in mcp/handlers/_utils.py, which reads
+        # it fresh from get_config_service() on every call so Web UI hot-reload
+        # takes effect without a restart). Keeping REST's value in sync with
+        # the MCP config value is a manual operator responsibility if the
+        # config default is ever changed -- not automatic. This is a known,
+        # accepted knob duplication, not an oversight.
         max_repos = 50
         if len(aliases) > max_repos:
             raise HTTPException(

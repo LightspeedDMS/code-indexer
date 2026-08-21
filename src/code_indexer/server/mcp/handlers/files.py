@@ -13,6 +13,10 @@ from pathlib import Path
 from code_indexer.server.auth.user_manager import User
 from . import _utils
 from code_indexer.server.services.config_service import get_config_service
+from code_indexer.server.services.query_admission_gate import (
+    check_query_admission,
+    memory_pressure_mcp_payload,
+)
 from code_indexer.server.logging_utils import format_error_log
 from ._utils import (
     CapBreach,
@@ -697,6 +701,10 @@ def _omni_list_files(params: Dict[str, Any], user: User) -> Dict[str, Any]:
 
 def list_files(params: Dict[str, Any], user: User) -> Dict[str, Any]:
     """List files in a repository."""
+    _admission = check_query_admission()
+    if not _admission.allowed:
+        return _mcp_response(memory_pressure_mcp_payload(_admission))
+
     from code_indexer.server.models.api_models import FileListQueryParams
 
     try:
@@ -774,6 +782,10 @@ def list_files(params: Dict[str, Any], user: User) -> Dict[str, Any]:
 
 def get_file_content(params: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Get content of a specific file with optional pagination."""
+    _admission = check_query_admission()
+    if not _admission.allowed:
+        return _mcp_response(memory_pressure_mcp_payload(_admission))
+
     try:
         repository_alias = params["repository_alias"]
         file_path = params["file_path"]
@@ -962,6 +974,10 @@ def _normalize_browse_params(params: Dict[str, Any]) -> Dict[str, Any]:
 
 def browse_directory(params: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Browse directory recursively."""
+    _admission = check_query_admission()
+    if not _admission.allowed:
+        return _mcp_response(memory_pressure_mcp_payload(_admission))
+
     from code_indexer.server.models.api_models import FileListQueryParams
 
     try:
@@ -1380,6 +1396,10 @@ def handle_exit_write_mode(params: Dict[str, Any], user: User) -> Dict[str, Any]
 
 def handle_directory_tree(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Handler for directory_tree tool - generate hierarchical tree view."""
+    _admission = check_query_admission()
+    if not _admission.allowed:
+        return _mcp_response(memory_pressure_mcp_payload(_admission))
+
     from code_indexer.global_repos.directory_explorer import DirectoryExplorerService
 
     repository_alias = args.get("repository_alias")

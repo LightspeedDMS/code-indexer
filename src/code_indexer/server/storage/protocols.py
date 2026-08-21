@@ -562,6 +562,11 @@ class GoldenRepoMetadataBackend(Protocol):
 
     def clear_dedup_state(self, golden_alias: str, reason: str) -> None: ...
 
+    # Story #1589: bulk-clear EVERY currently-active dedup-outcome row in
+    # one shot -- the Diagnostics tab's "Clear All Dedup Warnings" action.
+    # Returns the number of rows actually cleared.
+    def clear_all_dedup_states(self, reason: str) -> int: ...
+
     # Bug #1539's cidx-meta backup conflict-resolution per-repo failure
     # quarantine state (record_cidx_meta_conflict_failure /
     # reset_cidx_meta_conflict_failure / get_cidx_meta_conflict_failure_state)

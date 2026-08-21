@@ -216,6 +216,32 @@ def clear_dedup_state(golden_repo_manager: Any, golden_alias: str, reason: str) 
         ) from exc
 
 
+def clear_all_dedup_states(golden_repo_manager: Any, reason: str) -> int:
+    """Story #1589: bulk-clear EVERY currently-active dedup-outcome row in
+    one shot -- the entry point the Diagnostics tab's "Clear All Dedup
+    Warnings" REST endpoint calls. Returns 0 (deliberate "tracking
+    disabled" no-op) when no backend is configured, mirroring
+    record_dedup_outcome's None-return convention above but as an int
+    since this operation always has a well-defined count (zero cleared).
+
+    Raises:
+        ValueError: reason is not a non-empty string.
+        DedupStateUnavailableError: the WRITE genuinely failed.
+    """
+    if not isinstance(reason, str) or not reason:
+        raise ValueError(f"reason must be a non-empty string, got {reason!r}")
+    backend = _get_dedup_backend(golden_repo_manager)
+    if backend is None or not hasattr(backend, "clear_all_dedup_states"):
+        return 0
+    try:
+        return backend.clear_all_dedup_states(reason)  # type: ignore[no-any-return]
+    except Exception as exc:  # noqa: BLE001 -- re-raised as a typed error below
+        logger.error("Story #1589: failed to CLEAR ALL dedup states: %s", exc)
+        raise DedupStateUnavailableError(
+            f"failed to clear all dedup states: {exc}"
+        ) from exc
+
+
 def _is_well_formed_completed_journal(journal: Dict[str, Any]) -> bool:
     """Codex review Finding F1 hardening: True iff every key
     `record_dedup_outcome()` requires is present -- a malformed

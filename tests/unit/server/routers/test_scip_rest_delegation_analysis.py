@@ -149,13 +149,16 @@ class TestCallchainRouteDelegation:
         from fastapi import Request
         from code_indexer.server.routers.scip_queries import get_callchain
 
-        mock_scip_service.trace_callchain.return_value = [
-            {
-                "path": ["Controller.handle", "Service.process", "Database.query"],
-                "length": 3,
-                "has_cycle": False,
-            }
-        ]
+        mock_scip_service.trace_callchain.return_value = (
+            [
+                {
+                    "path": ["Controller.handle", "Service.process", "Database.query"],
+                    "length": 3,
+                    "has_cycle": False,
+                }
+            ],
+            [],
+        )
 
         mock_request = MagicMock(spec=Request)
 
@@ -193,7 +196,7 @@ class TestCallchainRouteDelegation:
         from fastapi import Request
         from code_indexer.server.routers.scip_queries import get_callchain
 
-        mock_scip_service.trace_callchain.return_value = []
+        mock_scip_service.trace_callchain.return_value = ([], [])
 
         mock_request = MagicMock(spec=Request)
 

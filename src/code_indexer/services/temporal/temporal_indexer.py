@@ -44,6 +44,11 @@ from .temporal_projection_matrix import _ensure_shard_has_projection_matrix
 from .temporal_progressive_metadata import TemporalProgressiveMetadata
 from .temporal_structure_marker import is_v2_structure, write_structure_marker
 
+# Story #1586 AC5: custom span around the whole temporal per-commit indexing
+# run. create_span() no-ops (yields a _NoOpSpan) when OTEL tracing is
+# unavailable/uninitialized (always true on the CLI-only path).
+from code_indexer.server.telemetry.spans import create_span
+
 logger = logging.getLogger(__name__)
 
 
@@ -353,6 +358,36 @@ class TemporalIndexer:
             )
 
     def index_commits(
+        self,
+        all_branches: bool = False,
+        max_commits: Optional[int] = None,
+        since_date: Optional[str] = None,
+        progress_callback: Optional[Callable] = None,
+        reconcile: bool = False,
+        embedder_scope: Optional[List[str]] = None,
+    ) -> IndexingResult:
+        """Index git commit history as per-commit aggregated contextual documents.
+
+        Thin span-wrapping public entry point (Story #1586 AC5) -- spans the
+        WHOLE run (never per-commit inside the internal loop, which would be
+        unbounded cardinality). The full implementation lives in
+        _index_commits_impl(), unchanged, so wrapping it in a custom span
+        never requires re-indenting that large body.
+        """
+        with create_span(
+            "cidx.temporal.index_commits",
+            attributes={"codebase_dir": str(self.codebase_dir)},
+        ):
+            return self._index_commits_impl(
+                all_branches=all_branches,
+                max_commits=max_commits,
+                since_date=since_date,
+                progress_callback=progress_callback,
+                reconcile=reconcile,
+                embedder_scope=embedder_scope,
+            )
+
+    def _index_commits_impl(
         self,
         all_branches: bool = False,
         max_commits: Optional[int] = None,

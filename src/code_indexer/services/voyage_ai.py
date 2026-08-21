@@ -375,15 +375,45 @@ class VoyageAIClient(EmbeddingProvider):
                 instrument_call,
             )
 
-            response = instrument_call(
-                provider="voyageai",
-                call_type="embed",
+            def _count_batch_tokens() -> int:
+                from .embedded_voyage_tokenizer import VoyageTokenizer
+
+                return VoyageTokenizer.count_tokens(texts, model_name)
+
+            # Story #1586 AC2: cidx.embedding.* OTEL metrics -- one event per
+            # real outbound HTTP attempt, the same boundary instrument_call()
+            # already wraps (per-attempt granularity, mirroring the existing
+            # embedding-stats writer's proven semantics -- see
+            # tests/unit/services/test_voyage_ai_embedding_stats_1418.py).
+            from code_indexer.services.embedding_metrics_telemetry import (
+                record_embedding_provider_call,
+            )
+
+            _embed_metric_start = time.monotonic()
+            try:
+                response = instrument_call(
+                    provider="voyageai",
+                    call_type="embed",
+                    model=model_name,
+                    item_count=len(texts),
+                    token_count=0,
+                    batch_size=len(texts),
+                    purpose="query" if not retry else "index",
+                    fn=_do_post_and_validate,
+                )
+            except Exception:
+                record_embedding_provider_call(
+                    model=model_name,
+                    duration_seconds=time.monotonic() - _embed_metric_start,
+                    status="error",
+                    count_tokens=lambda: 0,
+                )
+                raise
+            record_embedding_provider_call(
                 model=model_name,
-                item_count=len(texts),
-                token_count=0,
-                batch_size=len(texts),
-                purpose="query" if not retry else "index",
-                fn=_do_post_and_validate,
+                duration_seconds=time.monotonic() - _embed_metric_start,
+                status="success",
+                count_tokens=_count_batch_tokens,
             )
 
             result = response.json()
@@ -552,18 +582,47 @@ class VoyageAIClient(EmbeddingProvider):
                 instrument_call,
             )
 
-            response = instrument_call(
-                provider="voyageai",
-                call_type="embed",
+            def _count_contextualized_tokens() -> int:
+                from .embedded_voyage_tokenizer import VoyageTokenizer
+
+                flat_chunks = [chunk for doc in documents for chunk in doc]
+                return VoyageTokenizer.count_tokens(flat_chunks, model_name)
+
+            # Story #1586 AC2: cidx.embedding.* OTEL metrics -- mirrors the
+            # _make_sync_request wiring above (one event per real outbound
+            # HTTP attempt, same instrument_call() boundary).
+            from code_indexer.services.embedding_metrics_telemetry import (
+                record_embedding_provider_call,
+            )
+
+            _embed_metric_start = time.monotonic()
+            try:
+                response = instrument_call(
+                    provider="voyageai",
+                    call_type="embed",
+                    model=model_name,
+                    item_count=len(documents),
+                    token_count=0,
+                    batch_size=len(documents),
+                    # CONTEXTUALIZED_EMBEDDINGS_ENDPOINT is used exclusively by
+                    # the per-commit temporal contextual embedder
+                    # (voyage-context-4) -- purpose is always "temporal".
+                    purpose="temporal",
+                    fn=_do_post_and_validate,
+                )
+            except Exception:
+                record_embedding_provider_call(
+                    model=model_name,
+                    duration_seconds=time.monotonic() - _embed_metric_start,
+                    status="error",
+                    count_tokens=lambda: 0,
+                )
+                raise
+            record_embedding_provider_call(
                 model=model_name,
-                item_count=len(documents),
-                token_count=0,
-                batch_size=len(documents),
-                # CONTEXTUALIZED_EMBEDDINGS_ENDPOINT is used exclusively by
-                # the per-commit temporal contextual embedder
-                # (voyage-context-4) -- purpose is always "temporal".
-                purpose="temporal",
-                fn=_do_post_and_validate,
+                duration_seconds=time.monotonic() - _embed_metric_start,
+                status="success",
+                count_tokens=_count_contextualized_tokens,
             )
 
             result = response.json()
