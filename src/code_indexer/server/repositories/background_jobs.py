@@ -166,7 +166,14 @@ _MEMORY_HEAVY_OPS: frozenset = frozenset(
 # IndexJobClaimLoop, or it simply keeps the legacy local-pool path.
 # Public (imported by distributed_job_worker + index_job_claim_loop + lifespan)
 # so the ops set has a single source of truth across the cluster job plumbing.
-POD_PULL_OPS: frozenset = _MEMORY_HEAVY_OPS
+#
+# EVO-66445: fts_backfill_build is POD_PULL (work-stealable across pods) but NOT
+# memory-heavy — a tantivy rebuild is a cheap LOCAL build, so it must not be gated by
+# the memory-admission path (which keys on _MEMORY_HEAVY_OPS above). Keeping the two
+# sets distinct lets a light op be distributed without being throttled. The literal
+# must equal ``fts_backfill.policy.FTS_BACKFILL_BUILD_OP`` — a mismatch fails loudly at
+# startup via ``validate_dispatch_covers`` (dispatch keys must == POD_PULL_OPS).
+POD_PULL_OPS: frozenset = _MEMORY_HEAVY_OPS | frozenset({"fts_backfill_build"})
 
 # Memory-aware admission: min seconds between "deferring under memory pressure" INFO
 # logs per manager, so a sustained RED spell (a heavy job deferred every

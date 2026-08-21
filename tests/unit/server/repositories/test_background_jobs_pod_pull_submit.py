@@ -88,7 +88,9 @@ class TestPodPullSubmit:
         job_id = self._submit(m, "add_golden_repo", metadata={"alias": "repoA"})
         assert any(item[0] == job_id for item in self.enqueued)
 
-    def test_all_five_heavy_ops_are_pod_pull(self):
+    def test_all_heavy_ops_plus_fts_backfill_are_pod_pull(self):
+        # The 5 memory-heavy index builds, PLUS fts_backfill_build (EVO-66445): pod-pull
+        # (work-stealable) but NOT memory-heavy — a tantivy rebuild is a cheap local build.
         assert POD_PULL_OPS == frozenset(
             {
                 "add_golden_repo",
@@ -96,5 +98,12 @@ class TestPodPullSubmit:
                 "provider_temporal_index_rebuild",
                 "sync_repository",
                 "change_branch",
+                "fts_backfill_build",
             }
         )
+
+    def test_fts_backfill_is_pod_pull_but_not_memory_heavy(self):
+        from code_indexer.server.repositories.background_jobs import _MEMORY_HEAVY_OPS
+
+        assert "fts_backfill_build" in POD_PULL_OPS
+        assert "fts_backfill_build" not in _MEMORY_HEAVY_OPS  # not memory-gated
