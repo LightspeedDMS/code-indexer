@@ -20,6 +20,7 @@ from code_indexer.server.auth.dependencies import get_current_user
 from code_indexer.server.auth.user_manager import User
 from code_indexer.server.services.scip_query_service import SCIPQueryService
 from code_indexer.server.logging_utils import format_error_log
+from code_indexer.scip.database.queries import MAX_DEPTH_CAP as _MAX_CALLCHAIN_DEPTH
 
 
 logger = logging.getLogger(__name__)
@@ -32,6 +33,12 @@ router = APIRouter(prefix="/scip", tags=["SCIP Queries"])
 # _MIN_SCIP_DEPTH/_MAX_SCIP_DEPTH).
 _MIN_SCIP_DEPTH = 1
 _MAX_SCIP_DEPTH = 10
+
+# _MAX_CALLCHAIN_DEPTH is imported (aliased from MAX_DEPTH_CAP) above, not
+# redeclared here, so /scip/callchain's REST bound and the query layer's
+# cap can never drift apart (Bug #1603 code review Priority 4 / O1).
+# /scip/impact, /scip/dependents, and /scip/dependencies remain [1, 10],
+# unaffected by this change.
 
 
 # Response Models
@@ -419,10 +426,10 @@ def get_callchain(
     from_symbol: str = Query(..., description="Starting symbol"),
     to_symbol: str = Query(..., description="Target symbol"),
     max_depth: int = Query(
-        10,
+        3,
         ge=_MIN_SCIP_DEPTH,
-        le=_MAX_SCIP_DEPTH,
-        description="Maximum chain length (default 10, max 10)",
+        le=_MAX_CALLCHAIN_DEPTH,
+        description="Maximum chain length (default 3, max 3)",
     ),
     project: Optional[str] = Query(None, description="Filter by specific project"),
     current_user: User = Depends(get_current_user),
@@ -433,7 +440,7 @@ def get_callchain(
     Args:
         from_symbol: Starting symbol
         to_symbol: Target symbol
-        max_depth: Maximum chain length (default 10, max 10)
+        max_depth: Maximum chain length (default 3, max 3)
         project: Optional project filter (repository alias)
         current_user: Authenticated user (injected by dependency)
 
@@ -442,13 +449,35 @@ def get_callchain(
     """
     try:
         service = _get_scip_query_service(request)
-        chains = service.trace_callchain(
+        chains, timeout_errors = service.trace_callchain(
             from_symbol=from_symbol,
             to_symbol=to_symbol,
             max_depth=max_depth,
             repository_alias=project,
             username=current_user.username,
         )
+
+        if timeout_errors:
+            # Bug #1603 code review Priority 1: a timeout must never be
+            # reported as an indistinguishable empty success.
+            logger.warning(
+                format_error_log(
+                    "WEB-GENERAL-027",
+                    f"Call chain tracing timeout for {from_symbol!r} -> "
+                    f"{to_symbol!r}: {timeout_errors}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
+            return {
+                "success": False,
+                "error": (
+                    "Query timeout exceeded while tracing call chain: "
+                    f"{timeout_errors[0]}"
+                ),
+                "from_symbol": from_symbol,
+                "to_symbol": to_symbol,
+                "chains": [],
+            }
 
         return {
             "success": True,

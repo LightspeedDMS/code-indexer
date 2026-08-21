@@ -285,9 +285,22 @@ class TestSCIPAPIClientCallchain:
                 from_symbol="main",
                 to_symbol="process_request",
                 repository_alias="test-repo",
-                max_depth=10,
+                max_depth=3,
             )
             assert isinstance(result, dict)
+
+    @pytest.mark.asyncio
+    async def test_callchain_rejects_max_depth_above_cap(self, scip_client):
+        """callchain() must reject (not silently clamp) a max_depth above
+        the [1, 3] cap -- symmetric with the existing max_depth < 1
+        rejection (Bug #1603 code review Priority 4 / O2)."""
+        with pytest.raises(ValueError, match="max_depth"):
+            scip_client.callchain(
+                from_symbol="main",
+                to_symbol="process_request",
+                repository_alias="test-repo",
+                max_depth=4,
+            )
 
     @pytest.mark.asyncio
     async def test_callchain_validates_empty_from_symbol(self, scip_client):

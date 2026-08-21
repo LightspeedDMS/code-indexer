@@ -320,24 +320,27 @@ class TestCallChainEndpoint:
 
     def test_callchain_endpoint_returns_results(self, test_client, mock_scip_service):
         """Should call SCIPQueryService and return call chain results."""
-        mock_scip_service.trace_callchain.return_value = [
-            {
-                "path": [
-                    "com.example.Controller",
-                    "com.example.Service",
-                    "com.example.Database",
-                ],
-                "length": 3,
-                "has_cycle": False,
-            }
-        ]
+        mock_scip_service.trace_callchain.return_value = (
+            [
+                {
+                    "path": [
+                        "com.example.Controller",
+                        "com.example.Service",
+                        "com.example.Database",
+                    ],
+                    "length": 3,
+                    "has_cycle": False,
+                }
+            ],
+            [],
+        )
 
         with patch(
             "code_indexer.server.routers.scip_queries._get_scip_query_service",
             return_value=mock_scip_service,
         ):
             response = test_client.get(
-                "/scip/callchain?from_symbol=Controller&to_symbol=Database&max_depth=10"
+                "/scip/callchain?from_symbol=Controller&to_symbol=Database&max_depth=3"
             )
 
             assert response.status_code == 200
@@ -350,18 +353,84 @@ class TestCallChainEndpoint:
             assert "chains" in data
             assert len(data["chains"]) == 1
 
+    def test_callchain_endpoint_accepts_max_depth_at_new_cap_of_3(
+        self, test_client, mock_scip_service
+    ):
+        """max_depth=3 (the new upper bound) must still be accepted (200),
+        pinning the top edge of the narrowed [1, 3] callchain contract
+        (Bug #1603)."""
+        mock_scip_service.trace_callchain.return_value = ([], [])
+
+        with patch(
+            "code_indexer.server.routers.scip_queries._get_scip_query_service",
+            return_value=mock_scip_service,
+        ):
+            response = test_client.get(
+                "/scip/callchain?from_symbol=Controller&to_symbol=Database&max_depth=3"
+            )
+
+        assert response.status_code == 200
+
+    def test_callchain_endpoint_surfaces_timeout_as_failure(
+        self, test_client, mock_scip_service
+    ):
+        """Bug #1603 code review (Priority 1): a non-empty timeout_errors
+        from SCIPQueryService.trace_callchain must produce success: False
+        with an explicit error, NOT an indistinguishable empty-success
+        response (total_chains_found: 0 looks identical to "no chains
+        exist" while actually meaning "the query was cut off")."""
+        mock_scip_service.trace_callchain.return_value = (
+            [],
+            ["Query exceeded 30-second timeout."],
+        )
+
+        with patch(
+            "code_indexer.server.routers.scip_queries._get_scip_query_service",
+            return_value=mock_scip_service,
+        ):
+            response = test_client.get(
+                "/scip/callchain?from_symbol=Controller&to_symbol=Database&max_depth=3"
+            )
+
+            assert response.status_code == 200
+            data = response.json()
+
+            assert data["success"] is False, (
+                f"Expected success: False on timeout, got: {data}"
+            )
+            assert "error" in data and data["error"], (
+                f"Expected a non-empty error message, got: {data}"
+            )
+            assert "timeout" in data["error"].lower()
+
     def test_callchain_endpoint_rejects_out_of_range_max_depth_with_422(
         self, test_client
     ):
-        """max_depth=11 (above the [1, 10] convention shared by /scip/impact
-        and the MCP scip_callchain handler's _MIN_SCIP_DEPTH/_MAX_SCIP_DEPTH)
-        must be rejected by FastAPI's Query validation with HTTP 422. Prior to
-        this fix the route's bound was le=20, which let 11-20 through even
-        though the real supported range is [1, 10] -- the REST contract
-        promised depths the backend does not actually honor as requested
-        (Bug #1599/#1602/#1604 REST-boundary follow-up)."""
+        """max_depth=4 (the first value above the NEW [1, 3] callchain-only
+        bound) must be rejected by FastAPI's Query validation with HTTP 422.
+
+        Bug #1603 narrows /scip/callchain's max_depth bound from the old
+        [1, 10] (shared with /scip/impact and the MCP scip_callchain
+        handler's then-shared _MIN_SCIP_DEPTH/_MAX_SCIP_DEPTH) down to
+        [1, 3], to match trace_call_chain_v2/_batched's REAL MAX_DEPTH_CAP
+        in queries.py -- depths 4-10 were previously silently downgraded to
+        3 by that layer anyway (a WARNING, not an error), so the old [1, 10]
+        REST contract advertised depths the backend never actually honored.
+        This bound is deliberately DIFFERENT from /scip/impact, dependents,
+        and dependencies, which remain [1, 10] -- unaffected by this change.
+        """
         response = test_client.get(
-            "/scip/callchain?from_symbol=Controller&to_symbol=Database&max_depth=11"
+            "/scip/callchain?from_symbol=Controller&to_symbol=Database&max_depth=4"
+        )
+
+        assert response.status_code == 422
+
+    def test_callchain_endpoint_rejects_max_depth_below_min_with_422(self, test_client):
+        """max_depth=0 (below the [1, 3] callchain-only floor) must be
+        rejected by FastAPI's Query validation with HTTP 422, pinning the
+        bottom edge of the narrowed contract (Bug #1603)."""
+        response = test_client.get(
+            "/scip/callchain?from_symbol=Controller&to_symbol=Database&max_depth=0"
         )
 
         assert response.status_code == 422

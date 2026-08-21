@@ -26,6 +26,50 @@ def db_fixture_path(scip_fixture_path):
     return db_path
 
 
+def _build_two_method_call_chain_db(tmp_path: Path) -> Path:
+    """Build a real, dedicated SCIP database with two distinct METHOD
+    symbols (Caller#run(), Callee#assist()), each carrying only a
+    definition occurrence -- no call edge is needed since the call-chain
+    query itself is patched in the test that uses this. Distinct from the
+    shared comprehensive_index.scip.db fixture, whose only expandable
+    class has a single method (from/to would resolve to the SAME symbol
+    ID and be removed by DatabaseBackend.trace_call_chain's self-loop
+    guard before the query is ever reached).
+    """
+    from code_indexer.scip.database.builder import ROLE_DEFINITION
+    from code_indexer.scip.database.builder import SCIPDatabaseBuilder
+    from code_indexer.scip.protobuf import scip_pb2
+
+    index = scip_pb2.Index()
+    caller = "python test `caller`/Caller#run()."
+    callee = "python test `callee`/Callee#assist()."
+    for sym in (caller, callee):
+        sym_info = index.external_symbols.add()
+        sym_info.symbol = sym
+        # Generated protobuf stub doesn't statically declare enum members,
+        # so mypy can't see SymbolInformation.Method -- ignore is scoped
+        # to this one attribute access.
+        sym_info.kind = scip_pb2.SymbolInformation.Method  # type: ignore[attr-defined]
+
+    doc = index.documents.add()
+    doc.relative_path, doc.language = "src/caller.py", "python"
+    occ = doc.occurrences.add()
+    occ.symbol, occ.symbol_roles = caller, ROLE_DEFINITION
+    occ.range.extend([0, 0, 0, 10])
+
+    doc = index.documents.add()
+    doc.relative_path, doc.language = "src/callee.py", "python"
+    occ = doc.occurrences.add()
+    occ.symbol, occ.symbol_roles = callee, ROLE_DEFINITION
+    occ.range.extend([0, 0, 0, 10])
+
+    scip_file = tmp_path / "two_method_index.scip"
+    scip_file.write_bytes(index.SerializeToString())
+    db_path = tmp_path / "two_method_index.scip.db"
+    SCIPDatabaseBuilder().build(scip_file, db_path)
+    return db_path
+
+
 class TestDatabaseBackend:
     """Tests for DatabaseBackend implementation."""
 
@@ -150,6 +194,46 @@ class TestDatabaseBackend:
         # Test depth > 10
         with pytest.raises(ValueError, match="Depth must be between 1 and 10"):
             backend.analyze_impact("SomeSymbol", depth=11)
+
+    def test_database_backend_trace_call_chain_propagates_timeout_error(
+        self, tmp_path: Path
+    ):
+        """Bug #1603 code review (Priority 1): a timeout from the
+        underlying trace_call_chain_v2_batched query must not be silently
+        swallowed into a bare empty-results success. When the caller
+        supplies a `timeout_errors` list, DatabaseBackend.trace_call_chain
+        must append the real error message to it so callers further up the
+        stack (SCIPQueryService, then MCP/REST) can surface a genuine
+        failure instead of an indistinguishable "no chains found".
+        """
+        from unittest.mock import patch
+        from code_indexer.scip.query.backends import DatabaseBackend
+
+        db_path = _build_two_method_call_chain_db(tmp_path)
+        backend = DatabaseBackend(db_path)
+
+        with patch(
+            "code_indexer.scip.database.queries.trace_call_chain_v2_batched",
+            return_value=([], "Query exceeded 30-second timeout."),
+        ) as mock_query:
+            timeout_errors: list = []
+            results = backend.trace_call_chain(
+                "Caller",
+                "Callee",
+                max_depth=3,
+                timeout_errors=timeout_errors,
+            )
+
+        assert mock_query.called, (
+            "Expected trace_call_chain_v2_batched to actually be reached "
+            "(from/to resolved to distinct, non-empty symbol ID sets) -- "
+            "otherwise this test cannot discriminate the propagation fix."
+        )
+        assert results == [], f"Expected no chains on timeout, got: {results}"
+        assert len(timeout_errors) == 1, (
+            f"Expected exactly one propagated timeout message, got: {timeout_errors}"
+        )
+        assert "timeout" in timeout_errors[0].lower()
 
     def test_database_backend_trace_call_chain(self, db_fixture_path):
         """

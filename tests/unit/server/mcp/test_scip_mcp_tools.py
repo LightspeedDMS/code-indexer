@@ -269,13 +269,16 @@ class TestSCIPCallChainTool:
 
         # Mock SCIPQueryService (Story #40 refactoring)
         mock_service = Mock()
-        mock_service.trace_callchain.return_value = [
-            {
-                "path": ["Controller", "Service", "Database"],
-                "length": 3,
-                "has_cycle": False,
-            }
-        ]
+        mock_service.trace_callchain.return_value = (
+            [
+                {
+                    "path": ["Controller", "Service", "Database"],
+                    "length": 3,
+                    "has_cycle": False,
+                }
+            ],
+            [],
+        )
 
         with patch(
             "code_indexer.server.mcp.handlers._get_scip_query_service",
@@ -289,6 +292,37 @@ class TestSCIPCallChainTool:
             assert data["from_symbol"] == "Controller"
             assert data["to_symbol"] == "Database"
             assert data["total_chains_found"] == 1
+
+    def test_scip_callchain_surfaces_timeout_as_failure(self, mock_user):
+        """Bug #1603 code review (Priority 1): a non-empty timeout_errors
+        from SCIPQueryService.trace_callchain must produce success: False
+        with an explicit error, NOT an indistinguishable empty-success
+        response (total_chains_found: 0 looks identical to "no chains
+        exist" while actually meaning "the query was cut off")."""
+        from code_indexer.server.mcp.handlers import scip_callchain
+
+        params = {"from_symbol": "Controller", "to_symbol": "Database"}
+
+        mock_service = Mock()
+        mock_service.trace_callchain.return_value = (
+            [],
+            ["Query exceeded 30-second timeout."],
+        )
+
+        with patch(
+            "code_indexer.server.mcp.handlers._get_scip_query_service",
+            return_value=mock_service,
+        ):
+            response = scip_callchain(params, mock_user)
+
+            data = json.loads(response["content"][0]["text"])
+            assert data["success"] is False, (
+                f"Expected success: False on timeout, got: {data}"
+            )
+            assert "error" in data and data["error"], (
+                f"Expected a non-empty error message, got: {data}"
+            )
+            assert "timeout" in data["error"].lower()
 
 
 class TestSCIPContextTool:
@@ -426,40 +460,70 @@ class TestSCIPImpactDepthClamp:
         _, kwargs = mock_service.analyze_impact.call_args
         assert kwargs["depth"] == 3
 
-    def test_scip_callchain_max_depth_clamp_regression_untouched(self, mock_user):
-        """Regression: scip_callchain's pre-existing [1, 10] max_depth clamp
-        must remain unchanged by the scip_impact fix."""
+    @pytest.mark.parametrize("bad_max_depth", [100000, -3])
+    def test_scip_callchain_max_depth_out_of_range_is_rejected(
+        self, mock_user, bad_max_depth
+    ):
+        """Bug #1603 code review (Priority 2, item 4): scip_callchain must
+        REJECT an out-of-range max_depth (success: False, explicit error),
+        matching the REST route's FastAPI Query(le=3) HTTP 422 behavior --
+        NOT silently clamp it to 3 with only a server-side WARNING log (the
+        pre-remediation behavior this test replaces). trace_callchain must
+        never even be called for a rejected value."""
         from code_indexer.server.mcp.handlers import scip_callchain
 
         mock_service = Mock()
-        mock_service.trace_callchain.return_value = []
+        mock_service.trace_callchain.return_value = ([], [])
 
         with patch(
             "code_indexer.server.mcp.handlers._get_scip_query_service",
             return_value=mock_service,
         ):
-            scip_callchain(
+            response = scip_callchain(
                 {
                     "from_symbol": "Controller",
                     "to_symbol": "Database",
-                    "max_depth": 100000,
+                    "max_depth": bad_max_depth,
                 },
                 mock_user,
             )
-            _, kwargs_over = mock_service.trace_callchain.call_args
-            assert kwargs_over["max_depth"] == 10
+            data = json.loads(response["content"][0]["text"])
+            assert data["success"] is False
+            assert "max_depth" in data["error"]
+            mock_service.trace_callchain.assert_not_called()
 
-            mock_service.trace_callchain.reset_mock()
-            scip_callchain(
+    def test_scip_callchain_max_depth_accepts_string_value(self, mock_user):
+        """Bug #1603 code review round 2 (Priority 3, item D): max_depth
+        used to be read via a direct params.get("max_depth", 3) instead
+        of the _coerce_int helper every sibling handler in this file uses
+        (scip_dependencies, scip_dependents, scip_impact, scip_context)
+        -- a JSON client sending max_depth as a string ("3") would hit a
+        TypeError in the subsequent int comparison against
+        _MAX_CALLCHAIN_DEPTH instead of being coerced cleanly."""
+        from code_indexer.server.mcp.handlers import scip_callchain
+
+        mock_service = Mock()
+        mock_service.trace_callchain.return_value = ([], [])
+
+        with patch(
+            "code_indexer.server.mcp.handlers._get_scip_query_service",
+            return_value=mock_service,
+        ):
+            response = scip_callchain(
                 {
                     "from_symbol": "Controller",
                     "to_symbol": "Database",
-                    "max_depth": -3,
+                    "max_depth": "3",
                 },
                 mock_user,
             )
-            _, kwargs_under = mock_service.trace_callchain.call_args
-            assert kwargs_under["max_depth"] == 1
+
+        data = json.loads(response["content"][0]["text"])
+        assert data["success"] is True, (
+            f"Expected string max_depth to be coerced cleanly, got: {data}"
+        )
+        _, kwargs = mock_service.trace_callchain.call_args
+        assert kwargs["max_depth"] == 3
 
 
 def _call_scip_dependents_with_mock_service(params, mock_user, mock_service):

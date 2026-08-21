@@ -297,6 +297,117 @@ class TestSCIPMultiServiceCallChain:
             assert response.results["repo1"][0].repository == "repo1"
             assert response.results["repo2"][0].repository == "repo2"
 
+    @pytest.mark.parametrize("invalid_max_depth", [100000, 0])
+    def test_trace_callchain_in_repo_rejects_out_of_range_max_depth(
+        self, tmp_path, invalid_max_depth
+    ):
+        """Bug #1603 code review round 2 (Priority 1, item 2): a
+        caller-supplied out-of-range max_depth (above the cap, e.g.
+        100000, or below the minimum, e.g. 0) used to be silently
+        clamped into [1, 3] with only a WARNING log -- inconsistent with
+        the MCP handler (scip.py's scip_callchain, which REJECTS via
+        _MAX_CALLCHAIN_DEPTH) and the REST route (scip_queries.py's
+        FastAPI Query(le=3) -> HTTP 422). _trace_callchain_in_repo must
+        now raise ValueError for an explicit out-of-range max_depth
+        rather than silently rewriting it."""
+        from code_indexer.server.multi.scip_multi_service import SCIPMultiService
+
+        service = SCIPMultiService()
+        request = SCIPMultiRequest(
+            repositories=["repo1"],
+            symbol="",
+            from_symbol="api_handler",
+            to_symbol="database_query",
+            max_depth=invalid_max_depth,
+        )
+
+        with patch.object(
+            service, "_get_scip_file_for_repo", return_value=tmp_path / "index.scip"
+        ):
+            with pytest.raises(ValueError, match="max_depth must be between 1 and 3"):
+                service._trace_callchain_in_repo("repo1", request)
+
+    def test_callchain_surfaces_invalid_max_depth_via_errors_map(self, tmp_path):
+        """End-to-end through callchain()/_execute_parallel_operation: an
+        invalid max_depth must surface as a per-repo error entry, not a
+        silent 200 success with a rewritten depth."""
+        from code_indexer.server.multi.scip_multi_service import SCIPMultiService
+
+        service = SCIPMultiService()
+        request = SCIPMultiRequest(
+            repositories=["repo1"],
+            symbol="",
+            from_symbol="api_handler",
+            to_symbol="database_query",
+            max_depth=100000,
+        )
+
+        with patch.object(
+            service, "_get_scip_file_for_repo", return_value=tmp_path / "index.scip"
+        ):
+            response = service.callchain(request)
+
+        assert response.errors is not None
+        assert "repo1" in response.errors
+        assert "max_depth must be between 1 and 3" in response.errors["repo1"]
+        assert "repo1" not in response.results
+
+
+class TestSCIPMultiServiceCallChainTimeout:
+    """Bug #1603 code review round 2 (Priority 1, item 1): both round-2
+    reviewers independently found that _trace_callchain_in_repo called
+    engine.trace_call_chain(...) WITHOUT passing timeout_errors=, so
+    POST /api/scip/multi/callchain turned a query timeout into a silent
+    empty-result success -- the exact 'timeout reported as success' bug
+    round 1 was supposed to close everywhere, left open on this one
+    front door. Verifies the fix: a non-empty timeout_errors list
+    (mutated in place by the real trace_call_chain contract) must surface
+    as a per-repo failure through the errors map, never an empty success
+    in the results map."""
+
+    def test_timeout_surfaces_as_per_repo_error_not_silent_empty_success(
+        self, tmp_path
+    ):
+        from unittest.mock import patch, MagicMock
+        from code_indexer.server.multi.scip_multi_service import SCIPMultiService
+
+        service = SCIPMultiService()
+        request = SCIPMultiRequest(
+            repositories=["repo1"],
+            symbol="",
+            from_symbol="api_handler",
+            to_symbol="database_query",
+        )
+
+        def _fake_trace_call_chain(
+            from_symbol, to_symbol, max_depth, limit, timeout_errors
+        ):
+            # Mirrors the real contract: the backend mutates the
+            # caller-supplied list in place on timeout instead of
+            # raising or returning a sentinel.
+            timeout_errors.append("Query exceeded 30-second timeout")
+            return []
+
+        mock_engine = MagicMock()
+        mock_engine.trace_call_chain.side_effect = _fake_trace_call_chain
+
+        with patch.object(
+            service, "_get_scip_file_for_repo", return_value=tmp_path / "index.scip"
+        ):
+            with patch(
+                "code_indexer.server.multi.scip_multi_service.SCIPQueryEngine",
+                return_value=mock_engine,
+            ):
+                response = service.callchain(request)
+
+        assert "repo1" not in response.results, (
+            "A timed-out callchain query must not be reported in the "
+            "results map as an (empty) success"
+        )
+        assert response.errors is not None
+        assert "repo1" in response.errors
+        assert "timed out" in response.errors["repo1"].lower()
+
 
 class TestSCIPMultiServiceTimeout:
     """Test timeout handling with recommendations (AC7)."""

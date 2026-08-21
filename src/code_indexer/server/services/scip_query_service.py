@@ -29,7 +29,7 @@ SERVER-ONLY SCOPE:
 import logging
 import os
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set, Union, TYPE_CHECKING
+from typing import Any, Dict, List, Optional, Set, Tuple, Union, TYPE_CHECKING
 from code_indexer.server.logging_utils import format_error_log
 
 if TYPE_CHECKING:
@@ -37,6 +37,57 @@ if TYPE_CHECKING:
     from code_indexer.scip.query.primitives import QueryResult
 
 logger = logging.getLogger(__name__)
+
+
+def _call_chain_to_dict(chain: Any) -> Dict[str, Any]:
+    """Convert a backend CallChain object into its serializable dict form.
+
+    Extracted from SCIPQueryService.trace_callchain to keep that method
+    focused/short.
+    """
+    return {
+        "path": chain.path,
+        "length": chain.length,
+        "has_cycle": chain.has_cycle,
+    }
+
+
+def _trace_callchain_in_file(
+    scip_file: Path,
+    from_symbol: str,
+    to_symbol: str,
+    max_depth: int,
+    limit: int,
+    timeout_errors: List[str],
+) -> List[Dict[str, Any]]:
+    """Trace a call chain within a single SCIP file.
+
+    Converts results to dicts and appends any timeout message (Bug #1603
+    code review Priority 1) to `timeout_errors` (mutated in place). Logs
+    and swallows any other exception (e.g. corrupt/incompatible index) so
+    one bad file doesn't abort the whole cross-repo scan. Extracted from
+    SCIPQueryService.trace_callchain to keep that method focused/short.
+    """
+    from code_indexer.scip.query.primitives import SCIPQueryEngine
+
+    try:
+        engine = SCIPQueryEngine(scip_file)
+        chains = engine.trace_call_chain(
+            from_symbol,
+            to_symbol,
+            max_depth=max_depth,
+            limit=limit,
+            timeout_errors=timeout_errors,
+        )
+        return [_call_chain_to_dict(c) for c in chains]
+    except Exception as e:
+        logger.warning(
+            format_error_log(
+                "MCP-GENERAL-142",
+                f"Failed to trace call chain in {scip_file}: {e}",
+            )
+        )
+        return []
 
 
 class SCIPQueryService:
@@ -537,56 +588,38 @@ class SCIPQueryService:
         limit: int = 100,
         repository_alias: Optional[str] = None,
         username: Optional[str] = None,
-    ) -> List[Dict[str, Any]]:
+    ) -> Tuple[List[Dict[str, Any]], List[str]]:
         """
         Trace call chains between two symbols.
 
-        Args:
-            from_symbol: Entry point symbol name
-            to_symbol: Target symbol name
-            max_depth: Maximum path length in hops (default 10)
-            limit: Maximum number of paths to return (default 100)
-            repository_alias: Optional repository name to filter SCIP indexes
-            username: Optional username for access control filtering
-
         Returns:
-            List of dictionaries with call chain information (path, length, has_cycle)
+            (chains, timeout_errors); non-empty timeout_errors means a
+            query was cut off and chains may be incomplete (Bug #1603).
         """
-        from code_indexer.scip.query.primitives import SCIPQueryEngine
+        if not from_symbol or not to_symbol or max_depth < 1 or limit < 0:
+            return [], []
 
         scip_files = self.find_scip_files(
             repository_alias=repository_alias, username=username
         )
-
         if not scip_files:
-            return []
+            return [], []
 
         all_results: List[Dict[str, Any]] = []
-
+        timeout_errors: List[str] = []
         for scip_file in scip_files:
-            try:
-                engine = SCIPQueryEngine(scip_file)
-                chains = engine.trace_call_chain(
-                    from_symbol, to_symbol, max_depth=max_depth, limit=limit
+            all_results.extend(
+                _trace_callchain_in_file(
+                    scip_file,
+                    from_symbol,
+                    to_symbol,
+                    max_depth,
+                    limit,
+                    timeout_errors,
                 )
-                all_results.extend(
-                    {
-                        "path": chain.path,
-                        "length": chain.length,
-                        "has_cycle": chain.has_cycle,
-                    }
-                    for chain in chains
-                )
-            except Exception as e:
-                logger.warning(
-                    format_error_log(
-                        "MCP-GENERAL-142",
-                        f"Failed to trace call chain in {scip_file}: {e}",
-                    )
-                )
-                continue
+            )
 
-        return all_results
+        return all_results, timeout_errors
 
     def get_context(
         self,

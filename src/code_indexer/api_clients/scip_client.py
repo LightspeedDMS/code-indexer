@@ -12,6 +12,12 @@ from .base_client import CIDXRemoteAPIClient, APIClientError
 
 logger = logging.getLogger(__name__)
 
+# Bug #1603: real, server-enforced upper bound for callchain's max_depth.
+# The combinatorial-path query (trace_call_chain_v2) is unsafe above this
+# depth regardless of front door -- see MAX_DEPTH_CAP in
+# scip/database/queries.py, which this mirrors.
+_MAX_CALLCHAIN_DEPTH = 3
+
 
 class SCIPQueryError(APIClientError):
     """Exception raised when SCIP query execution fails."""
@@ -256,7 +262,7 @@ class SCIPAPIClient(CIDXRemoteAPIClient):
         from_symbol: str,
         to_symbol: str,
         repository_alias: Optional[str] = None,
-        max_depth: int = 10,
+        max_depth: int = _MAX_CALLCHAIN_DEPTH,
         project: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Trace call chains between two symbols.
@@ -265,7 +271,7 @@ class SCIPAPIClient(CIDXRemoteAPIClient):
             from_symbol: Starting symbol for chain tracing
             to_symbol: Target symbol for chain tracing
             repository_alias: Repository alias to query (required for remote)
-            max_depth: Maximum chain length (default: 10, max: 20)
+            max_depth: Maximum chain length (default: 3, max: 3)
             project: Optional project path filter
 
         Returns:
@@ -277,13 +283,23 @@ class SCIPAPIClient(CIDXRemoteAPIClient):
             raise ValueError("to_symbol cannot be empty")
         if not repository_alias:
             raise ValueError("repository_alias is required for remote SCIP queries")
+        if max_depth < 1:
+            raise ValueError(f"max_depth must be at least 1, got {max_depth}")
+        if max_depth > _MAX_CALLCHAIN_DEPTH:
+            # Bug #1603 code review Priority 4 / O2: reject symmetrically
+            # with the < 1 case above instead of silently clamping -- a
+            # caller asking for depth 5 should get a clear rejection, not
+            # a silently downgraded depth-3 result.
+            raise ValueError(
+                f"max_depth must be at most {_MAX_CALLCHAIN_DEPTH}, got {max_depth}"
+            )
 
         payload = {
             "repositories": [repository_alias],
             "symbol": from_symbol,
             "from_symbol": from_symbol,
             "to_symbol": to_symbol,
-            "max_depth": min(max_depth, 20),
+            "max_depth": max_depth,
         }
         if project:
             payload["project"] = project
