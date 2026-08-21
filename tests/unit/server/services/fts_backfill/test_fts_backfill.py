@@ -59,6 +59,17 @@ def test_discovery_returns_only_repos_missing_fts(tmp_path: Path) -> None:
     assert sorted(m.alias for m in missing) == ["a", "c"]
 
 
+def test_discovery_excludes_repos_marked_no_files(tmp_path: Path) -> None:
+    """EVO-66445: a repo marked as having no indexable files is NOT re-attempted, so
+    the sweep stops churning on file-less config/infra mirrors and converges."""
+    a = _repo(tmp_path, "a", fts=False)  # missing -> candidate
+    empty = _repo(tmp_path, "empty", fts=False)  # missing but marked no-files
+    (empty / ".code-indexer" / "fts_backfill_no_files.skip").write_text("")
+    grm = _FakeGRM([{"alias": "a"}, {"alias": "empty"}], {"a": a, "empty": empty})
+    missing = discover_repos_missing_fts(grm)
+    assert [m.alias for m in missing] == ["a"]  # 'empty' excluded
+
+
 def test_discovery_accepts_alias_name_key_and_skips_bad_entries(tmp_path: Path) -> None:
     a = _repo(tmp_path, "a", fts=False)
     grm = _FakeGRM(
@@ -118,6 +129,33 @@ def test_tick_counts_failures_loudly_without_aborting(tmp_path: Path) -> None:
     assert stats.rebuilt == 1
     assert stats.failed == 1
     assert stats.failed_aliases == ["bad"]
+
+
+def test_tick_counts_skipped_separately_from_rebuilt_and_failed(tmp_path: Path) -> None:
+    """EVO-66445: a no-files SKIPPED repo is neither a rebuild nor a failure; it counts
+    as skipped and (like a rebuild) leaves nothing remaining."""
+    cands = [
+        FtsBackfillCandidate(alias=x, repo_path=tmp_path / x)
+        for x in ("built", "empty", "broken")
+    ]
+    results = {
+        "built": FtsBuildStatus.REBUILT,
+        "empty": FtsBuildStatus.SKIPPED,
+        "broken": FtsBuildStatus.FAILED,
+    }
+    stats = run_fts_backfill_tick(
+        object(),
+        batch_size=10,
+        ensure_fn=_ensure_stub(results),
+        discover_fn=lambda _grm: cands,
+    )
+    assert stats.attempted == 3
+    assert stats.rebuilt == 1
+    assert stats.skipped == 1
+    assert stats.failed == 1
+    assert stats.failed_aliases == ["broken"]  # skipped is NOT a failure
+    # built + skipped are both resolved -> only the failed repo remains.
+    assert stats.remaining_after_tick == 1
 
 
 def test_tick_empty_fleet_is_complete_noop() -> None:

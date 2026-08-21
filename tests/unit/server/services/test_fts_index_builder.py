@@ -11,8 +11,14 @@ from code_indexer.server.services.fts_index_builder import (
     FTS_INDEX_DIRNAME,
     FtsBuildStatus,
     ensure_fts_index,
+    fts_backfill_skip_present,
     fts_index_present,
 )
+
+# The exact stdout/stderr split the real cidx CLI emits on a file-less repo: the
+# "local mode" banner goes to STDERR, the actual error to STDOUT.
+_NO_FILES_STDOUT = "🔍 Discovering files...\n❌ No files found to index"
+_LOCAL_MODE_STDERR = "🔧 Running in local mode"
 
 
 def _make_repo(tmp_path: Path, *, config: bool = True, fts: bool = False) -> Path:
@@ -42,11 +48,15 @@ class _FakeRunner:
         build_on_rebuild: bool = True,
         init_rc: int = 0,
         rebuild_rc: int = 0,
+        rebuild_stdout: str = "",
+        rebuild_stderr: str = "",
     ) -> None:
         self.repo_path = repo_path
         self.build_on_rebuild = build_on_rebuild
         self.init_rc = init_rc
         self.rebuild_rc = rebuild_rc
+        self.rebuild_stdout = rebuild_stdout
+        self.rebuild_stderr = rebuild_stderr
         self.calls: List[List[str]] = []
 
     def __call__(self, cmd, **kwargs) -> "subprocess.CompletedProcess[str]":
@@ -60,7 +70,12 @@ class _FakeRunner:
         elif "--rebuild-fts-index" in cmd:
             rc = self.rebuild_rc
             if rc != 0:
-                err = "rebuild boom"
+                # Explicit stdout/stderr override lets a test reproduce the real CLI
+                # split (banner on stderr, error on stdout); else a generic message.
+                out = self.rebuild_stdout
+                err = self.rebuild_stderr or (
+                    "rebuild boom" if not self.rebuild_stdout else ""
+                )
             elif self.build_on_rebuild:
                 d = self.repo_path / ".code-indexer" / FTS_INDEX_DIRNAME
                 d.mkdir(parents=True, exist_ok=True)
@@ -156,3 +171,59 @@ def test_timeout_expired_is_failed_not_raised(tmp_path: Path) -> None:
     outcome = ensure_fts_index(repo, alias="a", runner=slow_runner, timeout=30)
     assert outcome.status is FtsBuildStatus.FAILED
     assert "subprocess error" in outcome.detail
+
+
+# ── EVO-66445 follow-up: no-files repos are SKIPPED (marked), and _detail is honest ──
+
+
+def _skip_marker(repo: Path) -> Path:
+    return repo / ".code-indexer" / "fts_backfill_no_files.skip"
+
+
+def test_no_files_repo_is_skipped_and_marked(tmp_path: Path, caplog) -> None:
+    """A file-less repo (rebuild exits 1 with 'No files found') is SKIPPED, not FAILED,
+    and gets a skip marker so discovery stops re-attempting it."""
+    repo = _make_repo(tmp_path, config=True, fts=False)
+    runner = _FakeRunner(
+        repo,
+        rebuild_rc=1,
+        rebuild_stdout=_NO_FILES_STDOUT,
+        rebuild_stderr=_LOCAL_MODE_STDERR,
+    )
+    with caplog.at_level("ERROR"):
+        outcome = ensure_fts_index(repo, alias="cow-storage-daemon-2", runner=runner)
+    assert outcome.status is FtsBuildStatus.SKIPPED
+    assert not outcome.ok  # no usable index, but explicitly not a failure
+    assert _skip_marker(repo).exists()
+    assert fts_backfill_skip_present(repo)
+    # A skip is expected, not an error: nothing logged at ERROR.
+    assert caplog.text == ""
+
+
+def test_detail_surfaces_stdout_error_not_stderr_banner(tmp_path: Path) -> None:
+    """A genuine failure must report the real ❌ error (stdout), not the
+    '🔧 Running in local mode' banner (stderr) that _detail used to prefer."""
+    repo = _make_repo(tmp_path, config=True, fts=False)
+    runner = _FakeRunner(
+        repo,
+        rebuild_rc=1,
+        rebuild_stdout="🔍 Discovering files...\n❌ Tantivy write failed: disk full",
+        rebuild_stderr=_LOCAL_MODE_STDERR,
+    )
+    outcome = ensure_fts_index(repo, alias="a", runner=runner)
+    assert outcome.status is FtsBuildStatus.FAILED  # not the no-files signal
+    assert "disk full" in outcome.detail
+    assert "Running in local mode" not in outcome.detail
+
+
+def test_successful_rebuild_clears_a_stale_skip_marker(tmp_path: Path) -> None:
+    """A repo previously marked file-less that now builds must have the mark cleared,
+    so discovery picks it up normally."""
+    repo = _make_repo(tmp_path, config=True, fts=False)
+    _skip_marker(repo).write_text("")  # stale mark from a prior empty state
+    assert fts_backfill_skip_present(repo)
+    runner = _FakeRunner(repo, build_on_rebuild=True)
+    outcome = ensure_fts_index(repo, alias="a", runner=runner)
+    assert outcome.status is FtsBuildStatus.REBUILT
+    assert not _skip_marker(repo).exists()
+    assert not fts_backfill_skip_present(repo)

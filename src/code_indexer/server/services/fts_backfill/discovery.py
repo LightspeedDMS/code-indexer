@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, List
 
-from ..fts_index_builder import fts_index_present
+from ..fts_index_builder import fts_backfill_skip_present, fts_index_present
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +45,12 @@ def discover_repos_missing_fts(golden_repo_manager: Any) -> List[FtsBackfillCand
                 exc,
             )
             continue
-        if not fts_index_present(repo_root):
+        # Skip repos already marked as having no indexable files -- re-attempting a
+        # permanently file-less repo every tick only churns subprocesses and keeps the
+        # sweep from converging. A successful rebuild clears the mark (builder), so a
+        # repo that later gains code returns to the candidate set.
+        if not fts_index_present(repo_root) and not fts_backfill_skip_present(
+            repo_root
+        ):
             missing.append(FtsBackfillCandidate(alias=alias, repo_path=repo_root))
     return missing

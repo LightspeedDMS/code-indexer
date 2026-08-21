@@ -40,9 +40,18 @@ FTS_INDEX_DIRNAME = "tantivy_index"
 _FTS_MARKER = "meta.json"
 #: ``cidx index`` requires an initialized project (``config.json``).
 _CONFIG_MARKER = "config.json"
+#: Marker written when a repo has NO indexable source files, so ``cidx index
+#: --rebuild-fts-index`` legitimately finds nothing to index. Discovery treats a
+#: marked repo as "not missing" so the sweep stops re-attempting a permanently
+#: file-less repo (config/infra mirrors) every tick. Cleared on a successful
+#: rebuild so a repo that later gains code is picked up again (no stale skip).
+_SKIP_MARKER = "fts_backfill_no_files.skip"
 
 # Truncate captured subprocess output in log/detail lines (avoid dumping MBs).
 _DETAIL_MAX = 500
+#: Substring (case-folded) the CLI/daemon rebuild emits when FileFinder discovers no
+#: indexable files -- the ONE non-failure reason a rebuild exits non-zero.
+_NO_FILES_SIGNAL = "no files found to index"
 
 
 class FtsBuildStatus(str, Enum):
@@ -51,6 +60,9 @@ class FtsBuildStatus(str, Enum):
     PRESENT = "present"  # index already existed; no work performed
     REBUILT = "rebuilt"  # index was missing and was successfully (re)built
     FAILED = "failed"  # index missing and (re)build failed -- surfaced, never swallowed
+    SKIPPED = (
+        "skipped"  # repo has no indexable files -- nothing to build (not a failure)
+    )
 
 
 @dataclass(frozen=True)
@@ -77,9 +89,34 @@ def fts_index_present(repo_path: Path) -> bool:
     return (repo_path / ".code-indexer" / FTS_INDEX_DIRNAME / _FTS_MARKER).exists()
 
 
+def fts_backfill_skip_present(repo_path: Path) -> bool:
+    """Return True iff ``repo_path`` was marked as having no indexable files.
+
+    Set by :func:`ensure_fts_index` when a rebuild reports no files to index; read by
+    the backfill discovery so a permanently file-less repo is not re-attempted every
+    tick. A successful rebuild clears it, so the mark never wrongly sticks.
+    """
+    return (repo_path / ".code-indexer" / _SKIP_MARKER).exists()
+
+
+def _combined_output(result: "subprocess.CompletedProcess[str]") -> str:
+    """stdout + stderr joined. The CLI prints its banner (``🔧 Running in local
+    mode``) to stderr but the actual error (``❌ No files found to index``) to
+    stdout, so neither stream alone is sufficient."""
+    parts = [s.strip() for s in (result.stdout, result.stderr) if s and s.strip()]
+    return "\n".join(parts)
+
+
 def _detail(result: "subprocess.CompletedProcess[str]") -> str:
-    text = (result.stderr or result.stdout or f"exit {result.returncode}") or ""
-    return text.strip()[:_DETAIL_MAX]
+    text = _combined_output(result)
+    if not text:
+        return f"exit {result.returncode}"
+    # Surface the meaningful error, not the leading ``🔧 Running in local mode``
+    # banner: prefer the CLI's explicit ``❌``-prefixed error line(s), else the
+    # trailing output (the error is emitted last, after any banners).
+    errs = [ln.strip() for ln in text.splitlines() if ln.lstrip().startswith("❌")]
+    detail = " / ".join(errs) if errs else text.splitlines()[-1]
+    return detail[:_DETAIL_MAX]
 
 
 def _run_or_fail(
@@ -219,6 +256,29 @@ def ensure_fts_index(
     assert result is not None  # narrow for mypy: launch_outcome is None here
     if result.returncode != 0:
         detail = _detail(result)
+        # A repo with no indexable source files (config/infra mirror) legitimately has
+        # nothing to build -- that is a SKIP, not a failure. Mark it so discovery stops
+        # re-attempting it every tick; log at INFO (expected), never ERROR.
+        if _NO_FILES_SIGNAL in _combined_output(result).casefold():
+            try:
+                (ci / _SKIP_MARKER).touch()
+            except OSError as exc:  # marking is best-effort; never fail the sweep on it
+                logger.warning(
+                    "EVO-66445 FTS backfill: could not write skip marker for alias=%s at %s: %s",
+                    alias,
+                    repo_path,
+                    exc,
+                )
+            logger.info(
+                "EVO-66445 FTS backfill: alias=%s at %s has no indexable files -- skipping",
+                alias,
+                repo_path,
+            )
+            return FtsBuildOutcome(
+                FtsBuildStatus.SKIPPED,
+                alias,
+                "no indexable files to build an FTS index",
+            )
         logger.error(
             "EVO-66445 FTS (re)build failed for alias=%s at %s: %s",
             alias,
@@ -243,6 +303,9 @@ def ensure_fts_index(
             "rebuild exited 0 but no tantivy_index marker was written",
         )
 
+    # Success: clear any stale "no files" mark so a repo that has since gained code is
+    # not wrongly skipped by discovery on the next tick.
+    (ci / _SKIP_MARKER).unlink(missing_ok=True)
     return FtsBuildOutcome(
         FtsBuildStatus.REBUILT, alias, f"FTS index rebuilt at {ci / FTS_INDEX_DIRNAME}"
     )

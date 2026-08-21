@@ -20,12 +20,17 @@ class FtsBackfillTickStats:
     attempted: int = 0  # repos we tried to build this tick (<= batch_size)
     rebuilt: int = 0  # successful (re)builds this tick
     failed: int = 0  # build failures this tick (surfaced, not swallowed)
+    skipped: int = 0  # repos with no indexable files this tick (marked, not retried)
     failed_aliases: List[str] = field(default_factory=list)
 
     @property
     def remaining_after_tick(self) -> int:
-        """Best-effort estimate of repos still missing FTS after this tick."""
-        return max(0, self.total_missing - self.rebuilt)
+        """Best-effort estimate of repos still missing FTS after this tick.
+
+        Both rebuilt and skipped repos are resolved -- rebuilt now have an index,
+        skipped are marked so discovery drops them -- so neither remains missing.
+        """
+        return max(0, self.total_missing - self.rebuilt - self.skipped)
 
     @property
     def complete(self) -> bool:
@@ -71,15 +76,18 @@ def run_fts_backfill_tick(
         if outcome.status is FtsBuildStatus.FAILED:
             stats.failed += 1
             stats.failed_aliases.append(cand.alias)
+        elif outcome.status is FtsBuildStatus.SKIPPED:
+            stats.skipped += 1
         else:
             stats.rebuilt += 1
 
     logger.info(
-        "fts_backfill tick: missing=%d attempted=%d rebuilt=%d failed=%d "
+        "fts_backfill tick: missing=%d attempted=%d rebuilt=%d skipped=%d failed=%d "
         "remaining~=%d%s",
         stats.total_missing,
         stats.attempted,
         stats.rebuilt,
+        stats.skipped,
         stats.failed,
         stats.remaining_after_tick,
         f" failed_aliases={stats.failed_aliases}" if stats.failed_aliases else "",
