@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [12.23.0] - 2026-08-21
+
+### Fixed
+
+- **Bug #1601**: `regex_search` could read unbounded ripgrep/grep subprocess output into
+  memory and was immune to `max_results`, risking server OOM at production repo counts.
+  Bounded subprocess output read (64 MiB), per-match content (256 KiB), and aggregate
+  response content across all matches in one search (8 MiB). Fixed a stderr-pipe deadlock,
+  file descriptor leaks, and event-loop blocking. Also fixed an access-control leak where
+  cidx-meta-filtered responses reported the raw pre-filter match count.
+- **Bug #1603**: `scip_callchain` was non-functional server-side -- `signal.alarm()` only
+  works on a process's main thread, but the MCP/REST handler stack always invokes it from a
+  worker thread. Replaced with a real cross-thread-cancellable watchdog. Tightened the
+  advertised max depth to a safe combinatorial bound, and closed a "timeout reported as
+  silent success" gap across all five call sites (MCP, single-repo REST, multi-repo REST,
+  local CLI, Web UI).
+- **Bug #1598**: `xray_search`'s `timeout_seconds` was enforced during AST evaluation but
+  never reached candidate-file selection, so a short requested timeout could not bound a
+  slow directory walk or regex scan. Phase 1 now honors the caller's timeout end-to-end,
+  including the zero-match-pattern diagnostic probe, and reports a clean partial/timeout
+  result instead of an unbounded run or a raw traceback failure.
+
+### Added
+
+- **Story #1600**: query-path memory-pressure admission gate -- the 15 identified
+  memory/CPU-unbounded MCP query handlers, plus the REST `/api/query` route, now check the
+  server's existing memory-pressure monitor before executing and cleanly reject with a
+  retry hint under sustained memory pressure, instead of the server driving itself into an
+  OOM/swap death spiral that previously required a manual restart to recover from.
+
 ## [12.22.0] - 2026-08-19
 
 ### Added
