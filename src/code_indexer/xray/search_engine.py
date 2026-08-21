@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import fnmatch
 import logging
+import math
 import re
 import threading
 import time
@@ -27,6 +28,36 @@ from code_indexer.global_repos.regex_search import (
 from code_indexer.xray.sandbox import _line_to_byte_offset_bytes as _line_to_byte_offset
 
 logger = logging.getLogger(__name__)
+
+
+class XRayPhase1TimeoutError(Exception):
+    """Raised when Phase 1 (candidate-file selection) exceeds timeout_seconds.
+
+    Bug #1598: timeout_seconds is a real, documented xray_search parameter
+    but was never threaded into Phase 1 (only Phase 2's AST evaluation
+    budget consumed it). This exception lets both Phase 1 implementations
+    (filename walk and content/ripgrep driver) signal a deadline overrun
+    to XRaySearchEngine.run(), which catches it and returns the documented
+    partial/timeout result shape instead of letting the exception escape
+    into the background-job executor as an unhandled failure.
+
+    Attributes:
+        candidates: Partial list of candidate Path objects collected before
+            the deadline tripped. Non-empty for filename-mode timeouts (the
+            incremental walk preserves everything found so far). Always
+            empty for content-mode timeouts -- ripgrep's TimeoutError
+            carries no partial matches through the current
+            RegexSearchResult API, so this asymmetry with filename mode is
+            intentional, not a bug.
+    """
+
+    def __init__(self, candidates: List[Path]) -> None:
+        super().__init__(
+            f"XRay Phase 1 driver exceeded timeout_seconds "
+            f"({len(candidates)} partial candidates collected)"
+        )
+        self.candidates = candidates
+
 
 # Module-level singleton for cluster cache backend.
 # Created once on first successful/definitive initialization, reused thereafter.
@@ -269,7 +300,12 @@ class XRaySearchEngine:
                 lookbehind) in Phase 1 content driver. Default False.
             path: Subdirectory within the repository to restrict the search to.
                 Relative to repo root. None means the full repository. Default None.
-            timeout_seconds: Wall-clock cap (unused in #972; #978 enforces it).
+            timeout_seconds: Wall-clock cap enforced across BOTH phases: Phase 1
+                (candidate-file selection -- filename walk, content/ripgrep
+                driver, AND the zero-match-pattern probe, which shares the
+                SAME budget as the main Phase 1 search rather than each
+                getting a fresh allotment, Bug #1598) and Phase 2 (AST
+                evaluation, #978).
             worker_threads: Thread-pool size (unused in #972; #978 uses it).
             progress_callback: Called with ``(percent, phase_name, phase_detail)``
                 at key milestones.
@@ -313,6 +349,7 @@ class XRaySearchEngine:
                 multiline=multiline,
                 pcre2=pcre2,
                 path=path,
+                timeout_seconds=timeout_seconds,
             )
         except RipgrepExecutionError as exc:
             # Finding 3.1 (v10.4.4): surface Phase 1 errors (e.g. invalid regex)
@@ -328,6 +365,29 @@ class XRaySearchEngine:
                 "phase1_failed": True,
                 "phase1_error": str(exc),
                 "partial": True,
+            }
+        except XRayPhase1TimeoutError as exc:
+            # Bug #1598: Phase 1 (candidate-file selection) exceeded
+            # timeout_seconds -- neither phase-1 driver checked the caller's
+            # deadline before this fix, so a short timeout_seconds could not
+            # bound Phase 1 at all. Report the documented partial/timeout
+            # contract instead of letting this propagate into the
+            # background-job executor as an unhandled failure (would land
+            # on status="failed" with a raw traceback).
+            logger.warning(
+                "XRaySearchEngine: Phase 1 driver timed out after %ss "
+                "(%d partial candidates collected)",
+                timeout_seconds,
+                len(exc.candidates),
+            )
+            return {
+                "matches": [],
+                "evaluation_errors": [],
+                "files_processed": 0,
+                "files_total": len(exc.candidates),
+                "elapsed_seconds": time.monotonic() - start,
+                "partial": True,
+                "timeout": True,
             }
 
         files_total = len(candidate_files)
@@ -664,6 +724,7 @@ class XRaySearchEngine:
         self,
         repo_path: Path,
         include_patterns: List[str],
+        timeout_seconds: int = 120,
     ) -> List[Dict[str, Any]]:
         """Probe each include_pattern to detect those that match zero files.
 
@@ -676,9 +737,30 @@ class XRaySearchEngine:
         Args:
             repo_path: Root directory of the repository.
             include_patterns: The caller-supplied glob patterns to probe.
+            timeout_seconds: TOTAL wall-clock budget SHARED across ALL
+                ``include_patterns`` probed by this call (Bug #1598 R1) --
+                NOT a fresh per-pattern allotment. The caller
+                (``_run_phase1_content``) passes the budget REMAINING after
+                the main Phase 1 search already consumed its share of the
+                caller's requested ``timeout_seconds``, so the main search
+                plus every probe together stay within ONE total deadline
+                instead of each of the N patterns getting its own full
+                budget (which previously let phase 1 alone run for up to
+                ``N * timeout_seconds``).
 
         Returns:
             List of zero-match warning dicts (may be empty).
+
+        Raises:
+            TimeoutError: If the shared probe budget is exhausted before
+                every ``include_pattern`` has been probed (checked at the
+                top of each loop iteration, so the loop stops itself once
+                the budget runs out rather than relying solely on each
+                individual ``search()`` call's own internal enforcement),
+                or if an individual probe ``search()`` call itself exceeds
+                its remaining share of the budget. The caller translates
+                this into an advisory warning (Bug #1598 R2) instead of
+                discarding the main search's already-found candidates.
         """
         if not include_patterns:
             return []
@@ -690,13 +772,22 @@ class XRaySearchEngine:
         )
         warnings: List[Dict[str, Any]] = []
         probe_service = RegexSearchService(repo_path)
+        probe_loop_start = time.monotonic()
 
-        for pat in include_patterns:
+        for idx, pat in enumerate(include_patterns):
+            remaining = timeout_seconds - (time.monotonic() - probe_loop_start)
+            if remaining <= 0:
+                raise TimeoutError(
+                    f"zero-match-pattern probe shared budget of "
+                    f"{timeout_seconds}s exhausted after probing {idx} of "
+                    f"{len(include_patterns)} include_pattern(s)"
+                )
             probe_result = _run_async_in_sync(
                 probe_service.search(
                     pattern=r".*",
                     include_patterns=[pat],
                     max_results=1,
+                    timeout_seconds=max(1, math.ceil(remaining)),
                 )
             )
             if not probe_result.matches:
@@ -740,6 +831,7 @@ class XRaySearchEngine:
         multiline: bool = False,
         pcre2: bool = False,
         path: Optional[str] = None,
+        timeout_seconds: int = 120,
     ) -> List[Path]:
         """Phase 1: regex-based candidate file selection.
 
@@ -763,9 +855,14 @@ class XRaySearchEngine:
             multiline: Enable multi-line regex.
             pcre2: Enable PCRE2 engine.
             path: Optional subdirectory restriction within repo.
+            timeout_seconds: Wall-clock budget for Phase 1 itself (Bug #1598).
+                Raises ``XRayPhase1TimeoutError`` if exceeded.
 
         Returns:
             Ordered, deduplicated list of matching Path objects.
+
+        Raises:
+            XRayPhase1TimeoutError: If Phase 1 exceeds ``timeout_seconds``.
         """
         # Reset per-call side-channels.
         # Positions are dicts: {line_number, line_content, column, byte_offset,
@@ -775,7 +872,11 @@ class XRaySearchEngine:
 
         if search_target == "filename":
             return self._run_phase1_filename(
-                repo_path, driver_regex, include_patterns, exclude_patterns
+                repo_path,
+                driver_regex,
+                include_patterns,
+                exclude_patterns,
+                timeout_seconds=timeout_seconds,
             )
 
         return self._run_phase1_content(
@@ -788,6 +889,7 @@ class XRaySearchEngine:
             multiline=multiline,
             pcre2=pcre2,
             path=path,
+            timeout_seconds=timeout_seconds,
         )
 
     def _run_phase1_filename(
@@ -796,6 +898,7 @@ class XRaySearchEngine:
         driver_regex: str,
         include_patterns: List[str],
         exclude_patterns: List[str],
+        timeout_seconds: int = 120,
     ) -> List[Path]:
         """Inline filename-path walker (RegexSearchService has no filename mode).
 
@@ -806,15 +909,38 @@ class XRaySearchEngine:
                 segment, ``**`` matches multiple segments recursively.
                 Warnings are emitted for any pattern that matches zero files.
             exclude_patterns: Glob exclude filters (empty = exclude none).
+            timeout_seconds: Wall-clock budget for the walk (Bug #1598).
+                Checked on every ``rglob()`` entry -- NOT merely between
+                per-file evaluations -- since ``rglob()`` is consumed
+                directly (unsorted) rather than pre-materialized via
+                ``sorted()``, which previously drained the whole generator
+                before any check could run.
 
         Returns:
             Ordered, deduplicated list of matching Path objects.
+
+        Raises:
+            XRayPhase1TimeoutError: If the walk exceeds ``timeout_seconds``.
+                Carries the candidates collected so far (already sorted) so
+                a timed-out search still returns partial results instead of
+                discarding the work done.
         """
         pattern = re.compile(driver_regex)
         candidates: List[Path] = []
         all_rel_paths: List[str] = []
+        start = time.monotonic()
 
-        for p in sorted(repo_path.rglob("*")):
+        # Bug #1598: iterate rglob() directly (unsorted) instead of
+        # sorted(repo_path.rglob("*")) -- sorted() would fully drain and
+        # sort the entire tree in memory BEFORE the loop body executes even
+        # once, so a time-check inside the loop alone could never bound
+        # that initial traversal on a large tree. Sort only the final,
+        # already-bounded candidate list to preserve deterministic output
+        # ordering.
+        for p in repo_path.rglob("*"):
+            if time.monotonic() - start > timeout_seconds:
+                raise XRayPhase1TimeoutError(candidates=sorted(candidates))
+
             if not p.is_file():
                 continue
 
@@ -844,7 +970,7 @@ class XRaySearchEngine:
         self._last_phase1_warnings = self._check_zero_match_patterns(
             include_patterns, all_rel_paths
         )
-        return candidates
+        return sorted(candidates)
 
     def _run_phase1_content(
         self,
@@ -858,6 +984,7 @@ class XRaySearchEngine:
         multiline: bool = False,
         pcre2: bool = False,
         path: Optional[str] = None,
+        timeout_seconds: int = 120,
     ) -> List[Path]:
         """Content driver via RegexSearchService (ripgrep-backed, async-bridged).
 
@@ -874,10 +1001,44 @@ class XRaySearchEngine:
             multiline: Enable multi-line regex matching.
             pcre2: Enable PCRE2 regex engine.
             path: Optional subdirectory restriction relative to repo root.
+            timeout_seconds: Wall-clock budget (Bug #1598), forwarded to
+                ``RegexSearchService.search()`` (already enforced there on
+                the ripgrep/grep subprocess paths) for the main search.
+                The zero-match-pattern probe below does NOT get a fresh
+                copy of this budget (Bug #1598 R1 fix) -- it receives
+                whatever remains of ``timeout_seconds`` after the main
+                search has already run, so main search + all N probes
+                together stay within ONE total ``timeout_seconds`` budget
+                instead of the probe alone being able to run for up to
+                ``N * timeout_seconds``. NOTE: the pure-Python multiline
+                fallback (``RegexSearchService._search_python_multiline``,
+                used when ``multiline=True`` on the grep engine or ripgrep
+                is unavailable) still has no ``timeout_seconds`` parameter
+                as of this fix — deliberately out of scope here, tracked
+                as follow-up issue #1611 rather than left silently
+                unbounded.
 
         Returns:
             Ordered, deduplicated list of matching Path objects.
+
+        Raises:
+            XRayPhase1TimeoutError: If the underlying MAIN search exceeds
+                ``timeout_seconds``. The candidate list is always empty on
+                this path — unlike filename-mode timeouts, ripgrep's
+                ``TimeoutError`` carries no partial matches through the
+                current ``RegexSearchResult`` API, so this asymmetry is
+                intentional. NOTE (Bug #1598 R2): a timeout in the
+                zero-match-pattern probe does NOT raise this exception --
+                the probe is advisory-only (diagnostic hints), so its
+                timeout is recorded as a warning and the function returns
+                the main search's already-found candidates normally
+                instead of discarding a fully successful search.
         """
+        # Bug #1598 R1: track elapsed time from the START of the main
+        # search so the zero-match-pattern probe below can be given only
+        # the REMAINING share of timeout_seconds, not a fresh copy of it.
+        start = time.monotonic()
+
         # Finding 3.6 (v10.4.4): always exclude CIDX's internal index store from
         # content-mode Phase 1 — ripgrep walks it otherwise and surfaces error logs
         # / vector .json files as candidates.
@@ -887,19 +1048,28 @@ class XRaySearchEngine:
             *list(exclude_patterns or []),
         ]
         service = RegexSearchService(repo_path)
-        search_result = _run_async_in_sync(
-            service.search(
-                pattern=driver_regex,
-                path=path,
-                include_patterns=include_patterns or None,
-                exclude_patterns=effective_excludes,
-                case_sensitive=case_sensitive,
-                context_lines=context_lines,
-                max_results=100_000,
-                multiline=multiline,
-                pcre2=pcre2,
+        try:
+            search_result = _run_async_in_sync(
+                service.search(
+                    pattern=driver_regex,
+                    path=path,
+                    include_patterns=include_patterns or None,
+                    exclude_patterns=effective_excludes,
+                    case_sensitive=case_sensitive,
+                    context_lines=context_lines,
+                    max_results=100_000,
+                    multiline=multiline,
+                    pcre2=pcre2,
+                    timeout_seconds=timeout_seconds,
+                )
             )
-        )
+        except TimeoutError as exc:
+            logger.warning(
+                "XRaySearchEngine: Phase 1 content driver timed out after %ss: %s",
+                timeout_seconds,
+                exc,
+            )
+            raise XRayPhase1TimeoutError(candidates=[]) from exc
 
         # Build deduplicated candidate list and populate positions side-channel.
         # Positions are dicts with line_number, line_content, column, byte_offset,
@@ -932,10 +1102,47 @@ class XRaySearchEngine:
 
         # Probe each include_pattern to detect zero-match patterns.
         # Uses ripgrep-backed probe so glob semantics match the main search.
+        # Bug #1598 R1: the probe receives only the REMAINING share of
+        # timeout_seconds after the main search above already ran, so
+        # main search + all N probes together stay within ONE total
+        # timeout_seconds budget (mirrors the remaining-budget pattern
+        # used for Phase 2 in run(): `max(1, timeout_seconds - elapsed)`).
+        # Bug #1598 R2: the probe is advisory-only (zero-match-pattern
+        # diagnostic hints) -- a probe timeout must NEVER discard the
+        # main search's already-found candidates, so it is recorded as a
+        # warning and this function returns normally instead of raising
+        # XRayPhase1TimeoutError.
         if include_patterns:
-            self._last_phase1_warnings = self._probe_zero_match_patterns_content(
-                repo_path, include_patterns
+            elapsed_before_probe = time.monotonic() - start
+            remaining_probe_budget = max(
+                1, math.ceil(timeout_seconds - elapsed_before_probe)
             )
+            try:
+                self._last_phase1_warnings = self._probe_zero_match_patterns_content(
+                    repo_path,
+                    include_patterns,
+                    timeout_seconds=remaining_probe_budget,
+                )
+            except TimeoutError as exc:
+                logger.warning(
+                    "XRaySearchEngine: zero-match-pattern probe timed out "
+                    "after %ss (advisory only -- main search's %d "
+                    "already-found candidate(s) are preserved): %s",
+                    remaining_probe_budget,
+                    len(candidates),
+                    exc,
+                )
+                self._last_phase1_warnings = [
+                    {
+                        "type": "zero_match_probe_timeout",
+                        "hint": (
+                            "The zero-match-pattern probe timed out before "
+                            "checking all include_patterns; some "
+                            "zero-match-pattern warnings may be missing. "
+                            "The main search's results are unaffected."
+                        ),
+                    }
+                ]
 
         # Issue #1601 (AC-E): surface the byte-ceiling signal rather than
         # silently dropping it. Appended (not assigned) so it survives
