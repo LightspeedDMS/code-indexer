@@ -1122,7 +1122,9 @@ class FtsBackfillSweepConfig:
     # backlog drains cross-pod (batch_size x cluster) rather than one-pod-serial, so the
     # existing fleet's FTS backlog pays down in a handful of ticks post-deploy. In steady
     # state (backlog empty) a tick is a cheap full-dir `is_present` walk that finds nothing
-    # to enqueue. Runtime-tunable via the Config screen if NFS load needs dialing.
+    # to enqueue. To dial pacing without a code change, edit the persisted
+    # `fts_backfill_sweep_config` (dict->dataclass on load); there is no Config-screen
+    # control for it yet, unlike hnsw_orphan_sweep.
     tick_interval_minutes: int = 5
 
     # Per-repo wall-clock timeout (seconds) for the sweep's FTS rebuild subprocess
