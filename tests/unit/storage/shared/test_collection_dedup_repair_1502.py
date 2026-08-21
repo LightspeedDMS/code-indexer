@@ -158,9 +158,7 @@ def _write_collection_meta(
 
 
 def _all_json_files(collection_dir: Path) -> set:
-    return {
-        p for p in collection_dir.rglob("*.json") if "collection_meta" not in p.name
-    }
+    return {p for p in collection_dir.rglob("*.json") if p.name.startswith("vector_")}
 
 
 def _marker_path(collection_dir: Path) -> Path:

@@ -284,6 +284,17 @@ class _NullJobTracker:
     def get_job(self, job_id: str):
         return None
 
+    def fail_job(self, job_id: str, **kwargs) -> None:
+        # Bug #1620: DependencyMapDashboardJobRunner.run's except block
+        # calls self._tracker.fail_job(...) unconditionally. Without this
+        # no-op, a missing method here raises AttributeError, which
+        # replaces (masks) the real dashboard_service failure as the job's
+        # recorded error.
+        pass
+
+    def cancel_job(self, job_id: str) -> None:
+        pass
+
 
 def _submit_dashboard_job(
     cache_backend, bg_job_manager, dashboard_service, job_tracker
@@ -337,10 +348,19 @@ def _submit_dashboard_job(
     )
 
     try:
+        # Bug #1620: submit_job() unconditionally injects job_id as a KEYWORD
+        # whenever the target function's signature declares one (runner.run
+        # does). Passing new_job_id POSITIONALLY here used to collide with
+        # that injection -- both bound to the same parameter, raising
+        # TypeError: run() got multiple values for argument 'job_id' on
+        # every single call. Zero positionals after func is the correct
+        # contract (see temporal_live_dispatch.py's run_temporal_worker
+        # submission for the same pattern); submit_job mints its OWN job_id
+        # regardless of new_job_id, which is why the slot is re-pointed to
+        # the real returned id below.
         submitted_id = bg_job_manager.submit_job(
             _DASHBOARD_OP_TYPE,
             runner.run,
-            new_job_id,
             submitter_username="system",
             is_admin=True,
             repo_alias="__depmap_dashboard__",
@@ -360,7 +380,16 @@ def _submit_dashboard_job(
 
     actual_id = str(submitted_id)
     if actual_id != new_job_id:
-        cache_backend.claim_job_slot(actual_id)
+        # Bug #1620: claim_job_slot() is compare-and-swap-if-empty and
+        # silently no-ops here because the slot is already occupied by our
+        # own placeholder new_job_id -- it cannot re-point an occupied
+        # slot. set_job_slot() is a CAS keyed on our own placeholder: it
+        # re-points the slot to the id BackgroundJobManager actually
+        # tracks, but no-ops (with its own WARNING log) if the slot
+        # already changed hands concurrently (e.g. a zombie-detection
+        # clear, or a completed result already cached) rather than
+        # clobbering that legitimate state.
+        cache_backend.set_job_slot(actual_id, expected_current=new_job_id)
     return actual_id
 
 

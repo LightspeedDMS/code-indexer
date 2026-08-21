@@ -31,6 +31,7 @@ from .hnsw_stale_logger import log_hnsw_stale
 from code_indexer.utils.file_locking import fsync_directory, nfs_safe_fsync
 from code_indexer.storage.shared.hnsw_sync_state import (
     HNSW_SYNC_SCHEMA_VERSION,
+    HNSW_SYNC_STATE_FILENAME,
     HNSWSyncSession,
     HNSWSyncState,
     compute_dirty_transition,
@@ -5012,6 +5013,10 @@ class FilesystemVectorStore:
         for vector_file in collection_path.rglob("*.json"):
             if "collection_meta" in vector_file.name:
                 continue
+            if vector_file.name == HNSW_SYNC_STATE_FILENAME:
+                # Bug #1619: dedicated hnsw_sync bookkeeping sidecar, never
+                # a vector record.
+                continue
             try:
                 with open(str(vector_file), "r") as fh:
                     data: Dict[str, Any] = json.load(fh)
@@ -7928,6 +7933,10 @@ class FilesystemVectorStore:
             # Skip collection metadata
             if "collection_meta" in json_file.name:
                 continue
+            # Bug #1619: dedicated hnsw_sync bookkeeping sidecar, never a
+            # vector record.
+            if json_file.name == HNSW_SYNC_STATE_FILENAME:
+                continue
 
             try:
                 with open(json_file) as f:
@@ -8012,6 +8021,9 @@ class FilesystemVectorStore:
             f
             for f in collection_path.rglob("*.json")
             if "collection_meta" not in f.name
+            # Bug #1619: dedicated hnsw_sync bookkeeping sidecar, never a
+            # vector record -- exclude it from the sampling population too.
+            and f.name != HNSW_SYNC_STATE_FILENAME
         ]
 
         if not all_vector_files:

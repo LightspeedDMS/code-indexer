@@ -106,9 +106,13 @@ class TestFilesystemVectorStoreSubdirectory:
 
         assert result["status"] == "ok", "upsert should succeed"
 
-        # Verify JSON files created in subdirectory
+        # Verify JSON files created in subdirectory. Select by the actual
+        # vector-record naming convention (vector_*.json) rather than a
+        # "not collection_meta" blacklist -- Bug #1619 added a second,
+        # small bookkeeping sidecar (hnsw_sync_state.json) to the
+        # collection root that a blacklist approach would wrongly match.
         json_files = list((tmp_path / "multimodal_index" / "test_coll").rglob("*.json"))
-        vector_files = [f for f in json_files if "collection_meta" not in f.name]
+        vector_files = [f for f in json_files if f.name.startswith("vector_")]
         assert len(vector_files) > 0, "Vector files should exist in subdirectory"
 
         # Verify stored data

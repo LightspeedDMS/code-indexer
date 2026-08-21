@@ -143,6 +143,7 @@ class FakeCacheBackend:
         self._running_job_id = running_job_id
         self._claim_returns = claim_returns
         self.claimed_ids: list = []
+        self.set_job_slot_ids: list = []
 
     def is_fresh(self, ttl_seconds: int) -> bool:
         return self._fresh
@@ -156,6 +157,10 @@ class FakeCacheBackend:
     def claim_job_slot(self, new_job_id: str) -> Optional[str]:
         self.claimed_ids.append(new_job_id)
         return self._claim_returns
+
+    def set_job_slot(self, job_id: str, expected_current: Optional[str] = None) -> bool:
+        self.set_job_slot_ids.append(job_id)
+        return True
 
     def clear_job_slot_for_retry(self) -> None:
         pass

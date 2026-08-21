@@ -14,6 +14,7 @@ from typing import Any, Dict, Optional
 import numpy as np
 
 from code_indexer.storage.shared.chunk_layout import ChunkLayout, resolve_chunk_layout
+from code_indexer.storage.shared.hnsw_sync_state import HNSW_SYNC_STATE_FILENAME
 from code_indexer.storage.sqlite_chunk_store import (
     chunk_store_has_real_data,
     open_chunk_store_for_path,
@@ -653,6 +654,12 @@ _ROOT_ONLY_CHURN_FILENAMES = frozenset(
         "collection_meta.json",
         "path_index.bin",
         "temporal_progress.json",
+        # Bug #1619: the dedicated hnsw_sync dirty-marker sidecar file
+        # (write_hnsw_sync_state()) is rewritten on EVERY
+        # upsert_points()/delete_points() call -- the single highest-churn
+        # file in a collection root, churnier than path_index.bin/
+        # temporal_progress.json above.
+        HNSW_SYNC_STATE_FILENAME,
     }
 )
 

@@ -112,6 +112,7 @@ class FakeCacheBackend:
         self._cached_row = cached_row
         self._running_job_id = running_job_id
         self.claimed_job_ids: list = []
+        self.set_job_slot_ids: list = []
         self.retry_cleared: bool = False
         # None == claim succeeds; a string == slot already taken
         self._claim_returns: Optional[str] = None
@@ -128,6 +129,10 @@ class FakeCacheBackend:
     def claim_job_slot(self, new_job_id: str) -> Optional[str]:
         self.claimed_job_ids.append(new_job_id)
         return self._claim_returns
+
+    def set_job_slot(self, job_id: str, expected_current: Optional[str] = None) -> bool:
+        self.set_job_slot_ids.append(job_id)
+        return True
 
     def clear_job_slot_for_retry(self) -> None:
         self.retry_cleared = True

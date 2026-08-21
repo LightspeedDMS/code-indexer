@@ -142,6 +142,7 @@ from code_indexer.storage.id_index_manager import (
     IDIndexManager,
 )
 from code_indexer.storage.shared.chunk_layout import ChunkLayout
+from code_indexer.storage.shared.hnsw_sync_state import HNSW_SYNC_STATE_FILENAME
 from code_indexer.utils.file_locking import nfs_safe_fsync
 
 logger = logging.getLogger(__name__)
@@ -316,6 +317,11 @@ def _is_vector_record_file(json_file: Path) -> bool:
     if json_file.name == _CHUNKS_DB_CONTENT_MANIFEST_FILENAME:
         return False
     if json_file.name in _TEMPORAL_BOOKKEEPING_FILENAMES:
+        return False
+    if json_file.name == HNSW_SYNC_STATE_FILENAME:
+        # Bug #1619: the dedicated hnsw_sync dirty-marker file lives
+        # alongside collection_meta.json in the collection root -- it is a
+        # bookkeeping sidecar, never a vector record.
         return False
     return True
 

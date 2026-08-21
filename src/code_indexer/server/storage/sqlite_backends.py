@@ -7938,6 +7938,79 @@ class DependencyMapDashboardCacheBackend:
         self._conn_manager.execute_atomic(_op)
         return result[0]
 
+    def set_job_slot(self, job_id: str, expected_current: Optional[str]) -> bool:
+        """
+        Compare-and-swap: re-point the job slot at job_id, but only if the
+        slot currently holds expected_current (None means "no row, or an
+        empty/NULL job_id").
+
+        Exists to correct a placeholder job id to the real id returned by
+        BackgroundJobManager.submit_job() (Bug #1620), since submit_job()
+        mints its own job_id and ignores any id the caller pre-generated.
+
+        This is deliberately a CAS -- not an unconditional overwrite --
+        because a concurrent request can legitimately change the slot
+        between the caller's claim_job_slot(placeholder) and this call
+        (e.g. clearing a perceived zombie, or caching a completed result).
+        Blindly overwriting that state would clobber a legitimate
+        transition; instead the swap no-ops and logs a WARNING.
+
+        Args:
+            job_id: The real job ID to record in the slot.
+            expected_current: The job id the caller believes the slot
+                currently holds (typically its own placeholder), or None to
+                mean "the slot is currently empty / no row exists yet".
+
+        Returns:
+            True if the swap was applied, False if the slot no longer held
+            expected_current (no write performed).
+        """
+        result: List[bool] = [False]
+
+        def _op(conn: sqlite3.Connection) -> None:
+            cursor = conn.execute(
+                "SELECT job_id FROM dependency_map_dashboard_cache WHERE cache_key = ?",
+                (self._CACHE_KEY,),
+            )
+            row = cursor.fetchone()
+
+            if row is None:
+                if expected_current is not None:
+                    result[0] = False
+                    return
+                conn.execute(
+                    """
+                    INSERT INTO dependency_map_dashboard_cache
+                        (cache_key, result_json, computed_at, job_id,
+                         last_failure_message, last_failure_at)
+                    VALUES (?, NULL, NULL, ?, NULL, NULL)
+                    """,
+                    (self._CACHE_KEY, job_id),
+                )
+                result[0] = True
+                return
+
+            current_job_id = row[0]
+            if current_job_id != expected_current:
+                result[0] = False
+                return
+
+            conn.execute(
+                "UPDATE dependency_map_dashboard_cache SET job_id = ? WHERE cache_key = ?",
+                (job_id, self._CACHE_KEY),
+            )
+            result[0] = True
+
+        self._conn_manager.execute_atomic(_op)
+        if not result[0]:
+            logger.warning(
+                "DependencyMapDashboardCacheBackend.set_job_slot: CAS failed "
+                "-- slot does not hold expected_current=%r; job_id=%r not applied",
+                expected_current,
+                job_id,
+            )
+        return result[0]
+
     def get_running_job_id(self, job_tracker: Any = None) -> Optional[str]:
         """
         Return the current job_id if a job is actively running, else None.

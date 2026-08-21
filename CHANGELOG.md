@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [12.24.0] - 2026-08-21
+
+### Fixed
+
+- **Bug #1619**: `write_hnsw_sync_state()` did a full read-merge-write of the entire
+  `collection_meta.json` (holding the potentially multi-MB HNSW `id_mapping`) on every
+  single `upsert_points()`/`delete_points()` call, serialized behind one global exclusive
+  lock -- diagnosed live with `py-spy` against a real stuck indexing run: worker threads
+  blocked on the lock, embedding threads sitting idle, zero files completed after 2h43m on
+  a ~66K-file repo. The `hnsw_sync` payload now lives in its own dedicated sidecar file,
+  still guarded by the same lock (preserving the Bug #1575 Part C mutual-exclusion
+  guarantee), making the write O(sync-payload size) instead of O(collection size). Also
+  fixes 6 collection-root scanners that only excluded `collection_meta.json` by name and
+  would otherwise misclassify the new sidecar file.
+- **Bug #1620**: the Dependency Map dashboard panel was 100% broken on every page load with
+  `TypeError: run() got multiple values for argument 'job_id'` -- a job id was passed both
+  positionally and via keyword injection into the same background-job worker parameter.
+  Also fixes a secondary defect where the dashboard's cache slot could be left holding a
+  job id the job tracker never knew about; `set_job_slot()` is now a proper
+  compare-and-swap operation instead of an unconditional overwrite.
+- Fixed a pre-existing typo (`ci.voyage_api_key` instead of `ci.voyageai_api_key`) that
+  silently broke VoyageAI API-key sync-on-config-change in cluster/PostgreSQL mode, and
+  added the equivalent missing sync call for Cohere.
+
 ## [12.23.0] - 2026-08-21
 
 ### Fixed

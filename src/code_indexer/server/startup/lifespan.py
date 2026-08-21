@@ -4256,8 +4256,10 @@ def make_lifespan(
                             ci = new_config.claude_integration_config
                             if ci and ci.anthropic_api_key:
                                 sync_svc.sync_anthropic_key(ci.anthropic_api_key)
-                            if ci and ci.voyage_api_key:
-                                sync_svc.sync_voyageai_key(ci.voyage_api_key)
+                            if ci and ci.voyageai_api_key:
+                                sync_svc.sync_voyageai_key(ci.voyageai_api_key)
+                            if ci and ci.cohere_api_key:
+                                sync_svc.sync_cohere_key(ci.cohere_api_key)
                         except Exception:
                             logger.debug(
                                 "Bug #586: API key sync on config change failed",
