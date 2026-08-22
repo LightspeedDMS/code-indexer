@@ -56,10 +56,11 @@ _MIN_AUDIT_LIMIT = 1
 _MAX_AUDIT_LIMIT = 1000
 
 # Depth bounds shared by scip_impact, scip_dependents, and
-# scip_dependencies (Bug #1599 / Bug #1602 / Bug #1604). An out-of-range
-# depth otherwise reaches a deeper ValueError guard in
-# queries.py/DatabaseBackend that gets silently swallowed into a
-# success:true/total_results:0 response instead of clamping.
+# scip_dependencies (Bug #1599 / Bug #1602 / Bug #1604). scip_impact
+# still clamps an out-of-range depth to this range; scip_dependents and
+# scip_dependencies now REJECT (success: False) an out-of-range depth
+# instead of clamping, matching scip_callchain's loud-reject contract
+# (Bug #1614).
 _MIN_SCIP_DEPTH = 1
 _MAX_SCIP_DEPTH = 10
 
@@ -499,6 +500,13 @@ def scip_dependencies(params: Dict[str, Any], user: User) -> Dict[str, Any]:
         # silently clamped out-of-range depth to [1, 10] with no error/
         # warning field, hiding the caller's mistake behind a misleading
         # success:true.
+        #
+        # Validation order note: this checks depth BEFORE symbol presence
+        # (below), so {"depth": 99} with no symbol returns the depth error
+        # first. This is the opposite order from scip_callchain, which
+        # validates symbol format before max_depth. Both orderings are
+        # legitimate -- this comment exists so a future reader isn't
+        # confused by the inconsistency between sibling handlers.
         if depth < _MIN_SCIP_DEPTH or depth > _MAX_SCIP_DEPTH:
             return _mcp_response(
                 {
@@ -508,6 +516,7 @@ def scip_dependencies(params: Dict[str, Any], user: User) -> Dict[str, Any]:
                         f"{_MAX_SCIP_DEPTH}, got {depth}"
                     ),
                     "results": [],
+                    "symbol": symbol,
                 }
             )
 
@@ -604,6 +613,13 @@ def scip_dependents(params: Dict[str, Any], user: User) -> Dict[str, Any]:
         # silently clamped out-of-range depth to [1, 10] with no error/
         # warning field, hiding the caller's mistake behind a misleading
         # success:true.
+        #
+        # Validation order note: this checks depth BEFORE symbol presence
+        # (below), so {"depth": 99} with no symbol returns the depth error
+        # first. This is the opposite order from scip_callchain, which
+        # validates symbol format before max_depth. Both orderings are
+        # legitimate -- this comment exists so a future reader isn't
+        # confused by the inconsistency between sibling handlers.
         if depth < _MIN_SCIP_DEPTH or depth > _MAX_SCIP_DEPTH:
             return _mcp_response(
                 {
@@ -613,6 +629,7 @@ def scip_dependents(params: Dict[str, Any], user: User) -> Dict[str, Any]:
                         f"{_MAX_SCIP_DEPTH}, got {depth}"
                     ),
                     "results": [],
+                    "symbol": symbol,
                 }
             )
 

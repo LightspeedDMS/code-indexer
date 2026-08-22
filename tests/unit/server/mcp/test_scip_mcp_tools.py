@@ -538,7 +538,7 @@ class TestSCIPImpactDepthClamp:
 def _call_scip_dependents_with_mock_service(params, mock_user, mock_service):
     """Shared helper: patch _get_scip_query_service and invoke scip_dependents.
 
-    Used by TestSCIPDependentsDepthClamp to avoid repeating the same
+    Used by TestSCIPDependentsDepthReject to avoid repeating the same
     patch-context boilerplate in every test method.
     """
     from code_indexer.server.mcp.handlers import scip_dependents
@@ -550,7 +550,7 @@ def _call_scip_dependents_with_mock_service(params, mock_user, mock_service):
         return scip_dependents(params, mock_user)
 
 
-class TestSCIPDependentsDepthClamp:
+class TestSCIPDependentsDepthReject:
     """Tests for scip_dependents depth validation (Bug #1602 depth-clamp
     family; contract corrected by Bug #1614).
 
@@ -579,6 +579,7 @@ class TestSCIPDependentsDepthClamp:
         assert "depth" in data["error"]
         assert str(raw_depth) in data["error"]
         assert data["results"] == []
+        assert data["symbol"] == "UserService"
         mock_service.get_dependents.assert_not_called()
 
     @pytest.mark.parametrize("raw_depth", [0, -5])
@@ -597,6 +598,7 @@ class TestSCIPDependentsDepthClamp:
         assert "depth" in data["error"]
         assert str(raw_depth) in data["error"]
         assert data["results"] == []
+        assert data["symbol"] == "UserService"
         mock_service.get_dependents.assert_not_called()
 
     def test_scip_dependents_default_depth_unchanged(self, mock_user):
@@ -637,7 +639,7 @@ class TestSCIPDependentsDepthClamp:
 def _call_scip_dependencies_with_mock_service(params, mock_user, mock_service):
     """Shared helper: patch _get_scip_query_service and invoke scip_dependencies.
 
-    Used by TestSCIPDependenciesDepthClamp to avoid repeating the same
+    Used by TestSCIPDependenciesDepthReject to avoid repeating the same
     patch-context boilerplate in every test method.
     """
     from code_indexer.server.mcp.handlers import scip_dependencies
@@ -649,7 +651,7 @@ def _call_scip_dependencies_with_mock_service(params, mock_user, mock_service):
         return scip_dependencies(params, mock_user)
 
 
-class TestSCIPDependenciesDepthClamp:
+class TestSCIPDependenciesDepthReject:
     """Tests for scip_dependencies depth validation (Bug #1604 depth-clamp
     family; contract corrected by Bug #1614).
 
@@ -677,6 +679,7 @@ class TestSCIPDependenciesDepthClamp:
         assert "depth" in data["error"]
         assert str(raw_depth) in data["error"]
         assert data["results"] == []
+        assert data["symbol"] == "UserService"
         mock_service.get_dependencies.assert_not_called()
 
     @pytest.mark.parametrize("raw_depth", [0, -5])
@@ -695,6 +698,7 @@ class TestSCIPDependenciesDepthClamp:
         assert "depth" in data["error"]
         assert str(raw_depth) in data["error"]
         assert data["results"] == []
+        assert data["symbol"] == "UserService"
         mock_service.get_dependencies.assert_not_called()
 
     def test_scip_dependencies_default_depth_unchanged(self, mock_user):
