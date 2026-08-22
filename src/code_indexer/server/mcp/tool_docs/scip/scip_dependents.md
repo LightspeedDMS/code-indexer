@@ -13,7 +13,9 @@ inputSchema:
     depth:
       type: integer
       default: 1
-      description: Dependent traversal depth. Default 1 for direct dependents only. Max 10.
+      minimum: 1
+      maximum: 10
+      description: Dependent traversal depth. Default 1 for direct dependents only. Min 1, max 10 -- values outside this range are REJECTED (success:false, empty results), not clamped.
     exact:
       type: boolean
       default: false
@@ -99,5 +101,7 @@ Pass simple symbol names (e.g., 'UserService'). Fuzzy match by default ('User' m
 
 USE FOR: Impact analysis before changes, finding consumers of an API, understanding coupling.
 NOT FOR: Finding what this symbol depends on (scip_dependencies), tracing specific paths (scip_callchain).
+
+DEPTH VALIDATION: depth outside [1, 10] is rejected, not clamped -- returns {success: false, error: "depth must be between 1 and 10, got N", results: []}.
 
 EXAMPLE: scip_dependents(symbol='DatabaseClient') -> [{symbol: 'AuthService', kind: 'call'}, ...]

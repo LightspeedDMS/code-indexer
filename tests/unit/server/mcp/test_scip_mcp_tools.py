@@ -550,67 +550,59 @@ def _call_scip_dependents_with_mock_service(params, mock_user, mock_service):
         return scip_dependents(params, mock_user)
 
 
-def _make_depth_validating_get_dependents(result_for_depth):
-    """Build a get_dependents side_effect mimicking the real
-    DatabaseBackend/queries.py depth guard: raises ValueError for depth
-    outside [1, 10] (same message the real guard raises), otherwise
-    delegates to result_for_depth(depth) for the return value.
-
-    Shared by TestSCIPDependentsDepthClamp's regression and real-behavior
-    tests to avoid duplicating the guard-simulation logic.
-    """
-
-    def _side_effect(**kwargs):
-        depth = kwargs["depth"]
-        if depth < 1 or depth > 10:
-            raise ValueError(f"Depth must be between 1 and 10, got {depth}")
-        return result_for_depth(depth)
-
-    return _side_effect
-
-
 class TestSCIPDependentsDepthClamp:
-    """Tests for scip_dependents depth clamping (Bug #1602).
+    """Tests for scip_dependents depth validation (Bug #1602 depth-clamp
+    family; contract corrected by Bug #1614).
 
-    scip_dependents's depth parameter must be clamped to [1, 10] at the
-    handler layer, mirroring the existing clamp pattern scip_callchain uses
-    for max_depth and the scip_impact fix from Bug #1599. Unlike scip_impact,
-    an unclamped out-of-range depth here reaches a deeper ValueError guard
-    that gets swallowed into a silently-wrong success:true/total_results:0
-    response.
+    Bug #1614: scip_dependents's depth parameter must be REJECTED (success:
+    False, empty results, service never called) when out of the documented
+    [1, 10] range -- mirroring scip_callchain's existing loud-reject
+    contract for max_depth (Bug #1603) and the REST/service-layer siblings
+    (GET /scip/dependents depth=0/11 -> HTTP 422; POST
+    /api/scip/multi/dependents max_depth=0 -> structured error). Silently
+    clamping to the nearest bound (the pre-#1614 behavior this test class
+    replaces) hid the caller's mistake behind a misleading success:true.
     """
 
-    def test_scip_dependents_depth_far_above_max_is_clamped_to_10(self, mock_user):
-        """depth=100000 must be clamped down to the documented max of 10."""
+    @pytest.mark.parametrize("raw_depth", [100000, 11])
+    def test_scip_dependents_depth_above_max_is_rejected(self, mock_user, raw_depth):
+        """depth above the documented max of 10 must be rejected loudly."""
         mock_service = Mock()
         mock_service.get_dependents.return_value = []
 
-        _call_scip_dependents_with_mock_service(
-            {"symbol": "UserService", "depth": 100000}, mock_user, mock_service
-        )
-
-        _, kwargs = mock_service.get_dependents.call_args
-        assert kwargs["depth"] == 10
-
-    @pytest.mark.parametrize("raw_depth", [0, -5])
-    def test_scip_dependents_depth_below_min_is_clamped_to_1(
-        self, mock_user, raw_depth
-    ):
-        """depth=0 or a negative depth must be clamped up to the min of 1."""
-        mock_service = Mock()
-        mock_service.get_dependents.return_value = []
-
-        _call_scip_dependents_with_mock_service(
+        response = _call_scip_dependents_with_mock_service(
             {"symbol": "UserService", "depth": raw_depth}, mock_user, mock_service
         )
 
-        _, kwargs = mock_service.get_dependents.call_args
-        assert kwargs["depth"] == 1
+        data = json.loads(response["content"][0]["text"])
+        assert data["success"] is False
+        assert "depth" in data["error"]
+        assert str(raw_depth) in data["error"]
+        assert data["results"] == []
+        mock_service.get_dependents.assert_not_called()
+
+    @pytest.mark.parametrize("raw_depth", [0, -5])
+    def test_scip_dependents_depth_below_min_is_rejected(self, mock_user, raw_depth):
+        """depth=0 or a negative depth must be rejected loudly rather than
+        clamped up to the min of 1."""
+        mock_service = Mock()
+        mock_service.get_dependents.return_value = []
+
+        response = _call_scip_dependents_with_mock_service(
+            {"symbol": "UserService", "depth": raw_depth}, mock_user, mock_service
+        )
+
+        data = json.loads(response["content"][0]["text"])
+        assert data["success"] is False
+        assert "depth" in data["error"]
+        assert str(raw_depth) in data["error"]
+        assert data["results"] == []
+        mock_service.get_dependents.assert_not_called()
 
     def test_scip_dependents_default_depth_unchanged(self, mock_user):
         """No depth param supplied must still default to 1 (scip_dependents'
         documented default, NOT 3 like scip_impact), unaffected by the new
-        clamp (1 is already within [1, 10])."""
+        rejection guard (1 is already within [1, 10])."""
         mock_service = Mock()
         mock_service.get_dependents.return_value = []
 
@@ -621,69 +613,25 @@ class TestSCIPDependentsDepthClamp:
         _, kwargs = mock_service.get_dependents.call_args
         assert kwargs["depth"] == 1
 
-    def test_scip_dependents_out_of_range_depth_no_warning_logged(
-        self, mock_user, caplog
+    @pytest.mark.parametrize("valid_depth", [1, 5, 10])
+    def test_scip_dependents_depth_within_range_still_succeeds(
+        self, mock_user, valid_depth
     ):
-        """Regression: before the fix, an out-of-range depth reached a
-        deeper ValueError guard (real DatabaseBackend/queries.py behavior:
-        'Depth must be between 1 and 10, got N'). After the fix, the clamp
-        means the service never sees the raw out-of-range value, so it
-        never raises and nothing is logged at WARNING/ERROR level."""
+        """Every depth within the documented [1, 10] range must still
+        succeed unaffected by the new rejection guard."""
         mock_service = Mock()
-        mock_service.get_dependents.side_effect = _make_depth_validating_get_dependents(
-            lambda depth: [{"symbol": "com.example.AuthHandler", "kind": "dependent"}]
-        )
+        mock_service.get_dependents.return_value = [
+            {"symbol": "com.example.AuthHandler", "kind": "dependent"}
+        ]
 
-        with caplog.at_level("WARNING"):
-            response = _call_scip_dependents_with_mock_service(
-                {"symbol": "UserService", "depth": -5}, mock_user, mock_service
-            )
+        response = _call_scip_dependents_with_mock_service(
+            {"symbol": "UserService", "depth": valid_depth}, mock_user, mock_service
+        )
 
         data = json.loads(response["content"][0]["text"])
         assert data["success"] is True
-        assert data["total_results"] == 1
-
         _, kwargs = mock_service.get_dependents.call_args
-        assert kwargs["depth"] == 1
-
-        warning_or_error_records = [
-            r for r in caplog.records if r.levelname in ("WARNING", "ERROR")
-        ]
-        assert warning_or_error_records == []
-
-    def test_scip_dependents_negative_depth_returns_same_as_depth_one(self, mock_user):
-        """Real-behavior test: depth=-5 must now return the SAME results as
-        depth=1 on a symbol with real dependents -- proving the fix produces
-        the correct answer rather than the silently-wrong empty one Bug
-        #1602 observed live (depth=1 -> 78 real dependents, depth=-5 -> 0)."""
-        real_dependents = [
-            {"symbol": "com.example.AuthHandler", "kind": "dependent"},
-            {"symbol": "com.example.SessionManager", "kind": "dependent"},
-        ]
-
-        mock_service = Mock()
-        mock_service.get_dependents.side_effect = _make_depth_validating_get_dependents(
-            # Real backend only honors depth=1 traversal in this fixture.
-            lambda depth: real_dependents if depth == 1 else []
-        )
-
-        response_depth_1 = _call_scip_dependents_with_mock_service(
-            {"symbol": "UserService", "depth": 1}, mock_user, mock_service
-        )
-        response_depth_negative_5 = _call_scip_dependents_with_mock_service(
-            {"symbol": "UserService", "depth": -5}, mock_user, mock_service
-        )
-
-        data_depth_1 = json.loads(response_depth_1["content"][0]["text"])
-        data_depth_negative_5 = json.loads(
-            response_depth_negative_5["content"][0]["text"]
-        )
-
-        assert data_depth_1["success"] is True
-        assert data_depth_negative_5["success"] is True
-        assert data_depth_1["total_results"] == 2
-        assert data_depth_negative_5["total_results"] == data_depth_1["total_results"]
-        assert data_depth_negative_5["results"] == data_depth_1["results"]
+        assert kwargs["depth"] == valid_depth
 
 
 def _call_scip_dependencies_with_mock_service(params, mock_user, mock_service):
@@ -702,44 +650,57 @@ def _call_scip_dependencies_with_mock_service(params, mock_user, mock_service):
 
 
 class TestSCIPDependenciesDepthClamp:
-    """Tests for scip_dependencies depth clamping (Bug #1604).
+    """Tests for scip_dependencies depth validation (Bug #1604 depth-clamp
+    family; contract corrected by Bug #1614).
 
-    scip_dependencies's depth parameter must be clamped to [1, 10] at the
-    handler layer, mirroring the unified clamp used by scip_impact,
-    scip_callchain, and scip_dependents (Bug #1599 / Bug #1602).
+    Bug #1614: scip_dependencies's depth parameter must be REJECTED
+    (success: False, empty results, service never called) when out of the
+    documented [1, 10] range -- mirroring scip_callchain's existing
+    loud-reject contract for max_depth (Bug #1603) and the REST/
+    service-layer siblings. Silently clamping to the nearest bound (the
+    pre-#1614 behavior this test class replaces) hid the caller's mistake
+    behind a misleading success:true.
     """
 
-    def test_scip_dependencies_depth_far_above_max_is_clamped_to_10(self, mock_user):
-        """depth=100000 must be clamped down to the documented max of 10."""
+    @pytest.mark.parametrize("raw_depth", [100000, 11])
+    def test_scip_dependencies_depth_above_max_is_rejected(self, mock_user, raw_depth):
+        """depth above the documented max of 10 must be rejected loudly."""
         mock_service = Mock()
         mock_service.get_dependencies.return_value = []
 
-        _call_scip_dependencies_with_mock_service(
-            {"symbol": "UserService", "depth": 100000}, mock_user, mock_service
-        )
-
-        _, kwargs = mock_service.get_dependencies.call_args
-        assert kwargs["depth"] == 10
-
-    @pytest.mark.parametrize("raw_depth", [0, -5])
-    def test_scip_dependencies_depth_below_min_is_clamped_to_1(
-        self, mock_user, raw_depth
-    ):
-        """depth=0 or a negative depth must be clamped up to the min of 1."""
-        mock_service = Mock()
-        mock_service.get_dependencies.return_value = []
-
-        _call_scip_dependencies_with_mock_service(
+        response = _call_scip_dependencies_with_mock_service(
             {"symbol": "UserService", "depth": raw_depth}, mock_user, mock_service
         )
 
-        _, kwargs = mock_service.get_dependencies.call_args
-        assert kwargs["depth"] == 1
+        data = json.loads(response["content"][0]["text"])
+        assert data["success"] is False
+        assert "depth" in data["error"]
+        assert str(raw_depth) in data["error"]
+        assert data["results"] == []
+        mock_service.get_dependencies.assert_not_called()
+
+    @pytest.mark.parametrize("raw_depth", [0, -5])
+    def test_scip_dependencies_depth_below_min_is_rejected(self, mock_user, raw_depth):
+        """depth=0 or a negative depth must be rejected loudly rather than
+        clamped up to the min of 1."""
+        mock_service = Mock()
+        mock_service.get_dependencies.return_value = []
+
+        response = _call_scip_dependencies_with_mock_service(
+            {"symbol": "UserService", "depth": raw_depth}, mock_user, mock_service
+        )
+
+        data = json.loads(response["content"][0]["text"])
+        assert data["success"] is False
+        assert "depth" in data["error"]
+        assert str(raw_depth) in data["error"]
+        assert data["results"] == []
+        mock_service.get_dependencies.assert_not_called()
 
     def test_scip_dependencies_default_depth_unchanged(self, mock_user):
         """No depth param supplied must still default to 1 (scip_dependencies'
-        documented default), unaffected by the new clamp (1 is already
-        within [1, 10])."""
+        documented default), unaffected by the new rejection guard (1 is
+        already within [1, 10])."""
         mock_service = Mock()
         mock_service.get_dependencies.return_value = []
 
@@ -750,65 +711,25 @@ class TestSCIPDependenciesDepthClamp:
         _, kwargs = mock_service.get_dependencies.call_args
         assert kwargs["depth"] == 1
 
-
-def _make_depth_validating_get_dependencies(result_for_depth):
-    """Build a get_dependencies side_effect mimicking the real
-    DatabaseBackend/queries.py depth guard: raises ValueError for depth
-    outside [1, 10] (same message the real guard raises), otherwise
-    delegates to result_for_depth(depth) for the return value.
-
-    Used by TestSCIPDependenciesDepthClampRegression to avoid duplicating
-    the guard-simulation logic.
-    """
-
-    def _side_effect(**kwargs):
-        depth = kwargs["depth"]
-        if depth < 1 or depth > 10:
-            raise ValueError(f"Depth must be between 1 and 10, got {depth}")
-        return result_for_depth(depth)
-
-    return _side_effect
-
-
-class TestSCIPDependenciesDepthClampRegression:
-    """Regression test for scip_dependencies depth clamping (Bug #1604).
-
-    Before the fix, an out-of-range depth reached a deeper ValueError guard
-    (real DatabaseBackend/queries.py behavior: 'Depth must be between 1 and
-    10, got N') that scip_query_service.py's get_dependencies swallows into
-    a silently-wrong success:true/total_results:0 response. After the fix,
-    the clamp means the service never sees the raw out-of-range value.
-    """
-
-    def test_scip_dependencies_out_of_range_depth_no_warning_logged(
-        self, mock_user, caplog
+    @pytest.mark.parametrize("valid_depth", [1, 5, 10])
+    def test_scip_dependencies_depth_within_range_still_succeeds(
+        self, mock_user, valid_depth
     ):
-        """After the fix, depth=-5 must be clamped before reaching the
-        service, so the service never raises and nothing is logged at
-        WARNING/ERROR level."""
+        """Every depth within the documented [1, 10] range must still
+        succeed unaffected by the new rejection guard."""
         mock_service = Mock()
-        mock_service.get_dependencies.side_effect = (
-            _make_depth_validating_get_dependencies(
-                lambda depth: [{"symbol": "com.example.Database", "kind": "dependency"}]
-            )
-        )
+        mock_service.get_dependencies.return_value = [
+            {"symbol": "com.example.Database", "kind": "dependency"}
+        ]
 
-        with caplog.at_level("WARNING"):
-            response = _call_scip_dependencies_with_mock_service(
-                {"symbol": "UserService", "depth": -5}, mock_user, mock_service
-            )
+        response = _call_scip_dependencies_with_mock_service(
+            {"symbol": "UserService", "depth": valid_depth}, mock_user, mock_service
+        )
 
         data = json.loads(response["content"][0]["text"])
         assert data["success"] is True
-        assert data["total_results"] == 1
-
         _, kwargs = mock_service.get_dependencies.call_args
-        assert kwargs["depth"] == 1
-
-        warning_or_error_records = [
-            r for r in caplog.records if r.levelname in ("WARNING", "ERROR")
-        ]
-        assert warning_or_error_records == []
+        assert kwargs["depth"] == valid_depth
 
 
 def _call_scip_references_with_mock_service(params, mock_user, mock_service):

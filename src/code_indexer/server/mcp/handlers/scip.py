@@ -491,9 +491,25 @@ def scip_dependencies(params: Dict[str, Any], user: User) -> Dict[str, Any]:
         symbol = params.get("symbol")
         depth = _coerce_int(params.get("depth"), 1)
 
-        # Bug #1604: clamp depth to a safe range, mirroring the clamp used
-        # by scip_impact, scip_callchain, and scip_dependents.
-        depth = max(_MIN_SCIP_DEPTH, min(_MAX_SCIP_DEPTH, depth))
+        # Bug #1614: reject (not clamp) an out-of-range depth, mirroring
+        # scip_callchain's loud-reject contract for max_depth (Bug #1603)
+        # and the REST/service-layer siblings (GET /scip/dependencies
+        # depth=0/11 -> HTTP 422; POST /api/scip/multi/dependencies
+        # max_depth=0 -> structured error). The prior Bug #1604 fix
+        # silently clamped out-of-range depth to [1, 10] with no error/
+        # warning field, hiding the caller's mistake behind a misleading
+        # success:true.
+        if depth < _MIN_SCIP_DEPTH or depth > _MAX_SCIP_DEPTH:
+            return _mcp_response(
+                {
+                    "success": False,
+                    "error": (
+                        f"depth must be between {_MIN_SCIP_DEPTH} and "
+                        f"{_MAX_SCIP_DEPTH}, got {depth}"
+                    ),
+                    "results": [],
+                }
+            )
 
         exact = params.get("exact", False)
         project = params.get("project")
@@ -580,12 +596,25 @@ def scip_dependents(params: Dict[str, Any], user: User) -> Dict[str, Any]:
         symbol = params.get("symbol")
         depth = _coerce_int(params.get("depth"), 1)
 
-        # Bug #1602: clamp depth to a safe range, mirroring the clamp used
-        # by scip_impact and scip_callchain. Without this, an out-of-range
-        # depth reaches a deeper ValueError guard in queries.py/DatabaseBackend
-        # that gets swallowed into a silently-wrong success:true/
-        # total_results:0 response instead of clamping.
-        depth = max(_MIN_SCIP_DEPTH, min(_MAX_SCIP_DEPTH, depth))
+        # Bug #1614: reject (not clamp) an out-of-range depth, mirroring
+        # scip_callchain's loud-reject contract for max_depth (Bug #1603)
+        # and the REST/service-layer siblings (GET /scip/dependents
+        # depth=0/11 -> HTTP 422; POST /api/scip/multi/dependents
+        # max_depth=0 -> structured error). The prior Bug #1602 fix
+        # silently clamped out-of-range depth to [1, 10] with no error/
+        # warning field, hiding the caller's mistake behind a misleading
+        # success:true.
+        if depth < _MIN_SCIP_DEPTH or depth > _MAX_SCIP_DEPTH:
+            return _mcp_response(
+                {
+                    "success": False,
+                    "error": (
+                        f"depth must be between {_MIN_SCIP_DEPTH} and "
+                        f"{_MAX_SCIP_DEPTH}, got {depth}"
+                    ),
+                    "results": [],
+                }
+            )
 
         exact = params.get("exact", False)
         project = params.get("project")
