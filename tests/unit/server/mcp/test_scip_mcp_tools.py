@@ -1,6 +1,7 @@
 """Unit tests for SCIP MCP tool handlers."""
 
 import pytest
+from pathlib import Path
 from unittest.mock import Mock, patch
 import json
 from datetime import datetime, timezone
@@ -279,6 +280,10 @@ class TestSCIPCallChainTool:
             ],
             [],
         )
+        # Bug #1613: scip_callchain now derives scip_files_searched from a
+        # real find_scip_files() call -- stub it (a Mock(), unlike
+        # MagicMock(), has no usable __len__ by default).
+        mock_service.find_scip_files.return_value = [Path("repo/index.scip.db")]
 
         with patch(
             "code_indexer.server.mcp.handlers._get_scip_query_service",
@@ -504,6 +509,10 @@ class TestSCIPImpactDepthClamp:
 
         mock_service = Mock()
         mock_service.trace_callchain.return_value = ([], [])
+        # Bug #1613: scip_callchain now derives scip_files_searched from a
+        # real find_scip_files() call -- stub it (a Mock(), unlike
+        # MagicMock(), has no usable __len__ by default).
+        mock_service.find_scip_files.return_value = []
 
         with patch(
             "code_indexer.server.mcp.handlers._get_scip_query_service",

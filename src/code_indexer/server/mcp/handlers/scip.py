@@ -862,6 +862,17 @@ def scip_callchain(params: Dict[str, Any], user: User) -> Dict[str, Any]:
             from_symbol, to_symbol, len(unique_chains)
         )
 
+        # Bug #1613: this was hardcoded to 0, permanently misleading callers
+        # (a real query with 100 real chains still reported 0 files
+        # searched). find_scip_files() is the SAME lookup trace_callchain()
+        # already performs internally to select which .scip.db files to
+        # search, so this reports the real, honest count.
+        scip_files_searched = len(
+            service.find_scip_files(
+                repository_alias=repository_alias, username=user.username
+            )
+        )
+
         return _mcp_response(
             {
                 "success": True,
@@ -870,8 +881,7 @@ def scip_callchain(params: Dict[str, Any], user: User) -> Dict[str, Any]:
                 "total_chains_found": len(unique_chains),
                 "truncated": truncated,
                 "max_depth_reached": max_depth_reached,
-                # Note: scip_files_searched not available via service API
-                "scip_files_searched": 0,
+                "scip_files_searched": scip_files_searched,
                 "repository_filter": repository_alias if repository_alias else "all",
                 "chains": returned_chains,
                 "diagnostic": diagnostic,
