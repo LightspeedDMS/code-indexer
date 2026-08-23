@@ -13,6 +13,7 @@ from __future__ import annotations
 import logging
 from typing import Any, Dict, List, Optional, Union, cast
 
+import anyio.to_thread
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 
@@ -146,7 +147,7 @@ async def _execute_omni_search(
     search_engine = "ripgrep"
 
     for alias in aliases:
-        repo_path_str = _resolve_repo_path(alias)
+        repo_path_str = await anyio.to_thread.run_sync(_resolve_repo_path, alias)
         if repo_path_str is None:
             errors[alias] = f"Repository alias {alias!r} not found"
             continue
@@ -263,7 +264,9 @@ async def regex_search(
     # ------------------------------------------------------------------
     # 4. Single-repo path
     # ------------------------------------------------------------------
-    repo_path_str = _resolve_repo_path(body.repository_alias)
+    repo_path_str = await anyio.to_thread.run_sync(
+        _resolve_repo_path, body.repository_alias
+    )
     if repo_path_str is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,

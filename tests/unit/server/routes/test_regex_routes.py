@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import anyio.to_thread
 import pytest
 from fastapi.testclient import TestClient
 
@@ -771,3 +772,60 @@ class TestReadCappedSurfacing1601:
 
         assert resp.status_code == 200
         assert resp.json()["read_capped"] is True
+
+
+class TestAsyncOffloading1634:
+    """Bug #1634: Repository alias resolution must be offloaded via
+    anyio.to_thread.run_sync to prevent blocking the event loop."""
+
+    def test_single_repo_alias_resolution_is_offloaded_to_thread(self, app, client):
+        """Single-repo search resolves alias via anyio.to_thread.run_sync."""
+        app.dependency_overrides[get_current_user] = lambda: NORMAL_USER
+
+        with (
+            patch(
+                "anyio.to_thread.run_sync", wraps=anyio.to_thread.run_sync
+            ) as mock_run_sync,
+            _patch_repo_found("/some/repo/path") as mock_resolve,
+            _patch_search_success([]),
+            _patch_metrics(),
+            _patch_config_service(),
+        ):
+            resp = client.post("/api/regex/search", json=VALID_SINGLE_BODY)
+
+        assert resp.status_code == 200
+        offloaded_calls = [
+            c
+            for c in mock_run_sync.call_args_list
+            if c.args and c.args[0] == mock_resolve
+        ]
+        assert len(offloaded_calls) == 1
+        assert offloaded_calls[0].args == (
+            mock_resolve,
+            VALID_SINGLE_BODY["repository_alias"],
+        )
+
+    def test_omni_repo_alias_resolutions_are_offloaded_to_thread(self, app, client):
+        """Omni search resolves all aliases via anyio.to_thread.run_sync."""
+        app.dependency_overrides[get_current_user] = lambda: NORMAL_USER
+
+        with (
+            patch(
+                "anyio.to_thread.run_sync", wraps=anyio.to_thread.run_sync
+            ) as mock_run_sync,
+            _patch_repo_found("/some/repo/path") as mock_resolve,
+            _patch_search_success([]),
+            _patch_metrics(),
+            _patch_config_service(),
+        ):
+            resp = client.post("/api/regex/search", json=VALID_OMNI_BODY)
+
+        assert resp.status_code == 200
+        offloaded_calls = [
+            c
+            for c in mock_run_sync.call_args_list
+            if c.args and c.args[0] == mock_resolve
+        ]
+        assert len(offloaded_calls) == len(VALID_OMNI_BODY["repository_alias"])
+        for i, alias in enumerate(VALID_OMNI_BODY["repository_alias"]):
+            assert offloaded_calls[i].args == (mock_resolve, alias)
