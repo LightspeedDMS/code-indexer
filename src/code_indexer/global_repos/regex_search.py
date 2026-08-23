@@ -33,7 +33,7 @@ import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Iterable, List, Optional, Union, cast
+from typing import Iterable, List, Optional, Tuple, Union, cast
 
 import anyio.to_thread
 
@@ -1542,6 +1542,44 @@ class RegexSearchService:
 
         return matches, total
 
+    @staticmethod
+    def _read_and_parse_glob_output(
+        output_path: str,
+    ) -> Tuple[List[str], Optional[str]]:
+        """Read and parse glob_files.py's JSON output file.
+
+        Bug #1608 follow-up (F1): extracted so the caller can offload this
+        synchronous file I/O + UTF-8 decode + json.loads via
+        anyio.to_thread.run_sync, mirroring _read_and_parse_grep and
+        _read_and_parse_ripgrep's identical offload rationale -- it must
+        never run directly on the event loop.
+
+        Returns:
+            (files, decode_error) -- decode_error is the JSONDecodeError's
+            message when the (non-empty) output failed to parse as a JSON
+            list, else None. Bug #1608 follow-up (F3): returning the raw
+            decode-failure signal (rather than logging it here) lets the
+            caller decide whether a failure is a genuine parse error or
+            capacity-truncation (result.output_capped), which this
+            file-only helper has no visibility into.
+        """
+        with open(output_path, "r") as f:
+            output = f.read().strip()
+
+        if not output:
+            return [], None
+
+        try:
+            files = json.loads(output)
+        except json.JSONDecodeError as e:
+            return [], str(e)
+
+        if not isinstance(files, list):
+            logger.warning(f"glob_files.py returned non-list: {type(files)}")
+            return [], None
+
+        return files, None
+
     async def _find_files_by_patterns(
         self,
         search_path: Path,
@@ -1603,7 +1641,15 @@ class RegexSearchService:
             script_path = (
                 Path(__file__).parent.parent.parent.parent / "scripts" / "glob_files.py"
             )
-            if not script_path.exists():
+            # Bug #1608 follow-up (F2): offload via anyio.to_thread.run_sync,
+            # mirroring the search_path.exists() offload above -- this
+            # project's Production Scale invariant (CLAUDE.md) forbids a
+            # synchronous filesystem call directly inside async def
+            # regardless of how fast it looks locally (the destination here
+            # happens to be the install directory, not the NFS golden-repo
+            # mount, but the invariant is categorical, not risk-scored).
+            script_exists = await anyio.to_thread.run_sync(script_path.exists)
+            if not script_exists:
                 raise RuntimeError(f"glob_files.py script not found at {script_path}")
 
             # Execute glob script with subprocess executor for timeout + async protection
@@ -1634,23 +1680,33 @@ class RegexSearchService:
                     # Return empty list on error (graceful degradation)
                     return []
 
-                # Read and parse JSON output
-                with open(output_path, "r") as f:
-                    output = f.read().strip()
-                    if not output:
-                        return []
+                # Bug #1608 follow-up (F1): read+parse is a synchronous,
+                # potentially expensive operation (file I/O, UTF-8 decode,
+                # json.loads) -- run it in a worker thread via
+                # anyio.to_thread.run_sync so it never blocks the event
+                # loop, mirroring _read_and_parse_ripgrep/
+                # _read_and_parse_grep's identical offload rationale.
+                files, decode_error = await anyio.to_thread.run_sync(
+                    self._read_and_parse_glob_output, output_path
+                )
 
-                    try:
-                        files = json.loads(output)
-                        if not isinstance(files, list):
-                            logger.warning(
-                                f"glob_files.py returned non-list: {type(files)}"
-                            )
-                            return []
-                        return files
-                    except json.JSONDecodeError as e:
-                        logger.warning(f"Failed to parse glob output as JSON: {e}")
-                        return []
+                # Bug #1608 follow-up (F3): the glob script emits ONE
+                # atomic JSON document (a single print(json.dumps(files))
+                # in scripts/glob_files.py). When max_output_bytes
+                # truncates it mid-write, json.loads necessarily fails.
+                # Consume result.output_capped here -- exactly like
+                # _search_ripgrep/_search_grep's self._last_search_read_capped
+                # signal -- so a truncation is diagnosed as a capacity
+                # limit (feeding the existing AC-I3 fleet-scale warning
+                # already logged by search()), not silently reported as
+                # "no matches" behind a misleading parse-error log.
+                if result.output_capped:
+                    self._last_search_read_capped = True
+                elif decode_error:
+                    logger.warning(
+                        f"Failed to parse glob output as JSON: {decode_error}"
+                    )
+                return files
 
             finally:
                 # Issue #1601 round 5 (Priority 2): offload this
