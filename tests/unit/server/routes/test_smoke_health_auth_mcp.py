@@ -111,7 +111,6 @@ def test_post_oauth_routes(client, path, body):
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.slow
 @pytest.mark.parametrize(
     "path",
     [
