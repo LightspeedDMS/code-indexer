@@ -10,9 +10,11 @@ in /api/query remains unchanged.
 
 from __future__ import annotations
 
+import functools
 import logging
 from typing import Any, Dict, List, Optional, Union, cast
 
+import anyio.to_thread
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 
@@ -87,7 +89,16 @@ async def _execute_single_search(
         api_metrics_service.increment_regex_search(username=user.username)
 
     repo_path = Path(repo_path_str)
-    service = RegexSearchService(repo_path)
+    # Issue #1609: RegexSearchService.__init__ performs synchronous
+    # filesystem calls (Path.resolve(), shutil.which()) that must never
+    # run directly on the event-loop thread inside an `async def` (this
+    # project's own Production Scale invariant). Offload the constructor
+    # call itself via anyio.to_thread.run_sync, mirroring the granular
+    # per-call offload pattern already established elsewhere in this
+    # search path (see regex_search.py's search() method).
+    service = await anyio.to_thread.run_sync(
+        functools.partial(RegexSearchService, repo_path)
+    )
     result = await service.search(
         pattern=body.pattern,
         path=body.path,
