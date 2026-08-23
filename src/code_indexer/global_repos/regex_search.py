@@ -1947,6 +1947,7 @@ class RegexSearchService:
         exclude_patterns: Optional[List[str]],
         case_sensitive: bool,
         max_results: int,
+        timeout_seconds: Optional[int] = None,
     ) -> tuple:
         """Python re.DOTALL search for multiline patterns.
 
@@ -1971,8 +1972,39 @@ class RegexSearchService:
         or produces a corrupted match -- ``compiled.finditer`` only ever
         sees the (possibly truncated) content it is given, so any match
         returned is a genuine match within that substring.
+
+        Bug #1611: this method previously had NO timeout enforcement of
+        any kind -- a slow multiline regex (catastrophic backtracking) or
+        a large repo scanned via this fallback could run unbounded,
+        regardless of the caller's requested ``timeout_seconds``, since
+        this synchronous ``os.walk`` loop is the whole unit of work
+        offloaded to a worker thread and nothing inside it ever checked a
+        clock. Unlike the ripgrep/trigram-prefilter phases elsewhere in
+        this file (which bound genuinely uninterruptible blocking calls --
+        an NFS-wedged ``Path.resolve()``, a stuck sqlite query -- via
+        ``_run_with_thread_watchdog``'s ``Thread.join(timeout=)``), this
+        method already runs entirely off the event loop on its own worker
+        thread (see ``_search_grep``'s ``anyio.to_thread.run_sync`` call),
+        and its own loop is fully interruptible Python code between files
+        -- a plain ``time.monotonic()``-based deadline check, mirroring
+        the ABSOLUTE-deadline idiom ``search()``/``_prefilter_candidate_files``
+        already use, is sufficient and does not need a second worker
+        thread. ``timeout_seconds`` is optional (default ``None``,
+        preserving the exact prior unbounded behavior for direct callers
+        that omit it -- e.g. existing unit tests); when supplied, the
+        elapsed time since this call started is checked once per file
+        (the coarsest granularity a single stuck/slow file's own
+        ``compiled.finditer`` call could still exceed on its own, but
+        cheap enough to add no measurable per-file overhead), raising
+        ``TimeoutError`` -- the same sentinel every other timeout path in
+        this file raises -- before the walk can proceed to another file
+        once the deadline has passed.
         """
         from fnmatch import fnmatch
+
+        deadline: Optional[float] = (
+            time.monotonic() + timeout_seconds if timeout_seconds is not None else None
+        )
 
         flags = re.DOTALL
         if not case_sensitive:
@@ -1997,6 +2029,18 @@ class RegexSearchService:
                 continue
 
             for fname in files:
+                # Bug #1611: per-file elapsed-time check against the
+                # ABSOLUTE deadline computed above -- the coarsest
+                # granularity that still guarantees the walk cannot
+                # continue past a genuinely large/slow repo's worth of
+                # files once the caller's timeout_seconds has elapsed.
+                if deadline is not None and time.monotonic() >= deadline:
+                    raise TimeoutError(
+                        f"Python multiline regex search for pattern={pattern!r} "
+                        f"path={search_path} exceeded its {timeout_seconds}s "
+                        f"timeout"
+                    )
+
                 file_path = os.path.join(root, fname)
                 rel_path = self._to_repo_relative(file_path)
                 if rel_path is None:
@@ -2064,11 +2108,22 @@ class RegexSearchService:
         pcre2: bool = False,
     ) -> tuple:
         """Fallback search using grep with timeout protection."""
+        # Bug #1590/#1601 precedent (ripgrep engine): a caller that omits
+        # timeout_seconds still gets a bounded default rather than an
+        # infinite one. Hoisted above the multiline branch (Bug #1611) so
+        # the Python multiline fallback below gets the SAME bounded
+        # default -- forwarding a bare None here would leave that fallback
+        # exactly as unbounded as before the fix.
+        timeout = timeout_seconds or DEFAULT_SEARCH_TIMEOUT_SECONDS
+
         # For multiline searches, use Python re.DOTALL fallback. Issue
         # #1601 remediation (Priority 2): _search_python_multiline is a
         # fully synchronous method (its own os.walk + per-file read +
         # regex scan) -- offload it to a worker thread so it never blocks
-        # the event loop.
+        # the event loop. Bug #1611: timeout is now forwarded so this
+        # fallback is bounded the same way every other engine path in this
+        # file already is -- previously nothing here enforced any time
+        # budget at all, regardless of what the caller requested.
         if multiline:
             return await anyio.to_thread.run_sync(
                 self._search_python_multiline,
@@ -2078,9 +2133,9 @@ class RegexSearchService:
                 exclude_patterns,
                 case_sensitive,
                 max_results,
+                timeout,
             )
 
-        timeout = timeout_seconds or DEFAULT_SEARCH_TIMEOUT_SECONDS
         has_path_patterns = include_patterns and any(
             "/" in pat for pat in include_patterns
         )

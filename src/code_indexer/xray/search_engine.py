@@ -1013,10 +1013,10 @@ class XRaySearchEngine:
                 ``N * timeout_seconds``. NOTE: the pure-Python multiline
                 fallback (``RegexSearchService._search_python_multiline``,
                 used when ``multiline=True`` on the grep engine or ripgrep
-                is unavailable) still has no ``timeout_seconds`` parameter
-                as of this fix — deliberately out of scope here, tracked
-                as follow-up issue #1611 rather than left silently
-                unbounded.
+                is unavailable) was out of scope for this fix and was
+                previously unbounded; issue #1611 has since fixed it to
+                accept and enforce ``timeout_seconds`` (forwarded via
+                ``_search_grep``), so this fallback is bounded too.
 
         Returns:
             Ordered, deduplicated list of matching Path objects.
