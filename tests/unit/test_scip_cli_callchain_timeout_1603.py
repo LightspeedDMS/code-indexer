@@ -169,7 +169,7 @@ class TestRemoteCallchainTimeoutHandling:
     def test_exits_zero_when_no_chains_and_no_errors(self):
         from code_indexer.cli_scip import _display_callchain_results
 
-        result = {"results": {}, "errors": {}}
+        result: dict = {"results": {}, "errors": {}}
 
         with pytest.raises(SystemExit) as exc_info:
             _display_callchain_results(result, "main", "run")

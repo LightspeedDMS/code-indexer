@@ -56,6 +56,7 @@ def _make_capture_ripgrep():
         multiline=False,
         pcre2=False,
         candidate_files=None,
+        deadline=None,
     ):
         captured["multiline"] = multiline
         captured["pcre2"] = pcre2

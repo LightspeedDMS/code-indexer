@@ -23,6 +23,7 @@ backends (ripgrep vs grep/python-multiline).
 
 import json
 import logging
+import math
 import os
 import re
 import shutil
@@ -32,7 +33,7 @@ import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Iterable, List, Optional, Union
+from typing import Iterable, List, Optional, Union, cast
 
 import anyio.to_thread
 
@@ -351,6 +352,35 @@ _PCRE2_CHECK_TIMEOUT_SEC = 5
 # the ripgrep arg list would be unwieldy and the filter is not selective enough
 # to beat a plain scan.
 _MAX_PREFILTER_CANDIDATES = 8000
+
+# Bug #1590 review round 2 (F1): floor for the ripgrep-phase timeout computed
+# from the remaining shared deadline -- never hand SubprocessExecutor a
+# zero-or-negative timeout (which would be ambiguous/reject outright); one
+# second is a negligible floor relative to any real search budget.
+_MIN_RIPGREP_TIMEOUT_SECONDS = 1
+
+# Bug #1590 review round 6: floor for the post-hop thread-watchdog budget
+# handed to _run_with_thread_watchdog by the two phases that run AFTER an
+# earlier phase has already consumed the shared deadline -- the
+# ripgrep-output parse phase (_search_ripgrep's remaining_parse) and the
+# trigram pre-filter's candidate-path resolve phase
+# (_prefilter_candidate_files's remaining). Same rationale as
+# _MIN_RIPGREP_TIMEOUT_SECONDS above, applied one level deeper: the
+# ripgrep-subprocess-phase timeout is itself computed as
+# max(_MIN_RIPGREP_TIMEOUT_SECONDS, math.ceil(remaining)) -- rounding UP --
+# so ripgrep can legitimately finish up to ~1s past the true deadline even
+# though it stayed within ITS OWN allowance. When that happens, the next
+# phase's "remaining = deadline - time.monotonic()" is already <= 0, and
+# _run_with_thread_watchdog's Thread.join(timeout=0) can never "win" even
+# against a worker that would complete in microseconds -- a deadline that
+# has technically already elapsed must never be handed through verbatim,
+# or a fully successful, already-completed operation is discarded as a
+# spurious TimeoutError. One second matches _MIN_RIPGREP_TIMEOUT_SECONDS's
+# order of magnitude: negligible against any real search budget, but
+# enough for a worker thread to actually be scheduled and finish typical
+# parse/resolve work (a JSON parse of ripgrep output, or resolving up to
+# _MAX_PREFILTER_CANDIDATES=8000 paths).
+_MIN_PARSE_TIMEOUT_SECONDS = 1.0
 
 # Lazy trigram-index rebuild: when a regex search finds no compatible trigram
 # index (missing, or stale/old-format per the schema-version guard), kick off a
@@ -721,26 +751,117 @@ class RegexSearchService:
         self._last_read_capped_bytes = None
 
         start_time = time.time()
+        start_monotonic = time.monotonic()
+
+        # Bug #1590 review round 5 finding 1: hoisted from inside the
+        # ripgrep-engine branch below. The round-4 comment there justified
+        # leaving the search_path existence check (immediately below)
+        # unbounded by claiming ``deadline`` "only becomes an absolute
+        # deadline further down, inside the ripgrep-engine branch, so
+        # bounding this earlier, engine-agnostic check would require
+        # restructuring engine dispatch" -- review round 5 proved that
+        # false: ``deadline`` depends only on ``start_monotonic`` (two
+        # lines above) and ``timeout_seconds`` (already a parameter),
+        # neither of which has anything to do with which engine gets
+        # dispatched.
+        deadline: Optional[float] = (
+            start_monotonic + timeout_seconds if timeout_seconds is not None else None
+        )
 
         search_path = self.repo_path / path if path else self.repo_path
-        if not await anyio.to_thread.run_sync(search_path.exists):
+        # Bug #1590 review round 5 finding 1 fix: bound via the same
+        # thread-watchdog idiom (_run_with_thread_watchdog) used throughout
+        # this file, instead of the plain anyio.to_thread.run_sync offload
+        # alone -- on the `hard` NFSv3 golden-repo mount this project's own
+        # Production Scale invariant calls out, a bare os.stat() can block
+        # in uninterruptible kernel retry and never return; the plain
+        # offload (still used below when there is no deadline at all)
+        # bounds only the EVENT LOOP, not this request. No sqlite
+        # connection is ever opened by Path.exists, so the watchdog's
+        # optional ``holder`` parameter is simply omitted.
+        from .trigram_index_manager import _run_with_thread_watchdog
+
+        if deadline is not None:
+            remaining_exists = max(0.0, deadline - time.monotonic())
+            path_exists, exists_timed_out = await anyio.to_thread.run_sync(
+                _run_with_thread_watchdog,
+                search_path.exists,
+                remaining_exists,
+                "regex_search_path_exists",
+            )
+            if exists_timed_out:
+                raise TimeoutError(
+                    f"Path existence check for {search_path} exceeded its "
+                    f"{remaining_exists:.3f}s remaining search deadline"
+                )
+        else:
+            path_exists = await anyio.to_thread.run_sync(search_path.exists)
+        if not path_exists:
             raise ValueError(f"Path does not exist: {path}")
 
         if self._search_engine == "ripgrep":
+            # Bug #1590 (AC1) + review round 2 findings F1/F3 + review
+            # round 3 finding B1 + review round 4 finding R1 + review
+            # round 5 findings 1/2 (comment rewritten to be genuinely,
+            # fully true -- round 4's version here disclosed
+            # search_path.exists() as a known exception and never
+            # disclosed the parse phase's per-match resolve as one at all;
+            # both are now fixed, so no exception remains): a single
+            # ABSOLUTE MONOTONIC deadline (never a duration recomputed
+            # piecemeal, and never wall-clock time.time() -- an NTP step
+            # could otherwise corrupt the arithmetic into a spurious
+            # instant-timeout or an inflated budget), computed once above
+            # BEFORE this branch is even entered, is threaded through
+            # EVERY blocking step in the chain: the search_path existence
+            # check above, the trigram pre-filter's two internal sqlite
+            # calls (exists() then query()), the resolve phase that turns
+            # each returned candidate into an absolute path (up to
+            # _MAX_PREFILTER_CANDIDATES=8000 Path.resolve() calls -- see
+            # _prefilter_candidate_files), the ripgrep subprocess phase
+            # (bounded by SubprocessExecutor's own timeout machinery), and
+            # the post-ripgrep JSON parse phase below
+            # (_read_and_parse_ripgrep, which resolves each match's
+            # reported path via _to_repo_relative -- see _search_ripgrep's
+            # ``deadline`` parameter). HONEST contract: this call is
+            # bounded by timeout_seconds PLUS up to ~3 total seconds of
+            # overrun, from THREE independent 1-second floors --
+            # _MIN_RIPGREP_TIMEOUT_SECONDS on the ripgrep subprocess phase
+            # (plus its own extra ceil() second of rounding), and
+            # _MIN_PARSE_TIMEOUT_SECONDS (review round 6) applied
+            # separately to BOTH the trigram-prefilter-resolve phase
+            # (_prefilter_candidate_files) and the post-ripgrep parse
+            # phase (_read_and_parse_ripgrep, above) -- each floor can
+            # independently contribute up to ~1s if an earlier phase on
+            # the same shared deadline has already run it past zero. This
+            # is a small, deliberate design tradeoff (~10% of the 30s
+            # production MCP/REST search timeout, ~2.5% of xray Phase 1's
+            # 120s default), not an unbounded gap.
+
             # Index-assisted pre-filter: when a trigram index is present, narrow
             # the scan to files that could match instead of walking the whole
             # (NFS-backed) working tree. Returns None to fall back to a full
-            # scan; an empty list means no file can match.
+            # scan; an empty list means no file can match. Raises TimeoutError
+            # (propagates naturally through anyio.to_thread.run_sync) when the
+            # trigram index itself blows the remaining budget -- see
+            # _prefilter_candidate_files's docstring.
             candidate_files = await anyio.to_thread.run_sync(
                 self._prefilter_candidate_files,
                 pattern,
                 search_path,
                 path,
                 case_sensitive,
+                deadline,
             )
             if candidate_files is not None and not candidate_files:
                 matches, total = [], 0
             else:
+                if deadline is not None:
+                    remaining = max(0.0, deadline - time.monotonic())
+                    ripgrep_timeout: Optional[int] = max(
+                        _MIN_RIPGREP_TIMEOUT_SECONDS, math.ceil(remaining)
+                    )
+                else:
+                    ripgrep_timeout = timeout_seconds
                 matches, total = await self._search_ripgrep(
                     pattern,
                     search_path,
@@ -749,10 +870,11 @@ class RegexSearchService:
                     case_sensitive,
                     context_lines,
                     max_results,
-                    timeout_seconds,
+                    ripgrep_timeout,
                     multiline=multiline,
                     pcre2=pcre2,
                     candidate_files=candidate_files,
+                    deadline=deadline,
                 )
         else:
             matches, total = await self._search_grep(
@@ -1022,6 +1144,7 @@ class RegexSearchService:
         search_path: Path,
         path: Optional[str],
         case_sensitive: bool,
+        deadline: Optional[float] = None,
     ) -> Optional[List[Path]]:
         """Return candidate file paths from the trigram index, or None.
 
@@ -1038,15 +1161,88 @@ class RegexSearchService:
         filesystem/DB call. Callers reached from an ``async def`` context
         MUST invoke this via ``anyio.to_thread.run_sync`` (see
         ``search()``) rather than calling it directly.
+
+        Bug #1590 (AC1) + review round 2 finding F1: ``deadline`` is an
+        ABSOLUTE ``time.monotonic()`` timestamp (NOT a duration). The
+        remaining budget is recomputed via ``max(0.0, deadline -
+        time.monotonic())`` immediately before EACH of the two internal
+        sqlite calls (``index.exists()`` then ``index.query()``), so they
+        share ONE real end-to-end budget instead of each independently
+        receiving a fresh full copy of the caller's original
+        ``timeout_seconds`` -- passing the same static duration to both
+        (the pre-fix bug) let a slow ``exists()`` alone consume the whole
+        budget and still hand ``query()`` a brand-new full allotment,
+        permitting up to ~2x the requested deadline with no exception at
+        all. A genuine deadline overrun on either call raises
+        ``TrigramIndexTimeoutError``, which this method re-raises as a
+        plain ``TimeoutError`` -- the SAME sentinel the ripgrep subprocess
+        phase already raises on its own timeout -- so ``search()``'s
+        caller treats a stuck trigram pre-filter identically to a stuck
+        ripgrep run: the whole search fails fast with a bounded deadline
+        instead of falling back to a full scan whose own ripgrep-phase
+        timeout has already been eaten by the stuck prefilter. Every OTHER
+        failure (index genuinely absent, corrupt, or any other exception)
+        still degrades to None (full scan, itself bounded by the
+        ripgrep-phase timeout ``search()`` computes from the SAME
+        deadline) exactly as before -- only a genuine timeout escalates.
+
+        Bug #1590 review round 3 finding B1 + review round 4 finding R1:
+        the SAME ``deadline`` also bounds the phase that resolves each
+        ``index.query()`` candidate to an absolute path (up to
+        ``_MAX_PREFILTER_CANDIDATES`` = 8000 ``Path.resolve()`` calls, each
+        several real filesystem syscalls), including ``search_path.resolve()``
+        itself. Round 3's fix only checked the deadline BETWEEN loop
+        iterations, which left a SINGLE wedged resolve call (e.g. the
+        `hard` NFSv3 mount blocking in uninterruptible kernel retry, this
+        project's own documented failure mode) completely unbounded --
+        live reproduction proved this is not merely a bounded overrun: in
+        the single-candidate case the loop has no "next iteration" to
+        notice the overrun on at all, so it silently returns the
+        candidate, ripgrep runs, and the search completes SUCCESSFULLY
+        with no ``TimeoutError`` ever raised. Round 4 replaces the
+        inter-iteration check with the SAME thread-based watchdog
+        ``exists()``/``query()`` already use (``_run_with_thread_watchdog``
+        + ``_TrigramConnectionHolder``, whose ``interrupt()`` is a
+        documented no-op here since this phase never publishes a sqlite
+        connection): the entire resolve phase runs as one unit on a daemon
+        thread joined with the remaining budget, so a single stuck syscall
+        is bounded by a real ``Thread.join(timeout=)``, not by hoping
+        another iteration comes along to check a clock. A deadline overrun
+        raises the same ``TrigramIndexTimeoutError`` -> ``TimeoutError``
+        sentinel as ``exists()``/``query()`` above. Round 5 LOW note: this
+        phase is called with no connection holder at all (the watchdog's
+        ``holder`` parameter is optional precisely because this phase
+        never publishes a sqlite connection, so there is nothing to
+        cancel).
         """
+        # TrigramIndexTimeoutError is imported unconditionally here, unlike
+        # the other trigram_index_manager imports below (which live inside
+        # the try: per round 5 LOW note 2), because it is referenced by
+        # name in the `except TrigramIndexTimeoutError` clause at the
+        # bottom of this method -- if that import itself failed inside the
+        # try, Python would need to resolve this same name to match the
+        # exception and find it unbound, raising a confusing
+        # UnboundLocalError instead of gracefully falling through to the
+        # `except Exception` full-scan fallback this method's docstring
+        # promises.
+        from .trigram_index_manager import TrigramIndexTimeoutError
+
+        def _remaining_budget() -> Optional[float]:
+            if deadline is None:
+                return None
+            return max(0.0, deadline - time.monotonic())
+
         try:
             from .regex_trigram import extract_required_trigrams
-            from .trigram_index_manager import TrigramIndexManager
+            from .trigram_index_manager import (
+                TrigramIndexManager,
+                _run_with_thread_watchdog,
+            )
 
             index = TrigramIndexManager(
                 self.repo_path / ".code-indexer" / "trigram_index"
             )
-            if not index.exists():
+            if not index.exists(timeout_seconds=_remaining_budget()):
                 # No compatible index (missing or stale/old-format). Self-heal in
                 # the background so later searches are pre-filtered; this one
                 # full-scans.
@@ -1057,23 +1253,79 @@ class RegexSearchService:
             )
             if not required:
                 return None
-            rel_candidates = index.query(required)
+            rel_candidates = index.query(required, timeout_seconds=_remaining_budget())
             if rel_candidates is None:
                 return None
             if len(rel_candidates) > _MAX_PREFILTER_CANDIDATES:
                 # Too many candidates: the arg list would be huge and the filter
                 # is not selective -- a full scan is simpler and comparable.
                 return None
-            scope = search_path.resolve()
-            abs_paths: List[Path] = []
-            for rel in rel_candidates:
-                ap = (self.repo_path / rel).resolve()
-                try:
-                    ap.relative_to(scope)  # keep only files under the scan scope
-                except ValueError:
-                    continue
-                abs_paths.append(ap)
-            return abs_paths
+
+            def _resolve_candidates() -> List[Path]:
+                # Runs on the watchdog worker thread below (or directly,
+                # unbounded, when there is no deadline). Both
+                # search_path.resolve() (round 4 finding R1: previously had
+                # NO deadline protection of any kind) and the per-candidate
+                # resolve loop (up to _MAX_PREFILTER_CANDIDATES=8000 real
+                # filesystem syscalls) live here as one unit so a single
+                # wedged call anywhere in this phase is caught by the
+                # watchdog's Thread.join(timeout=), not by an inter-
+                # iteration clock check.
+                scope = search_path.resolve()
+                resolved: List[Path] = []
+                for rel in rel_candidates:
+                    ap = (self.repo_path / rel).resolve()
+                    try:
+                        ap.relative_to(scope)  # keep only files under scan scope
+                    except ValueError:
+                        continue
+                    resolved.append(ap)
+                return resolved
+
+            remaining = _remaining_budget()
+            if remaining is None:
+                # No caller deadline -- behavior unchanged from before R1.
+                return _resolve_candidates()
+
+            # Round 5 LOW note: no holder passed -- this phase never opens
+            # a sqlite connection, so there is nothing for .interrupt() to
+            # ever cancel; constructing a throwaway _TrigramConnectionHolder()
+            # here just to satisfy a required parameter was a naming/
+            # cohesion nit now resolved by making the parameter optional.
+            #
+            # Bug #1590 review round 6: floor `remaining` at
+            # _MIN_PARSE_TIMEOUT_SECONDS (same pattern as the ripgrep-
+            # output parse phase's identical fix -- see that constant's
+            # comment) rather than handing the raw, possibly-zero
+            # `_remaining_budget()` value straight to the watchdog. A
+            # deadline that has technically already elapsed (e.g. an
+            # earlier call on this SAME shared deadline overshooting its
+            # own rounded-up allowance) must not turn into
+            # Thread.join(timeout=0), which can never "win" even against
+            # a resolve loop that completes in milliseconds.
+            bounded_remaining = max(_MIN_PARSE_TIMEOUT_SECONDS, remaining)
+            result, timed_out = _run_with_thread_watchdog(
+                _resolve_candidates, bounded_remaining, "trigram_prefilter_resolve"
+            )
+            if timed_out:
+                raise TrigramIndexTimeoutError(
+                    "trigram pre-filter candidate-path resolution for "
+                    f"{self.repo_path} exceeded its shared deadline while "
+                    f"resolving up to {len(rel_candidates)} candidate(s)"
+                )
+            return cast(List[Path], result)
+        except TrigramIndexTimeoutError as exc:
+            # Bug #1590 AC1/AC2 (review round 2 finding F4: corrected
+            # wording -- the prior comment here incorrectly called the
+            # full-scan fallback "unbounded"; it is NOT -- search()
+            # already computes the ripgrep-phase timeout from the SAME
+            # shared deadline this exception represents having exhausted).
+            # A genuine deadline overrun on the trigram index itself is
+            # escalated here instead of silently falling back to that
+            # full scan, because the deadline is ALREADY exhausted by the
+            # time this fires -- a fresh full scan would have nothing
+            # left of the budget to run in anyway.
+            raise TimeoutError(str(exc)) from exc
         except Exception as exc:  # never let the optimization break search
             logger.debug("trigram pre-filter unavailable (%s); full scan", exc)
             return None
@@ -1091,12 +1343,21 @@ class RegexSearchService:
         multiline: bool = False,
         pcre2: bool = False,
         candidate_files: Optional[List[Path]] = None,
+        deadline: Optional[float] = None,
     ) -> tuple:
         """Search using ripgrep with JSON output and timeout protection.
 
         When ``candidate_files`` is provided, ripgrep searches exactly those
         files (the trigram pre-filter's superset) instead of walking
         ``search_path``; include/exclude globs still apply.
+
+        ``deadline`` (Bug #1590 review round 5 finding 2; optional, an
+        ABSOLUTE ``time.monotonic()`` timestamp -- the SAME one
+        ``search()`` threads through the trigram pre-filter) additionally
+        bounds the post-subprocess JSON parse phase
+        (``_read_and_parse_ripgrep``) against the shared search deadline.
+        Direct callers (e.g. existing unit tests) that omit it get the
+        prior, unbounded-parse-phase behavior unchanged.
         """
         cmd = ["rg", "--json", "-e", pattern]
 
@@ -1173,18 +1434,67 @@ class RegexSearchService:
                 # UTF-8 decode, JSON/regex parsing) -- run it in a worker
                 # thread via anyio.to_thread.run_sync so it never blocks
                 # the asyncio event loop for the whole server.
+                #
+                # Bug #1590 review round 5 finding 2 fix: when a shared
+                # ``deadline`` was supplied, additionally bound this
+                # offloaded hop with the SAME thread-watchdog idiom used
+                # elsewhere in this file. This phase calls
+                # _to_repo_relative once PER MATCH, which resolves the
+                # reported path again (candidate.resolve()) -- a second,
+                # previously undisclosed instance of the identical
+                # Path.resolve()-on-NFS class of gap round 4's R1 fix
+                # addressed for the trigram pre-filter's resolve loop; a
+                # live reproduction proved a single wedged resolve here
+                # absorbs a full multi-second wedge past an
+                # already-exhausted budget and raises nothing. When there
+                # is no deadline, this stays the plain
+                # anyio.to_thread.run_sync offload exactly as before.
+                #
+                # Bug #1590 review round 6: floored at
+                # _MIN_PARSE_TIMEOUT_SECONDS (not 0.0) -- see that
+                # constant's comment. Without the floor, a deadline that
+                # has technically already elapsed (because the prior
+                # ripgrep-subprocess phase's ceil()-rounded-up allowance
+                # let real wall-clock time run a little past it, even
+                # though ripgrep itself finished within ITS OWN
+                # allowance) hands Thread.join(timeout=0) to the
+                # watchdog, which can never "win" even against a parse
+                # that completes in milliseconds -- spuriously discarding
+                # a fully successful, already-completed result.
+                if deadline is not None:
+                    from .trigram_index_manager import _run_with_thread_watchdog
+
+                    remaining_parse = max(
+                        _MIN_PARSE_TIMEOUT_SECONDS, deadline - time.monotonic()
+                    )
+                    parse_result, parse_timed_out = await anyio.to_thread.run_sync(
+                        _run_with_thread_watchdog,
+                        lambda: self._read_and_parse_ripgrep(
+                            temp_path, max_results, context_lines
+                        ),
+                        remaining_parse,
+                        "regex_search_read_and_parse_ripgrep",
+                    )
+                    if parse_timed_out:
+                        raise TimeoutError(
+                            f"Parsing ripgrep output for pattern={pattern!r} "
+                            f"path={search_path} exceeded its "
+                            f"{remaining_parse:.3f}s remaining search deadline"
+                        )
+                else:
+                    parse_result = await anyio.to_thread.run_sync(
+                        self._read_and_parse_ripgrep,
+                        temp_path,
+                        max_results,
+                        context_lines,
+                    )
                 (
                     matches,
                     total,
                     bytes_read,
                     reader_read_capped,
                     content_capped,
-                ) = await anyio.to_thread.run_sync(
-                    self._read_and_parse_ripgrep,
-                    temp_path,
-                    max_results,
-                    context_lines,
-                )
+                ) = parse_result
                 # read_capped is the OR of THREE independent signals: the
                 # executor killed the still-running subprocess because its
                 # output crossed the ceiling (result.output_capped -- a
