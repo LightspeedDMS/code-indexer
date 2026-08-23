@@ -116,7 +116,15 @@ def test_post_oauth_routes(client, path, body):
     "path",
     [
         "/mcp",
-        "/mcp-public",
+        # GET /mcp-public deliberately excluded (see EXCLUDED_ROUTES in
+        # _smoke_registry.py, Bug #1628): it is a genuine SSE stream whose
+        # response body never completes by design, so the naive blocking
+        # `_smoke()` helper hangs forever on it. A streaming-aware dedicated
+        # test was evaluated but is not viable here: Starlette's TestClient
+        # (starlette/testclient.py) runs the whole ASGI call synchronously
+        # to completion before returning any response to httpx, regardless
+        # of whether `.get()` or `.stream()` is used — so any call against
+        # this infinite-generator endpoint hangs identically either way.
     ],
 )
 def test_get_mcp_routes(client, path):
