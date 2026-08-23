@@ -2,6 +2,8 @@
 
 import os
 import stat
+import subprocess
+import sys
 
 import pytest
 from pathlib import Path
@@ -10,6 +12,8 @@ try:
     from pysqlite3 import dbapi2 as sqlite3
 except ImportError:
     import sqlite3
+
+_SRC_ROOT = str(Path(__file__).parent.parent.parent / "src")
 
 
 @pytest.fixture
@@ -651,3 +655,101 @@ class TestImmutableVersionedSnapshotReadOnly1616:
             "AND name='idx_symbol_references_from'"
         ).fetchall()
         assert len(rows) == 1, "Expected Story #609 migration to have created the index"
+
+
+class TestDatabaseBackendNonVersionedPathSkipsServerImport1616Followup:
+    """Bug #1616 code-review follow-up (Item 1, Medium): a ``.scip.db`` path
+    that provably cannot be an immutable versioned snapshot (no ``.versioned``
+    substring anywhere in it) must short-circuit BEFORE importing
+    ``code_indexer.server.services.query_path_cache`` -- that import
+    transitively pulls in ``code_indexer.server.storage.shared`` (clone
+    backends, NFS monitor/validator, ONTAP client, snapshot manager) and
+    ``starlette``, none of which a CLI-shaped process (never having touched
+    the server package) has any reason to load.
+
+    Subprocess-based (mirrors tests/unit/storage/test_lazy_load_1468.py's
+    proven approach): in-process checks are unreliable because pytest loads
+    the server package via earlier server-focused test files in the same
+    session. A fresh subprocess has no such contamination.
+    """
+
+    @staticmethod
+    def _build_plain_scip_db(tmp_path: Path) -> Path:
+        """Build a real, non-versioned (plain) .scip.db via SCIPDatabaseBuilder."""
+        from code_indexer.scip.database.builder import SCIPDatabaseBuilder
+        from code_indexer.scip.protobuf import scip_pb2
+
+        index = scip_pb2.Index()
+        sym_info = index.external_symbols.add()
+        sym_info.symbol = "python test `sample`/MyClass#"
+        sym_info.kind = scip_pb2.SymbolInformation.Class  # type: ignore[attr-defined]
+        doc = index.documents.add()
+        doc.relative_path = "src/sample.py"
+        doc.language = "python"
+        occ = doc.occurrences.add()
+        occ.symbol = sym_info.symbol
+        occ.range.extend([0, 0, 0, 7])
+        occ.symbol_roles = 1
+
+        scip_file = tmp_path / "index.scip.source"
+        scip_file.write_bytes(index.SerializeToString())
+        db_path = tmp_path / "index.scip.db"
+        SCIPDatabaseBuilder().build(scip_file, db_path)
+        return db_path
+
+    def test_non_versioned_path_does_not_import_server_storage_shared(
+        self, tmp_path: Path
+    ) -> None:
+        db_path = self._build_plain_scip_db(tmp_path)
+
+        script = f"""
+import sys, json
+sys.path.insert(0, {_SRC_ROOT!r})
+from pathlib import Path
+from code_indexer.scip.query.backends import DatabaseBackend
+backend = DatabaseBackend(Path({str(db_path)!r}))
+print(json.dumps({{
+    "starlette": "starlette" in sys.modules,
+    "server_storage_shared": "code_indexer.server.storage.shared" in sys.modules,
+    "query_path_cache": "code_indexer.server.services.query_path_cache" in sys.modules,
+    "read_only": backend.read_only,
+}}))
+"""
+        result = subprocess.run(
+            [sys.executable, "-c", script],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        assert result.returncode == 0, (
+            f"Subprocess failed:\nstdout: {result.stdout}\nstderr: {result.stderr}"
+        )
+        import json as _json
+
+        payload = _json.loads(result.stdout.strip().splitlines()[-1])
+        assert payload == {
+            "starlette": False,
+            "server_storage_shared": False,
+            "query_path_cache": False,
+            "read_only": False,
+        }, (
+            f"LAZY-IMPORT VIOLATION (Bug #1616 follow-up Item 1): constructing "
+            f"DatabaseBackend on a non-versioned path leaked server-package "
+            f"imports: {payload}"
+        )
+
+    def test_versioned_path_still_gets_correct_readonly_detection(
+        self, tmp_path: Path
+    ) -> None:
+        """The short-circuit must NOT change behavior for a genuinely
+        versioned-snapshot path -- it must still import the real predicate
+        and correctly detect read-only status."""
+        db_path = TestImmutableVersionedSnapshotReadOnly1616._build_snapshot_scip_db(
+            tmp_path
+        )
+
+        from code_indexer.scip.query.backends import DatabaseBackend
+
+        snapshot_root = db_path.parents[2]
+        backend = DatabaseBackend(db_path, project_root=str(snapshot_root))
+        assert backend.read_only is True

@@ -166,24 +166,43 @@ class DatabaseBackend(SCIPBackend):
         # SQLITE_OPEN_CREATE is set), but any later write attempt --
         # namely the lazy index-creation migration below -- then raises
         # "attempt to write a readonly database". Detect the condition
-        # structurally (no filesystem access) via the SAME canonical
-        # predicate the rest of the codebase uses for this exact class of
-        # path, and open read-only + skip the migration write entirely
-        # when true. Function-local import keeps this module's (CLI
-        # startup) import footprint unchanged.
-        from code_indexer.server.services.query_path_cache import (
-            is_immutable_versioned_snapshot,
-        )
-
+        # via the SAME canonical predicate the rest of the codebase uses
+        # for this exact class of path -- the predicate itself is purely
+        # structural (no filesystem access) -- and open read-only + skip
+        # the migration write entirely when true.
+        #
+        # Code-review follow-up (Item 1): the canonical predicate's
+        # canonical clause requires ".versioned" to appear as a specific
+        # path component (parts[-3]), so a path that doesn't even contain
+        # the ".versioned" substring is provably not a snapshot without
+        # needing the predicate at all. Short-circuit on that cheap string
+        # check BEFORE importing is_immutable_versioned_snapshot: that
+        # import transitively pulls in code_indexer.server.storage.shared
+        # (clone backends, NFS monitor/validator, ONTAP client, snapshot
+        # manager) and starlette, none of which a CLI-shaped process that
+        # never touches the server package has any reason to load.
         self.db_path = db_path
-        self.read_only = is_immutable_versioned_snapshot(str(db_path))
+        if ".versioned" in str(db_path):
+            from code_indexer.server.services.query_path_cache import (
+                is_immutable_versioned_snapshot,
+            )
+
+            self.read_only = is_immutable_versioned_snapshot(str(db_path))
+        else:
+            self.read_only = False
         if self.read_only:
             # Path.as_uri() percent-encodes URI-special characters (?, #, %,
             # spaces, ...) present in the path itself, so a literal f-string
             # interpolation here would risk SQLite misparsing a path that
-            # happens to contain one of those characters.
+            # happens to contain one of those characters. Path(db_path) also
+            # hardens against a plain str db_path (the sole production call
+            # site always passes a Path, but the type isn't runtime-enforced,
+            # and the else branch below already tolerates str via
+            # sqlite3.connect). Path.resolve() DOES touch the filesystem
+            # (readlink/stat) -- no new exposure versus the sqlite3.connect
+            # call on the very next line, which also blocks on I/O.
             self.conn = sqlite3.connect(
-                db_path.resolve().as_uri() + "?mode=ro", uri=True
+                Path(db_path).resolve().as_uri() + "?mode=ro", uri=True
             )
         else:
             self.conn = sqlite3.connect(db_path)
