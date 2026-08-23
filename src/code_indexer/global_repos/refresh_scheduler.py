@@ -56,7 +56,10 @@ from code_indexer.server.services.cidx_meta_backup import (
 )
 from code_indexer.server.services.config_service import get_config_service
 from code_indexer.server.services.db_outage_throttle import DbOutageThrottle
-from code_indexer.server.services.metadata_reader import read_current_commit
+from code_indexer.server.services.metadata_reader import (
+    read_current_commit,
+    read_status,
+)
 from code_indexer.server.storage.sqlite_backends import GoldenRepoMetadataSqliteBackend
 from code_indexer.server.storage.shared.nfs_visibility import (
     _configured_visibility_timeout,
@@ -3125,27 +3128,24 @@ class RefreshScheduler:
         # --reconcile compares content IDs against existing vectors, skips unchanged
         # files. Only used when needed (interrupted state or extension drift), otherwise
         # normal incremental.
+        # Bug #1623-A: provider-aware read (voyage-ai first, legacy bare
+        # metadata.json fallback) via metadata_reader.read_status() -- this
+        # call site is a second, verbatim copy of the exact gap Bug #1623
+        # fixed in _check_stale_index_metadata(): reading only the bare
+        # legacy metadata.json left an in_progress/failed status recorded
+        # ONLY in a provider-suffixed file (e.g. metadata-voyage-ai.json,
+        # the real production filename) invisible here. read_status()
+        # never raises; it returns None on any read/parse error, missing
+        # file, or missing/empty key, which safely disables --reconcile
+        # (fail-open, matching the original bare try/except's behavior).
         needs_reconcile = False
-        metadata_path = Path(source_path) / ".code-indexer" / "metadata.json"
-        if metadata_path.exists():
-            try:
-                import json as _json
-
-                with open(metadata_path) as _f:
-                    _meta = _json.load(_f)
-                meta_status = _meta.get("status", "")
-                if meta_status in ("in_progress", "failed"):
-                    needs_reconcile = True
-                    logger.info(
-                        f"Previous indexing interrupted (status={meta_status}), "
-                        f"using --reconcile for crash recovery on {alias_name}"
-                    )
-            except Exception as _meta_err:
-                logger.warning(
-                    "Could not read metadata.json for %s, proceeding without --reconcile: %s",
-                    alias_name,
-                    _meta_err,
-                )
+        meta_status = read_status(source_path)
+        if meta_status in ("in_progress", "failed"):
+            needs_reconcile = True
+            logger.info(
+                f"Previous indexing interrupted (status={meta_status}), "
+                f"using --reconcile for crash recovery on {alias_name}"
+            )
 
         # Story #1001: OR with force_reconcile from extension-drift detection.
         needs_reconcile = needs_reconcile or force_reconcile
@@ -4068,18 +4068,15 @@ class RefreshScheduler:
         supposedly built from.
 
         This cross-checks metadata against two independent signals:
-        - status "in_progress"/"failed" (read from the legacy bare
-          metadata.json only -- see the Bug #1591 provider-file note
-          below, this signal shares that same limitation and is not
-          fixed by it): the last indexing attempt for whatever commit it
-          recorded never completed.
+        - status "in_progress"/"failed": the last indexing attempt for
+          whatever commit it recorded never completed.
         - current_commit != actual working-tree HEAD: the git tree has
           advanced (via a pull) past the last commit that was ever
           recorded as indexed, regardless of that run's reported status.
 
-        Bug #1591 (provider-aware read): current_commit is read via
-        metadata_reader.read_current_commit(), which resolves the REAL
-        filename SmartIndexer writes in production --
+        Bug #1591 (provider-aware current_commit read): current_commit is
+        read via metadata_reader.read_current_commit(), which resolves
+        the REAL filename SmartIndexer writes in production --
         `.code-indexer/metadata-{provider}.json` (e.g.
         metadata-voyage-ai.json) -- falling back to the legacy bare
         metadata.json only when no provider file exists. A live census of
@@ -4095,6 +4092,24 @@ class RefreshScheduler:
         metadata-cohere.json) is not covered by this fix -- that is a
         pre-existing gap in read_current_commit() itself, out of scope
         here.
+
+        Bug #1623 (provider-aware status read): the status signal above
+        was, until this fix, the ONLY remaining part of this check still
+        blind to provider-suffixed metadata files -- it read the legacy
+        bare metadata.json exclusively even after #1591 made
+        current_commit provider-aware. It is now read via
+        metadata_reader.read_status(), the status-field sibling of
+        read_current_commit() with the IDENTICAL provider-first
+        (metadata-voyage-ai.json), legacy-fallback (metadata.json)
+        precedence. Live evidence: colorama/metadata-voyage-ai.json and
+        markupsafe/metadata-voyage-ai.json both recorded
+        status=in_progress while their sibling metadata-cohere.json files
+        said completed -- exactly the interrupted-index condition this
+        check exists to catch, sitting in a file the status check never
+        opened before this fix. Same scope limitation as
+        read_current_commit(): a repo whose ONLY metadata file uses a
+        different provider suffix (e.g. metadata-cohere.json) is not
+        covered.
 
         Bug #1591 (prefix tolerance): the current_commit comparison is
         prefix-tolerant, not a plain string equality, and requires at
@@ -4130,30 +4145,22 @@ class RefreshScheduler:
             True if a reconcile pass is needed to catch up a stale index,
             False if metadata is absent, unreadable, or fully consistent.
         """
-        legacy_metadata_path = Path(source_path) / ".code-indexer" / "metadata.json"
-        if legacy_metadata_path.exists():
-            try:
-                with open(legacy_metadata_path) as f:
-                    meta = json.load(f)
-            except Exception as e:
-                logger.warning(
-                    "Could not read metadata.json for %s while checking for a "
-                    "stale index, proceeding without forced reconcile: %s",
-                    alias_name,
-                    e,
-                )
-                return False
-
-            status = meta.get("status", "")
-            if status in ("in_progress", "failed"):
-                logger.warning(
-                    "Stale/interrupted index detected for %s (metadata "
-                    "status=%s) despite no new git changes -- forcing "
-                    "reconcile to catch up (Bug #1508)",
-                    alias_name,
-                    status,
-                )
-                return True
+        # Bug #1623: provider-aware read (voyage-ai first, legacy bare
+        # metadata.json fallback) -- see docstring above. read_status()
+        # never raises; it returns None on any read/parse error, missing
+        # file, or missing/empty key, which safely falls through to the
+        # current_commit check below (fail-open, matching the
+        # current_commit signal's own error handling).
+        status = read_status(source_path)
+        if status in ("in_progress", "failed"):
+            logger.warning(
+                "Stale/interrupted index detected for %s (metadata "
+                "status=%s) despite no new git changes -- forcing "
+                "reconcile to catch up (Bug #1508)",
+                alias_name,
+                status,
+            )
+            return True
 
         # Bug #1591: provider-aware read (voyage-ai first, legacy bare
         # metadata.json fallback) -- see docstring above.
