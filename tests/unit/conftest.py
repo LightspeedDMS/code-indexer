@@ -57,3 +57,29 @@ def fake_curl_env(tmp_path, isolated_config):
         p for p in (str(fake_curl_dir), env.get("PATH", "")) if p
     )
     yield env_with_fake, config_path
+
+
+
+@pytest.fixture
+def background_job_manager_factory():
+    """Yield a factory(*args, **kwargs) -> BackgroundJobManager.
+
+    Every manager constructed through the factory is tracked internally and
+    shutdown() is invoked on each during fixture teardown, preventing background
+    worker threads from leaking across tests.
+    """
+    from code_indexer.server.repositories.background_jobs import (
+        BackgroundJobManager,
+    )
+
+    created = []
+
+    def _factory(*args, **kwargs):
+        mgr = BackgroundJobManager(*args, **kwargs)
+        created.append(mgr)
+        return mgr
+
+    yield _factory
+
+    for mgr in created:
+        mgr.shutdown()

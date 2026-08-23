@@ -37,9 +37,9 @@ from code_indexer.server.utils.config_manager import BackgroundJobsConfig
 # ---------------------------------------------------------------------------
 
 
-def _make_manager(tmp_path) -> BackgroundJobManager:
+def _make_manager(tmp_path, factory) -> BackgroundJobManager:
     db_path = str(tmp_path / "jobs.db")
-    return BackgroundJobManager(
+    return factory(
         background_jobs_config=BackgroundJobsConfig(max_concurrent_background_jobs=5),
         db_path=db_path,
     )
@@ -89,13 +89,13 @@ def _run_job_with_n_ticks(
 class TestProgressDebounceCoalescing:
     """Rapid intermediate progress ticks within DEBOUNCE_INTERVAL must not each persist."""
 
-    def test_rapid_ticks_do_not_each_call_persist(self, tmp_path):
+    def test_rapid_ticks_do_not_each_call_persist(self, tmp_path, background_job_manager_factory):
         """
         10 rapid ticks fired within a single debounce window should result in
         far fewer _persist_jobs calls than 10. The in-memory state is updated
         each time, but DB writes are batched.
         """
-        mgr = _make_manager(tmp_path)
+        mgr = _make_manager(tmp_path, background_job_manager_factory)
 
         persist_call_count = [0]
         original_persist = mgr._persist_jobs
@@ -120,12 +120,12 @@ class TestProgressDebounceCoalescing:
             f"for 10 ticks with no delay — debounce is not working."
         )
 
-    def test_in_memory_state_updated_on_every_tick(self, tmp_path):
+    def test_in_memory_state_updated_on_every_tick(self, tmp_path, background_job_manager_factory):
         """
         Even when debounce suppresses a DB write, the in-memory job.progress
         value must be updated on every tick so get_job() reflects current progress.
         """
-        mgr = _make_manager(tmp_path)
+        mgr = _make_manager(tmp_path, background_job_manager_factory)
         seen_progress = []
 
         def counting_job(progress_callback=None):
@@ -175,12 +175,12 @@ class TestProgressDebounceCoalescing:
 class TestProgressTerminalFlush:
     """Terminal state (COMPLETED/FAILED/CANCELLED) must flush to DB immediately."""
 
-    def test_terminal_completed_persists_immediately(self, tmp_path):
+    def test_terminal_completed_persists_immediately(self, tmp_path, background_job_manager_factory):
         """
         On job completion, _persist_jobs must be called for the terminal state
         even if the last intermediate tick was within the debounce window.
         """
-        mgr = _make_manager(tmp_path)
+        mgr = _make_manager(tmp_path, background_job_manager_factory)
 
         terminal_persists = []
         original_persist = mgr._persist_jobs
@@ -208,9 +208,9 @@ class TestProgressTerminalFlush:
             "the terminal flush."
         )
 
-    def test_terminal_failed_persists_immediately(self, tmp_path):
+    def test_terminal_failed_persists_immediately(self, tmp_path, background_job_manager_factory):
         """Failed jobs must also flush immediately."""
-        mgr = _make_manager(tmp_path)
+        mgr = _make_manager(tmp_path, background_job_manager_factory)
 
         terminal_persists = []
         original_persist = mgr._persist_jobs
@@ -239,13 +239,13 @@ class TestProgressTerminalFlush:
 class TestProgressCancellationLatency:
     """Cancellation detection must fire on every progress tick regardless of debounce."""
 
-    def test_cancellation_check_called_on_every_tick(self, tmp_path):
+    def test_cancellation_check_called_on_every_tick(self, tmp_path, background_job_manager_factory):
         """
         _check_db_cancellation must be called on every progress_callback invocation,
         not just when debounce allows a DB persist. This ensures cancel latency
         is bounded by tick frequency, not by DEBOUNCE_INTERVAL.
         """
-        mgr = _make_manager(tmp_path)
+        mgr = _make_manager(tmp_path, background_job_manager_factory)
 
         cancellation_checks = [0]
         original_check = mgr._check_db_cancellation
@@ -275,7 +275,7 @@ class TestProgressCancellationLatency:
 class TestProgressDebounceWindowExpiry:
     """Ticks spaced beyond DEBOUNCE_INTERVAL each trigger a persist."""
 
-    def test_slow_ticks_each_persist(self, tmp_path):
+    def test_slow_ticks_each_persist(self, tmp_path, background_job_manager_factory):
         """
         When ticks are separated by > DEBOUNCE_INTERVAL (0.5s), each tick
         should eventually result in a DB persist.
@@ -283,7 +283,7 @@ class TestProgressDebounceWindowExpiry:
         We use 3 ticks with 0.6s delay between each — each tick lands in
         a fresh debounce window and must persist.
         """
-        mgr = _make_manager(tmp_path)
+        mgr = _make_manager(tmp_path, background_job_manager_factory)
 
         intermediate_persist_count = [0]
         original_persist = mgr._persist_jobs
