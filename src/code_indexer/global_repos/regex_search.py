@@ -1571,8 +1571,15 @@ class RegexSearchService:
             ValueError: If search_path doesn't exist.
             TimeoutError: If file discovery exceeds timeout_seconds.
         """
-        # Validate search path exists
-        if not search_path.exists():
+        # Validate search path exists. Issue #1608: offloaded via
+        # anyio.to_thread.run_sync -- this project's Production Scale
+        # invariant (CLAUDE.md) forbids a synchronous filesystem call
+        # directly inside async def, since on the `hard` NFSv3 golden-repo
+        # mount a bare os.stat() can block the whole event loop
+        # indefinitely. Mirrors the plain (no-deadline) offload of the
+        # identical check in search() above.
+        path_exists = await anyio.to_thread.run_sync(search_path.exists)
+        if not path_exists:
             raise ValueError(f"Search path does not exist: {search_path}")
 
         # Create temp files for config and output
@@ -1604,11 +1611,17 @@ class RegexSearchService:
 
             executor = SubprocessExecutor(max_workers=self._subprocess_max_workers)
             try:
+                # Issue #1608 (mirrors #1601 Fix direction 4a elsewhere in
+                # this module): max_output_bytes makes the executor
+                # terminate the glob script itself if its stdout crosses
+                # the byte ceiling WHILE STILL RUNNING, bounding both the
+                # temp output file and the subsequent f.read() below.
                 result = await executor.execute_with_limits(
                     command=cmd,
                     working_dir=str(self.repo_path),
                     timeout_seconds=timeout_seconds,
                     output_file_path=output_path,
+                    max_output_bytes=_MAX_READ_BYTES,
                 )
 
                 if result.timed_out:
