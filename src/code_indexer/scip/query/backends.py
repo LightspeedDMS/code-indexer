@@ -236,10 +236,33 @@ class DatabaseBackend(SCIPBackend):
             update_scip_db_version,
         )
 
-        # Determine config path (Story #609)
-        # Convert project_root to Path for local use only
+        # Determine config path (Story #609).
+        #
+        # Bug #1630: self.project_root is the SUB-PROJECT's own directory
+        # for a sub-project database (required for _read_context_lines()
+        # to resolve document-relative source paths correctly), not the
+        # repo root. The scip_db_version marker, however, is a single
+        # repo-wide value and must always live at the ONE real
+        # <repo_root>/.code-indexer/config.json -- deriving it from
+        # project_root would create/read a bogus ".code-indexer" directory
+        # inside the sub-project's own location instead. Independently
+        # locate the real repo root from the actual db location via
+        # _find_scip_repo_root (matches the literal ".code-indexer/scip"
+        # segment pair in the db's own ancestry -- see its docstring for
+        # why a generic "has a .code-indexer child" walk is unsafe here:
+        # it can match an unrelated .code-indexer project at an
+        # intermediate ancestor level); only fall back to the
+        # project_root-based derivation when the db path never had that
+        # structure at all (e.g. a synthetic db in a test fixture, where
+        # project_root already IS the correct location).
+        from .primitives import _find_scip_repo_root
+
         project_root_path = Path(self.project_root) if self.project_root else Path.cwd()
-        config_path = project_root_path / ".code-indexer" / "config.json"
+        repo_root_candidate = _find_scip_repo_root(self.db_path.parent)
+        if repo_root_candidate is not None:
+            config_path = repo_root_candidate / ".code-indexer" / "config.json"
+        else:
+            config_path = project_root_path / ".code-indexer" / "config.json"
 
         # Fast path: Skip migration if version >= 2
         current_version = get_scip_db_version(config_path)
