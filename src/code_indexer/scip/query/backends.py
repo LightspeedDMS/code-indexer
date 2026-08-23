@@ -159,13 +159,43 @@ class DatabaseBackend(SCIPBackend):
             project_root: Project root path for QueryResult objects
             scip_file: Optional path to .scip protobuf file for hybrid mode (ALL symbol references)
         """
+        # Bug #1616: a .scip.db living under an immutable golden-repo
+        # versioned snapshot (.versioned/{ns}/v_<ts>/...) is genuinely
+        # read-only on disk. Opening it read-write "succeeds" silently
+        # (SQLite auto-downgrades a failed O_RDWR open to read-only when
+        # SQLITE_OPEN_CREATE is set), but any later write attempt --
+        # namely the lazy index-creation migration below -- then raises
+        # "attempt to write a readonly database". Detect the condition
+        # structurally (no filesystem access) via the SAME canonical
+        # predicate the rest of the codebase uses for this exact class of
+        # path, and open read-only + skip the migration write entirely
+        # when true. Function-local import keeps this module's (CLI
+        # startup) import footprint unchanged.
+        from code_indexer.server.services.query_path_cache import (
+            is_immutable_versioned_snapshot,
+        )
+
         self.db_path = db_path
-        self.conn = sqlite3.connect(db_path)
+        self.read_only = is_immutable_versioned_snapshot(str(db_path))
+        if self.read_only:
+            # Path.as_uri() percent-encodes URI-special characters (?, #, %,
+            # spaces, ...) present in the path itself, so a literal f-string
+            # interpolation here would risk SQLite misparsing a path that
+            # happens to contain one of those characters.
+            self.conn = sqlite3.connect(
+                db_path.resolve().as_uri() + "?mode=ro", uri=True
+            )
+        else:
+            self.conn = sqlite3.connect(db_path)
         self.project_root = project_root
         self.scip_file = scip_file
 
-        # Run migration to ensure indexes exist (Story #609)
-        self._ensure_migration_complete()
+        # Run migration to ensure indexes exist (Story #609). Skipped for
+        # read-only snapshots (Bug #1616): the connection cannot write, and
+        # an immutable snapshot's indexes (or lack thereof) were fixed at
+        # generation time -- there is nothing this call could durably fix.
+        if not self.read_only:
+            self._ensure_migration_complete()
 
     def _ensure_migration_complete(self) -> None:
         """
@@ -177,6 +207,9 @@ class DatabaseBackend(SCIPBackend):
         Performance:
         - Fast path (version >= 2): <1ms (version check only)
         - Migration path (version < 2): ~100-500ms (create 5 indexes)
+
+        Never called when ``self.read_only`` is True (Bug #1616) -- the
+        connection has no write capability in that case.
         """
         from ..database.migration import (
             ensure_indexes_created,
