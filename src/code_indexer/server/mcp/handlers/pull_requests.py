@@ -18,7 +18,9 @@ from typing import Any, Dict
 
 from code_indexer.server.auth.user_manager import User
 from code_indexer.server.logging_utils import format_error_log
-from code_indexer.server.middleware.correlation import get_correlation_id
+from code_indexer.server.telemetry.correlation_bridge import (
+    get_current_correlation_id as get_correlation_id,
+)
 
 from ._utils import _mcp_response, _parse_json_string_array
 
