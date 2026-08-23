@@ -163,7 +163,7 @@ fn main() {
                     error: Some(err_msg),
                     debug_messages: vec![],
                 };
-                println!("{}", serde_json::to_string(&out).unwrap());
+                print_json_output(&out);
             }
             // Human-readable error already printed inside build_dynlib_evaluators
             std::process::exit(1);
@@ -193,7 +193,7 @@ fn main() {
                     error: None,
                     debug_messages: result.debug_messages,
                 };
-                println!("{}", serde_json::to_string(&out).unwrap());
+                print_json_output(&out);
             } else {
                 let alloc_count = result
                     .findings
@@ -447,6 +447,10 @@ fn parse_args(args: &[String]) -> ParsedArgs {
             i += 1;
             continue;
         }
+        // NOTE: --files-from (Bug #1612) is the live path used by the Python
+        // integration (RustNativeBackend) to avoid ARG_MAX overflow at fleet
+        // scale. --files is retained only for backward compatibility and
+        // manual/ad-hoc CLI invocation.
         if args[i] == "--files" {
             i += 1;
             // Consume all subsequent args until we see a KNOWN flag.

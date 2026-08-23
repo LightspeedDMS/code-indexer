@@ -6,7 +6,7 @@ Rust-native scanner backend.
 Pipeline:
 1. Validate Rust evaluator code via validate_rust_evaluator()
 2. Write validated Rust code to a temp file
-3. Invoke xray-cli subprocess with --dynlib, --json, --files flags
+3. Invoke xray-cli subprocess with --dynlib, --json, --files-from flags
 4. Parse JSON output and group findings by file path
 5. Return List[(matches, errors, meta)] — one tuple per file spec
 
