@@ -20,12 +20,23 @@ confirmed live via `cidx index --index-commits --clear` failing with
 exactly that error against a freshly-built, natively-CHUNKS_DB temporal
 collection.
 
-The fix: clear_collection() must strip the `chunks_db` discriminator (and
-any migration-authoritative `vector_count` cross-check field) from the
-metadata it restores after the rmtree, so the collection reverts to
+The fix: clear_collection() must strip the `chunks_db` discriminator from
+the metadata it restores after the rmtree, so the ON-DISK layout reverts to
 SHARDED_JSON-resolving (i.e. "no store built yet") -- exactly the state a
 brand-new collection is in before its first `write_chunks_db_discriminator`
-call, which is what re-indexing legitimately produces next.
+call. Other metadata fields (`name`, `vector_size`, `vector_count`, etc.)
+are NOT stripped and survive the clear unchanged -- a stale `vector_count`
+there is self-correcting elsewhere (e.g. temporal's pre-flight
+consolidation) and out of scope for this fix.
+
+Bug #1644 Finding 1: stripping the on-disk discriminator alone is not
+enough for SEMANTIC collections, which (unlike temporal) have no pre-flight
+step that re-commits it after a clear. clear_collection() also records this
+session's CHUNKS_DB build intent in `self._chunks_db_mode` when the
+pre-clear layout was CHUNKS_DB, so the SAME store instance's next write
+still builds `chunks.db` instead of silently downgrading to legacy
+`vector_*.json` files -- see
+`test_clear_preserves_chunks_db_write_intent_for_next_index` below.
 """
 
 import json
@@ -137,3 +148,55 @@ def test_clear_on_sharded_json_collection_is_unaffected(store):
     assert result is True
     assert meta_path.exists()
     assert resolve_chunk_layout(collection_path) == ChunkLayout.SHARDED_JSON
+
+
+def test_clear_preserves_chunks_db_write_intent_for_next_index(store):
+    """Bug #1644 Finding 1: stripping the on-disk discriminator must not
+    leave the SAME store instance thinking the next index run should write
+    the legacy SHARDED_JSON layout.
+
+    Semantic (non-temporal) collections have no pre-flight step -- unlike
+    temporal's ``consolidate_legacy_temporal_shards()`` -- that re-commits
+    the discriminator after a clear. In a real `cidx index --clear` process,
+    `ensure_provider_aware_collection()` skips `create_collection()` entirely
+    once `clear_collection()` has restored a valid `collection_meta.json`
+    (`collection_exists()` returns True), so the on-disk discriminator this
+    fix strips was the ONLY remaining signal for the subsequent write's
+    layout decision. Without recording in-session intent here, the next
+    write would silently downgrade to legacy `vector_*.json` files -- the
+    exact storage explosion Epic #1454 exists to eliminate.
+    """
+    records = [_record("v0"), _record("v1")]
+    collection_path = _build_chunks_db_collection(store, "coll", records)
+    # This store's own default is NOT chunks_db (fixture uses no explicit
+    # opt-in), so _chunks_db_mode has no pre-existing entry for "coll" --
+    # the collection was consolidated purely via the on-disk discriminator,
+    # exactly like a fresh `cidx index --clear` process that never called
+    # create_collection() with chunks_db intent for this name.
+    assert not store._chunks_db_mode.get("coll")
+
+    result = store.clear_collection(collection_name="coll")
+
+    assert result is True
+    # On-disk discriminator is correctly gone (chunks.db was deleted).
+    assert resolve_chunk_layout(collection_path) == ChunkLayout.SHARDED_JSON
+    # In-session intent correctly survives, so the next write on this same
+    # store instance still builds CHUNKS_DB instead of downgrading.
+    assert store._is_chunks_db_collection("coll", collection_path) is True
+
+
+def test_delete_collection_clears_chunks_db_mode_intent(store):
+    """A deleted-and-recreated collection must not inherit a stale
+    in-session CHUNKS_DB intent from before the delete (Bug #1644 Finding
+    1 follow-up) -- otherwise a long-lived daemon store could force the
+    legacy SHARDED_JSON collection back into CHUNKS_DB mode purely because
+    an old collection of the same name once used it."""
+    records = [_record("v0")]
+    collection_path = _build_chunks_db_collection(store, "coll", records)
+    store._chunks_db_mode["coll"] = True
+
+    result = store.delete_collection(collection_name="coll")
+
+    assert result is True
+    assert "coll" not in store._chunks_db_mode
+    assert collection_path.exists() is False

@@ -230,3 +230,28 @@ def write_chunks_db_discriminator(collection_dir: Union[str, Path]) -> None:
         "version": CHUNK_LAYOUT_DISCRIMINATOR_VERSION,
     }
     _atomic_write_json_durable(meta_path, meta)
+
+
+def clear_chunks_db_discriminator(metadata_bytes: bytes) -> bytes:
+    """Strip the ``chunks_db`` layout discriminator from raw
+    ``collection_meta.json`` bytes.
+
+    Used by ``FilesystemVectorStore.clear_collection()`` (Bug #1644) to keep
+    restored metadata from claiming CHUNKS_DB layout for a collection whose
+    ``chunks.db`` file was just deleted by that same clear -- callers must
+    not restate the discriminator schema themselves; this module is its
+    sole owner (see the module docstring).
+
+    Byte-identical no-op when the discriminator key is absent, or when
+    ``metadata_bytes`` is not valid JSON / not a JSON object -- restoring
+    such content verbatim is the pre-existing behavior for that case, and
+    this helper must never turn a readable-but-odd file into an error.
+    """
+    try:
+        meta = json.loads(metadata_bytes)
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return metadata_bytes
+    if not isinstance(meta, dict) or _DISCRIMINATOR_KEY not in meta:
+        return metadata_bytes
+    del meta[_DISCRIMINATOR_KEY]
+    return json.dumps(meta).encode("utf-8")

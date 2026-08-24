@@ -130,38 +130,6 @@ def hnsw_cache_key_for_collection_path(
     return key
 
 
-def _strip_stale_chunks_db_discriminator(metadata_bytes: bytes) -> bytes:
-    """Strip the ``chunks_db`` layout discriminator from preserved
-    ``collection_meta.json`` bytes before they are restored after a
-    ``clear_collection()`` rmtree.
-
-    ``clear_collection()`` deletes the entire collection directory
-    (including ``chunks.db``) but restores the pre-clear
-    ``collection_meta.json`` verbatim to keep fast-reindex metadata
-    (quantization_range, etc.). For a CHUNKS_DB-layout collection this used
-    to also restore the ``chunks_db`` discriminator -- leaving
-    ``resolve_chunk_layout()`` reporting CHUNKS_DB for a directory whose
-    ``chunks.db`` no longer exists. A layout-aware caller that trusts the
-    discriminator (e.g. ``consolidate_legacy_temporal_shards()``) then finds
-    a missing content-integrity manifest for what looks like an unfinished
-    migration and raises ``UnrecoverableConsolidationCorruptionError`` --
-    confirmed live via ``cidx index --index-commits --clear``.
-
-    Byte-identical no-op for a SHARDED_JSON collection (no discriminator key
-    to strip) or malformed/unparseable metadata (returned unchanged --
-    restoring it verbatim is the pre-existing behavior for that case, and
-    this helper must never turn a readable-but-odd file into an error).
-    """
-    try:
-        meta = json.loads(metadata_bytes)
-    except (json.JSONDecodeError, UnicodeDecodeError):
-        return metadata_bytes
-    if not isinstance(meta, dict) or "chunks_db" not in meta:
-        return metadata_bytes
-    del meta["chunks_db"]
-    return json.dumps(meta).encode("utf-8")
-
-
 # Story #1110 (S6 Chunk B): module-level lazy references so tests can patch them
 # at `code_indexer.storage.filesystem_vector_store.*`.  Both are server-only; the
 # CLI path never enters the `if parallel_executor is not None` branch with these
@@ -7237,7 +7205,17 @@ class FilesystemVectorStore:
         ``chunks.db`` file it points at was just deleted by this same clear,
         so keeping the discriminator would falsely claim CHUNKS_DB layout for
         a store that no longer exists (see
-        ``_strip_stale_chunks_db_discriminator``).
+        ``chunk_layout.clear_chunks_db_discriminator``).
+
+        Bug #1644 Finding 1: a semantic (non-temporal) collection has no
+        pre-flight step that re-commits the discriminator after a clear
+        (unlike temporal's ``consolidate_legacy_temporal_shards()``), so
+        merely stripping it here would leave THIS store instance's next
+        write silently downgrading to the legacy SHARDED_JSON layout. The
+        pre-clear on-disk layout is therefore captured before the rmtree
+        and, if it was CHUNKS_DB, recorded as this session's build intent
+        in ``self._chunks_db_mode`` so the next write on this same instance
+        still builds ``chunks.db``.
 
         Args:
             collection_name: Name of the collection to clear
@@ -7254,6 +7232,16 @@ class FilesystemVectorStore:
         try:
             import shutil
 
+            from code_indexer.storage.shared.chunk_layout import (
+                ChunkLayout,
+                clear_chunks_db_discriminator,
+                resolve_chunk_layout,
+            )
+
+            was_chunks_db = (
+                resolve_chunk_layout(collection_path) == ChunkLayout.CHUNKS_DB
+            )
+
             # Save projection matrix and metadata if we need to preserve them
             matrix_file = collection_path / "projection_matrix.npy"
             metadata_file = collection_path / "collection_meta.json"
@@ -7265,9 +7253,7 @@ class FilesystemVectorStore:
                     matrix_data = matrix_file.read_bytes()
                 if metadata_file.exists():
                     metadata_data = metadata_file.read_bytes()
-                    metadata_data = _strip_stale_chunks_db_discriminator(
-                        metadata_data
-                    )
+                    metadata_data = clear_chunks_db_discriminator(metadata_data)
 
             # Remove entire collection directory
             shutil.rmtree(collection_path)
@@ -7287,6 +7273,13 @@ class FilesystemVectorStore:
                     matrix_file.write_bytes(matrix_data)
                 if metadata_data is not None:
                     metadata_file.write_bytes(metadata_data)
+
+            # Bug #1644 Finding 1: preserve this session's CHUNKS_DB write
+            # intent so the next index operation on this same store
+            # instance keeps building chunks.db instead of silently
+            # downgrading to legacy vector_*.json files.
+            if was_chunks_db:
+                self._chunks_db_mode[collection_name] = True
 
             return True
 
@@ -7322,6 +7315,11 @@ class FilesystemVectorStore:
                 # Bug #1583: a deleted-and-recreated collection must be
                 # eligible for the reactive stale-index rebuild again.
                 self._id_index_reactive_rebuild_done.discard(collection_name)
+
+            # Bug #1644 Finding 1 follow-up: a deleted collection must not
+            # leave a stale in-session CHUNKS_DB intent behind for a
+            # future collection of the same name to inherit.
+            self._chunks_db_mode.pop(collection_name, None)
 
             return True
 
