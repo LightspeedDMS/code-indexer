@@ -15,6 +15,7 @@ import logging
 import pathspec
 from contextlib import contextmanager
 from dataclasses import dataclass
+from datetime import date, datetime
 from typing import Dict, Any, Optional, List, Union, TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -247,6 +248,26 @@ def _enrich_with_wiki_url(
     result_dict["wiki_url"] = f"/wiki/{wiki_alias}/{article_path}"
 
 
+def _json_default(obj: Any) -> str:
+    """Fallback encoder for ``json.dumps`` in the MCP response path.
+
+    Cluster (PostgreSQL) backends return ``TIMESTAMPTZ`` columns as native
+    ``datetime`` objects (e.g. ``audit_logs.timestamp``); the SQLite/solo path
+    stores the same column as ``TEXT`` and returns ``str``.  Without this
+    fallback, any handler that forwards a raw DB ``datetime`` into its response
+    (e.g. ``handle_query_audit_logs``) crashes with
+    ``Object of type datetime is not JSON serializable`` in cluster mode only.
+
+    Datetimes are rendered with ``.isoformat()`` to match the ISO-8601 "T"
+    convention used everywhere else in the codebase (never ``str(dt)``, which
+    emits a space separator).  Any other unexpected type degrades to ``str``
+    rather than raising, so a serialization edge case can never take a tool down.
+    """
+    if isinstance(obj, (datetime, date)):
+        return obj.isoformat()
+    return str(obj)
+
+
 def _mcp_response(data: Dict[str, Any]) -> Dict[str, Any]:
     """Wrap response data in MCP-compliant content array format.
 
@@ -271,7 +292,7 @@ def _mcp_response(data: Dict[str, Any]) -> Dict[str, Any]:
     # encoder (c_make_encoder). Whitespace is not part of the MCP content
     # contract -- clients parse this as JSON -- so dropping indentation is
     # a pure performance fix with no semantic response change.
-    return {"content": [{"type": "text", "text": json.dumps(data)}]}
+    return {"content": [{"type": "text", "text": json.dumps(data, default=_json_default)}]}
 
 
 def _get_golden_repos_dir() -> str:
