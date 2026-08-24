@@ -10,9 +10,11 @@ in /api/query remains unchanged.
 
 from __future__ import annotations
 
+import functools
 import logging
 from typing import Any, Dict, List, Optional, Union, cast
 
+import anyio.to_thread
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 
@@ -65,6 +67,40 @@ def _resolve_repo_path(alias: str) -> Optional[str]:
     return cast(Optional[str], _resolve_golden_repo_path(alias))
 
 
+async def _resolve_repo_path_offloaded(alias: str) -> Optional[str]:
+    """Resolve a single repo alias off the event-loop thread (Issue #1634).
+
+    ``_resolve_repo_path`` transitively performs synchronous filesystem
+    calls (``AliasManager.read_alias``'s ``alias_file.exists()`` +
+    ``open()`` + ``json.load()``) against the NFS-backed golden-repos
+    aliases directory, which must never run directly on the event-loop
+    thread inside an `async def` (this project's own Production Scale
+    invariant).
+    """
+    return await anyio.to_thread.run_sync(functools.partial(_resolve_repo_path, alias))
+
+
+def _resolve_repo_paths_batch(aliases: List[str]) -> Dict[str, Optional[str]]:
+    """Resolve multiple repo aliases to paths in a single synchronous pass.
+
+    Used by the omni (multi-repo) search path so that up to 50 aliases
+    share ONE anyio.to_thread.run_sync offload instead of issuing up to 50
+    separate thread-pool round-trips (Issue #1634) -- avoiding excessive
+    thread-pool churn.
+    """
+    return {alias: _resolve_repo_path(alias) for alias in aliases}
+
+
+async def _resolve_repo_paths_batch_offloaded(
+    aliases: List[str],
+) -> Dict[str, Optional[str]]:
+    """Resolve a batch of repo aliases off the event-loop thread in ONE
+    anyio.to_thread.run_sync call (Issue #1634)."""
+    return await anyio.to_thread.run_sync(
+        functools.partial(_resolve_repo_paths_batch, aliases)
+    )
+
+
 # ---------------------------------------------------------------------------
 # Internal: single-repo search execution
 # ---------------------------------------------------------------------------
@@ -87,7 +123,16 @@ async def _execute_single_search(
         api_metrics_service.increment_regex_search(username=user.username)
 
     repo_path = Path(repo_path_str)
-    service = RegexSearchService(repo_path)
+    # Issue #1609: RegexSearchService.__init__ performs synchronous
+    # filesystem calls (Path.resolve(), shutil.which()) that must never
+    # run directly on the event-loop thread inside an `async def` (this
+    # project's own Production Scale invariant). Offload the constructor
+    # call itself via anyio.to_thread.run_sync, mirroring the granular
+    # per-call offload pattern already established elsewhere in this
+    # search path (see regex_search.py's search() method).
+    service = await anyio.to_thread.run_sync(
+        functools.partial(RegexSearchService, repo_path)
+    )
     result = await service.search(
         pattern=body.pattern,
         path=body.path,
@@ -145,8 +190,15 @@ async def _execute_omni_search(
     read_capped = False
     search_engine = "ripgrep"
 
+    # Issue #1634: resolve all aliases in ONE batched offload call rather
+    # than one anyio.to_thread.run_sync per alias -- up to 50 aliases would
+    # otherwise create excessive thread-pool churn, and each individual
+    # un-offloaded call could hang the event loop forever on a wedged NFS
+    # mount.
+    resolved_paths = await _resolve_repo_paths_batch_offloaded(aliases)
+
     for alias in aliases:
-        repo_path_str = _resolve_repo_path(alias)
+        repo_path_str = resolved_paths[alias]
         if repo_path_str is None:
             errors[alias] = f"Repository alias {alias!r} not found"
             continue
@@ -263,7 +315,7 @@ async def regex_search(
     # ------------------------------------------------------------------
     # 4. Single-repo path
     # ------------------------------------------------------------------
-    repo_path_str = _resolve_repo_path(body.repository_alias)
+    repo_path_str = await _resolve_repo_path_offloaded(body.repository_alias)
     if repo_path_str is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,

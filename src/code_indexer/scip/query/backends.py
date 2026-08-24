@@ -159,13 +159,62 @@ class DatabaseBackend(SCIPBackend):
             project_root: Project root path for QueryResult objects
             scip_file: Optional path to .scip protobuf file for hybrid mode (ALL symbol references)
         """
+        # Bug #1616: a .scip.db living under an immutable golden-repo
+        # versioned snapshot (.versioned/{ns}/v_<ts>/...) is genuinely
+        # read-only on disk. Opening it read-write "succeeds" silently
+        # (SQLite auto-downgrades a failed O_RDWR open to read-only when
+        # SQLITE_OPEN_CREATE is set), but any later write attempt --
+        # namely the lazy index-creation migration below -- then raises
+        # "attempt to write a readonly database". Detect the condition
+        # via the SAME canonical predicate the rest of the codebase uses
+        # for this exact class of path -- the predicate itself is purely
+        # structural (no filesystem access) -- and open read-only + skip
+        # the migration write entirely when true.
+        #
+        # Code-review follow-up (Item 1): the canonical predicate's
+        # canonical clause requires ".versioned" to appear as a specific
+        # path component (parts[-3]), so a path that doesn't even contain
+        # the ".versioned" substring is provably not a snapshot without
+        # needing the predicate at all. Short-circuit on that cheap string
+        # check BEFORE importing is_immutable_versioned_snapshot: that
+        # import transitively pulls in code_indexer.server.storage.shared
+        # (clone backends, NFS monitor/validator, ONTAP client, snapshot
+        # manager) and starlette, none of which a CLI-shaped process that
+        # never touches the server package has any reason to load.
         self.db_path = db_path
-        self.conn = sqlite3.connect(db_path)
+        if ".versioned" in str(db_path):
+            from code_indexer.server.services.query_path_cache import (
+                is_immutable_versioned_snapshot,
+            )
+
+            self.read_only = is_immutable_versioned_snapshot(str(db_path))
+        else:
+            self.read_only = False
+        if self.read_only:
+            # Path.as_uri() percent-encodes URI-special characters (?, #, %,
+            # spaces, ...) present in the path itself, so a literal f-string
+            # interpolation here would risk SQLite misparsing a path that
+            # happens to contain one of those characters. Path(db_path) also
+            # hardens against a plain str db_path (the sole production call
+            # site always passes a Path, but the type isn't runtime-enforced,
+            # and the else branch below already tolerates str via
+            # sqlite3.connect). Path.resolve() DOES touch the filesystem
+            # (readlink/stat) -- no new exposure versus the sqlite3.connect
+            # call on the very next line, which also blocks on I/O.
+            self.conn = sqlite3.connect(
+                Path(db_path).resolve().as_uri() + "?mode=ro", uri=True
+            )
+        else:
+            self.conn = sqlite3.connect(db_path)
         self.project_root = project_root
         self.scip_file = scip_file
 
-        # Run migration to ensure indexes exist (Story #609)
-        self._ensure_migration_complete()
+        # Run migration to ensure indexes exist (Story #609). Skipped for
+        # read-only snapshots (Bug #1616): the connection cannot write, and
+        # an immutable snapshot's indexes (or lack thereof) were fixed at
+        # generation time -- there is nothing this call could durably fix.
+        if not self.read_only:
+            self._ensure_migration_complete()
 
     def _ensure_migration_complete(self) -> None:
         """
@@ -177,6 +226,9 @@ class DatabaseBackend(SCIPBackend):
         Performance:
         - Fast path (version >= 2): <1ms (version check only)
         - Migration path (version < 2): ~100-500ms (create 5 indexes)
+
+        Never called when ``self.read_only`` is True (Bug #1616) -- the
+        connection has no write capability in that case.
         """
         from ..database.migration import (
             ensure_indexes_created,
@@ -184,10 +236,33 @@ class DatabaseBackend(SCIPBackend):
             update_scip_db_version,
         )
 
-        # Determine config path (Story #609)
-        # Convert project_root to Path for local use only
+        # Determine config path (Story #609).
+        #
+        # Bug #1630: self.project_root is the SUB-PROJECT's own directory
+        # for a sub-project database (required for _read_context_lines()
+        # to resolve document-relative source paths correctly), not the
+        # repo root. The scip_db_version marker, however, is a single
+        # repo-wide value and must always live at the ONE real
+        # <repo_root>/.code-indexer/config.json -- deriving it from
+        # project_root would create/read a bogus ".code-indexer" directory
+        # inside the sub-project's own location instead. Independently
+        # locate the real repo root from the actual db location via
+        # _find_scip_repo_root (matches the literal ".code-indexer/scip"
+        # segment pair in the db's own ancestry -- see its docstring for
+        # why a generic "has a .code-indexer child" walk is unsafe here:
+        # it can match an unrelated .code-indexer project at an
+        # intermediate ancestor level); only fall back to the
+        # project_root-based derivation when the db path never had that
+        # structure at all (e.g. a synthetic db in a test fixture, where
+        # project_root already IS the correct location).
+        from .primitives import _find_scip_repo_root
+
         project_root_path = Path(self.project_root) if self.project_root else Path.cwd()
-        config_path = project_root_path / ".code-indexer" / "config.json"
+        repo_root_candidate = _find_scip_repo_root(self.db_path.parent)
+        if repo_root_candidate is not None:
+            config_path = repo_root_candidate / ".code-indexer" / "config.json"
+        else:
+            config_path = project_root_path / ".code-indexer" / "config.json"
 
         # Fast path: Skip migration if version >= 2
         current_version = get_scip_db_version(config_path)

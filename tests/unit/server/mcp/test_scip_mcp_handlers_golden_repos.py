@@ -718,6 +718,138 @@ class TestScipCallchainEnhancedResponse:
             assert "func2" in data["diagnostic"]
 
 
+def _build_real_scip_db_with_call_chain(db_path: Path) -> None:
+    """Build a REAL, on-disk .scip.db (via SCIPDatabaseBuilder, the actual
+    production builder -- no mocking of the SCIP engine/database) containing
+    one genuine call-graph edge: Caller#run() -> Callee#assist().
+
+    Mirrors the pattern used by
+    tests/unit/test_scip_backends.py::_build_two_method_call_chain_db, but
+    additionally includes a reference occurrence to the callee symbol
+    inside the caller's definition range so a real call_graph edge is
+    produced (proximity-heuristic resolution in EnclosingSymbolResolver),
+    letting SCIPQueryEngine.trace_call_chain discover a genuine, non-empty
+    chain against real data (Bug #1613).
+    """
+    from code_indexer.scip.database.builder import ROLE_DEFINITION
+    from code_indexer.scip.database.builder import SCIPDatabaseBuilder
+    from code_indexer.scip.protobuf import scip_pb2
+
+    index = scip_pb2.Index()
+    caller = "python test `caller`/Caller#run()."
+    callee = "python test `callee`/Callee#assist()."
+    for sym in (caller, callee):
+        sym_info = index.external_symbols.add()
+        sym_info.symbol = sym
+        sym_info.kind = scip_pb2.SymbolInformation.Method  # type: ignore[attr-defined]
+
+    doc = index.documents.add()
+    doc.relative_path, doc.language = "src/caller.py", "python"
+    definition_occ = doc.occurrences.add()
+    definition_occ.symbol, definition_occ.symbol_roles = caller, ROLE_DEFINITION
+    definition_occ.range.extend([0, 0, 10, 0])
+    # Real reference to the callee, inside the caller's range, produces a
+    # genuine call_graph edge (not a mock/stub).
+    reference_occ = doc.occurrences.add()
+    reference_occ.symbol, reference_occ.symbol_roles = callee, 0
+    reference_occ.range.extend([1, 4, 1, 20])
+
+    doc2 = index.documents.add()
+    doc2.relative_path, doc2.language = "src/callee.py", "python"
+    callee_def_occ = doc2.occurrences.add()
+    callee_def_occ.symbol, callee_def_occ.symbol_roles = callee, ROLE_DEFINITION
+    callee_def_occ.range.extend([0, 0, 10, 0])
+
+    scip_file = db_path.parent / f"{db_path.stem}.source.scip"
+    scip_file.write_bytes(index.SerializeToString())
+    SCIPDatabaseBuilder().build(scip_file, db_path)
+
+
+class TestScipCallchainFilesSearchedRealCount:
+    """Bug #1613: scip_callchain's `scip_files_searched` field must report
+    the REAL number of .scip.db files searched, not a hardcoded 0.
+
+    These tests use a REAL, on-disk .scip.db built via the production
+    SCIPDatabaseBuilder and a REAL SCIPQueryService (no mocking of the SCIP
+    engine/database), per the story's explicit no-mock requirement.
+    """
+
+    def test_scip_files_searched_reflects_real_scip_db_count_with_real_chains(
+        self, tmp_path: Path
+    ) -> None:
+        """A real callchain query that finds real, non-empty call chains
+        must report a real (non-zero) scip_files_searched count -- the
+        exact evidence from the bug report: 100 real chains found while
+        scip_files_searched read 0.
+        """
+        from code_indexer.server.mcp.handlers import scip_callchain
+
+        golden_repos_dir = tmp_path / "golden-repos"
+        scip_dir = golden_repos_dir / "repo1" / ".code-indexer" / "scip"
+        scip_dir.mkdir(parents=True)
+        _build_real_scip_db_with_call_chain(scip_dir / "index.scip.db")
+
+        service = SCIPQueryService(golden_repos_dir=golden_repos_dir)
+        mock_user = MagicMock()
+        mock_user.username = "testuser"
+
+        with patch(
+            "code_indexer.server.mcp.handlers._get_scip_query_service",
+            return_value=service,
+        ):
+            result = scip_callchain(
+                {"from_symbol": "Caller", "to_symbol": "Callee"}, mock_user
+            )
+
+        content = result.get("content", [])
+        assert len(content) > 0
+        data = json.loads(content[0]["text"])
+
+        # Sanity: this really did find a real, non-empty call chain.
+        assert data["success"] is True
+        assert data["total_chains_found"] >= 1, (
+            f"Expected a real call chain to be found, got: {data}"
+        )
+
+        # The actual bug: scip_files_searched must be the REAL count (1
+        # real .scip.db file was searched), never the hardcoded 0.
+        assert data["scip_files_searched"] == 1, (
+            "scip_files_searched must reflect the real number of .scip.db "
+            f"files searched (1), got: {data['scip_files_searched']}"
+        )
+
+    def test_scip_files_searched_scales_with_number_of_scip_files(
+        self, tmp_path: Path
+    ) -> None:
+        """scip_files_searched must change meaningfully as the real number
+        of .scip.db files searched changes -- not a fixed/fake value."""
+        from code_indexer.server.mcp.handlers import scip_callchain
+
+        golden_repos_dir = tmp_path / "golden-repos"
+        for repo_name in ("repo1", "repo2"):
+            scip_dir = golden_repos_dir / repo_name / ".code-indexer" / "scip"
+            scip_dir.mkdir(parents=True)
+            _build_real_scip_db_with_call_chain(scip_dir / "index.scip.db")
+
+        service = SCIPQueryService(golden_repos_dir=golden_repos_dir)
+        mock_user = MagicMock()
+        mock_user.username = "testuser"
+
+        with patch(
+            "code_indexer.server.mcp.handlers._get_scip_query_service",
+            return_value=service,
+        ):
+            result = scip_callchain(
+                {"from_symbol": "Caller", "to_symbol": "Callee"}, mock_user
+            )
+
+        data = json.loads(result["content"][0]["text"])
+        assert data["scip_files_searched"] == 2, (
+            "scip_files_searched must reflect 2 real .scip.db files across "
+            f"2 repos, got: {data['scip_files_searched']}"
+        )
+
+
 class TestScipHandlerRegistration:
     """Tests for SCIP handler registration in HANDLER_REGISTRY."""
 

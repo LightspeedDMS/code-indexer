@@ -31,6 +31,45 @@ _TEST_BYTE_CEILING = 4096
 _SYNTHETIC_LINE_COUNT = 5000
 
 
+@pytest.fixture(autouse=True)
+def _reset_mcp_self_registration_singleton():
+    """Issue #1629: guard against leaking MCPSelfRegistrationService's
+    process-wide singleton into other test modules collected in the same
+    pytest session.
+
+    `TestMcpHandlerThreadsAliasIntoRegexSearchService` below imports
+    `code_indexer.server.mcp.handlers.search` inside its test body. That
+    import transitively imports `code_indexer.server.app`, whose
+    module-level `app = create_app()` eagerly calls `initialize_services()`
+    -- which constructs a REAL `MCPSelfRegistrationService` and calls
+    `MCPSelfRegistrationService.set_instance(...)` as a load-bearing import
+    side effect (the same class of bug already documented for
+    ConfigService/MemoryGovernor in `tests/conftest.py`, Bug #1428 /
+    Story #1600). Because module imports are cached for the whole pytest
+    process, that singleton then persists past this test and corrupts any
+    later test file that calls `invoke_claude_cli()` while assuming the
+    singleton is unset -- confirmed root cause of Issue #1629, where
+    `tests/unit/global_repos/test_subprocess_wrapper.py` deterministically
+    fails when collected after this file: `invoke_claude_cli()`'s
+    `if svc is not None: svc.ensure_registered()` fires unexpectedly,
+    `ensure_registered()` calls `claude_cli_available()`, and its internal
+    (unrelated) `subprocess.run(["claude", "--version"], ...)` call consumes
+    `test_subprocess_wrapper.py`'s own scoped `subprocess.Popen` mock,
+    producing `ValueError: not enough values to unpack (expected 2, got 0)`.
+
+    Capturing and restoring the singleton around every test in this file
+    (rather than editing the victim file) keeps the fix surgically scoped
+    to the module that causes the leak.
+    """
+    from code_indexer.server.services.mcp_self_registration_service import (
+        MCPSelfRegistrationService,
+    )
+
+    original = MCPSelfRegistrationService.get_instance()
+    yield
+    MCPSelfRegistrationService.set_instance(original)
+
+
 def _write_synthetic_ripgrep_output(path: str, num_lines: int) -> None:
     import json
 

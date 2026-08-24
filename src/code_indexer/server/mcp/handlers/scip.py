@@ -13,7 +13,9 @@ from typing import Dict, Any, Optional, List
 
 from code_indexer.server.auth.user_manager import User, UserRole
 from code_indexer.server.logging_utils import format_error_log
-from code_indexer.server.middleware.correlation import get_correlation_id
+from code_indexer.server.telemetry.correlation_bridge import (
+    get_current_correlation_id as get_correlation_id,
+)
 from code_indexer.server.services.config_service import get_config_service
 from code_indexer.server.services.query_admission_gate import (
     check_query_admission,
@@ -56,10 +58,11 @@ _MIN_AUDIT_LIMIT = 1
 _MAX_AUDIT_LIMIT = 1000
 
 # Depth bounds shared by scip_impact, scip_dependents, and
-# scip_dependencies (Bug #1599 / Bug #1602 / Bug #1604). An out-of-range
-# depth otherwise reaches a deeper ValueError guard in
-# queries.py/DatabaseBackend that gets silently swallowed into a
-# success:true/total_results:0 response instead of clamping.
+# scip_dependencies (Bug #1599 / Bug #1602 / Bug #1604). scip_impact
+# still clamps an out-of-range depth to this range; scip_dependents and
+# scip_dependencies now REJECT (success: False) an out-of-range depth
+# instead of clamping, matching scip_callchain's loud-reject contract
+# (Bug #1614).
 _MIN_SCIP_DEPTH = 1
 _MAX_SCIP_DEPTH = 10
 
@@ -491,9 +494,33 @@ def scip_dependencies(params: Dict[str, Any], user: User) -> Dict[str, Any]:
         symbol = params.get("symbol")
         depth = _coerce_int(params.get("depth"), 1)
 
-        # Bug #1604: clamp depth to a safe range, mirroring the clamp used
-        # by scip_impact, scip_callchain, and scip_dependents.
-        depth = max(_MIN_SCIP_DEPTH, min(_MAX_SCIP_DEPTH, depth))
+        # Bug #1614: reject (not clamp) an out-of-range depth, mirroring
+        # scip_callchain's loud-reject contract for max_depth (Bug #1603)
+        # and the REST/service-layer siblings (GET /scip/dependencies
+        # depth=0/11 -> HTTP 422; POST /api/scip/multi/dependencies
+        # max_depth=0 -> structured error). The prior Bug #1604 fix
+        # silently clamped out-of-range depth to [1, 10] with no error/
+        # warning field, hiding the caller's mistake behind a misleading
+        # success:true.
+        #
+        # Validation order note: this checks depth BEFORE symbol presence
+        # (below), so {"depth": 99} with no symbol returns the depth error
+        # first. This is the opposite order from scip_callchain, which
+        # validates symbol format before max_depth. Both orderings are
+        # legitimate -- this comment exists so a future reader isn't
+        # confused by the inconsistency between sibling handlers.
+        if depth < _MIN_SCIP_DEPTH or depth > _MAX_SCIP_DEPTH:
+            return _mcp_response(
+                {
+                    "success": False,
+                    "error": (
+                        f"depth must be between {_MIN_SCIP_DEPTH} and "
+                        f"{_MAX_SCIP_DEPTH}, got {depth}"
+                    ),
+                    "results": [],
+                    "symbol": symbol,
+                }
+            )
 
         exact = params.get("exact", False)
         project = params.get("project")
@@ -580,12 +607,33 @@ def scip_dependents(params: Dict[str, Any], user: User) -> Dict[str, Any]:
         symbol = params.get("symbol")
         depth = _coerce_int(params.get("depth"), 1)
 
-        # Bug #1602: clamp depth to a safe range, mirroring the clamp used
-        # by scip_impact and scip_callchain. Without this, an out-of-range
-        # depth reaches a deeper ValueError guard in queries.py/DatabaseBackend
-        # that gets swallowed into a silently-wrong success:true/
-        # total_results:0 response instead of clamping.
-        depth = max(_MIN_SCIP_DEPTH, min(_MAX_SCIP_DEPTH, depth))
+        # Bug #1614: reject (not clamp) an out-of-range depth, mirroring
+        # scip_callchain's loud-reject contract for max_depth (Bug #1603)
+        # and the REST/service-layer siblings (GET /scip/dependents
+        # depth=0/11 -> HTTP 422; POST /api/scip/multi/dependents
+        # max_depth=0 -> structured error). The prior Bug #1602 fix
+        # silently clamped out-of-range depth to [1, 10] with no error/
+        # warning field, hiding the caller's mistake behind a misleading
+        # success:true.
+        #
+        # Validation order note: this checks depth BEFORE symbol presence
+        # (below), so {"depth": 99} with no symbol returns the depth error
+        # first. This is the opposite order from scip_callchain, which
+        # validates symbol format before max_depth. Both orderings are
+        # legitimate -- this comment exists so a future reader isn't
+        # confused by the inconsistency between sibling handlers.
+        if depth < _MIN_SCIP_DEPTH or depth > _MAX_SCIP_DEPTH:
+            return _mcp_response(
+                {
+                    "success": False,
+                    "error": (
+                        f"depth must be between {_MIN_SCIP_DEPTH} and "
+                        f"{_MAX_SCIP_DEPTH}, got {depth}"
+                    ),
+                    "results": [],
+                    "symbol": symbol,
+                }
+            )
 
         exact = params.get("exact", False)
         project = params.get("project")
@@ -862,6 +910,17 @@ def scip_callchain(params: Dict[str, Any], user: User) -> Dict[str, Any]:
             from_symbol, to_symbol, len(unique_chains)
         )
 
+        # Bug #1613: this was hardcoded to 0, permanently misleading callers
+        # (a real query with 100 real chains still reported 0 files
+        # searched). find_scip_files() is the SAME lookup trace_callchain()
+        # already performs internally to select which .scip.db files to
+        # search, so this reports the real, honest count.
+        scip_files_searched = len(
+            service.find_scip_files(
+                repository_alias=repository_alias, username=user.username
+            )
+        )
+
         return _mcp_response(
             {
                 "success": True,
@@ -870,8 +929,7 @@ def scip_callchain(params: Dict[str, Any], user: User) -> Dict[str, Any]:
                 "total_chains_found": len(unique_chains),
                 "truncated": truncated,
                 "max_depth_reached": max_depth_reached,
-                # Note: scip_files_searched not available via service API
-                "scip_files_searched": 0,
+                "scip_files_searched": scip_files_searched,
                 "repository_filter": repository_alias if repository_alias else "all",
                 "chains": returned_chains,
                 "diagnostic": diagnostic,

@@ -4,7 +4,9 @@ Domain module for file operation handlers. Part of the handlers package
 modularization (Story #496).
 """
 
-from code_indexer.server.middleware.correlation import get_correlation_id
+from code_indexer.server.telemetry.correlation_bridge import (
+    get_current_correlation_id as get_correlation_id,
+)
 
 import logging
 from typing import Dict, Any, Optional, Tuple

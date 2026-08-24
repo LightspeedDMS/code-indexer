@@ -28,7 +28,9 @@ from typing import Any, Dict, List, Optional
 
 from code_indexer.server.auth.user_manager import User
 from code_indexer.server.logging_utils import format_error_log
-from code_indexer.server.middleware.correlation import get_correlation_id
+from code_indexer.server.telemetry.correlation_bridge import (
+    get_current_correlation_id as get_correlation_id,
+)
 from code_indexer.server.services.config_service import get_config_service
 from code_indexer.server.services.query_admission_gate import (
     check_query_admission,

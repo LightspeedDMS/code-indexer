@@ -132,41 +132,35 @@ class TestExecutingNodeStampedAtRegistration:
 
 
 class TestBackgroundJobManagerNodeScopedFailOrphaned:
-    def test_bgm_accepts_node_id(self) -> None:
-        from code_indexer.server.repositories.background_jobs import (
-            BackgroundJobManager,
-        )
-
-        bgm = BackgroundJobManager(node_id="node-a")
+    def test_bgm_accepts_node_id(self, background_job_manager_factory) -> None:
+        bgm = background_job_manager_factory(node_id="node-a")
         assert bgm._node_id == "node-a"
 
-    def test_fail_orphaned_jobs_skips_backend_call_for_postgres_backend(self) -> None:
+    def test_fail_orphaned_jobs_skips_backend_call_for_postgres_backend(
+        self, background_job_manager_factory
+    ) -> None:
         """The unscoped fail_orphaned_jobs() sweep must never touch the
         cluster-shared PostgreSQL backend -- it would fail every OTHER
         node's in-flight jobs on any single node's restart. Detected by
         backend class name since that's the only cluster-mode signal
         available to BGM without importing the postgres module directly."""
-        from code_indexer.server.repositories.background_jobs import (
-            BackgroundJobManager,
-        )
-
         pg_backend = BackgroundJobsPostgresBackend()
-        bgm = BackgroundJobManager(storage_backend=pg_backend, node_id="node-a")
+        bgm = background_job_manager_factory(
+            storage_backend=pg_backend, node_id="node-a"
+        )
 
         bgm.fail_orphaned_jobs()
 
         assert pg_backend.fail_orphaned_jobs_called is False
 
-    def test_fail_orphaned_jobs_still_calls_sqlite_backend(self) -> None:
+    def test_fail_orphaned_jobs_still_calls_sqlite_backend(
+        self, background_job_manager_factory
+    ) -> None:
         """Solo/SQLite mode (single process) keeps the pre-#1400 behavior --
         the unscoped sweep is safe there because there is only ever one
         node."""
-        from code_indexer.server.repositories.background_jobs import (
-            BackgroundJobManager,
-        )
-
         sqlite_backend = BackgroundJobsSqliteBackend()
-        bgm = BackgroundJobManager(storage_backend=sqlite_backend)
+        bgm = background_job_manager_factory(storage_backend=sqlite_backend)
 
         bgm.fail_orphaned_jobs()
 

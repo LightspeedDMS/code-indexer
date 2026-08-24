@@ -5,7 +5,9 @@ sibling domain module (search, repos, files, etc.).  All domain modules import
 from here; nothing here imports from them.
 """
 
-from code_indexer.server.middleware.correlation import get_correlation_id
+from code_indexer.server.telemetry.correlation_bridge import (
+    get_current_correlation_id as get_correlation_id,
+)
 
 import difflib
 import json

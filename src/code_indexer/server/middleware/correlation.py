@@ -5,23 +5,45 @@ Implements correlation ID generation, storage in contextvars (async-safe),
 and FastAPI middleware for automatic request/response correlation tracking.
 
 Following Story #666 AC2: CorrelationContextMiddleware Implementation
+
+Bug #1632: get_correlation_id/set_correlation_id/clear_correlation_id used
+to read/write this module's OWN private ContextVar, which is only ever
+populated by CorrelationContextMiddleware below -- and that middleware is
+NEVER registered in startup/app_wiring.py (only
+telemetry.correlation_bridge.CorrelationBridgeMiddleware is). That made
+get_correlation_id() always return None in production for every one of
+the ~70 files that import it from here (Story #1293 / Bug #1631 already
+fixed 12 of those files individually by importing from the wired reader
+directly; this bug heals the rest at the source instead).
+
+The fix: these three functions now DELEGATE to
+telemetry.correlation_bridge's canonical ContextVar, so every existing
+`from code_indexer.server.middleware.correlation import get_correlation_id`
+call site is healed without touching each file individually. Imports are
+local to each function (not at module level) to preserve the Bug #1468
+invariant that merely importing this module for the lightweight
+contextvar helpers must not force fastapi/starlette to load --
+telemetry.correlation_bridge imports starlette at module level.
+
+CorrelationBridgeMiddleware is added via app.add_middleware() in
+startup/app_wiring.py BEFORE any route is registered, and nothing is
+added between it and route registration, so it always wraps
+route/handler execution -- its ContextVar is guaranteed to be populated
+by the time any handler, logging helper, or audit-logger call runs.
 """
 
-import contextvars
 from typing import Any, Optional
 
 from .error_formatters import generate_correlation_id
 
 
-# ContextVar for storing correlation ID (async-safe, request-scoped)
-_correlation_id: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar(
-    "correlation_id", default=None
-)
-
-
 def get_correlation_id() -> Optional[str]:
     """
     Get current correlation ID from context.
+
+    Delegates to telemetry.correlation_bridge.get_current_correlation_id()
+    (Bug #1632) -- the canonical ContextVar populated by the REGISTERED
+    CorrelationBridgeMiddleware.
 
     Returns:
         Optional[str]: Current correlation ID or None if not set
@@ -34,12 +56,26 @@ def get_correlation_id() -> Optional[str]:
             extra=get_log_extra("APP-MIGRATE-001")
         )
     """
-    return _correlation_id.get()
+    from code_indexer.server.telemetry.correlation_bridge import (
+        get_current_correlation_id,
+    )
+
+    # Explicit annotation (rather than a bare `return get_current_correlation_id()`)
+    # works around a mypy module-identity quirk in this codebase's dual
+    # code_indexer.*/src.code_indexer.* import-style setup, where the
+    # cross-module call's return type otherwise resolves to Any.
+    result: Optional[str] = get_current_correlation_id()
+    return result
 
 
 def set_correlation_id(correlation_id: str) -> None:
     """
     Set correlation ID in context.
+
+    Delegates to telemetry.correlation_bridge.set_current_correlation_id()
+    (Bug #1632) so this module's own CorrelationContextMiddleware (dead
+    code -- never registered) and get_correlation_id() stay consistent
+    with the one canonical store.
 
     Args:
         correlation_id: Correlation ID to store in context
@@ -48,21 +84,29 @@ def set_correlation_id(correlation_id: str) -> None:
         >>> set_correlation_id("abc-123-def")
         >>> assert get_correlation_id() == "abc-123-def"
     """
-    _correlation_id.set(correlation_id)
+    from code_indexer.server.telemetry.correlation_bridge import (
+        set_current_correlation_id,
+    )
+
+    set_current_correlation_id(correlation_id)
 
 
 def clear_correlation_id() -> None:
     """
     Clear correlation ID from context.
 
-    Useful for test cleanup and explicit context clearing.
+    Useful for test cleanup and explicit context clearing. Delegates to
+    telemetry.correlation_bridge's ContextVar directly (Bug #1632) since
+    that module exposes no public "clear" helper of its own.
 
     Example:
         >>> set_correlation_id("test-id")
         >>> clear_correlation_id()
         >>> assert get_correlation_id() is None
     """
-    _correlation_id.set(None)
+    from code_indexer.server.telemetry import correlation_bridge
+
+    correlation_bridge._correlation_id_var.set(None)
 
 
 def __getattr__(name: str) -> Any:

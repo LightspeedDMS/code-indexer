@@ -29,9 +29,12 @@ from code_indexer.server.telemetry.metrics_instrumentation import (
 )
 
 import asyncio
+import functools
 import logging
 import socket
 import time
+
+import anyio.to_thread
 
 from code_indexer.server.services.deactivation_query_drain import (
     track_activated_repo_query,
@@ -1976,14 +1979,24 @@ async def _execute_regex_search_impl(
         ),
     )
 
-    service = RegexSearchService(
-        repo_path,
-        subprocess_max_workers=subprocess_max_workers,
-        # Issue #1601 Priority 9: thread the already-in-scope alias
-        # through so the service's read-capped WARNING log surfaces the
-        # real user-facing alias, not just the (possibly
-        # versioned-snapshot) repo_path.
-        alias=repository_alias,
+    # Issue #1609: RegexSearchService.__init__ performs synchronous
+    # filesystem calls (Path.resolve(), shutil.which()) that must never
+    # run directly on the event-loop thread inside an `async def` (this
+    # project's own Production Scale invariant). Offload the constructor
+    # call itself via anyio.to_thread.run_sync, mirroring the granular
+    # per-call offload pattern already established elsewhere in this
+    # search path (see regex_search.py's search() method).
+    service = await anyio.to_thread.run_sync(
+        functools.partial(
+            RegexSearchService,
+            repo_path,
+            subprocess_max_workers=subprocess_max_workers,
+            # Issue #1601 Priority 9: thread the already-in-scope alias
+            # through so the service's read-capped WARNING log surfaces the
+            # real user-facing alias, not just the (possibly
+            # versioned-snapshot) repo_path.
+            alias=repository_alias,
+        )
     )
     search_result = await service.search(
         pattern=args["pattern"],

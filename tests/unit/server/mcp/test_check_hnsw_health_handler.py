@@ -27,7 +27,6 @@ import pytest
 from code_indexer.server.mcp.handlers import HANDLER_REGISTRY
 from code_indexer.server.auth.user_manager import User, UserRole
 from code_indexer.server.repositories.background_jobs import (
-    BackgroundJobManager,
     DuplicateJobError,
     JobStatus,
 )
@@ -283,7 +282,7 @@ class TestCheckHnswHealthRealBackgroundJobManagerEndToEnd:
     of BackgroundJobManager itself, per this codebase's testing philosophy)."""
 
     def test_submit_execute_poll_against_real_hnsw_index(
-        self, tmp_path, mock_regular_user
+        self, tmp_path, mock_regular_user, background_job_manager_factory
     ):
         from code_indexer.server.mcp.handlers import check_hnsw_health
 
@@ -294,7 +293,7 @@ class TestCheckHnswHealthRealBackgroundJobManagerEndToEnd:
         index = build_hnsw_index(vectors, num_threads=1)
         index.save_index(str(coll / "hnsw_index.bin"))
 
-        real_job_manager = BackgroundJobManager()
+        real_job_manager = background_job_manager_factory()
 
         params = {"repository_alias": "test-repo", "force_refresh": True}
 

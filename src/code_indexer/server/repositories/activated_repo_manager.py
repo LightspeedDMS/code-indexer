@@ -73,6 +73,26 @@ class GitOperationError(ActivatedRepoError):
     pass
 
 
+class ActivatedRepoCloneNotStartedError(ActivatedRepoError):
+    """Bug #1618: raised by `_clone_with_copy_on_write`'s two pre-clone
+    guard branches (an in-flight refresh detected via
+    `check_refresh_not_in_progress`, or a failed `acquire_write_lock`) --
+    both of which fail BEFORE `self._clone_backend.create_clone_at_path(...)`
+    is ever reached, so no clone was attempted and no orphan directory can
+    possibly exist.
+
+    `_do_activate_repository`'s clone-phase exception handler distinguishes
+    this from a genuine (post-clone-attempt) `ActivatedRepoError` so it can
+    skip the Bug #1349 orphan-cleanup bounded retry loop entirely --
+    running that loop here would burn ~12s of real time.sleep() waiting for
+    a clone that could never materialize, and its exhaustion WARNING
+    ("a late-materializing async clone may still be in flight") would be
+    definitionally false.
+    """
+
+    pass
+
+
 # Bug #1346: bound on how many __cause__/__context__ links _is_cancellation_chain
 # will follow before giving up. Real chains here are 1-2 deep (ActivatedRepoError
 # wrapping a SubprocessCancelledError); this is a defensive ceiling, not a
@@ -2159,6 +2179,18 @@ class ActivatedRepoManager:
                     cancel_check=cancel_check,
                     golden_repo_alias=golden_repo_alias,
                 )
+            except ActivatedRepoCloneNotStartedError:
+                # Bug #1618: the clone step was never reached (write-lock
+                # acquisition failed, or a refresh was already in flight for
+                # this golden repo) -- no clone backend call happened, so no
+                # orphan directory can possibly exist. Re-raise immediately
+                # WITHOUT invoking the Bug #1349 cleanup grace loop below:
+                # running it here would waste ~12s of real time.sleep() and
+                # log a definitionally-false "late-materializing async
+                # clone" WARNING. This except clause must stay ABOVE the
+                # broader `except ActivatedRepoError:` below since this is a
+                # subtype of it.
+                raise
             except ActivatedRepoError:
                 # Bug #1345/#1349: a cancel (or any other failure) during the
                 # CLONE phase must not leave an orphaned partial clone
@@ -3271,7 +3303,11 @@ class ActivatedRepoManager:
             try:
                 scheduler.check_refresh_not_in_progress(golden_repo_alias)
             except DuplicateJobError as e:
-                raise ActivatedRepoError(
+                # Bug #1618: this branch runs BEFORE any clone is attempted --
+                # use the distinct subtype so the caller's cleanup handler
+                # can skip the Bug #1349 orphan-cleanup grace loop, which is
+                # meaningless here (no clone, no possible orphan directory).
+                raise ActivatedRepoCloneNotStartedError(
                     f"Cannot activate golden repository '{golden_repo_alias}': "
                     f"a refresh is currently in progress for it ({e}). "
                     "Retry activation once the refresh completes."
@@ -3285,7 +3321,10 @@ class ActivatedRepoManager:
             if not scheduler.acquire_write_lock(
                 golden_repo_alias, owner_name="activation_clone"
             ):
-                raise ActivatedRepoError(
+                # Bug #1618: this branch also runs BEFORE any clone is
+                # attempted -- same distinct subtype/rationale as the
+                # DuplicateJobError branch above.
+                raise ActivatedRepoCloneNotStartedError(
                     f"Cannot clone golden repository '{golden_repo_alias}': "
                     "write lock is already held by another writer. "
                     "Retry activation once it completes."

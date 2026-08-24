@@ -174,6 +174,37 @@ def _find_enclosing_symbol(
     return candidate
 
 
+def _find_scip_repo_root(scip_dir: Path) -> Optional[Path]:
+    """
+    Locate the real repo root for a SCIP output directory (Bug #1630).
+
+    Walks UP ``scip_dir``'s own ancestor name-chain looking for the literal
+    ``.code-indexer/scip`` path-segment pair that a SCIPGenerator-produced
+    ``scip_dir`` must be nested under
+    (``<repo_root>/.code-indexer/scip/[<relative_path>/]``). Returns the
+    corresponding repo root (the parent of that ``.code-indexer``), or
+    ``None`` if the pair never appears in ``scip_dir``'s own lineage.
+
+    Deliberately NOT implemented as a generic "does this ancestor have a
+    .code-indexer child" walk: a dev repo can legitimately contain OTHER,
+    unrelated ``.code-indexer`` directories at intermediate ancestor
+    levels -- verified live in this repo's own tree during Bug #1630's
+    fix (``/tmp/.code-indexer``, an unrelated cidx project accidentally
+    rooted at ``/tmp`` and therefore an ancestor of every pytest
+    ``tmp_path``; and ``tests/.code-indexer``, an unrelated nested
+    fixture project). A "has a .code-indexer child" check picks up those
+    unrelated projects' ``config.json`` instead of the real one. Matching
+    the literal ``.code-indexer/scip`` segment pair in ``scip_dir``'s OWN
+    name-chain avoids that false-positive class entirely, since it never
+    probes any ancestor's *children* -- only ``scip_dir``'s own ancestry.
+    """
+    current = scip_dir.resolve()
+    for ancestor in [current] + list(current.parents):
+        if ancestor.name == "scip" and ancestor.parent.name == ".code-indexer":
+            return ancestor.parent.parent
+    return None
+
+
 class SCIPQueryEngine:
     """Engine for executing SCIP primitive queries."""
 
@@ -215,12 +246,50 @@ class SCIPQueryEngine:
             self.index = self.loader.load(self.scip_file)
             project_root = self.index.metadata.project_root
         else:
-            # .scip file was deleted - derive project root from db path
-            # Path structure: .../repo/.code-indexer/scip/[subproject/]index.scip.db
+            # .scip file was deleted - derive project root from db path.
+            #
+            # Database path structure (SCIPGenerator, Bug #1630):
+            #   <repo_root>/.code-indexer/scip/[<relative_path>/]index.scip.db
+            # <relative_path> is empty for the top-level project and an
+            # arbitrary-depth sub-project path for a monorepo module
+            # discovered by ProjectDiscovery. A fixed two-level parent walk
+            # (scip_dir.parent.parent) only produces the correct root for
+            # the top-level (empty relative_path) case; for any sub-project
+            # it undershoots by however many levels relative_path adds.
+            #
+            # Fix: locate the real repo root independently of nesting depth
+            # by matching the literal ".code-indexer/scip" segment pair in
+            # scip_dir's own ancestry (_find_scip_repo_root), then
+            # re-derive the sub-project's own directory by re-applying the
+            # same relative-path suffix under the repo root instead of
+            # under ".code-indexer/scip". This keeps project_root
+            # consistent with how document-relative paths are actually
+            # recorded -- relative to the sub-project's OWN directory, not
+            # the repo root (verified against a real SCIPDatabaseBuilder-
+            # built sub-project database) -- which
+            # DatabaseBackend._read_context_lines() requires to resolve
+            # source files on disk.
+            #
+            # When scip_dir does not follow that convention at all (e.g. a
+            # synthetic/non-standard test fixture path), fall back to the
+            # pre-#1630 heuristic rather than crash -- there is no valid
+            # sub-project depth to correct for on a path that never had
+            # the ".code-indexer/scip" structure in the first place.
             self.index = None
             scip_dir = self.db_path.parent
-            # Navigate up: scip/ -> .code-indexer/ -> repo/
-            project_root = str(scip_dir.parent.parent)
+
+            repo_root = _find_scip_repo_root(scip_dir)
+            if repo_root is None:
+                project_root = str(scip_dir.parent.parent)
+            else:
+                scip_base_dir = repo_root / ".code-indexer" / "scip"
+                relative_suffix = scip_dir.resolve().relative_to(
+                    scip_base_dir.resolve()
+                )
+                if relative_suffix == Path("."):
+                    project_root = str(repo_root)
+                else:
+                    project_root = str(repo_root / relative_suffix)
 
         from .backends import DatabaseBackend
 
