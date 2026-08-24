@@ -630,6 +630,38 @@ def _write_authoritative_vector_count(collection_dir: Path, count: int) -> None:
     _atomic_write_json(meta_path, meta)
 
 
+def strip_authoritative_vector_count(metadata_bytes: bytes) -> bytes:
+    """Strip the authoritative ``vector_count`` cross-check field from raw
+    ``collection_meta.json`` bytes.
+
+    Used by ``FilesystemVectorStore.clear_collection()`` (Bug #1644 round 3)
+    when recommitting the CHUNKS_DB layout for a collection whose
+    ``chunks.db`` was just deleted and rebuilt fresh+empty by that same
+    clear. A stale ``vector_count`` left over from the PRE-clear store would
+    make :func:`_is_natively_built_chunks_db` treat the freshly recommitted,
+    natively-built collection as though a migration had already run here --
+    that function treats ANY present top-level ``vector_count`` as proof a
+    migration occurred, routing the collection down the wrong
+    verified/resume code path instead of being recognized as a fresh native
+    build. Mirrors :func:`chunk_layout.clear_chunks_db_discriminator`
+    exactly, but for this cross-check field instead of the layout
+    discriminator.
+
+    Byte-identical no-op when the ``vector_count`` key is absent, or when
+    ``metadata_bytes`` is not valid JSON / not a JSON object -- restoring
+    such content verbatim is the pre-existing behavior for that case, and
+    this helper must never turn a readable-but-odd file into an error.
+    """
+    try:
+        meta = json.loads(metadata_bytes)
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return metadata_bytes
+    if not isinstance(meta, dict) or _VECTOR_COUNT_META_KEY not in meta:
+        return metadata_bytes
+    del meta[_VECTOR_COUNT_META_KEY]
+    return json.dumps(meta).encode("utf-8")
+
+
 def _read_authoritative_vector_count(collection_dir: Path) -> Optional[int]:
     """Bug #1486 Critical Finding 2: read the independent authoritative
     ``vector_count`` cross-check field, or None if

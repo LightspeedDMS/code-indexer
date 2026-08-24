@@ -7201,21 +7201,33 @@ class FilesystemVectorStore:
         (quantization_range) is recreated on next index operation.
 
         The preserved ``collection_meta.json`` has its ``chunks_db`` layout
-        discriminator stripped, if present, before being restored -- the
-        ``chunks.db`` file it points at was just deleted by this same clear,
-        so keeping the discriminator would falsely claim CHUNKS_DB layout for
-        a store that no longer exists (see
-        ``chunk_layout.clear_chunks_db_discriminator``).
+        discriminator and authoritative ``vector_count`` cross-check field
+        stripped, if present, before being restored -- both fields describe a
+        ``chunks.db`` store that was just deleted by this same clear (see
+        ``chunk_layout.clear_chunks_db_discriminator`` and
+        ``collection_migration.strip_authoritative_vector_count``).
 
-        Bug #1644 Finding 1: a semantic (non-temporal) collection has no
-        pre-flight step that re-commits the discriminator after a clear
-        (unlike temporal's ``consolidate_legacy_temporal_shards()``), so
-        merely stripping it here would leave THIS store instance's next
-        write silently downgrading to the legacy SHARDED_JSON layout. The
-        pre-clear on-disk layout is therefore captured before the rmtree
-        and, if it was CHUNKS_DB, recorded as this session's build intent
-        in ``self._chunks_db_mode`` so the next write on this same instance
-        still builds ``chunks.db``.
+        Bug #1644 round 3 (ON-DISK-TRUTHFUL fix; supersedes round 2's
+        in-memory ``self._chunks_db_mode`` write-intent flag, commit
+        b97f7432, which was rejected because that flag is per-process RAM
+        that does not survive a process boundary -- e.g. ``cidx clean``
+        exiting, or the daemon ``clean`` RPC returning, followed by a
+        brand-new ``cidx index`` process -- silently downgrading the next
+        index run to legacy SHARDED_JSON, and because a read-only method
+        trusting the in-memory intent while nothing backed it on disk could
+        create ``chunks.db`` as a side effect of merely reading):
+
+        When the pre-clear on-disk layout (captured via
+        ``resolve_chunk_layout()`` before the rmtree) was CHUNKS_DB, this
+        method makes the ON-DISK state itself truthful and durable instead
+        of recording an in-process flag: it creates a fresh, empty
+        ``chunks.db`` file in the cleared collection directory and
+        re-commits the ``chunks_db`` discriminator via
+        ``write_chunks_db_discriminator()``. Any store instance, in any
+        process, that later inspects this collection therefore sees a
+        genuinely consistent CHUNKS_DB collection -- discriminator present,
+        ``chunks.db`` physically exists, both facts agreeing -- with zero
+        reliance on which instance performed the clear.
 
         Args:
             collection_name: Name of the collection to clear
@@ -7236,6 +7248,10 @@ class FilesystemVectorStore:
                 ChunkLayout,
                 clear_chunks_db_discriminator,
                 resolve_chunk_layout,
+                write_chunks_db_discriminator,
+            )
+            from code_indexer.storage.shared.collection_migration import (
+                strip_authoritative_vector_count,
             )
 
             was_chunks_db = (
@@ -7254,6 +7270,7 @@ class FilesystemVectorStore:
                 if metadata_file.exists():
                     metadata_data = metadata_file.read_bytes()
                     metadata_data = clear_chunks_db_discriminator(metadata_data)
+                    metadata_data = strip_authoritative_vector_count(metadata_data)
 
             # Remove entire collection directory
             shutil.rmtree(collection_path)
@@ -7274,12 +7291,21 @@ class FilesystemVectorStore:
                 if metadata_data is not None:
                     metadata_file.write_bytes(metadata_data)
 
-            # Bug #1644 Finding 1: preserve this session's CHUNKS_DB write
-            # intent so the next index operation on this same store
-            # instance keeps building chunks.db instead of silently
-            # downgrading to legacy vector_*.json files.
-            if was_chunks_db:
-                self._chunks_db_mode[collection_name] = True
+            # Bug #1644 round 3: recommit the CHUNKS_DB layout ON DISK,
+            # truthfully, for a collection that was CHUNKS_DB before the
+            # clear -- a fresh empty chunks.db plus a freshly re-committed
+            # discriminator, so ANY store instance in ANY process sees a
+            # genuinely consistent CHUNKS_DB collection. Only applicable
+            # when metadata was actually restored (remove_projection_matrix
+            # =True skips metadata restoration entirely, and the collection
+            # ceases to exist per collection_exists(), so there is nothing
+            # to make consistent in that branch).
+            if was_chunks_db and metadata_data is not None:
+                from code_indexer.storage.sqlite_chunk_store import ChunkStore
+
+                with ChunkStore(collection_path / "chunks.db"):
+                    pass
+                write_chunks_db_discriminator(collection_path)
 
             return True
 
@@ -7315,11 +7341,6 @@ class FilesystemVectorStore:
                 # Bug #1583: a deleted-and-recreated collection must be
                 # eligible for the reactive stale-index rebuild again.
                 self._id_index_reactive_rebuild_done.discard(collection_name)
-
-            # Bug #1644 Finding 1 follow-up: a deleted collection must not
-            # leave a stale in-session CHUNKS_DB intent behind for a
-            # future collection of the same name to inherit.
-            self._chunks_db_mode.pop(collection_name, None)
 
             return True
 
