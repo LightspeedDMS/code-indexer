@@ -154,6 +154,10 @@ _MEMORY_HEAVY_OPS: frozenset = frozenset(
         "provider_temporal_index_rebuild",
         "sync_repository",
         "change_branch",
+        # A semantic re-embed re-runs `cidx index` (VoyageAI embed) on a golden clone —
+        # as heavy as add_golden_repo, so it goes through the same memory-admission gate.
+        # Must equal semantic_backfill.policy.SEMANTIC_BACKFILL_REINDEX_OP (validate_dispatch_covers).
+        "semantic_backfill_reindex",
     }
 )
 

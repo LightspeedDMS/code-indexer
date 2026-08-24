@@ -1090,6 +1090,76 @@ def make_lifespan(
                     _run_scip_reconcile()
                 )
 
+                # Semantic (vector) index self-heal backfill — sibling of the SCIP
+                # reconcile. DEFAULT OFF (cost gate): a re-embed spends VoyageAI $, so
+                # it stays inert until the operator sets
+                # semantic_backfill_sweep_config.enabled=true. Leader-gated like SCIP so
+                # one pod enqueues; the re-embed jobs are POD_PULL/memory-heavy.
+                async def _run_semantic_backfill() -> None:
+                    import anyio.to_thread as _to_thread
+
+                    from code_indexer.server.services.config_service import (
+                        get_config_service,
+                    )
+                    from code_indexer.server.services.semantic_backfill.sweep import (
+                        run_semantic_backfill_cycle,
+                    )
+
+                    # When disabled, re-check config on this cheap cadence so flipping it
+                    # on takes effect without a restart.
+                    _POLL_WHEN_DISABLED = 300
+                    while True:
+                        _sleep = _POLL_WHEN_DISABLED
+                        try:
+                            _leader_gate_ready = getattr(
+                                app.state, "scip_reconcile_leader_gate_ready", True
+                            )
+                            if not _leader_gate_ready:
+                                await asyncio.sleep(1)
+                                continue
+                            _le = getattr(app.state, "leader_election", None)
+                            if _le is None or _le.is_leader:
+                                _cfg = (
+                                    get_config_service()
+                                    .get_config()
+                                    .semantic_backfill_sweep_config
+                                )
+                                if _cfg and _cfg.enabled:
+                                    _sleep = max(
+                                        60, int(_cfg.tick_interval_minutes) * 60
+                                    )
+                                    _sc = await _to_thread.run_sync(
+                                        lambda: run_semantic_backfill_cycle(
+                                            golden_repo_manager,
+                                            background_job_manager,
+                                            enabled=True,
+                                            batch_size=int(_cfg.batch_size),
+                                            cooldown_seconds=int(
+                                                _cfg.attempt_cooldown_seconds
+                                            ),
+                                        )
+                                    )
+                                    if _sc.enqueued or _sc.errors:
+                                        logger.info(
+                                            "semantic backfill: %s", _sc.as_dict()
+                                        )
+                        except asyncio.CancelledError:
+                            raise
+                        except Exception as _sem_err:  # noqa: BLE001 — safety
+                            logger.warning(
+                                "semantic backfill failed: %s",
+                                _sem_err,
+                                exc_info=True,
+                            )
+                        try:
+                            await asyncio.sleep(_sleep)
+                        except asyncio.CancelledError:
+                            raise
+
+                app.state.semantic_backfill_task = asyncio.create_task(
+                    _run_semantic_backfill()
+                )
+
             # Story #1034: inject snapshot_manager into GoldenRepoManager so
             # change_branch CoW routes through VersionedSnapshotManager (single
             # source of truth).  Belt-and-suspenders: also wire directly into
@@ -3593,6 +3663,19 @@ def make_lifespan(
                         fts_backfill_build_executor,
                     )
 
+                    # Semantic self-heal re-embed is POD_PULL/memory-heavy: the claiming
+                    # pod reconstructs the re-embed from the row metadata (clone_path +
+                    # alias) via grm._execute_post_clone_workflow.
+                    from code_indexer.server.services.semantic_backfill.policy import (
+                        SEMANTIC_BACKFILL_REINDEX_OP,
+                        semantic_backfill_reindex_executor,
+                    )
+
+                    def _pp_semantic_backfill(md, progress_callback):
+                        return semantic_backfill_reindex_executor(
+                            golden_repo_manager, md, progress_callback
+                        )
+
                     _index_dispatch = {
                         "add_golden_repo": _pp_add_golden_repo,
                         "change_branch": _pp_change_branch,
@@ -3600,6 +3683,7 @@ def make_lifespan(
                         "provider_index_add": _pp_provider_index,
                         "provider_temporal_index_rebuild": _pp_provider_temporal,
                         FTS_BACKFILL_BUILD_OP: fts_backfill_build_executor,
+                        SEMANTIC_BACKFILL_REINDEX_OP: _pp_semantic_backfill,
                     }
                     # M3: fail loudly if a pod-pull op ever lacks an executor (or
                     # vice versa) instead of silently claiming an unrunnable row.

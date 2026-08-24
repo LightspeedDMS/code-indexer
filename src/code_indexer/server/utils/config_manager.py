@@ -1137,6 +1137,41 @@ class FtsBackfillSweepConfig:
 
 
 @dataclass
+class SemanticBackfillSweepConfig:
+    """Golden-repo SEMANTIC (vector) index self-heal backfill configuration.
+
+    Closes the reverse-fill gap the FTS backfill closed for tantivy: a golden repo whose
+    ``.code-indexer/index/`` semantic vectors were wiped had no loop to rebuild them
+    (``reconcile_registry_from_filesystem`` skips a repo with a missing index; it "NEVER
+    re-indexes"). This paced sweep re-embeds those repos.
+
+    SHIPS OFF by default — unlike the FTS backfill (a free local tantivy build), a semantic
+    re-embed calls VoyageAI ($), so auto-refilling the whole fleet could burn cost; the
+    operator opts in (set ``enabled: true`` in the persisted config). When enabled, the
+    defaults are deliberately conservative (one repo per tick, 24h per-repo cooldown) so it
+    trickles rather than storms.
+    """
+
+    # Whether the semantic backfill sweep is active (default: FALSE -- ships OFF; cost gate).
+    enabled: bool = False
+
+    # Golden repos ENQUEUED per tick (default: 1). A semantic re-embed is a heavy,
+    # $-bearing VoyageAI job (POD_PULL + memory-heavy, like add_golden_repo), so the batch
+    # is intentionally tiny -- it drips one repo per tick rather than fanning a re-embed
+    # storm across the cluster.
+    batch_size: int = 1
+
+    # Minutes between ticks (default: 30). Slow on purpose: the backlog of wiped indexes is
+    # small and each rebuild is expensive, so there is no reason to hurry (contrast FTS's 5).
+    tick_interval_minutes: int = 30
+
+    # Per-repo attempt cooldown (seconds, default: 86400 = 24h). Once a repo's re-embed is
+    # enqueued, it is not re-attempted for a day -- a large monorepo re-embed can run long,
+    # and a failed one should back off hard rather than retry-storm the provider.
+    attempt_cooldown_seconds: int = 86400
+
+
+@dataclass
 class XRayConfig:
     """
     Configuration for X-Ray precision AST-aware code search (Story #977).
@@ -1626,6 +1661,8 @@ class ServerConfig:
 
     # EVO-66445 - golden-repo FTS backfill sweep configuration
     fts_backfill_sweep_config: Optional[FtsBackfillSweepConfig] = None
+    #: Semantic (vector) index self-heal backfill — ships OFF (cost gate).
+    semantic_backfill_sweep_config: Optional[SemanticBackfillSweepConfig] = None
 
     # Story #977 - X-Ray precision AST-aware code search configuration (runtime, not bootstrap)
     xray_config: Optional[XRayConfig] = None
@@ -1925,6 +1962,8 @@ class ServerConfig:
         # EVO-66445 - Initialize FTS backfill sweep config
         if self.fts_backfill_sweep_config is None:
             self.fts_backfill_sweep_config = FtsBackfillSweepConfig()
+        if self.semantic_backfill_sweep_config is None:
+            self.semantic_backfill_sweep_config = SemanticBackfillSweepConfig()
         # Story #977 - Initialize X-Ray config
         if self.xray_config is None:
             self.xray_config = XRayConfig()
@@ -2673,6 +2712,16 @@ class ServerConfigManager:
             _fts_allowed = {f.name for f in fields(FtsBackfillSweepConfig)}
             config_dict["fts_backfill_sweep_config"] = FtsBackfillSweepConfig(
                 **{k: v for k, v in _fts_dict.items() if k in _fts_allowed}
+            )
+
+        # Convert semantic_backfill_sweep_config dict to SemanticBackfillSweepConfig
+        if "semantic_backfill_sweep_config" in config_dict and isinstance(
+            config_dict["semantic_backfill_sweep_config"], dict
+        ):
+            _sem_dict = config_dict["semantic_backfill_sweep_config"]
+            _sem_allowed = {f.name for f in fields(SemanticBackfillSweepConfig)}
+            config_dict["semantic_backfill_sweep_config"] = SemanticBackfillSweepConfig(
+                **{k: v for k, v in _sem_dict.items() if k in _sem_allowed}
             )
 
         # Story #977: Convert xray_config dict to XRayConfig
