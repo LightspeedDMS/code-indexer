@@ -130,6 +130,38 @@ def hnsw_cache_key_for_collection_path(
     return key
 
 
+def _strip_stale_chunks_db_discriminator(metadata_bytes: bytes) -> bytes:
+    """Strip the ``chunks_db`` layout discriminator from preserved
+    ``collection_meta.json`` bytes before they are restored after a
+    ``clear_collection()`` rmtree.
+
+    ``clear_collection()`` deletes the entire collection directory
+    (including ``chunks.db``) but restores the pre-clear
+    ``collection_meta.json`` verbatim to keep fast-reindex metadata
+    (quantization_range, etc.). For a CHUNKS_DB-layout collection this used
+    to also restore the ``chunks_db`` discriminator -- leaving
+    ``resolve_chunk_layout()`` reporting CHUNKS_DB for a directory whose
+    ``chunks.db`` no longer exists. A layout-aware caller that trusts the
+    discriminator (e.g. ``consolidate_legacy_temporal_shards()``) then finds
+    a missing content-integrity manifest for what looks like an unfinished
+    migration and raises ``UnrecoverableConsolidationCorruptionError`` --
+    confirmed live via ``cidx index --index-commits --clear``.
+
+    Byte-identical no-op for a SHARDED_JSON collection (no discriminator key
+    to strip) or malformed/unparseable metadata (returned unchanged --
+    restoring it verbatim is the pre-existing behavior for that case, and
+    this helper must never turn a readable-but-odd file into an error).
+    """
+    try:
+        meta = json.loads(metadata_bytes)
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return metadata_bytes
+    if not isinstance(meta, dict) or "chunks_db" not in meta:
+        return metadata_bytes
+    del meta["chunks_db"]
+    return json.dumps(meta).encode("utf-8")
+
+
 # Story #1110 (S6 Chunk B): module-level lazy references so tests can patch them
 # at `code_indexer.storage.filesystem_vector_store.*`.  Both are server-only; the
 # CLI path never enters the `if parallel_executor is not None` branch with these
@@ -7200,6 +7232,13 @@ class FilesystemVectorStore:
         projection matrix to allow faster re-indexing. The collection metadata
         (quantization_range) is recreated on next index operation.
 
+        The preserved ``collection_meta.json`` has its ``chunks_db`` layout
+        discriminator stripped, if present, before being restored -- the
+        ``chunks.db`` file it points at was just deleted by this same clear,
+        so keeping the discriminator would falsely claim CHUNKS_DB layout for
+        a store that no longer exists (see
+        ``_strip_stale_chunks_db_discriminator``).
+
         Args:
             collection_name: Name of the collection to clear
             remove_projection_matrix: If True, also remove projection matrix (default: False)
@@ -7226,6 +7265,9 @@ class FilesystemVectorStore:
                     matrix_data = matrix_file.read_bytes()
                 if metadata_file.exists():
                     metadata_data = metadata_file.read_bytes()
+                    metadata_data = _strip_stale_chunks_db_discriminator(
+                        metadata_data
+                    )
 
             # Remove entire collection directory
             shutil.rmtree(collection_path)
