@@ -186,6 +186,99 @@ class TestSCIPMultiServiceDependencies:
             assert response.results["repo1"][0].kind == "dependency"
             assert response.results["repo2"][0].kind == "dependency"
 
+    @pytest.mark.parametrize("invalid_max_depth", [11, 0])
+    def test_get_dependencies_in_repo_rejects_out_of_range_max_depth(
+        self, tmp_path, invalid_max_depth
+    ):
+        """Bug #1626: unlike _execute_callchain (which explicitly validates
+        max_depth before ever calling the engine), _get_dependencies_in_repo
+        passed request.max_depth straight through to
+        engine.get_dependencies(), relying on the engine's own deep
+        ValueError (queries.py, Bug #1625: range 1-10) to propagate up.
+        This must now raise ValueError with the engine's own bounds/message
+        BEFORE SCIPQueryEngine is ever constructed or called, mirroring
+        _execute_callchain's established guard pattern exactly."""
+        from unittest.mock import MagicMock
+        from code_indexer.server.multi.scip_multi_service import SCIPMultiService
+
+        service = SCIPMultiService()
+        request = SCIPMultiRequest(
+            repositories=["repo1"], symbol="UserService", max_depth=invalid_max_depth
+        )
+
+        mock_engine = MagicMock()
+
+        with patch.object(
+            service,
+            "_get_scip_file_for_repo",
+            return_value=tmp_path / "index.scip.db",
+        ):
+            with patch(
+                "code_indexer.server.multi.scip_multi_service.SCIPQueryEngine",
+                return_value=mock_engine,
+            ) as mock_engine_cls:
+                with pytest.raises(ValueError, match="Depth must be between 1 and 10"):
+                    service._get_dependencies_in_repo("repo1", request)
+
+        mock_engine_cls.assert_not_called()
+        mock_engine.get_dependencies.assert_not_called()
+
+    def test_dependencies_surfaces_invalid_max_depth_via_errors_map(self, tmp_path):
+        """End-to-end through dependencies()/_execute_parallel_operation: an
+        invalid max_depth must surface as a per-repo error entry, not a
+        silent 200 success."""
+        from code_indexer.server.multi.scip_multi_service import SCIPMultiService
+
+        service = SCIPMultiService()
+        request = SCIPMultiRequest(
+            repositories=["repo1"], symbol="UserService", max_depth=11
+        )
+
+        with patch.object(
+            service,
+            "_get_scip_file_for_repo",
+            return_value=tmp_path / "index.scip.db",
+        ):
+            response = service.dependencies(request)
+
+        assert response.errors is not None
+        assert "repo1" in response.errors
+        assert "Depth must be between 1 and 10" in response.errors["repo1"]
+        assert "repo1" not in response.results
+
+    @pytest.mark.parametrize("valid_max_depth", [1, 10])
+    def test_get_dependencies_in_repo_accepts_boundary_depths(
+        self, tmp_path, valid_max_depth
+    ):
+        """Valid boundary depths (1 and 10) must still reach the engine
+        unchanged -- the new guard must not reject in-range values."""
+        from unittest.mock import MagicMock
+        from code_indexer.server.multi.scip_multi_service import SCIPMultiService
+
+        service = SCIPMultiService()
+        request = SCIPMultiRequest(
+            repositories=["repo1"], symbol="UserService", max_depth=valid_max_depth
+        )
+
+        mock_engine = MagicMock()
+        mock_engine.get_dependencies.return_value = []
+
+        with patch.object(
+            service,
+            "_get_scip_file_for_repo",
+            return_value=tmp_path / "index.scip.db",
+        ):
+            with patch(
+                "code_indexer.server.multi.scip_multi_service.SCIPQueryEngine",
+                return_value=mock_engine,
+            ):
+                result = service._get_dependencies_in_repo("repo1", request)
+
+        assert result == []
+        mock_engine.get_dependencies.assert_called_once_with(
+            "UserService", depth=valid_max_depth, exact=False
+        )
+
 
 class TestSCIPMultiServiceDependents:
     """Test multi-repository dependents analysis (AC4)."""
@@ -231,6 +324,99 @@ class TestSCIPMultiServiceDependents:
             assert response.metadata.repos_with_results == 2
             assert response.results["repo1"][0].kind == "dependent"
             assert response.results["repo2"][0].kind == "dependent"
+
+    @pytest.mark.parametrize("invalid_max_depth", [11, 0])
+    def test_get_dependents_in_repo_rejects_out_of_range_max_depth(
+        self, tmp_path, invalid_max_depth
+    ):
+        """Bug #1626: unlike _execute_callchain (which explicitly validates
+        max_depth before ever calling the engine), _get_dependents_in_repo
+        passed request.max_depth straight through to
+        engine.get_dependents(), relying on the engine's own deep
+        ValueError (queries.py, Bug #1625: range 1-10) to propagate up.
+        This must now raise ValueError with the engine's own bounds/message
+        BEFORE SCIPQueryEngine is ever constructed or called, mirroring
+        _execute_callchain's established guard pattern exactly."""
+        from unittest.mock import MagicMock
+        from code_indexer.server.multi.scip_multi_service import SCIPMultiService
+
+        service = SCIPMultiService()
+        request = SCIPMultiRequest(
+            repositories=["repo1"], symbol="UserService", max_depth=invalid_max_depth
+        )
+
+        mock_engine = MagicMock()
+
+        with patch.object(
+            service,
+            "_get_scip_file_for_repo",
+            return_value=tmp_path / "index.scip.db",
+        ):
+            with patch(
+                "code_indexer.server.multi.scip_multi_service.SCIPQueryEngine",
+                return_value=mock_engine,
+            ) as mock_engine_cls:
+                with pytest.raises(ValueError, match="Depth must be between 1 and 10"):
+                    service._get_dependents_in_repo("repo1", request)
+
+        mock_engine_cls.assert_not_called()
+        mock_engine.get_dependents.assert_not_called()
+
+    def test_dependents_surfaces_invalid_max_depth_via_errors_map(self, tmp_path):
+        """End-to-end through dependents()/_execute_parallel_operation: an
+        invalid max_depth must surface as a per-repo error entry, not a
+        silent 200 success."""
+        from code_indexer.server.multi.scip_multi_service import SCIPMultiService
+
+        service = SCIPMultiService()
+        request = SCIPMultiRequest(
+            repositories=["repo1"], symbol="UserService", max_depth=0
+        )
+
+        with patch.object(
+            service,
+            "_get_scip_file_for_repo",
+            return_value=tmp_path / "index.scip.db",
+        ):
+            response = service.dependents(request)
+
+        assert response.errors is not None
+        assert "repo1" in response.errors
+        assert "Depth must be between 1 and 10" in response.errors["repo1"]
+        assert "repo1" not in response.results
+
+    @pytest.mark.parametrize("valid_max_depth", [1, 10])
+    def test_get_dependents_in_repo_accepts_boundary_depths(
+        self, tmp_path, valid_max_depth
+    ):
+        """Valid boundary depths (1 and 10) must still reach the engine
+        unchanged -- the new guard must not reject in-range values."""
+        from unittest.mock import MagicMock
+        from code_indexer.server.multi.scip_multi_service import SCIPMultiService
+
+        service = SCIPMultiService()
+        request = SCIPMultiRequest(
+            repositories=["repo1"], symbol="UserService", max_depth=valid_max_depth
+        )
+
+        mock_engine = MagicMock()
+        mock_engine.get_dependents.return_value = []
+
+        with patch.object(
+            service,
+            "_get_scip_file_for_repo",
+            return_value=tmp_path / "index.scip.db",
+        ):
+            with patch(
+                "code_indexer.server.multi.scip_multi_service.SCIPQueryEngine",
+                return_value=mock_engine,
+            ):
+                result = service._get_dependents_in_repo("repo1", request)
+
+        assert result == []
+        mock_engine.get_dependents.assert_called_once_with(
+            "UserService", depth=valid_max_depth, exact=False
+        )
 
 
 class TestSCIPMultiServiceCallChain:

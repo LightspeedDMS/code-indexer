@@ -29,7 +29,30 @@ from .scip_models import (
 )
 from ...scip.query.primitives import SCIPQueryEngine, QueryResult
 from ...scip.database.queries import MAX_DEPTH_CAP, QueryTimeoutError
+from ..services.constants import (
+    MIN_SCIP_DEPENDENCY_DEPTH,
+    MAX_SCIP_DEPENDENCY_DEPTH,
+)
 from code_indexer.server.logging_utils import format_error_log
+
+
+def _validate_dependency_depth(max_depth: Optional[int]) -> None:
+    """Reject an out-of-range caller-supplied dependency/dependents depth.
+
+    Bug #1626: mirrors _execute_callchain's existing explicit caller-input
+    guard, using MIN/MAX_SCIP_DEPENDENCY_DEPTH (Bug #1625's single source
+    of truth for the SCIP engine's real get_dependencies()/get_dependents()
+    ceiling in scip/database/queries.py) -- a deliberately different,
+    narrower range than callchain's own MAX_DEPTH_CAP.
+    """
+    if max_depth is None:
+        return
+    if max_depth < MIN_SCIP_DEPENDENCY_DEPTH or max_depth > MAX_SCIP_DEPENDENCY_DEPTH:
+        raise ValueError(
+            f"Depth must be between {MIN_SCIP_DEPENDENCY_DEPTH} and "
+            f"{MAX_SCIP_DEPENDENCY_DEPTH}, got {max_depth}"
+        )
+
 
 logger = logging.getLogger(__name__)
 
@@ -220,6 +243,12 @@ class SCIPMultiService:
         if scip_file is None:
             return None
 
+        # Bug #1626: explicit depth-range guard mirroring
+        # _execute_callchain's established pattern -- previously this
+        # method passed request.max_depth straight through to
+        # engine.get_dependencies() with no validation of its own.
+        _validate_dependency_depth(request.max_depth)
+
         try:
             engine = SCIPQueryEngine(scip_file)
             # Bug #83-3 Fix: Use instance variable instead of hardcoded constant
@@ -268,6 +297,12 @@ class SCIPMultiService:
         scip_file = self._get_scip_file_for_repo(repo_id)
         if scip_file is None:
             return None
+
+        # Bug #1626: explicit depth-range guard mirroring
+        # _execute_callchain's established pattern -- previously this
+        # method passed request.max_depth straight through to
+        # engine.get_dependents() with no validation of its own.
+        _validate_dependency_depth(request.max_depth)
 
         try:
             engine = SCIPQueryEngine(scip_file)
