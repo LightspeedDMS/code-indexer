@@ -7,6 +7,7 @@ and calls the appropriate rebuild functionality.
 
 import subprocess
 import sys
+import tempfile
 
 from click.testing import CliRunner
 
@@ -52,14 +53,23 @@ class TestCLIRebuildIndexesE2E:
     """End-to-end tests for --rebuild-indexes flag using subprocess calls."""
 
     def run_cli_command(self, args, expect_failure=False):
-        """Run CLI command and return result."""
+        """Run CLI command in an isolated, uninitialized temp directory and return result.
+
+        The subprocess must NOT inherit pytest's working directory: this repo's own
+        root is a real, self-indexed cidx project (dogfooding) and may hold a
+        `.index-mutation.lock`, which would route the CLI down an unrelated
+        "another index running" code path instead of the "uninitialized project"
+        path these tests intend to exercise.
+        """
         cmd = [sys.executable, "-m", "code_indexer.cli"] + args
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
+        with tempfile.TemporaryDirectory() as isolated_cwd:
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=30,
+                cwd=isolated_cwd,
+            )
 
         if expect_failure:
             assert result.returncode != 0, (
