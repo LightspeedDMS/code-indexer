@@ -52,6 +52,20 @@ _VECTOR_STORE_PATH = (
 _CONSOLIDATE_LEGACY_TEMPORAL_SHARDS_PATH = (
     "code_indexer.services.chunk_migration_cli.consolidate_legacy_temporal_shards"
 )
+# Story #1488 (Codex Finding 1): cli.py's --index-commits branch now acquires
+# the real repo-scoped EXCLUSIVE index-mutation lock (a real flock() on
+# .code-indexer/.index-mutation.lock under this test process's actual CWD)
+# BEFORE migrate/resolve run. This repo dogfoods itself with a permanently
+# running `code_indexer.daemon` that legitimately holds that same lock, so
+# leaving this unmocked makes acquisition fail with MigrationLockError ->
+# cli.py sys.exit(1) before migrate is ever called -- unrelated to the
+# migrate/resolve ordering (Bug #642) this suite actually verifies. Patched
+# at its defining module (it is lazily imported inside the CLI function) to
+# a no-op context manager so the test is isolated from real daemon/lock
+# state, same rationale as the consolidate_legacy_temporal_shards mock above.
+_ACQUIRE_INDEX_MUTATION_LOCK_PATH = (
+    "code_indexer.services.chunk_migration_cli.acquire_index_mutation_lock"
+)
 
 
 def _stub_indexer_result() -> MagicMock:
@@ -82,8 +96,8 @@ def _patch_index_commits_path(
 
     Allows the real ConfigManager to run (it uses backtracking from CWD).
     Only migrate_legacy_temporal_collection, resolve, TemporalIndexer,
-    FilesystemVectorStore, and consolidate_legacy_temporal_shards are
-    patched.
+    FilesystemVectorStore, consolidate_legacy_temporal_shards, and the
+    index-mutation lock acquisition are patched.
 
     Yields (runner,) to the caller.
     """
@@ -101,6 +115,10 @@ def _patch_index_commits_path(
         patch(_TEMPORAL_INDEXER_PATH, return_value=mock_ti_instance),
         patch(_VECTOR_STORE_PATH, return_value=mock_vs_instance),
         patch(_CONSOLIDATE_LEGACY_TEMPORAL_SHARDS_PATH, return_value=(0, 0)),
+        patch(
+            _ACQUIRE_INDEX_MUTATION_LOCK_PATH,
+            side_effect=lambda config_dir: contextlib.nullcontext(),
+        ),
     ):
         yield (runner,)
 
