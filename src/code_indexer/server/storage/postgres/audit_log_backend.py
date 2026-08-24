@@ -19,6 +19,8 @@ import logging
 from datetime import datetime, timezone
 from typing import Any, List, Optional, Tuple
 
+from .pg_utils import sanitize_row
+
 
 logger = logging.getLogger(__name__)
 
@@ -211,7 +213,7 @@ class AuditLogPostgresBackend:
                 cur.execute(query_sql, count_params)
                 rows = cur.fetchall()
 
-        return list(rows), total
+        return [sanitize_row(row) for row in rows], total
 
     def get_pr_logs(
         self,
@@ -247,7 +249,7 @@ class AuditLogPostgresBackend:
                     "ORDER BY timestamp DESC LIMIT %s OFFSET %s",
                     params + [limit, offset],
                 )
-                return list(cur.fetchall())
+                return [sanitize_row(row) for row in cur.fetchall()]
 
     def get_cleanup_logs(
         self,
@@ -282,7 +284,7 @@ class AuditLogPostgresBackend:
                     "ORDER BY timestamp DESC LIMIT %s OFFSET %s",
                     params + [limit, offset],
                 )
-                return list(cur.fetchall())
+                return [sanitize_row(row) for row in cur.fetchall()]
 
     def cleanup_old_logs(self, cutoff_iso: str) -> int:
         """Delete audit log records older than cutoff_iso.
