@@ -1268,3 +1268,122 @@ def test_last_debug_messages_empty_when_no_debug_output(tmp_path):
     assert messages == [], (
         f"_last_debug_messages must be empty list when not in JSON: {messages}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Bug #1612: large candidate file lists must not overflow argv (E2BIG).
+# ---------------------------------------------------------------------------
+
+# Multiplier applied to os.sysconf('SC_ARG_MAX') so the generated candidate
+# list comfortably overflows real argv limits regardless of per-platform
+# pointer-table/environment overhead not fully captured by ARG_MAX alone.
+_ARG_MAX_SAFETY_MARGIN = 3
+
+# Every argv string carries one NUL terminator in the kernel's exec() byte
+# accounting, in addition to the string's own characters.
+_NUL_TERMINATOR_LENGTH = 1
+
+# Generous timeout for scanning a very large (tens of thousands) candidate
+# list of nonexistent files -- rayon-parallel stat/read misses are cheap but
+# the sheer count needs headroom on slower CI hosts.
+_LARGE_LIST_TIMEOUT_SECONDS = 120
+
+
+def _require_xray_cli_binary() -> None:
+    """Skip this test if the real xray-cli release binary is not built locally.
+
+    This is a genuine component test (no subprocess mocking) -- it needs the
+    real compiled binary to prove the fix works at the OS process-exec layer.
+    """
+    from code_indexer.xray.rust_backend import _XRAY_CLI_DEFAULT
+
+    if not _XRAY_CLI_DEFAULT.exists():
+        pytest.skip(
+            f"xray-cli binary not built at {_XRAY_CLI_DEFAULT}; "
+            "run 'cargo build --release' inside rust/ to enable this test."
+        )
+
+
+def test_large_candidate_list_does_not_overflow_argv_bug_1612():
+    """Bug #1612: xray_search filename-mode search with a large candidate set
+    fails with '[Errno 7] Argument list too long' because candidate file
+    paths were passed to xray-cli via argv instead of stdin/a temp file.
+
+    Builds a candidate list sized to comfortably exceed os.sysconf('SC_ARG_MAX')
+    if encoded as argv, and drives it through the REAL RustNativeBackend ->
+    real xray-cli subprocess path (no subprocess mocking). Before the fix,
+    this raises an unhandled OSError: [Errno 7] Argument list too long. After
+    the fix (file-based candidate handoff), the call completes normally and
+    returns one result tuple per file spec.
+    """
+    _require_xray_cli_binary()
+    import os
+    from code_indexer.xray.rust_backend import RustNativeBackend
+
+    arg_max = os.sysconf("SC_ARG_MAX")
+    path_template = "/nonexistent/xray_bug_1612_" + ("x" * 60) + "/File_{:07d}.java"
+    approx_path_len = len(path_template.format(0)) + _NUL_TERMINATOR_LENGTH
+    num_paths = (arg_max * _ARG_MAX_SAFETY_MARGIN) // approx_path_len
+
+    backend = RustNativeBackend()
+    specs = [_spec(path_template.format(i), "", "java") for i in range(num_paths)]
+
+    # Must not raise OSError -- proves candidate paths are no longer passed via argv.
+    results = backend.run_batch(
+        evaluator_code=VALID_EVALUATOR,
+        file_specs=specs,
+        repo_path="/",
+        timeout_seconds=_LARGE_LIST_TIMEOUT_SECONDS,
+    )
+
+    assert len(results) == num_paths, (
+        f"Expected {num_paths} result tuples (one per candidate), got {len(results)}"
+    )
+    # None of these files exist -- every spec resolves to a clean empty result,
+    # never an exception and never a spurious per-file error.
+    for matches, errors, meta in results:
+        assert matches == []
+        assert errors == []
+        assert meta is None
+
+
+# ---------------------------------------------------------------------------
+# Bug #1612: any OSError from the xray-cli subprocess invocation (e.g. E2BIG)
+# must become a structured tool error, never an unhandled exception.
+# ---------------------------------------------------------------------------
+
+
+def test_subprocess_oserror_becomes_structured_error_not_unhandled_bug_1612():
+    """Bug #1612: an OSError raised by subprocess.Popen (e.g. E2BIG /
+    'Argument list too long') must be caught inside RustNativeBackend and
+    surfaced as a structured error tuple -- never propagate out of run_batch()
+    as an unhandled exception (which is what turns into an unhandled MCP
+    -32603 internal error instead of a graceful xray_search tool error).
+    """
+    import errno
+    from code_indexer.xray.rust_backend import RustNativeBackend
+
+    backend = RustNativeBackend()
+    specs = [_spec("src/Foo.java", SIMPLE_JAVA, "java")]
+
+    with patch(
+        "subprocess.Popen",
+        side_effect=OSError(errno.E2BIG, "Argument list too long"),
+    ):
+        results = backend.run_batch(
+            evaluator_code=VALID_EVALUATOR,
+            file_specs=specs,
+            repo_path=str(REPO_ROOT),
+        )
+
+    assert len(results) == 1
+    matches, errors, meta = results[0]
+    assert matches == []
+    assert len(errors) == 1
+    err = errors[0]
+    assert err["error_type"] == "XRayCliError"
+    msg = err["error_message"].lower()
+    assert "argument list too long" in msg or "e2big" in msg, (
+        f"Expected E2BIG/argument-list-too-long detail in error message, got: {msg!r}"
+    )
+    assert meta is None

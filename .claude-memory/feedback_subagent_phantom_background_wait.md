@@ -4,7 +4,7 @@ description: "Dispatched subagents sometimes end their turn believing an async m
 metadata:
   type: feedback
   originSessionId: ca34043c-b05f-4314-8219-619a25ec9f26
-  modified: 2026-08-20T08:16:54.776Z
+  modified: 2026-08-24T03:43:36.342Z
 ---
 
 **Still recurring as of 2026-08-20**: two more occurrences in a single multi-bug remediation
@@ -60,6 +60,26 @@ don't assume either way from the phrasing alone. When a real violation is confir
 assume the underlying work is wrong just because the process was — have the offending agent
 (or yourself) independently re-verify the actual diff/tests directly rather than trusting
 the nested agent's summary a second time.
+
+**Escalation observed (2026-08-23, bug #1635's 5th remediation round)**: the cascade went
+TWO levels deep, not one. The dispatched `tdd-engineer` delegated the whole task to a
+nested `tdd-engineer`, which itself delegated further to a THIRD nested agent — three
+agents total running where the user's explicit constraint capped it at two. All three
+ended their turns believing a notification would resume them; the deepest one sent several
+consecutive identical "still running, no action needed, waiting for next update" reports
+in a row without ever synchronously checking the real background process it had started
+(`bash server-fast-automation.sh`), which kept running unsupervised the whole time with
+nobody left in the chain to eventually read its output. The orchestrator had to identify
+the unexpected extra agent IDs via `ListAgents` (a count above what was dispatched is the
+tell), trace the delegation chain through each agent's transcript, confirm the actual
+process was still healthy via `ps`/`uptime`/thread counts, and message the deepest live
+agent directly with an explicit `while kill -0 <pid>; do sleep 30; done` template plus an
+unconditional "do not spawn any further Task/Agent calls" instruction. Lesson: a dispatch
+prompt for any task expected to end in a long verification run (a full regression suite,
+not just `fast-automation.sh`) needs the "you are the implementer, not an orchestrator; do
+NOT call the Agent/Task tool" instruction stated explicitly up front — this class of task
+(long-running, multi-step, "apply fixes AND run the full gate") is exactly the shape that
+tempts a subagent to split it into sub-dispatches.
 
 Related: [[feedback_agent_stall_detection_needs_reply_not_just_mtime]],
 [[feedback_active_monitoring_check_back]], [[feedback_no_subagent_to_subagent_delegation]].

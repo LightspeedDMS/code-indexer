@@ -29,6 +29,12 @@ struct ParsedArgs {
     dynlib_path: Option<String>,
     json_output: bool,
     file_list: Vec<String>,
+    /// Bug #1612: path to a newline-delimited file containing the candidate
+    /// file list, populated by --files-from parsing (already implemented
+    /// below in parse_args). Lets callers hand xray-cli a large candidate
+    /// set without ever putting it on argv (which overflows ARG_MAX at
+    /// fleet scale).
+    files_from_path: Option<String>,
     remaining_args: Vec<String>,
 }
 
@@ -39,6 +45,40 @@ fn default_target() -> String {
     format!("{}/Dev/evolution", home)
 }
 
+/// Read a newline-delimited candidate file list from disk (Bug #1612).
+///
+/// Lets callers hand xray-cli a large candidate set via a file instead of
+/// argv, avoiding the ARG_MAX / E2BIG ceiling that argv-based `--files`
+/// hits at fleet scale. Lines are trimmed; blank lines are skipped.
+///
+/// The path must be absolute -- the only real caller (RustNativeBackend on
+/// the Python side) always passes an absolute tempfile path it created
+/// itself; requiring absolute rejects malformed/relative input early with a
+/// clear error instead of silently resolving against an unpredictable cwd.
+fn read_file_list(path: &str) -> Result<Vec<PathBuf>, String> {
+    let path_buf = PathBuf::from(path);
+    if !path_buf.is_absolute() {
+        return Err(format!("--files-from path must be absolute, got: {}", path));
+    }
+    let content = std::fs::read_to_string(&path_buf)
+        .map_err(|e| format!("Failed to read --files-from list at {}: {}", path, e))?;
+    Ok(content
+        .lines()
+        .map(|line| line.trim())
+        .filter(|line| !line.is_empty())
+        .map(PathBuf::from)
+        .collect())
+}
+
+/// Serialize `out` to a JSON line on stdout, or a plain-text error to stderr
+/// if serialization itself fails (never panics via `.unwrap()`).
+fn print_json_output(out: &JsonOutput) {
+    match serde_json::to_string(out) {
+        Ok(json) => println!("{}", json),
+        Err(e) => eprintln!("Error: failed to serialize JSON output: {}", e),
+    }
+}
+
 fn main() {
     let wall_start = Instant::now();
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -46,13 +86,36 @@ fn main() {
     let parsed = parse_args(&args);
     let json_output = parsed.json_output;
 
-    // Determine target directory (only used when --files is not provided)
+    // Determine target directory (only used when neither --files nor
+    // --files-from is provided)
     let target = std::env::var("XRAY_TARGET")
         .or_else(|_| parsed.remaining_args.first().cloned().ok_or(()))
         .unwrap_or_else(|_| default_target());
 
-    // Collect files: either from --files list or by walking target directory
-    let files: Vec<PathBuf> = if !parsed.file_list.is_empty() {
+    // Collect files: --files-from (Bug #1612 -- avoids argv overflow) takes
+    // precedence, then --files, then a full directory walk of `target`.
+    let files: Vec<PathBuf> = if let Some(ref files_from_path) = parsed.files_from_path {
+        match read_file_list(files_from_path) {
+            Ok(list) => list,
+            Err(msg) => {
+                if json_output {
+                    print_json_output(&JsonOutput {
+                        findings: vec![],
+                        files_parsed: 0,
+                        files_errored: 0,
+                        parse_scan_ms: 0,
+                        compile_ms: 0,
+                        cached: false,
+                        error: Some(msg),
+                        debug_messages: vec![],
+                    });
+                } else {
+                    eprintln!("Error: {}", msg);
+                }
+                std::process::exit(1);
+            }
+        }
+    } else if !parsed.file_list.is_empty() {
         parsed.file_list.iter().map(PathBuf::from).collect()
     } else {
         let target_path = PathBuf::from(&target);
@@ -100,7 +163,7 @@ fn main() {
                     error: Some(err_msg),
                     debug_messages: vec![],
                 };
-                println!("{}", serde_json::to_string(&out).unwrap());
+                print_json_output(&out);
             }
             // Human-readable error already printed inside build_dynlib_evaluators
             std::process::exit(1);
@@ -130,7 +193,7 @@ fn main() {
                     error: None,
                     debug_messages: result.debug_messages,
                 };
-                println!("{}", serde_json::to_string(&out).unwrap());
+                print_json_output(&out);
             } else {
                 let alloc_count = result
                     .findings
@@ -277,12 +340,85 @@ mod tests {
         assert!(!parsed.json_output);
         assert!(parsed.dynlib_path.is_none());
     }
+
+    // --- Bug #1612: --files-from <path> avoids passing the candidate list via argv ---
+
+    #[test]
+    fn test_parse_args_files_from_flag() {
+        let args = sv(&["--files-from", "/tmp/candidates.txt", "--json"]);
+        let parsed = parse_args(&args);
+        assert_eq!(
+            parsed.files_from_path,
+            Some("/tmp/candidates.txt".to_string())
+        );
+        assert!(parsed.json_output);
+    }
+
+    #[test]
+    fn test_parse_args_files_stops_at_files_from_flag() {
+        let args = sv(&["--files", "a.rs", "--files-from", "/tmp/list.txt"]);
+        let parsed = parse_args(&args);
+        assert_eq!(parsed.file_list, sv(&["a.rs"]));
+        assert_eq!(parsed.files_from_path, Some("/tmp/list.txt".to_string()));
+    }
+
+    #[test]
+    fn test_parse_args_files_from_absent_by_default() {
+        let parsed = parse_args(&sv(&["--json"]));
+        assert!(parsed.files_from_path.is_none());
+    }
+
+    // --- Bug #1612: read_file_list() reads the candidate list from disk ---
+
+    #[test]
+    fn test_read_file_list_parses_newline_delimited_paths() {
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!(
+            "xray_cli_test_read_file_list_{}_{}.txt",
+            std::process::id(),
+            "a"
+        ));
+        std::fs::write(&path, "/a/One.java\n/a/Two.java\n\n  \n/a/Three.java\n").unwrap();
+
+        let result = read_file_list(path.to_str().unwrap());
+
+        std::fs::remove_file(&path).ok();
+
+        let files = result.expect("read_file_list must succeed for an existing file");
+        assert_eq!(
+            files,
+            vec![
+                PathBuf::from("/a/One.java"),
+                PathBuf::from("/a/Two.java"),
+                PathBuf::from("/a/Three.java"),
+            ],
+            "blank lines must be skipped and remaining lines preserved in order"
+        );
+    }
+
+    #[test]
+    fn test_read_file_list_missing_file_returns_error() {
+        let missing = std::env::temp_dir().join(format!(
+            "xray_cli_test_read_file_list_missing_{}.txt",
+            std::process::id()
+        ));
+        // Ensure it really does not exist.
+        std::fs::remove_file(&missing).ok();
+
+        let result = read_file_list(missing.to_str().unwrap());
+
+        assert!(
+            result.is_err(),
+            "read_file_list must return Err for a nonexistent path"
+        );
+    }
 }
 
 fn parse_args(args: &[String]) -> ParsedArgs {
     let mut dynlib_path = None;
     let mut json_output = false;
     let mut file_list = Vec::new();
+    let mut files_from_path = None;
     let mut remaining = Vec::new();
     let mut i = 0;
     while i < args.len() {
@@ -296,17 +432,31 @@ fn parse_args(args: &[String]) -> ParsedArgs {
                 std::process::exit(1);
             }
         }
+        if args[i] == "--files-from" {
+            if i + 1 < args.len() {
+                files_from_path = Some(args[i + 1].clone());
+                i += 2;
+                continue;
+            } else {
+                eprintln!("Error: --files-from requires a path to a newline-delimited file list");
+                std::process::exit(1);
+            }
+        }
         if args[i] == "--json" {
             json_output = true;
             i += 1;
             continue;
         }
+        // NOTE: --files-from (Bug #1612) is the live path used by the Python
+        // integration (RustNativeBackend) to avoid ARG_MAX overflow at fleet
+        // scale. --files is retained only for backward compatibility and
+        // manual/ad-hoc CLI invocation.
         if args[i] == "--files" {
             i += 1;
             // Consume all subsequent args until we see a KNOWN flag.
             // This allows filenames that start with "--" (e.g. "--weird.rs").
             while i < args.len() {
-                if args[i] == "--json" || args[i] == "--dynlib" {
+                if args[i] == "--json" || args[i] == "--dynlib" || args[i] == "--files-from" {
                     break;
                 }
                 file_list.push(args[i].clone());
@@ -321,6 +471,7 @@ fn parse_args(args: &[String]) -> ParsedArgs {
         dynlib_path,
         json_output,
         file_list,
+        files_from_path,
         remaining_args: remaining,
     }
 }

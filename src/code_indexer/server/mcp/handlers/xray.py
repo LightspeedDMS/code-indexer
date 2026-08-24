@@ -634,6 +634,16 @@ async def handle_xray_search(params: Dict[str, Any], user: User) -> Dict[str, An
                     bjm.register_child_process(jid, proc)
 
                 try:
+                    # Bug #1590 AC3: transition to "running" only once
+                    # execution actually starts (after the cell-limiter slot
+                    # is held, before Phase 1 begins) -- so the dashboard can
+                    # distinguish "queued, no worker slot yet" from
+                    # "actively executing". Code-review finding F2: this
+                    # call MUST be inside this try block -- placed before it,
+                    # a raising update_status() (e.g. a SQLite write
+                    # failure) would skip the finally below and leak the
+                    # held xray cell-limiter slot forever.
+                    _get_job_tracker().update_status(jid, status="running")
                     result = _E().run(
                         repo_path=rp,
                         driver_regex=driver_regex,
@@ -808,6 +818,15 @@ async def handle_xray_search(params: Dict[str, Any], user: User) -> Dict[str, An
             bjm.register_child_process(job_id, proc)
 
         try:
+            # Bug #1590 AC3: transition to "running" only once execution
+            # actually starts (after the cell-limiter slot is held, before
+            # Phase 1 begins) -- so the dashboard can distinguish "queued,
+            # no worker slot yet" from "actively executing". Code-review
+            # finding F2: this call MUST be inside this try block --
+            # placed before it, a raising update_status() (e.g. a SQLite
+            # write failure) would skip the finally below and leak the
+            # held xray cell-limiter slot forever.
+            job_tracker.update_status(job_id, status="running")
             result = _Engine().run(
                 repo_path=repo_path,
                 driver_regex=driver_regex,
@@ -901,6 +920,19 @@ def _make_xray_explore_job_fn(  # type: ignore[no-untyped-def]
                 bjm.register_child_process(job_id_holder[0], proc)
 
         try:
+            # Bug #1590 AC3: transition to "running" only once execution
+            # actually starts (after the cell-limiter slot is held, before
+            # Phase 1 begins) -- so the dashboard can distinguish "queued,
+            # no worker slot yet" from "actively executing". job_id_holder
+            # is a single-element list populated by the caller before
+            # job_fn runs (both single-repo and multi-repo/omni explore
+            # paths). Code-review finding F2: this call MUST be inside
+            # this try block -- placed before it, a raising
+            # update_status() (e.g. a SQLite write failure) would skip the
+            # finally below and leak the held xray cell-limiter slot
+            # forever.
+            if job_id_holder:
+                _get_job_tracker().update_status(job_id_holder[0], status="running")
             result = _Engine().run(
                 repo_path=repo_path,
                 driver_regex=driver_regex,

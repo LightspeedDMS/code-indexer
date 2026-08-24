@@ -492,7 +492,12 @@ class ScipConfig:
     temporal_stale_threshold_days: int = 7
     # AC31: SCIP reference limit (default 100, range 10-10000)
     scip_reference_limit: int = 100
-    # AC32: SCIP dependency depth (default 3, range 1-20)
+    # AC32: SCIP dependency depth (default 3, range 1-10)
+    # Bug #1625: ceiling lowered from 20 to 10 to match the SCIP engine's
+    # real get_dependencies()/get_dependents() ceiling (hardcoded 10 in
+    # scip/database/queries.py) -- kept in sync with
+    # server/services/constants.py's MAX_SCIP_DEPENDENCY_DEPTH and with
+    # the validate_config() check below.
     scip_dependency_depth: int = 3
     # AC33: SCIP callchain max depth (validated range 1-50, kept for
     # backward compatibility with already-persisted config.json values).
@@ -3196,10 +3201,23 @@ class ServerConfigManager:
                 raise ValueError(
                     f"scip_reference_limit must be between 10 and 10000, got {config.scip_config.scip_reference_limit}"
                 )
-            # AC32: scip_dependency_depth range 1-20
-            if not (1 <= config.scip_config.scip_dependency_depth <= 20):
+            # AC32: scip_dependency_depth range (Bug #1625: sourced from
+            # server/services/constants.py, kept in sync with the SCIP
+            # engine's real get_dependencies()/get_dependents() ceiling in
+            # scip/database/queries.py)
+            from ..services.constants import (
+                MIN_SCIP_DEPENDENCY_DEPTH,
+                MAX_SCIP_DEPENDENCY_DEPTH,
+            )
+
+            if not (
+                MIN_SCIP_DEPENDENCY_DEPTH
+                <= config.scip_config.scip_dependency_depth
+                <= MAX_SCIP_DEPENDENCY_DEPTH
+            ):
                 raise ValueError(
-                    f"scip_dependency_depth must be between 1 and 20, got {config.scip_config.scip_dependency_depth}"
+                    f"scip_dependency_depth must be between {MIN_SCIP_DEPENDENCY_DEPTH} "
+                    f"and {MAX_SCIP_DEPENDENCY_DEPTH}, got {config.scip_config.scip_dependency_depth}"
                 )
             # AC33: scip_callchain_max_depth range 1-50
             if not (1 <= config.scip_config.scip_callchain_max_depth <= 50):

@@ -7,6 +7,92 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [12.25.0] - 2026-08-24
+
+### Fixed
+
+- **Bug #1635**: `BackgroundJobManager` starts 7 long-lived worker threads per instance;
+  many test files never called `.shutdown()` on it, and three further vectors (an
+  internal construction inside `create_app()`, an implicit default fallback in
+  `ActivatedRepoManager`/`SemanticQueryManager`/`ActivatedRepoIndexManager`, and 10
+  unguarded `.shutdown()` call sites) went undetected by a simple literal-construction
+  grep. This compounded to 5,768 live threads during this session's own verification of
+  an unrelated fix, driving the host's load average to 1449 and requiring an emergency
+  process kill. `tests/unit/server/conftest.py` now monkeypatches
+  `BackgroundJobManager.__init__` at the class level (covering both the canonical class
+  and a `src.`-prefixed import alias, confirmed to resolve to a genuinely distinct class
+  object), tracking and independently tearing down every instance constructed during a
+  test regardless of caller -- one mechanism covering all four vectors. Verified via a
+  full local regression run: 19,606 passed, 1 pre-existing unrelated flake (a deployment
+  test with an unmocked real network call).
+- **Bug #1623/#1624**: `RefreshScheduler`'s stale-index status check (interrupted-index
+  detection) only read the legacy bare `metadata.json` file, missing the signal entirely
+  when it existed only in a provider-suffixed file (`metadata-voyage-ai.json`,
+  `metadata-cohere.json`) -- confirmed live on real fleet repos. Made the check
+  provider-aware via a new `read_status()` reader sharing precedence logic with the
+  existing `read_current_commit()`. A companion fix attempt (normalizing a stale status
+  during legacy-to-provider migration) was reverted after code review proved it silently
+  disabled interrupted-index resume capability, producing a worse defect (a silent
+  partial index) than the one it targeted.
+- **Bug #1630**: `SCIPQueryEngine` derived `project_root` via a fixed two-directory-level
+  walk, correct only for a top-level SCIP database -- a sub-project's database at any
+  deeper nesting nesting undershot the real root, causing silently-empty source context
+  in query results and, on the mutable indexing path, creating a bogus nested
+  `.code-indexer/` directory inside the sub-project's own output folder (reproduced live
+  in this repo's own test fixtures). Fixed with a name-chain-anchored root resolver.
+- **Bug #1625/#1626/#1627**: a three-layer SCIP dependency-depth validation inconsistency
+  -- the Web UI Config screen allowed values up to 20 while the query engine hard-capped
+  at 10 (config-save-time now rejects out-of-range values instead of failing opaquely at
+  query time); `SCIPMultiService`'s dependencies/dependents endpoints had no explicit
+  depth guard (only accidental, and in one path non-existent, error propagation); the CLI
+  `dependencies`/`dependents` commands had no client-side validation, unlike their
+  `callchain` sibling.
+- **Bug #1629**: importing `code_indexer.server.mcp.handlers.search` in one test file
+  triggered a process-wide `MCPSelfRegistrationService` singleton registration as an
+  import-time side effect, silently corrupting an unrelated test file's own subprocess
+  mock when both ran in the same pytest session.
+- **Bug #1631/#1632**: the `correlation_id` reader was wired to a ContextVar that no
+  middleware ever populates, silently returning `None` everywhere it was used --
+  including the shared `logging_utils.get_log_extra()` helper and the primary audit
+  logger (~70 files total). Fixed by delegating to the actually-wired
+  `telemetry.correlation_bridge` reader.
+- **Bug #1590/#1608/#1609/#1611/#1634**: `regex_search`'s ripgrep-fallback and
+  pure-Python-multiline code paths, plus `RegexSearchService` construction and
+  `regex_routes.py`'s alias resolution, performed unbounded synchronous filesystem I/O
+  and had no timeout enforcement on several sub-paths -- all now offloaded off the event
+  loop and/or timeout-bounded, closing several distinct risks of hanging the server event
+  loop or the `xray_search` job status.
+- **Bug #1610**: a package-level `__setattr__` forwarding shim corrupted unrelated,
+  independently-defined submodule attributes that happened to share a name, causing
+  cross-test pollution in `tests/unit/server/mcp/`.
+- **Bug #1612**: `xray_search` filename mode failed with "Argument list too long" on large
+  candidate sets by spreading candidates into subprocess argv; now passed via a temp
+  file.
+- **Bug #1613/#1614**: `scip_callchain` reported a hardcoded `scip_files_searched: 0`
+  instead of a real count; `scip_dependents`/`scip_dependencies` silently clamped
+  out-of-range depth instead of rejecting it loudly, unlike every other SCIP depth front
+  door.
+- **Bug #1616**: `SCIPQueryEngine` opened versioned-snapshot sub-databases read-write,
+  causing readonly-database warning spam and silent data exclusion under immutable
+  snapshots.
+- **Bug #1618**: activation clone-phase orphan cleanup ran (and logged a false
+  "late-materializing async clone" warning plus unnecessary sleep delay) even when the
+  clone was never attempted because write-lock acquisition failed.
+- **Bug #1628**: the generic MCP route smoke test hung indefinitely against the
+  `/mcp-public` SSE stream endpoint, which was never excluded from the test's generic
+  route-probing logic.
+- **Bug #1633**: a test's monkeypatch stub predated an earlier bug fix's new function
+  parameter, causing the test to fail unconditionally on every run.
+
+### Investigated
+
+- **Bug #1591**: abbreviated-SHA-prefix commit values were incorrectly flagged as drift
+  in the stale-index check; now recognized as non-drifted when they match a full SHA's
+  prefix.
+- **Bug #1615**: freshly-generated SCIP index returning `total_results: 0` for ~20 minutes
+  on clustered staging was investigated and found not locally reproducible; re-scoped
+  toward cluster/NFS-level investigation.
+
 ## [12.24.0] - 2026-08-21
 
 ### Fixed

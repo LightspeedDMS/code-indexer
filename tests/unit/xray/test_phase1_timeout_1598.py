@@ -56,12 +56,14 @@ AC coverage map:
         tests/unit/server/mcp/test_xray_pcre2_invalid_regex_v10_4_4.py
         files unmodified alongside this one -- not duplicated here.
   AC-12 _search_python_multiline (src/code_indexer/global_repos/regex_search.py)
-        still has no timeout_seconds parameter as of this fix and remains
-        explicitly, deliberately out of scope: it is the pure-Python
-        multiline fallback used only when multiline=True on the grep engine
-        or when ripgrep is unavailable, neither of which this bug's fix
-        touches. Filed as priority-4 GitHub follow-up issue #1611 rather
-        than left as an undocumented residual gap.
+        had no timeout_seconds parameter as of this bug's fix and was
+        explicitly, deliberately left out of scope here: it is the
+        pure-Python multiline fallback used only when multiline=True on the
+        grep engine or when ripgrep is unavailable, neither of which this
+        bug's fix touches. Filed as priority-4 GitHub follow-up issue #1611
+        rather than left as an undocumented residual gap -- #1611 has since
+        been fixed, adding and enforcing timeout_seconds on that fallback
+        (see tests/unit/global_repos/test_regex_search_python_multiline_timeout_1611.py).
 
 Review-finding coverage (post-merge review round):
   R1  TestZeroMatchProbeSharedBudget.test_probe_shares_one_budget_across_patterns

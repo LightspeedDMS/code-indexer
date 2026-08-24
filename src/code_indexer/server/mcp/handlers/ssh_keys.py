@@ -6,7 +6,9 @@ import logging
 from threading import Lock
 from typing import Dict, Any, Optional, TYPE_CHECKING
 
-from ...middleware.correlation import get_correlation_id
+from ...telemetry.correlation_bridge import (
+    get_current_correlation_id as get_correlation_id,
+)
 from ...auth.user_manager import User
 from ...services.ssh_key_manager import (
     SSHKeyManager,

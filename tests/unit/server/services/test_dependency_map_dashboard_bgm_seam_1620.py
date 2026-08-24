@@ -118,7 +118,7 @@ class TestDashboardJobRealBgmSeam:
     """Bug #1620: real DependencyMapDashboardJobRunner.run through real BGM."""
 
     def test_submit_dashboard_job_completes_through_real_bgm(
-        self, cache_backend, tmp_path: Path
+        self, cache_backend, tmp_path: Path, background_job_manager_factory
     ) -> None:
         """
         _submit_dashboard_job must produce a job that reaches status
@@ -132,7 +132,7 @@ class TestDashboardJobRealBgmSeam:
         'job_id', and the job is marked FAILED with that TypeError
         as its error before the worker body ever executes.
         """
-        bgm = BackgroundJobManager(storage_path=str(tmp_path / "jobs.json"))
+        bgm = background_job_manager_factory(storage_path=str(tmp_path / "jobs.json"))
         dashboard_service = _FakeDashboardService()
 
         job_id = _submit_dashboard_job(
@@ -163,10 +163,10 @@ class TestDashboardJobCacheSlotMatchesRealJobId:
     """
 
     def test_cache_slot_holds_real_bgm_job_id_after_submission(
-        self, cache_backend, tmp_path: Path
+        self, cache_backend, tmp_path: Path, background_job_manager_factory
     ) -> None:
         """The cache slot's job_id must equal the job_id BGM is tracking."""
-        bgm = BackgroundJobManager(storage_path=str(tmp_path / "jobs.json"))
+        bgm = background_job_manager_factory(storage_path=str(tmp_path / "jobs.json"))
         dashboard_service = _FakeDashboardService()
 
         returned_job_id = _submit_dashboard_job(
@@ -206,9 +206,9 @@ class TestDashboardJobFailurePathWithNullTracker:
     """
 
     def test_failure_with_null_tracker_reports_real_error_not_attributeerror(
-        self, cache_backend, tmp_path: Path
+        self, cache_backend, tmp_path: Path, background_job_manager_factory
     ) -> None:
-        bgm = BackgroundJobManager(storage_path=str(tmp_path / "jobs.json"))
+        bgm = background_job_manager_factory(storage_path=str(tmp_path / "jobs.json"))
         dashboard_service = _FailingDashboardService()
 
         job_id = _submit_dashboard_job(

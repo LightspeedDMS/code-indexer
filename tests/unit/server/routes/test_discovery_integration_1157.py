@@ -72,7 +72,10 @@ def admin_client_and_bgm():
             "code_indexer.server.web.routes.get_session_manager", return_value=mock_sm
         ):
             client = TestClient(app, raise_server_exceptions=False)
-            yield client, bgm
+            try:
+                yield client, bgm
+            finally:
+                bgm.shutdown()
 
 
 def _make_mock_provider(repos=None, total_source=None):
@@ -252,10 +255,11 @@ class TestPayloadCacheReads:
 class TestDedupDuringPendingJob:
     """When a job is in PENDING state, second POST returns same job_id."""
 
-    def test_second_post_returns_same_job_id(self, admin_client_and_bgm):
+    def test_second_post_returns_same_job_id(
+        self, admin_client_and_bgm, background_job_manager_factory
+    ):
         """Two POSTs for same platform return same job_id while first is pending."""
         from code_indexer.server.repositories.background_jobs import (
-            BackgroundJobManager,
             JobStatus,
             BackgroundJob,
         )
@@ -264,7 +268,7 @@ class TestDedupDuringPendingJob:
         client, _ = admin_client_and_bgm
 
         # Use a fresh BGM with a pre-inserted PENDING job (no real execution)
-        bgm_dedup = BackgroundJobManager()
+        bgm_dedup = background_job_manager_factory()
 
         existing_job_id = "dedup-pending-job"
         job = BackgroundJob(

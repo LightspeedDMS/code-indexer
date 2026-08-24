@@ -56,6 +56,10 @@ from code_indexer.server.services.cidx_meta_backup import (
 )
 from code_indexer.server.services.config_service import get_config_service
 from code_indexer.server.services.db_outage_throttle import DbOutageThrottle
+from code_indexer.server.services.metadata_reader import (
+    read_current_commit,
+    read_status,
+)
 from code_indexer.server.storage.sqlite_backends import GoldenRepoMetadataSqliteBackend
 from code_indexer.server.storage.shared.nfs_visibility import (
     _configured_visibility_timeout,
@@ -3124,27 +3128,24 @@ class RefreshScheduler:
         # --reconcile compares content IDs against existing vectors, skips unchanged
         # files. Only used when needed (interrupted state or extension drift), otherwise
         # normal incremental.
+        # Bug #1623-A: provider-aware read (voyage-ai first, legacy bare
+        # metadata.json fallback) via metadata_reader.read_status() -- this
+        # call site is a second, verbatim copy of the exact gap Bug #1623
+        # fixed in _check_stale_index_metadata(): reading only the bare
+        # legacy metadata.json left an in_progress/failed status recorded
+        # ONLY in a provider-suffixed file (e.g. metadata-voyage-ai.json,
+        # the real production filename) invisible here. read_status()
+        # never raises; it returns None on any read/parse error, missing
+        # file, or missing/empty key, which safely disables --reconcile
+        # (fail-open, matching the original bare try/except's behavior).
         needs_reconcile = False
-        metadata_path = Path(source_path) / ".code-indexer" / "metadata.json"
-        if metadata_path.exists():
-            try:
-                import json as _json
-
-                with open(metadata_path) as _f:
-                    _meta = _json.load(_f)
-                meta_status = _meta.get("status", "")
-                if meta_status in ("in_progress", "failed"):
-                    needs_reconcile = True
-                    logger.info(
-                        f"Previous indexing interrupted (status={meta_status}), "
-                        f"using --reconcile for crash recovery on {alias_name}"
-                    )
-            except Exception as _meta_err:
-                logger.warning(
-                    "Could not read metadata.json for %s, proceeding without --reconcile: %s",
-                    alias_name,
-                    _meta_err,
-                )
+        meta_status = read_status(source_path)
+        if meta_status in ("in_progress", "failed"):
+            needs_reconcile = True
+            logger.info(
+                f"Previous indexing interrupted (status={meta_status}), "
+                f"using --reconcile for crash recovery on {alias_name}"
+            )
 
         # Story #1001: OR with force_reconcile from extension-drift detection.
         needs_reconcile = needs_reconcile or force_reconcile
@@ -4060,18 +4061,81 @@ class RefreshScheduler:
         LAST indexing pass for the current local HEAD actually completed.
         If a refresh's git-pull step succeeds but the subsequent indexing
         step is interrupted (server restart landing mid-refresh, `cidx
-        index` crash, OOM kill) before .code-indexer/metadata.json is
-        updated, every SUBSEQUENT refresh will see local HEAD == origin
-        HEAD and has_changes() will report False forever -- permanently
-        masking that the on-disk index is stale relative to the git tree
-        it is supposedly built from.
+        index` crash, OOM kill) before metadata is updated, every
+        SUBSEQUENT refresh will see local HEAD == origin HEAD and
+        has_changes() will report False forever -- permanently masking
+        that the on-disk index is stale relative to the git tree it is
+        supposedly built from.
 
-        This cross-checks metadata.json against two independent signals:
+        This cross-checks metadata against two independent signals:
         - status "in_progress"/"failed": the last indexing attempt for
           whatever commit it recorded never completed.
         - current_commit != actual working-tree HEAD: the git tree has
           advanced (via a pull) past the last commit that was ever
           recorded as indexed, regardless of that run's reported status.
+
+        Bug #1591 (provider-aware current_commit read): current_commit is
+        read via metadata_reader.read_current_commit(), which resolves
+        the REAL filename SmartIndexer writes in production --
+        `.code-indexer/metadata-{provider}.json` (e.g.
+        metadata-voyage-ai.json) -- falling back to the legacy bare
+        metadata.json only when no provider file exists. A live census of
+        the dev golden-repos fleet found 15 metadata-voyage-ai.json + 13
+        metadata-cohere.json vs only 2 bare metadata.json; reading only
+        the legacy file (the original Bug #1508 implementation) left the
+        current_commit signal permanently inert on ~93% of the fleet,
+        which in turn meant the "unknown"/stale-SHA self-heal below could
+        never actually run for those repos. This fix makes the signal
+        effective fleet-wide for the provider filenames read_current_commit
+        knows about (voyage-ai and legacy bare); a repo whose ONLY
+        metadata file uses a different provider suffix (e.g.
+        metadata-cohere.json) is not covered by this fix -- that is a
+        pre-existing gap in read_current_commit() itself, out of scope
+        here.
+
+        Bug #1623 (provider-aware status read): the status signal above
+        was, until this fix, the ONLY remaining part of this check still
+        blind to provider-suffixed metadata files -- it read the legacy
+        bare metadata.json exclusively even after #1591 made
+        current_commit provider-aware. It is now read via
+        metadata_reader.read_status(), the status-field sibling of
+        read_current_commit() with the IDENTICAL provider-first
+        (metadata-voyage-ai.json), legacy-fallback (metadata.json)
+        precedence. Live evidence: colorama/metadata-voyage-ai.json and
+        markupsafe/metadata-voyage-ai.json both recorded
+        status=in_progress while their sibling metadata-cohere.json files
+        said completed -- exactly the interrupted-index condition this
+        check exists to catch, sitting in a file the status check never
+        opened before this fix. Same scope limitation as
+        read_current_commit(): a repo whose ONLY metadata file uses a
+        different provider suffix (e.g. metadata-cohere.json) is not
+        covered.
+
+        Bug #1591 (prefix tolerance): the current_commit comparison is
+        prefix-tolerant, not a plain string equality, and requires at
+        least 7 hex characters (git's own default abbreviation length) to
+        accept a value as a genuine prefix -- anything shorter is too
+        collision-prone to trust as a real commit identifier. Three
+        independent producers write this field: git_detection.py's
+        GitDetectionService._get_detailed_git_state() (the real indexing
+        path, reached via SmartIndexer.get_git_status() ->
+        GitAwareDocumentProcessor.get_git_status() ->
+        self.git_detection._get_current_git_state()) and
+        file_identifier.py's _get_cached_commit_hash() both write the
+        FULL 40-char SHA via `git rev-parse HEAD` and both write the
+        literal "unknown" if that command fails; config_fixer.py's
+        GitStateDetector previously wrote an abbreviated 7-char SHA via
+        `git rev-parse --short HEAD` (changed to the full SHA in the same
+        fix that added this prefix tolerance) and also writes "unknown"
+        on failure. A recorded value that is a genuine, valid-hex prefix
+        (>=7 chars, case-insensitive) of the actual HEAD is the SAME
+        commit and must NOT be treated as drift. The literal "unknown"
+        (matched case/whitespace-insensitively) carries no usable
+        information and always forces one reconcile so a real commit gets
+        recorded going forward -- the subsequent real indexing run writes
+        a full SHA via one of the producers above, which self-heals the
+        field for future cycles for any repo whose metadata file is one
+        read_current_commit() actually consults.
 
         Args:
             source_path: Absolute path to the live repo directory.
@@ -4081,23 +4145,13 @@ class RefreshScheduler:
             True if a reconcile pass is needed to catch up a stale index,
             False if metadata is absent, unreadable, or fully consistent.
         """
-        metadata_path = Path(source_path) / ".code-indexer" / "metadata.json"
-        if not metadata_path.exists():
-            return False
-
-        try:
-            with open(metadata_path) as f:
-                meta = json.load(f)
-        except Exception as e:
-            logger.warning(
-                "Could not read metadata.json for %s while checking for a "
-                "stale index, proceeding without forced reconcile: %s",
-                alias_name,
-                e,
-            )
-            return False
-
-        status = meta.get("status", "")
+        # Bug #1623: provider-aware read (voyage-ai first, legacy bare
+        # metadata.json fallback) -- see docstring above. read_status()
+        # never raises; it returns None on any read/parse error, missing
+        # file, or missing/empty key, which safely falls through to the
+        # current_commit check below (fail-open, matching the
+        # current_commit signal's own error handling).
+        status = read_status(source_path)
         if status in ("in_progress", "failed"):
             logger.warning(
                 "Stale/interrupted index detected for %s (metadata "
@@ -4108,7 +4162,9 @@ class RefreshScheduler:
             )
             return True
 
-        recorded_commit = meta.get("current_commit")
+        # Bug #1591: provider-aware read (voyage-ai first, legacy bare
+        # metadata.json fallback) -- see docstring above.
+        recorded_commit = read_current_commit(source_path)
         if not recorded_commit:
             return False
 
@@ -4133,18 +4189,42 @@ class RefreshScheduler:
             return False
 
         actual_commit = head_result.stdout.strip()
-        if actual_commit and actual_commit != recorded_commit:
+        if not actual_commit:
+            return False
+
+        recorded_lower = recorded_commit.strip().lower()
+
+        if recorded_lower == "unknown":
             logger.warning(
-                "Index metadata for %s reflects commit %s but working tree "
-                "HEAD is %s -- forcing reconcile to catch up on drifted "
-                "index (Bug #1508)",
+                "Index metadata for %s has no usable recorded commit "
+                '("unknown", written on a git-state detection failure by '
+                "config_fixer.py, git_detection.py, or file_identifier.py) "
+                "-- forcing reconcile once so a real commit gets recorded "
+                "going forward (Bug #1591)",
                 alias_name,
-                recorded_commit,
-                actual_commit,
             )
             return True
 
-        return False
+        # A shorter, valid-hex recorded value that is a genuine PREFIX of
+        # the actual HEAD is the SAME commit, not drift -- but only when
+        # it meets git's own minimum abbreviation length of 7 characters;
+        # anything shorter (e.g. a single character) is too collision-
+        # prone to trust as a real commit identifier.
+        is_hex_fragment = len(recorded_lower) >= 7 and all(
+            c in "0123456789abcdef" for c in recorded_lower
+        )
+        if is_hex_fragment and actual_commit.lower().startswith(recorded_lower):
+            return False
+
+        logger.warning(
+            "Index metadata for %s reflects commit %s but working tree "
+            "HEAD is %s -- forcing reconcile to catch up on drifted "
+            "index (Bug #1508)",
+            alias_name,
+            recorded_commit,
+            actual_commit,
+        )
+        return True
 
     def _detect_existing_indexes(
         self, repo_path: Path, repo_alias: Optional[str] = None

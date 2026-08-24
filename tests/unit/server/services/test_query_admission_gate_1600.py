@@ -294,4 +294,4 @@ class TestRaiseMemoryPressureHttpError:
         assert exc_info.value.headers["Retry-After"] == str(
             _EXPECTED_RETRY_AFTER_SECONDS
         )
-        assert exc_info.value.detail["error_code"] == "memory_pressure"
+        assert exc_info.value.detail["error_code"] == "memory_pressure"  # type: ignore[index]  # HTTPException.detail is str|Any; dict access is safe here

@@ -6,7 +6,7 @@ Rust-native scanner backend.
 Pipeline:
 1. Validate Rust evaluator code via validate_rust_evaluator()
 2. Write validated Rust code to a temp file
-3. Invoke xray-cli subprocess with --dynlib, --json, --files flags
+3. Invoke xray-cli subprocess with --dynlib, --json, --files-from flags
 4. Parse JSON output and group findings by file path
 5. Return List[(matches, errors, meta)] — one tuple per file spec
 
@@ -86,6 +86,9 @@ _RUSTC_VERSION_TIMEOUT_SECS = 10
 # Maximum stderr bytes to include in the rustc failure log message.
 _RUSTC_STDERR_LOG_LIMIT = 200
 
+# Maximum stderr bytes to include in an xray-cli non-zero-exit error message.
+_XRAY_CLI_STDERR_ERROR_LIMIT = 200
+
 # Environment variable that overrides the CIDX data directory root.
 # When set, the xray cache lives at $CIDX_DATA_DIR/xray-cache instead of
 # ~/.cidx-server/xray-cache, matching the server's IPC path alignment (Bug #879).
@@ -117,6 +120,36 @@ def _find_project_root() -> Path:
 
 _PROJECT_ROOT = _find_project_root()
 _XRAY_CLI_DEFAULT = _PROJECT_ROOT / "rust" / "target" / "release" / "xray-cli"
+
+
+def _write_temp_file(content: str, suffix: str, prefix: str) -> Any:
+    """Write content to a closed NamedTemporaryFile(delete=False), return the handle.
+
+    The caller is responsible for unlinking the file (via the returned
+    handle's .name attribute) once done with it. If write() raises, both
+    cleanup steps (unlink the on-disk file, close the file descriptor) are
+    attempted independently; any cleanup-step exception is swallowed so the
+    original write() exception is always what propagates -- callers never
+    see a leaked temp file/descriptor, and never see a masked root cause.
+    """
+    tmp = tempfile.NamedTemporaryFile(
+        suffix=suffix, mode="w", delete=False, prefix=prefix
+    )
+    try:
+        tmp.write(content)
+    except Exception:
+        try:
+            Path(tmp.name).unlink(missing_ok=True)
+        except Exception:
+            pass
+        try:
+            tmp.close()
+        except Exception:
+            pass
+        raise
+    tmp.close()
+    return tmp
+
 
 # Type alias for the run_batch return type.
 _BatchResult = List[
@@ -424,6 +457,41 @@ class RustNativeBackend:
         except Exception as exc:
             logger.warning("XrayCache: pre-fill failed: %s", exc)
 
+    def _run_xray_cli_process(
+        self,
+        cmd: List[str],
+        timeout_seconds: int,
+        on_process_spawned: Optional[Callable],
+    ) -> Tuple[str, Optional[str]]:
+        """Spawn xray-cli, wait for completion, return (stdout, error_msg)."""
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+
+        if on_process_spawned is not None:
+            on_process_spawned(proc)
+
+        try:
+            stdout, stderr = proc.communicate(timeout=timeout_seconds)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+            msg = f"xray-cli timed out after {timeout_seconds}s"
+            logger.warning("RustNativeBackend: %s", msg)
+            return "", _sanitize_error_message(msg)
+
+        if proc.returncode != 0 and not stdout.strip():
+            raw_msg = (
+                f"xray-cli exited with code {proc.returncode}: "
+                f"{stderr[:_XRAY_CLI_STDERR_ERROR_LIMIT]}"
+            )
+            logger.warning("RustNativeBackend: %s", raw_msg)
+            return "", _sanitize_error_message(raw_msg)
+        return stdout or "", None
+
     def _invoke_xray_cli(
         self,
         rust_code: str,
@@ -431,14 +499,24 @@ class RustNativeBackend:
         timeout_seconds: int,
         on_process_spawned: Optional[Callable],
     ) -> Tuple[str, Optional[str]]:
-        """Write temp file, invoke xray-cli, return (stdout, error_msg)."""
-        tmp_file = tempfile.NamedTemporaryFile(
-            suffix=".rs", mode="w", delete=False, prefix="xray_eval_"
-        )
+        """Write temp files (evaluator + candidate list), invoke xray-cli.
+
+        Returns (stdout, error_msg).
+
+        Bug #1612: the candidate file list is written to a temp file and
+        handed to xray-cli via --files-from instead of individual --files
+        argv elements. Passing tens of thousands of candidate paths as argv
+        overflows ARG_MAX (OSError: [Errno 7] Argument list too long) once a
+        repo's candidate set is large enough -- the temp-file handoff has no
+        such ceiling.
+        """
+        tmp_file: Optional[Any] = None
+        files_tmp: Optional[Any] = None
         try:
-            tmp_file.write(rust_code)
-            tmp_file.close()
-            tmp_path = tmp_file.name
+            tmp_file = _write_temp_file(rust_code, suffix=".rs", prefix="xray_eval_")
+            files_tmp = _write_temp_file(
+                "\n".join(abs_paths), suffix=".txt", prefix="xray_files_"
+            )
 
             # Cluster pre-fill: if PG has a fresh blob, write it locally so Rust
             # sees a local cache hit and skips compilation entirely.
@@ -448,42 +526,27 @@ class RustNativeBackend:
             cmd = [
                 str(self._xray_cli_path),
                 "--dynlib",
-                tmp_path,
-                "--files",
-                *abs_paths,
+                tmp_file.name,
+                "--files-from",
+                files_tmp.name,
                 "--json",
             ]
-
-            proc = subprocess.Popen(
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-            )
-
-            if on_process_spawned is not None:
-                on_process_spawned(proc)
-
-            try:
-                stdout, stderr = proc.communicate(timeout=timeout_seconds)
-            except subprocess.TimeoutExpired:
-                proc.kill()
-                proc.wait()
-                msg = f"xray-cli timed out after {timeout_seconds}s"
-                logger.warning("RustNativeBackend: %s", msg)
-                return "", _sanitize_error_message(msg)
-
-            if proc.returncode != 0 and not stdout.strip():
-                raw_msg = f"xray-cli exited with code {proc.returncode}: {stderr[:200]}"
-                logger.warning("RustNativeBackend: %s", raw_msg)
-                return "", _sanitize_error_message(raw_msg)
-            return stdout or "", None
-        except FileNotFoundError as exc:
+            return self._run_xray_cli_process(cmd, timeout_seconds, on_process_spawned)
+        except OSError as exc:
+            # Broadened from FileNotFoundError (Bug #1612): ANY OS-level
+            # failure -- creating the temp files or spawning xray-cli,
+            # including a residual E2BIG ("Argument list too long") -- must
+            # be caught here and surfaced as a structured error tuple, never
+            # propagate unhandled up through run_batch() into the MCP layer
+            # as a raw -32603 internal error.
             msg = f"xray-cli could not be executed: {exc}"
             logger.error("RustNativeBackend: %s", msg)
             return "", _sanitize_error_message(msg)
         finally:
-            Path(tmp_file.name).unlink(missing_ok=True)
+            if tmp_file is not None:
+                Path(tmp_file.name).unlink(missing_ok=True)
+            if files_tmp is not None:
+                Path(files_tmp.name).unlink(missing_ok=True)
 
     def _parse_json_output(self, stdout: str) -> Tuple[Dict[str, Any], Optional[str]]:
         """Parse JSON from xray-cli stdout. Returns (output_dict, error_msg)."""

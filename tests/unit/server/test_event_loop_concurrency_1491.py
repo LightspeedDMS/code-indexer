@@ -1590,10 +1590,13 @@ class _PrefilterObserver:
             search_path: Path,
             path: Optional[str],
             case_sensitive: bool,
+            deadline: Optional[float] = None,
         ) -> Optional[List[Path]]:
             if self.barrier is not None:
                 self.barrier.enter()
-            raw = real(service_self, pattern, search_path, path, case_sensitive)
+            raw = real(
+                service_self, pattern, search_path, path, case_sensitive, deadline
+            )
             result: Optional[List[Path]] = None if raw is None else list(raw)
             with self._lock:
                 # -1 records "no usable pre-filter, full scan" distinctly from a

@@ -29,13 +29,13 @@ from code_indexer.server.repositories.background_jobs import (
 # ---------------------------------------------------------------------------
 
 
-def _make_bjm() -> BackgroundJobManager:
+def _make_bjm(background_job_manager_factory) -> BackgroundJobManager:
     """Create a BackgroundJobManager without maintenance mode or persistence."""
     with patch(
         "code_indexer.server.services.maintenance_service.get_maintenance_state"
     ) as mock_maint:
         mock_maint.return_value.is_maintenance_mode.return_value = False
-        bjm = BackgroundJobManager()
+        bjm = background_job_manager_factory()
     return bjm
 
 
@@ -68,9 +68,11 @@ def _insert_job(
 class TestRegisterChildProcess:
     """BackgroundJobManager.register_child_process stores process references."""
 
-    def test_register_child_process_stores_process(self):
+    def test_register_child_process_stores_process(
+        self, background_job_manager_factory
+    ):
         """register_child_process stores one process for a job_id."""
-        bjm = _make_bjm()
+        bjm = _make_bjm(background_job_manager_factory)
         mock_proc = MagicMock(spec=multiprocessing.Process)
         mock_proc.is_alive.return_value = True
 
@@ -81,9 +83,9 @@ class TestRegisterChildProcess:
         assert len(procs) == 1
         assert procs[0] is mock_proc
 
-    def test_register_child_process_multiple(self):
+    def test_register_child_process_multiple(self, background_job_manager_factory):
         """register_child_process appends multiple processes for the same job_id."""
-        bjm = _make_bjm()
+        bjm = _make_bjm(background_job_manager_factory)
         proc1 = MagicMock(spec=multiprocessing.Process)
         proc2 = MagicMock(spec=multiprocessing.Process)
         proc1.is_alive.return_value = True
@@ -107,9 +109,9 @@ class TestRegisterChildProcess:
 class TestUnregisterChildProcesses:
     """BackgroundJobManager.unregister_child_processes cleans up correctly."""
 
-    def test_unregister_child_processes_cleans_up(self):
+    def test_unregister_child_processes_cleans_up(self, background_job_manager_factory):
         """unregister_child_processes removes all processes for a job_id."""
-        bjm = _make_bjm()
+        bjm = _make_bjm(background_job_manager_factory)
         mock_proc = MagicMock(spec=multiprocessing.Process)
         bjm.register_child_process("job-cleanup", mock_proc)
 
@@ -119,9 +121,9 @@ class TestUnregisterChildProcesses:
             procs = bjm._child_processes.get("job-cleanup")
         assert procs is None
 
-    def test_unregister_idempotent(self):
+    def test_unregister_idempotent(self, background_job_manager_factory):
         """unregister_child_processes does not raise when job_id has no processes."""
-        bjm = _make_bjm()
+        bjm = _make_bjm(background_job_manager_factory)
 
         # Should not raise even with unknown job_id
         bjm.unregister_child_processes("nonexistent-job")
@@ -138,9 +140,9 @@ class TestUnregisterChildProcesses:
 class TestTerminateChildProcesses:
     """BackgroundJobManager._terminate_child_processes sends signals correctly."""
 
-    def test_terminate_sends_sigterm(self):
+    def test_terminate_sends_sigterm(self, background_job_manager_factory):
         """_terminate_child_processes calls terminate() on alive processes."""
-        bjm = _make_bjm()
+        bjm = _make_bjm(background_job_manager_factory)
         mock_proc = MagicMock(spec=multiprocessing.Process)
         # Returns True for the is_alive() check before terminate(), False for
         # the is_alive() check after join() so SIGKILL is NOT sent.
@@ -152,9 +154,9 @@ class TestTerminateChildProcesses:
         mock_proc.terminate.assert_called_once()
         mock_proc.kill.assert_not_called()
 
-    def test_terminate_escalates_to_sigkill(self):
+    def test_terminate_escalates_to_sigkill(self, background_job_manager_factory):
         """_terminate_child_processes sends SIGKILL if process survives SIGTERM grace period."""
-        bjm = _make_bjm()
+        bjm = _make_bjm(background_job_manager_factory)
         mock_proc = MagicMock(spec=multiprocessing.Process)
         # Process stays alive after terminate() + join(timeout=2.0)
         mock_proc.is_alive.return_value = True
@@ -165,9 +167,9 @@ class TestTerminateChildProcesses:
         mock_proc.terminate.assert_called_once()
         mock_proc.kill.assert_called_once()
 
-    def test_terminate_skips_dead_process(self):
+    def test_terminate_skips_dead_process(self, background_job_manager_factory):
         """_terminate_child_processes does not call terminate() on dead process."""
-        bjm = _make_bjm()
+        bjm = _make_bjm(background_job_manager_factory)
         mock_proc = MagicMock(spec=multiprocessing.Process)
         mock_proc.is_alive.return_value = False
 
@@ -190,9 +192,11 @@ class TestTerminateChildProcesses:
 class TestCancelJobTerminatesProcesses:
     """cancel_job triggers process termination for running jobs."""
 
-    def test_cancel_job_terminates_running_processes(self):
+    def test_cancel_job_terminates_running_processes(
+        self, background_job_manager_factory
+    ):
         """cancel_job calls _terminate_child_processes when job is RUNNING."""
-        bjm = _make_bjm()
+        bjm = _make_bjm(background_job_manager_factory)
         _insert_job(bjm, "job-running", JobStatus.RUNNING, username="alice")
         mock_proc = MagicMock(spec=multiprocessing.Process)
         # Returns True for the is_alive() check before terminate(), False for
@@ -206,9 +210,9 @@ class TestCancelJobTerminatesProcesses:
         assert result["success"] is True
         mock_proc.terminate.assert_called_once()
 
-    def test_cancel_job_pending_no_terminate(self):
+    def test_cancel_job_pending_no_terminate(self, background_job_manager_factory):
         """cancel_job does NOT call _terminate_child_processes for PENDING jobs."""
-        bjm = _make_bjm()
+        bjm = _make_bjm(background_job_manager_factory)
         _insert_job(bjm, "job-pending", JobStatus.PENDING, username="alice")
 
         with patch.object(bjm, "_persist_jobs"):
@@ -227,9 +231,11 @@ class TestCancelJobTerminatesProcesses:
 class TestRaceConditionCancelBeforeRegister:
     """AC7: cancel arriving before process registration terminates the process."""
 
-    def test_race_condition_cancel_before_register(self):
+    def test_race_condition_cancel_before_register(
+        self, background_job_manager_factory
+    ):
         """When job is already cancelled, register_child_process terminates the process."""
-        bjm = _make_bjm()
+        bjm = _make_bjm(background_job_manager_factory)
         _insert_job(bjm, "job-race", JobStatus.RUNNING, username="alice")
 
         # Mark job as cancelled (simulate cancel arriving first)
@@ -254,12 +260,14 @@ class TestRaceConditionCancelBeforeRegister:
 class TestExceptionAfterCancelYieldsCancelled:
     """When process termination causes an exception, status must be CANCELLED."""
 
-    def test_cancelled_job_exception_yields_cancelled(self):
+    def test_cancelled_job_exception_yields_cancelled(
+        self, background_job_manager_factory
+    ):
         """If job.cancelled is True when exception fires, status = CANCELLED."""
         import threading
         import time
 
-        bjm = _make_bjm()
+        bjm = _make_bjm(background_job_manager_factory)
         barrier = threading.Event()
 
         def slow_then_fail():
