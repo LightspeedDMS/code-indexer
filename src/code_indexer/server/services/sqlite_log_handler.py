@@ -28,6 +28,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
+from code_indexer.server.logging_utils import inject_correlation_id
 from code_indexer.server.storage.database_manager import DatabaseConnectionManager
 
 logger = logging.getLogger(__name__)
@@ -334,6 +335,18 @@ class SQLiteLogHandler(logging.Handler):
             return
         self._emit_guard.active = True
         try:
+            # Bug #1641 defense-in-depth: when this handler is attached
+            # directly to a logger WITHOUT async_logging's queue in
+            # between, emit() runs on the original calling thread, so the
+            # ambient correlation id is still visible here. In the real
+            # production configuration (behind install_queue_logging's
+            # QueueListener) this is a no-op -- the record already carries
+            # correlation_id, injected earlier by
+            # IdentityQueueHandler.prepare() on the request thread, before
+            # the record crossed into the listener thread where this
+            # context would no longer be visible.
+            inject_correlation_id(record)
+
             # Format the message
             message = self.format(record)
 

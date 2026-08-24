@@ -13,6 +13,7 @@ Usage:
     )
 """
 
+import logging
 import re
 from typing import Any, Dict
 
@@ -106,6 +107,52 @@ def get_log_extra(error_code: str) -> Dict[str, Any]:
         extra["correlation_id"] = correlation_id
 
     return extra
+
+
+def inject_correlation_id(record: logging.LogRecord) -> None:
+    """
+    Populate ``record.correlation_id`` from the ambient request context,
+    unless the call site already set one explicitly (Bug #1641).
+
+    Background: get_correlation_id() (healed by #1631/#1632) correctly
+    reads the correlation id for the CURRENT request/task context, but the
+    log-store persistence handler (SQLiteLogHandler) only ever reads
+    ``record.correlation_id`` -- an attribute that exists on a LogRecord
+    ONLY when the logging call site explicitly passed
+    ``extra={"correlation_id": ...}`` (e.g. via get_log_extra() above).
+    The overwhelming majority of ``logger.info()/warning()/error()`` calls
+    across the codebase pass no ``extra`` at all, so the record never
+    carries the attribute and the log store's correlation_id COLUMN stays
+    NULL even though the reader itself works correctly.
+
+    This helper is the single, call-site-independent wiring point: it must
+    be invoked as early as possible in the logging pipeline, on the
+    ORIGINAL calling thread (before any hand-off to an async queue/listener
+    thread), because ``get_correlation_id()`` resolves a ``contextvars``
+    value that does NOT propagate across a plain ``threading.Thread``
+    boundary. Callers: ``async_logging.IdentityQueueHandler.prepare()``
+    (the real production wiring point -- runs on the request thread before
+    the record is enqueued) and, defensively,
+    ``SQLiteLogHandler.emit()`` (covers the non-queued direct-attach case).
+
+    An explicitly-provided ``record.correlation_id`` (any truthy value) is
+    NEVER overridden -- a call site that deliberately attributes a log line
+    to a different correlation id (e.g. one propagated from an unrelated
+    background job) must win over the ambient per-thread context.
+
+    Args:
+        record: The LogRecord to enrich in place. No-op if a correlation id
+            is already present on the record, or if none is active in the
+            current context (never fabricates a value).
+    """
+    if getattr(record, "correlation_id", None):
+        return
+
+    from code_indexer.server.middleware.correlation import get_correlation_id
+
+    correlation_id = get_correlation_id()
+    if correlation_id:
+        record.correlation_id = correlation_id
 
 
 def sanitize_for_logging(data: Any) -> Any:

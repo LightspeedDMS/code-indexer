@@ -101,7 +101,22 @@ class IdentityQueueHandler(logging.handlers.QueueHandler):
         a process boundary. Our QueueListener and its handlers run in-process, so
         we keep the raw record and let the real handlers format it on the listener
         thread (off the request hot path).
+
+        Bug #1641: this method runs synchronously on the ORIGINAL calling
+        (request) thread -- the last point before the record is handed off
+        to the listener thread via the queue. It is therefore the correct,
+        single central place to inject ``record.correlation_id`` from the
+        ambient request context: ``get_correlation_id()`` resolves a
+        ``contextvars`` value that would no longer be visible once the
+        record reaches the persistent listener thread (plain
+        ``threading.Thread`` instances do not inherit the calling thread's
+        context). This heals the log store's correlation_id column for
+        every ``logger.x()`` call server-wide without touching individual
+        call sites -- see ``logging_utils.inject_correlation_id``.
         """
+        from code_indexer.server.logging_utils import inject_correlation_id
+
+        inject_correlation_id(record)
         return record
 
     def _record_drop(self) -> None:

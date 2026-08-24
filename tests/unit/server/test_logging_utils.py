@@ -4,6 +4,8 @@ Unit tests for logging_utils module.
 Tests the logging utility functions for formatting log messages with error codes.
 """
 
+import pytest
+
 
 def test_format_error_log():
     """Test formatting an error log message with error code."""
@@ -96,3 +98,75 @@ class TestMaskUrlCredentials:
         assert mask_url_credentials(once) == once  # masking twice is a no-op
         assert mask_url_credentials(None) is None
         assert mask_url_credentials(123) == 123
+
+
+def _make_log_record(msg: str = "test message"):
+    import logging
+
+    return logging.LogRecord(
+        name="test.logging_utils.inject",
+        level=logging.INFO,
+        pathname=__file__,
+        lineno=1,
+        msg=msg,
+        args=(),
+        exc_info=None,
+    )
+
+
+@pytest.fixture
+def _reset_correlation_contextvar_util():
+    from code_indexer.server.telemetry.correlation_bridge import _correlation_id_var
+
+    token = _correlation_id_var.set(None)
+    try:
+        yield
+    finally:
+        _correlation_id_var.reset(token)
+
+
+class TestInjectCorrelationId:
+    """Bug #1641: inject_correlation_id() is the shared helper both
+    async_logging.IdentityQueueHandler.prepare() and
+    SQLiteLogHandler.emit() call to heal the log store's correlation_id
+    column for plain logger.x() calls that pass no extra=... at all."""
+
+    def test_sets_correlation_id_from_active_context(
+        self, _reset_correlation_contextvar_util
+    ):
+        from code_indexer.server.logging_utils import inject_correlation_id
+        from code_indexer.server.telemetry.correlation_bridge import (
+            set_current_correlation_id,
+        )
+
+        set_current_correlation_id("ctx-id-1641")
+        record = _make_log_record()
+
+        inject_correlation_id(record)
+
+        assert record.correlation_id == "ctx-id-1641"
+
+    def test_does_not_override_existing_correlation_id(
+        self, _reset_correlation_contextvar_util
+    ):
+        from code_indexer.server.logging_utils import inject_correlation_id
+        from code_indexer.server.telemetry.correlation_bridge import (
+            set_current_correlation_id,
+        )
+
+        set_current_correlation_id("ambient-id")
+        record = _make_log_record()
+        record.correlation_id = "explicit-id"
+
+        inject_correlation_id(record)
+
+        assert record.correlation_id == "explicit-id"
+
+    def test_no_op_when_no_active_context(self, _reset_correlation_contextvar_util):
+        from code_indexer.server.logging_utils import inject_correlation_id
+
+        record = _make_log_record()
+
+        inject_correlation_id(record)
+
+        assert getattr(record, "correlation_id", None) is None
