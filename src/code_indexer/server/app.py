@@ -1,6 +1,7 @@
 """FastAPI application for CIDX Server — multi-user semantic code search with JWT auth."""
 
 import logging
+import threading
 from typing import Optional, Any
 
 logger = logging.getLogger(__name__)
@@ -37,20 +38,54 @@ from .models.jobs import AddIndexRequest as AddIndexRequest  # noqa: F401
 from .models.auth import ChangePasswordRequest as ChangePasswordRequest  # noqa: F401
 
 
-# Global managers (initialized in create_app)
-jwt_manager: Optional[JWTManager] = None
-user_manager: Optional[UserManager] = None
-refresh_token_manager: Optional[RefreshTokenManager] = None
-golden_repo_manager: Optional[GoldenRepoManager] = None
-background_job_manager: Optional[BackgroundJobManager] = None
-job_tracker: Optional[Any] = None  # Story #311: JobTracker instance
-activated_repo_manager: Optional[ActivatedRepoManager] = None
-repository_listing_manager: Optional[RepositoryListingManager] = None
-semantic_query_manager: Optional[SemanticQueryManager] = None
-workspace_cleanup_service: Optional[WorkspaceCleanupService] = None
-langfuse_sync_service: Optional[Any] = None  # Story #168: Langfuse trace sync service
-_server_hnsw_cache: Optional[Any] = None  # Server-wide HNSW cache (Story #526)
-_server_fts_cache: Optional[Any] = None  # Server-wide FTS cache
+# Global managers (initialized in create_app).
+#
+# Bug #1638: these are ANNOTATION-ONLY (no `= None` binding) so they are
+# absent from this module's __dict__ until create_app() actually runs.
+# That absence is what lets the module-level __getattr__() below (PEP 562)
+# detect "not yet initialized" and defer initialize_services() until one of
+# these names -- or `app` -- is genuinely accessed, instead of running it
+# unconditionally as an import-time side effect. A bare `import
+# code_indexer.server.app` (or a transitive import of it, e.g. via
+# `from code_indexer.server import app as app_module`) no longer runs
+# ConfigService/SQLite/DependencyLatencyTracker/MCPSelfRegistrationService
+# startup or contends for the live server's primary_instance.lock file.
+jwt_manager: Optional[JWTManager]
+user_manager: Optional[UserManager]
+refresh_token_manager: Optional[RefreshTokenManager]
+golden_repo_manager: Optional[GoldenRepoManager]
+background_job_manager: Optional[BackgroundJobManager]
+job_tracker: Optional[Any]  # Story #311: JobTracker instance
+activated_repo_manager: Optional[ActivatedRepoManager]
+repository_listing_manager: Optional[RepositoryListingManager]
+semantic_query_manager: Optional[SemanticQueryManager]
+workspace_cleanup_service: Optional[WorkspaceCleanupService]
+langfuse_sync_service: Optional[Any]  # Story #168: Langfuse trace sync service
+_server_hnsw_cache: Optional[Any]  # Server-wide HNSW cache (Story #526)
+_server_fts_cache: Optional[Any]  # Server-wide FTS cache
+
+# Names whose first attribute access on this module should trigger lazy
+# app construction (Bug #1638). Kept as a plain module-level set (not a
+# function-local literal) so __getattr__ stays a simple membership check.
+_LAZY_INIT_ATTRS = frozenset(
+    {
+        "app",
+        "jwt_manager",
+        "user_manager",
+        "refresh_token_manager",
+        "golden_repo_manager",
+        "background_job_manager",
+        "job_tracker",
+        "activated_repo_manager",
+        "repository_listing_manager",
+        "semantic_query_manager",
+        "workspace_cleanup_service",
+        "langfuse_sync_service",
+        "_server_hnsw_cache",
+        "_server_fts_cache",
+    }
+)
+_lazy_init_lock = threading.Lock()
 
 # Module-level service singletons (imported for backward compat with handlers.py app_module pattern)
 from .services.file_service import file_service as file_service  # noqa: F401
@@ -302,5 +337,31 @@ def create_app():
     return app
 
 
-# Create app instance for uvicorn
-app = create_app()
+def __getattr__(name: str) -> Any:
+    """PEP 562 lazy module attribute access (Bug #1638).
+
+    `app = create_app()` used to run unconditionally at import time, so a
+    bare `import code_indexer.server.app` -- or a transitive import of it,
+    e.g. `code_indexer.server.mcp.handlers._utils` does
+    `from code_indexer.server import app as app_module` -- ran full service
+    initialization (ConfigService load, SQLite golden-repo enumeration,
+    DependencyLatencyTracker startup, MCPSelfRegistrationService singleton
+    registration, primary_instance.lock contention) as a side effect, with
+    no explicit opt-in.
+
+    `__getattr__` is only invoked by Python when normal attribute lookup on
+    this module fails (i.e. the name is absent from this module's
+    __dict__). Since `app` is no longer assigned at module level, and the
+    service globals above are annotation-only, importing this module is
+    now inert -- initialize_services() only runs the first time real code
+    actually reaches for one of these names (e.g. `app_module.app`,
+    `from code_indexer.server.app import golden_repo_manager`, or the
+    production `uvicorn code_indexer.server.app:app` entrypoint resolving
+    its `app` target), never on a bare import.
+    """
+    if name not in _LAZY_INIT_ATTRS:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    with _lazy_init_lock:
+        if "app" not in globals():
+            globals()["app"] = create_app()
+    return globals()[name]
