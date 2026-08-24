@@ -4679,6 +4679,16 @@ def make_lifespan(
             except Exception:
                 pass
 
+        # Shutdown: Stop the semantic self-heal backfill loop (same rationale). Created
+        # unconditionally (the enabled gate is checked inside the loop), so cancel it
+        # unconditionally too — its only exit path is CancelledError.
+        _semantic_backfill_task = getattr(app.state, "semantic_backfill_task", None)
+        if _semantic_backfill_task is not None:
+            try:
+                _semantic_backfill_task.cancel()
+            except Exception:
+                pass
+
         # Shutdown: Stop the async-logging QueueListener FIRST (py-spy logging
         # follow-up to Bug #1078). The listener owns the real handlers behind the
         # root QueueHandler; stop() drains every queued record and then closes the
