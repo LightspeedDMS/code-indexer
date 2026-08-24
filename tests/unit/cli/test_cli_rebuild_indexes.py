@@ -114,5 +114,5 @@ class TestCLIRebuildIndexesE2E:
             ]
             output_lower = (result.stdout + result.stderr).lower()
             assert any(error in output_lower for error in acceptable_errors), (
-                f"Unexpected error: {result.stderr}"
+                f"Unexpected error.\nSTDOUT: {result.stdout}\nSTDERR: {result.stderr}"
             )
