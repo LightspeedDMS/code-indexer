@@ -89,8 +89,8 @@ class TestPodPullSubmit:
         assert any(item[0] == job_id for item in self.enqueued)
 
     def test_all_heavy_ops_plus_fts_backfill_are_pod_pull(self):
-        # The 5 memory-heavy index builds, PLUS fts_backfill_build (EVO-66445): pod-pull
-        # (work-stealable) but NOT memory-heavy — a tantivy rebuild is a cheap local build.
+        # The memory-heavy index builds (incl. semantic_backfill_reindex — a re-embed is
+        # as heavy as add), PLUS fts_backfill_build (EVO-66445): pod-pull work-stealable.
         assert POD_PULL_OPS == frozenset(
             {
                 "add_golden_repo",
@@ -98,9 +98,17 @@ class TestPodPullSubmit:
                 "provider_temporal_index_rebuild",
                 "sync_repository",
                 "change_branch",
+                "semantic_backfill_reindex",
                 "fts_backfill_build",
             }
         )
+
+    def test_semantic_backfill_reindex_is_pod_pull_and_memory_heavy(self):
+        from code_indexer.server.repositories.background_jobs import _MEMORY_HEAVY_OPS
+
+        # Unlike the light FTS build, a semantic re-embed IS memory-gated.
+        assert "semantic_backfill_reindex" in POD_PULL_OPS
+        assert "semantic_backfill_reindex" in _MEMORY_HEAVY_OPS
 
     def test_fts_backfill_is_pod_pull_but_not_memory_heavy(self):
         from code_indexer.server.repositories.background_jobs import _MEMORY_HEAVY_OPS
