@@ -614,10 +614,11 @@ def unauthenticated_client():
 class TestDedupScanReturnsExistingJob:
     """POST /api/discovery/{platform}/start returns existing job_id when same op already running."""
 
-    def test_pending_job_returns_existing(self, app_and_client):
+    def test_pending_job_returns_existing(
+        self, app_and_client, background_job_manager_factory
+    ):
         """PENDING job of same op_type returns existing job_id with existing=True."""
         from code_indexer.server.repositories.background_jobs import (
-            BackgroundJobManager,
             JobStatus,
             BackgroundJob,
         )
@@ -626,7 +627,7 @@ class TestDedupScanReturnsExistingJob:
         _, client = app_and_client
 
         existing_job_id = "existing-job-abc"
-        bgm = BackgroundJobManager()
+        bgm = background_job_manager_factory()
 
         # Manually insert a pending job
         job = BackgroundJob(
@@ -669,10 +670,11 @@ class TestDedupScanReturnsExistingJob:
         assert body["job_id"] == existing_job_id
         assert body["existing"] is True
 
-    def test_running_job_returns_existing(self, app_and_client):
+    def test_running_job_returns_existing(
+        self, app_and_client, background_job_manager_factory
+    ):
         """RUNNING job of same op_type returns existing job_id with existing=True."""
         from code_indexer.server.repositories.background_jobs import (
-            BackgroundJobManager,
             JobStatus,
             BackgroundJob,
         )
@@ -681,7 +683,7 @@ class TestDedupScanReturnsExistingJob:
         _, client = app_and_client
 
         existing_job_id = "existing-running-xyz"
-        bgm = BackgroundJobManager()
+        bgm = background_job_manager_factory()
 
         job = BackgroundJob(
             job_id=existing_job_id,
@@ -732,15 +734,13 @@ class TestDedupScanReturnsExistingJob:
 class TestNewJobSubmission:
     """POST /api/discovery/{platform}/start submits new job when none exists."""
 
-    def test_new_job_returns_existing_false(self, app_and_client):
+    def test_new_job_returns_existing_false(
+        self, app_and_client, background_job_manager_factory
+    ):
         """No existing job -> new job submitted, existing=False."""
-        from code_indexer.server.repositories.background_jobs import (
-            BackgroundJobManager,
-        )
-
         _, client = app_and_client
 
-        bgm = BackgroundJobManager()
+        bgm = background_job_manager_factory()
 
         mock_provider = MagicMock()
         mock_provider.is_configured.return_value = True

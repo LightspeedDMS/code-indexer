@@ -28,13 +28,13 @@ from unittest.mock import patch
 from code_indexer.server.repositories.background_jobs import BackgroundJobManager
 
 
-def _make_bjm() -> BackgroundJobManager:
+def _make_bjm(background_job_manager_factory) -> BackgroundJobManager:
     """Create a BackgroundJobManager without maintenance mode or persistence."""
     with patch(
         "code_indexer.server.services.maintenance_service.get_maintenance_state"
     ) as mock_maint:
         mock_maint.return_value.is_maintenance_mode.return_value = False
-        bjm = BackgroundJobManager()
+        bjm = background_job_manager_factory()
     return bjm
 
 
@@ -47,12 +47,12 @@ class TestTerminateChildProcessesPopen1495:
     """Bug #1495: subprocess.Popen handles must terminate without AttributeError."""
 
     def test_terminate_child_processes_terminates_real_popen_without_attributeerror(
-        self,
+        self, background_job_manager_factory
     ):
         """A real subprocess.Popen registered as a child process must be
         terminated by _terminate_child_processes without raising
         AttributeError, and must actually be dead afterward."""
-        bjm = _make_bjm()
+        bjm = _make_bjm(background_job_manager_factory)
         proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
         try:
             bjm.register_child_process("job-popen-1495", proc)
@@ -78,12 +78,12 @@ class TestTerminateChildProcessesPopen1495:
                 proc.wait(timeout=5)
 
     def test_terminate_child_processes_still_terminates_real_multiprocessing_process(
-        self,
+        self, background_job_manager_factory
     ):
         """Regression: a real multiprocessing.Process must still be
         terminated correctly (no regression to the pre-existing working
         path introduced by the Popen polymorphism fix)."""
-        bjm = _make_bjm()
+        bjm = _make_bjm(background_job_manager_factory)
         proc = multiprocessing.Process(target=_mp_sleep_worker, args=(30,))
         proc.start()
         try:

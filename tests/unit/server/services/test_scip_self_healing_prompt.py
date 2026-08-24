@@ -5,17 +5,16 @@ Tests prompt generation for language-specific SCIP failure diagnosis.
 """
 
 import pytest
-from code_indexer.server.repositories.background_jobs import BackgroundJobManager
 
 
 class TestSCIPSelfHealingPromptBuilding:
     """Test suite for prompt building functionality."""
 
     @pytest.fixture
-    def job_manager(self, tmp_path):
+    def job_manager(self, tmp_path, background_job_manager_factory):
         """Create a BackgroundJobManager for testing."""
         storage_path = tmp_path / "jobs.json"
-        return BackgroundJobManager(storage_path=str(storage_path))
+        return background_job_manager_factory(storage_path=str(storage_path))
 
     def test_build_project_prompt_python_poetry(self, job_manager, tmp_path):
         """AC2: Verify language-specific prompt generation for Python/poetry project."""

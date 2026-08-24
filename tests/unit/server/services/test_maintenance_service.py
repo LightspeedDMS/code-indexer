@@ -250,14 +250,13 @@ class TestSyncJobManagerMaintenanceIntegration:
 
         assert "maintenance" in str(exc_info.value).lower()
 
-    def test_background_job_manager_rejects_during_maintenance(self):
+    def test_background_job_manager_rejects_during_maintenance(
+        self, background_job_manager_factory
+    ):
         """BackgroundJobManager should raise error when in maintenance mode."""
         from code_indexer.server.services.maintenance_service import (
             _reset_maintenance_state,
             get_maintenance_state,
-        )
-        from code_indexer.server.repositories.background_jobs import (
-            BackgroundJobManager,
         )
         from code_indexer.server.jobs.exceptions import MaintenanceModeError
 
@@ -265,7 +264,7 @@ class TestSyncJobManagerMaintenanceIntegration:
         state = get_maintenance_state()
         state.enter_maintenance_mode()
 
-        manager = BackgroundJobManager()
+        manager = background_job_manager_factory()
 
         def dummy_func():
             return {"status": "done"}
@@ -307,16 +306,15 @@ class TestSyncJobManagerMaintenanceIntegration:
 
             assert "maintenance" in str(exc_info.value).lower()
 
-    def test_refresh_scheduler_job_submission_rejected_during_maintenance(self):
+    def test_refresh_scheduler_job_submission_rejected_during_maintenance(
+        self, background_job_manager_factory
+    ):
         """RefreshScheduler job submission via BackgroundJobManager is rejected during maintenance."""
         from code_indexer.server.services.maintenance_service import (
             _reset_maintenance_state,
             get_maintenance_state,
         )
         from code_indexer.global_repos.refresh_scheduler import RefreshScheduler
-        from code_indexer.server.repositories.background_jobs import (
-            BackgroundJobManager,
-        )
         from code_indexer.server.jobs.exceptions import MaintenanceModeError
         from unittest.mock import MagicMock, patch
         import tempfile
@@ -327,7 +325,7 @@ class TestSyncJobManagerMaintenanceIntegration:
 
         with tempfile.TemporaryDirectory() as tmpdir:
             # Create real BackgroundJobManager (no mock)
-            job_manager = BackgroundJobManager()
+            job_manager = background_job_manager_factory()
 
             # Create mock dependencies for RefreshScheduler
             mock_config = MagicMock()
@@ -390,6 +388,11 @@ class TestHealthEndpointMaintenanceMode:
 
         # Clean up
         app.dependency_overrides.clear()
+        # Bug #1635: teardown of every BackgroundJobManager constructed
+        # during this test (including create_app()'s internal one) is
+        # handled uniformly (test-outcome-independent, vector-agnostic) by
+        # the autouse _teardown_all_background_job_managers fixture in
+        # tests/unit/server/conftest.py, so no explicit call is needed here.
 
     def test_health_endpoint_includes_maintenance_mode_true(self):
         """AC6: /health response should include maintenance_mode field (true when in maintenance)."""
@@ -428,6 +431,12 @@ class TestHealthEndpointMaintenanceMode:
         # Clean up — reset singleton so downstream tests don't see maintenance mode
         _reset_maintenance_state()
         app.dependency_overrides.clear()
+        # Bug #1635: see the identical note in
+        # test_health_endpoint_includes_maintenance_mode_false above -- the
+        # autouse _teardown_all_background_job_managers fixture in
+        # tests/unit/server/conftest.py handles teardown of every
+        # BackgroundJobManager constructed during this test uniformly, so
+        # no explicit call is needed here.
 
 
 class TestMaintenanceStateAutouseTeardownBug1446:
