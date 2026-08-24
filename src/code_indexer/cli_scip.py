@@ -1118,6 +1118,27 @@ def scip_dependencies(
       Local mode: SCIP indexes must be generated first (run 'cidx scip generate')
       Remote mode: --repository flag required
     """
+    # Bug #1627: validate --depth BEFORE branching into local/remote mode,
+    # mirroring Bug #1603's --max-depth fix on `scip callchain`, so both
+    # paths reject an out-of-range value identically with a clean,
+    # immediate CLI-level message instead of letting it reach the deep
+    # engine layer. Bounds match the ones already enforced server-side by
+    # Bug #1625 (Web UI ceiling) and Bug #1626 (SCIPMultiService guard) --
+    # NOT callchain's own MAX_DEPTH_CAP, which is a deliberately different,
+    # narrower range for a different operation.
+    from code_indexer.server.services.constants import (
+        MIN_SCIP_DEPENDENCY_DEPTH,
+        MAX_SCIP_DEPENDENCY_DEPTH,
+    )
+
+    if depth < MIN_SCIP_DEPENDENCY_DEPTH or depth > MAX_SCIP_DEPENDENCY_DEPTH:
+        console.print(
+            f"Error: --depth must be between {MIN_SCIP_DEPENDENCY_DEPTH} and "
+            f"{MAX_SCIP_DEPENDENCY_DEPTH}, got {depth}",
+            style="red",
+        )
+        sys.exit(1)
+
     # Remote mode handling
     if _is_remote_mode():
         if not repository:
@@ -1277,6 +1298,28 @@ def scip_dependents(
       Local mode: SCIP indexes must be generated first (run 'cidx scip generate')
       Remote mode: --repository flag required
     """
+    # Bug #1627: validate --depth BEFORE branching into local/remote mode,
+    # mirroring Bug #1603's --max-depth fix on `scip callchain` and the
+    # same fix applied to `scip_dependencies` above, so all three paths
+    # reject an out-of-range value identically with a clean, immediate
+    # CLI-level message instead of letting it reach the deep engine layer.
+    # Bounds match the ones already enforced server-side by Bug #1625 (Web
+    # UI ceiling) and Bug #1626 (SCIPMultiService guard) -- NOT callchain's
+    # own MAX_DEPTH_CAP, which is a deliberately different, narrower range
+    # for a different operation.
+    from code_indexer.server.services.constants import (
+        MIN_SCIP_DEPENDENCY_DEPTH,
+        MAX_SCIP_DEPENDENCY_DEPTH,
+    )
+
+    if depth < MIN_SCIP_DEPENDENCY_DEPTH or depth > MAX_SCIP_DEPENDENCY_DEPTH:
+        console.print(
+            f"Error: --depth must be between {MIN_SCIP_DEPENDENCY_DEPTH} and "
+            f"{MAX_SCIP_DEPENDENCY_DEPTH}, got {depth}",
+            style="red",
+        )
+        sys.exit(1)
+
     # Remote mode handling
     if _is_remote_mode():
         if not repository:
