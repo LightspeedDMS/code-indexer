@@ -32,6 +32,7 @@ from code_indexer.server.services.ci_token_manager import (
     GITLAB_TOKEN_PATTERN,
 )
 from code_indexer.server.storage.database_manager import DatabaseConnectionManager
+from code_indexer.server.storage.json_column import parse_json_column
 from code_indexer.storage.hnsw_index_manager import HNSWIndexManager
 
 if TYPE_CHECKING:
@@ -831,64 +832,114 @@ class DiagnosticsService:
             logger = logging.getLogger(__name__)
             logger.error(f"Failed to save diagnostic results to database: {e}")
 
+    def _reconstruct_diagnostic_results(
+        self, results_data: List[Dict[str, Any]]
+    ) -> List[DiagnosticResult]:
+        """Rebuild DiagnosticResult objects from persisted result dicts.
+
+        Shared by _load_results_from_db and _read_category_from_db (Bug
+        #1653) so the two call sites can't drift.
+        """
+        return [
+            DiagnosticResult(
+                name=result_dict["name"],
+                status=DiagnosticStatus(result_dict["status"]),
+                message=result_dict["message"],
+                details=result_dict.get("details", {}),
+                timestamp=datetime.fromisoformat(result_dict["timestamp"]),
+            )
+            for result_dict in results_data
+        ]
+
+    def _fetch_all_diagnostic_rows(
+        self,
+    ) -> Optional[List[Tuple[str, object, str]]]:
+        """Fetch all raw (category, results_json, run_at) rows.
+
+        Returns None if there is nothing to load yet (no backend and no
+        on-disk SQLite file). Raises on a genuine fetch failure -- the
+        caller decides how to handle that.
+        """
+        if self._backend is not None:
+            # mypy: self._backend's DiagnosticsBackend Protocol declares
+            # load_all_results() -> List[Tuple[str, str, str]], which is
+            # invariant-incompatible with this method's broader
+            # Tuple[str, object, str] element type (needed because a real
+            # PostgreSQL backend's results_json is a native object, not a
+            # str -- see Bug #1653). The broadening is intentional.
+            return self._backend.load_all_results()  # type: ignore[no-any-return]
+
+        if not Path(self._db_path).exists():
+            return None
+
+        # Bug #1532 follow-up: route the raw connection through
+        # guarded_connection() so close_all() cannot close it mid-read.
+        with self._conn_manager.guarded_connection() as conn:
+            cursor = conn.execute(
+                "SELECT category, results_json, run_at FROM diagnostic_results"
+            )
+            return cursor.fetchall()  # type: ignore[no-any-return]
+
     def _load_results_from_db(self) -> None:
         """
         Load persisted diagnostic results from database on initialization.
 
         Populates the cache with previously saved results. If database
         is empty or has errors, cache remains empty (will use placeholders).
+
+        Bug #1653: fetching rows and processing each row are separate
+        exception boundaries. A fetch failure legitimately aborts the load
+        (nothing to iterate). Once rows exist, EACH row gets its own
+        try/except so one malformed/differently-shaped row (e.g. a
+        PostgreSQL JSONB column already deserialized to a native list, vs.
+        SQLite's TEXT str) cannot abort the rest of the population pass --
+        it is logged and skipped, and later rows are still cached.
         """
+        import logging
+
+        logger = logging.getLogger(__name__)
+
         try:
-            if self._backend is not None:
-                rows = self._backend.load_all_results()
-            else:
-                # Check if database file exists
-                if not Path(self._db_path).exists():
-                    return
+            rows = self._fetch_all_diagnostic_rows()
+        except Exception as e:
+            logger.error(f"Failed to load diagnostic results from database: {e}")
+            return
+        if rows is None:
+            return
 
-                # Bug #1532 follow-up: route the raw connection through
-                # guarded_connection() so close_all() cannot close it
-                # mid-read.
-                with self._conn_manager.guarded_connection() as conn:
-                    cursor = conn.execute(
-                        "SELECT category, results_json, run_at FROM diagnostic_results"
-                    )
-                    rows = cursor.fetchall()
-
-            for row in rows:
+        for row in rows:
+            try:
                 category_str, results_json, run_at = row
 
-                # Parse category
                 try:
                     category = DiagnosticCategory(category_str)
                 except ValueError:
                     continue  # Skip unknown categories
 
-                # Deserialize results
-                results_data = json.loads(results_json)
-                results = []
+                # Bug #1653: results_json is JSONB on PostgreSQL (psycopg
+                # already deserializes it to a native list) and TEXT on
+                # SQLite (a str needing json.loads()). parse_json_column()
+                # accepts either shape and fails soft (WARNING + None) on
+                # malformed input instead of raising.
+                results_data = parse_json_column(
+                    results_json, list, "diagnostic_results.results_json"
+                )
+                if results_data is None:
+                    continue  # Malformed row -- skip, keep the rest
 
-                for result_dict in results_data:
-                    # Reconstruct DiagnosticResult from dict
-                    result = DiagnosticResult(
-                        name=result_dict["name"],
-                        status=DiagnosticStatus(result_dict["status"]),
-                        message=result_dict["message"],
-                        details=result_dict.get("details", {}),
-                        timestamp=datetime.fromisoformat(result_dict["timestamp"]),
-                    )
-                    results.append(result)
-
-                # Populate cache
-                self._cache[category] = results
+                self._cache[category] = self._reconstruct_diagnostic_results(
+                    results_data
+                )
                 self._cache_timestamps[category] = datetime.fromisoformat(run_at)
 
-        except Exception as e:
-            # Log error but don't fail service initialization
-            import logging
-
-            logger = logging.getLogger(__name__)
-            logger.error(f"Failed to load diagnostic results from database: {e}")
+            except Exception as e:
+                # Bug #1653: a single row's failure must never abort the
+                # rest of the population loop -- log and continue.
+                logger.warning(
+                    "Failed to load one diagnostic_results row from "
+                    f"database (skipping, continuing with remaining rows): {e}"
+                )
+                continue
 
     def _read_category_from_db(
         self, category: DiagnosticCategory
@@ -933,20 +984,19 @@ class DiagnosticsService:
 
                 results_json, run_at = db_row
 
-            # Deserialize results
-            results_data = json.loads(results_json)
-            results = []
+            # Bug #1653: results_json is JSONB on PostgreSQL (psycopg
+            # already deserializes it to a native list) and TEXT on
+            # SQLite (a str needing json.loads()). parse_json_column()
+            # accepts either shape and fails soft (WARNING + None) on
+            # malformed input instead of raising -- never a bare
+            # json.loads().
+            results_data = parse_json_column(
+                results_json, list, "diagnostic_results.results_json"
+            )
+            if results_data is None:
+                return None
 
-            for result_dict in results_data:
-                # Reconstruct DiagnosticResult from dict
-                result = DiagnosticResult(
-                    name=result_dict["name"],
-                    status=DiagnosticStatus(result_dict["status"]),
-                    message=result_dict["message"],
-                    details=result_dict.get("details", {}),
-                    timestamp=datetime.fromisoformat(result_dict["timestamp"]),
-                )
-                results.append(result)
+            results = self._reconstruct_diagnostic_results(results_data)
 
             return results, datetime.fromisoformat(run_at)
 
