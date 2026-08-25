@@ -347,8 +347,16 @@ class TestExecuteWiring:
     )
     @patch.object(DeploymentExecutor, "git_pull", return_value=True)
     @patch.object(DeploymentExecutor, "_ensure_rust_toolchain", return_value=True)
+    # Bug #1640: these three steps make real, unmocked npm/git network calls
+    # when left unpatched.
+    @patch.object(DeploymentExecutor, "_ensure_claude_cli_updated", return_value=True)
+    @patch.object(DeploymentExecutor, "_ensure_codex_cli_installed", return_value=True)
+    @patch.object(DeploymentExecutor, "_ensure_pace_maker_installed", return_value=True)
     def test_execute_calls_ensure_auto_update_path(
         self,
+        mock_ensure_pace_maker,
+        mock_ensure_codex,
+        mock_ensure_claude_cli_updated,
         mock_ensure_rust,
         mock_git_pull,
         mock_calc_hash,
@@ -397,8 +405,16 @@ class TestExecuteWiring:
     )
     @patch.object(DeploymentExecutor, "git_pull", return_value=True)
     @patch.object(DeploymentExecutor, "_ensure_rust_toolchain", return_value=True)
+    # Bug #1640: these three steps make real, unmocked npm/git network calls
+    # when left unpatched.
+    @patch.object(DeploymentExecutor, "_ensure_claude_cli_updated", return_value=True)
+    @patch.object(DeploymentExecutor, "_ensure_codex_cli_installed", return_value=True)
+    @patch.object(DeploymentExecutor, "_ensure_pace_maker_installed", return_value=True)
     def test_execute_continues_on_ensure_auto_update_path_failure(
         self,
+        mock_ensure_pace_maker,
+        mock_ensure_codex,
+        mock_ensure_claude_cli_updated,
         mock_ensure_rust,
         mock_git_pull,
         mock_calc_hash,

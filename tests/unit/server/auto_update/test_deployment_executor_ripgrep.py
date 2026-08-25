@@ -155,7 +155,25 @@ class TestExecuteMethodIntegration:
                                         "_ensure_rust_toolchain",
                                         return_value=True,
                                     ):
-                                        result = executor.execute()
+                                        # Bug #1640: these three steps make
+                                        # real, unmocked npm/git network
+                                        # calls when left unpatched.
+                                        with patch.object(
+                                            executor,
+                                            "_ensure_claude_cli_updated",
+                                            return_value=True,
+                                        ):
+                                            with patch.object(
+                                                executor,
+                                                "_ensure_codex_cli_installed",
+                                                return_value=True,
+                                            ):
+                                                with patch.object(
+                                                    executor,
+                                                    "_ensure_pace_maker_installed",
+                                                    return_value=True,
+                                                ):
+                                                    result = executor.execute()
 
         # Verify ensure_ripgrep was called
         mock_ensure_rg.assert_called_once()
@@ -192,7 +210,31 @@ class TestExecuteMethodIntegration:
                                     "_ensure_rust_toolchain",
                                     return_value=True,
                                 ):
-                                    result = executor.execute()
+                                    # Bug #1640: these three steps make
+                                    # real, unmocked npm/git network calls
+                                    # when left unpatched (same convention
+                                    # as the sibling _ensure_rust_toolchain
+                                    # patch immediately above -- isolating
+                                    # execute()'s step-wiring from each
+                                    # step's own real implementation, which
+                                    # is unit-tested independently
+                                    # elsewhere).
+                                    with patch.object(
+                                        executor,
+                                        "_ensure_claude_cli_updated",
+                                        return_value=True,
+                                    ):
+                                        with patch.object(
+                                            executor,
+                                            "_ensure_codex_cli_installed",
+                                            return_value=True,
+                                        ):
+                                            with patch.object(
+                                                executor,
+                                                "_ensure_pace_maker_installed",
+                                                return_value=True,
+                                            ):
+                                                result = executor.execute()
 
         # Verify ensure_ripgrep was called
         mock_ensure_rg.assert_called_once()
@@ -233,7 +275,27 @@ class TestExecuteMethodIntegration:
                                     "_ensure_rust_toolchain",
                                     return_value=True,
                                 ):
-                                    result = executor.execute()
+                                    # Bug #1640: these three steps make
+                                    # real, unmocked npm/git network calls
+                                    # when left unpatched (same convention
+                                    # as the sibling _ensure_rust_toolchain
+                                    # patch immediately above).
+                                    with patch.object(
+                                        executor,
+                                        "_ensure_claude_cli_updated",
+                                        return_value=True,
+                                    ):
+                                        with patch.object(
+                                            executor,
+                                            "_ensure_codex_cli_installed",
+                                            return_value=True,
+                                        ):
+                                            with patch.object(
+                                                executor,
+                                                "_ensure_pace_maker_installed",
+                                                return_value=True,
+                                            ):
+                                                result = executor.execute()
 
         # Verify ripgrep success was logged at INFO level
         assert any(
@@ -275,7 +337,27 @@ class TestExecuteMethodIntegration:
                                     "_ensure_rust_toolchain",
                                     return_value=True,
                                 ):
-                                    result = executor.execute()
+                                    # Bug #1640: these three steps make
+                                    # real, unmocked npm/git network calls
+                                    # when left unpatched (same convention
+                                    # as the sibling _ensure_rust_toolchain
+                                    # patch immediately above).
+                                    with patch.object(
+                                        executor,
+                                        "_ensure_claude_cli_updated",
+                                        return_value=True,
+                                    ):
+                                        with patch.object(
+                                            executor,
+                                            "_ensure_codex_cli_installed",
+                                            return_value=True,
+                                        ):
+                                            with patch.object(
+                                                executor,
+                                                "_ensure_pace_maker_installed",
+                                                return_value=True,
+                                            ):
+                                                result = executor.execute()
 
         # Verify ripgrep failure was logged at ERROR level with error code
         assert any(

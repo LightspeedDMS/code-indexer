@@ -112,11 +112,25 @@ def _all_steps_except_rust(executor: DeploymentExecutor) -> Iterator[None]:
         patch.object(executor, "git_pull", return_value=True),
         patch.object(executor, "git_submodule_update", return_value=True),
         patch.object(executor, "build_custom_hnswlib", return_value=True),
+        # Bug #1640 family: execute() calls _build_hnswlib_with_fallback()
+        # directly (a sibling step to _ensure_rust_toolchain, the one step
+        # under test in this class) -- with a fake/temp repo_path lacking a
+        # real third_party/hnswlib/setup.py, the real method's fallback
+        # branch does a real `git clone` of the hnswlib fork. Mocking it
+        # here follows this file's own established pattern of no-op'ing
+        # every OTHER execute() step so only _ensure_rust_toolchain runs
+        # for real.
+        patch.object(executor, "_build_hnswlib_with_fallback", return_value=True),
         patch.object(executor, "pip_install", return_value=True),
         patch.object(executor, "ensure_ripgrep", return_value=True),
         patch.object(executor, "_ensure_sudoers_restart", return_value=True),
         patch.object(executor, "_ensure_memory_overcommit", return_value=True),
         patch.object(executor, "_ensure_swap_file", return_value=True),
+        # Bug #1640: _ensure_codex_cli_installed makes a real, unmocked
+        # `npm install -g @openai/codex` network call when left unpatched
+        # here (confirmed live: this method was the one gap in this list,
+        # and running these execute() tests actually invoked real npm).
+        patch.object(executor, "_ensure_codex_cli_installed", return_value=True),
         patch.object(executor, "_ensure_claude_cli_updated", return_value=True),
         patch.object(executor, "_ensure_pace_maker_installed", return_value=True),
         patch.object(executor, "_ensure_claude_cli_installed", return_value=True),

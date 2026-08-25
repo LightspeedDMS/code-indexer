@@ -231,6 +231,21 @@ def test_execute_wires_ensure_scip_python(executor, caplog):
         patch.object(
             executor, "_ensure_git_safe_directory_wildcard", return_value=True
         ),
+        # Bug #1640: _ensure_claude_cli_updated makes a real, unmocked `npm
+        # install -g @anthropic-ai/claude-code@latest` network call, and
+        # _ensure_pace_maker_installed makes a real `git pull` against the
+        # developer's actual ~/claude-pace-maker clone, when left unpatched
+        # here -- both bypass the blanket `shutil.which` patch below since
+        # neither gates its subprocess call on shutil.which("npm"). Worse,
+        # the blanket `shutil.which` patch (needed to force ensure_scip_
+        # python's npm-absent branch) ALSO blinds _ensure_claude_cli_
+        # installed's own shutil.which("claude") gate, tricking it into
+        # running the real `curl -fsSL https://claude.ai/install.sh | sh`
+        # installer against the host — confirmed via live process
+        # monitoring during this exact test.
+        patch.object(executor, "_ensure_claude_cli_updated", return_value=True),
+        patch.object(executor, "_ensure_claude_cli_installed", return_value=True),
+        patch.object(executor, "_ensure_pace_maker_installed", return_value=True),
         patch("shutil.which", return_value=None),
         caplog.at_level(logging.WARNING),
     ):
