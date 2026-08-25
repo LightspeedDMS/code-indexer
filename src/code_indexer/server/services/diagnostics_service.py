@@ -851,9 +851,43 @@ class DiagnosticsService:
             for result_dict in results_data
         ]
 
+    def _coerce_run_at(self, raw: object) -> Optional[datetime]:
+        """Normalize a persisted run_at value to a naive local datetime.
+
+        Bug #1653 round 2: run_at is PostgreSQL's TIMESTAMPTZ (psycopg
+        returns a real, often tz-aware, datetime) but SQLite's TEXT (an
+        ISO-format str). get_status() compares this value against a naive
+        datetime.now() (its TTL-staleness check) -- a tz-aware pass-through
+        would raise "can't subtract offset-naive and offset-aware
+        datetimes" the first time that comparison runs, so an aware value
+        is converted to local time and stripped of tzinfo before being
+        returned. A malformed value (neither datetime nor a parseable str)
+        fails soft: logs a WARNING and returns None, mirroring
+        parse_json_column()'s contract.
+        """
+        if isinstance(raw, datetime):
+            if raw.tzinfo is not None:
+                return raw.astimezone().replace(tzinfo=None)
+            return raw
+
+        if isinstance(raw, str):
+            try:
+                return datetime.fromisoformat(raw)
+            except ValueError:
+                pass
+
+        import logging
+
+        logging.getLogger(__name__).warning(
+            "diagnostic_results.run_at: malformed value %s (type %s)",
+            repr(raw)[:200],
+            type(raw).__name__,
+        )
+        return None
+
     def _fetch_all_diagnostic_rows(
         self,
-    ) -> Optional[List[Tuple[str, object, str]]]:
+    ) -> Optional[List[Tuple[str, object, object]]]:
         """Fetch all raw (category, results_json, run_at) rows.
 
         Returns None if there is nothing to load yet (no backend and no
@@ -927,10 +961,24 @@ class DiagnosticsService:
                 if results_data is None:
                     continue  # Malformed row -- skip, keep the rest
 
-                self._cache[category] = self._reconstruct_diagnostic_results(
-                    results_data
-                )
-                self._cache_timestamps[category] = datetime.fromisoformat(run_at)
+                # Bug #1653 round 2: run_at is TIMESTAMPTZ on PostgreSQL
+                # (psycopg returns a real datetime) and TEXT on SQLite (an
+                # ISO str) -- the exact same dual-shape hazard as
+                # results_json above. Compute this BEFORE touching either
+                # cache dict so a coercion failure never leaves an orphan
+                # entry in one dict without its pair in the other.
+                run_at_dt = self._coerce_run_at(run_at)
+                if run_at_dt is None:
+                    continue  # Malformed run_at -- skip, keep the rest
+
+                results = self._reconstruct_diagnostic_results(results_data)
+
+                # Both values are known-good at this point -- publish them
+                # together, atomically. _cache/_cache_timestamps must never
+                # diverge (see get_status()'s and run_all_diagnostics'
+                # "published as a pair" comments elsewhere in this class).
+                self._cache[category] = results
+                self._cache_timestamps[category] = run_at_dt
 
             except Exception as e:
                 # Bug #1653: a single row's failure must never abort the
@@ -996,9 +1044,16 @@ class DiagnosticsService:
             if results_data is None:
                 return None
 
+            # Bug #1653 round 2: run_at is TIMESTAMPTZ on PostgreSQL (a real
+            # datetime) and TEXT on SQLite (an ISO str) -- same dual-shape
+            # hazard as results_json above.
+            run_at_dt = self._coerce_run_at(run_at)
+            if run_at_dt is None:
+                return None
+
             results = self._reconstruct_diagnostic_results(results_data)
 
-            return results, datetime.fromisoformat(run_at)
+            return results, run_at_dt
 
         except Exception as e:
             # Log error but report "nothing persisted" so the caller falls back
