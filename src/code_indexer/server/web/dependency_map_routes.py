@@ -13,6 +13,7 @@ Provides:
 """
 
 import html
+import json
 import logging
 import re
 import threading
@@ -393,6 +394,51 @@ def _submit_dashboard_job(
     return actual_id
 
 
+def _parse_phase_timings_value(raw):
+    """
+    Normalize a run-history row's phase_timings_json value to a dict.
+
+    Bug #1622: on PostgreSQL, phase_timings_json is a JSONB column that the
+    driver already deserializes into a python dict; on SQLite it is a TEXT
+    column that arrives as a JSON string (json.loads() also accepts bytes).
+    A dict value is returned as-is (no parsing needed, no warning). Any
+    other value is passed to json.loads(); a value that is neither a dict
+    nor str/bytes, or a string that fails to parse, or one that parses to
+    something other than a dict, logs a WARNING and returns None (same
+    fallback behavior as before this fix).
+
+    Args:
+        raw: The row's raw phase_timings_json value (None, dict, str, bytes,
+            or an unexpected type).
+
+    Returns:
+        The phase-timings dict, or None if raw was None or malformed.
+    """
+    if raw is None:
+        # Absent value — no warning; expected for legacy or NULL rows.
+        return None
+    if isinstance(raw, dict):
+        return raw
+    try:
+        parsed = json.loads(raw)
+    except (ValueError, TypeError) as exc:
+        logger.warning(
+            "_render_complete_response: malformed phase_timings_json %r: %s",
+            raw,
+            exc,
+        )
+        return None
+    if not isinstance(parsed, dict):
+        logger.warning(
+            "_render_complete_response: phase_timings_json parsed to %s "
+            "(expected dict), ignoring: %r",
+            type(parsed).__name__,
+            raw,
+        )
+        return None
+    return parsed
+
+
 def _render_complete_response(request, session, cached_row: dict) -> HTMLResponse:
     """
     Render the complete dashboard state using depmap_job_status.html.
@@ -451,32 +497,12 @@ def _render_complete_response(request, session, cached_row: dict) -> HTMLRespons
 
     # Story D Bug #874: pre-parse phase_timings_json str -> dict for each run row
     # so the template iterates a real dict rather than needing a Jinja filter.
+    # Bug #1622: on PostgreSQL this value is already a dict (JSONB) rather
+    # than a JSON string — _parse_phase_timings_value handles both.
     for row in job_status.get("run_history", []):
-        raw = row.get("phase_timings_json")
-        if raw is None:
-            # Absent value — no warning; expected for legacy or NULL rows.
-            row["phase_timings_parsed"] = None
-        else:
-            try:
-                parsed = _json.loads(raw)
-            except (ValueError, TypeError) as exc:
-                logger.warning(
-                    "_render_complete_response: malformed phase_timings_json %r: %s",
-                    raw,
-                    exc,
-                )
-                row["phase_timings_parsed"] = None
-            else:
-                if not isinstance(parsed, dict):
-                    logger.warning(
-                        "_render_complete_response: phase_timings_json parsed to %s "
-                        "(expected dict), ignoring: %r",
-                        type(parsed).__name__,
-                        raw,
-                    )
-                    row["phase_timings_parsed"] = None
-                else:
-                    row["phase_timings_parsed"] = parsed
+        row["phase_timings_parsed"] = _parse_phase_timings_value(
+            row.get("phase_timings_json")
+        )
 
     return templates.TemplateResponse(
         request,
