@@ -71,6 +71,25 @@ def create_fastapi_app(services: Dict[str, Any], lifespan: Callable) -> FastAPI:
         lifespan=lifespan,
     )
 
+    # Bug #1679: instrument the app for OTEL tracing IMMEDIATELY at
+    # construction time, before Starlette builds its ASGI middleware
+    # stack. Starlette builds that stack LAZILY on the very first ASGI
+    # message the app receives -- which is the "lifespan" startup message
+    # itself (Starlette.__call__ checks `self.middleware_stack is None`
+    # and builds it BEFORE dispatching to lifespan()). The pre-#1679 call
+    # site lived inside lifespan() (startup/lifespan.py), which runs
+    # AFTER that stack is already frozen -- FastAPIInstrumentor's
+    # monkey-patch of build_middleware_stack was therefore a structural
+    # no-op there: no exception, no warning, just zero HTTP request spans
+    # ever produced, on every deployment. This lifespan.py call site was
+    # already updated to a no-op log line (see the comment there) --
+    # instrument_fastapi() does not need a TelemetryManager (see its
+    # module docstring) so it is safe and correct to call unconditionally
+    # here, before any middleware is even added below.
+    from code_indexer.server.telemetry.instrumentation import instrument_fastapi
+
+    instrument_fastapi(app)
+
     # Add CORS middleware for Claude.ai OAuth compatibility
     app.add_middleware(
         CORSMiddleware,

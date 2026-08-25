@@ -92,83 +92,73 @@ class TestFastAPIInstrumentation:
         """Reset singletons after each test."""
         reset_all_singletons()
 
-    def test_instrument_fastapi_with_enabled_telemetry(self):
+    def test_instrument_fastapi_structurally_instruments_app(self):
         """
-        instrument_fastapi() instruments app when telemetry enabled.
+        instrument_fastapi(app) structurally instruments the app.
+
+        Bug #1679: instrument_fastapi() no longer takes a TelemetryManager
+        and no longer gates on telemetry config at all -- it must be
+        callable (and succeed) at FastAPI-app-construction time, before
+        any TelemetryManager exists. Whether spans actually get exported
+        is decided entirely by TelemetryManager's own tracer-provider
+        wiring (see test_instrument_fastapi_no_export_when_traces_disabled
+        below), never by this function.
         """
         from fastapi import FastAPI
-        from src.code_indexer.server.telemetry import get_telemetry_manager
         from src.code_indexer.server.telemetry.instrumentation import (
             instrument_fastapi,
             uninstrument_fastapi,
         )
 
-        config = TelemetryConfig(
-            enabled=True,
-            export_traces=True,
-            collector_endpoint="http://localhost:4317",
-        )
-        telemetry_manager = get_telemetry_manager(config)
-
         app = FastAPI()
 
-        # Instrument the app
-        result = instrument_fastapi(app, telemetry_manager)
+        # Instrument the app -- no telemetry_manager argument needed
+        result = instrument_fastapi(app)
 
         # Should return True indicating instrumentation was applied
         assert result is True
+        assert getattr(app, "_is_instrumented_by_opentelemetry", False) is True
 
         # Cleanup
         uninstrument_fastapi()
 
-    def test_instrument_fastapi_noop_when_disabled(self):
+    def test_instrument_fastapi_no_export_when_traces_disabled(self):
         """
-        instrument_fastapi() is a no-op when telemetry disabled.
-        """
-        from fastapi import FastAPI
-        from src.code_indexer.server.telemetry import get_telemetry_manager
-        from src.code_indexer.server.telemetry.instrumentation import (
-            instrument_fastapi,
-        )
+        Bug #1679 requirement: when export_traces is False, zero export
+        overhead is guaranteed -- but the guarantee lives in
+        TelemetryManager's own tracer-provider wiring (no span processor
+        is ever attached), not in instrument_fastapi() refusing to patch
+        the app. This test asserts the invariant at the level where it is
+        actually enforced: TelemetryManager._setup_trace_exporter() is
+        only ever called when export_traces is True, so a manager built
+        with export_traces=False has a real TracerProvider (so callers
+        can still record no-op-cost spans) with NO span processors
+        attached -- nothing for a span to be exported to.
 
-        config = TelemetryConfig(
-            enabled=False,
-            collector_endpoint="http://localhost:4317",
-        )
+        TelemetryConfig is imported at module scope (see top of this
+        file) alongside pytest.
+        """
+        from src.code_indexer.server.telemetry import get_telemetry_manager
+
+        # collector_endpoint intentionally omitted: export_traces=False
+        # means TelemetryManager never even constructs an exporter, so no
+        # collector address is needed for this test at all -- relying on
+        # TelemetryConfig's own default value here would be misleading.
+        config = TelemetryConfig(enabled=True, export_traces=False)
         telemetry_manager = get_telemetry_manager(config)
 
-        app = FastAPI()
+        tracer_provider = telemetry_manager.tracer_provider
+        assert tracer_provider is not None
 
-        # Instrument the app - should be no-op
-        result = instrument_fastapi(app, telemetry_manager)
-
-        # Should return False indicating no instrumentation
-        assert result is False
-
-    def test_instrument_fastapi_noop_when_traces_disabled(self):
-        """
-        instrument_fastapi() is a no-op when export_traces is False.
-        """
-        from fastapi import FastAPI
-        from src.code_indexer.server.telemetry import get_telemetry_manager
-        from src.code_indexer.server.telemetry.instrumentation import (
-            instrument_fastapi,
+        # No span processor (i.e. no exporter) was ever attached when
+        # export_traces is False -- confirms zero export overhead
+        # regardless of whether FastAPI instrumentation is structurally
+        # applied elsewhere.
+        processors = tracer_provider._active_span_processor._span_processors
+        assert processors == (), (
+            f"Expected zero span processors when export_traces=False, "
+            f"got: {processors!r}"
         )
-
-        config = TelemetryConfig(
-            enabled=True,
-            export_traces=False,
-            collector_endpoint="http://localhost:4317",
-        )
-        telemetry_manager = get_telemetry_manager(config)
-
-        app = FastAPI()
-
-        # Instrument the app - should be no-op since traces disabled
-        result = instrument_fastapi(app, telemetry_manager)
-
-        # Should return False indicating no instrumentation
-        assert result is False
 
 
 # =============================================================================

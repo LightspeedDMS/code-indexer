@@ -3347,23 +3347,23 @@ def make_lifespan(
                         extra={"correlation_id": get_correlation_id()},
                     )
 
-                # Initialize FastAPI instrumentation for OTEL (Story #697)
-                if server_config.telemetry_config.export_traces:
-                    from code_indexer.server.telemetry.instrumentation import (
-                        instrument_fastapi,
-                    )
-
-                    instrumented = instrument_fastapi(app, telemetry_manager)
-                    if instrumented:
-                        logger.info(
-                            "FastAPI instrumented with OTEL tracing",
-                            extra={"correlation_id": get_correlation_id()},
-                        )
-                    else:
-                        logger.debug(
-                            "FastAPI instrumentation skipped",
-                            extra={"correlation_id": get_correlation_id()},
-                        )
+                # FastAPI OTEL instrumentation (Story #697) is no longer
+                # applied here. Bug #1679: by the time this lifespan body
+                # executes, Starlette has ALREADY built its ASGI
+                # middleware stack (it builds that stack lazily on the
+                # very first ASGI message the app receives, which is the
+                # "lifespan" startup message itself) -- calling
+                # instrument_fastapi() at this point was a structural
+                # no-op that silently produced zero HTTP request spans on
+                # every deployment. Instrumentation now happens
+                # immediately after `FastAPI(...)` is constructed, in
+                # startup/app_wiring.py's create_fastapi_app(), well
+                # before this lifespan body ever runs.
+                logger.debug(
+                    "FastAPI OTEL instrumentation already applied at "
+                    "app-construction time (see app_wiring.py)",
+                    extra={"correlation_id": get_correlation_id()},
+                )
             else:
                 # Telemetry disabled - set to None
                 app.state.telemetry_manager = None
