@@ -119,8 +119,8 @@ class TestFastAPIInstrumentation:
         assert result is True
         assert getattr(app, "_is_instrumented_by_opentelemetry", False) is True
 
-        # Cleanup
-        uninstrument_fastapi()
+        # Cleanup -- per-app, not global (Bug #1679 round-2 review Finding 3)
+        uninstrument_fastapi(app)
 
     def test_instrument_fastapi_no_export_when_traces_disabled(self):
         """
@@ -159,6 +159,104 @@ class TestFastAPIInstrumentation:
             f"Expected zero span processors when export_traces=False, "
             f"got: {processors!r}"
         )
+
+
+class TestFastAPIInstrumentationOrderingMechanism1679:
+    """
+    Fast (no 'slow' marker), non-subprocess A/B mechanism test for Bug
+    #1679, so it runs in the normal fast/server-fast-automation gates.
+
+    Uses a bare FastAPI() app with an EXPLICIT local TracerProvider passed
+    directly to FastAPIInstrumentor.instrument_app(app, tracer_provider=...)
+    -- this bypasses OTEL's "global tracer provider settable only once per
+    process" constraint entirely (no subprocess needed), while still
+    exercising the REAL FastAPIInstrumentor/TracerProvider/
+    InMemorySpanExporter/TestClient machinery. No mocks.
+
+    Complements (does not replace) the subprocess-based
+    test_fastapi_instrumentation_ordering_1679.py, which proves the same
+    invariant through the REAL create_app() code path but is marked slow
+    (full server bootstrap) and therefore deselected by
+    fast-automation.sh/server-fast-automation.sh. This class exists so a
+    refactor reintroducing the Bug #1679 ordering mistake is still caught
+    by a normal, green server-fast-automation.sh run.
+    """
+
+    @staticmethod
+    def _build_app_with_local_tracer():
+        from fastapi import FastAPI
+        from opentelemetry.sdk.trace import TracerProvider
+        from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+        from opentelemetry.sdk.trace.export.in_memory_span_exporter import (
+            InMemorySpanExporter,
+        )
+
+        app = FastAPI()
+
+        @app.get("/ping")
+        def ping():
+            return {"ok": True}
+
+        provider = TracerProvider()
+        exporter = InMemorySpanExporter()
+        provider.add_span_processor(SimpleSpanProcessor(exporter))
+        return app, provider, exporter
+
+    def test_instrument_before_stack_build_produces_real_spans(self):
+        """Matches the FIXED call site: instrument_fastapi(app) in
+        app_wiring.py runs immediately after FastAPI(...), before
+        Starlette ever builds the middleware stack."""
+        from fastapi.testclient import TestClient
+        from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
+
+        app, provider, exporter = self._build_app_with_local_tracer()
+
+        assert app.middleware_stack is None, (
+            "Precondition: Starlette must not have built its middleware "
+            "stack yet, or this test cannot distinguish before/after."
+        )
+
+        FastAPIInstrumentor.instrument_app(app, tracer_provider=provider)
+        try:
+            with TestClient(app) as client:
+                response = client.get("/ping")
+
+            assert response.status_code == 200
+            assert len(exporter.get_finished_spans()) > 0, (
+                "Expected real spans when instrumented BEFORE the "
+                "middleware stack is built (the fixed ordering)."
+            )
+        finally:
+            FastAPIInstrumentor.uninstrument_app(app)
+
+    def test_instrument_after_stack_build_produces_zero_spans(self):
+        """Reproduces the Bug #1679 mechanism directly: instrumenting
+        AFTER Starlette has already built its middleware stack (matching
+        the pre-fix call site inside lifespan()) is a structural no-op."""
+        from fastapi.testclient import TestClient
+        from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
+
+        app, provider, exporter = self._build_app_with_local_tracer()
+
+        # Simulate what Starlette does automatically on the very first
+        # ASGI message it receives (the "lifespan" startup message
+        # itself, BEFORE lifespan() body runs) -- freezes the middleware
+        # stack using the UNPATCHED build_middleware_stack.
+        app.middleware_stack = app.build_middleware_stack()
+
+        FastAPIInstrumentor.instrument_app(app, tracer_provider=provider)
+        try:
+            with TestClient(app) as client:
+                response = client.get("/ping")
+
+            assert response.status_code == 200
+            assert len(exporter.get_finished_spans()) == 0, (
+                "Expected ZERO spans when instrumented AFTER the "
+                "middleware stack is already built -- this reproduces "
+                "Bug #1679's exact structural no-op."
+            )
+        finally:
+            FastAPIInstrumentor.uninstrument_app(app)
 
 
 # =============================================================================

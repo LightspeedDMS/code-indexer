@@ -33,7 +33,6 @@ from code_indexer.server.telemetry.instrumentation import (
     instrument_fastapi,
     uninstrument_fastapi,
     DEFAULT_EXCLUDED_URLS,
-    reset_instrumentation_state,
 )
 from code_indexer.server.telemetry.correlation_bridge import (
     CorrelationBridgeMiddleware,
@@ -76,7 +75,6 @@ __all__ = [
     "instrument_fastapi",
     "uninstrument_fastapi",
     "DEFAULT_EXCLUDED_URLS",
-    "reset_instrumentation_state",
     # Correlation bridge
     "CorrelationBridgeMiddleware",
     "get_current_correlation_id",

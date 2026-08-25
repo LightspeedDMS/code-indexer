@@ -82,13 +82,26 @@ def create_fastapi_app(services: Dict[str, Any], lifespan: Callable) -> FastAPI:
     # monkey-patch of build_middleware_stack was therefore a structural
     # no-op there: no exception, no warning, just zero HTTP request spans
     # ever produced, on every deployment. This lifespan.py call site was
-    # already updated to a no-op log line (see the comment there) --
-    # instrument_fastapi() does not need a TelemetryManager (see its
-    # module docstring) so it is safe and correct to call unconditionally
-    # here, before any middleware is even added below.
-    from code_indexer.server.telemetry.instrumentation import instrument_fastapi
+    # already updated to a no-op log line (see the comment there).
+    #
+    # Gated on telemetry_config.enabled (already resolved above, from the
+    # same config_service.get_config() call lifespan() uses -- only the
+    # TelemetryManager INSTANCE is unavailable this early, not the
+    # config) rather than applied unconditionally: OpenTelemetryMiddleware
+    # does real per-request work (attribute collection, context
+    # extraction, counter/histogram calls) even when the underlying
+    # tracer is a no-op, so instrumenting unconditionally would add real
+    # overhead on every deployment with telemetry disabled -- contrary to
+    # this project's documented "zero overhead when disabled" guarantee
+    # (TelemetryConfig's and telemetry/__init__.py's docstrings). Toggling
+    # telemetry already requires a server restart (TelemetryManager
+    # itself is only constructed at lifespan/startup time), so this gate
+    # costs no runtime flexibility.
+    _telemetry_cfg = server_config.telemetry_config
+    if _telemetry_cfg is not None and _telemetry_cfg.enabled:
+        from code_indexer.server.telemetry.instrumentation import instrument_fastapi
 
-    instrument_fastapi(app)
+        instrument_fastapi(app)
 
     # Add CORS middleware for Claude.ai OAuth compatibility
     app.add_middleware(

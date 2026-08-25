@@ -78,14 +78,15 @@ def _run() -> dict:
             span_count = 0
             span_names: list = []
             if exporter is not None and tracer_provider is not None:
-                flushed = tracer_provider.force_flush()
-                if not flushed:
-                    raise RuntimeError(
-                        "TracerProvider.force_flush() reported failure -- "
-                        "span export/processing did not complete within "
-                        "its timeout, so the captured span count below "
-                        "would be unreliable."
-                    )
+                # No force_flush() needed: exporter is wired via a
+                # SimpleSpanProcessor, which exports synchronously inside
+                # span.end() (called when the request's server span
+                # finishes, before the HTTP response above returns) --
+                # get_finished_spans() already reflects everything.
+                # force_flush() on the shared TracerProvider would ALSO
+                # wait on the real OTLP/gRPC BatchSpanProcessor pointed at
+                # a dead fake collector endpoint, whose retry/backoff
+                # could blow this subprocess's own timeout for no benefit.
                 spans = exporter.get_finished_spans()
                 span_count = len(spans)
                 span_names = [s.name for s in spans]
