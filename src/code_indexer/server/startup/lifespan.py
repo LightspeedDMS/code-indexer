@@ -11,7 +11,7 @@ import os
 import threading
 import time
 from pathlib import Path
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, Optional, Union
 
 from code_indexer.server.middleware.correlation import get_correlation_id
 from code_indexer.server.logging_utils import format_error_log
@@ -21,6 +21,30 @@ from code_indexer.server.storage.database_manager import DatabaseConnectionManag
 from code_indexer.server.utils.registry_factory import STORAGE_MODE_PENDING_SENTINEL
 
 logger = logging.getLogger(__name__)
+
+
+def _ensure_dep_map_output_dir(golden_repos_dir: Union[str, Path]) -> Path:
+    """Eagerly create the dependency-map output directory (Bug #1621).
+
+    Without this, {golden_repos_dir}/cidx-meta/dependency-map/ is only ever
+    created lazily, as a side effect of the first analysis run. That meant
+    `_get_dep_map_output_dir()` (dependency_map_routes.py) returned None for
+    every request on a never-before-visited node -- including the very
+    request that would otherwise trigger the directory's creation -- causing
+    a spurious "Dashboard analysis infrastructure unavailable" error on the
+    first dashboard load. The next poll a few seconds later would then
+    succeed once something else happened to create the directory.
+
+    This is a single, trivial O(1) directory creation, unconditionally safe
+    to run once at startup regardless of whether the dependency-map feature
+    is enabled -- it does not scale with fleet size (unlike golden-repo-count
+    work, which must never run unbacked on the startup path).
+
+    Returns the (created, or already-existing) directory path.
+    """
+    dep_map_dir = Path(golden_repos_dir) / "cidx-meta" / "dependency-map"
+    dep_map_dir.mkdir(parents=True, exist_ok=True)
+    return dep_map_dir
 
 
 def _make_dep_map_repair_invoker_fn(
@@ -2601,6 +2625,15 @@ def make_lifespan(
 
             # Story #927: closures capture dep_map_dir, tracking_backend, job_tracker
             _dep_map_dir = Path(golden_repos_dir) / "cidx-meta" / "dependency-map"
+
+            # Bug #1621: eagerly create the dep-map output directory here, before
+            # anything below checks for its existence. Without this, a
+            # never-before-visited node has no cidx-meta/dependency-map/ on disk
+            # until the first analysis run happens to create it lazily -- so the
+            # very first dashboard HTMX poll sees `_get_dep_map_output_dir()`
+            # return None and renders a spurious "infrastructure unavailable"
+            # error, even though the directory would exist moments later.
+            _ensure_dep_map_output_dir(golden_repos_dir)
 
             # Bug #1040 follow-up: clean stale sentinel lock files on startup.
             # Server restart kills analysis threads but leaves sentinel files on
