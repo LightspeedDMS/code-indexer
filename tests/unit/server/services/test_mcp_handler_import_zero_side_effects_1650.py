@@ -8,7 +8,7 @@ golden-repo-loading and worker-thread side effects still occurred."
 Code review of the first #1650 fix attempt (commit 2085fe9a, module-level
 PEP 562 lazy-init only) proved this repro was UNCHANGED, pre-fix and
 post-fix: byte-for-byte identical result -- 2x "Loaded N golden repos from
-SQLite" and 4 new bgm-worker/bgm-temporal-worker threads, both times. Root
+SQLite" and 14 threads, both times. Root
 cause: `mcp.handlers.search` imports `mcp.handlers.__init__`/`_legacy.py`
 (package init runs first), which bind `git_operations_service` at MODULE
 SCOPE via `from ... import git_operations_service` -- PEP 562's
@@ -16,7 +16,7 @@ __getattr__ fires transparently on that statement too, so the module-level
 deferral alone never prevented construction.
 
 Tracing (stack-trace instrumentation on ActivatedRepoManager.__init__,
-during this investigation) revealed the 2x/4-threads count came from TWO
+during this investigation) revealed the 2x/14-threads count came from TWO
 INDEPENDENT sources:
   1. mcp/handlers/_legacy.py -> git_operations_service.py's __getattr__ ->
      GitOperationsService.__init__ -> (eagerly) ActivatedRepoManager()
