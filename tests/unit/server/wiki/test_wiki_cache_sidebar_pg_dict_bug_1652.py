@@ -26,22 +26,30 @@ follows that exact pattern: accept a value already of the expected type
 for str/bytes; log a WARNING and return None for anything else that is
 malformed — never raise.
 
-Tests target the extracted `_parse_json_cache_value()` helper directly
-(smallest correct unit boundary, mirrors test_phase_timings_pg_dict_bug_1622.py),
-plus integration-level tests against WikiCache.get_sidebar()/get_article()
-using a fake backend that returns already-deserialized dict/list values,
-simulating psycopg's real JSONB behavior without requiring a live
-PostgreSQL server.
+Code-review remediation (F3, on the original #1652/#1655 commit): the
+normalization logic itself is no longer duplicated in wiki_cache.py — it
+was extracted to the shared `parse_json_column()` helper in
+server/storage/json_column.py (see test_json_column.py for the canonical,
+comprehensive unit coverage of that helper, including malformed/wrong-shape
+cases and the WARNING-truncation fix). This file now keeps ONLY
+integration-level tests proving WikiCache.get_sidebar()/get_article()
+correctly wire that shared helper in — i.e. that a fake backend returning
+already-deserialized dict/list values (simulating psycopg's real JSONB
+behavior) is handled without raising, without requiring a live PostgreSQL
+server.
 """
 
 import logging
 from pathlib import Path
 
 _WIKI_CACHE_MODULE = "code_indexer.server.wiki.wiki_cache"
+_JSON_COLUMN_MODULE = "code_indexer.server.storage.json_column"
 
 
 def _warnings(caplog):
-    return [r for r in caplog.records if r.name == _WIKI_CACHE_MODULE]
+    return [
+        r for r in caplog.records if r.name in (_WIKI_CACHE_MODULE, _JSON_COLUMN_MODULE)
+    ]
 
 
 class _FakeBackend:
@@ -60,100 +68,6 @@ class _FakeBackend:
 
     def get_article(self, repo_alias, article_path):
         return self._article_row
-
-
-class TestParseJsonCacheValueNoneAndPassthrough:
-    """None passthrough, and Bug #1652's core fix: matching-type passthrough."""
-
-    def test_none_value_returns_none_without_warning(self, caplog):
-        from code_indexer.server.wiki.wiki_cache import _parse_json_cache_value
-
-        with caplog.at_level(logging.WARNING, logger=_WIKI_CACHE_MODULE):
-            result = _parse_json_cache_value(None, list, "sidebar_json")
-
-        assert result is None
-        assert _warnings(caplog) == []
-
-    def test_list_value_returned_as_is_without_warning(self, caplog):
-        """Bug #1652: a list value (PostgreSQL JSONB sidebar_json) must be used directly."""
-        from code_indexer.server.wiki.wiki_cache import _parse_json_cache_value
-
-        raw = [{"title": "Home", "path": "home", "children": []}]
-        with caplog.at_level(logging.WARNING, logger=_WIKI_CACHE_MODULE):
-            result = _parse_json_cache_value(raw, list, "sidebar_json")
-
-        assert result == raw
-        assert result is raw
-        assert _warnings(caplog) == []
-
-    def test_dict_value_returned_as_is_without_warning(self, caplog):
-        """A dict value (PostgreSQL JSONB metadata) must be used directly."""
-        from code_indexer.server.wiki.wiki_cache import _parse_json_cache_value
-
-        raw = {"author": "alice", "tags": ["a", "b"]}
-        with caplog.at_level(logging.WARNING, logger=_WIKI_CACHE_MODULE):
-            result = _parse_json_cache_value(raw, dict, "metadata_json")
-
-        assert result == raw
-        assert _warnings(caplog) == []
-
-
-class TestParseJsonCacheValueStringAndBytes:
-    """Regression: SQLite's TEXT column (str, and str's bytes cousin)."""
-
-    def test_json_string_list_still_parses_without_warning(self, caplog):
-        from code_indexer.server.wiki.wiki_cache import _parse_json_cache_value
-
-        with caplog.at_level(logging.WARNING, logger=_WIKI_CACHE_MODULE):
-            result = _parse_json_cache_value(
-                '[{"title": "Home", "path": "home"}]', list, "sidebar_json"
-            )
-
-        assert result == [{"title": "Home", "path": "home"}]
-        assert _warnings(caplog) == []
-
-    def test_bytes_value_still_parses_without_warning(self, caplog):
-        from code_indexer.server.wiki.wiki_cache import _parse_json_cache_value
-
-        with caplog.at_level(logging.WARNING, logger=_WIKI_CACHE_MODULE):
-            result = _parse_json_cache_value(
-                b'{"author": "bob"}', dict, "metadata_json"
-            )
-
-        assert result == {"author": "bob"}
-        assert _warnings(caplog) == []
-
-
-class TestParseJsonCacheValueMalformed:
-    """Regression: genuinely malformed values must still WARN and return None."""
-
-    def test_malformed_json_string_warns_and_returns_none(self, caplog):
-        from code_indexer.server.wiki.wiki_cache import _parse_json_cache_value
-
-        with caplog.at_level(logging.WARNING, logger=_WIKI_CACHE_MODULE):
-            result = _parse_json_cache_value("not-valid-json{", list, "sidebar_json")
-
-        assert result is None
-        assert len(_warnings(caplog)) == 1
-
-    def test_unexpected_scalar_type_warns_and_returns_none(self, caplog):
-        from code_indexer.server.wiki.wiki_cache import _parse_json_cache_value
-
-        with caplog.at_level(logging.WARNING, logger=_WIKI_CACHE_MODULE):
-            result = _parse_json_cache_value(42, list, "sidebar_json")
-
-        assert result is None
-        assert len(_warnings(caplog)) == 1
-
-    def test_wrong_shape_json_value_warns_and_returns_none(self, caplog):
-        """A JSON object string when a list was expected must still warn."""
-        from code_indexer.server.wiki.wiki_cache import _parse_json_cache_value
-
-        with caplog.at_level(logging.WARNING, logger=_WIKI_CACHE_MODULE):
-            result = _parse_json_cache_value('{"not": "a list"}', list, "sidebar_json")
-
-        assert result is None
-        assert len(_warnings(caplog)) == 1
 
 
 class TestGetSidebarWithPostgresDictBackend:
@@ -224,7 +138,7 @@ class TestGetArticleWithPostgresDictBackendMetadata:
         backend = _FakeBackend(article_row=row)
         cache = WikiCache(db_path=":memory:", storage_backend=backend)
 
-        with caplog.at_level(logging.WARNING, logger=_WIKI_CACHE_MODULE):
+        with caplog.at_level(logging.WARNING):
             result = cache.get_article("my-repo", "article", article_file)
 
         assert result is not None

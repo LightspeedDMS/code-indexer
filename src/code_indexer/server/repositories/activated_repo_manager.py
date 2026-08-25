@@ -14,6 +14,7 @@ from code_indexer.server.utils.cancellable_subprocess import (
 from code_indexer.server.storage.shared.snapshot_manager import (
     _ensure_source_tree_readable_for_clone,
 )
+from code_indexer.server.storage.json_column import parse_json_column
 from code_indexer.utils.subprocess_env import build_cidx_subprocess_env
 
 import json
@@ -506,12 +507,9 @@ class ActivatedRepoManager:
         }
         metadata_json = row.get("metadata_json")
         if metadata_json:
-            extra = (
-                metadata_json
-                if isinstance(metadata_json, dict)
-                else json.loads(metadata_json)
-            )
-            result.update(extra)
+            extra = parse_json_column(metadata_json, dict, "metadata_json")
+            if extra:
+                result.update(extra)
         return result
 
     def get_activation_id(self, username: str, user_alias: str) -> Optional[str]:

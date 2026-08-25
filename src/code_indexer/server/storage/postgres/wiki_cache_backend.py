@@ -5,8 +5,16 @@ Drop-in replacement for WikiCacheSqliteBackend using psycopg v3 sync
 connections via ConnectionPool.  Satisfies the WikiCacheBackend Protocol
 (protocols.py).
 
-Tables created on first use (CREATE TABLE IF NOT EXISTS) so no separate
-migration step is required.
+Schema (wiki_cache, wiki_sidebar_cache, wiki_article_views) is owned
+entirely by the SQL migrations (storage/postgres/migrations/sql/) — this
+backend does NOT create or alter any table. `service_init.py` always
+runs `MigrationRunner` before `StorageFactory.create_backends()`
+constructs this class, so schema is guaranteed present by the time any
+instance exists (Bug #1655 code-review remediation, F4: a previous
+self-heal `CREATE TABLE IF NOT EXISTS` here was dead code in every real
+deployment and had silently drifted out of sync with the real migration
+column names/types — removed rather than re-synced so there is no
+second copy of the schema left to drift again).
 """
 
 from __future__ import annotations
@@ -29,59 +37,15 @@ class WikiCachePostgresBackend:
 
     def __init__(self, pool: ConnectionPool) -> None:
         """
-        Initialize with a shared connection pool and ensure tables exist.
+        Initialize with a shared connection pool.
+
+        Schema is assumed to already exist (see module docstring) — this
+        constructor does not touch the database.
 
         Args:
             pool: ConnectionPool instance providing psycopg v3 connections.
         """
         self._pool = pool
-        self._ensure_schema()
-
-    def _ensure_schema(self) -> None:
-        """Create wiki tables and indexes if they do not already exist."""
-        try:
-            with self._pool.connection() as conn:
-                conn.execute(
-                    """
-                    CREATE TABLE IF NOT EXISTS wiki_cache (
-                        repo_alias TEXT NOT NULL,
-                        article_path TEXT NOT NULL,
-                        rendered_html TEXT NOT NULL,
-                        title TEXT NOT NULL,
-                        file_mtime DOUBLE PRECISION NOT NULL,
-                        file_size INTEGER NOT NULL,
-                        rendered_at TEXT NOT NULL,
-                        metadata JSONB,
-                        PRIMARY KEY (repo_alias, article_path)
-                    )
-                    """
-                )
-                conn.execute(
-                    """
-                    CREATE TABLE IF NOT EXISTS wiki_sidebar_cache (
-                        repo_alias TEXT PRIMARY KEY,
-                        sidebar_json TEXT NOT NULL,
-                        max_mtime DOUBLE PRECISION NOT NULL,
-                        built_at TEXT NOT NULL
-                    )
-                    """
-                )
-                conn.execute(
-                    """
-                    CREATE TABLE IF NOT EXISTS wiki_article_views (
-                        repo_alias TEXT NOT NULL,
-                        article_path TEXT NOT NULL,
-                        real_views INTEGER DEFAULT 0,
-                        first_viewed_at TEXT,
-                        last_viewed_at TEXT,
-                        PRIMARY KEY (repo_alias, article_path)
-                    )
-                    """
-                )
-                conn.commit()
-        except Exception as exc:
-            logger.error("WikiCachePostgresBackend: schema setup failed: %s", exc)
-            raise
 
     def get_article(
         self, repo_alias: str, article_path: str

@@ -11,20 +11,23 @@ every run-history row, logging a spurious WARNING and leaving
 phase_timings_parsed = None (per-phase pills never rendered, falling back
 to the coarse P1/P2 pills).
 
-Tests target the extracted `_parse_phase_timings_value()` helper directly
-(dependency_map_routes.py) — the smallest correct unit boundary for this
-fix. This also allows exercising a `bytes` input directly: bytes has no
+Code-review remediation (F3, on the #1652/#1655 commit): the
+_parse_phase_timings_value() helper that originally lived in
+dependency_map_routes.py was extracted into the shared
+`parse_json_column()` helper (server/storage/json_column.py) alongside
+two other near-identical implementations (wiki_cache.py,
+activated_repo_manager.py). dependency_map_routes.py now calls
+`parse_json_column(row.get("phase_timings_json"), dict,
+"phase_timings_json")` directly. Tests below call the shared helper the
+same way dependency_map_routes.py does, preserving Bug #1622's original
+regression coverage (including the `bytes` case, which has no
 representation inside the dashboard's JSON-serialized result_json cache
-envelope, so it could never be reproduced through the full HTTP endpoint.
+envelope and could never be reproduced through the full HTTP endpoint) at
+its new, correct import location.
 """
 
 import logging
 
-_ROUTES = "code_indexer.server.web.dependency_map_routes"
-# Matches both WARNING message variants _parse_phase_timings_value logs:
-# "malformed phase_timings_json %r: %s" (json.loads failure) and
-# "phase_timings_json parsed to %s (expected dict), ignoring: %r"
-# (valid JSON that isn't a dict, e.g. a JSON array).
 _WARNING_SUBSTRING = "phase_timings_json"
 
 
@@ -32,29 +35,27 @@ def _warnings(caplog):
     return [r for r in caplog.records if _WARNING_SUBSTRING in r.getMessage()]
 
 
+def _parse_phase_timings(raw):
+    from code_indexer.server.storage.json_column import parse_json_column
+
+    return parse_json_column(raw, dict, "phase_timings_json")
+
+
 class TestParsePhaseTimingsValueNoneAndDict:
     """None passthrough, and Bug #1622's core fix: dict passthrough."""
 
     def test_none_value_returns_none_without_warning(self, caplog):
-        from code_indexer.server.web.dependency_map_routes import (
-            _parse_phase_timings_value,
-        )
-
-        with caplog.at_level(logging.WARNING, logger=_ROUTES):
-            result = _parse_phase_timings_value(None)
+        with caplog.at_level(logging.WARNING):
+            result = _parse_phase_timings(None)
 
         assert result is None
         assert _warnings(caplog) == []
 
     def test_dict_value_returned_as_is_without_warning(self, caplog):
         """Bug #1622: a dict value (PostgreSQL JSONB) must be used directly."""
-        from code_indexer.server.web.dependency_map_routes import (
-            _parse_phase_timings_value,
-        )
-
         raw = {"detect_s": 54.26505970954895, "merge_s": 0.0066}
-        with caplog.at_level(logging.WARNING, logger=_ROUTES):
-            result = _parse_phase_timings_value(raw)
+        with caplog.at_level(logging.WARNING):
+            result = _parse_phase_timings(raw)
 
         assert result == raw
         assert _warnings(caplog) == []
@@ -64,12 +65,8 @@ class TestParsePhaseTimingsValueStringAndBytes:
     """Regression: SQLite's TEXT column (str, and str's bytes cousin)."""
 
     def test_json_string_value_still_parses_without_warning(self, caplog):
-        from code_indexer.server.web.dependency_map_routes import (
-            _parse_phase_timings_value,
-        )
-
-        with caplog.at_level(logging.WARNING, logger=_ROUTES):
-            result = _parse_phase_timings_value('{"detect_s": 0.5, "merge_s": 94.1}')
+        with caplog.at_level(logging.WARNING):
+            result = _parse_phase_timings('{"detect_s": 0.5, "merge_s": 94.1}')
 
         assert result == {"detect_s": 0.5, "merge_s": 94.1}
         assert _warnings(caplog) == []
@@ -81,12 +78,8 @@ class TestParsePhaseTimingsValueStringAndBytes:
         (JSON has no bytes type), so this unit-level call is the only
         boundary able to prove it.
         """
-        from code_indexer.server.web.dependency_map_routes import (
-            _parse_phase_timings_value,
-        )
-
-        with caplog.at_level(logging.WARNING, logger=_ROUTES):
-            result = _parse_phase_timings_value(b'{"refine_s": 61.0}')
+        with caplog.at_level(logging.WARNING):
+            result = _parse_phase_timings(b'{"refine_s": 61.0}')
 
         assert result == {"refine_s": 61.0}
         assert _warnings(caplog) == []
@@ -96,36 +89,24 @@ class TestParsePhaseTimingsValueMalformed:
     """Regression: genuinely malformed values must still WARN and return None."""
 
     def test_malformed_json_string_warns_and_returns_none(self, caplog):
-        from code_indexer.server.web.dependency_map_routes import (
-            _parse_phase_timings_value,
-        )
-
-        with caplog.at_level(logging.WARNING, logger=_ROUTES):
-            result = _parse_phase_timings_value("not-valid-json{")
+        with caplog.at_level(logging.WARNING):
+            result = _parse_phase_timings("not-valid-json{")
 
         assert result is None
         assert len(_warnings(caplog)) == 1
 
     def test_unexpected_scalar_type_warns_and_returns_none(self, caplog):
         """An int (neither dict nor str/bytes) must still hit the warning path."""
-        from code_indexer.server.web.dependency_map_routes import (
-            _parse_phase_timings_value,
-        )
-
-        with caplog.at_level(logging.WARNING, logger=_ROUTES):
-            result = _parse_phase_timings_value(42)
+        with caplog.at_level(logging.WARNING):
+            result = _parse_phase_timings(42)
 
         assert result is None
         assert len(_warnings(caplog)) == 1
 
     def test_non_dict_json_value_warns_and_returns_none(self, caplog):
         """A JSON array (parses fine, but isn't a dict) must still warn."""
-        from code_indexer.server.web.dependency_map_routes import (
-            _parse_phase_timings_value,
-        )
-
-        with caplog.at_level(logging.WARNING, logger=_ROUTES):
-            result = _parse_phase_timings_value("[1, 2, 3]")
+        with caplog.at_level(logging.WARNING):
+            result = _parse_phase_timings("[1, 2, 3]")
 
         assert result is None
         assert len(_warnings(caplog)) == 1

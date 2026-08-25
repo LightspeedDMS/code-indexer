@@ -114,27 +114,40 @@ class TestMigrationGroundTruth:
         assert "metadata_json" not in columns
 
 
-class TestEnsureSchemaColumnName:
-    def test_ensure_schema_create_table_does_not_reference_metadata_json(self):
-        """Bug #1655: the self-heal CREATE TABLE fallback must match the
-        real migration's column name so a fresh (pre-migration) schema and
-        an already-migrated schema behave identically."""
+class TestConstructorDoesNotCreateTables:
+    """Code-review remediation (F4, on the #1652/#1655 commit): the
+    self-heal `CREATE TABLE IF NOT EXISTS` block in `_ensure_schema()` was
+    dead code in production — `service_init.py` always runs
+    `MigrationRunner` before `StorageFactory.create_backends()` constructs
+    any PostgreSQL backend (postgres storage mode), and `WikiCachePostgresBackend`
+    is only ever constructed from that factory. Its only real effect was
+    being a SECOND, silently-drifting source of truth for the schema — the
+    exact mechanism that produced Bug #1655 (metadata vs metadata_json) and
+    that also mis-declared wiki_cache.rendered_at, wiki_sidebar_cache.sidebar_json,
+    and wiki_sidebar_cache.built_at as TEXT instead of the migration's
+    TIMESTAMPTZ/JSONB types. The dead CREATE TABLE block is removed
+    entirely rather than re-synced, so there is no second copy left to
+    drift again."""
+
+    def test_constructor_issues_zero_create_table_statements(self):
         pool = _make_mock_pool()
 
         _make_backend(pool)
 
         sql_statements = _all_executed_sql(pool)
-        create_wiki_cache_sql = next(
-            s
-            for s in sql_statements
-            if "CREATE TABLE" in s
-            and "wiki_cache" in s
-            and "wiki_sidebar_cache" not in s
-            and "wiki_article_views" not in s
-        )
+        create_table_statements = [s for s in sql_statements if "CREATE TABLE" in s]
 
-        assert "metadata_json" not in create_wiki_cache_sql
-        assert re.search(r"\bmetadata\b", create_wiki_cache_sql) is not None
+        assert create_table_statements == []
+
+    def test_constructor_does_not_call_conn_execute_at_all(self):
+        """The whole point of removing the dead _ensure_schema() body is
+        that construction no longer talks to the database at all."""
+        pool = _make_mock_pool()
+
+        _make_backend(pool)
+
+        conn = _get_conn(pool)
+        assert conn.execute.call_count == 0
 
 
 class TestGetArticleColumnName:
