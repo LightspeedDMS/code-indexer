@@ -204,15 +204,29 @@ class GitOperationsService:
                 return
             config = self.config_manager.get_config()
             # Handle case where no config file exists (e.g., CI/CD parity tests)
+            #
+            # Bug #1650 round-2 remediation (M1): each slot is only filled
+            # if still None. Without this guard, a caller that explicitly
+            # sets _git_timeouts (e.g. a test's mock/sentinel, via the
+            # setter below) and then reads _api_limits for the first time
+            # would silently have its _git_timeouts overwritten here too --
+            # this method fills BOTH slots unconditionally on every run
+            # (there being no way to derive one without the other from a
+            # single config read), so it must not clobber a slot that was
+            # already independently populated.
             if config is not None:
-                self._git_timeouts_lazy = config.git_timeouts_config
-                self._api_limits_lazy = config.api_limits_config
+                if self._git_timeouts_lazy is None:
+                    self._git_timeouts_lazy = config.git_timeouts_config
+                if self._api_limits_lazy is None:
+                    self._api_limits_lazy = config.api_limits_config
             else:
                 # Use defaults when no config file exists
                 from ..utils.config_manager import GitTimeoutsConfig, ApiLimitsConfig
 
-                self._git_timeouts_lazy = GitTimeoutsConfig()
-                self._api_limits_lazy = ApiLimitsConfig()
+                if self._git_timeouts_lazy is None:
+                    self._git_timeouts_lazy = GitTimeoutsConfig()
+                if self._api_limits_lazy is None:
+                    self._api_limits_lazy = ApiLimitsConfig()
             self._config_loaded = True
 
     @property
@@ -252,23 +266,47 @@ class GitOperationsService:
         """Lazily construct ActivatedRepoManager (Bug #1650): this is the
         expensive GoldenRepoManager -> SQLite golden-repo load and
         bgm-worker/bgm-temporal-worker thread spawn, deferred to first real
-        git operation instead of GitOperationsService() construction time."""
-        if self._activated_repo_manager_lazy is None:
-            with self._activated_repo_manager_lock:
-                if self._activated_repo_manager_lazy is None:
-                    # Import here to avoid circular imports (same reasoning
-                    # as the original eager code this replaces).
-                    import os
-                    from ..repositories.activated_repo_manager import (
-                        ActivatedRepoManager,
-                    )
+        git operation instead of GitOperationsService() construction time.
 
-                    _server_dir = os.environ.get("CIDX_SERVER_DATA_DIR")
-                    self._activated_repo_manager_lazy = ActivatedRepoManager(
-                        data_dir=os.path.join(_server_dir, "data")
-                        if _server_dir
-                        else None
+        Guarded by a per-instance `_arm_initializing` sentinel (Bug #1650
+        round-2 remediation, M2): the RLock alone stops CROSS-THREAD
+        deadlock but not SAME-THREAD re-entrant recursion -- on re-entry
+        the double-checked `is None` test is still True (the assignment
+        happens only after the constructor returns), so an unguarded
+        re-entrant call arriving from within construction would construct
+        AGAIN (proven: reaches construction depth 6+ unguarded; uncapped
+        that is unbounded recursion -> RecursionError). Mirrors this
+        module's own __getattr__ `_initializing` sentinel pattern exactly.
+        Uses getattr(..., default) throughout: GitOperationsService.__new__(...)
+        -bypassed test instances may read this property without __init__
+        ever having run.
+        """
+        if getattr(self, "_activated_repo_manager_lazy", None) is None:
+            with self._activated_repo_manager_lock:
+                if getattr(self, "_arm_initializing", False):
+                    raise AttributeError(
+                        "activated_repo_manager is still under construction "
+                        "(re-entrant access)"
                     )
+                if getattr(self, "_activated_repo_manager_lazy", None) is None:
+                    self._arm_initializing = True
+                    try:
+                        # Import here to avoid circular imports (same
+                        # reasoning as the original eager code this
+                        # replaces).
+                        import os
+                        from ..repositories.activated_repo_manager import (
+                            ActivatedRepoManager,
+                        )
+
+                        _server_dir = os.environ.get("CIDX_SERVER_DATA_DIR")
+                        self._activated_repo_manager_lazy = ActivatedRepoManager(
+                            data_dir=os.path.join(_server_dir, "data")
+                            if _server_dir
+                            else None
+                        )
+                    finally:
+                        self._arm_initializing = False
         return self._activated_repo_manager_lazy
 
     @activated_repo_manager.setter

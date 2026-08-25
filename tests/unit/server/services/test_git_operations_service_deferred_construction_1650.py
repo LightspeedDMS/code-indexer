@@ -140,6 +140,78 @@ class TestInitDoesNotEagerlyConstructActivatedRepoManager:
         assert results["a"] is results["b"]
 
 
+class TestActivatedRepoManagerReentrancyDoesNotRecurse:
+    """Round-2 code review M2: the activated_repo_manager lazy property's
+    RLock stops cross-thread deadlock but NOT same-thread re-entrant
+    recursion -- on re-entry the double-checked `is None` test is still
+    True (the assignment happens only after the constructor returns), so a
+    re-entrant call during construction would construct AGAIN. Reviewer
+    proved this reaches construction depth 6 (capped only by the probe
+    itself; uncapped this is unbounded recursion -> RecursionError, and in
+    production N redundant ActivatedRepoManager instances each spawning
+    their own bgm-worker/bgm-temporal-worker threads).
+
+    This exercises the fix via a background thread with a bounded
+    join(timeout=...), per the CLAUDE.md "Module-Level Service Singletons
+    Must Be Lazy" invariant's prescribed re-entrancy test shape -- hooking
+    the (mocked) ActivatedRepoManager constructor to probe
+    activated_repo_manager again mid-construction, on the same thread.
+    """
+
+    def test_reentrant_access_during_construction_does_not_recurse(self) -> None:
+        fake_config_manager = MagicMock()
+        fake_config_manager.get_config.return_value = None
+        service = GitOperationsService(config_manager=fake_config_manager)
+
+        construction_count = {"n": 0}
+        reentrant_outcome: dict = {}
+
+        class ReentrantARM:
+            def __init__(self, *args, **kwargs):
+                construction_count["n"] += 1
+                if construction_count["n"] == 1:
+                    # Re-entrant probe from WITHIN construction, same thread.
+                    try:
+                        reentrant_outcome["value"] = service.activated_repo_manager
+                    except Exception as e:  # noqa: BLE001 - captured for assertion
+                        reentrant_outcome["exception"] = e
+
+        result: dict = {}
+
+        def worker() -> None:
+            try:
+                with patch(
+                    "code_indexer.server.repositories.activated_repo_manager.ActivatedRepoManager",
+                    ReentrantARM,
+                ):
+                    result["value"] = service.activated_repo_manager
+            except Exception as e:  # noqa: BLE001 - captured for assertion
+                result["exception"] = e
+
+        t = threading.Thread(target=worker, daemon=True)
+        t.start()
+        t.join(timeout=THREAD_JOIN_TIMEOUT_SECONDS)
+
+        assert not t.is_alive(), (
+            "REGRESSION: re-entrant access during construction hung "
+            "(unbounded recursion or deadlock)."
+        )
+        assert construction_count["n"] == 1, (
+            "BUG #1650 REMEDIATION REGRESSION (M2): the constructor must run "
+            "EXACTLY ONCE -- a re-entrant call arriving mid-construction "
+            "must not trigger a second/recursive construction. "
+            f"construction_count={construction_count['n']}"
+        )
+        assert "exception" in reentrant_outcome, (
+            "The re-entrant call must raise (matching pre-fix unbound "
+            f"semantics), not silently return a value. Got: {reentrant_outcome}"
+        )
+        assert "value" in result, f"outer call must succeed: {result}"
+        assert "exception" not in result, (
+            f"outer (original) call must not raise: {result}"
+        )
+
+
 class TestActivatedRepoManagerSetterStillWorksForTestPatching:
     """Regression guard: tests/unit/server/routers/test_git_read_endpoints_contract.py
     does `git_operations_service.activated_repo_manager = mock_arm` directly on
@@ -215,6 +287,41 @@ class TestInitDoesNotEagerlyReadConfig:
             f"timeout/limit access. call_count={fake_config_manager.get_config.call_count}"
         )
         assert service._git_timeouts is fake_config.git_timeouts_config
+        assert service._api_limits is fake_config.api_limits_config
+
+    def test_explicitly_set_git_timeouts_survives_later_api_limits_read(
+        self,
+    ) -> None:
+        """Round-2 code review M1: _ensure_config_loaded() must not silently
+        clobber an already-set _git_timeouts_lazy/_api_limits_lazy slot.
+
+        Reproduces the reviewer's exact probe: set _git_timeouts to a
+        sentinel, then read _api_limits (which triggers
+        _ensure_config_loaded() since _api_limits_lazy is still None) --
+        the sentinel must survive, not be silently overwritten by the
+        config-derived value. Verified independently before this fix: the
+        sentinel was replaced by config.git_timeouts_config.
+        """
+        fake_config = MagicMock()
+        fake_config_manager = MagicMock()
+        fake_config_manager.get_config.return_value = fake_config
+
+        with patch(
+            "code_indexer.server.repositories.activated_repo_manager.ActivatedRepoManager"
+        ):
+            service = GitOperationsService(config_manager=fake_config_manager)
+
+        sentinel = object()
+        service._git_timeouts = sentinel
+
+        _ = service._api_limits
+
+        assert service._git_timeouts is sentinel, (
+            "BUG #1650 REMEDIATION REGRESSION (M1): explicitly setting "
+            "_git_timeouts must survive a later _api_limits read -- "
+            "_ensure_config_loaded() must not unconditionally overwrite an "
+            f"already-set slot. Got: {service._git_timeouts!r}"
+        )
         assert service._api_limits is fake_config.api_limits_config
 
     def test_no_config_manager_arg_defers_get_config_service_call(self) -> None:

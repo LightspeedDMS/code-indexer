@@ -139,23 +139,42 @@ class FileListingService:
         several existing test files construct this service via
         FileListingService.__new__(FileListingService) (bypassing __init__
         entirely) and may read this property before ever assigning to it.
+
+        Guarded by a per-instance `_arm_initializing` sentinel (Bug #1650
+        round-2 remediation, M2): the RLock alone stops CROSS-THREAD
+        deadlock but not SAME-THREAD re-entrant recursion -- on re-entry
+        the double-checked `is None` test is still True (the assignment
+        happens only after the constructor returns), so an unguarded
+        re-entrant call arriving from within construction would construct
+        AGAIN. Mirrors GitOperationsService.activated_repo_manager's
+        identical fix exactly.
         """
         if getattr(self, "_activated_repo_manager_lazy", None) is None:
             with self._activated_repo_manager_lock:
+                if getattr(self, "_arm_initializing", False):
+                    raise AttributeError(
+                        "activated_repo_manager is still under construction "
+                        "(re-entrant access)"
+                    )
                 if getattr(self, "_activated_repo_manager_lazy", None) is None:
-                    # Import here to avoid circular imports (same reasoning
-                    # as the original eager code this replaces).
-                    import os
-                    from ..repositories.activated_repo_manager import (
-                        ActivatedRepoManager,
-                    )
+                    self._arm_initializing = True
+                    try:
+                        # Import here to avoid circular imports (same
+                        # reasoning as the original eager code this
+                        # replaces).
+                        import os
+                        from ..repositories.activated_repo_manager import (
+                            ActivatedRepoManager,
+                        )
 
-                    _server_dir = os.environ.get("CIDX_SERVER_DATA_DIR")
-                    self._activated_repo_manager_lazy = ActivatedRepoManager(
-                        data_dir=os.path.join(_server_dir, "data")
-                        if _server_dir
-                        else None
-                    )
+                        _server_dir = os.environ.get("CIDX_SERVER_DATA_DIR")
+                        self._activated_repo_manager_lazy = ActivatedRepoManager(
+                            data_dir=os.path.join(_server_dir, "data")
+                            if _server_dir
+                            else None
+                        )
+                    finally:
+                        self._arm_initializing = False
         return self._activated_repo_manager_lazy
 
     @activated_repo_manager.setter

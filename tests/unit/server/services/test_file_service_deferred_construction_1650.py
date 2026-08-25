@@ -34,6 +34,7 @@ setter-backward-compatibility regression tests.
 
 import subprocess
 import sys
+import threading
 from pathlib import Path
 from unittest.mock import patch
 
@@ -41,6 +42,7 @@ import pytest
 
 SRC_ROOT = str(Path(__file__).parent.parent.parent.parent.parent / "src")
 SUBPROCESS_TIMEOUT_SECONDS = 30
+THREAD_JOIN_TIMEOUT_SECONDS = 10
 
 
 @pytest.fixture
@@ -125,3 +127,70 @@ class TestInitDoesNotEagerlyConstructActivatedRepoManager:
         )
         assert first == "constructed-instance"
         assert first is second
+
+
+class TestActivatedRepoManagerReentrancyDoesNotRecurse:
+    """Round-2 code review M2 (applies to BOTH classes, not just
+    GitOperationsService): the activated_repo_manager lazy property's
+    RLock stops cross-thread deadlock but NOT same-thread re-entrant
+    recursion -- on re-entry the double-checked `is None` test is still
+    True (the assignment happens only after the constructor returns), so a
+    re-entrant call during construction would construct AGAIN.
+
+    Mirrors test_git_operations_service_deferred_construction_1650.py's
+    TestActivatedRepoManagerReentrancyDoesNotRecurse exactly, using a
+    background thread with a bounded join(timeout=...).
+    """
+
+    def test_reentrant_access_during_construction_does_not_recurse(self) -> None:
+        from code_indexer.server.services.file_service import FileListingService
+
+        service = FileListingService()
+
+        construction_count = {"n": 0}
+        reentrant_outcome: dict = {}
+
+        class ReentrantARM:
+            def __init__(self, *args, **kwargs):
+                construction_count["n"] += 1
+                if construction_count["n"] == 1:
+                    # Re-entrant probe from WITHIN construction, same thread.
+                    try:
+                        reentrant_outcome["value"] = service.activated_repo_manager
+                    except Exception as e:  # noqa: BLE001 - captured for assertion
+                        reentrant_outcome["exception"] = e
+
+        result: dict = {}
+
+        def worker() -> None:
+            try:
+                with patch(
+                    "code_indexer.server.repositories.activated_repo_manager.ActivatedRepoManager",
+                    ReentrantARM,
+                ):
+                    result["value"] = service.activated_repo_manager
+            except Exception as e:  # noqa: BLE001 - captured for assertion
+                result["exception"] = e
+
+        t = threading.Thread(target=worker, daemon=True)
+        t.start()
+        t.join(timeout=THREAD_JOIN_TIMEOUT_SECONDS)
+
+        assert not t.is_alive(), (
+            "REGRESSION: re-entrant access during construction hung "
+            "(unbounded recursion or deadlock)."
+        )
+        assert construction_count["n"] == 1, (
+            "BUG #1650 REMEDIATION REGRESSION (M2): the constructor must run "
+            "EXACTLY ONCE -- a re-entrant call arriving mid-construction "
+            "must not trigger a second/recursive construction. "
+            f"construction_count={construction_count['n']}"
+        )
+        assert "exception" in reentrant_outcome, (
+            "The re-entrant call must raise (matching pre-fix unbound "
+            f"semantics), not silently return a value. Got: {reentrant_outcome}"
+        )
+        assert "value" in result, f"outer call must succeed: {result}"
+        assert "exception" not in result, (
+            f"outer (original) call must not raise: {result}"
+        )
