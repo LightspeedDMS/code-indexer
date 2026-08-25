@@ -1472,6 +1472,24 @@ def scip_impact(
       Local mode: SCIP indexes must be generated first (run 'cidx scip generate')
       Remote mode: --repository flag required
     """
+    # Bug #1639: validate --depth BEFORE branching into local/remote mode,
+    # mirroring Bug #1627's --depth fix on `scip dependencies`/`dependents`
+    # and Bug #1603's --max-depth fix on `scip callchain`, so both paths
+    # reject an out-of-range value identically with a clean, immediate
+    # CLI-level message instead of letting it reach the deep engine layer.
+    # The bound is MAX_TRAVERSAL_DEPTH from composites.py's analyze_impact
+    # -- a DIFFERENT constant from dependencies/dependents's
+    # MAX_SCIP_DEPENDENCY_DEPTH (both happen to be 10 today, but they are
+    # not the same source of truth and must not be conflated).
+    from code_indexer.scip.query.composites import MAX_TRAVERSAL_DEPTH
+
+    if depth < 1 or depth > MAX_TRAVERSAL_DEPTH:
+        console.print(
+            f"Error: --depth must be between 1 and {MAX_TRAVERSAL_DEPTH}, got {depth}",
+            style="red",
+        )
+        sys.exit(1)
+
     # Remote mode handling
     if _is_remote_mode():
         if not repository:
