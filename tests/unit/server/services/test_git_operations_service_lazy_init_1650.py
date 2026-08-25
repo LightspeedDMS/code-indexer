@@ -149,14 +149,17 @@ class TestReentrantAccessDuringConstructionDoesNotDeadlock:
     rationale): this exercises the REAL, unmodified production
     __getattr__ / _ensure_initialized() lock+sentinel logic and the REAL
     GitOperationsService()/_get_git_operations_service() production code.
-    Only `ActivatedRepoManager` -- an EXTERNAL dependency imported by
-    GitOperationsService.__init__ from a different module
-    (repositories/activated_repo_manager.py), not part of the lazy-init
-    mechanism under test -- is replaced with a stand-in that performs a
+    Only `TTLCache` -- a third-party EXTERNAL dependency (cachetools),
+    still constructed unconditionally inside GitOperationsService.__init__
+    even after the Bug #1650 Option A remediation moved
+    ActivatedRepoManager/config-service resolution off the __init__ call
+    chain entirely -- is replaced with a stand-in that performs a
     re-entrant probe of the module's own lazy attribute before returning,
     simulating a future/indirect call chain re-entering __getattr__ on the
     same thread (exactly like #1638's _running_server_app_state() probe did
-    for app.py's create_app() -> ... -> registry chain).
+    for app.py's create_app() -> ... -> registry chain). Verified
+    empirically that patching TTLCache here intercepts exactly the one call
+    __init__ makes, with no double-invocation.
     """
 
     def test_reentrant_probe_during_construction_returns_none_no_deadlock(
@@ -169,13 +172,12 @@ import threading
 from unittest import mock
 
 import code_indexer.server.services.git_operations_service as gos_module
-import code_indexer.server.repositories.activated_repo_manager as arm_module
 
 call_count = {{"n": 0}}
 captured = {{}}
 
 
-class FakeActivatedRepoManager:
+class ProbingTTLCache:
     def __init__(self, *args, **kwargs):
         call_count["n"] += 1
         # Re-entrant probe from WITHIN the lazy-construction call chain, on
@@ -189,9 +191,7 @@ result = {{}}
 
 def worker():
     try:
-        with mock.patch.object(
-            arm_module, "ActivatedRepoManager", FakeActivatedRepoManager
-        ):
+        with mock.patch.object(gos_module, "TTLCache", ProbingTTLCache):
             result["service"] = gos_module.git_operations_service
     except Exception as e:
         result["exception"] = repr(e)

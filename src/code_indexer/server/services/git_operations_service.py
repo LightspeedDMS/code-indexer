@@ -26,13 +26,26 @@ import subprocess
 import threading
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
 from cachetools import TTLCache
 
 from code_indexer.server.utils.config_manager import ServerConfigManager
 from code_indexer.utils.git_runner import run_git_command
 from code_indexer.server.logging_utils import format_error_log
+
+if TYPE_CHECKING:
+    # Bug #1650: type-only imports for the lazily-constructed attributes
+    # below. Kept under TYPE_CHECKING (never imported at runtime here) so
+    # the real imports stay local to the properties that need them, for the
+    # same circular-import-avoidance reason as the original eager code.
+    from code_indexer.server.utils.config_manager import (
+        GitTimeoutsConfig,
+        ApiLimitsConfig,
+    )
+    from code_indexer.server.repositories.activated_repo_manager import (
+        ActivatedRepoManager,
+    )
 
 # Module logger
 logger = logging.getLogger(__name__)
@@ -90,6 +103,21 @@ class GitCommandError(Exception):
 class GitOperationsService:
     """Service for executing git operations with subprocess."""
 
+    # Bug #1650 remediation: CLASS-LEVEL locks (not per-instance). Two
+    # reasons: (1) instances created via
+    # GitOperationsService.__new__(GitOperationsService) in 5+ existing test
+    # files (bypassing __init__ entirely) must still have a lock to
+    # synchronize on instead of raising AttributeError when a setter/getter
+    # below runs; (2) RLock, not a plain Lock, so re-entrant same-thread
+    # access (e.g. a mocked constructor calling back into this instance
+    # during a test) never deadlocks -- same rationale as the module-level
+    # RLock pattern from Bug #1638/#1650's __getattr__ fix. Sharing one lock
+    # across instances is an accepted trade-off: production runs a single
+    # long-lived GitOperationsService singleton, so there is no real
+    # multi-instance contention this coarsens away.
+    _config_lazy_lock = threading.RLock()
+    _activated_repo_manager_lock = threading.RLock()
+
     def __init__(self, config_manager: Optional[ServerConfigManager] = None):
         """
         Initialize GitOperationsService with configuration.
@@ -107,36 +135,146 @@ class GitOperationsService:
         )
         self._tokens_lock = threading.RLock()
 
-        # Use config service for runtime config (for REST router compatibility)
-        if config_manager is None:
-            from code_indexer.server.services.config_service import get_config_service
+        # Bug #1650 remediation: code review of the first fix attempt
+        # (commit 2085fe9a, module-level PEP 562 lazy-init only) proved
+        # deferring the module-level `git_operations_service` singleton
+        # binding alone does NOT fix the reported symptom -- PEP 562's
+        # __getattr__ fires transparently on `from module import name` too,
+        # and all five real consumers (routers/git.py,
+        # mcp/handlers/{git_read,git_write,__init__,_legacy}.py) bind the
+        # name at module scope, so importing any MCP handler module still
+        # forces this __init__ to run. The actual fix is making __init__
+        # itself cheap: both the config-service resolution/read (relevant to
+        # the Bug #1428 credential-bleed path -- get_config_service() can
+        # return real provider API keys) and the ActivatedRepoManager
+        # construction (-> GoldenRepoManager -> SQLite golden-repo load,
+        # spawning bgm-worker/bgm-temporal-worker threads) are deferred to
+        # first REAL use via the properties defined below __init__, instead
+        # of running here unconditionally.
+        self._config_manager_arg = config_manager
+        self._config_manager_lazy: Optional[ServerConfigManager] = None
+        self._config_loaded = False
+        self._git_timeouts_lazy: Optional["GitTimeoutsConfig"] = None
+        self._api_limits_lazy: Optional["ApiLimitsConfig"] = None
 
-            config_manager = get_config_service()
+        self._activated_repo_manager_lazy: Optional["ActivatedRepoManager"] = None
 
-        self.config_manager = config_manager
-        config = config_manager.get_config()
+    @property
+    def config_manager(self) -> ServerConfigManager:
+        """Lazily resolve the config service (Bug #1650): get_config_service()
+        is only invoked on first genuine need, not at construction time."""
+        if self._config_manager_lazy is None:
+            with self._config_lazy_lock:
+                if self._config_manager_lazy is None:
+                    if self._config_manager_arg is not None:
+                        self._config_manager_lazy = self._config_manager_arg
+                    else:
+                        from code_indexer.server.services.config_service import (
+                            get_config_service,
+                        )
 
-        # Bug #83 Phase 1: Load timeout configuration from config_manager
-        # Handle case where no config file exists (e.g., CI/CD parity tests)
-        if config is not None:
-            self._git_timeouts = config.git_timeouts_config
-            self._api_limits = config.api_limits_config
-        else:
-            # Use defaults when no config file exists
-            from ..utils.config_manager import GitTimeoutsConfig, ApiLimitsConfig
+                        self._config_manager_lazy = get_config_service()
+        return self._config_manager_lazy
 
-            self._git_timeouts = GitTimeoutsConfig()
-            self._api_limits = ApiLimitsConfig()
+    @config_manager.setter
+    def config_manager(self, value: ServerConfigManager) -> None:
+        with self._config_lazy_lock:
+            self._config_manager_lazy = value
+            # Invalidate previously-derived timeout/limit config so a newly
+            # assigned config_manager takes effect on next access, instead
+            # of silently continuing to serve values derived from the
+            # config_manager this one replaces.
+            self._config_loaded = False
+            self._git_timeouts_lazy = None
+            self._api_limits_lazy = None
 
-        # Import ActivatedRepoManager for resolving repo aliases to paths
-        # (import here to avoid circular imports)
-        import os
-        from ..repositories.activated_repo_manager import ActivatedRepoManager
+    def _ensure_config_loaded(self) -> None:
+        """Run the config read (Bug #83 Phase 1 timeout/limit derivation)
+        exactly once, on first real need -- not at construction time.
 
-        _server_dir = os.environ.get("CIDX_SERVER_DATA_DIR")
-        self.activated_repo_manager = ActivatedRepoManager(
-            data_dir=os.path.join(_server_dir, "data") if _server_dir else None
-        )
+        The is-not-None/else branch below is an unmodified relocation of
+        the pre-existing Bug #83 Phase 1 logic that used to run
+        unconditionally inside __init__ -- only WHEN it runs changed
+        (deferred to first access), not WHAT it does.
+        """
+        if self._config_loaded:
+            return
+        with self._config_lazy_lock:
+            if self._config_loaded:
+                return
+            config = self.config_manager.get_config()
+            # Handle case where no config file exists (e.g., CI/CD parity tests)
+            if config is not None:
+                self._git_timeouts_lazy = config.git_timeouts_config
+                self._api_limits_lazy = config.api_limits_config
+            else:
+                # Use defaults when no config file exists
+                from ..utils.config_manager import GitTimeoutsConfig, ApiLimitsConfig
+
+                self._git_timeouts_lazy = GitTimeoutsConfig()
+                self._api_limits_lazy = ApiLimitsConfig()
+            self._config_loaded = True
+
+    @property
+    def _git_timeouts(self) -> "GitTimeoutsConfig":
+        if self._git_timeouts_lazy is None:
+            self._ensure_config_loaded()
+        return self._git_timeouts_lazy
+
+    @_git_timeouts.setter
+    def _git_timeouts(self, value: "GitTimeoutsConfig") -> None:
+        # `_config_lazy_lock` is a CLASS-LEVEL attribute (declared above
+        # __init__), so it resolves via normal attribute lookup even on
+        # instances created via GitOperationsService.__new__(...) that
+        # bypass __init__ entirely (5+ existing test files use exactly this
+        # pattern to set _git_timeouts directly) -- verified: a bare
+        # __new__(GitOperationsService) instance has `_config_lazy_lock`
+        # available and lockable with no AttributeError. Deliberately does
+        # not mark _config_loaded=True: those bypass callers only ever
+        # set/read _git_timeouts, never _api_limits, so there is no real
+        # config to invalidate/derive-from here.
+        with self._config_lazy_lock:
+            self._git_timeouts_lazy = value
+
+    @property
+    def _api_limits(self) -> "ApiLimitsConfig":
+        if self._api_limits_lazy is None:
+            self._ensure_config_loaded()
+        return self._api_limits_lazy
+
+    @_api_limits.setter
+    def _api_limits(self, value: "ApiLimitsConfig") -> None:
+        with self._config_lazy_lock:
+            self._api_limits_lazy = value
+
+    @property
+    def activated_repo_manager(self) -> "ActivatedRepoManager":
+        """Lazily construct ActivatedRepoManager (Bug #1650): this is the
+        expensive GoldenRepoManager -> SQLite golden-repo load and
+        bgm-worker/bgm-temporal-worker thread spawn, deferred to first real
+        git operation instead of GitOperationsService() construction time."""
+        if self._activated_repo_manager_lazy is None:
+            with self._activated_repo_manager_lock:
+                if self._activated_repo_manager_lazy is None:
+                    # Import here to avoid circular imports (same reasoning
+                    # as the original eager code this replaces).
+                    import os
+                    from ..repositories.activated_repo_manager import (
+                        ActivatedRepoManager,
+                    )
+
+                    _server_dir = os.environ.get("CIDX_SERVER_DATA_DIR")
+                    self._activated_repo_manager_lazy = ActivatedRepoManager(
+                        data_dir=os.path.join(_server_dir, "data")
+                        if _server_dir
+                        else None
+                    )
+        return self._activated_repo_manager_lazy
+
+    @activated_repo_manager.setter
+    def activated_repo_manager(self, value: "ActivatedRepoManager") -> None:
+        with self._activated_repo_manager_lock:
+            self._activated_repo_manager_lazy = value
 
     # REST API Wrapper Methods (resolve repo_alias to repo_path)
 

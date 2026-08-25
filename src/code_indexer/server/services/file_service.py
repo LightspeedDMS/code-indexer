@@ -12,7 +12,7 @@ import threading
 import time
 from collections import OrderedDict
 from pathlib import Path
-from typing import List, Optional, Tuple, Dict, Any, Set, cast
+from typing import List, Optional, Tuple, Dict, Any, Set, cast, TYPE_CHECKING
 from datetime import datetime, timezone
 import logging
 import math
@@ -27,6 +27,16 @@ from ..models.api_models import (
     FileListQueryParams,
 )
 from ..services.config_service import get_config_service
+
+if TYPE_CHECKING:
+    # Bug #1650: type-only import for the lazily-constructed
+    # activated_repo_manager property below. Kept under TYPE_CHECKING
+    # (never imported at runtime here) so the real import stays local to
+    # the property that needs it, for the same circular-import-avoidance
+    # reason as the original eager code.
+    from code_indexer.server.repositories.activated_repo_manager import (
+        ActivatedRepoManager,
+    )
 
 logger = logging.getLogger(__name__)
 
@@ -103,16 +113,55 @@ class FileListingService:
     DEFAULT_MAX_LINES: int = 500  # Default limit when no explicit limit provided
     MAX_ALLOWED_LIMIT: int = 5000  # Maximum limit client can request
 
+    # Bug #1650 remediation: CLASS-LEVEL RLock (not per-instance), so
+    # instances created via FileListingService.__new__(FileListingService)
+    # in several existing test files (bypassing __init__ entirely) still
+    # have a lock to synchronize on instead of raising AttributeError.
+    # Mirrors the identical pattern applied to GitOperationsService for the
+    # same bug: importing this module (transitively, via server/app.py's
+    # own module-level `from .services.file_service import file_service`)
+    # used to construct a real ActivatedRepoManager -> GoldenRepoManager ->
+    # SQLite golden-repo load, spawning bgm-worker/bgm-temporal-worker
+    # threads, as a side effect of merely importing any MCP handler module.
+    _activated_repo_manager_lock = threading.RLock()
+
     def __init__(self):
         """Initialize the file listing service."""
-        # Import here to avoid circular imports
-        import os
-        from ..repositories.activated_repo_manager import ActivatedRepoManager
+        self._activated_repo_manager_lazy: Optional["ActivatedRepoManager"] = None
 
-        _server_dir = os.environ.get("CIDX_SERVER_DATA_DIR")
-        self.activated_repo_manager = ActivatedRepoManager(
-            data_dir=os.path.join(_server_dir, "data") if _server_dir else None
-        )
+    @property
+    def activated_repo_manager(self) -> "ActivatedRepoManager":
+        """Lazily construct ActivatedRepoManager (Bug #1650): deferred to
+        first real access instead of FileListingService() construction
+        time.
+
+        Uses getattr(..., None) rather than bare self._activated_repo_manager_lazy:
+        several existing test files construct this service via
+        FileListingService.__new__(FileListingService) (bypassing __init__
+        entirely) and may read this property before ever assigning to it.
+        """
+        if getattr(self, "_activated_repo_manager_lazy", None) is None:
+            with self._activated_repo_manager_lock:
+                if getattr(self, "_activated_repo_manager_lazy", None) is None:
+                    # Import here to avoid circular imports (same reasoning
+                    # as the original eager code this replaces).
+                    import os
+                    from ..repositories.activated_repo_manager import (
+                        ActivatedRepoManager,
+                    )
+
+                    _server_dir = os.environ.get("CIDX_SERVER_DATA_DIR")
+                    self._activated_repo_manager_lazy = ActivatedRepoManager(
+                        data_dir=os.path.join(_server_dir, "data")
+                        if _server_dir
+                        else None
+                    )
+        return self._activated_repo_manager_lazy
+
+    @activated_repo_manager.setter
+    def activated_repo_manager(self, value: "ActivatedRepoManager") -> None:
+        with self._activated_repo_manager_lock:
+            self._activated_repo_manager_lazy = value
 
     def _get_file_content_limits_config(self):
         """Get file content limits config from ConfigService (Bug #939: unified ContentLimitsConfig).
