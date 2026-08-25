@@ -87,14 +87,28 @@ def semantic_index_vector_count(index_base_path: Path) -> int:
 
 def _discovered_indexable_files(clone_path: Path) -> Optional[int]:
     """Count of indexable files the last ``cidx index`` DISCOVERED, from
-    ``indexing_progress.json``'s ``total_files`` (reliable even when the completion
-    counters are not). ``None`` when unreadable — the caller then cannot distinguish a
-    genuinely file-less repo from a failure, and errs safe (treats it as a failure)."""
+    ``indexing_progress.json``'s ``total_files``.
+
+    Returns **0** for a genuinely FILE-LESS repo: ``cidx index`` (smart_indexer) raises
+    ``"No files found to index"`` BEFORE it ever calls ``start_session()``, and
+    ``_execute_post_clone_workflow`` TOLERATES that error — so the progress file is never
+    written (absent), or a stale one has ``current_session: null``. Both mean "no files",
+    which must route to the skip-marker, NOT to fail-loud. Returns **None** only when the
+    file exists but is genuinely UNREADABLE/corrupt (rare) — there the caller can't confirm
+    file-less, so it errs on fail-loud rather than silently masking a real failure."""
     p = clone_path / ".code-indexer" / "indexing_progress.json"
     try:
-        session = json.loads(p.read_text()).get("current_session", {})
-    except (json.JSONDecodeError, OSError, AttributeError):
-        return None
+        raw = p.read_text()
+    except FileNotFoundError:
+        return 0  # never started a session → nothing to index → genuinely file-less
+    except OSError:
+        return None  # unreadable (IO/perms) → unknown
+    try:
+        session = json.loads(raw).get("current_session")
+    except (json.JSONDecodeError, AttributeError):
+        return None  # corrupt → unknown
+    if not session:
+        return 0  # present but no session → file-less
     tf = session.get("total_files")
     return tf if isinstance(tf, int) else None
 
@@ -144,25 +158,30 @@ def semantic_backfill_reindex_executor(
         )
         return {"status": "reindexed", "alias": alias, "vector_count": vector_count}
 
-    # 0 vectors — distinguish a real (silent) failure from a legitimately file-less repo.
+    # 0 vectors — distinguish a legitimately file-less repo from a real (silent) failure.
     discovered = _discovered_indexable_files(clone)
-    if discovered is None or discovered > 0:
-        raise SemanticReindexProducedNoVectorsError(
-            f"semantic re-embed of '{alias}' produced 0 vectors "
-            f"(discovered indexable files: {discovered}) — failing loud rather than "
-            f"masking an empty index as done"
+    if discovered == 0:
+        # Genuinely file-less (cidx index found nothing to index → no session written).
+        # Mark it so the sweep stops re-embedding a repo that has nothing to embed.
+        marker = clone / ".code-indexer" / SEMANTIC_NO_FILES_MARKER
+        try:
+            marker.parent.mkdir(parents=True, exist_ok=True)
+            marker.touch()
+        except OSError:
+            pass
+        logger.info(
+            "semantic_backfill: '%s' has no indexable files → marked no-files skip",
+            alias,
         )
-    # No indexable files → legitimately empty. Mark it so the sweep stops retrying.
-    marker = clone / ".code-indexer" / SEMANTIC_NO_FILES_MARKER
-    try:
-        marker.parent.mkdir(parents=True, exist_ok=True)
-        marker.touch()
-    except OSError:
-        pass
-    logger.info(
-        "semantic_backfill: '%s' has no indexable files → marked no-files skip", alias
+        return {"status": "skipped_no_files", "alias": alias}
+
+    # discovered > 0 (files were there, none embedded) OR None (progress unreadable, can't
+    # confirm file-less): fail LOUD rather than mask an empty index as done.
+    raise SemanticReindexProducedNoVectorsError(
+        f"semantic re-embed of '{alias}' produced 0 vectors "
+        f"(discovered indexable files: {discovered}) — failing loud rather than "
+        f"masking an empty index as done"
     )
-    return {"status": "skipped_no_files", "alias": alias}
 
 
 class SemanticBackfillPolicy:

@@ -55,21 +55,39 @@ def _repo(tmp_path: Path, *, vectors: int = 0) -> Path:
 
 class _GRM:
     def __init__(
-        self, registered: set[str], *, produce_vectors: int = 0, files: int = 0
+        self,
+        registered: set[str],
+        *,
+        produce_vectors: int = 0,
+        files: int = 0,
+        progress: str = "normal",
     ) -> None:
+        # progress: "normal" -> current_session with total_files; "absent" -> no progress
+        # file (the real file-less case: cidx index raises before start_session); "null" ->
+        # a stale file whose current_session is null.
         self._registered = registered
         self._produce = produce_vectors
         self._files = files
+        self._progress = progress
         self.reindexed: List[dict] = []
 
     def get_golden_repo(self, alias: str) -> Any:
         return object() if alias in self._registered else None
 
     def _execute_post_clone_workflow(self, clone_path, **kwargs):
-        # Simulate the real workflow's on-disk effect: write progress + the resulting index.
+        # Simulate the real workflow's on-disk effect: (maybe) write progress + the index.
         self.reindexed.append({"clone_path": clone_path, **kwargs})
         repo = Path(clone_path)
-        _write_progress(repo, total_files=self._files)
+        (repo / ".code-indexer").mkdir(parents=True, exist_ok=True)
+        if self._progress == "normal":
+            _write_progress(repo, total_files=self._files)
+        elif self._progress == "null":
+            (repo / ".code-indexer" / "indexing_progress.json").write_text(
+                json.dumps({"current_session": None})
+            )
+        elif self._progress == "corrupt":
+            (repo / ".code-indexer" / "indexing_progress.json").write_text("{ not json")
+        # "absent" -> write no progress file at all
         if self._produce > 0:
             _write_semantic_index(repo, vector_count=self._produce)
 
@@ -162,14 +180,44 @@ def test_executor_fails_loud_when_files_but_zero_vectors(tmp_path: Path) -> None
 
 
 def test_executor_marks_no_files_repo_as_skipped(tmp_path: Path) -> None:
-    # A genuinely file-less repo (0 discovered) legitimately embeds to 0 vectors — mark it
-    # so the sweep stops retrying instead of failing forever.
+    # A file-less repo with a present-but-0 progress → skip (mark), not fail.
     grm = _GRM(set(), produce_vectors=0, files=0)
     result = semantic_backfill_reindex_executor(
         grm, {"clone_path": str(tmp_path / "docs"), "alias": "docs"}
     )
     assert result["status"] == "skipped_no_files"
     assert (tmp_path / "docs" / ".code-indexer" / SEMANTIC_NO_FILES_MARKER).exists()
+
+
+def test_executor_skips_when_progress_absent(tmp_path: Path) -> None:
+    # Review regression: a GENUINELY file-less repo writes NO progress file (cidx index
+    # raises 'No files found to index' before start_session, and the workflow tolerates it).
+    # This must route to skip, NOT fail-loud (the bug: absent progress → None → was raising).
+    grm = _GRM(set(), produce_vectors=0, progress="absent")
+    result = semantic_backfill_reindex_executor(
+        grm, {"clone_path": str(tmp_path / "docs"), "alias": "docs"}
+    )
+    assert result["status"] == "skipped_no_files"
+    assert (tmp_path / "docs" / ".code-indexer" / SEMANTIC_NO_FILES_MARKER).exists()
+
+
+def test_executor_skips_when_session_null(tmp_path: Path) -> None:
+    # A stale progress file whose current_session is null → also "no session" → file-less → skip.
+    grm = _GRM(set(), produce_vectors=0, progress="null")
+    result = semantic_backfill_reindex_executor(
+        grm, {"clone_path": str(tmp_path / "docs2"), "alias": "docs2"}
+    )
+    assert result["status"] == "skipped_no_files"
+
+
+def test_executor_fails_loud_when_progress_corrupt(tmp_path: Path) -> None:
+    # A CORRUPT (unparseable) progress file → cannot confirm file-less → fail loud rather
+    # than silently mask a possible real failure.
+    grm = _GRM(set(), produce_vectors=0, progress="corrupt")
+    with pytest.raises(SemanticReindexProducedNoVectorsError):
+        semantic_backfill_reindex_executor(
+            grm, {"clone_path": str(tmp_path / "svc"), "alias": "svc"}
+        )
 
 
 def test_config_ships_off() -> None:
