@@ -14,9 +14,42 @@ import pytest
 import tempfile
 from pathlib import Path
 from unittest.mock import MagicMock, patch
+from fastapi.routing import APIRoute
 from fastapi.testclient import TestClient
 
 pytestmark = pytest.mark.slow
+
+# Issue #1656: /restart carries `dependencies=[Depends(require_elevation())]`
+# (added by commit 21e8cc57, Story #956) at the ROUTER level. A router-level
+# dependency runs before the route body even though this file only ever
+# patched `_require_admin_session` (checked *inside* the route body). The
+# elevation dependency's own sub-dependency (`get_current_admin_user_hybrid`)
+# calls `get_session_manager()`, which raises `RuntimeError: Session manager
+# not initialized` in this file's minimal FastAPI app (no lifespan/session
+# manager wiring) -- reproduced identically for all 13 TestClient-based tests
+# below. This is NOT the session-manager-global-leak issue tracked separately
+# in #1673 (missing `init_session_manager()` call); the correct, established
+# fix -- already used for this exact route in
+# test_1195_ac3_ac4_restart_gates.py, and for other admin routes in
+# test_groups_toggle_ajax.py / test_admin_elevation_gating_956.py / etc. --
+# is to override the elevation dependency via FastAPI's
+# `app.dependency_overrides`, bypassing it entirely rather than trying to
+# satisfy its real session-manager requirement.
+_ELEVATION_QUALNAME = "require_elevation.<locals>._check"
+
+
+def _bypass_elevation(app, router):
+    """Override all require_elevation deps so tests can call routes without TOTP setup."""
+    for route in router.routes:
+        if not isinstance(route, APIRoute):
+            continue
+        for dep in route.dependencies or []:
+            dep_callable = getattr(dep, "dependency", None)
+            if (
+                dep_callable
+                and getattr(dep_callable, "__qualname__", "") == _ELEVATION_QUALNAME
+            ):
+                app.dependency_overrides[dep_callable] = lambda: None
 
 
 @pytest.fixture(autouse=True)
@@ -45,6 +78,7 @@ def test_client():
 
     with patch("code_indexer.server.web.routes._require_admin_session") as mock_auth:
         mock_auth.return_value = mock_admin_session
+        _bypass_elevation(app, web_router)
         yield TestClient(app)
 
 
@@ -60,6 +94,7 @@ def test_client_non_admin():
     # Mock non-admin session - return None (not authenticated)
     with patch("code_indexer.server.web.routes._require_admin_session") as mock_auth:
         mock_auth.return_value = None
+        _bypass_elevation(app, web_router)
         yield TestClient(app)
 
 
