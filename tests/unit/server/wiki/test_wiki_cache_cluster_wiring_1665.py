@@ -34,12 +34,17 @@ mocked at its import boundary and the constructor call arguments are
 asserted -- standard interaction-based testing of a collaborator, not of
 the code under test.
 
-Plus a cross-node visibility regression test (TestCrossNodeVisibility*)
-proving the dispatch is correctly CONDITIONAL rather than an accidental
-universal change: two WikiCachePostgresBackend instances sharing one
-underlying store see each other's writes, while two SQLite-solo WikiCache
-instances (different db_path, no storage_backend -- today's default) do
-NOT -- proving SQLite-solo behavior is genuinely unchanged.
+Plus characterization tests (TestCrossNodeVisibility*) verifying
+WikiCachePostgresBackend's own sharing behavior in isolation: two
+WikiCachePostgresBackend instances sharing one underlying store see each
+other's writes, while two SQLite-solo WikiCache instances (different
+db_path, no storage_backend -- today's default) do NOT. These are unit
+tests of the backend/cache classes themselves, run entirely against a
+hand-rolled fake pool -- they exercise neither StorageFactory nor any of
+the 6 production call sites above, so they have no discriminating power
+for the #1665 wiring gap and are NOT a regression guard for it (they
+passed unchanged against the pre-fix code). The per-call-site tests above
+(Sites 1-6) are the actual #1665 regression guards.
 """
 
 from __future__ import annotations
@@ -610,10 +615,15 @@ class FakeWikiConnectionPool:
 
 
 class TestCrossNodeVisibilityPostgresSharedPool:
-    """Primary regression guard (mocked pool, always runs): two
-    WikiCachePostgresBackend instances sharing one underlying row store
-    (simulating two cluster nodes talking to the SAME PostgreSQL database)
-    must see each other's writes."""
+    """Characterization test verifying WikiCachePostgresBackend's own
+    sharing behavior in isolation (mocked pool, always runs) -- NOT a
+    #1665 regression guard: it exercises WikiCachePostgresBackend directly
+    against a hand-rolled fake pool, never StorageFactory or any of the 6
+    production call sites, so it passed unchanged against the pre-fix
+    buggy code. See the per-call-site tests above (Sites 1-6) for the
+    actual #1665 regression guards. Two WikiCachePostgresBackend instances
+    sharing one underlying row store (simulating two cluster nodes talking
+    to the SAME PostgreSQL database) must see each other's writes."""
 
     def test_shared_pool_backends_see_each_others_writes(self):
         store = _SharedRowStore()
