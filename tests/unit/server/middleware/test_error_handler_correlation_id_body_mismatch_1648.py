@@ -32,28 +32,22 @@ from __future__ import annotations
 import logging
 
 import pytest
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.testclient import TestClient
 
 from code_indexer.server.middleware.error_handler import GlobalErrorHandler
 from code_indexer.server.telemetry.correlation_bridge import (
     CorrelationBridgeMiddleware,
-    _correlation_id_var,
     set_current_correlation_id,
 )
 
 _LOGGER_NAME = "code_indexer.server.middleware.error_handler"
 _KNOWN_CORRELATION_ID = "7a225a32-2767-4c4f-a47a-bc48fd1680c8"
 
-
-@pytest.fixture(autouse=True)
-def _reset_correlation_contextvar():
-    """Prevent correlation-id leakage between tests via the shared ContextVar."""
-    token = _correlation_id_var.set(None)
-    try:
-        yield
-    finally:
-        _correlation_id_var.reset(token)
+# Bug #1648 (code-review round 2, Finding 1): correlation-id ContextVar
+# isolation between tests is provided tree-wide by
+# tests/unit/server/conftest.py's _reset_correlation_id_contextvar autouse
+# fixture -- no per-file fixture needed here.
 
 
 def _build_app_with_unhandled_exception_route() -> FastAPI:
@@ -120,6 +114,51 @@ class TestUnhandledExceptionBodyMatchesAmbientCorrelationId:
             "reuse the ambient request correlation id, matching the "
             "correlation_id column the log store persists for this same "
             f"log row (Bug #1641); got log message: {log_message!r}"
+        )
+
+
+class TestHttpExceptionResponseSideLoggingMatchesAmbientCorrelationId:
+    """Bug #1648 Finding 3: dispatch()'s already-logged 5xx branch is the
+    REAL production path for an HTTPException response -- Bug #1566
+    established that GlobalErrorHandler's own `except HTTPException` clause
+    is dead code, since Starlette's ExceptionMiddleware converts it to a
+    Response before it ever reaches GlobalErrorHandler. That branch resolves
+    its correlation id via self._resolve_correlation_id() AFTER
+    call_next(request) returns -- this test proves the ambient ContextVar
+    set by CorrelationBridgeMiddleware (the outermost layer) is still
+    readable at that point, i.e. it survives BaseHTTPMiddleware's
+    call_next() task-group hop, and that the resulting WARNING log's
+    [ID: ...] text matches the request's own X-Correlation-ID header."""
+
+    def test_http_exception_response_side_log_id_matches_ambient_correlation_id(
+        self, caplog
+    ):
+        app = FastAPI()
+        app.add_middleware(GlobalErrorHandler)
+        app.add_middleware(CorrelationBridgeMiddleware)
+
+        @app.get("/http-boom")
+        def http_boom():
+            raise HTTPException(status_code=500, detail="internal error")
+
+        with caplog.at_level(logging.WARNING, logger=_LOGGER_NAME):
+            with TestClient(app, raise_server_exceptions=False) as client:
+                response = client.get(
+                    "/http-boom", headers={"X-Correlation-ID": _KNOWN_CORRELATION_ID}
+                )
+
+        assert response.status_code == 500
+        assert response.headers["x-correlation-id"] == _KNOWN_CORRELATION_ID
+
+        warning_records = [r for r in caplog.records if r.levelno == logging.WARNING]
+        assert len(warning_records) == 1
+        log_message = warning_records[0].getMessage()
+
+        assert f"[ID: {_KNOWN_CORRELATION_ID}]" in log_message, (
+            "the response-side 5xx WARNING log's embedded [ID: ...] text "
+            "must reuse the ambient request correlation id, proving the "
+            "ContextVar survives call_next() returning back up through "
+            f"BaseHTTPMiddleware; got log message: {log_message!r}"
         )
 
 

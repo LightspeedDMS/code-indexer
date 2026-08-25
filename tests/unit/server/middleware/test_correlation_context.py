@@ -18,34 +18,13 @@ from code_indexer.server.middleware.correlation import (
     clear_correlation_id,
     CorrelationContextMiddleware,
 )
-from code_indexer.server.telemetry.correlation_bridge import _correlation_id_var
 
-
-@pytest.fixture(autouse=True)
-def _reset_correlation_contextvar():
-    """
-    Prevent correlation-id leakage between tests via the shared ContextVar.
-
-    Several tests in this module (e.g. test_correlation_id_format_is_string)
-    call set_correlation_id(...) without a matching clear_correlation_id()
-    afterward. This was harmless before Bug #1648's fix, since nothing read
-    the ambient value back out except tests that explicitly cleared it
-    first. Now that GlobalErrorHandler._resolve_correlation_id() genuinely
-    reuses the ambient correlation id, a leaked value here would silently
-    poison every subsequent test in the same pytest session (including in
-    other files, since ContextVar default state is process-wide across
-    ordinary sync test functions).
-
-    Teardown explicitly forces the ContextVar back to None (never
-    reset(token), which would merely restore whatever -- possibly already
-    dirty -- value preceded this fixture's own setup, propagating rather
-    than fixing any pre-existing leak).
-    """
-    _correlation_id_var.set(None)
-    try:
-        yield
-    finally:
-        _correlation_id_var.set(None)
+# Bug #1648 (code-review round 2, Finding 1): correlation-id ContextVar
+# isolation between tests (several tests here, e.g.
+# test_correlation_id_format_is_string, call set_correlation_id(...)
+# without a matching clear_correlation_id()) is now provided tree-wide by
+# tests/unit/server/conftest.py's _reset_correlation_id_contextvar autouse
+# fixture -- no per-file fixture needed here.
 
 
 class TestCorrelationIDContextHelpers:

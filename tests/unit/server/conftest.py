@@ -100,8 +100,43 @@ from typing import Any, Callable, Generator, List, Set, Type
 import pytest
 
 from code_indexer.server.repositories.background_jobs import BackgroundJobManager
+from code_indexer.server.telemetry.correlation_bridge import _correlation_id_var
 
 logger = logging.getLogger(__name__)
+
+
+@pytest.fixture(autouse=True)
+def _reset_correlation_id_contextvar() -> Generator[None, None, None]:
+    """Bug #1648 (code-review round 2, Finding 1): force-clear the shared
+    correlation-id ContextVar (`telemetry.correlation_bridge._correlation_id_var`)
+    before and after every test under tests/unit/server/.
+
+    Before GlobalErrorHandler._resolve_correlation_id() started reading this
+    ContextVar back (Bug #1648's fix), a test calling
+    set_current_correlation_id(...) without a matching clear was harmless --
+    nothing consumed the leaked value. Now it silently poisons every later
+    test in the same pytest process: proven reproducible by combining
+    tests/unit/server/telemetry/test_custom_spans.py or
+    tests/unit/server/services/test_audit_flush_race_1295.py (both leak an
+    uncleared correlation id) with
+    tests/unit/server/middleware/test_unhandled_exception_handling.py in a
+    single pytest invocation.
+
+    This single, tree-wide fixture replaces per-file fixtures (which
+    duplicated the same reasoning file-by-file and, in two cases, disagreed
+    on teardown mechanism -- `.set(None)` vs `.reset(token)`). `.set(None)`
+    is used deliberately in both places here rather than `.reset(token)`:
+    reset() would merely restore whatever -- possibly already dirty --
+    value preceded this fixture's own setup, propagating rather than fixing
+    any pre-existing leak from a test file that does not yet use this
+    fixture (e.g. one collected before this conftest.py existed, or a
+    module-scoped test running outside tests/unit/server/).
+    """
+    _correlation_id_var.set(None)
+    try:
+        yield
+    finally:
+        _correlation_id_var.set(None)
 
 
 def _safe_shutdown(manager: Any) -> None:
