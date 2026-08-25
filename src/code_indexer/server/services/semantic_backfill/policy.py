@@ -9,10 +9,18 @@ repos under the same memory-admission gate as add_golden_repo.
 COST: a semantic re-embed calls VoyageAI ($) — unlike the free local FTS build. So the
 policy is inert unless explicitly enabled (``semantic_backfill_sweep_config.enabled``,
 DEFAULT FALSE): eligibility returns None when disabled, so the engine enqueues nothing.
+
+HARDENING (against the silent-empty failure that left 840 repos "added successfully" but
+with 0 vectors): presence and success are decided by the ACTUAL ``vector_count``, never by
+a "completed" status or the indexing_progress counters (which can read 0 for a full index).
+``is_present`` treats a present-but-empty index as MISSING; the executor FAILS LOUD when a
+repo with indexable files re-embeds to 0 vectors, and marks a genuinely file-less repo so
+the sweep stops retrying it.
 """
 
 from __future__ import annotations
 
+import json
 import logging
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional
@@ -25,21 +33,94 @@ logger = logging.getLogger(__name__)
 #: key + POD_PULL_OPS/_MEMORY_HEAVY_OPS membership — see background_jobs).
 SEMANTIC_BACKFILL_REINDEX_OP = "semantic_backfill_reindex"
 
-#: Where detect_semantic_index looks (a collection dir holding hnsw_index.bin).
+#: Where the semantic collections live under a golden clone.
 _SEMANTIC_INDEX_SUBDIR = ".code-indexer/index"
+#: Per-collection metadata file holding ``hnsw_index.vector_count`` (the same fast-path
+#: FilesystemVectorStore.count_points reads).
+_COLLECTION_META = "collection_meta.json"
+#: Collections that are NOT the semantic code index.
+_NON_SEMANTIC = ("multimodal", "temporal", "tantivy")
+#: Marker (on the clone's .code-indexer) for a repo with no indexable code — it
+#: legitimately embeds to 0 vectors, so ``is_present`` honours it to stop re-embedding.
+SEMANTIC_NO_FILES_MARKER = ".semantic_backfill_no_files.skip"
+
+
+class SemanticReindexProducedNoVectorsError(RuntimeError):
+    """A re-embed of a repo WITH indexable files produced 0 vectors — the exact
+    silent-empty failure (index ran against an empty/removed clone → "success" with no
+    vectors) that left the fleet's semantic index gone. Raising it FAILS the job loudly
+    (retried after cooldown) instead of masking an empty index as done."""
 
 
 def _index_base(repo_path: Path) -> Path:
     return repo_path / _SEMANTIC_INDEX_SUBDIR
 
 
-def semantic_index_present(repo_path: Path) -> bool:
-    """True when the repo has a built semantic vector index (a non-multimodal/temporal/
-    tantivy collection with hnsw_index.bin). Reuses the SAME detector the registry
-    reconcile gates on, so 'present' means exactly 'the query path can serve it'."""
-    from code_indexer.server.routers.repository_health import detect_semantic_index
+def semantic_index_vector_count(index_base_path: Path) -> int:
+    """Sum ``hnsw_index.vector_count`` across the repo's SEMANTIC collections (excluding
+    multimodal/temporal/tantivy) by reading each ``collection_meta.json`` — the SAME
+    fast-path :meth:`FilesystemVectorStore.count_points` uses.
 
-    return detect_semantic_index(_index_base(repo_path))
+    This is the TRUSTWORTHY completeness signal. ``detect_semantic_index`` only checks
+    that an ``hnsw_index.bin`` file exists (an empty index passes), and
+    ``indexing_progress.json``'s ``files_completed``/``chunks_created`` can read 0 even
+    for a fully-built index (observed on evolution: 44,805 real vectors, progress said 0).
+    ``vector_count`` reflects the vectors actually written. Returns 0 when absent."""
+    if not index_base_path.is_dir():
+        return 0
+    total = 0
+    for coll in sorted(index_base_path.iterdir(), key=lambda p: p.name):
+        if not coll.is_dir() or any(tag in coll.name for tag in _NON_SEMANTIC):
+            continue
+        meta = coll / _COLLECTION_META
+        if not meta.is_file():
+            continue
+        try:
+            data = json.loads(meta.read_text())
+            vc = data.get("hnsw_index", {}).get("vector_count")
+        except (json.JSONDecodeError, OSError):
+            continue
+        if isinstance(vc, int):
+            total += vc
+    return total
+
+
+def _discovered_indexable_files(clone_path: Path) -> Optional[int]:
+    """Count of indexable files the last ``cidx index`` DISCOVERED, from
+    ``indexing_progress.json``'s ``total_files``.
+
+    Returns **0** for a genuinely FILE-LESS repo: ``cidx index`` (smart_indexer) raises
+    ``"No files found to index"`` BEFORE it ever calls ``start_session()``, and
+    ``_execute_post_clone_workflow`` TOLERATES that error — so the progress file is never
+    written (absent), or a stale one has ``current_session: null``. Both mean "no files",
+    which must route to the skip-marker, NOT to fail-loud. Returns **None** only when the
+    file exists but is genuinely UNREADABLE/corrupt (rare) — there the caller can't confirm
+    file-less, so it errs on fail-loud rather than silently masking a real failure."""
+    p = clone_path / ".code-indexer" / "indexing_progress.json"
+    try:
+        raw = p.read_text()
+    except FileNotFoundError:
+        return 0  # never started a session → nothing to index → genuinely file-less
+    except OSError:
+        return None  # unreadable (IO/perms) → unknown
+    try:
+        session = json.loads(raw).get("current_session")
+    except (json.JSONDecodeError, AttributeError):
+        return None  # corrupt → unknown
+    if not session:
+        return 0  # present but no session → file-less
+    tf = session.get("total_files")
+    return tf if isinstance(tf, int) else None
+
+
+def semantic_index_present(repo_path: Path) -> bool:
+    """Count-based presence: 'present' iff the repo has REAL vectors (vector_count > 0),
+    OR it is a marked no-indexable-files repo. A present-but-empty index (hnsw file exists,
+    0 vectors) is treated as MISSING so the sweep re-embeds it — closing the gap where a
+    presence-only check would leave a 0-vector index stuck forever."""
+    if semantic_index_vector_count(_index_base(repo_path)) > 0:
+        return True
+    return (repo_path / ".code-indexer" / SEMANTIC_NO_FILES_MARKER).exists()
 
 
 def semantic_backfill_reindex_executor(
@@ -48,14 +129,17 @@ def semantic_backfill_reindex_executor(
     progress_callback: Optional[Callable[..., Any]] = None,
 ) -> Dict[str, Any]:
     """Re-embed ONE golden repo's semantic index from the pod-pull ``metadata`` row
-    (clone_path + alias), so any pod that claims the job can run it.
+    (clone_path + alias), then VALIDATE the result by ``vector_count`` — never by a
+    "completed" status.
 
-    Uses ``_execute_post_clone_workflow(force_init=False)`` — the SAME incremental-refresh
-    path the user-facing golden refresh uses: it SKIPS ``cidx init`` when the repo's
-    config already exists and runs ``cidx index`` (which rebuilds the missing semantic
-    vectors). force_init=False (no ``--force``, no ``--clear``) is deliberate: it must
-    NOT reset config or clear the co-located FTS/SCIP indexes — only fill the semantic gap.
-    """
+    Uses ``_execute_post_clone_workflow(force_init=False)`` (the incremental-refresh path:
+    SKIP ``cidx init`` when config exists, run ``cidx index``) — no ``--force``/``--clear``,
+    so it fills the semantic gap WITHOUT clearing the co-located FTS/SCIP indexes.
+
+    Post-check (the hardening): read the real vector_count. If > 0 → success. If 0 and the
+    repo had indexable files → raise (fail loud; retried after cooldown). If 0 and the repo
+    is genuinely file-less → mark it so the sweep stops re-embedding a repo that has nothing
+    to embed."""
     clone_path = metadata["clone_path"]
     alias = metadata.get("alias")
     golden_repo_manager._execute_post_clone_workflow(
@@ -65,7 +149,39 @@ def semantic_backfill_reindex_executor(
         job_id=metadata.get("job_id"),
         progress_callback=progress_callback,
     )
-    return {"status": "reindexed", "alias": alias, "clone_path": clone_path}
+
+    clone = Path(clone_path)
+    vector_count = semantic_index_vector_count(_index_base(clone))
+    if vector_count > 0:
+        logger.info(
+            "semantic_backfill: '%s' re-embedded → %d vectors", alias, vector_count
+        )
+        return {"status": "reindexed", "alias": alias, "vector_count": vector_count}
+
+    # 0 vectors — distinguish a legitimately file-less repo from a real (silent) failure.
+    discovered = _discovered_indexable_files(clone)
+    if discovered == 0:
+        # Genuinely file-less (cidx index found nothing to index → no session written).
+        # Mark it so the sweep stops re-embedding a repo that has nothing to embed.
+        marker = clone / ".code-indexer" / SEMANTIC_NO_FILES_MARKER
+        try:
+            marker.parent.mkdir(parents=True, exist_ok=True)
+            marker.touch()
+        except OSError:
+            pass
+        logger.info(
+            "semantic_backfill: '%s' has no indexable files → marked no-files skip",
+            alias,
+        )
+        return {"status": "skipped_no_files", "alias": alias}
+
+    # discovered > 0 (files were there, none embedded) OR None (progress unreadable, can't
+    # confirm file-less): fail LOUD rather than mask an empty index as done.
+    raise SemanticReindexProducedNoVectorsError(
+        f"semantic re-embed of '{alias}' produced 0 vectors "
+        f"(discovered indexable files: {discovered}) — failing loud rather than "
+        f"masking an empty index as done"
+    )
 
 
 class SemanticBackfillPolicy:

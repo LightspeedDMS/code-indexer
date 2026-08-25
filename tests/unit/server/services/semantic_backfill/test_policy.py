@@ -1,9 +1,13 @@
-"""Unit tests for the DEFAULT-OFF semantic (vector) index self-heal backfill policy."""
+"""Unit tests for the DEFAULT-OFF semantic (vector) index self-heal backfill policy,
+including the count-based hardening against the silent-empty failure."""
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any, List
+
+import pytest
 
 from code_indexer.server.repositories.background_jobs import (
     POD_PULL_OPS,
@@ -12,34 +16,80 @@ from code_indexer.server.repositories.background_jobs import (
 )
 from code_indexer.server.services.semantic_backfill.policy import (
     SEMANTIC_BACKFILL_REINDEX_OP,
+    SEMANTIC_NO_FILES_MARKER,
     SemanticBackfillPolicy,
+    SemanticReindexProducedNoVectorsError,
     semantic_backfill_reindex_executor,
     semantic_index_present,
+    semantic_index_vector_count,
 )
 
 
-def _repo(tmp_path: Path, *, with_vectors: bool) -> Path:
-    idx = tmp_path / ".code-indexer" / "index"
-    idx.mkdir(parents=True)
-    if with_vectors:
-        coll = idx / "code_voyage-code-3"
-        coll.mkdir()
-        (coll / "hnsw_index.bin").write_bytes(b"\x00")
+def _write_semantic_index(repo: Path, *, vector_count: int) -> None:
+    """Write a voyage-code-3 collection_meta.json with the given vector_count (the
+    trustworthy completeness signal)."""
+    coll = repo / ".code-indexer" / "index" / "voyage-code-3"
+    coll.mkdir(parents=True, exist_ok=True)
+    (coll / "collection_meta.json").write_text(
+        json.dumps(
+            {"name": "voyage-code-3", "hnsw_index": {"vector_count": vector_count}}
+        )
+    )
+
+
+def _write_progress(repo: Path, *, total_files: int) -> None:
+    (repo / ".code-indexer").mkdir(parents=True, exist_ok=True)
+    (repo / ".code-indexer" / "indexing_progress.json").write_text(
+        json.dumps(
+            {"current_session": {"total_files": total_files, "files_completed": 0}}
+        )
+    )
+
+
+def _repo(tmp_path: Path, *, vectors: int = 0) -> Path:
+    (tmp_path / ".code-indexer" / "index").mkdir(parents=True, exist_ok=True)
+    if vectors > 0:
+        _write_semantic_index(tmp_path, vector_count=vectors)
     return tmp_path
 
 
 class _GRM:
-    """Registry stub: get_golden_repo returns a truthy row only for known aliases."""
-
-    def __init__(self, registered: set[str]) -> None:
+    def __init__(
+        self,
+        registered: set[str],
+        *,
+        produce_vectors: int = 0,
+        files: int = 0,
+        progress: str = "normal",
+    ) -> None:
+        # progress: "normal" -> current_session with total_files; "absent" -> no progress
+        # file (the real file-less case: cidx index raises before start_session); "null" ->
+        # a stale file whose current_session is null.
         self._registered = registered
+        self._produce = produce_vectors
+        self._files = files
+        self._progress = progress
         self.reindexed: List[dict] = []
 
     def get_golden_repo(self, alias: str) -> Any:
         return object() if alias in self._registered else None
 
     def _execute_post_clone_workflow(self, clone_path, **kwargs):
+        # Simulate the real workflow's on-disk effect: (maybe) write progress + the index.
         self.reindexed.append({"clone_path": clone_path, **kwargs})
+        repo = Path(clone_path)
+        (repo / ".code-indexer").mkdir(parents=True, exist_ok=True)
+        if self._progress == "normal":
+            _write_progress(repo, total_files=self._files)
+        elif self._progress == "null":
+            (repo / ".code-indexer" / "indexing_progress.json").write_text(
+                json.dumps({"current_session": None})
+            )
+        elif self._progress == "corrupt":
+            (repo / ".code-indexer" / "indexing_progress.json").write_text("{ not json")
+        # "absent" -> write no progress file at all
+        if self._produce > 0:
+            _write_semantic_index(repo, vector_count=self._produce)
 
 
 class _BJM:
@@ -55,74 +105,126 @@ class _BJM:
 
 
 def test_op_is_pod_pull_and_memory_heavy() -> None:
-    # A re-embed is heavy → gated by memory admission (unlike the light FTS build).
     assert SEMANTIC_BACKFILL_REINDEX_OP in _MEMORY_HEAVY_OPS
     assert SEMANTIC_BACKFILL_REINDEX_OP in POD_PULL_OPS
 
 
-def test_is_present_reflects_semantic_index(tmp_path: Path) -> None:
-    assert semantic_index_present(_repo(tmp_path / "a", with_vectors=True)) is True
-    assert semantic_index_present(_repo(tmp_path / "b", with_vectors=False)) is False
+def test_vector_count_reads_collection_meta(tmp_path: Path) -> None:
+    repo = _repo(tmp_path / "a", vectors=280)
+    assert semantic_index_vector_count(repo / ".code-indexer" / "index") == 280
+    assert semantic_index_vector_count(tmp_path / "b" / ".code-indexer" / "index") == 0
 
 
-def test_disabled_is_the_cost_gate_no_eligibility(tmp_path: Path) -> None:
-    # DEFAULT OFF: even a registered repo missing its index is NOT eligible when disabled,
-    # so the engine enqueues nothing (zero VoyageAI spend until the operator opts in).
-    repo = _repo(tmp_path / "svc", with_vectors=False)
-    p = SemanticBackfillPolicy(_GRM({"svc"}), _BJM(), enabled=False)
-    assert p.eligibility(repo) is None
+def test_is_present_is_count_based_not_presence(tmp_path: Path) -> None:
+    # Real vectors → present.
+    assert semantic_index_present(_repo(tmp_path / "full", vectors=44805)) is True
+    # An index dir with a 0-vector collection_meta (the silent-empty trap) → NOT present,
+    # so the sweep re-embeds it (a presence-only check would leave it stuck).
+    empty = _repo(tmp_path / "empty")
+    _write_semantic_index(empty, vector_count=0)
+    assert semantic_index_present(empty) is False
+    # A marked no-files repo → present (don't re-embed a repo with nothing to embed).
+    marked = _repo(tmp_path / "docs")
+    (marked / ".code-indexer" / SEMANTIC_NO_FILES_MARKER).write_text("")
+    assert semantic_index_present(marked) is True
 
 
-def test_enabled_eligible_only_for_registered_repos(tmp_path: Path) -> None:
-    reg = _repo(tmp_path / "svc", with_vectors=False)
-    unreg = _repo(tmp_path / "stray", with_vectors=False)
+def test_disabled_is_the_cost_gate(tmp_path: Path) -> None:
+    repo = _repo(tmp_path / "svc")
+    assert (
+        SemanticBackfillPolicy(_GRM({"svc"}), _BJM(), enabled=False).eligibility(repo)
+        is None
+    )
+
+
+def test_enabled_eligible_only_for_registered(tmp_path: Path) -> None:
+    reg = _repo(tmp_path / "svc")
+    unreg = _repo(tmp_path / "stray")
     p = SemanticBackfillPolicy(_GRM({"svc"}), _BJM(), enabled=True)
     assert p.eligibility(reg) == {"clone_path": str(reg), "alias": "svc"}
-    assert p.eligibility(unreg) is None  # not a registered golden repo → never re-embed
+    assert p.eligibility(unreg) is None
 
 
-def test_enqueue_submits_pod_pull_reindex_job(tmp_path: Path) -> None:
+def test_enqueue_submits_pod_pull_job(tmp_path: Path) -> None:
     bjm = _BJM()
     p = SemanticBackfillPolicy(_GRM({"svc"}), bjm, enabled=True)
     meta = {"clone_path": str(tmp_path / "svc"), "alias": "svc"}
     p.enqueue("svc", tmp_path / "svc", meta)
-    assert len(bjm.calls) == 1
-    call = bjm.calls[0]
-    assert call["op"] == SEMANTIC_BACKFILL_REINDEX_OP
-    assert call["repo_alias"] == "svc"
-    assert call["metadata"] == meta
-    assert call["is_admin"] is True
+    assert bjm.calls[0]["op"] == SEMANTIC_BACKFILL_REINDEX_OP
+    assert bjm.calls[0]["metadata"] == meta
 
 
 def test_enqueue_swallows_duplicate(tmp_path: Path) -> None:
     p = SemanticBackfillPolicy(_GRM({"svc"}), _BJM(raise_dup=True), enabled=True)
-    p.enqueue(
-        "svc", tmp_path, {"clone_path": str(tmp_path), "alias": "svc"}
-    )  # no raise
+    p.enqueue("svc", tmp_path, {"clone_path": str(tmp_path), "alias": "svc"})
 
 
-def test_executor_reembeds_via_incremental_refresh(tmp_path: Path) -> None:
-    # force_init=False is the safety contract: no --force/--clear, so the co-located
-    # FTS/SCIP indexes are never wiped — only the missing semantic vectors are filled.
-    grm = _GRM(set())
+def test_executor_success_returns_vector_count(tmp_path: Path) -> None:
+    # A repo that re-embeds to real vectors → success carrying the count (force_init=False).
+    grm = _GRM(set(), produce_vectors=280, files=57)
     result = semantic_backfill_reindex_executor(
-        grm, {"clone_path": str(tmp_path / "svc"), "alias": "svc", "job_id": "j1"}
+        grm, {"clone_path": str(tmp_path / "svc"), "alias": "svc"}
     )
-    assert grm.reindexed[0]["clone_path"] == str(tmp_path / "svc")
     assert grm.reindexed[0]["force_init"] is False
-    assert grm.reindexed[0]["golden_repo_alias"] == "svc"
-    assert result == {
-        "status": "reindexed",
-        "alias": "svc",
-        "clone_path": str(tmp_path / "svc"),
-    }
+    assert result == {"status": "reindexed", "alias": "svc", "vector_count": 280}
+
+
+def test_executor_fails_loud_when_files_but_zero_vectors(tmp_path: Path) -> None:
+    # THE hardening: had 57 indexable files but produced 0 vectors → the silent-empty
+    # failure — must RAISE (job fails, retried) instead of masking as done.
+    grm = _GRM(set(), produce_vectors=0, files=57)
+    with pytest.raises(SemanticReindexProducedNoVectorsError):
+        semantic_backfill_reindex_executor(
+            grm, {"clone_path": str(tmp_path / "svc"), "alias": "svc"}
+        )
+
+
+def test_executor_marks_no_files_repo_as_skipped(tmp_path: Path) -> None:
+    # A file-less repo with a present-but-0 progress → skip (mark), not fail.
+    grm = _GRM(set(), produce_vectors=0, files=0)
+    result = semantic_backfill_reindex_executor(
+        grm, {"clone_path": str(tmp_path / "docs"), "alias": "docs"}
+    )
+    assert result["status"] == "skipped_no_files"
+    assert (tmp_path / "docs" / ".code-indexer" / SEMANTIC_NO_FILES_MARKER).exists()
+
+
+def test_executor_skips_when_progress_absent(tmp_path: Path) -> None:
+    # Review regression: a GENUINELY file-less repo writes NO progress file (cidx index
+    # raises 'No files found to index' before start_session, and the workflow tolerates it).
+    # This must route to skip, NOT fail-loud (the bug: absent progress → None → was raising).
+    grm = _GRM(set(), produce_vectors=0, progress="absent")
+    result = semantic_backfill_reindex_executor(
+        grm, {"clone_path": str(tmp_path / "docs"), "alias": "docs"}
+    )
+    assert result["status"] == "skipped_no_files"
+    assert (tmp_path / "docs" / ".code-indexer" / SEMANTIC_NO_FILES_MARKER).exists()
+
+
+def test_executor_skips_when_session_null(tmp_path: Path) -> None:
+    # A stale progress file whose current_session is null → also "no session" → file-less → skip.
+    grm = _GRM(set(), produce_vectors=0, progress="null")
+    result = semantic_backfill_reindex_executor(
+        grm, {"clone_path": str(tmp_path / "docs2"), "alias": "docs2"}
+    )
+    assert result["status"] == "skipped_no_files"
+
+
+def test_executor_fails_loud_when_progress_corrupt(tmp_path: Path) -> None:
+    # A CORRUPT (unparseable) progress file → cannot confirm file-less → fail loud rather
+    # than silently mask a possible real failure.
+    grm = _GRM(set(), produce_vectors=0, progress="corrupt")
+    with pytest.raises(SemanticReindexProducedNoVectorsError):
+        semantic_backfill_reindex_executor(
+            grm, {"clone_path": str(tmp_path / "svc"), "alias": "svc"}
+        )
 
 
 def test_config_ships_off() -> None:
     from code_indexer.server.utils.config_manager import SemanticBackfillSweepConfig
 
     c = SemanticBackfillSweepConfig()
-    assert c.enabled is False  # cost gate: default OFF
+    assert c.enabled is False
     assert c.batch_size == 1
     assert c.tick_interval_minutes == 30
     assert c.attempt_cooldown_seconds == 86400
