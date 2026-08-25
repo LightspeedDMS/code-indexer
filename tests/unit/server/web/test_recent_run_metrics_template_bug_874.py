@@ -1,21 +1,41 @@
 """
 Unit tests for Story D of Bug #874: Recent Run Metrics UI template redesign.
 
-FR7 requirements tested (6 scenarios, 3 test methods):
+FR7 requirements tested (7 scenarios, 4 test methods):
   1. (standalone) Legacy null timings -> em-dash in Phase timings cell, no "0.0"
   2. (standalone) NULL run_type -> em-dash in Type column, no run-type-* badge
   3. (parametrized x4) delta/full/refinement/legacy-P1P2 -> correct pills/badges
+  4. (standalone) PostgreSQL JSONB dict-shaped phase_timings_json -> pills
+     still render (Bug #1622 / code-review finding F6 on the #1652/#1655
+     remediation)
 
 All assertions scoped to id="recent-run-metrics" section.
 
 Template rendered via _render_complete_response() which pre-parses
 phase_timings_json str -> dict in the view layer (no Jinja filter needed).
+
+Bug #1622 / F6: on PostgreSQL, phase_timings_json is JSONB, and psycopg
+already decodes it into a native dict before dependency_map_service.py
+ever builds the cached job_status envelope. When that envelope is
+JSON-serialized for caching and later JSON-deserialized for rendering,
+a dict value round-trips as a nested JSON object (stays a dict) while a
+str value round-trips as a JSON string (stays a str) -- so the SAME
+dict-vs-str shape difference that exists at the raw DB row survives all
+the way to _render_complete_response()'s
+`parse_json_column(row.get("phase_timings_json"), dict,
+"phase_timings_json")` call. test_row_renders_correct_markup's
+parametrized cases below all use a JSON *string* for phase_timings_json
+(the SQLite/legacy shape) -- none of them reach the PostgreSQL dict
+branch. test_dict_shaped_phase_timings_json_renders_pills_correctly
+closes that gap by passing a native dict through _make_row(), the
+_FakeCache envelope, the real HTTP endpoint, and the real
+_render_complete_response() call site.
 """
 
 import json
 import os
 import re
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 from unittest.mock import patch
 
 import pytest
@@ -164,7 +184,7 @@ def _make_row(
     pass1_duration_s: Optional[float] = None,
     pass2_duration_s: Optional[float] = None,
     run_type: Optional[str] = None,
-    phase_timings_json: Optional[str] = None,
+    phase_timings_json: Optional[Union[str, dict]] = None,
 ) -> Dict[str, Any]:
     """Build a run_history row dict with sensible defaults."""
     return {
@@ -314,3 +334,32 @@ class TestRecentRunMetricsTemplate:
             assert re.search(r"run-type-full[^>]*>\s*full\s*<", section), (
                 "Expected visible text 'full' inside the run-type-full badge element"
             )
+
+    def test_dict_shaped_phase_timings_json_renders_pills_correctly(self, client):
+        """
+        Bug #1622 / code-review finding F6: a native-dict phase_timings_json
+        (the PostgreSQL JSONB shape) must render identically to the
+        JSON-string shape (the SQLite/legacy shape) tested by
+        test_row_renders_correct_markup's "delta_phase_pills" case.
+
+        This is the only test in the suite that passes phase_timings_json
+        as an actual dict (not a JSON string) all the way through
+        _make_row() -> the _FakeCache envelope -> the real HTTP endpoint
+        -> the real _render_complete_response()'s
+        `parse_json_column(row.get("phase_timings_json"), dict,
+        "phase_timings_json")` call site. Reverting that call site to a
+        bare json.loads(...), or swapping its expected_type from dict to
+        list, makes this test fail with a TypeError/None-parsed result
+        while leaving every other test in this file green (verified
+        manually during development of this fix).
+        """
+        row = _make_row(
+            run_type="delta",
+            phase_timings_json={"detect_s": 0.5, "merge_s": 94.1, "finalize_s": 0.2},
+        )
+
+        section = _render_section(client, [row])
+
+        assert 'class="phase-pill"' in section
+        for text in ["detect", "0.5s", "merge", "94.1s", "finalize", "0.2s"]:
+            assert text in section, f"Expected {text!r} in metrics section"

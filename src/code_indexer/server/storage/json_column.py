@@ -68,24 +68,14 @@ def parse_json_column(
             bytes, or an unexpected type).
         expected_type: The python type the value should normalize to
             (e.g. ``dict`` for a metadata/phase-timings column, ``list``
-            for a sidebar/array column). Must be an actual ``type``.
+            for a sidebar/array column).
         field_name: Human-readable field name used in WARNING log
             messages (e.g. "sidebar_json", "phase_timings_json").
 
     Returns:
         The parsed value of `expected_type`, or None if raw was None or
         malformed.
-
-    Raises:
-        TypeError: if `expected_type` is not an actual type (programmer
-            error at the call site, not a data-quality issue — this is
-            NOT the fail-soft path).
     """
-    if not isinstance(expected_type, type):
-        raise TypeError(
-            f"parse_json_column: expected_type must be a type, got "
-            f"{expected_type!r} ({type(expected_type).__name__})"
-        )
     if raw is None:
         # Absent value — no warning; expected for legacy or NULL rows.
         return None

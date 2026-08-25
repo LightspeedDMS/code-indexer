@@ -19,12 +19,9 @@ second copy of the schema left to drift again).
 
 from __future__ import annotations
 
-import logging
 from typing import Any, Dict, List, Optional
 
 from .connection_pool import ConnectionPool
-
-logger = logging.getLogger(__name__)
 
 
 class WikiCachePostgresBackend:
