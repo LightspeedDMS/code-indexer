@@ -32,6 +32,7 @@ from ..models.error_models import (
 )
 from .sanitization import SensitiveDataSanitizer
 from .retry_handler import DatabaseRetryHandler
+from .correlation import get_correlation_id
 from .error_formatters import (
     generate_correlation_id,
     get_current_timestamp,
@@ -132,6 +133,12 @@ class GlobalErrorHandler(BaseHTTPMiddleware):
             error_type = ErrorType(error_type)
         return self._status_code_map.get(error_type, 500)
 
+    def _resolve_correlation_id(self) -> str:
+        """Reuse the ambient request correlation id (matches the
+        X-Correlation-ID header and log store column, Bug #1648); generate
+        a fresh one only as a fallback when no ambient id is active yet."""
+        return get_correlation_id() or generate_correlation_id()
+
     async def dispatch(self, request: Request, call_next: Callable) -> Response:
         """
         Main middleware dispatch method that catches and handles all errors.
@@ -149,7 +156,7 @@ class GlobalErrorHandler(BaseHTTPMiddleware):
             already_logged = getattr(request.state, "error_already_logged", False)
             if not already_logged and response.status_code >= WARN_MIN_STATUS:
                 msg = f"HTTP {response.status_code}"
-                cid = generate_correlation_id()
+                cid = self._resolve_correlation_id()
                 self._log_error("HTTPException", msg, cid, request)
             return cast(Response, response)
 
@@ -186,7 +193,7 @@ class GlobalErrorHandler(BaseHTTPMiddleware):
         Returns:
             Standardized error response dictionary
         """
-        correlation_id = generate_correlation_id()
+        correlation_id = self._resolve_correlation_id()
         timestamp = get_current_timestamp()
 
         # Use formatter to create validation error response
@@ -219,7 +226,7 @@ class GlobalErrorHandler(BaseHTTPMiddleware):
         Returns:
             Standardized error response dictionary
         """
-        correlation_id = generate_correlation_id()
+        correlation_id = self._resolve_correlation_id()
         timestamp = get_current_timestamp()
 
         # Determine error type and create response using formatter
@@ -256,7 +263,7 @@ class GlobalErrorHandler(BaseHTTPMiddleware):
         Returns:
             Standardized error response dictionary
         """
-        correlation_id = generate_correlation_id()
+        correlation_id = self._resolve_correlation_id()
         timestamp = get_current_timestamp()
 
         # Use formatter to create generic error response
@@ -274,18 +281,7 @@ class GlobalErrorHandler(BaseHTTPMiddleware):
         return error_response
 
     def execute_with_database_retry(self, operation: Callable[[], T]) -> T:
-        """
-        Execute database operation with retry logic.
-
-        Args:
-            operation: Database operation to execute
-
-        Returns:
-            Result of the operation
-
-        Raises:
-            DatabaseError: If operation fails after all retries
-        """
+        """Execute a database operation with retry logic; raises DatabaseError if retries are exhausted."""
         return self.retry_handler.execute_with_retry(operation)
 
     def _create_error_response(self, error_data: Dict[str, Any]) -> JSONResponse:
@@ -296,7 +292,7 @@ class GlobalErrorHandler(BaseHTTPMiddleware):
         self, error: HTTPException, request: Request
     ) -> JSONResponse:
         """Create standardized response for FastAPI HTTPException."""
-        correlation_id = generate_correlation_id()
+        correlation_id = self._resolve_correlation_id()
         timestamp = get_current_timestamp()
 
         # Use formatter to create HTTP exception response
@@ -367,9 +363,9 @@ class GlobalErrorHandler(BaseHTTPMiddleware):
 
             log_message = " | ".join(log_parts)
 
-            # Log at appropriate level
-            # Use the correlation_id parameter (not get_correlation_id() from context)
-            # to ensure the ID shown in the error response matches the logged ID
+            # Log at appropriate level. correlation_id is already resolved via
+            # _resolve_correlation_id() (ambient-first, Bug #1648), so this
+            # log line's [ID: ...] text matches the response body/header.
             if error_type in ["ValidationError", "HTTPException"]:
                 logger.warning(
                     format_error_log(
