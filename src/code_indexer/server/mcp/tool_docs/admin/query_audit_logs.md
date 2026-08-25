@@ -25,6 +25,11 @@ inputSchema:
       default: 100
       minimum: 1
       maximum: 1000
+    page:
+      type: integer
+      description: Page number for pagination (1-based)
+      default: 1
+      minimum: 1
   required: []
 ---
 
@@ -42,9 +47,11 @@ INPUTS:
 - from_date (optional): Start date for time range (ISO 8601 format)
 - to_date (optional): End date for time range (ISO 8601 format)
 - limit (optional): Maximum number of entries to return (default: 100)
+- page (optional): Page number for pagination (1-based, default: 1)
 
 RETURNS:
 - entries: Array of audit log entries with timestamp, user, action, resource, and details fields
+- total: True count of all matching entries across every page (not just len(entries))
 
 PERMISSIONS: Requires manage_users (admin only).
 

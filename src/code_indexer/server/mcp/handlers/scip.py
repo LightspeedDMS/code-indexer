@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional
 
 from code_indexer.server.auth.user_manager import User, UserRole
 from code_indexer.server.logging_utils import format_error_log
@@ -116,36 +116,6 @@ def _compute_fetch_limit(requested_limit: int, rerank_query: Optional[str]) -> i
 # ---------------------------------------------------------------------------
 # Private helpers: audit log parsing
 # ---------------------------------------------------------------------------
-
-
-def _filter_audit_entries(
-    entries: List[Dict[str, Any]],
-    filter_user: Optional[str],
-    action: Optional[str],
-    from_date: Optional[str],
-    to_date: Optional[str],
-    limit: int,
-) -> List[Dict[str, Any]]:
-    """Filter audit log entries by user, action, and date range.
-
-    Used by both handle_scip_pr_history/handle_scip_cleanup_history (this module)
-    and handle_query_audit_logs (currently in _legacy.py, to be extracted to
-    admin.py in a future Story #496 step).
-    """
-    filtered = entries
-    if filter_user:
-        filtered = [
-            e for e in filtered if e.get("user", "").lower() == filter_user.lower()
-        ]
-    if action:
-        filtered = [
-            e for e in filtered if action.lower() in e.get("action", "").lower()
-        ]
-    if from_date:
-        filtered = [e for e in filtered if e.get("timestamp", "") >= from_date]
-    if to_date:
-        filtered = [e for e in filtered if e.get("timestamp", "") <= to_date]
-    return filtered[:limit]
 
 
 def _parse_log_details(row: dict) -> dict:

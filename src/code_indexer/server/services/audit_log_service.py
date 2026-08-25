@@ -51,6 +51,13 @@ _PR_ACTION_TYPES = (
 # Cleanup action_type value
 _CLEANUP_ACTION_TYPE = "git_cleanup"
 
+# Public aliases (Issue #1646/#1647): handle_query_audit_logs
+# (mcp/handlers/admin/__init__.py) reuses these to recognize PR/cleanup rows
+# for field enrichment when merging them out of one general query() call,
+# instead of re-declaring a third duplicate of these literals.
+PR_ACTION_TYPES = _PR_ACTION_TYPES
+CLEANUP_ACTION_TYPE = _CLEANUP_ACTION_TYPE
+
 
 class AuditLogService:
     """
