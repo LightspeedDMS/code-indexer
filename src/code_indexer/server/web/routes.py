@@ -3708,8 +3708,15 @@ def toggle_wiki_enabled(
             from ..wiki.wiki_cache import WikiCache
             from ..wiki.wiki_service import WikiService
             from ...global_repos.alias_manager import AliasManager
+            from ..utils.registry_factory import resolve_backend_registry_attr
 
-            cache = WikiCache(manager.db_path)
+            # Bug #1665: resolve the shared PostgreSQL wiki_cache backend in
+            # cluster mode so this hook sees the same store regardless of
+            # which node handles the request.
+            wiki_backend, _ = resolve_backend_registry_attr(
+                "wiki_cache", caller_name="web.routes.toggle_wiki_enabled"
+            )
+            cache = WikiCache(manager.db_path, storage_backend=wiki_backend)
             cache.ensure_tables()
             aliases_dir = str(Path(manager.golden_repos_dir) / "aliases")
             actual_path = AliasManager(aliases_dir).read_alias(f"{alias}-global")
@@ -3874,9 +3881,15 @@ def refresh_wiki_cache(
             status_code=400,
         )
     from ..wiki.wiki_cache import WikiCache
+    from ..utils.registry_factory import resolve_backend_registry_attr
 
     manager = _get_golden_repo_manager()
-    cache = WikiCache(manager.db_path)
+    # Bug #1665: resolve the shared PostgreSQL wiki_cache backend in
+    # cluster mode so this invalidation is visible to every node.
+    wiki_backend, _ = resolve_backend_registry_attr(
+        "wiki_cache", caller_name="web.routes.refresh_wiki_cache"
+    )
+    cache = WikiCache(manager.db_path, storage_backend=wiki_backend)
     cache.invalidate_repo(alias)
     return _create_golden_repos_page_response(
         request, session, success_message="Wiki cache cleared"
@@ -4794,9 +4807,16 @@ def toggle_user_wiki_enabled(
         if not enabling:
             try:
                 from ..wiki.wiki_cache import WikiCache
+                from ..utils.registry_factory import resolve_backend_registry_attr
 
                 golden_manager = _get_golden_repo_manager()
-                cache = WikiCache(golden_manager.db_path)
+                # Bug #1665: resolve the shared PostgreSQL wiki_cache
+                # backend in cluster mode so this invalidation is visible
+                # to every node.
+                wiki_backend, _ = resolve_backend_registry_attr(
+                    "wiki_cache", caller_name="web.routes.toggle_user_wiki_enabled"
+                )
+                cache = WikiCache(golden_manager.db_path, storage_backend=wiki_backend)
                 cache.invalidate_user_wiki(username, alias)
             except Exception as cache_exc:
                 logger.warning(
