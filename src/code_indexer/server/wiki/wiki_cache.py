@@ -6,7 +6,7 @@ import sqlite3
 import threading
 from datetime import date, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Dict, List, Optional
+from typing import TYPE_CHECKING, Dict, List, Optional, Type, TypeVar
 
 from code_indexer.server.storage.database_manager import DatabaseConnectionManager
 
@@ -21,6 +21,62 @@ def _json_default(obj: object) -> str:
     if isinstance(obj, (datetime, date)):
         return obj.isoformat()
     raise TypeError(f"Object of type {type(obj).__name__} is not JSON serializable")
+
+
+T = TypeVar("T")
+
+
+def _parse_json_cache_value(
+    raw: object, expected_type: Type[T], field_name: str
+) -> Optional[T]:
+    """
+    Normalize a wiki-cache row's raw JSON-bearing value to `expected_type`.
+
+    Bug #1652 (same root-cause class as Bug #1622's
+    _parse_phase_timings_value in dependency_map_routes.py): on PostgreSQL,
+    wiki_sidebar_cache.sidebar_json and wiki_cache.metadata are JSONB
+    columns that the driver already deserializes into a native python
+    object (list / dict respectively); on SQLite they are TEXT columns
+    that arrive as a JSON string (json.loads() also accepts bytes).
+
+    A value already of `expected_type` is returned as-is (no parsing, no
+    warning). Any other value is passed to json.loads(); a value that is
+    neither `expected_type` nor str/bytes, or a string that fails to
+    parse, or one that parses to something other than `expected_type`,
+    logs a WARNING and returns None (fail-soft — never raise, matching
+    this module's pre-existing fallback behavior).
+
+    Args:
+        raw: The row's raw value (None, `expected_type` instance, str,
+            bytes, or an unexpected type).
+        expected_type: The python type the value should normalize to
+            (``list`` for sidebar_json, ``dict`` for metadata).
+        field_name: Human-readable field name used in WARNING log messages.
+
+    Returns:
+        The parsed value of `expected_type`, or None if raw was None or
+        malformed.
+    """
+    if raw is None:
+        # Absent value — no warning; expected for legacy or NULL rows.
+        return None
+    if isinstance(raw, expected_type):
+        return raw
+    try:
+        parsed = json.loads(raw)  # type: ignore[arg-type]
+    except (ValueError, TypeError) as exc:
+        logger.warning("wiki_cache: malformed %s %r: %s", field_name, raw, exc)
+        return None
+    if not isinstance(parsed, expected_type):
+        logger.warning(
+            "wiki_cache: %s parsed to %s (expected %s), ignoring: %r",
+            field_name,
+            type(parsed).__name__,
+            expected_type.__name__,
+            raw,
+        )
+        return None
+    return parsed
 
 
 _CREATE_WIKI_CACHE_TABLE = """
@@ -240,14 +296,9 @@ class WikiCache:
             metadata: Optional[Dict] = None
             stored_metadata_json = row_dict.get("metadata_json")
             if stored_metadata_json:
-                try:
-                    metadata = json.loads(stored_metadata_json)
-                except (ValueError, TypeError):
-                    logger.warning(
-                        "Failed to parse cached metadata_json for %s/%s",
-                        repo_alias,
-                        article_path,
-                    )
+                metadata = _parse_json_cache_value(
+                    stored_metadata_json, dict, "metadata_json"
+                )
             return {
                 "html": row_dict["rendered_html"],
                 "title": row_dict["title"],
@@ -266,14 +317,9 @@ class WikiCache:
             return None
         metadata = None
         if stored_metadata_json:
-            try:
-                metadata = json.loads(stored_metadata_json)
-            except (ValueError, TypeError):
-                logger.warning(
-                    "Failed to parse cached metadata_json for %s/%s",
-                    repo_alias,
-                    article_path,
-                )
+            metadata = _parse_json_cache_value(
+                stored_metadata_json, dict, "metadata_json"
+            )
         return {"html": stored_html, "title": stored_title, "metadata": metadata}
 
     def put_article(
@@ -343,7 +389,7 @@ class WikiCache:
             raw = self._backend.get_sidebar(repo_alias)
             if raw is None:
                 return None
-            return json.loads(raw)  # type: ignore[no-any-return]
+            return _parse_json_cache_value(raw, list, "sidebar_json")
         # Bug #1532 follow-up: route the raw connection through
         # guarded_connection() so close_all() cannot close it mid-read.
         with self._conn_manager.guarded_connection() as conn:
@@ -353,7 +399,7 @@ class WikiCache:
             ).fetchone()
         if row is None:
             return None
-        return json.loads(row[0])  # type: ignore[no-any-return]
+        return _parse_json_cache_value(row[0], list, "sidebar_json")
 
     def put_sidebar(self, repo_alias: str, sidebar_data: List, repo_dir: Path) -> None:
         """Store sidebar JSON with current max_mtime of .md files."""

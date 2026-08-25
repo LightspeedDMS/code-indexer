@@ -51,7 +51,7 @@ class WikiCachePostgresBackend:
                         file_mtime DOUBLE PRECISION NOT NULL,
                         file_size INTEGER NOT NULL,
                         rendered_at TEXT NOT NULL,
-                        metadata_json TEXT,
+                        metadata JSONB,
                         PRIMARY KEY (repo_alias, article_path)
                     )
                     """
@@ -89,7 +89,7 @@ class WikiCachePostgresBackend:
         """Return dict with rendered_html, title, file_mtime, file_size, metadata_json or None."""
         with self._pool.connection() as conn:
             row = conn.execute(
-                "SELECT rendered_html, title, file_mtime, file_size, metadata_json "
+                "SELECT rendered_html, title, file_mtime, file_size, metadata "
                 "FROM wiki_cache WHERE repo_alias = %s AND article_path = %s",
                 (repo_alias, article_path),
             ).fetchone()
@@ -119,7 +119,7 @@ class WikiCachePostgresBackend:
             conn.execute(
                 """
                 INSERT INTO wiki_cache
-                    (repo_alias, article_path, rendered_html, title, file_mtime, file_size, rendered_at, metadata_json)
+                    (repo_alias, article_path, rendered_html, title, file_mtime, file_size, rendered_at, metadata)
                 VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT (repo_alias, article_path) DO UPDATE SET
                     rendered_html = EXCLUDED.rendered_html,
@@ -127,7 +127,7 @@ class WikiCachePostgresBackend:
                     file_mtime = EXCLUDED.file_mtime,
                     file_size = EXCLUDED.file_size,
                     rendered_at = EXCLUDED.rendered_at,
-                    metadata_json = EXCLUDED.metadata_json
+                    metadata = EXCLUDED.metadata
                 """,
                 (
                     repo_alias,
