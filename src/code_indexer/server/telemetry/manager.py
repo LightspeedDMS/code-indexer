@@ -17,6 +17,7 @@ from __future__ import annotations
 import logging
 from threading import Lock
 from typing import TYPE_CHECKING, Optional
+from code_indexer import __version__ as _CIDX_VERSION
 from code_indexer.server.logging_utils import format_error_log
 
 if TYPE_CHECKING:
@@ -26,6 +27,16 @@ if TYPE_CHECKING:
     from src.code_indexer.server.utils.config_manager import TelemetryConfig
 
 logger = logging.getLogger(__name__)
+
+# Story #1676 AC6: custom resource attribute for this codebase's cluster
+# node-identity concept. Deliberately NOT the semantic-convention
+# ResourceAttributes.HOST_ID -- that field has different semantics (a
+# stable machine/VM identifier) than the node identity resolved by
+# code_indexer.server.utils.cluster_node_id.resolve_cluster_node_id()
+# (which is what NodeHeartbeatService/get_active_nodes() treat as
+# authoritative for this cluster). Kept as a module constant so every
+# reader/writer of this attribute name agrees on the exact string.
+CLUSTER_NODE_ID_RESOURCE_ATTRIBUTE = "cidx.cluster.node_id"
 
 # Singleton instance and lock
 _telemetry_manager: Optional["TelemetryManager"] = None
@@ -45,18 +56,33 @@ class TelemetryManager:
     Thread-safe singleton pattern is implemented via get_telemetry_manager().
     """
 
-    def __init__(self, config: "TelemetryConfig") -> None:
+    def __init__(
+        self,
+        config: "TelemetryConfig",
+        cluster_node_id: Optional[str] = None,
+    ) -> None:
         """
         Initialize TelemetryManager with configuration.
 
         Args:
             config: TelemetryConfig instance with telemetry settings
+            cluster_node_id: Story #1676 AC6 -- this process's cluster node
+                identity, PRE-RESOLVED by the caller (lifespan.py) via
+                code_indexer.server.utils.cluster_node_id.resolve_cluster_node_id().
+                Deliberately a plain constructor argument rather than
+                resolved internally here: manager.py must not import
+                cluster-bootstrap internals, and must never invent a
+                second/competing identity scheme. When None (e.g. tests
+                constructing TelemetryManager directly, or any caller that
+                has not resolved an identity), the resource simply omits
+                the cidx.cluster.node_id attribute.
 
         Note:
             OTEL SDK is only loaded if config.enabled is True.
             This ensures zero overhead when telemetry is disabled.
         """
         self._config = config
+        self._cluster_node_id = cluster_node_id
         self._tracer_provider: Optional["TracerProvider"] = None
         self._meter_provider: Optional["MeterProvider"] = None
         self._is_initialized = False
@@ -79,13 +105,22 @@ class TelemetryManager:
             from opentelemetry.sdk.trace import TracerProvider
             from opentelemetry.semconv.resource import ResourceAttributes
 
-            # Create resource with service information
-            resource = Resource.create(
-                {
-                    ResourceAttributes.SERVICE_NAME: self._config.service_name,
-                    ResourceAttributes.DEPLOYMENT_ENVIRONMENT: self._config.deployment_environment,
-                }
-            )
+            # Create resource with service information. Story #1676 AC6
+            # adds service.version (from the installed code_indexer package
+            # version) and, when a cluster node identity was resolved by
+            # the caller, a custom cidx.cluster.node_id attribute -- both
+            # shared by the tracer AND meter providers below since they are
+            # built from this ONE resource instance.
+            resource_attributes = {
+                ResourceAttributes.SERVICE_NAME: self._config.service_name,
+                ResourceAttributes.DEPLOYMENT_ENVIRONMENT: self._config.deployment_environment,
+                ResourceAttributes.SERVICE_VERSION: _CIDX_VERSION,
+            }
+            if self._cluster_node_id:
+                resource_attributes[CLUSTER_NODE_ID_RESOURCE_ATTRIBUTE] = (
+                    self._cluster_node_id
+                )
+            resource = Resource.create(resource_attributes)
 
             # Initialize TracerProvider if traces are enabled
             if self._config.export_traces:
@@ -220,6 +255,12 @@ class TelemetryManager:
         return self._config.service_name
 
     @property
+    def cluster_node_id(self) -> Optional[str]:
+        """Return the resolved cluster node identity (Story #1676 AC6), or
+        None if the caller never supplied one."""
+        return self._cluster_node_id
+
+    @property
     def deployment_environment(self) -> str:
         """Return the configured deployment environment."""
         return self._config.deployment_environment
@@ -288,6 +329,7 @@ class TelemetryManager:
 
 def get_telemetry_manager(
     config: Optional["TelemetryConfig"] = None,
+    cluster_node_id: Optional[str] = None,
 ) -> TelemetryManager:
     """
     Get the TelemetryManager singleton instance.
@@ -296,6 +338,11 @@ def get_telemetry_manager(
         config: TelemetryConfig to use for initialization.
                 Required on first call, optional on subsequent calls.
                 If None on first call, creates a disabled TelemetryConfig as fallback.
+        cluster_node_id: Story #1676 AC6 -- this process's cluster node
+                identity, pre-resolved by the caller (see
+                TelemetryManager.__init__ for the full rationale). Only
+                meaningful on the call that actually constructs the
+                singleton (first call wins, same as config).
 
     Returns:
         TelemetryManager singleton instance
@@ -318,7 +365,7 @@ def get_telemetry_manager(
 
             config = TelemetryConfig(enabled=False)
 
-        _telemetry_manager = TelemetryManager(config)
+        _telemetry_manager = TelemetryManager(config, cluster_node_id=cluster_node_id)
         return _telemetry_manager
 
 

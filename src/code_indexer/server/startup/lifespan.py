@@ -3239,8 +3239,35 @@ def make_lifespan(
                 # Lazy import telemetry module only when enabled
                 from code_indexer.server.telemetry import get_telemetry_manager
 
+                # Story #1676 AC6: resolve this process's cluster node
+                # identity via the SAME shared resolver service_init.py and
+                # the cluster-services block below use for JobTracker /
+                # NodeHeartbeatService (resolve_cluster_node_id) -- never a
+                # second/competing identity scheme. server_config.cluster is
+                # the already-parsed ClusterConfig from this same
+                # config.json (see ServerConfigManager's "cluster" ->
+                # ClusterConfig conversion), so we build the small raw-dict
+                # shape the resolver expects from it instead of re-reading
+                # config.json a third time in this startup routine. In solo
+                # (non-cluster) mode server_config.cluster is None and the
+                # resolver's existing f"{hostname}-cidx" fallback applies
+                # unchanged.
+                from code_indexer.server.utils.cluster_node_id import (
+                    resolve_cluster_node_id,
+                )
+
+                _telemetry_raw_cluster_cfg = (
+                    {"cluster": {"node_id": server_config.cluster.node_id}}
+                    if server_config.cluster is not None
+                    else None
+                )
+                _telemetry_cluster_node_id = resolve_cluster_node_id(
+                    _telemetry_raw_cluster_cfg
+                )
+
                 telemetry_manager = get_telemetry_manager(
-                    server_config.telemetry_config
+                    server_config.telemetry_config,
+                    cluster_node_id=_telemetry_cluster_node_id,
                 )
                 app.state.telemetry_manager = telemetry_manager
 
