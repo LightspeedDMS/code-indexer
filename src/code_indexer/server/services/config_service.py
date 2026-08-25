@@ -685,6 +685,7 @@ class ConfigService:
                 "machine_metrics_enabled": config.telemetry_config.machine_metrics_enabled,
                 "machine_metrics_interval_seconds": config.telemetry_config.machine_metrics_interval_seconds,
                 "deployment_environment": config.telemetry_config.deployment_environment,
+                "trace_sample_rate": config.telemetry_config.trace_sample_rate,
             },
             # Langfuse configuration (Story #136, Story #164)
             "langfuse": {
