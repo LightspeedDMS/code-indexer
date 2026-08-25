@@ -256,6 +256,22 @@ defect regardless of how fast it looks locally.
 
 This rule applies to ALL contexts: main context, subagents, tdd-engineer, code-reviewer. A code reviewer who approves a module-level dict used as cross-request server state has missed a critical cluster bug.
 
+### Module-Level Service Singletons Must Be Lazy (PEP 562) (Bug #1638, Bug #1650)
+
+NEVER bind a heavy service/manager to a bare module-level name (`foo = HeavyService()`) that runs unconditionally at import time -- any bare or transitive import of that module then pays the full construction cost as a side effect, with no explicit opt-in. Observed twice: Bug #1638 (`server/app.py`'s `app = create_app()` triggered ConfigService/SQLite/DependencyLatencyTracker/MCPSelfRegistrationService startup and `primary_instance.lock` contention) and Bug #1650 (`server/services/git_operations_service.py`'s `git_operations_service = _get_git_operations_service()` triggered `GitOperationsService -> ActivatedRepoManager -> GoldenRepoManager -> SQLite` golden-repo load, spawning ~14 `bgm-worker`/`bgm-temporal-worker` threads).
+
+**Fix pattern**: an annotation-only module global (no `= value` binding) plus a PEP 562 module-level `__getattr__` that lazily constructs on first genuine access, guarded by:
+
+- `threading.RLock` (NEVER a plain `Lock`) -- a re-entrant probe arriving from within the construction call chain on the SAME thread must be able to re-acquire without deadlocking. A plain Lock self-deadlocking here was #1638's first-round review rejection.
+- Explicit `_initialized`/`_initializing` sentinels (not the lock itself) to stop a re-entrant call from recursing into a second construction -- it returns `AttributeError` (-> `None` via `getattr(..., None)`), matching pre-fix unbound semantics exactly.
+- A `_lazy_values` snapshot dict so `unittest.mock.patch`'s delattr-then-hasattr teardown sequence resolves cleanly instead of raising `KeyError` and permanently poisoning the module.
+
+`from module import name` triggers `__getattr__` transparently (PEP 562), so existing call sites doing `from package.module import name` at module scope keep working unchanged and lazily construct on their own import -- only a BARE `import module` (or a transitive import that never touches the name) becomes inert. Any new fix in this class MUST include a re-entrancy discriminating test (a stand-in for an external dependency in the construction chain that probes the lazy attribute again mid-construction, on the same thread, run via a background thread with a bounded `join(timeout=...)`) -- this is the exact test shape that catches the plain-Lock self-deadlock class of bug before it reaches review.
+
+Canonical implementations: `src/code_indexer/server/app.py` (Bug #1638), `src/code_indexer/server/services/git_operations_service.py` (Bug #1650). Tests: `tests/unit/server/test_app_import_no_side_effects_1638.py`, `tests/unit/server/test_app_lazy_init_repair_1638.py`, `tests/unit/server/services/test_git_operations_service_lazy_init_1650.py`.
+
+This is distinct from the Bug #1467/#1468 PEP 562 note (Indexing Path section below): that one is about avoiding pulling heavy cross-layer IMPORTS (psycopg, fastapi) into CLI/solo-path modules; this one is about avoiding eager service CONSTRUCTION as an import-time side effect.
+
 ### Shared-Storage Protocol Is Pinned to NFSv3 — NFSv4 Is Off The Table
 
 Cluster shared mounts (golden-repos, cow-storage) are pinned to NFSv3 (`vers=3,nolock,hard` / `soft,timeo=30,retrans=3`). NFSv4 was deployed and rolled back after three separate live failures (lock loss, git pack corruption, state-recovery hangs) — do not propose NFSv4 without addressing all three. The strategic direction is to need LESS from the filesystem (coordination moved to PostgreSQL), not to find a better protocol; any storage proposal must preserve local `cp --reflink` support.

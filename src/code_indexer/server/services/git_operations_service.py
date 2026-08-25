@@ -2810,17 +2810,143 @@ class GitOperationsService:
             )
 
 
+# Bug #1650 (mirrors Bug #1638): the lazy-init lock MUST be an RLock, not a
+# plain Lock. If any future call chain inside GitOperationsService.__init__
+# (directly or via a dependency such as ActivatedRepoManager/
+# GoldenRepoManager) ever reads this module's `git_operations_service`
+# attribute again before construction finishes, that re-entrant call arrives
+# on the SAME thread while the lock is already held. A plain Lock would
+# self-deadlock there; the RLock lets the re-entrant call back in, and the
+# `_initializing` sentinel (defined below) -- not the lock -- is what stops
+# it from recursively re-running the constructor: it returns AttributeError
+# (-> None via getattr(..., None)) instead, matching the exact pre-fix
+# semantics (before this fix, `git_operations_service` was simply unbound
+# until the module-level assignment completed). Declared before
+# _get_git_operations_service() so every reader/writer of the singleton --
+# whether reached via __getattr__ or called directly -- serializes on the
+# same lock.
+_lazy_init_lock = threading.RLock()
+
 # Global service instance (lazy initialization to avoid circular imports)
-_git_operations_service_instance = None
+_git_operations_service_instance: Optional[GitOperationsService] = None
 
 
-def _get_git_operations_service():
-    """Get or create the global GitOperationsService instance."""
+def _get_git_operations_service() -> GitOperationsService:
+    """Get or create the global GitOperationsService instance.
+
+    Guarded by `_lazy_init_lock` (an RLock) so concurrent/direct callers
+    cannot race and construct two distinct instances; the module's
+    `__getattr__` already holds this same lock when it calls here, and the
+    RLock's re-entrancy makes that nested acquisition a cheap no-op.
+    """
     global _git_operations_service_instance
-    if _git_operations_service_instance is None:
-        _git_operations_service_instance = GitOperationsService()
-    return _git_operations_service_instance
+    with _lazy_init_lock:
+        if _git_operations_service_instance is None:
+            _git_operations_service_instance = GitOperationsService()
+        return _git_operations_service_instance
 
 
-# Global service instance for easy import
-git_operations_service = _get_git_operations_service()
+# Global service instance for easy import.
+#
+# Bug #1650: `git_operations_service` is ANNOTATION-ONLY (no `= ...` binding)
+# so it is absent from this module's __dict__ until real code genuinely
+# accesses it. That absence is what lets the module-level __getattr__()
+# below (PEP 562) detect "not yet initialized" and defer
+# _get_git_operations_service() until the name is actually read, instead of
+# running it unconditionally as an import-time side effect. This mirrors
+# Bug #1638's fix in server/app.py -- see that module's docstring/comments
+# for the full rationale. Before this fix, a bare
+# `import code_indexer.server.services.git_operations_service` (or a
+# transitive import of it) ran GitOperationsService() ->
+# ActivatedRepoManager() -> GoldenRepoManager() ->
+# _load_metadata_from_sqlite(), spawning ~14 bgm-worker/bgm-temporal-worker
+# background threads, with no explicit opt-in.
+git_operations_service: GitOperationsService
+
+# Names whose first attribute access on this module should trigger lazy
+# construction. Only one name here (unlike app.py's many globals), but the
+# same frozenset-membership-check shape is kept for consistency with the
+# validated #1638 pattern.
+_LAZY_INIT_ATTRS = frozenset({"git_operations_service"})
+
+# Snapshot of the `git_operations_service` value, taken immediately after
+# the one real _get_git_operations_service() call completes. This is the
+# fallback __getattr__ reads when the name is momentarily absent from
+# globals() -- e.g. unittest.mock.patch's teardown calling delattr() then
+# hasattr() re-enters __getattr__ with the name freshly deleted; without
+# this snapshot, globals()[name] would raise KeyError (not AttributeError),
+# which hasattr() does not catch, permanently poisoning the module for every
+# later read of that name.
+_lazy_values: Dict[str, Any] = {}
+_initialized = False
+_initializing = False
+
+
+def _ensure_initialized() -> None:
+    """Run _get_git_operations_service() exactly once, tolerating re-entrant
+    probes.
+
+    MUST be called while `_lazy_init_lock` is already held by the caller
+    (an RLock, so the SAME thread re-entering is a cheap no-op re-acquire,
+    not a deadlock). An explicit `_initializing` sentinel -- not the lock --
+    is what stops a re-entrant call from recursing into a second
+    _get_git_operations_service() call: it simply returns, leaving
+    `git_operations_service` absent from globals() until the ORIGINAL call
+    finishes. See the module-level comment above `_lazy_init_lock` for the
+    full re-entrancy rationale.
+    """
+    global _initialized, _initializing
+    if _initialized or _initializing:
+        return
+    _initializing = True
+    try:
+        globals()["git_operations_service"] = _get_git_operations_service()
+        _initialized = True
+        # Snapshot now that construction has run, so __getattr__ has a
+        # stable fallback independent of globals() mutation (mock.patch
+        # delattr, etc.) -- see _lazy_values above.
+        for n in _LAZY_INIT_ATTRS:
+            _lazy_values[n] = globals().get(n)
+    finally:
+        _initializing = False
+
+
+def __getattr__(name: str) -> Any:
+    """PEP 562 lazy module attribute access (Bug #1650, mirrors Bug #1638).
+
+    `git_operations_service = _get_git_operations_service()` used to run
+    unconditionally at import time, so a bare
+    `import code_indexer.server.services.git_operations_service` -- or a
+    transitive import of it -- ran full GitOperationsService construction as
+    a side effect, with no explicit opt-in.
+
+    `__getattr__` is only invoked by Python when normal attribute lookup on
+    this module fails (i.e. the name is absent from this module's
+    __dict__). Since `git_operations_service` is no longer assigned at
+    module level, importing this module is now inert --
+    _get_git_operations_service() only runs the first time real code
+    actually reaches for the name (e.g. `gos_module.git_operations_service`,
+    or `from code_indexer.server.services.git_operations_service import
+    git_operations_service`, the pattern used by routers/git.py and the MCP
+    git handlers), never on a bare import.
+
+    Mid-construction (a re-entrant call arriving while
+    _get_git_operations_service() is still executing on this same thread),
+    this deliberately raises AttributeError rather than blocking or
+    returning a partial value -- so `getattr(gos_module,
+    "git_operations_service", None)` from inside the construction call
+    chain correctly yields None, matching pre-fix semantics exactly.
+
+    The entire read (init-if-needed + globals()/_lazy_values lookup) runs
+    under `_lazy_init_lock` so a concurrent reader on another thread never
+    observes `_initialized`/`_lazy_values` mid-mutation.
+    """
+    if name not in _LAZY_INIT_ATTRS:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    with _lazy_init_lock:
+        _ensure_initialized()
+        if name in globals():
+            return globals()[name]
+        if _initialized and name in _lazy_values:
+            return _lazy_values[name]
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
