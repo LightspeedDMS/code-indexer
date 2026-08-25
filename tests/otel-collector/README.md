@@ -55,12 +55,16 @@ To send telemetry to this local stack, configure CIDX with:
 }
 ```
 
-Or via environment variables:
+Telemetry configuration is managed exclusively via the Web UI Config Screen
+(DB-backed) -- there is no environment-variable override. Log in to the
+server's Web UI, open the Config Screen, and set:
 
-```bash
-export CIDX_TELEMETRY_ENABLED=true
-export CIDX_OTEL_COLLECTOR_ENDPOINT=http://localhost:4317
-```
+- Telemetry Enabled: on
+- Collector Endpoint: `http://localhost:4317`
+- Collector Protocol: `grpc`
+
+Saving the form persists these values to the database immediately; no
+server restart or environment variable is required.
 
 ## Verifying Telemetry
 

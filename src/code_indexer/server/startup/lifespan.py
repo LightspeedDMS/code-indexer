@@ -3221,7 +3221,14 @@ def make_lifespan(
             config_service = get_config_service()
             server_config = config_service.get_config()
 
-            # Apply environment variable overrides (e.g., CIDX_TELEMETRY_ENABLED)
+            # Apply environment variable overrides (e.g., CIDX_SERVER_HOST,
+            # CIDX_LOG_LEVEL). Story #1676 AC1: telemetry configuration is
+            # managed exclusively via the Web UI Config Screen (DB-backed) --
+            # apply_env_overrides() no longer applies any of the 5 legacy
+            # CIDX_TELEMETRY_*/CIDX_OTEL_*/CIDX_DEPLOYMENT_ENVIRONMENT
+            # variables to server_config.telemetry_config below; it only logs
+            # one aggregated WARNING if any of them are still present in the
+            # process environment.
             config_manager = ServerConfigManager()
             server_config = config_manager.apply_env_overrides(server_config)
 

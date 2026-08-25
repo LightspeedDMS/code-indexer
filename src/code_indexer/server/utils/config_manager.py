@@ -36,6 +36,19 @@ _MCP_DISPATCH_POOL_MAX: int = 1024
 _QUERY_EXECUTOR_POOL_MIN: int = 1
 _QUERY_EXECUTOR_POOL_MAX: int = 2048
 
+# Story #1676 AC1: telemetry configuration is managed exclusively via the Web
+# UI Config Screen (DB-backed) -- these 5 legacy environment variables no
+# longer override it. Listed here (rather than re-derived) so the single
+# aggregated-warning check in apply_env_overrides() and its tests share one
+# source of truth.
+_IGNORED_TELEMETRY_ENV_VARS: tuple = (
+    "CIDX_TELEMETRY_ENABLED",
+    "CIDX_OTEL_COLLECTOR_ENDPOINT",
+    "CIDX_OTEL_COLLECTOR_PROTOCOL",
+    "CIDX_OTEL_SERVICE_NAME",
+    "CIDX_DEPLOYMENT_ENVIRONMENT",
+)
+
 
 @dataclass
 class PasswordSecurityConfig:
@@ -2947,27 +2960,25 @@ class ServerConfigManager:
                     f"Invalid CIDX_SCIP_WORKSPACE_RETENTION_DAYS environment variable value '{retention_env}'. Using default {config.scip_config.scip_workspace_retention_days} days"
                 )
 
-        # Telemetry environment variable overrides (Story #695)
-        # Assert telemetry_config is not None (guaranteed by __post_init__)
-        assert config.telemetry_config is not None
-        if telemetry_enabled_env := os.environ.get("CIDX_TELEMETRY_ENABLED"):
-            config.telemetry_config.enabled = telemetry_enabled_env.lower() in (
-                "true",
-                "1",
-                "yes",
+        # Story #1676 AC1: telemetry configuration is managed exclusively via
+        # the Web UI Config Screen (DB-backed) -- the env var overrides that
+        # used to live here (Story #695) were removed. Any of the 5 legacy
+        # variables still present in the process environment is IGNORED; a
+        # single aggregated WARNING names every one found (never one
+        # WARNING per variable) so an operator migrating off env-based
+        # config gets one clear, actionable message instead of silent
+        # divergence from the DB-backed value.
+        present_telemetry_env_vars = [
+            name for name in _IGNORED_TELEMETRY_ENV_VARS if name in os.environ
+        ]
+        if present_telemetry_env_vars:
+            logging.warning(
+                "%s environment variable(s) are set but ignored -- telemetry "
+                "configuration is managed exclusively via the Web UI Config "
+                "Screen. Remove these environment variables from your "
+                "deployment.",
+                ", ".join(sorted(present_telemetry_env_vars)),
             )
-
-        if collector_endpoint_env := os.environ.get("CIDX_OTEL_COLLECTOR_ENDPOINT"):
-            config.telemetry_config.collector_endpoint = collector_endpoint_env
-
-        if collector_protocol_env := os.environ.get("CIDX_OTEL_COLLECTOR_PROTOCOL"):
-            config.telemetry_config.collector_protocol = collector_protocol_env.lower()
-
-        if service_name_env := os.environ.get("CIDX_OTEL_SERVICE_NAME"):
-            config.telemetry_config.service_name = service_name_env
-
-        if deployment_env := os.environ.get("CIDX_DEPLOYMENT_ENVIRONMENT"):
-            config.telemetry_config.deployment_environment = deployment_env
 
         return config
 

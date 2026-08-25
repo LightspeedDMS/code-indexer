@@ -9,7 +9,6 @@ All tests use real components following MESSI Rule #1: No mocks.
 """
 
 import json
-import os
 import tempfile
 
 import pytest
@@ -292,143 +291,134 @@ class TestTelemetryConfigSerialization:
 
 
 # =============================================================================
-# AC3: Environment variable overrides
+# Story #1676 AC1: telemetry environment-variable overrides REMOVED.
+# DB/file config is authoritative; any of the 5 legacy vars still present in
+# the process environment is ignored and reported via ONE aggregated WARNING.
 # =============================================================================
 
+_ALL_TELEMETRY_ENV_VARS = (
+    "CIDX_TELEMETRY_ENABLED",
+    "CIDX_OTEL_COLLECTOR_ENDPOINT",
+    "CIDX_OTEL_COLLECTOR_PROTOCOL",
+    "CIDX_OTEL_SERVICE_NAME",
+    "CIDX_DEPLOYMENT_ENVIRONMENT",
+)
 
-class TestTelemetryConfigEnvOverrides:
-    """Tests for environment variable overrides of telemetry config."""
+_TELEMETRY_ENV_VAR_VALUES = {
+    "CIDX_TELEMETRY_ENABLED": "true",
+    "CIDX_OTEL_COLLECTOR_ENDPOINT": "http://env-collector:4317",
+    "CIDX_OTEL_COLLECTOR_PROTOCOL": "http",
+    "CIDX_OTEL_SERVICE_NAME": "env-service-name",
+    "CIDX_DEPLOYMENT_ENVIRONMENT": "production",
+}
 
-    def test_env_override_telemetry_enabled(self):
-        """
-        AC3: CIDX_TELEMETRY_ENABLED overrides config.
 
-        Given a config with telemetry disabled
-        When CIDX_TELEMETRY_ENABLED=true is set
-        Then apply_env_overrides enables telemetry
-        """
-        try:
-            os.environ["CIDX_TELEMETRY_ENABLED"] = "true"
+class TestTelemetryEnvVarsNoLongerOverride:
+    """AC1: none of the 5 legacy telemetry env vars override the DB/file
+    config any more -- the config value always wins. Uses monkeypatch so the
+    process environment is restored automatically after each test."""
 
-            config = ServerConfig(server_dir="/tmp/test")
-            assert config.telemetry_config.enabled is False  # type: ignore[union-attr]
+    @pytest.mark.parametrize(
+        "env_var,env_value,field_name",
+        [
+            ("CIDX_TELEMETRY_ENABLED", "true", "enabled"),
+            (
+                "CIDX_OTEL_COLLECTOR_ENDPOINT",
+                "http://env-collector:4317",
+                "collector_endpoint",
+            ),
+            ("CIDX_OTEL_COLLECTOR_PROTOCOL", "http", "collector_protocol"),
+            ("CIDX_OTEL_SERVICE_NAME", "env-service-name", "service_name"),
+            (
+                "CIDX_DEPLOYMENT_ENVIRONMENT",
+                "production",
+                "deployment_environment",
+            ),
+        ],
+    )
+    def test_env_var_no_longer_applied(
+        self, monkeypatch, env_var, env_value, field_name
+    ):
+        """Given a config value, setting the env var must not change it."""
+        monkeypatch.setenv(env_var, env_value)
 
-            manager = ServerConfigManager("/tmp/test")
-            config = manager.apply_env_overrides(config)
+        config = ServerConfig(server_dir="/tmp/test")
+        original_value = getattr(config.telemetry_config, field_name)  # type: ignore[union-attr]
 
-            assert (
-                config.telemetry_config.enabled is True  # type: ignore[union-attr]
-            ), "CIDX_TELEMETRY_ENABLED=true should enable telemetry"
-        finally:
-            os.environ.pop("CIDX_TELEMETRY_ENABLED", None)
+        manager = ServerConfigManager("/tmp/test")
+        config = manager.apply_env_overrides(config)
 
-    def test_env_override_telemetry_disabled(self):
-        """
-        AC3: CIDX_TELEMETRY_ENABLED=false overrides config.
+        assert (
+            getattr(config.telemetry_config, field_name) == original_value  # type: ignore[union-attr]
+        ), f"{env_var} must be ignored -- DB config is authoritative"
 
-        Given a config with telemetry enabled
-        When CIDX_TELEMETRY_ENABLED=false is set
-        Then apply_env_overrides disables telemetry
-        """
-        try:
-            os.environ["CIDX_TELEMETRY_ENABLED"] = "false"
+    def test_telemetry_disabled_env_var_no_longer_applied(self, monkeypatch):
+        """CIDX_TELEMETRY_ENABLED=false must NOT override an enabled DB config."""
+        monkeypatch.setenv("CIDX_TELEMETRY_ENABLED", "false")
 
-            config = ServerConfig(server_dir="/tmp/test")
-            config.telemetry_config = TelemetryConfig(enabled=True)
+        config = ServerConfig(server_dir="/tmp/test")
+        config.telemetry_config = TelemetryConfig(enabled=True)
 
-            manager = ServerConfigManager("/tmp/test")
-            config = manager.apply_env_overrides(config)
+        manager = ServerConfigManager("/tmp/test")
+        config = manager.apply_env_overrides(config)
 
-            assert (
-                config.telemetry_config.enabled is False  # type: ignore[union-attr]
-            ), "CIDX_TELEMETRY_ENABLED=false should disable telemetry"
-        finally:
-            os.environ.pop("CIDX_TELEMETRY_ENABLED", None)
+        assert (
+            config.telemetry_config.enabled is True  # type: ignore[union-attr]
+        ), "CIDX_TELEMETRY_ENABLED=false must be ignored -- DB config is authoritative"
 
-    def test_env_override_collector_endpoint(self):
-        """
-        AC3: CIDX_OTEL_COLLECTOR_ENDPOINT overrides config.
 
-        Given a config with default collector endpoint
-        When CIDX_OTEL_COLLECTOR_ENDPOINT is set
-        Then apply_env_overrides uses the env value
-        """
-        try:
-            os.environ["CIDX_OTEL_COLLECTOR_ENDPOINT"] = "http://env-collector:4317"
+class TestTelemetryEnvVarIgnoredWarning:
+    """AC1: presence of legacy telemetry env vars is reported via exactly
+    ONE aggregated WARNING naming every present variable -- never one
+    WARNING per variable, and never silently."""
 
-            config = ServerConfig(server_dir="/tmp/test")
-            manager = ServerConfigManager("/tmp/test")
-            config = manager.apply_env_overrides(config)
+    def test_aggregated_warning_fires_once_naming_all_present_vars(
+        self, monkeypatch, caplog
+    ):
+        for name, value in _TELEMETRY_ENV_VAR_VALUES.items():
+            monkeypatch.setenv(name, value)
 
-            assert (
-                config.telemetry_config.collector_endpoint  # type: ignore[union-attr]
-                == "http://env-collector:4317"
-            ), "CIDX_OTEL_COLLECTOR_ENDPOINT should override endpoint"
-        finally:
-            os.environ.pop("CIDX_OTEL_COLLECTOR_ENDPOINT", None)
+        config = ServerConfig(server_dir="/tmp/test")
+        manager = ServerConfigManager("/tmp/test")
 
-    def test_env_override_collector_protocol(self):
-        """
-        AC3: CIDX_OTEL_COLLECTOR_PROTOCOL overrides config.
+        with caplog.at_level("WARNING"):
+            manager.apply_env_overrides(config)
 
-        Given a config with default protocol (grpc)
-        When CIDX_OTEL_COLLECTOR_PROTOCOL=http is set
-        Then apply_env_overrides uses the env value
-        """
-        try:
-            os.environ["CIDX_OTEL_COLLECTOR_PROTOCOL"] = "http"
+        telemetry_warnings = [
+            record
+            for record in caplog.records
+            if record.levelname == "WARNING"
+            and any(name in record.message for name in _ALL_TELEMETRY_ENV_VARS)
+        ]
+        assert len(telemetry_warnings) == 1, (
+            "Exactly one aggregated WARNING must be logged, not one per "
+            f"variable (found {len(telemetry_warnings)}: "
+            f"{[r.message for r in telemetry_warnings]})"
+        )
+        message = telemetry_warnings[0].message
+        for name in _ALL_TELEMETRY_ENV_VARS:
+            assert name in message, f"{name} must be named in the aggregated warning"
+        assert "ignored" in message.lower()
 
-            config = ServerConfig(server_dir="/tmp/test")
-            manager = ServerConfigManager("/tmp/test")
-            config = manager.apply_env_overrides(config)
+    def test_no_warning_when_no_telemetry_env_vars_present(self, monkeypatch, caplog):
+        for name in _ALL_TELEMETRY_ENV_VARS:
+            monkeypatch.delenv(name, raising=False)
 
-            assert (
-                config.telemetry_config.collector_protocol == "http"  # type: ignore[union-attr]
-            ), "CIDX_OTEL_COLLECTOR_PROTOCOL should override protocol"
-        finally:
-            os.environ.pop("CIDX_OTEL_COLLECTOR_PROTOCOL", None)
+        config = ServerConfig(server_dir="/tmp/test")
+        manager = ServerConfigManager("/tmp/test")
 
-    def test_env_override_service_name(self):
-        """
-        AC3: CIDX_OTEL_SERVICE_NAME overrides config.
+        with caplog.at_level("WARNING"):
+            manager.apply_env_overrides(config)
 
-        Given a config with default service name
-        When CIDX_OTEL_SERVICE_NAME is set
-        Then apply_env_overrides uses the env value
-        """
-        try:
-            os.environ["CIDX_OTEL_SERVICE_NAME"] = "env-service-name"
-
-            config = ServerConfig(server_dir="/tmp/test")
-            manager = ServerConfigManager("/tmp/test")
-            config = manager.apply_env_overrides(config)
-
-            assert (
-                config.telemetry_config.service_name == "env-service-name"  # type: ignore[union-attr]
-            ), "CIDX_OTEL_SERVICE_NAME should override service_name"
-        finally:
-            os.environ.pop("CIDX_OTEL_SERVICE_NAME", None)
-
-    def test_env_override_deployment_environment(self):
-        """
-        AC3: CIDX_DEPLOYMENT_ENVIRONMENT overrides config.
-
-        Given a config with default deployment environment
-        When CIDX_DEPLOYMENT_ENVIRONMENT=production is set
-        Then apply_env_overrides uses the env value
-        """
-        try:
-            os.environ["CIDX_DEPLOYMENT_ENVIRONMENT"] = "production"
-
-            config = ServerConfig(server_dir="/tmp/test")
-            manager = ServerConfigManager("/tmp/test")
-            config = manager.apply_env_overrides(config)
-
-            assert (
-                config.telemetry_config.deployment_environment == "production"  # type: ignore[union-attr]
-            ), "CIDX_DEPLOYMENT_ENVIRONMENT should override deployment_environment"
-        finally:
-            os.environ.pop("CIDX_DEPLOYMENT_ENVIRONMENT", None)
+        telemetry_warnings = [
+            record
+            for record in caplog.records
+            if record.levelname == "WARNING" and "telemetry" in record.message.lower()
+        ]
+        assert len(telemetry_warnings) == 0, (
+            "No telemetry-related warning should be logged when no telemetry "
+            "env vars are present"
+        )
 
 
 # =============================================================================
