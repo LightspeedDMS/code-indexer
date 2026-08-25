@@ -57,8 +57,6 @@ from code_indexer.server.telemetry.spans import (
     reset_spans_state,
 )
 from code_indexer.server.telemetry.log_handler import (
-    OTELLogHandler,
-    OTELLogFormatter,
     get_trace_context,
 )
 
@@ -94,7 +92,5 @@ __all__ = [
     "get_tracer",
     "reset_spans_state",
     # Log handler
-    "OTELLogHandler",
-    "OTELLogFormatter",
     "get_trace_context",
 ]

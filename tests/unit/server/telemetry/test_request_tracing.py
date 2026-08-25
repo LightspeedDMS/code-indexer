@@ -163,23 +163,34 @@ class TestFastAPIInstrumentation:
 
 class TestFastAPIInstrumentationOrderingMechanism1679:
     """
-    Fast (no 'slow' marker), non-subprocess A/B mechanism test for Bug
-    #1679, so it runs in the normal fast/server-fast-automation gates.
+    Fast (no 'slow' marker), non-subprocess characterization test of the
+    THIRD-PARTY Starlette/FastAPIInstrumentor ordering mechanism Bug #1679
+    depends on -- it does NOT exercise this project's own production code
+    path and is NOT, by itself, a regression guard for the real call site.
 
-    Uses a bare FastAPI() app with an EXPLICIT local TracerProvider passed
-    directly to FastAPIInstrumentor.instrument_app(app, tracer_provider=...)
-    -- this bypasses OTEL's "global tracer provider settable only once per
+    Uses a bare FastAPI() app (built by this test, not create_app()) with
+    an EXPLICIT local TracerProvider passed directly to
+    FastAPIInstrumentor.instrument_app(app, tracer_provider=...) -- this
+    bypasses OTEL's "global tracer provider settable only once per
     process" constraint entirely (no subprocess needed), while still
     exercising the REAL FastAPIInstrumentor/TracerProvider/
     InMemorySpanExporter/TestClient machinery. No mocks.
 
-    Complements (does not replace) the subprocess-based
-    test_fastapi_instrumentation_ordering_1679.py, which proves the same
-    invariant through the REAL create_app() code path but is marked slow
-    (full server bootstrap) and therefore deselected by
-    fast-automation.sh/server-fast-automation.sh. This class exists so a
-    refactor reintroducing the Bug #1679 ordering mistake is still caught
-    by a normal, green server-fast-automation.sh run.
+    Round-3 code review correctly identified that this class never
+    imports or calls app_wiring.py's create_fastapi_app(), lifespan.py,
+    or even this project's own instrument_fastapi() wrapper -- so it
+    would keep passing unchanged even if someone moved the real
+    instrument_fastapi(app) call back inside lifespan(), deleted it
+    entirely, or reverted the telemetry_config.enabled gate. Its value is
+    narrower: it pins that FastAPIInstrumentor+Starlette really do behave
+    the way this fix's whole design depends on (instrument-before-build
+    succeeds, instrument-after-build is a silent no-op).
+
+    The ACTUAL regression guard for the real production call site (its
+    presence, its ordering relative to app.add_middleware(), its
+    telemetry_config.enabled gate, and its absence from lifespan.py) is
+    tests/unit/server/startup/test_app_wiring_fastapi_instrumentation_ordering_1679.py,
+    which inspects the real create_fastapi_app()/lifespan source directly.
     """
 
     @staticmethod
