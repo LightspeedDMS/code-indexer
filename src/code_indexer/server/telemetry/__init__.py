@@ -53,11 +53,8 @@ from code_indexer.server.telemetry.job_metrics import (
     reset_job_metrics,
 )
 from code_indexer.server.telemetry.spans import (
-    traced,
     create_span,
     get_tracer,
-    add_span_attribute,
-    add_span_event,
     reset_spans_state,
 )
 from code_indexer.server.telemetry.log_handler import (
@@ -95,11 +92,8 @@ __all__ = [
     "get_job_metrics",
     "reset_job_metrics",
     # Custom spans
-    "traced",
     "create_span",
     "get_tracer",
-    "add_span_attribute",
-    "add_span_event",
     "reset_spans_state",
     # Log handler
     "OTELLogHandler",

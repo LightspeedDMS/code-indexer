@@ -2,37 +2,28 @@
 Custom Spans for Key Operations (Story #700).
 
 This module provides utilities for creating custom OTEL spans for key
-operations beyond HTTP request boundaries. Includes a @traced decorator
-and create_span() context manager.
+operations beyond HTTP request boundaries. Provides the create_span()
+context manager.
 
 Usage:
-    from src.code_indexer.server.telemetry.spans import traced, create_span
-
-    # Using decorator
-    @traced(name="cidx.search.semantic")
-    def semantic_search(query: str):
-        ...
+    from code_indexer.server.telemetry.spans import create_span
 
     # Using context manager
     with create_span("cidx.git.clone", attributes={"repo": url}) as span:
-        ...
+        # Do work
+        span.set_attribute("files_count", 100)
 """
 
 from __future__ import annotations
 
-import asyncio
-import functools
 import logging
 from contextlib import contextmanager
-from typing import TYPE_CHECKING, Any, Callable, Dict, Generator, Optional, TypeVar
+from typing import TYPE_CHECKING, Any, Dict, Generator, Optional
 
 if TYPE_CHECKING:
     from opentelemetry.trace import Tracer
 
 logger = logging.getLogger(__name__)
-
-# Type variables for decorator
-F = TypeVar("F", bound=Callable[..., Any])
 
 # Module-level tracer cache
 _tracer: Optional["Tracer"] = None
@@ -172,94 +163,6 @@ class _NoOpSpan:
     def is_recording(self) -> bool:
         """Return False for no-op span."""
         return False
-
-
-def traced(
-    name: Optional[str] = None,
-    attributes: Optional[Dict[str, Any]] = None,
-) -> Callable[[F], F]:
-    """
-    Decorator for automatic span creation around functions.
-
-    Args:
-        name: Custom span name (defaults to function name)
-        attributes: Static attributes to add to span
-
-    Returns:
-        Decorated function
-
-    Example:
-        @traced(name="cidx.search.semantic", attributes={"type": "semantic"})
-        def semantic_search(query: str):
-            ...
-
-        @traced()  # Uses function name as span name
-        async def process_request():
-            ...
-    """
-
-    def decorator(func: F) -> F:
-        # Determine span name
-        span_name = name or f"cidx.{func.__module__}.{func.__name__}"
-
-        if asyncio.iscoroutinefunction(func):
-            # Async function wrapper
-            @functools.wraps(func)
-            async def async_wrapper(*args: Any, **kwargs: Any) -> Any:
-                with create_span(span_name, attributes=attributes):
-                    return await func(*args, **kwargs)
-
-            return async_wrapper  # type: ignore
-        else:
-            # Sync function wrapper
-            @functools.wraps(func)
-            def sync_wrapper(*args: Any, **kwargs: Any) -> Any:
-                with create_span(span_name, attributes=attributes):
-                    return func(*args, **kwargs)
-
-            return sync_wrapper  # type: ignore
-
-    return decorator
-
-
-def add_span_attribute(key: str, value: Any) -> None:
-    """
-    Add an attribute to the current span.
-
-    Args:
-        key: Attribute key
-        value: Attribute value
-    """
-    try:
-        from opentelemetry import trace
-
-        span = trace.get_current_span()
-        if span and span.is_recording():
-            span.set_attribute(key, value)
-    except ImportError:
-        pass
-    except Exception as e:
-        logger.debug(f"Failed to add span attribute: {e}")
-
-
-def add_span_event(name: str, attributes: Optional[Dict[str, Any]] = None) -> None:
-    """
-    Add an event to the current span.
-
-    Args:
-        name: Event name
-        attributes: Optional event attributes
-    """
-    try:
-        from opentelemetry import trace
-
-        span = trace.get_current_span()
-        if span and span.is_recording():
-            span.add_event(name, attributes=attributes)
-    except ImportError:
-        pass
-    except Exception as e:
-        logger.debug(f"Failed to add span event: {e}")
 
 
 def reset_spans_state() -> None:
