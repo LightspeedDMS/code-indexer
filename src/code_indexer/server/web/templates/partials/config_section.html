@@ -4022,6 +4022,16 @@ function saveLlmCredsConfig() {
                         </td>
                     </tr>
                     <tr>
+                        <td class="config-label">Trace Sample Rate</td>
+                        <td class="config-value">{{ config.telemetry.trace_sample_rate }}</td>
+                        <td class="config-note">
+                            {% if 'trace_sample_rate' in restart_required_fields %}
+                            <small class="restart-note">Requires server restart</small>
+                            {% endif %}
+                            <small>0.0-1.0, fraction of requests traced</small>
+                        </td>
+                    </tr>
+                    <tr>
                         <td class="config-label">Deployment Environment</td>
                         <td class="config-value">{{ config.telemetry.deployment_environment }}</td>
                         <td class="config-note">
@@ -4099,6 +4109,12 @@ function saveLlmCredsConfig() {
                     Machine Metrics Interval (sec)
                     <input type="number" id="telemetry-machine-metrics-interval" name="machine_metrics_interval_seconds"
                            value="{{ config.telemetry.machine_metrics_interval_seconds }}" min="1">
+                </label>
+                <label for="telemetry-trace-sample-rate">
+                    Trace Sample Rate
+                    <input type="number" id="telemetry-trace-sample-rate" name="trace_sample_rate"
+                           value="{{ config.telemetry.trace_sample_rate }}" min="0.0" max="1.0" step="0.01">
+                    <small>Fraction of requests traced (0.0-1.0)</small>
                 </label>
                 <label for="telemetry-deployment-environment">
                     Deployment Environment

@@ -103,6 +103,7 @@ class TelemetryManager:
             from opentelemetry.sdk.metrics import MeterProvider
             from opentelemetry.sdk.resources import Resource
             from opentelemetry.sdk.trace import TracerProvider
+            from opentelemetry.sdk.trace.sampling import ParentBased, TraceIdRatioBased
             from opentelemetry.semconv.resource import ResourceAttributes
 
             # Create resource with service information. Story #1676 AC6
@@ -122,14 +123,30 @@ class TelemetryManager:
                 )
             resource = Resource.create(resource_attributes)
 
+            # Story #1676 AC4: explicit, config-driven sampler for every
+            # TracerProvider this manager constructs, replacing the SDK's
+            # own default sampler resolution (normally
+            # ParentBased(AlwaysOn) absent OTEL_TRACES_SAMPLER env
+            # configuration). ParentBased ensures an already-sampled (or
+            # already-dropped) parent context is always honored regardless
+            # of trace_sample_rate. Built once and shared by both branches
+            # below for symmetry.
+            sampler = ParentBased(
+                root=TraceIdRatioBased(self._config.trace_sample_rate)
+            )
+
             # Initialize TracerProvider if traces are enabled
             if self._config.export_traces:
-                self._tracer_provider = TracerProvider(resource=resource)
+                self._tracer_provider = TracerProvider(
+                    resource=resource, sampler=sampler
+                )
                 self._setup_trace_exporter()
                 trace.set_tracer_provider(self._tracer_provider)
             else:
                 # Use no-op tracer provider
-                self._tracer_provider = TracerProvider(resource=resource)
+                self._tracer_provider = TracerProvider(
+                    resource=resource, sampler=sampler
+                )
                 trace.set_tracer_provider(self._tracer_provider)
 
             # Initialize MeterProvider if metrics are enabled

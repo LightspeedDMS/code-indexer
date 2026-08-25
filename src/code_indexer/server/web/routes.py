@@ -207,6 +207,10 @@ RESTART_REQUIRED_FIELDS = [
     "machine_metrics_enabled",
     "machine_metrics_interval_seconds",
     "deployment_environment",
+    # telemetry.trace_sample_rate -- Story #1676 AC4: captured once into
+    # the ParentBased(TraceIdRatioBased(...)) sampler at TracerProvider
+    # construction, same lifecycle as its telemetry.* siblings above.
+    "trace_sample_rate",
     # langfuse.* TRACING-CREDENTIAL fields only (frozen into an eagerly
     # created client at startup). Pull-sync fields (pull_enabled, pull_host,
     # pull_trace_age_days, pull_max_concurrent_observations, pull_projects)
@@ -7170,6 +7174,23 @@ def _validate_config_section(section: str, data: dict) -> Optional[str]:
                     return "Machine metrics interval must be at least 1 second"
             except (ValueError, TypeError):
                 return "Machine metrics interval must be a valid number"
+
+        # Story #1676 AC4: validate trace_sample_rate is in [0.0, 1.0].
+        # Rejected, never clamped.
+        _TRACE_SAMPLE_RATE_MIN = 0.0
+        _TRACE_SAMPLE_RATE_MAX = 1.0
+        trace_sample_rate = data.get("trace_sample_rate")
+        if trace_sample_rate is not None:
+            try:
+                trace_sample_rate_float = float(trace_sample_rate)
+                if not (
+                    _TRACE_SAMPLE_RATE_MIN
+                    <= trace_sample_rate_float
+                    <= _TRACE_SAMPLE_RATE_MAX
+                ):
+                    return "Trace sample rate must be between 0.0 and 1.0"
+            except (ValueError, TypeError):
+                return "Trace sample rate must be a valid number"
 
     elif section == "langfuse":
         # Validate Langfuse host URL format

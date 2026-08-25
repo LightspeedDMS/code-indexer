@@ -259,6 +259,14 @@ class TelemetryConfig:
     # Deployment environment (development, staging, production)
     deployment_environment: str = "development"
 
+    # Story #1676 AC4: fraction of requests traced, in [0.0, 1.0]. Default
+    # 1.0 preserves pre-AC4 always-on trace sampling for operators who never
+    # touch this setting. Applied via an explicit
+    # ParentBased(TraceIdRatioBased(trace_sample_rate)) sampler in
+    # telemetry/manager.py so an already-sampled parent context is always
+    # honored regardless of this rate.
+    trace_sample_rate: float = 1.0
+
 
 @dataclass
 class SearchLimitsConfig:
@@ -2305,10 +2313,13 @@ class ServerConfigManager:
             config_dict["telemetry_config"], dict
         ):
             # Bug #938: strip dead fields removed from TelemetryConfig so old
-            # config.json files load cleanly without TypeError.
+            # config.json files load cleanly without TypeError. Story #1676
+            # AC4 resurrected trace_sample_rate as a real, live field -- it
+            # must no longer be stripped here, or every config load/save
+            # cycle would silently delete an operator's configured sample
+            # rate. export_logs remains dead (AC3 not yet implemented).
             _tel = config_dict["telemetry_config"]
             _tel.pop("export_logs", None)
-            _tel.pop("trace_sample_rate", None)
             config_dict["telemetry_config"] = TelemetryConfig(**_tel)
 
         # Story #3 - Configuration Consolidation: Convert migrated config dicts
@@ -3094,6 +3105,14 @@ class ServerConfigManager:
             if config.telemetry_config.machine_metrics_interval_seconds < 1:
                 raise ValueError(
                     f"machine_metrics_interval_seconds must be >= 1, got {config.telemetry_config.machine_metrics_interval_seconds}"
+                )
+
+            # Story #1676 AC4: validate trace_sample_rate is in [0.0, 1.0].
+            # Rejected, never clamped -- an out-of-range value is a
+            # configuration mistake the operator must fix explicitly.
+            if not (0.0 <= config.telemetry_config.trace_sample_rate <= 1.0):
+                raise ValueError(
+                    f"trace_sample_rate must be between 0.0 and 1.0, got {config.telemetry_config.trace_sample_rate}"
                 )
 
         # Validate search_limits_config (Story #3 - Phase 1, AC-M1, AC-M2)

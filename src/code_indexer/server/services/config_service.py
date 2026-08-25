@@ -2004,6 +2004,8 @@ class ConfigService:
             telemetry.machine_metrics_interval_seconds = int(value)
         elif key == "deployment_environment":
             telemetry.deployment_environment = str(value)
+        elif key == "trace_sample_rate":
+            telemetry.trace_sample_rate = float(value)
         else:
             raise ValueError(f"Unknown telemetry setting: {key}")
 
