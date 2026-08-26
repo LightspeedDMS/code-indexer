@@ -33,7 +33,7 @@ from __future__ import annotations
 
 import os
 import uuid
-from typing import Any, Generator
+from typing import Any, Dict, Generator
 
 import pytest
 
@@ -156,7 +156,7 @@ def disposable_activated_repos_db(pg_server_dsn_for_activated_repo_manager):
             admin_conn.execute(f'CREATE DATABASE "{db_name}"')
         db_created = True
 
-        info = conninfo_to_dict(server_dsn)
+        info: Dict[str, Any] = dict(conninfo_to_dict(server_dsn))
         info["dbname"] = db_name
         test_dsn = make_conninfo(**info)
 
