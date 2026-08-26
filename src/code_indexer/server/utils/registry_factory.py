@@ -264,9 +264,25 @@ def _running_server_app_state() -> Optional[Any]:
     ``import``, which would trigger a fresh (expensive: FastAPI app + all
     routers + DB pools) import in a pure CLI process. See
     :func:`resolve_backend_registry_attr` for the full rationale.
+
+    Bug #1678: the module's ``app`` attribute is a PEP 562 ``__getattr__``
+    lazy singleton (Bug #1638) -- a bare ``getattr(app_module, "app", None)``
+    is NOT side-effect-free, because Python invokes ``__getattr__`` whenever
+    normal attribute lookup fails and only THEN does ``getattr()`` catch the
+    resulting ``AttributeError`` to return the default. That means this
+    "just probing" call used to construct and permanently cache the
+    process-wide app singleton the first time anything reached it -- even
+    from deep inside an unrelated, independently-constructed ``create_app()``
+    call (e.g. a test fixture building its own temp-dir-scoped app), leaking
+    that fixture's stale services into the singleton for the rest of the
+    process. ``app_module.__dict__.get("app")`` is a plain dict lookup: it
+    NEVER invokes ``__getattr__``, so it correctly returns ``None`` until the
+    singleton has genuinely, already been constructed via a real
+    ``app_module.app`` access elsewhere (e.g. uvicorn's entrypoint or another
+    module doing ``from code_indexer.server import app as app_module``).
     """
     app_module = sys.modules.get("code_indexer.server.app")
-    _app = getattr(app_module, "app", None) if app_module is not None else None
+    _app = app_module.__dict__.get("app") if app_module is not None else None
     return getattr(_app, "state", None)
 
 
