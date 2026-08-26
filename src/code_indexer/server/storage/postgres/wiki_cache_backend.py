@@ -22,6 +22,7 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional
 
 from .connection_pool import ConnectionPool
+from .pg_utils import sanitize_row
 
 
 class WikiCachePostgresBackend:
@@ -169,7 +170,19 @@ class WikiCachePostgresBackend:
         return int(row[0]) if row else 0
 
     def get_all_view_counts(self, repo_alias: str) -> List[Dict[str, Any]]:
-        """Return all view records for repo as list of dicts."""
+        """Return all view records for repo as list of dicts.
+
+        Bug #1669: PostgreSQL's TIMESTAMPTZ columns (first_viewed_at,
+        last_viewed_at) are deserialized by psycopg into native `datetime`
+        objects, unlike the SQLite path which stores/returns these as
+        ISO-8601 strings (via `datetime.utcnow().isoformat()`). Returning
+        the raw `datetime` here broke wiki_article_analytics 100% of the
+        time in cluster mode with "Object of type datetime is not JSON
+        serializable" once the result reached JSON serialization. Route
+        each row dict through the shared `sanitize_row()` helper (used by
+        other PostgreSQL backends for the same TIMESTAMPTZ-vs-string
+        divergence) so the return shape matches the SQLite path exactly.
+        """
         with self._pool.connection() as conn:
             rows = conn.execute(
                 "SELECT article_path, real_views, first_viewed_at, last_viewed_at "
@@ -177,12 +190,14 @@ class WikiCachePostgresBackend:
                 (repo_alias,),
             ).fetchall()
         return [
-            {
-                "article_path": row[0],
-                "real_views": row[1],
-                "first_viewed_at": row[2],
-                "last_viewed_at": row[3],
-            }
+            sanitize_row(
+                {
+                    "article_path": row[0],
+                    "real_views": row[1],
+                    "first_viewed_at": row[2],
+                    "last_viewed_at": row[3],
+                }
+            )
             for row in rows
         ]
 
