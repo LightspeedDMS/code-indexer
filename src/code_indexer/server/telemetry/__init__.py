@@ -32,6 +32,8 @@ from code_indexer.server.telemetry.machine_metrics import (
 from code_indexer.server.telemetry.instrumentation import (
     instrument_fastapi,
     uninstrument_fastapi,
+    instrument_httpx,
+    uninstrument_httpx,
     DEFAULT_EXCLUDED_URLS,
 )
 from code_indexer.server.telemetry.correlation_bridge import (
@@ -72,6 +74,8 @@ __all__ = [
     # Instrumentation
     "instrument_fastapi",
     "uninstrument_fastapi",
+    "instrument_httpx",
+    "uninstrument_httpx",
     "DEFAULT_EXCLUDED_URLS",
     # Correlation bridge
     "CorrelationBridgeMiddleware",

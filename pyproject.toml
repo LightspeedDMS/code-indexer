@@ -79,6 +79,20 @@ dependencies = [
     "opentelemetry-sdk>=1.20.0",
     "opentelemetry-exporter-otlp>=1.20.0",
     "opentelemetry-instrumentation-fastapi>=0.41b0",
+    # Story #1676 AC5: outbound HTTP span instrumentation for httpx
+    # (process-global) -- covers embedding-provider calls (VoyageAI,
+    # Cohere) made via HttpClientFactory's pooled client and any other
+    # httpx.Client/AsyncClient traffic in the server.
+    "opentelemetry-instrumentation-httpx>=0.41b0",
+    # Story #1676 AC3: the recommended, non-deprecated replacement for
+    # opentelemetry.sdk._logs.LoggingHandler (deprecated as of SDK 1.40).
+    # Floor chosen so the resolver picks the exact version pinned to the
+    # SAME opentelemetry-instrumentation release already resolved for each
+    # supported Python target (verified via `uv lock`: 0.62b1 on the
+    # Python 3.9 branch, matching that branch's opentelemetry-instrumentation
+    # 0.62b1; a newer 0.6xb0 on the Python 3.10-3.12 branch, matching that
+    # branch's opentelemetry-instrumentation release).
+    "opentelemetry-instrumentation-logging>=0.51b0",
     # Langfuse LLM observability (Bug #1117) — mandatory so the auto-updater's
     # `pip install -e .` installs it on every node (previously hand-installed on
     # one node only, so telemetry init failed cluster-wide). OTEL-based; verified

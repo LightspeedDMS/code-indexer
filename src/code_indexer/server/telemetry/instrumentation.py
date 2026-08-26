@@ -195,3 +195,93 @@ def uninstrument_fastapi(app: "FastAPI") -> bool:
             )
         )
         return False
+
+
+def instrument_httpx() -> bool:
+    """
+    Structurally instrument httpx globally with OTEL tracing (Story #1676 AC5).
+
+    Unlike instrument_fastapi() (per-app, must run before Starlette
+    freezes its middleware stack -- Bug #1679), HTTPXClientInstrumentor
+    monkey-patches httpx.HTTPTransport/AsyncHTTPTransport directly, which
+    is process-global with no ordering constraint -- safe to call from
+    inside lifespan(). Gated by the caller on telemetry_config.enabled
+    (same condition instrument_fastapi()'s caller uses), since the
+    instrumentation does real per-request work even with a no-op tracer.
+
+    Deliberately process-global and unscoped (Story #1676 AC5 Non-Goal):
+    instruments ALL httpx.Client/AsyncClient traffic in the process, not
+    just embedding-provider calls.
+
+    Returns True if instrumentation was applied (or already present),
+    False if the package is unavailable or patching failed.
+    """
+    try:
+        from opentelemetry.instrumentation.httpx import HTTPXClientInstrumentor
+
+        instrumentor = HTTPXClientInstrumentor()
+        if instrumentor.is_instrumented_by_opentelemetry:
+            logger.debug("httpx already instrumented, skipping")
+            return True
+
+        instrumentor.instrument()
+        logger.info("httpx instrumented with OTEL tracing (process-global)")
+        return True
+    except ImportError as e:
+        logger.warning(
+            format_error_log(
+                "QUERY-GENERAL-028",
+                f"httpx instrumentation unavailable: {e}. Install "
+                "opentelemetry-instrumentation-httpx for auto-tracing of "
+                "outbound HTTP calls.",
+            )
+        )
+        return False
+    except Exception as e:
+        logger.error(
+            format_error_log("QUERY-GENERAL-029", f"Failed to instrument httpx: {e}")
+        )
+        return False
+
+
+def uninstrument_httpx() -> bool:
+    """
+    Remove OTEL instrumentation from httpx globally (Story #1676 AC5).
+
+    Uses the instance method HTTPXClientInstrumentor().uninstrument()
+    directly -- unlike uninstrument_fastapi(), there is no per-app variant
+    for httpx to protect against corrupting; this module only ever
+    applies the global instrument_httpx() above, so the symmetric global
+    uninstrument() is the correct counterpart.
+
+    Called during telemetry shutdown/reset (see
+    telemetry/manager.py's reset_telemetry_manager()) so repeated
+    lifespan start/stop cycles never leave a dangling instrumentation
+    patch bound to a torn-down TracerProvider.
+
+    Returns True if uninstrumentation was performed, False if httpx was
+    not instrumented (or unpatching failed).
+    """
+    try:
+        from opentelemetry.instrumentation.httpx import HTTPXClientInstrumentor
+
+        instrumentor = HTTPXClientInstrumentor()
+        if not instrumentor.is_instrumented_by_opentelemetry:
+            return False
+
+        instrumentor.uninstrument()
+        logger.info("httpx OTEL instrumentation removed (process-global)")
+        return True
+    except ImportError as e:
+        logger.warning(
+            format_error_log(
+                "QUERY-GENERAL-031",
+                f"httpx instrumentation unavailable during uninstrument: {e}",
+            )
+        )
+        return False
+    except Exception as e:
+        logger.error(
+            format_error_log("QUERY-GENERAL-030", f"Failed to uninstrument httpx: {e}")
+        )
+        return False

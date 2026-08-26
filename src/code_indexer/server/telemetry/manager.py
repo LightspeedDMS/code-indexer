@@ -341,6 +341,18 @@ class TelemetryManager:
             )
 
         finally:
+            # Story #1676 AC5: httpx instrumentation is process-global
+            # (unlike per-app FastAPI instrumentation), so it has no
+            # per-instance teardown hook elsewhere -- unwind it here,
+            # unconditionally, so repeated lifespan start/stop cycles
+            # (e.g. the test suite, via reset_telemetry_manager()) never
+            # leave a dangling patch bound to this now-torn-down
+            # TracerProvider even if the shutdown steps above raised.
+            from code_indexer.server.telemetry.instrumentation import (
+                uninstrument_httpx,
+            )
+
+            uninstrument_httpx()
             self._is_initialized = False
 
 

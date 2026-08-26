@@ -3364,6 +3364,25 @@ def make_lifespan(
                     "app-construction time (see app_wiring.py)",
                     extra={"correlation_id": get_correlation_id()},
                 )
+
+                # Story #1676 AC5: outbound HTTP span instrumentation
+                # (httpx, process-global). Unlike FastAPI instrumentation
+                # above, HTTPXClientInstrumentor monkey-patches
+                # httpx.HTTPTransport/AsyncHTTPTransport directly -- no
+                # Bug #1679-style ordering constraint -- so it is safe to
+                # apply here in the lifespan body. Gated identically to
+                # instrument_fastapi()'s own gate (telemetry_config.enabled,
+                # this whole `if` block) rather than export_traces alone,
+                # matching instrument_fastapi()'s rationale: real
+                # per-request overhead is added even with a no-op tracer.
+                # Deliberately process-global (Story #1676 AC5 Non-Goal):
+                # also instruments non-embedding httpx traffic (e.g.
+                # ShardRouter calls below) -- intentional, not scoped.
+                from code_indexer.server.telemetry.instrumentation import (
+                    instrument_httpx,
+                )
+
+                instrument_httpx()
             else:
                 # Telemetry disabled - set to None
                 app.state.telemetry_manager = None
