@@ -237,9 +237,26 @@ class TelemetryConfig:
     """
     OpenTelemetry configuration for CIDX Server (Story #695).
 
-    Controls telemetry export including traces, metrics, and logs to an
-    OpenTelemetry collector endpoint. Disabled by default to ensure
-    zero overhead on fresh installations.
+    Controls telemetry export of traces and metrics to an OpenTelemetry
+    collector endpoint (export_traces/export_metrics below). Disabled by
+    default to ensure zero overhead on fresh installations.
+
+    Story #1676 AC2/AC3 scope split for "logs" (do not overclaim either
+    half in isolation):
+      - AC2 (delivered, this config unaffected): every stored log row in
+        BOTH the SQLite and PostgreSQL log stores carries `trace_id`/
+        `span_id` columns, letting an operator jump from a log line to its
+        OTEL trace. This is columnar log/trace CORRELATION, not export --
+        it works regardless of this config's settings, is populated by the
+        logging pipeline itself (logging_utils.inject_trace_context via
+        async_logging.IdentityQueueHandler.prepare()), and requires no new
+        field here.
+      - AC3 (NOT yet implemented): actual OTLP log EXPORT to the collector
+        endpoint (i.e. a live `export_logs` toggle mirroring
+        export_traces/export_metrics). A prior `export_logs` field was
+        removed as dead code (Bug #938) and is still stripped from loaded
+        config dicts pending AC3 -- see load_config()'s telemetry_config
+        conversion block.
     """
 
     # Core settings

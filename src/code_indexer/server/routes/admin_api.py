@@ -43,6 +43,16 @@ class LogEntry(BaseModel):
     correlation_id: Optional[str] = Field(
         None, description="Correlation ID for request tracking"
     )
+    trace_id: Optional[str] = Field(
+        None,
+        description="OTEL trace ID (32-char hex, or the zero-value "
+        '"0"*32 when no span was active)',
+    )
+    span_id: Optional[str] = Field(
+        None,
+        description="OTEL span ID (16-char hex, or the zero-value "
+        '"0"*16 when no span was active)',
+    )
     metadata: dict = Field(default_factory=dict, description="Additional metadata")
 
 
@@ -131,6 +141,8 @@ def get_logs(
             message=log["message"],
             source=log["source"],
             correlation_id=log.get("correlation_id"),
+            trace_id=log.get("trace_id"),
+            span_id=log.get("span_id"),
             metadata=log.get("metadata", {}),
         )
         for log in result["logs"]

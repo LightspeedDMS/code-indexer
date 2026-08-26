@@ -50,6 +50,16 @@ class LogsPostgresBackend:
         self._pool = pool
         self._ensure_schema()
 
+    # Story #1676 AC2: shared column list for the logs table's INSERT
+    # statements, so insert_log/insert_log_batch stay in sync with each
+    # other and with the schema in _ensure_schema (single source of truth).
+    _INSERT_COLUMNS = (
+        "timestamp, level, source, message, correlation_id, "
+        "user_id, request_path, extra_data, node_id, alias, "
+        "trace_id, span_id"
+    )
+    _INSERT_PLACEHOLDERS = "%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s"
+
     def _ensure_schema(self) -> None:
         """Create the logs table and indexes if they do not already exist."""
         try:
@@ -68,6 +78,8 @@ class LogsPostgresBackend:
                         extra_data TEXT,
                         node_id TEXT,
                         alias TEXT,
+                        trace_id TEXT,
+                        span_id TEXT,
                         created_at TIMESTAMPTZ DEFAULT NOW()
                     )
                     """
@@ -76,6 +88,9 @@ class LogsPostgresBackend:
                 # can filter lifecycle-runner failures by repo. ALTER is idempotent
                 # so legacy deployments migrate cleanly on next boot.
                 conn.execute("ALTER TABLE logs ADD COLUMN IF NOT EXISTS alias TEXT")
+                # Story #1676 AC2: OTEL trace/span correlation columns.
+                conn.execute("ALTER TABLE logs ADD COLUMN IF NOT EXISTS trace_id TEXT")
+                conn.execute("ALTER TABLE logs ADD COLUMN IF NOT EXISTS span_id TEXT")
                 conn.execute(
                     "CREATE INDEX IF NOT EXISTS idx_logs_pg_timestamp ON logs(timestamp)"
                 )
@@ -107,34 +122,18 @@ class LogsPostgresBackend:
         extra_data: Optional[str] = None,
         node_id: Optional[str] = None,
         alias: Optional[str] = None,
+        trace_id: Optional[str] = None,
+        span_id: Optional[str] = None,
     ) -> None:
-        """Insert a single log record.
-
-        Failures are caught and logged as warnings to prevent log writes from
-        crashing the application.
-
-        Args:
-            timestamp: ISO 8601 timestamp string.
-            level: Log level name (DEBUG, INFO, WARNING, ERROR, CRITICAL).
-            source: Logger name / source identifier.
-            message: Formatted log message text.
-            correlation_id: Optional request correlation ID.
-            user_id: Optional user identifier.
-            request_path: Optional HTTP request path.
-            extra_data: Optional JSON-serialised extra fields.
-            node_id: Optional cluster node identifier (NULL in standalone).
-            alias: Optional repo alias (Story #876 Phase C). Tags lifecycle-runner
-                ERROR rows so the admin UI can filter logs by repo.
-        """
+        """Insert a single log record (see class docstring for the
+        node_id/alias/trace_id/span_id column semantics). Failures are
+        caught and logged as warnings -- a failed log write must never crash
+        the application."""
         try:
             with self._pool.connection() as conn:
                 conn.execute(
-                    """
-                    INSERT INTO logs
-                        (timestamp, level, source, message, correlation_id,
-                         user_id, request_path, extra_data, node_id, alias)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                    """,
+                    f"INSERT INTO logs ({self._INSERT_COLUMNS}) "
+                    f"VALUES ({self._INSERT_PLACEHOLDERS})",
                     (
                         timestamp,
                         level,
@@ -146,6 +145,8 @@ class LogsPostgresBackend:
                         extra_data,
                         node_id,
                         alias,
+                        trace_id,
+                        span_id,
                     ),
                 )
                 conn.commit()
@@ -156,18 +157,15 @@ class LogsPostgresBackend:
         """Insert a batch of log records in ONE transaction via executemany.
 
         Issue #1241 P1.1: batched writer to eliminate per-record commit churn.
-        Uses SET LOCAL synchronous_commit = off for ephemeral log rows (safe:
-        rows are immediately visible; only crash-flush durability is relaxed).
+        Uses SET LOCAL synchronous_commit = off (safe: rows are immediately
+        visible; only crash-flush durability is relaxed).
 
-        Bug #1553: returns a real bool success signal (rather than implicit
-        None) so SQLiteLogHandler's writer loop can detect failure -- the
-        swallow-and-log-a-warning contract is unchanged, only the return
-        value is now observable by the caller.
+        Bug #1553: returns a real bool success signal so SQLiteLogHandler's
+        writer loop can detect failure without relying on an exception alone.
 
         Args:
-            items: List of 10-tuples in column order:
-                (timestamp, level, source, message, correlation_id,
-                 user_id, request_path, extra_data, node_id, alias)
+            items: List of 12-tuples matching _INSERT_COLUMNS' order (Story
+                #1676 AC2 appended trace_id/span_id).
 
         Returns:
             True on success (including the empty-input no-op case), False
@@ -177,21 +175,13 @@ class LogsPostgresBackend:
             return True
         try:
             with self._pool.connection() as conn:
-                # psycopg v3: executemany lives on the CURSOR, NOT the connection.
-                # Calling conn.executemany() raises AttributeError on real psycopg3
-                # (swallowed by the fail-open handler -> silently drops all rows).
-                # Mirror the pattern used by PayloadCachePostgresBackend and
-                # QueryEmbeddingCachePostgresBackend (payload_cache_backend.py:133,
-                # query_embedding_cache_backend.py:192).
+                # psycopg v3: executemany lives on the CURSOR, NOT the connection
+                # (mirrors PayloadCachePostgresBackend/QueryEmbeddingCachePostgresBackend).
                 with conn.cursor() as cur:
                     cur.execute("SET LOCAL synchronous_commit = off")
                     cur.executemany(
-                        """
-                        INSERT INTO logs
-                            (timestamp, level, source, message, correlation_id,
-                             user_id, request_path, extra_data, node_id, alias)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                        """,
+                        f"INSERT INTO logs ({self._INSERT_COLUMNS}) "
+                        f"VALUES ({self._INSERT_PLACEHOLDERS})",
                         items,
                     )
                 conn.commit()
@@ -257,10 +247,11 @@ class LogsPostgresBackend:
 
         Column order matches the SELECT list in query_logs(): id, timestamp,
         level, source, message, correlation_id, user_id, request_path,
-        extra_data, node_id, alias, created_at.
+        extra_data, node_id, alias, trace_id, span_id, created_at
+        (Story #1676 AC2 appended trace_id/span_id).
         """
         # created_at may come back as a datetime from PostgreSQL
-        created_at = row[11]
+        created_at = row[13]
         if isinstance(created_at, datetime):
             created_at = created_at.isoformat()
 
@@ -276,6 +267,8 @@ class LogsPostgresBackend:
             "extra_data": row[8],
             "node_id": row[9],
             "alias": row[10],
+            "trace_id": row[11],
+            "span_id": row[12],
             "created_at": created_at,
         }
 
@@ -325,7 +318,8 @@ class LogsPostgresBackend:
             rows = conn.execute(
                 f"""
                 SELECT id, timestamp, level, source, message, correlation_id,
-                       user_id, request_path, extra_data, node_id, alias, created_at
+                       user_id, request_path, extra_data, node_id, alias,
+                       trace_id, span_id, created_at
                 FROM logs {where_clause}
                 ORDER BY timestamp {order_direction}
                 LIMIT %s OFFSET %s
