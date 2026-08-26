@@ -8,6 +8,7 @@ All operations use real file system, database, and Filesystem operations.
 from code_indexer.server.middleware.correlation import get_correlation_id
 
 import os
+import threading
 from pathlib import Path
 from typing import Dict, List, Optional, Any, TYPE_CHECKING
 from datetime import datetime, timezone
@@ -134,24 +135,73 @@ class FileStats:
 class RepositoryStatsService:
     """Service for calculating repository statistics."""
 
+    # Bug #1691: CLASS-LEVEL RLock (not per-instance), mirroring the Bug
+    # #1650 pattern in FileListingService/GitOperationsService, so
+    # instances created via RepositoryStatsService.__new__(RepositoryStatsService)
+    # (an existing test pattern) still have a lock to synchronize on.
+    _vector_store_client_lock = threading.RLock()
+
     def __init__(self):
-        """Initialize the repository stats service with real dependencies."""
+        """Initialize the repository stats service.
+
+        Bug #1691: `vector_store_client` construction is DEFERRED to first
+        real access via the `vector_store_client` property (defined
+        below). This class is constructed at IMPORT TIME by the
+        module-level `stats_service` singleton (bottom of this file), with
+        no real repository context available. Eagerly resolving a config
+        here reproduced the Bug #1683 CWD-fallback failure shape:
+        `ConfigManager.create_with_backtrack()` with no starting directory
+        backtracks from the SERVER PROCESS's CWD, found no config there,
+        and silently fell back to a bare `Config()` with
+        `codebase_dir = Path(".")` -- so `FilesystemVectorStore.__init__`
+        went on to create a stray `.code-indexer/index` directory relative
+        to that CWD (confirmed live on the real dev server).
+        """
         # CLAUDE.md Foundation #1: Direct instantiation of real services only
         # NO dependency injection parameters that enable mocking
+        self._vector_store_client_lazy: Optional[FilesystemVectorStore] = None
+
+        # Repository manager will be instantiated when implemented
+        # For now, indicate that real integration is expected
+        self.repository_manager = (
+            None  # Will be real RepositoryManager when implemented
+        )
+
+    def _build_vector_store_client(self) -> FilesystemVectorStore:
+        """Construct the real FilesystemVectorStore from a freshly-resolved
+        config, refusing to fall back to the server process's CWD when no
+        real repository config can be found.
+
+        CLAUDE.md Foundation #1: real FilesystemVectorStore integration,
+        not injectable, not mockable.
+
+        Bug #1691: mirrors the Bug #1683 guard already established in
+        `AutoWatchManager.start_watch` -- `create_with_backtrack()`
+        unconditionally returns a ConfigManager even when NO config was
+        found anywhere in the CWD's ancestor chain; it silently defaults
+        `config_path` to `{cwd}/.code-indexer/config.json`, which does not
+        exist, and `get_config()` would then fall back to a bare
+        `Config()` whose `codebase_dir` is the unresolved relative
+        `Path(".")`. Verify a REAL config was found before trusting it,
+        rather than silently defaulting to CWD.
+        """
         try:
             config_manager = ConfigManager.create_with_backtrack()
-            self.config = config_manager.get_config()
+
+            if not config_manager.config_path.exists():
+                raise RuntimeError(
+                    "No .code-indexer/config.json found relative to the "
+                    "current working directory or any parent; refusing to "
+                    "fall back to a bare Config() with codebase_dir='.' "
+                    "(Bug #1691)"
+                )
+
+            config = config_manager.get_config()
 
             # Real FilesystemVectorStore integration - not injectable, not mockable
-            index_dir = Path(self.config.codebase_dir) / ".code-indexer" / "index"
-            self.vector_store_client = FilesystemVectorStore(
-                base_path=index_dir, project_root=Path(self.config.codebase_dir)
-            )
-
-            # Repository manager will be instantiated when implemented
-            # For now, indicate that real integration is expected
-            self.repository_manager = (
-                None  # Will be real RepositoryManager when implemented
+            index_dir = Path(config.codebase_dir) / ".code-indexer" / "index"
+            return FilesystemVectorStore(
+                base_path=index_dir, project_root=Path(config.codebase_dir)
             )
 
         except Exception as e:
@@ -163,6 +213,46 @@ class RepositoryStatsService:
                 )
             )
             raise RuntimeError(f"Cannot initialize repository stats service: {e}")
+
+    @property
+    def vector_store_client(self) -> FilesystemVectorStore:
+        """Lazily construct the real FilesystemVectorStore (Bug #1691).
+
+        Uses getattr(..., None) rather than a bare attribute read: some
+        existing test files construct this service via
+        RepositoryStatsService.__new__(RepositoryStatsService) (bypassing
+        __init__ entirely) and may read this property before ever
+        assigning to it.
+
+        Guarded by a per-instance `_vsc_initializing` sentinel (mirrors
+        FileListingService.activated_repo_manager's identical fix): the
+        RLock alone stops CROSS-THREAD deadlock but not SAME-THREAD
+        re-entrant recursion -- on re-entry the double-checked `is None`
+        test is still True (the assignment happens only after
+        _build_vector_store_client() returns), so an unguarded re-entrant
+        call arriving from within construction would construct AGAIN.
+        """
+        if getattr(self, "_vector_store_client_lazy", None) is None:
+            with self._vector_store_client_lock:
+                if getattr(self, "_vsc_initializing", False):
+                    raise AttributeError(
+                        "vector_store_client is still under construction "
+                        "(re-entrant access)"
+                    )
+                if getattr(self, "_vector_store_client_lazy", None) is None:
+                    self._vsc_initializing = True
+                    try:
+                        self._vector_store_client_lazy = (
+                            self._build_vector_store_client()
+                        )
+                    finally:
+                        self._vsc_initializing = False
+        return self._vector_store_client_lazy
+
+    @vector_store_client.setter
+    def vector_store_client(self, value: FilesystemVectorStore) -> None:
+        with self._vector_store_client_lock:
+            self._vector_store_client_lazy = value
 
     def get_repository_stats(
         self, repo_id: str, username: Optional[str] = None
