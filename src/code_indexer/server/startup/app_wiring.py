@@ -270,4 +270,42 @@ def create_fastapi_app(services: Dict[str, Any], lifespan: Callable) -> FastAPI:
     app.state.self_monitoring_repo_root = None
     app.state.self_monitoring_github_repo = None
 
+    # Bug #1667: wire the module-level WikiCacheInvalidator singleton to a
+    # live WikiCache instance. Prior to this fix, wiki_cache_invalidator.
+    # wiki_cache was NEVER set anywhere in production, so every one of its
+    # methods (invalidate_repo, invalidate_for_file_change,
+    # invalidate_for_git_operation, on_refresh_complete) was a permanent
+    # no-op guarded by `if self.wiki_cache is None: return` -- even though
+    # 3 live call sites (mcp/handlers/git_write.py, mcp/handlers/files.py x2)
+    # invoke it after every git write / file mutation. This mattered because
+    # WikiCache.get_sidebar() has NO independent staleness check (Story #304
+    # deliberately removed the old per-request filesystem mtime poll in
+    # favor of this event-driven invalidator) -- unlike get_article(), which
+    # still self-validates via file_mtime/file_size. Without this wiring the
+    # sidebar cache could go stale indefinitely after any git write or file
+    # mutation.
+    #
+    # This wiring is done here (app-wiring time), not via the request-time
+    # resolve_backend_registry_attr() helper other wiki_cache call sites use
+    # (e.g. golden_repo_manager.py, mcp/handlers/guides.py): at THIS point
+    # `backend_registry` is the real, already-fully-initialized instance
+    # (StorageFactory.create_backends() already ran inside
+    # initialize_services(), well before create_fastapi_app() is called --
+    # see the backend_registry comment above), not a pending-startup-window
+    # snapshot, so caching the resolved backend on the singleton here is
+    # safe and does not risk permanently wedging a node onto the wrong
+    # backend the way caching a resolve_backend_registry_attr() result
+    # during the STORAGE_MODE_PENDING_SENTINEL window would.
+    from code_indexer.server.wiki.wiki_cache import WikiCache
+    from code_indexer.server.wiki.wiki_cache_invalidator import (
+        wiki_cache_invalidator,
+    )
+
+    _wiki_cache_backend = (
+        backend_registry.wiki_cache if backend_registry is not None else None
+    )
+    wiki_cache_invalidator.set_wiki_cache(
+        WikiCache(db_path_str, storage_backend=_wiki_cache_backend)
+    )
+
     return app
