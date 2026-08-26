@@ -45,6 +45,17 @@ class RepositoryListingManager:
         Args:
             golden_repo_manager: Golden repository manager instance
             activated_repo_manager: Activated repository manager instance
+
+        Raises:
+            ValueError: If activated_repo_manager is not provided. Bug #1683:
+                this previously fell back to a bare, unwired
+                `ActivatedRepoManager()` -- its constructor hardcodes
+                `Path.home()/".cidx-server"/"data"` and ignores
+                `CIDX_SERVER_DATA_DIR`, silently reading the WRONG per-node
+                store instead of the shared, DI-wired singleton. The sole
+                production construction site (startup/service_init.py)
+                always passes an explicit, properly-wired manager, so this
+                fails loudly rather than silently constructing a wrong one.
         """
         if golden_repo_manager is None:
             from pathlib import Path
@@ -56,8 +67,14 @@ class RepositoryListingManager:
             golden_repo_manager = GoldenRepoManager(
                 data_dir=data_dir, resource_config=resource_config
             )
+        if activated_repo_manager is None:
+            raise ValueError(
+                "activated_repo_manager must be provided; RepositoryListingManager "
+                "must not construct its own -- a bare ActivatedRepoManager() bypasses "
+                "the shared DI wiring (connection pool / storage_mode) (Bug #1683)."
+            )
         self.golden_repo_manager = golden_repo_manager
-        self.activated_repo_manager = activated_repo_manager or ActivatedRepoManager()
+        self.activated_repo_manager = activated_repo_manager
         self.logger = logging.getLogger(__name__)
 
     def list_available_repositories(

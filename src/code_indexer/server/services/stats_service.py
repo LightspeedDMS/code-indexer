@@ -9,7 +9,7 @@ from code_indexer.server.middleware.correlation import get_correlation_id
 
 import os
 from pathlib import Path
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional, Any, TYPE_CHECKING
 from datetime import datetime, timezone
 import logging
 from dataclasses import dataclass
@@ -24,6 +24,9 @@ from ..models.api_models import (
 from ...config import ConfigManager
 from code_indexer.storage.filesystem_vector_store import FilesystemVectorStore
 from code_indexer.server.logging_utils import format_error_log
+
+if TYPE_CHECKING:
+    from ..repositories.activated_repo_manager import ActivatedRepoManager
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +46,28 @@ def _get_golden_repos_dir() -> str:
         "golden_repos_dir not configured in app.state. "
         "Server must set app.state.golden_repos_dir during startup."
     )
+
+
+def _get_activated_repo_manager() -> "ActivatedRepoManager":
+    """Get the DI-wired ActivatedRepoManager from app.state (Bug #1683).
+
+    Mirrors `_get_golden_repos_dir` above. Previously `_get_repository_path`
+    constructed a bare, unwired `ActivatedRepoManager()` -- its constructor
+    hardcodes `Path.home()/".cidx-server"/"data"` and ignores
+    `CIDX_SERVER_DATA_DIR`, so in cluster mode (or any deployment
+    overriding the data dir) it read from the WRONG per-node store instead
+    of the shared, properly-wired singleton every other lookup path uses.
+    """
+    from typing import cast
+    from ..app import app as app_module
+
+    manager = getattr(app_module.state, "activated_repo_manager", None)
+    if manager is None:
+        raise RuntimeError(
+            "activated_repo_manager not initialized in app.state. "
+            "Server must set app.state.activated_repo_manager during startup."
+        )
+    return cast("ActivatedRepoManager", manager)
 
 
 # File extension to language mapping
@@ -197,10 +222,9 @@ class RepositoryStatsService:
             FileNotFoundError: If repository not found
         """
         try:
-            # Use ActivatedRepoManager to find user's activated repository
-            from ..repositories.activated_repo_manager import ActivatedRepoManager
-
-            repo_manager = ActivatedRepoManager()
+            # Use the DI-wired ActivatedRepoManager (Bug #1683) to find the
+            # user's activated repository -- never a fresh, unwired instance.
+            repo_manager = _get_activated_repo_manager()
 
             # Get activated repository path for user
             if username is None:

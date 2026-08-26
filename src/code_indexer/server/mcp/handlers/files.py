@@ -87,12 +87,19 @@ def _start_auto_watch_if_needed(
 
     Shared by handle_create_file, handle_edit_file, handle_delete_file.
     Logs and continues on failure (auto-watch is enhancement, not critical).
+
+    Bug #1683: previously constructed a bare, unwired
+    `ActivatedRepoManager()` here -- its constructor hardcodes
+    `Path.home()/".cidx-server"/"data"` and ignores `CIDX_SERVER_DATA_DIR`,
+    so in cluster mode (or any deployment overriding the data dir) it read
+    from the WRONG per-node store, found nothing, and (via the caller's
+    fallback) mis-triggered auto-watch/indexing on the wrong directory.
+    Fixed to resolve the DI-wired singleton from app.state instead
+    (`_utils._get_activated_repo_manager()`, the same Bug #1533 pattern
+    already used elsewhere in this module for the same manager).
     """
     from code_indexer.server.services.file_crud_service import file_crud_service
     from code_indexer.server.services.auto_watch_manager import auto_watch_manager
-    from code_indexer.server.repositories.activated_repo_manager import (
-        ActivatedRepoManager,
-    )
 
     try:
         if file_crud_service.is_write_exception(repository_alias):
@@ -100,7 +107,11 @@ def _start_auto_watch_if_needed(
                 file_crud_service.get_write_exception_path(repository_alias)
             )
         else:
-            activated_repo_manager = ActivatedRepoManager()
+            activated_repo_manager = _utils._get_activated_repo_manager()
+            if activated_repo_manager is None:
+                raise RuntimeError(
+                    "activated_repo_manager not initialized on app.state"
+                )
             repo_path = activated_repo_manager.get_activated_repo_path(
                 username=user.username, user_alias=repository_alias
             )
