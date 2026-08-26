@@ -677,7 +677,8 @@ def scip_impact(params: Dict[str, Any], user: User) -> Dict[str, Any]:
     Args:
         params: Dictionary containing:
             - symbol: Symbol name to analyze
-            - depth: Optional traversal depth (default 3, max 10)
+            - depth: Optional traversal depth (default 3). Must be between
+              1 and 10 (inclusive); out-of-range values are rejected.
             - repository_alias: Optional repository name to filter SCIP indexes
         user: Authenticated user (for permission checking)
 
@@ -693,9 +694,33 @@ def scip_impact(params: Dict[str, Any], user: User) -> Dict[str, Any]:
         depth = _coerce_int(params.get("depth"), 3)
         repository_alias = params.get("repository_alias")
 
-        # Bug #1599: clamp depth to a safe range, mirroring the clamp used
-        # by scip_callchain below.
-        depth = max(_MIN_SCIP_DEPTH, min(_MAX_SCIP_DEPTH, depth))
+        # Bug #1672: reject (not clamp) an out-of-range depth, mirroring
+        # scip_dependencies/scip_dependents above (Bug #1614) and
+        # scip_callchain's loud-reject contract for max_depth (Bug #1603).
+        # The prior Bug #1599 fix silently clamped out-of-range depth to
+        # [1, 10] with no error/warning field, hiding the caller's mistake
+        # behind a misleading success:true -- the exact anti-pattern #1614
+        # already fixed on the two sibling handlers in this file, and #1639
+        # fixed at the CLI/remote-client/engine layers for this same
+        # `impact` operation (deliberately leaving this MCP handler
+        # untouched as a separate, later fix). Consistency across sibling
+        # tools sharing the identical depth parameter semantics outweighs
+        # preserving the historical one-off clamp exception. Response
+        # fields (affected_symbols/affected_files) match this handler's own
+        # existing error contract below, not the siblings' `results` field.
+        if depth < _MIN_SCIP_DEPTH or depth > _MAX_SCIP_DEPTH:
+            return _mcp_response(
+                {
+                    "success": False,
+                    "error": (
+                        f"depth must be between {_MIN_SCIP_DEPTH} and "
+                        f"{_MAX_SCIP_DEPTH}, got {depth}"
+                    ),
+                    "affected_symbols": [],
+                    "affected_files": [],
+                    "symbol": symbol,
+                }
+            )
 
         if not symbol:
             return _mcp_response(

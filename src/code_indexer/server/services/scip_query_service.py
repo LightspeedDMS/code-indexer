@@ -511,8 +511,10 @@ class SCIPQueryService:
 
         Args:
             symbol: Symbol name to analyze
-            depth: Maximum traversal depth (default 3). Clamped by underlying
-                   function to MAX_TRAVERSAL_DEPTH (10).
+            depth: Maximum traversal depth (default 3). Must be at least 1
+                   (raises ValueError otherwise -- Bug #1672/#1639); values
+                   above MAX_TRAVERSAL_DEPTH (10) are clamped by the
+                   underlying `composites.analyze_impact` as a safety net.
             repository_alias: Repository to scope the analysis to. When given,
                    only that repo's SCIP indexes are traversed (mirrors the
                    other SCIP endpoints); when None, all golden repos are.
@@ -520,8 +522,22 @@ class SCIPQueryService:
 
         Returns:
             Dictionary with impact analysis results
+
+        Raises:
+            ValueError: if depth is not a positive integer.
         """
         from code_indexer.scip.query.composites import analyze_impact
+
+        # Bug #1672: assert the precondition explicitly instead of letting a
+        # hypothetical depth < 1 flow into the no-index early return below,
+        # where `min(depth, 10)` would otherwise silently report a
+        # nonsensical `depth_analyzed: 0`. Currently unreachable in practice
+        # (both real callers -- the MCP scip_impact handler and the REST
+        # GET /scip/impact route -- already reject depth < 1 before calling
+        # this method), but this mirrors composites.analyze_impact's own
+        # guard (Bug #1639) so the invariant holds regardless of caller.
+        if depth < 1:
+            raise ValueError(f"depth must be at least 1, got {depth}")
 
         # Scope to the requested repo's SCIP indexes and early-out when there is
         # no index for it. Without this, impact analysis ignored the alias and
