@@ -89,6 +89,48 @@ class TestIdentityQueueHandlerPrepareInjectsTraceContext:
             reset_spans_state()
             reset_telemetry_manager()
 
+    def test_prepare_injects_otel_context(self) -> None:
+        """AC3 REQUIRED FIX 2: prepare() must capture the full OTEL Context
+        (not just trace_id/span_id strings) via inject_otel_context(), so
+        it can be reattached at export time. Fails if that call is removed
+        from prepare() -- captured would then be None.
+        """
+        from opentelemetry import context as otel_context
+        from opentelemetry import trace as otel_trace
+
+        from code_indexer.server.logging_utils import OTEL_CONTEXT_RECORD_ATTR
+        from code_indexer.server.telemetry import (
+            get_telemetry_manager,
+            reset_telemetry_manager,
+        )
+        from code_indexer.server.telemetry.spans import create_span, reset_spans_state
+        from code_indexer.server.utils.config_manager import TelemetryConfig
+
+        config = TelemetryConfig(enabled=True, export_traces=True)
+        get_telemetry_manager(config)
+        try:
+            q: "queue.Queue" = queue.Queue()
+            handler = IdentityQueueHandler(q)
+
+            with create_span("test.async_logging.prepare_otel_context") as span:
+                span_context = span.get_span_context()
+                record = _make_record()
+                prepared = handler.prepare(record)
+
+            captured = getattr(prepared, OTEL_CONTEXT_RECORD_ATTR, None)
+            assert captured is not None
+
+            token = otel_context.attach(captured)
+            try:
+                reattached = otel_trace.get_current_span().get_span_context()
+                assert reattached.trace_id == span_context.trace_id
+                assert reattached.span_id == span_context.span_id
+            finally:
+                otel_context.detach(token)
+        finally:
+            reset_spans_state()
+            reset_telemetry_manager()
+
 
 class TestPlainLogCallPersistsTraceContextViaAsyncQueue:
     """Real production path: root logger -> IdentityQueueHandler ->

@@ -308,7 +308,22 @@ class TelemetryManager:
                 logger_provider=self._logger_provider
             )
             wrapper = ContextAwareLogBridgeHandler(real_handler)
-            register_additional_listener_handler(wrapper)
+            registered = register_additional_listener_handler(wrapper)
+            if not registered:
+                # Round 2 code review SHOULD-FIX 4 (Messi Rule #13
+                # anti-silent-failure): a False return means there was no
+                # active async-logging listener to attach to (e.g. lifespan
+                # ordering changed) -- export_logs=true would otherwise
+                # silently export nothing while log_bridge_handler still
+                # reports non-None.
+                logger.warning(
+                    format_error_log(
+                        "REPO-GENERAL-072",
+                        "OTEL log bridge handler registration returned "
+                        "False -- no active async-logging listener found; "
+                        "OTLP log export will not receive any records",
+                    )
+                )
             self._log_bridge_handler = wrapper
 
         except Exception as e:
@@ -473,18 +488,14 @@ class TelemetryManager:
                     )
                 )
 
-        if self._logger_provider is not None:
-            try:
-                self._logger_provider.shutdown()  # type: ignore[attr-defined]
-                logger.debug("LoggerProvider shutdown complete")
-            except Exception as e:
-                logger.warning(
-                    format_error_log(
-                        "REPO-GENERAL-043",
-                        f"Error during LoggerProvider shutdown: {e}",
-                    )
-                )
-
+        # Round 2 code review SHOULD-FIX 5: unregister the wrapper handler
+        # from the async-logging listener BEFORE shutting down the
+        # LoggerProvider it wraps. Reversing this order leaves a narrow
+        # window where an in-flight record reaches the wrapper AFTER the
+        # LoggerProvider is already shut down -- the real OTEL SDK logs its
+        # own "Shutdown called, ignoring..." warning through one of its
+        # OWN opentelemetry.* loggers in that case, which (absent the
+        # Required Fix 1 filter) would re-enter this very pipeline.
         if self._log_bridge_handler is not None:
             try:
                 from code_indexer.server.services.async_logging import (
@@ -498,6 +509,18 @@ class TelemetryManager:
                     format_error_log(
                         "REPO-GENERAL-043",
                         f"Error unregistering OTEL log bridge handler: {e}",
+                    )
+                )
+
+        if self._logger_provider is not None:
+            try:
+                self._logger_provider.shutdown()  # type: ignore[attr-defined]
+                logger.debug("LoggerProvider shutdown complete")
+            except Exception as e:
+                logger.warning(
+                    format_error_log(
+                        "REPO-GENERAL-043",
+                        f"Error during LoggerProvider shutdown: {e}",
                     )
                 )
 

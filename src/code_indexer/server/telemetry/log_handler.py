@@ -139,6 +139,18 @@ class ContextAwareLogBridgeHandler(logging.Handler):
     async-logging background thread for the whole process.
     """
 
+    # Round 2 code review REQUIRED FIX 1: prefix shared by every logger the
+    # OTEL SDK/exporter packages themselves use for their own diagnostics
+    # (confirmed via source inspection: both
+    # opentelemetry.sdk._shared_internal and
+    # opentelemetry.exporter.otlp.proto.grpc.exporter -- among every other
+    # opentelemetry.* submodule that calls logging.getLogger(__name__) --
+    # resolve to a dotted name starting with this prefix). Mirrors the OTEL
+    # SDK's own established defense against exactly this hazard: its
+    # internal logger sets ``_internal_logger.propagate = False`` so its
+    # own diagnostics never re-enter application logging pipelines.
+    _OTEL_INTERNAL_LOGGER_PREFIX = "opentelemetry"
+
     def __init__(self, wrapped_handler: logging.Handler) -> None:
         super().__init__()
         self._wrapped_handler = wrapped_handler
@@ -149,6 +161,19 @@ class ContextAwareLogBridgeHandler(logging.Handler):
         return self._wrapped_handler
 
     def emit(self, record: logging.LogRecord) -> None:
+        # Round 2 code review REQUIRED FIX 1 (self-amplifying feedback
+        # loop): when the collector is unreachable, the OTLP export
+        # machinery itself logs through its OWN opentelemetry.* loggers
+        # (e.g. "Queue full, dropping..." / per-retry export failures).
+        # Those records propagate through the SAME root logger this
+        # handler is wired behind -- without this early return, they would
+        # re-enter this handler, get forwarded to the (still failing) real
+        # bridge handler, which logs ANOTHER opentelemetry.* warning, ad
+        # infinitum. Every such self-generated record must be dropped here,
+        # before it ever reaches the wrapped handler.
+        if record.name.startswith(self._OTEL_INTERNAL_LOGGER_PREFIX):
+            return
+
         from opentelemetry import context as otel_context
 
         from code_indexer.server.logging_utils import OTEL_CONTEXT_RECORD_ATTR
