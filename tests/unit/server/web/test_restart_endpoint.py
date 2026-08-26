@@ -17,7 +17,23 @@ from unittest.mock import MagicMock, patch
 from fastapi.routing import APIRoute
 from fastapi.testclient import TestClient
 
-pytestmark = pytest.mark.slow
+# Issue #1677: this file was marked pytest.mark.slow by commit 88eb3946 (a
+# 145-file, multi-story bulk commit for Stories #592/#593) with no
+# file-specific rationale recorded, which silently excluded it from
+# server-fast-automation.sh's "-m not slow" gate. It is exactly this kind of
+# blind spot that let #1656's 13 standing-red failures go unnoticed for
+# months. Measured standalone: 26 passed in ~4.9s (PYTHONPATH=./src python3
+# -m pytest tests/unit/server/web/test_restart_endpoint.py -v --durations=0),
+# with every individual test's own setup/call/teardown at 0.00-0.02s -- the
+# wall time is pytest/import startup overhead, not test-body slowness. Per
+# CLAUDE.md's fast-automation remediation thresholds (<5s target, >10s
+# investigate, >30s MUST exclude), this is at/under the target and nowhere
+# near the exclusion bar, so the marker is removed rather than replaced with
+# alternative coverage. `tests/unit/server/web/` is already one of
+# server-fast-automation.sh's included chunks (see the
+# `tests/unit/server/web/ tests/unit/server/repositories/
+# tests/unit/server/routers/` pytest invocation), so no script change is
+# needed for this file to rejoin the regression gate.
 
 # Issue #1656: /restart carries `dependencies=[Depends(require_elevation())]`
 # (added by commit 21e8cc57, Story #956) at the ROUTER level. A router-level
