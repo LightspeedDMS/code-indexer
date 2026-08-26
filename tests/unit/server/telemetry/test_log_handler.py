@@ -241,7 +241,7 @@ class TestGetTraceContextDebugLogRecursionGuard:
             "-- unbounded recursion in get_trace_context()'s except-branch "
             "debug log call."
         )
-        assert call_count <= 1, (
+        assert call_count == 1, (
             "get_current_span() (called from get_trace_context()) was "
             f"invoked {call_count} times for a single logger.info() call -- "
             "expected exactly 1. This indicates the except-branch "

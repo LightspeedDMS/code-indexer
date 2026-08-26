@@ -203,7 +203,10 @@ class TestInjectTraceContext:
 
     def test_sets_real_ids_from_active_span(self):
         from code_indexer.server.logging_utils import inject_trace_context
-        from code_indexer.server.telemetry import get_telemetry_manager
+        from code_indexer.server.telemetry import (
+            get_telemetry_manager,
+            reset_telemetry_manager,
+        )
         from code_indexer.server.telemetry.spans import create_span, reset_spans_state
         from code_indexer.server.utils.config_manager import TelemetryConfig
 
@@ -224,3 +227,4 @@ class TestInjectTraceContext:
                 int(record.span_id, 16)
         finally:
             reset_spans_state()
+            reset_telemetry_manager()
