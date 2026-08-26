@@ -113,10 +113,22 @@ class IdentityQueueHandler(logging.handlers.QueueHandler):
         context). This heals the log store's correlation_id column for
         every ``logger.x()`` call server-wide without touching individual
         call sites -- see ``logging_utils.inject_correlation_id``.
+
+        Story #1676 AC2: the same reasoning applies to OTEL trace/span
+        context -- ``get_trace_context()`` resolves the active span via
+        OTEL's own ``contextvars``-based current-span mechanism, which is
+        equally invisible once the record reaches the listener thread. This
+        is the single central wiring point that populates
+        ``record.trace_id``/``record.span_id`` for every ``logger.x()`` call
+        server-wide -- see ``logging_utils.inject_trace_context``.
         """
-        from code_indexer.server.logging_utils import inject_correlation_id
+        from code_indexer.server.logging_utils import (
+            inject_correlation_id,
+            inject_trace_context,
+        )
 
         inject_correlation_id(record)
+        inject_trace_context(record)
         return record
 
     def _record_drop(self) -> None:

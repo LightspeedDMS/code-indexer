@@ -468,7 +468,9 @@ class LogAggregatorService:
                 message,
                 correlation_id,
                 user_id,
-                request_path
+                request_path,
+                trace_id,
+                span_id
             FROM logs
             {where_sql}
             ORDER BY timestamp {order_direction}
@@ -516,7 +518,9 @@ class LogAggregatorService:
                 message,
                 correlation_id,
                 user_id,
-                request_path
+                request_path,
+                trace_id,
+                span_id
             FROM logs
             {where_sql}
             ORDER BY timestamp {order_direction}
@@ -537,6 +541,12 @@ class LogAggregatorService:
         """
         Convert database row to log entry dict.
 
+        Story #1676 AC2 adds trace_id/span_id -- direct row access is safe
+        here because both SELECT statements above always request these
+        columns, and SQLiteLogHandler._init_database's schema migration
+        (ALTER TABLE ADD COLUMN, run at startup before any query) guarantees
+        they exist on the `logs` table this service reads from.
+
         Args:
             row: SQLite row object
 
@@ -552,6 +562,8 @@ class LogAggregatorService:
             "correlation_id": row["correlation_id"],
             "user_id": row["user_id"],
             "request_path": row["request_path"],
+            "trace_id": row["trace_id"],
+            "span_id": row["span_id"],
         }
 
     def _empty_response(self, page: int, page_size: int) -> Dict[str, Any]:

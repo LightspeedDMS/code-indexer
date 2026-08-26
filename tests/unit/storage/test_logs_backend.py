@@ -739,4 +739,92 @@ class TestSQLiteLogHandlerNodeId:
         )
 
         assert total == 1
+
+
+class TestLogsSqliteBackendTraceSpanRoundTrip:
+    """Story #1676 AC2: LogsSqliteBackend (the delegated-write / cluster-mode
+    read backend, per Bug #1553's is_cross_node_backend distinction) must
+    round-trip trace_id/span_id end to end through insert_log,
+    insert_log_batch, and query_logs. Exercises the exact backend
+    LogAggregatorService._query_via_backend dispatches to in cluster mode
+    with a SQLite storage_mode -- the class of bug this story explicitly
+    calls out (#1653/#1654/#1662): a local-only fix that leaves the
+    backend-dispatched read path silently untouched."""
+
+    def test_insert_log_and_query_logs_round_trip_trace_span(self, tmp_path):
+        from code_indexer.server.storage.sqlite_backends import LogsSqliteBackend
+
+        backend = LogsSqliteBackend(str(tmp_path / "logs.db"))
+        try:
+            backend.insert_log(
+                timestamp="2026-01-01T00:00:00+00:00",
+                level="ERROR",
+                source="test.source",
+                message="trace span round trip",
+                trace_id="a" * 32,
+                span_id="b" * 16,
+            )
+
+            results, total = backend.query_logs(limit=10, offset=0)
+
+            assert total == 1
+            assert results[0]["trace_id"] == "a" * 32
+            assert results[0]["span_id"] == "b" * 16
+        finally:
+            backend.close()
+
+    def test_insert_log_batch_round_trips_trace_span(self, tmp_path):
+        from code_indexer.server.storage.sqlite_backends import LogsSqliteBackend
+
+        backend = LogsSqliteBackend(str(tmp_path / "logs.db"))
+        try:
+            success = backend.insert_log_batch(
+                [
+                    (
+                        "2026-01-01T00:00:00+00:00",
+                        "WARNING",
+                        "test.source",
+                        "batch trace span",
+                        None,  # correlation_id
+                        None,  # user_id
+                        None,  # request_path
+                        None,  # extra_data
+                        None,  # node_id
+                        None,  # alias
+                        "c" * 32,  # trace_id
+                        "d" * 16,  # span_id
+                    )
+                ]
+            )
+            assert success is True
+
+            results, total = backend.query_logs(limit=10, offset=0)
+
+            assert total == 1
+            assert results[0]["trace_id"] == "c" * 32
+            assert results[0]["span_id"] == "d" * 16
+        finally:
+            backend.close()
+
+    def test_insert_log_without_trace_span_stores_null(self, tmp_path):
+        """A caller that never passes trace_id/span_id (e.g. legacy code
+        predating this story) must store NULL, never raise."""
+        from code_indexer.server.storage.sqlite_backends import LogsSqliteBackend
+
+        backend = LogsSqliteBackend(str(tmp_path / "logs.db"))
+        try:
+            backend.insert_log(
+                timestamp="2026-01-01T00:00:00+00:00",
+                level="INFO",
+                source="test.source",
+                message="no trace context",
+            )
+
+            results, total = backend.query_logs(limit=10, offset=0)
+
+            assert total == 1
+            assert results[0]["trace_id"] is None
+            assert results[0]["span_id"] is None
+        finally:
+            backend.close()
         assert results[0]["node_id"] is None

@@ -155,6 +155,47 @@ def inject_correlation_id(record: logging.LogRecord) -> None:
         record.correlation_id = correlation_id
 
 
+def inject_trace_context(record: logging.LogRecord) -> None:
+    """
+    Populate ``record.trace_id`` / ``record.span_id`` from the currently
+    active OTEL span (Story #1676 AC2), unless the call site already set
+    both explicitly.
+
+    Mirrors ``inject_correlation_id()``'s exact pattern and rationale: this
+    must run on the ORIGINAL calling thread, before the record crosses into
+    async_logging's queue/listener thread, because OTEL's "current span" is
+    resolved via ``contextvars`` (inside ``get_trace_context()``), which does
+    NOT propagate across a plain ``threading.Thread`` boundary. Callers:
+    ``async_logging.IdentityQueueHandler.prepare()`` (the real production
+    wiring point -- runs on the request thread before the record is
+    enqueued) and, defensively, ``SQLiteLogHandler.emit()`` (covers the
+    non-queued direct-attach case).
+
+    Unlike ``inject_correlation_id()`` (which leaves ``correlation_id``
+    unset/None when there is no active correlation id -- "never fabricate a
+    value"), ``get_trace_context()`` ALWAYS returns a value: the documented
+    zero-values ("0"*32 / "0"*16) when no span is active, or when telemetry
+    is disabled. This function therefore ALWAYS leaves both
+    ``record.trace_id`` and ``record.span_id`` populated as strings -- never
+    None/absent -- so every stored log row has non-NULL trace_id/span_id
+    columns in both storage backends, exactly per the AC2 contract.
+
+    Args:
+        record: The LogRecord to enrich in place. No-op if the record
+            already carries BOTH ``trace_id`` and ``span_id`` (an explicitly
+            provided pair, e.g. propagated from a different context, is
+            never overridden).
+    """
+    if getattr(record, "trace_id", None) and getattr(record, "span_id", None):
+        return
+
+    from code_indexer.server.telemetry.log_handler import get_trace_context
+
+    context = get_trace_context()
+    record.trace_id = context["trace_id"]
+    record.span_id = context["span_id"]
+
+
 def sanitize_for_logging(data: Any) -> Any:
     """
     Sanitize data for logging by redacting sensitive information.

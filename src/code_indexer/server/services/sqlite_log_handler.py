@@ -28,8 +28,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
-from code_indexer.server.logging_utils import inject_correlation_id
+from code_indexer.server.logging_utils import (
+    inject_correlation_id,
+    inject_trace_context,
+)
 from code_indexer.server.storage.database_manager import DatabaseConnectionManager
+from code_indexer.server.telemetry.log_handler import ZERO_SPAN_ID, ZERO_TRACE_ID
 
 logger = logging.getLogger(__name__)
 
@@ -66,6 +70,10 @@ _LogItem = Tuple[
     Optional[str],  # request_path
     Optional[str],  # extra_data (JSON string or None)
     Optional[str],  # alias
+    str,  # trace_id (Story #1676 AC2 -- always populated, never None:
+    #      real hex from an active OTEL span, or the documented
+    #      zero-value "0"*32 when no span is active)
+    str,  # span_id (same contract as trace_id, "0"*16 zero-value)
 ]
 
 
@@ -263,7 +271,9 @@ class SQLiteLogHandler(logging.Handler):
             cursor = conn.cursor()
 
             # Create logs table with schema from AC5 (Story #876 Phase C adds
-            # the `alias` column for lifecycle-runner row tagging).
+            # the `alias` column for lifecycle-runner row tagging; Story
+            # #1676 AC2 adds `trace_id`/`span_id` for OTEL log/trace
+            # correlation).
             cursor.execute(
                 """
                 CREATE TABLE IF NOT EXISTS logs (
@@ -277,17 +287,25 @@ class SQLiteLogHandler(logging.Handler):
                     request_path TEXT,
                     extra_data TEXT,
                     alias TEXT,
+                    trace_id TEXT,
+                    span_id TEXT,
                     created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
                 )
                 """
             )
 
-            # Migrate pre-existing databases in-place: add alias if missing.
+            # Migrate pre-existing databases in-place: add columns if missing
+            # (backward-compatible additive change per the project's
+            # "Database Migrations Must Be Backward Compatible" rule).
             existing_columns = {
                 row[1] for row in cursor.execute("PRAGMA table_info(logs)").fetchall()
             }
             if "alias" not in existing_columns:
                 cursor.execute("ALTER TABLE logs ADD COLUMN alias TEXT")
+            if "trace_id" not in existing_columns:
+                cursor.execute("ALTER TABLE logs ADD COLUMN trace_id TEXT")
+            if "span_id" not in existing_columns:
+                cursor.execute("ALTER TABLE logs ADD COLUMN span_id TEXT")
 
             # Create indexes from AC5 + new alias index (Story #876 Phase C).
             cursor.execute(
@@ -346,6 +364,9 @@ class SQLiteLogHandler(logging.Handler):
             # the record crossed into the listener thread where this
             # context would no longer be visible.
             inject_correlation_id(record)
+            # Story #1676 AC2: same defense-in-depth rationale as
+            # inject_correlation_id above, for OTEL trace/span context.
+            inject_trace_context(record)
 
             # Format the message
             message = self.format(record)
@@ -367,6 +388,14 @@ class SQLiteLogHandler(logging.Handler):
             request_path = getattr(record, "request_path", None)
             # Story #876 Phase C: repo alias tag for lifecycle-runner ERROR rows.
             alias = getattr(record, "alias", None)
+            # Story #1676 AC2: OTEL trace/span correlation. Always populated
+            # by inject_trace_context() above (real hex or the documented
+            # zero-value) -- never None. The getattr default is the
+            # zero-value (not None) so this stays resilient -- and correctly
+            # typed as str, matching _LogItem -- even if some future call
+            # site ever bypasses that injection.
+            trace_id = getattr(record, "trace_id", ZERO_TRACE_ID)
+            span_id = getattr(record, "span_id", ZERO_SPAN_ID)
 
             # Extract additional extra data (exclude known fields)
             known_fields = {
@@ -374,6 +403,8 @@ class SQLiteLogHandler(logging.Handler):
                 "user_id",
                 "request_path",
                 "alias",
+                "trace_id",
+                "span_id",
                 # Standard LogRecord attributes
                 "name",
                 "msg",
@@ -405,11 +436,13 @@ class SQLiteLogHandler(logging.Handler):
 
             # Remove dedicated-column fields from extra_data defensively —
             # they must never leak back into the JSON blob (Story #876 Phase C
-            # adds `alias` to this list).
+            # adds `alias`; Story #1676 AC2 adds `trace_id`/`span_id`).
             extra_data.pop("correlation_id", None)
             extra_data.pop("user_id", None)
             extra_data.pop("request_path", None)
             extra_data.pop("alias", None)
+            extra_data.pop("trace_id", None)
+            extra_data.pop("span_id", None)
 
             # Serialize extra data as JSON (or NULL if empty)
             extra_data_json: Optional[str] = None
@@ -426,6 +459,8 @@ class SQLiteLogHandler(logging.Handler):
                 request_path,
                 extra_data_json,
                 alias,
+                trace_id,
+                span_id,
             )
 
             # Enqueue for the writer thread — non-blocking on the common path.
@@ -497,7 +532,9 @@ class SQLiteLogHandler(logging.Handler):
                     # call insert_log_batch() — ONE call per drain cycle.
                     # node_id is injected by set_node_id() in cluster mode
                     # (Story #501 AC3).  alias carries the repo tag for
-                    # lifecycle-runner rows (Story #876 Phase C).
+                    # lifecycle-runner rows (Story #876 Phase C).  trace_id/
+                    # span_id carry OTEL log/trace correlation (Story #1676
+                    # AC2).
                     expanded = [
                         (
                             ts,
@@ -510,8 +547,22 @@ class SQLiteLogHandler(logging.Handler):
                             extra,
                             self._node_id,
                             alias,
+                            trace_id,
+                            span_id,
                         )
-                        for (ts, lvl, src, msg, cid, uid, rpath, extra, alias) in batch
+                        for (
+                            ts,
+                            lvl,
+                            src,
+                            msg,
+                            cid,
+                            uid,
+                            rpath,
+                            extra,
+                            alias,
+                            trace_id,
+                            span_id,
+                        ) in batch
                     ]
                     try:
                         backend_success = self._logs_backend.insert_log_batch(expanded)
@@ -522,10 +573,35 @@ class SQLiteLogHandler(logging.Handler):
                             self._record_backend_write_failure(len(batch))
                 else:
                     # Direct-SQLite path: executemany in ONE transaction.
-                    # alias is persisted to its own column (Story #876 Phase C).
+                    # alias/trace_id/span_id are each persisted to their own
+                    # column (Story #876 Phase C; Story #1676 AC2).
                     batch_params = [
-                        (ts, lvl, src, msg, cid, uid, rpath, extra, alias)
-                        for (ts, lvl, src, msg, cid, uid, rpath, extra, alias) in batch
+                        (
+                            ts,
+                            lvl,
+                            src,
+                            msg,
+                            cid,
+                            uid,
+                            rpath,
+                            extra,
+                            alias,
+                            trace_id,
+                            span_id,
+                        )
+                        for (
+                            ts,
+                            lvl,
+                            src,
+                            msg,
+                            cid,
+                            uid,
+                            rpath,
+                            extra,
+                            alias,
+                            trace_id,
+                            span_id,
+                        ) in batch
                     ]
 
                     def _do_batch(conn: sqlite3.Connection) -> None:
@@ -534,8 +610,8 @@ class SQLiteLogHandler(logging.Handler):
                             INSERT INTO logs
                                 (timestamp, level, source, message,
                                  correlation_id, user_id, request_path,
-                                 extra_data, alias)
-                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                 extra_data, alias, trace_id, span_id)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                             """,
                             batch_params,
                         )

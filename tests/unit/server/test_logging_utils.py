@@ -170,3 +170,57 @@ class TestInjectCorrelationId:
         inject_correlation_id(record)
 
         assert getattr(record, "correlation_id", None) is None
+
+
+class TestInjectTraceContext:
+    """Story #1676 AC2: inject_trace_context() is the shared helper that
+    async_logging.IdentityQueueHandler.prepare() and SQLiteLogHandler.emit()
+    call to populate the log store's trace_id/span_id columns from the
+    currently active OTEL span, mirroring inject_correlation_id()'s pattern
+    exactly."""
+
+    def test_sets_zero_values_when_no_active_span(self):
+        from code_indexer.server.logging_utils import inject_trace_context
+
+        record = _make_log_record()
+
+        inject_trace_context(record)
+
+        assert record.trace_id == "0" * 32
+        assert record.span_id == "0" * 16
+
+    def test_does_not_override_existing_trace_context(self):
+        from code_indexer.server.logging_utils import inject_trace_context
+
+        record = _make_log_record()
+        record.trace_id = "explicit-trace-id"
+        record.span_id = "explicit-span-id"
+
+        inject_trace_context(record)
+
+        assert record.trace_id == "explicit-trace-id"
+        assert record.span_id == "explicit-span-id"
+
+    def test_sets_real_ids_from_active_span(self):
+        from code_indexer.server.logging_utils import inject_trace_context
+        from code_indexer.server.telemetry import get_telemetry_manager
+        from code_indexer.server.telemetry.spans import create_span, reset_spans_state
+        from code_indexer.server.utils.config_manager import TelemetryConfig
+
+        config = TelemetryConfig(enabled=True, export_traces=True)
+        get_telemetry_manager(config)
+        try:
+            with create_span("test.inject_trace_context"):
+                record = _make_log_record()
+                inject_trace_context(record)
+
+                assert len(record.trace_id) == 32
+                assert len(record.span_id) == 16
+                # Must be genuinely different from the zero-values (a real,
+                # recording span was active) and valid hex.
+                assert record.trace_id != "0" * 32
+                assert record.span_id != "0" * 16
+                int(record.trace_id, 16)
+                int(record.span_id, 16)
+        finally:
+            reset_spans_state()

@@ -952,6 +952,8 @@ class LogsBackend(Protocol):
         extra_data: Optional[str] = None,
         node_id: Optional[str] = None,
         alias: Optional[str] = None,
+        trace_id: Optional[str] = None,
+        span_id: Optional[str] = None,
     ) -> None:
         """Insert a single log record.
 
@@ -967,6 +969,10 @@ class LogsBackend(Protocol):
             node_id: Optional cluster node identifier (NULL in standalone).
             alias: Optional repo alias (Story #876 Phase C). Tags lifecycle-runner
                 ERROR rows so the admin UI can filter logs by repo.
+            trace_id: Optional OTEL trace ID (Story #1676 AC2). 32-char hex,
+                or the documented zero-value when no span was active.
+            span_id: Optional OTEL span ID (Story #1676 AC2). 16-char hex,
+                or the documented zero-value when no span was active.
         """
         ...
 

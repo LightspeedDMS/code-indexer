@@ -383,6 +383,8 @@ def test_logs_sqlite_backend_insert_log_batch_one_transaction(tmp_path: Path) ->
                 None,
                 None,
                 None,
+                None,
+                None,
             )
             for i in range(100)
         ]

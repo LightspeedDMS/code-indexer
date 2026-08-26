@@ -1,38 +1,43 @@
 """
-Log Correlation with Trace Context (Story #701).
+Log Correlation with Trace Context (Story #701, extended by Story #1676 AC2).
 
-This module provides log handlers and formatters that inject OTEL trace
-context (trace_id, span_id) into Python logging records, enabling
-correlation between logs and traces in observability platforms.
+This module provides ``get_trace_context()``, which reads the currently
+active OTEL span (if any) and returns its trace/span IDs so they can be
+attached to Python logging records.
 
-Fields added to log records:
+Fields returned by get_trace_context():
 - trace_id (32-char hex) - OTEL trace ID
 - span_id (16-char hex) - OTEL span ID
 - dd.trace_id - Datadog-compatible trace ID (decimal)
 - dd.span_id - Datadog-compatible span ID (decimal)
 
+Story #1676 AC2 note: the columnar-storage approach (dedicated trace_id/
+span_id columns on the ``logs`` table in both the SQLite and PostgreSQL
+backends, populated via ``logging_utils.inject_trace_context()`` at the
+``IdentityQueueHandler.prepare()`` wiring point in ``async_logging.py``)
+supersedes the format-string-injection approach this module used to also
+provide via ``OTELLogFormatter``/``OTELLogHandler``. Those two classes were
+never wired into the production logging pipeline -- no ``lifespan.py`` call
+site (or anywhere else) ever attached either of them to a real logger -- so
+they have been removed as orphaned code (Messi Rule #12: wire it or don't
+write it). The real, wired mechanism for log/trace correlation is the
+columnar one. Use ``get_trace_context()`` directly whenever trace/span IDs
+are needed outside the logging pipeline (e.g. inside a formatter of your
+own, or a one-off log line).
+
 Usage:
-    from src.code_indexer.server.telemetry.log_handler import (
-        OTELLogFormatter,
-        OTELLogHandler,
+    from code_indexer.server.telemetry.log_handler import get_trace_context
+
+    context = get_trace_context()
+    logger.info(
+        "message trace_id=%s span_id=%s", context["trace_id"], context["span_id"]
     )
-
-    # Add formatter to existing handler
-    handler = logging.StreamHandler()
-    handler.setFormatter(OTELLogFormatter(
-        fmt="%(levelname)s - %(message)s - trace_id=%(trace_id)s"
-    ))
-
-    # Or use the handler directly
-    handler = OTELLogHandler()
-    logger.addHandler(handler)
 """
 
 from __future__ import annotations
 
 import logging
-import threading
-from typing import Dict, Optional
+from typing import Dict
 
 logger = logging.getLogger(__name__)
 
@@ -86,119 +91,3 @@ def get_trace_context() -> Dict[str, str]:
         "dd.trace_id": dd_trace_id,
         "dd.span_id": dd_span_id,
     }
-
-
-class OTELLogFormatter(logging.Formatter):
-    """
-    Log formatter that injects OTEL trace context into log records.
-
-    Adds trace_id, span_id, and Datadog-compatible fields to log records
-    before formatting, allowing them to be included in log output format.
-
-    Example format strings:
-        "%(levelname)s - %(message)s - trace_id=%(trace_id)s span_id=%(span_id)s"
-        "%(message)s [dd.trace_id=%(dd.trace_id)s dd.span_id=%(dd.span_id)s]"
-    """
-
-    def format(self, record: logging.LogRecord) -> str:
-        """
-        Format log record with trace context injected.
-
-        Args:
-            record: Log record to format
-
-        Returns:
-            Formatted log string with trace context
-        """
-        # Get current trace context
-        trace_context = get_trace_context()
-
-        # Inject trace context into record
-        record.trace_id = trace_context["trace_id"]
-        record.span_id = trace_context["span_id"]
-
-        # Use setattr for dotted attribute names (Datadog fields)
-        setattr(record, "dd.trace_id", trace_context["dd.trace_id"])
-        setattr(record, "dd.span_id", trace_context["dd.span_id"])
-
-        # Call parent formatter
-        return super().format(record)
-
-
-class OTELLogHandler(logging.Handler):
-    """
-    Log handler that ensures trace context is available in log records.
-
-    This handler can be used alongside other handlers to ensure trace
-    context is injected into all log records processed by it.
-
-    The handler uses OTELLogFormatter by default if no formatter is set.
-
-    Re-entry guard (Bug #731 sibling risk): get_trace_context() may call
-    logger.debug() on exception, which re-enters emit() on the same thread.
-    A per-instance threading.local() guard silently drops recursive calls.
-    """
-
-    def __init__(
-        self,
-        level: int = logging.NOTSET,
-        formatter: Optional[logging.Formatter] = None,
-    ) -> None:
-        """
-        Initialize OTELLogHandler.
-
-        Args:
-            level: Logging level for the handler
-            formatter: Optional formatter (defaults to OTELLogFormatter)
-        """
-        super().__init__(level)
-        # Per-instance thread-local re-entry guard (Bug #731 sibling risk).
-        # Instance-owned so multiple OTELLogHandler instances do not share
-        # guard state. self._emit_guard.active is True while this thread
-        # is already inside this handler's emit().
-        self._emit_guard = threading.local()
-
-        if formatter is None:
-            # Default format includes trace context
-            self.setFormatter(
-                OTELLogFormatter(
-                    fmt="%(asctime)s - %(name)s - %(levelname)s - %(message)s "
-                    "[trace_id=%(trace_id)s span_id=%(span_id)s]"
-                )
-            )
-        else:
-            self.setFormatter(formatter)
-
-    def emit(self, record: logging.LogRecord) -> None:
-        """
-        Emit a log record with trace context.
-
-        Re-entry guard: if this thread is already inside emit(), silently drop
-        the recursive call to prevent infinite recursion caused by
-        get_trace_context() calling logger.debug() on exception.
-
-        This handler injects trace context but doesn't output directly.
-        It's designed to be used with a formatter that includes trace fields.
-
-        Args:
-            record: Log record to emit
-        """
-        if getattr(self._emit_guard, "active", False):
-            return
-        self._emit_guard.active = True
-        try:
-            # Ensure trace context is in record
-            if not hasattr(record, "trace_id"):
-                trace_context = get_trace_context()
-                record.trace_id = trace_context["trace_id"]
-                record.span_id = trace_context["span_id"]
-                setattr(record, "dd.trace_id", trace_context["dd.trace_id"])
-                setattr(record, "dd.span_id", trace_context["dd.span_id"])
-
-            # Format the record (trace context injection happens in formatter)
-            self.format(record)
-
-        except Exception:
-            self.handleError(record)
-        finally:
-            self._emit_guard.active = False
