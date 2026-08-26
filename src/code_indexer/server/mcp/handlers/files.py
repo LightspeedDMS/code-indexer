@@ -154,6 +154,10 @@ def _start_auto_watch_if_needed(
             if not activated_repo_manager.user_has_activated_repo(
                 user.username, repository_alias
             ):
+                # Bug #1683 round 3; round 2's code 220 collided with 9
+                # pre-existing list_pull_requests sites and used an
+                # is_dir() check that a prior errant run's own side
+                # effects could permanently satisfy.
                 logger.warning(
                     format_error_log(
                         "MCP-GENERAL-223",

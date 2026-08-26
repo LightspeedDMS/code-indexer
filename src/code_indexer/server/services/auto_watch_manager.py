@@ -164,23 +164,42 @@ class AutoWatchManager:
                 config = config_manager.get_config()
 
                 # Defense-in-depth: even with a real config file found
-                # up-tree, verify it actually describes repo_path (equal to
-                # it, or repo_path nested under it) rather than some
-                # unrelated ancestor directory a stray config happens to
-                # point at after Bug #1033's on-disk reconciliation.
+                # up-tree, verify it actually describes repo_path exactly.
+                # This MUST be strict equality, not "equal-or-ancestor":
+                # the only production caller passes the activated-repo
+                # root, whose own config lives at
+                # `<repo_path>/.code-indexer/`, so codebase_dir ==
+                # repo_path always holds for every legitimate case. Any
+                # wider check that permits codebase_dir to be a strict
+                # ANCESTOR of repo_path is not a safe relaxation -- it is
+                # precisely the unsafe direction: `find_config_path` walks
+                # UP the tree from repo_path, so a repo lacking its own
+                # config.json but sitting under an ancestor that happens
+                # to carry one (e.g. the server data root itself) would
+                # pass an ancestor-permitting check and then have
+                # `DaemonWatchManager` watch/index the ANCESTOR instead of
+                # repo_path (Bug #1683 round 4 -- reproduced live: an
+                # ancestor `.code-indexer/config.json` whose codebase_dir
+                # pointed at the server data directory let a watch request
+                # for an activated repo silently index the entire
+                # server-data tree, including cidx_server.db and every
+                # golden repo). This guard is reachable two ways in
+                # practice: (1) the `CODEBASE_DIR` env-var override path in
+                # `create_with_backtrack`, which ignores repo_path entirely
+                # and can point anywhere; and (2) exactly the ancestor
+                # shape just described, whenever repo_path itself has no
+                # config of its own.
                 resolved_codebase_dir = Path(config.codebase_dir).resolve()
                 resolved_repo_path = Path(repo_path).resolve()
-                if resolved_repo_path != resolved_codebase_dir and (
-                    not resolved_repo_path.is_relative_to(resolved_codebase_dir)
-                ):
+                if resolved_repo_path != resolved_codebase_dir:
                     logger.warning(
                         format_error_log(
                             "APP-GENERAL-069",
                             f"Refusing to start watch for {repo_path}: "
                             f"resolved config.codebase_dir "
-                            f"({resolved_codebase_dir}) does not point at or "
-                            f"contain the requested repo path "
-                            f"(Bug #1683 round 3)",
+                            f"({resolved_codebase_dir}) does not exactly "
+                            f"match the requested repo path "
+                            f"(Bug #1683 round 4)",
                             extra={"correlation_id": get_correlation_id()},
                         )
                     )

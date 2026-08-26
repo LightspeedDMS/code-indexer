@@ -2812,14 +2812,23 @@ ERROR_REGISTRY: Dict[str, ErrorDefinition] = {
         code="APP-GENERAL-069",
         description=(
             "AutoWatchManager.start_watch refused: resolved config."
-            "codebase_dir does not point at (or contain) the requested "
-            "repo path"
+            "codebase_dir does not exactly match the requested repo path"
         ),
         severity=Severity.WARNING,
         action=(
-            "Check for a stray/foreign .code-indexer/config.json up-tree "
-            "from the repo path that resolves to an unrelated directory "
-            "(Bug #1683 round 3)"
+            "Reachable two ways: (1) a CODEBASE_DIR env-var override "
+            "pointing config discovery at an unrelated directory, "
+            "ignoring repo_path entirely; or (2) repo_path has no "
+            ".code-indexer/config.json of its own and ConfigManager's "
+            "directory walk found only an ANCESTOR's config instead -- "
+            "strict equality is required (never equal-or-ancestor) "
+            "because indexing/watching would otherwise target the "
+            "ancestor, not the repo (Bug #1683 round 4). A stored "
+            "foreign codebase_dir surviving on-disk reconciliation "
+            "(Bug #1033) is NOT a realistic trigger: config.py forces "
+            "codebase_dir = config_path.resolve().parent.parent on every "
+            "load, so a config's codebase_dir cannot diverge from where "
+            "the config.json actually sits"
         ),
     ),
     "AUTH-GENERAL-010": ErrorDefinition(
@@ -3868,7 +3877,7 @@ ERROR_REGISTRY: Dict[str, ErrorDefinition] = {
     ),
     "MCP-GENERAL-220": ErrorDefinition(
         code="MCP-GENERAL-220",
-        description="list_pull_requests failed",
+        description="pull_requests handler failed (list/get/comments)",
         severity=Severity.ERROR,
         action="Check forge token, repository remote URL, and PR/MR state filters",
     ),
@@ -3884,10 +3893,7 @@ ERROR_REGISTRY: Dict[str, ErrorDefinition] = {
             "ActivatedRepoManager.user_has_activated_repo, not filesystem "
             "existence, so an orphan directory from a partially-failed "
             "activation cannot pass the guard) and not stale/deactivated on "
-            "another cluster node (Bug #1683 round 3; round 2's code 220 "
-            "collided with 9 pre-existing list_pull_requests sites and used "
-            "an is_dir() check that a prior errant run's own side effects "
-            "could permanently satisfy)"
+            "another cluster node"
         ),
     ),
     "QUERY-GENERAL-008": ErrorDefinition(
