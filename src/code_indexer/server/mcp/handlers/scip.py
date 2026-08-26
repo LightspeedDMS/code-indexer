@@ -58,11 +58,10 @@ _MIN_AUDIT_LIMIT = 1
 _MAX_AUDIT_LIMIT = 1000
 
 # Depth bounds shared by scip_impact, scip_dependents, and
-# scip_dependencies (Bug #1599 / Bug #1602 / Bug #1604). scip_impact
-# still clamps an out-of-range depth to this range; scip_dependents and
-# scip_dependencies now REJECT (success: False) an out-of-range depth
-# instead of clamping, matching scip_callchain's loud-reject contract
-# (Bug #1614).
+# scip_dependencies (Bug #1599 / Bug #1602 / Bug #1604). All three now
+# REJECT (success: False) an out-of-range depth instead of clamping,
+# matching scip_callchain's loud-reject contract (Bug #1614 for
+# dependents/dependencies, Bug #1672 for impact).
 _MIN_SCIP_DEPTH = 1
 _MAX_SCIP_DEPTH = 10
 
