@@ -173,10 +173,52 @@ class TestMockPatchRoundTrip:
 
         name = "golden_repo_manager"
 
+        # Bug #1657: force _ensure_initialized() to have run at least once
+        # in THIS process (via a genuine lazy attribute access, `app`)
+        # BEFORE reading `original` below. This guarantees _initialized is
+        # already True by the time the mock.patch round trip executes, so
+        # its internal getattr()/hasattr() fallback calls are guaranteed
+        # no-ops with respect to _ensure_initialized() and can never
+        # silently re-run create_app() (which would overwrite the
+        # _lazy_values resync performed a few lines down with yet another,
+        # unrelated GoldenRepoManager instance -- observed directly while
+        # diagnosing this bug: _initialized was still False at test start
+        # in a warm process where only OTHER tests had called create_app()
+        # directly without ever touching app_module.app, so mock.patch's
+        # own fallback getattr() triggered the first-ever
+        # _ensure_initialized(), clobbering the resync below).
+        _ = app_module.app
+
         # Force real initialization (if not already done in this process)
         # so we know the genuine baseline value to compare against later.
         original = getattr(app_module, name)
         assert original is not None
+
+        # Dozens of OTHER server test files legitimately call create_app()
+        # directly (e.g. test_auth_endpoints.py building a fresh per-test
+        # FastAPI app) to get their own isolated app instance. Each such
+        # call reassigns app_module's globals() for every _LAZY_INIT_ATTRS
+        # name via `global golden_repo_manager; ...` WITHOUT going through
+        # _ensure_initialized() -- so it never refreshes _lazy_values,
+        # which (now that _initialized is guaranteed True above) is
+        # snapshotted exactly ONCE, at the very first _ensure_initialized()
+        # call for the whole worker process's lifetime. In a warm, shared
+        # pytest process this lets globals()[name] (what `original` above
+        # just read) silently diverge from _lazy_values[name] (the
+        # mock.patch fallback this test exercises) depending purely on
+        # which other tests happened to run earlier in the SAME process --
+        # reproduced directly by running this test alongside
+        # test_auth_endpoints.py, which failed with two distinct
+        # GoldenRepoManager instances. That divergence is a same-process
+        # test-ordering artifact, not a production bug (production calls
+        # create_app() exactly once) and not genuine pytest-xdist
+        # concurrency (workers are separate processes and share no
+        # memory). Resync the snapshot to what this test just observed so
+        # its own assertion is discriminating regardless of execution
+        # order, restoring the prior snapshot value afterward.
+        had_lazy_value = name in app_module._lazy_values
+        saved_lazy_value = app_module._lazy_values.get(name)
+        app_module._lazy_values[name] = original
 
         # Reproduce the exact Blocker #2 precondition: the name is absent
         # from __dict__ at patch time (e.g. because create_app() ran via
@@ -207,6 +249,10 @@ class TestMockPatchRoundTrip:
                 app_module.__dict__[name] = saved_local
             else:
                 app_module.__dict__.pop(name, None)
+            if had_lazy_value:
+                app_module._lazy_values[name] = saved_lazy_value
+            else:
+                app_module._lazy_values.pop(name, None)
 
     def test_mock_patch_teardown_raises_no_exception(self) -> None:
         """Explicit no-exception assertion for the exact teardown sequence
