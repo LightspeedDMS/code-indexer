@@ -2795,6 +2795,33 @@ ERROR_REGISTRY: Dict[str, ErrorDefinition] = {
         severity=Severity.WARNING,
         action="TODO",
     ),
+    "APP-GENERAL-068": ErrorDefinition(
+        code="APP-GENERAL-068",
+        description=(
+            "AutoWatchManager.start_watch refused: no .code-indexer/"
+            "config.json found for the repo path or any parent directory"
+        ),
+        severity=Severity.WARNING,
+        action=(
+            "Verify the repo path is a real, indexed repository -- refusing "
+            "prevents ConfigManager from silently defaulting codebase_dir "
+            "onto the server process's CWD (Bug #1683 round 3)"
+        ),
+    ),
+    "APP-GENERAL-069": ErrorDefinition(
+        code="APP-GENERAL-069",
+        description=(
+            "AutoWatchManager.start_watch refused: resolved config."
+            "codebase_dir does not point at (or contain) the requested "
+            "repo path"
+        ),
+        severity=Severity.WARNING,
+        action=(
+            "Check for a stray/foreign .code-indexer/config.json up-tree "
+            "from the repo path that resolves to an unrelated directory "
+            "(Bug #1683 round 3)"
+        ),
+    ),
     "AUTH-GENERAL-010": ErrorDefinition(
         code="AUTH-GENERAL-010",
         description="TODO",
@@ -3841,11 +3868,26 @@ ERROR_REGISTRY: Dict[str, ErrorDefinition] = {
     ),
     "MCP-GENERAL-220": ErrorDefinition(
         code="MCP-GENERAL-220",
-        description="Auto-watch skipped: resolved repository path does not exist",
+        description="list_pull_requests failed",
+        severity=Severity.ERROR,
+        action="Check forge token, repository remote URL, and PR/MR state filters",
+    ),
+    "MCP-GENERAL-223": ErrorDefinition(
+        code="MCP-GENERAL-223",
+        description=(
+            "Auto-watch skipped: repository_alias is not a registered "
+            "activated repo, or its resolved path does not exist"
+        ),
         severity=Severity.WARNING,
         action=(
-            "Verify repository_alias is activated and not stale/deactivated "
-            "on another cluster node (Bug #1683 round 2)"
+            "Verify repository_alias is activated (checked via "
+            "ActivatedRepoManager.user_has_activated_repo, not filesystem "
+            "existence, so an orphan directory from a partially-failed "
+            "activation cannot pass the guard) and not stale/deactivated on "
+            "another cluster node (Bug #1683 round 3; round 2's code 220 "
+            "collided with 9 pre-existing list_pull_requests sites and used "
+            "an is_dir() check that a prior errant run's own side effects "
+            "could permanently satisfy)"
         ),
     ),
     "QUERY-GENERAL-008": ErrorDefinition(

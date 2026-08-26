@@ -92,6 +92,7 @@ class TestStartAutoWatchResolvesFromAppState:
         Path(correct_repo_path).mkdir(parents=True)
         sentinel_manager = MagicMock(name="sentinel-activated-repo-manager")
         sentinel_manager.get_activated_repo_path.return_value = correct_repo_path
+        sentinel_manager.user_has_activated_repo.return_value = True
         app_module.app.state.activated_repo_manager = sentinel_manager
 
         # Patch the class itself to raise if constructed -- proves the
@@ -115,6 +116,9 @@ class TestStartAutoWatchResolvesFromAppState:
                 )
 
         # Sentinel manager was consulted with the right args.
+        sentinel_manager.user_has_activated_repo.assert_called_once_with(
+            "poweruser", "some-activated-repo"
+        )
         sentinel_manager.get_activated_repo_path.assert_called_once_with(
             username="poweruser", user_alias="some-activated-repo"
         )
@@ -168,17 +172,40 @@ def _make_real_activated_repo_manager(tmp_path) -> ActivatedRepoManager:
     )
 
 
-class TestStartAutoWatchSkipsNonExistentResolvedPath:
-    """Bug #1683 (round 2): a resolved repo path that does not exist on
-    disk must never reach `auto_watch_manager.start_watch`.
+def _register_activated_repo(
+    manager: ActivatedRepoManager, username: str, user_alias: str
+) -> None:
+    """Write real activation metadata so `user_has_activated_repo` sees it.
 
-    Without this guard, `ConfigManager.create_with_backtrack` finds no
+    Mirrors the on-disk shape `ActivatedRepoManager.activate_repository`
+    produces (a `{alias}_metadata.json` file under the user's directory),
+    without paying for the full activation workflow (golden repo lookup,
+    CoW clone, background job).
+    """
+    manager._save_metadata(
+        username, user_alias, {"user_alias": user_alias, "golden_repo_alias": "src"}
+    )
+
+
+class TestStartAutoWatchSkipsNonExistentResolvedPath:
+    """Bug #1683 (round 2, superseded by round 3): a resolved repo path
+    that does not exist on disk must never reach
+    `auto_watch_manager.start_watch`.
+
+    Without a guard, `ConfigManager.create_with_backtrack` finds no
     config up-tree for the non-existent path and defaults `codebase_dir`
     to `"."`, which resolves against the SERVER PROCESS's CWD --
     silently watching/indexing the server's own project tree for any
     bad/typo'd/stale `repository_alias` (confirmed live against the
     pre-fix code: a non-existent path's ConfigManager-backtracked
     `codebase_dir` resolved to the code-indexer project tree itself).
+
+    Round 3 replaced the primary guard with
+    `user_has_activated_repo` (see `TestStartAutoWatchSkipsExistsButUnindexedOrphan`
+    and `TestStartAutoWatchSelfDefeatingGuardClosed` below for the cases
+    that motivated the change); the `is_dir()` check exercised here is
+    retained as defense-in-depth and still fires for a genuinely
+    non-existent alias since it is unregistered too.
     """
 
     def test_skips_auto_watch_when_resolved_path_does_not_exist(
@@ -236,7 +263,7 @@ class TestStartAutoWatchSkipsNonExistentResolvedPath:
                 )
 
         assert any(
-            "MCP-GENERAL-220" in record.message
+            "MCP-GENERAL-223" in record.message
             and "never-activated-typo" in record.message
             for record in caplog.records
         )
@@ -256,6 +283,7 @@ class TestStartAutoWatchSkipsNonExistentResolvedPath:
         app_module.app.state.activated_repo_manager = real_manager
 
         existing_alias = "genuinely-activated-repo"
+        _register_activated_repo(real_manager, "poweruser", existing_alias)
         resolved_path = real_manager.get_activated_repo_path(
             username="poweruser", user_alias=existing_alias
         )
@@ -273,3 +301,148 @@ class TestStartAutoWatchSkipsNonExistentResolvedPath:
             )
 
         mock_watch_manager.start_watch.assert_called_once_with(resolved_path)
+
+
+class TestStartAutoWatchSkipsExistsButUnindexedOrphan:
+    """Bug #1683 (round 3, BLOCKER 1): an activated-repo directory that
+    EXISTS on disk but was never actually activated (an orphan clone from
+    a partially-failed activation, or a repo deactivated on another
+    cluster node) must still be refused -- matching the real dev-server
+    `admin/tstwiki` shape (directory exists, no registry entry).
+
+    Round 2's `Path.is_dir()` guard sailed straight through this case
+    (`is_dir: True`) and still reached `auto_watch_manager.start_watch`
+    with the server's own CWD as the eventual `codebase_dir`. The round-3
+    guard (`user_has_activated_repo`) is registry-backed, not
+    filesystem-backed, so it correctly refuses regardless of what exists
+    on disk at the computed path.
+    """
+
+    def test_skips_auto_watch_for_orphan_directory_that_exists_but_is_unregistered(
+        self, app_state_activated_repo_manager_slot, tmp_path
+    ) -> None:
+        from code_indexer.server.mcp.handlers.files import (
+            _start_auto_watch_if_needed,
+        )
+
+        app_module = app_state_activated_repo_manager_slot
+        real_manager = _make_real_activated_repo_manager(tmp_path)
+        app_module.app.state.activated_repo_manager = real_manager
+
+        orphan_alias = "tstwiki"
+        orphan_path = real_manager.get_activated_repo_path(
+            username="admin", user_alias=orphan_alias
+        )
+        # The orphan directory genuinely EXISTS on disk (unlike round 2's
+        # non-existent-path scenario) -- e.g. left behind by a
+        # partially-failed activation -- but no `{alias}_metadata.json`
+        # was ever written, so it is NOT in the activation registry.
+        Path(orphan_path).mkdir(parents=True, exist_ok=True)
+        assert Path(orphan_path).is_dir()  # sanity: is_dir() alone would pass
+        assert not real_manager.user_has_activated_repo("admin", orphan_alias)
+
+        with patch(
+            "code_indexer.server.services.auto_watch_manager.auto_watch_manager"
+        ) as mock_watch_manager:
+            mock_watch_manager.start_watch = MagicMock()
+
+            _start_auto_watch_if_needed(
+                repository_alias=orphan_alias,
+                user=User(
+                    username="admin",
+                    password_hash="hashed_password",
+                    role=UserRole.ADMIN,
+                    email="admin@example.com",
+                    created_at=datetime.now(),
+                ),
+                error_code="TEST-AUTO-WATCH-1683-ORPHAN",
+            )
+
+        mock_watch_manager.start_watch.assert_not_called()
+
+    def test_logs_warning_for_orphan_directory(
+        self, app_state_activated_repo_manager_slot, tmp_path, caplog
+    ) -> None:
+        from code_indexer.server.mcp.handlers.files import (
+            _start_auto_watch_if_needed,
+        )
+
+        app_module = app_state_activated_repo_manager_slot
+        real_manager = _make_real_activated_repo_manager(tmp_path)
+        app_module.app.state.activated_repo_manager = real_manager
+
+        orphan_alias = "tstwiki"
+        orphan_path = real_manager.get_activated_repo_path(
+            username="admin", user_alias=orphan_alias
+        )
+        Path(orphan_path).mkdir(parents=True, exist_ok=True)
+
+        with patch(
+            "code_indexer.server.services.auto_watch_manager.auto_watch_manager"
+        ) as mock_watch_manager:
+            mock_watch_manager.start_watch = MagicMock()
+
+            with caplog.at_level("WARNING"):
+                _start_auto_watch_if_needed(
+                    repository_alias=orphan_alias,
+                    user=_make_user(),
+                    error_code="TEST-AUTO-WATCH-1683-ORPHAN-LOG",
+                )
+
+        assert any(
+            "MCP-GENERAL-223" in record.message and orphan_alias in record.message
+            for record in caplog.records
+        )
+
+
+class TestStartAutoWatchSelfDefeatingGuardClosed:
+    """Bug #1683 (round 3, BLOCKER 2): the round-2 `is_dir()` guard was
+    self-defeating -- the FIRST errant `start_watch` call for a
+    non-existent alias materializes `<repo_path>/.code-indexer/index` as
+    a side effect (via `BackendFactory...get_vector_store_client()`,
+    downstream of `DaemonWatchManager.start_watch`), so `is_dir()` then
+    returns True on every subsequent call and the guard permanently
+    disables itself for that alias.
+
+    This test simulates exactly that residue -- a `.code-indexer/index`
+    directory pre-created under an otherwise-unregistered alias -- and
+    proves the round-3 guard (registry-backed, not filesystem-backed)
+    still correctly refuses, since it does not depend on any on-disk
+    state a prior errant run could have polluted.
+    """
+
+    def test_refuses_even_when_prior_errant_run_created_index_directory(
+        self, app_state_activated_repo_manager_slot, tmp_path
+    ) -> None:
+        from code_indexer.server.mcp.handlers.files import (
+            _start_auto_watch_if_needed,
+        )
+
+        app_module = app_state_activated_repo_manager_slot
+        real_manager = _make_real_activated_repo_manager(tmp_path)
+        app_module.app.state.activated_repo_manager = real_manager
+
+        alias = "polluted-by-prior-errant-run"
+        repo_path = real_manager.get_activated_repo_path(
+            username="poweruser", user_alias=alias
+        )
+        # Simulate the side effect a prior errant `start_watch` call would
+        # have left behind -- a real .code-indexer/index directory -- with
+        # NO activation metadata ever written (the alias was never truly
+        # activated).
+        (Path(repo_path) / ".code-indexer" / "index").mkdir(parents=True)
+        assert Path(repo_path).is_dir()  # is_dir() alone is now satisfied
+        assert not real_manager.user_has_activated_repo("poweruser", alias)
+
+        with patch(
+            "code_indexer.server.services.auto_watch_manager.auto_watch_manager"
+        ) as mock_watch_manager:
+            mock_watch_manager.start_watch = MagicMock()
+
+            _start_auto_watch_if_needed(
+                repository_alias=alias,
+                user=_make_user(),
+                error_code="TEST-AUTO-WATCH-1683-SELF-DEFEATING",
+            )
+
+        mock_watch_manager.start_watch.assert_not_called()

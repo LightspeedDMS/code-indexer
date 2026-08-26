@@ -129,7 +129,69 @@ class AutoWatchManager:
             try:
                 # Initialize configuration
                 config_manager = ConfigManager.create_with_backtrack(Path(repo_path))
+
+                # Bug #1683 (round 3): create_with_backtrack() unconditionally
+                # returns a ConfigManager even when NO config was found for
+                # repo_path (or any parent) -- it silently defaults
+                # config_path to `{start_dir}/.code-indexer/config.json`,
+                # which does not exist. get_config()/load() then falls back
+                # to a bare `Config()` whose codebase_dir is the unresolved
+                # relative `Path(".")`, which resolves against the SERVER
+                # PROCESS's CWD -- not repo_path. Every caller of this
+                # primitive (files.py's 3 handlers today, any future caller
+                # tomorrow) was exposed to this trap; guarding one caller is
+                # not sufficient (Messi Rule 13 anti-silent-failure: check
+                # the return before trusting it; Messi Rule 2 anti-fallback:
+                # fail loud instead of substituting a fallback location).
+                if not config_manager.config_path.exists():
+                    logger.warning(
+                        format_error_log(
+                            "APP-GENERAL-068",
+                            f"Refusing to start watch for {repo_path}: no "
+                            f".code-indexer/config.json found for this path "
+                            f"or any parent directory (Bug #1683 round 3)",
+                            extra={"correlation_id": get_correlation_id()},
+                        )
+                    )
+                    return {
+                        "status": "error",
+                        "message": (
+                            f"No .code-indexer config found for {repo_path}; "
+                            f"refusing to start watch"
+                        ),
+                    }
+
                 config = config_manager.get_config()
+
+                # Defense-in-depth: even with a real config file found
+                # up-tree, verify it actually describes repo_path (equal to
+                # it, or repo_path nested under it) rather than some
+                # unrelated ancestor directory a stray config happens to
+                # point at after Bug #1033's on-disk reconciliation.
+                resolved_codebase_dir = Path(config.codebase_dir).resolve()
+                resolved_repo_path = Path(repo_path).resolve()
+                if resolved_repo_path != resolved_codebase_dir and (
+                    not resolved_repo_path.is_relative_to(resolved_codebase_dir)
+                ):
+                    logger.warning(
+                        format_error_log(
+                            "APP-GENERAL-069",
+                            f"Refusing to start watch for {repo_path}: "
+                            f"resolved config.codebase_dir "
+                            f"({resolved_codebase_dir}) does not point at or "
+                            f"contain the requested repo path "
+                            f"(Bug #1683 round 3)",
+                            extra={"correlation_id": get_correlation_id()},
+                        )
+                    )
+                    return {
+                        "status": "error",
+                        "message": (
+                            f"config.codebase_dir ({resolved_codebase_dir}) "
+                            f"does not match repo path {repo_path}; refusing "
+                            f"to start watch"
+                        ),
+                    }
 
                 # Create daemon watch manager
                 watch_instance = DaemonWatchManager()

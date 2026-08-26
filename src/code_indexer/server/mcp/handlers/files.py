@@ -107,8 +107,35 @@ def _start_auto_watch_if_needed(
     create_with_backtrack` finds no config up-tree and defaults
     `codebase_dir` to `"."`, which resolves against the SERVER PROCESS's
     CWD -- silently watching/indexing the server's own project tree
-    instead of failing loudly. Fixed with an explicit existence guard
-    below (Messi Rule 2: fail loud, never substitute a fallback location).
+    instead of failing loudly. Round 2 added a `Path.is_dir()` existence
+    guard, but this was REJECTED in review on two independently-reproduced
+    grounds: (1) an activated-repo directory that EXISTS but was never
+    indexed (an orphan clone from a partially-failed activation, or a repo
+    deactivated on another cluster node -- the real-world `admin/tstwiki`
+    shape) sails straight through `is_dir()` and still lands on the CWD
+    fallback; (2) the guard is self-defeating -- for a genuinely
+    non-existent alias, the FIRST errant `start_watch` call (via
+    `BackendFactory...get_vector_store_client()`, downstream of
+    `DaemonWatchManager.start_watch`) materializes
+    `<repo_path>/.code-indexer/index` as a side effect, so `is_dir()`
+    returns True on every subsequent call and the guard permanently
+    disables itself for that alias.
+
+    Bug #1683 (round 3): replaced the filesystem probe with the
+    established, registry/DB-backed authority already used at 10+ other
+    sites in this handler package --
+    `activated_repo_manager.user_has_activated_repo(username, alias)`
+    (`activated_repo_manager.py`, Story #1039) -- which answers "is this a
+    real, currently-activated repo for this user" rather than "does
+    something exist on disk at the path we'd compute", and is therefore
+    immune to on-disk residue left by any prior errant run. The bare
+    `Path(repo_path).is_dir()` check is retained as defense-in-depth (it
+    also covers the `is_write_exception` branch, which
+    `user_has_activated_repo` does not), but no longer the primary guard
+    for the activated-repo branch (Messi Rule 2: fail loud, never
+    substitute a fallback location). The root-cause fix for EVERY caller
+    of `AutoWatchManager.start_watch` (not just this one) lives in
+    `services/auto_watch_manager.py` itself.
     """
     from code_indexer.server.services.file_crud_service import file_crud_service
     from code_indexer.server.services.auto_watch_manager import auto_watch_manager
@@ -124,17 +151,32 @@ def _start_auto_watch_if_needed(
                 raise RuntimeError(
                     "activated_repo_manager not initialized on app.state"
                 )
+            if not activated_repo_manager.user_has_activated_repo(
+                user.username, repository_alias
+            ):
+                logger.warning(
+                    format_error_log(
+                        "MCP-GENERAL-223",
+                        f"Skipping auto-watch for {repository_alias}: not a "
+                        f"registered activated repo for {user.username} -- "
+                        f"refusing an orphan/stale directory that a "
+                        f"filesystem-existence check alone cannot detect "
+                        f"(Bug #1683 round 3)",
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                )
+                return
             repo_path = activated_repo_manager.get_activated_repo_path(
                 username=user.username, user_alias=repository_alias
             )
         if not Path(repo_path).is_dir():
             logger.warning(
                 format_error_log(
-                    "MCP-GENERAL-220",
+                    "MCP-GENERAL-223",
                     f"Skipping auto-watch for {repository_alias}: resolved "
                     f"path does not exist ({repo_path}) -- refusing to let "
                     f"ConfigManager backtracking fall back to the server "
-                    f"CWD (Bug #1683 round 2)",
+                    f"CWD (Bug #1683 round 2/3)",
                     extra={"correlation_id": get_correlation_id()},
                 )
             )
