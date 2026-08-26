@@ -134,7 +134,10 @@ class TestGetLogsExposesTraceSpanClusterPath:
     ) -> None:
         from code_indexer.server.routes.admin_api import get_logs
         from code_indexer.server.services.sqlite_log_handler import SQLiteLogHandler
-        from code_indexer.server.telemetry import get_telemetry_manager
+        from code_indexer.server.telemetry import (
+            get_telemetry_manager,
+            reset_telemetry_manager,
+        )
         from code_indexer.server.telemetry.spans import create_span, reset_spans_state
         from code_indexer.server.utils.config_manager import TelemetryConfig
 
@@ -151,6 +154,7 @@ class TestGetLogsExposesTraceSpanClusterPath:
         finally:
             handler.close()
             reset_spans_state()
+            reset_telemetry_manager()
 
         request = _FakeRequest()
         request.app.state.log_db_path = str(local_logs_db)

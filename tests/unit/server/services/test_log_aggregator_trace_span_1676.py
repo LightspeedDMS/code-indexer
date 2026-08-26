@@ -61,7 +61,10 @@ class TestLogAggregatorServiceLocalPathTraceSpan:
         from code_indexer.server.services.log_aggregator_service import (
             LogAggregatorService,
         )
-        from code_indexer.server.telemetry import get_telemetry_manager
+        from code_indexer.server.telemetry import (
+            get_telemetry_manager,
+            reset_telemetry_manager,
+        )
         from code_indexer.server.telemetry.spans import create_span, reset_spans_state
         from code_indexer.server.utils.config_manager import TelemetryConfig
 
@@ -74,6 +77,7 @@ class TestLogAggregatorServiceLocalPathTraceSpan:
                 _write_one_log_row(db_path, "aggregator active-span line")
         finally:
             reset_spans_state()
+            reset_telemetry_manager()
 
         service = LogAggregatorService(db_path)
         result = service.query(search="aggregator active-span line")

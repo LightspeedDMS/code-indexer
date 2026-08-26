@@ -36,10 +36,7 @@ Usage:
 
 from __future__ import annotations
 
-import logging
 from typing import Dict
-
-logger = logging.getLogger(__name__)
 
 # Zero values for when no trace context is available
 ZERO_TRACE_ID = "0" * 32
@@ -81,9 +78,24 @@ def get_trace_context() -> Dict[str, str]:
     except ImportError:
         # OpenTelemetry not available
         pass
-    except Exception as e:
-        # Log at debug level to avoid noise
-        logger.debug(f"Failed to get trace context: {e}")
+    except Exception:
+        # Deliberately swallow WITHOUT logging (#1676 AC2 round 2 code
+        # review, REQUIRED FIX 1): get_trace_context() is invoked from
+        # logging_utils.inject_trace_context(), which async_logging's
+        # IdentityQueueHandler.prepare() calls for EVERY record on the root
+        # logger. A logger.debug(...) call here would re-enter this same
+        # code path on the same thread whenever the root logger is at DEBUG
+        # (an operator troubleshooting, or any caplog.set_level(DEBUG)
+        # test), causing unbounded same-thread recursion -- confirmed live:
+        # a single logger.info() call produced 109 recursive invocations of
+        # the underlying OTEL call before this fix. OTELLogHandler used to
+        # carry a threading.local re-entry guard for exactly this hazard,
+        # but that class was removed as dead code in the same commit that
+        # wired get_trace_context() into the always-on root handler. Falling
+        # back to the zero-value trace/span IDs (this function's documented
+        # contract, unchanged) without reporting the failure is the simplest
+        # fix -- this diagnostic line carried near-zero value.
+        pass
 
     return {
         "trace_id": trace_id,

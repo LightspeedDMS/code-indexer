@@ -97,9 +97,19 @@ def _enable_real_telemetry() -> None:
 
 
 def _reset_spans() -> None:
+    """Reset both span state and the telemetry manager singleton.
+
+    #1676 AC2 round 2 code review REQUIRED FIX 2: _enable_real_telemetry()
+    installs a process-wide TelemetryManager singleton (real OTLP gRPC
+    exporter). Resetting only reset_spans_state() left that singleton alive
+    for every subsequent test in the same pytest process, causing exporter
+    retry noise against a dead localhost:4317 to leak into unrelated tests.
+    """
+    from code_indexer.server.telemetry import reset_telemetry_manager
     from code_indexer.server.telemetry.spans import reset_spans_state
 
     reset_spans_state()
+    reset_telemetry_manager()
 
 
 class TestAdminLogsQueryLocalPathTraceSpan:

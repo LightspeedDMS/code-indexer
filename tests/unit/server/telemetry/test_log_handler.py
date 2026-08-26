@@ -12,6 +12,11 @@ columnar trace_id/span_id storage approach -- see:
 All tests use real components following MESSI Rule #1: No mocks.
 """
 
+import logging
+import queue
+import threading
+from unittest.mock import patch
+
 import pytest
 from src.code_indexer.server.utils.config_manager import TelemetryConfig
 
@@ -153,3 +158,94 @@ class TestLogCorrelationIntegration:
             # (may still be zeros if tracing not fully initialized)
             assert len(context["trace_id"]) == 32
             assert len(context["span_id"]) == 16
+
+
+# =============================================================================
+# Reentrant-Recursion Regression Test (#1676 AC2 round 2, REQUIRED FIX 1)
+# =============================================================================
+
+
+_RECURSION_TIMEOUT_SECONDS = 5.0
+
+
+class TestGetTraceContextDebugLogRecursionGuard:
+    """Regression test for the reintroduced unbounded logging recursion
+    hazard flagged in code review of commits d2ef0608/b6904046.
+
+    Root cause: d2ef0608 deleted OTELLogHandler (correctly, as dead code)
+    along with its threading.local re-entry guard, but the SAME commit newly
+    wired get_trace_context() into IdentityQueueHandler.prepare() -- the
+    always-on root logging handler. get_trace_context()'s
+    ``except Exception: logger.debug(...)`` branch, when the root logger is
+    at DEBUG and IdentityQueueHandler is installed as a root handler (the
+    real production wiring), re-enters prepare()/emit() on the SAME thread
+    and recurses without bound (mirrors the intent of the deleted
+    TestOTELLogHandlerReentryGuard test class).
+
+    This test proves the underlying OTEL call
+    (``opentelemetry.trace.get_current_span``) is invoked EXACTLY ONCE for a
+    single logger.info() call. Before the fix (debug call still present) it
+    is invoked many times (empirically ~30+, bounded only by Python's
+    recursion limit) -- a genuinely discriminating failure, not a trivial
+    happy-path check.
+    """
+
+    def test_root_logger_debug_call_site_invoked_exactly_once_on_failure(
+        self,
+    ) -> None:
+        from code_indexer.server.services.async_logging import (
+            IdentityQueueHandler,
+        )
+
+        call_count = 0
+
+        def _raise(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            raise RuntimeError("simulated OTEL failure")
+
+        q: "queue.Queue" = queue.Queue()
+        handler = IdentityQueueHandler(q)
+
+        root_logger = logging.getLogger()
+        original_handlers = root_logger.handlers[:]
+        original_level = root_logger.level
+
+        completed = threading.Event()
+
+        def run_log_call() -> None:
+            try:
+                logging.getLogger("test.trace_context.recursion").info(
+                    "outer log call -- must not recurse"
+                )
+            finally:
+                completed.set()
+
+        try:
+            root_logger.handlers = [handler]
+            root_logger.setLevel(logging.DEBUG)
+
+            with patch(
+                "opentelemetry.trace.get_current_span",
+                side_effect=_raise,
+            ):
+                worker = threading.Thread(target=run_log_call, daemon=True)
+                worker.start()
+                finished = completed.wait(timeout=_RECURSION_TIMEOUT_SECONDS)
+        finally:
+            root_logger.handlers = original_handlers
+            root_logger.setLevel(original_level)
+
+        assert finished, (
+            f"logger.info() call timed out after {_RECURSION_TIMEOUT_SECONDS}s "
+            "-- unbounded recursion in get_trace_context()'s except-branch "
+            "debug log call."
+        )
+        assert call_count <= 1, (
+            "get_current_span() (called from get_trace_context()) was "
+            f"invoked {call_count} times for a single logger.info() call -- "
+            "expected exactly 1. This indicates the except-branch "
+            "logger.debug(...) call in get_trace_context() is re-entering "
+            "the logging pipeline via the root IdentityQueueHandler "
+            "(REQUIRED FIX 1, #1676 AC2 round 2)."
+        )

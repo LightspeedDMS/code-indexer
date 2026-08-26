@@ -64,7 +64,10 @@ class TestIdentityQueueHandlerPrepareInjectsTraceContext:
         assert prepared.span_id == "already-set-span-id"
 
     def test_prepare_injects_real_trace_context_from_active_span(self) -> None:
-        from code_indexer.server.telemetry import get_telemetry_manager
+        from code_indexer.server.telemetry import (
+            get_telemetry_manager,
+            reset_telemetry_manager,
+        )
         from code_indexer.server.telemetry.spans import create_span, reset_spans_state
         from code_indexer.server.utils.config_manager import TelemetryConfig
 
@@ -84,6 +87,7 @@ class TestIdentityQueueHandlerPrepareInjectsTraceContext:
                 assert prepared.span_id != "0" * 16
         finally:
             reset_spans_state()
+            reset_telemetry_manager()
 
 
 class TestPlainLogCallPersistsTraceContextViaAsyncQueue:
@@ -141,7 +145,10 @@ class TestPlainLogCallPersistsTraceContextViaAsyncQueue:
 
         from code_indexer.server.services.async_logging import install_queue_logging
         from code_indexer.server.services.sqlite_log_handler import SQLiteLogHandler
-        from code_indexer.server.telemetry import get_telemetry_manager
+        from code_indexer.server.telemetry import (
+            get_telemetry_manager,
+            reset_telemetry_manager,
+        )
         from code_indexer.server.telemetry.spans import create_span, reset_spans_state
         from code_indexer.server.utils.config_manager import TelemetryConfig
 
@@ -186,6 +193,7 @@ class TestPlainLogCallPersistsTraceContextViaAsyncQueue:
             root.setLevel(saved_level)
             sqlite_handler.close()
             reset_spans_state()
+            reset_telemetry_manager()
 
 
 if __name__ == "__main__":
