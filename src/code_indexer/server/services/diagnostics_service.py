@@ -22,7 +22,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from enum import Enum
 from pathlib import Path
-from typing import TYPE_CHECKING, Dict, List, Any, Optional, Tuple
+from typing import TYPE_CHECKING, Dict, List, Any, Optional, Sequence, Tuple
 
 import httpx
 
@@ -887,7 +887,7 @@ class DiagnosticsService:
 
     def _fetch_all_diagnostic_rows(
         self,
-    ) -> Optional[List[Tuple[str, object, object]]]:
+    ) -> Optional[Sequence[Tuple[str, object, object]]]:
         """Fetch all raw (category, results_json, run_at) rows.
 
         Returns None if there is nothing to load yet (no backend and no
@@ -895,12 +895,31 @@ class DiagnosticsService:
         caller decides how to handle that.
         """
         if self._backend is not None:
-            # mypy: self._backend's DiagnosticsBackend Protocol declares
-            # load_all_results() -> List[Tuple[str, str, str]], which is
-            # invariant-incompatible with this method's broader
-            # Tuple[str, object, str] element type (needed because a real
-            # PostgreSQL backend's results_json is a native object, not a
-            # str -- see Bug #1653). The broadening is intentional.
+            # Bug #1662: DiagnosticsBackend.load_all_results() now honestly
+            # declares Sequence[Tuple[str, object, object]] (previously the
+            # provably false List[Tuple[str, str, str]]) -- that widening
+            # itself needed no mypy suppression here. The suppression below
+            # remains for an UNRELATED, pre-existing reason, confirmed via
+            # reveal_type() probing under the project's real lint.sh mypy
+            # invocation (mypy --explicit-package-bases --check-untyped-defs
+            # src tests): mypy registers this module as
+            # src.code_indexer.server.services.diagnostics_service (it
+            # treats the repo root, not src/, as the package base), while
+            # the DiagnosticsBackend import above is written as bare
+            # code_indexer.server.storage.protocols (matching this
+            # project's runtime PYTHONPATH=./src convention). Those two
+            # spellings are different module identities to mypy, so the
+            # bare import can never resolve inside mypy's static analysis;
+            # combined with ignore_missing_imports=true it silently
+            # resolves to Any rather than erroring -- self._backend itself
+            # is Any, independent of how honestly DiagnosticsBackend types
+            # its own methods. This is a project-wide, pre-existing mypy
+            # limitation (see feedback_git_worktree_isolation_invalid_dual_import_path.md
+            # in .claude-memory/), not a str-vs-object typing gap -- e.g.
+            # wiki_cache.py's structurally identical
+            # self._backend.get_view_count(...) call site carries the
+            # identical suppression for the exact same cause. No narrowing
+            # on this line can fix a lost cross-module type identity.
             return self._backend.load_all_results()  # type: ignore[no-any-return]
 
         if not Path(self._db_path).exists():
