@@ -231,11 +231,19 @@ class RepositoryStatsService:
         test is still True (the assignment happens only after
         _build_vector_store_client() returns), so an unguarded re-entrant
         call arriving from within construction would construct AGAIN.
+
+        Raises RuntimeError (not AttributeError) on re-entrant access:
+        unlike a module-level `__getattr__` deferral (where AttributeError
+        has a specific required protocol meaning), this is a plain
+        `@property` -- AttributeError here would be a footgun for any
+        caller using `getattr(obj, "vector_store_client", default)` /
+        `hasattr()`, which would silently receive the default and mask a
+        real re-entrancy bug (code review finding, Bug #1691).
         """
         if getattr(self, "_vector_store_client_lazy", None) is None:
             with self._vector_store_client_lock:
                 if getattr(self, "_vsc_initializing", False):
-                    raise AttributeError(
+                    raise RuntimeError(
                         "vector_store_client is still under construction "
                         "(re-entrant access)"
                     )

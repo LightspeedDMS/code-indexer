@@ -36,13 +36,16 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+import threading
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
 # Generous ceiling for a single-module Python import in a fresh subprocess;
 # not a tight performance budget, just a hang guard.
 SUBPROCESS_IMPORT_TIMEOUT_SECONDS = 30
+THREAD_JOIN_TIMEOUT_SECONDS = 10
 
 
 @pytest.fixture
@@ -137,3 +140,160 @@ class TestRepositoryStatsServiceNoCwdFallbackSideEffect:
             "Importing stats_service.py must not eagerly create "
             ".code-indexer/index relative to the import-time CWD (Bug #1691)"
         )
+
+
+def _write_stub_config_file(tmp_path: Path) -> Path:
+    """Real (empty) config.json so `config_manager.config_path.exists()`
+    is True without needing to mock `Path.exists` itself."""
+    config_dir = tmp_path / ".code-indexer"
+    config_dir.mkdir()
+    config_path = config_dir / "config.json"
+    config_path.write_text("{}")
+    return config_path
+
+
+def _build_stub_config_manager(config_path: Path, codebase_dir: str):
+    """A stand-in for ConfigManager.create_with_backtrack()'s return
+    value: real enough for _build_vector_store_client's own logic
+    (config_path.exists() check + get_config().codebase_dir read)."""
+
+    class StubConfig:
+        pass
+
+    StubConfig.codebase_dir = codebase_dir  # type: ignore[attr-defined]
+
+    class StubConfigManager:
+        def __init__(self) -> None:
+            self.config_path = config_path
+
+        def get_config(self) -> "StubConfig":
+            return StubConfig()
+
+    return StubConfigManager()
+
+
+def _build_reentrant_vector_store_cls(
+    service, construction_count: dict, reentrant_outcome: dict
+):
+    """A stand-in for FilesystemVectorStore whose __init__ fires a
+    re-entrant `service.vector_store_client` probe from WITHIN
+    construction, on the same thread -- mirrors
+    test_file_service_deferred_construction_1650.py's ReentrantARM."""
+
+    class ReentrantFilesystemVectorStore:
+        def __init__(self, *args, **kwargs) -> None:
+            construction_count["n"] += 1
+            if construction_count["n"] == 1:
+                try:
+                    reentrant_outcome["value"] = service.vector_store_client
+                except Exception as e:  # noqa: BLE001 - captured for assertion
+                    reentrant_outcome["exception"] = e
+
+    return ReentrantFilesystemVectorStore
+
+
+def _run_reentrancy_probe(
+    stats_service_module, stub_config_manager, reentrant_cls, service
+) -> dict:
+    """Run the outer `service.vector_store_client` access on a background
+    thread, patched so construction triggers the re-entrant probe, and
+    join with a bounded timeout so a deadlock fails the test instead of
+    hanging it."""
+    result: dict = {}
+
+    def worker() -> None:
+        try:
+            with (
+                patch.object(
+                    stats_service_module.ConfigManager,
+                    "create_with_backtrack",
+                    return_value=stub_config_manager,
+                ),
+                patch.object(
+                    stats_service_module, "FilesystemVectorStore", reentrant_cls
+                ),
+            ):
+                result["value"] = service.vector_store_client
+        except Exception as e:  # noqa: BLE001 - captured for assertion
+            result["exception"] = e
+
+    t = threading.Thread(target=worker, daemon=True)
+    t.start()
+    t.join(timeout=THREAD_JOIN_TIMEOUT_SECONDS)
+    result["thread_alive"] = t.is_alive()
+    return result
+
+
+def _assert_reentrancy_outcome(
+    construction_count: dict, reentrant_outcome: dict, result: dict
+) -> None:
+    assert not result["thread_alive"], (
+        "REGRESSION: re-entrant access during construction hung "
+        "(unbounded recursion or deadlock)."
+    )
+    assert construction_count["n"] == 1, (
+        "BUG #1691 REMEDIATION REGRESSION: FilesystemVectorStore must be "
+        "constructed EXACTLY ONCE -- a re-entrant call arriving "
+        "mid-construction must not trigger a second/recursive "
+        f"construction. construction_count={construction_count['n']}"
+    )
+    assert "exception" in reentrant_outcome, (
+        "The re-entrant call must raise (matching pre-fix unbound "
+        f"semantics), not silently return a value. Got: {reentrant_outcome}"
+    )
+    assert isinstance(reentrant_outcome.get("exception"), RuntimeError), (
+        "The re-entrant call's exception must be a RuntimeError (a plain "
+        "@property re-entrancy guard, not a module-level __getattr__ "
+        "deferral, so AttributeError is deliberately avoided -- see "
+        f"vector_store_client's docstring). Got: {reentrant_outcome}"
+    )
+    assert "value" in result, f"outer call must succeed: {result}"
+    assert "exception" not in result, f"outer (original) call must not raise: {result}"
+
+
+class TestVectorStoreClientReentrancyDoesNotRecurse:
+    """Code review gap on the #1691 fix: CLAUDE.md's "Module-Level Service
+    Singletons Must Be Lazy (PEP 562)" section mandates that any fix in
+    this class MUST include a re-entrancy discriminating test -- none of
+    the tests above exercise it. The reviewer independently proved (via a
+    manual probe) that the current `threading.RLock` +
+    `_vsc_initializing` sentinel implementation is correct, but nothing in
+    the committed suite would catch a future regression (e.g. someone
+    "simplifying" the RLock to a plain Lock -- which self-deadlocks on
+    re-entrant access on the SAME thread -- or removing the
+    `_vsc_initializing` sentinel -- which would allow double
+    construction).
+
+    Mirrors test_file_service_deferred_construction_1650.py's
+    TestActivatedRepoManagerReentrancyDoesNotRecurse exactly: patch the
+    dependency inside the construction chain (here, `ConfigManager` and
+    `FilesystemVectorStore` as imported into stats_service.py) so that
+    `FilesystemVectorStore` construction itself triggers a SECOND access
+    to `service.vector_store_client` on the SAME THREAD, mid-construction
+    -- then run the outer access from a background thread with a bounded
+    `join(timeout=...)`.
+    """
+
+    def test_reentrant_access_during_construction_does_not_recurse(
+        self, tmp_path
+    ) -> None:
+        import code_indexer.server.services.stats_service as stats_service_module
+        from code_indexer.server.services.stats_service import (
+            RepositoryStatsService,
+        )
+
+        config_path = _write_stub_config_file(tmp_path)
+        stub_config_manager = _build_stub_config_manager(config_path, str(tmp_path))
+
+        service = RepositoryStatsService()
+        construction_count = {"n": 0}
+        reentrant_outcome: dict = {}
+        reentrant_cls = _build_reentrant_vector_store_cls(
+            service, construction_count, reentrant_outcome
+        )
+
+        result = _run_reentrancy_probe(
+            stats_service_module, stub_config_manager, reentrant_cls, service
+        )
+
+        _assert_reentrancy_outcome(construction_count, reentrant_outcome, result)
