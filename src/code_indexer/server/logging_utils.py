@@ -196,6 +196,56 @@ def inject_trace_context(record: logging.LogRecord) -> None:
     record.span_id = context["span_id"]
 
 
+# Story #1676 AC3: private LogRecord attribute name carrying the full OTEL
+# Context object captured by inject_otel_context() below. Deliberately named
+# so it reads as "private" (leading underscore) even though it must be a
+# public importable constant -- every module that needs to read, filter, or
+# strip this attribute (the context-aware log bridge handler in
+# async_logging.py, SQLiteLogHandler's extra_data JSON serialization, and any
+# future OTLP-attribute translation exclusion) must agree on the EXACT same
+# string, so this is the single source of truth rather than each site
+# hardcoding its own copy.
+OTEL_CONTEXT_RECORD_ATTR = "_otel_captured_context"
+
+
+def inject_otel_context(record: logging.LogRecord) -> None:
+    """
+    Capture the full OTEL ``Context`` object active on the calling thread
+    and attach it to ``record`` as a private attribute (Story #1676 AC3),
+    unless the record already carries one.
+
+    Background: unlike ``inject_trace_context()`` (which extracts just the
+    trace_id/span_id STRINGS -- safe to store in any JSON/DB column),
+    exporting a LogRecord to OTLP with correct trace/span correlation
+    requires reattaching the FULL ``Context`` object at export time so the
+    OTEL logging bridge handler's internal ``context.get_current()`` call
+    resolves to the correct span. A raw ``Context`` object is NOT
+    serializable (SQLite/PostgreSQL JSON storage, or OTLP attribute
+    translation) -- callers on the export path are responsible for popping
+    this attribute off the record before it reaches either serialization
+    step (see async_logging.py's context-aware wrapper handler).
+
+    Must run on the ORIGINAL calling thread, before the record crosses into
+    async_logging's queue/listener thread -- OTEL's "current context" is
+    resolved via ``contextvars``, which does NOT propagate across a plain
+    ``threading.Thread`` boundary (same rationale as
+    ``inject_correlation_id()``/``inject_trace_context()``). The real
+    production wiring point is
+    ``async_logging.IdentityQueueHandler.prepare()``.
+
+    Args:
+        record: The LogRecord to enrich in place. No-op if the record
+            already carries the attribute (an explicitly captured/propagated
+            context is never overridden).
+    """
+    if hasattr(record, OTEL_CONTEXT_RECORD_ATTR):
+        return
+
+    from opentelemetry import context as otel_context
+
+    setattr(record, OTEL_CONTEXT_RECORD_ATTR, otel_context.get_current())
+
+
 def sanitize_for_logging(data: Any) -> Any:
     """
     Sanitize data for logging by redacting sensitive information.

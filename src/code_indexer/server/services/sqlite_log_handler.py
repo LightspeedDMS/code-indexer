@@ -29,6 +29,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
 from code_indexer.server.logging_utils import (
+    OTEL_CONTEXT_RECORD_ATTR,
     inject_correlation_id,
     inject_trace_context,
 )
@@ -405,6 +406,13 @@ class SQLiteLogHandler(logging.Handler):
                 "alias",
                 "trace_id",
                 "span_id",
+                # Story #1676 AC3: private raw opentelemetry.context.Context
+                # object captured by logging_utils.inject_otel_context() for
+                # the OTEL log-export reattach mechanism. NOT
+                # JSON-serializable -- must never reach json.dumps() below,
+                # or the entire log record is silently dropped via this
+                # method's own exception handler.
+                OTEL_CONTEXT_RECORD_ATTR,
                 # Standard LogRecord attributes
                 "name",
                 "msg",
@@ -443,6 +451,7 @@ class SQLiteLogHandler(logging.Handler):
             extra_data.pop("alias", None)
             extra_data.pop("trace_id", None)
             extra_data.pop("span_id", None)
+            extra_data.pop(OTEL_CONTEXT_RECORD_ATTR, None)
 
             # Serialize extra data as JSON (or NULL if empty)
             extra_data_json: Optional[str] = None

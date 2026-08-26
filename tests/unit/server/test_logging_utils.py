@@ -228,3 +228,112 @@ class TestInjectTraceContext:
         finally:
             reset_spans_state()
             reset_telemetry_manager()
+
+
+class TestInjectOtelContext:
+    """Story #1676 AC3: inject_otel_context() captures the full OTEL
+    ``Context`` object active on the calling thread and attaches it to the
+    LogRecord as a private attribute. This is the wiring point
+    (async_logging.IdentityQueueHandler.prepare()) that later lets the
+    context-aware log bridge handler reattach the ORIGINAL request thread's
+    context on the QueueListener thread before exporting -- producing the
+    correct trace_id/span_id on the exported OTLP LogRecord instead of
+    whatever (unrelated) context happens to be live on the listener thread.
+    """
+
+    def test_attaches_private_context_attribute(self):
+        from code_indexer.server.logging_utils import (
+            OTEL_CONTEXT_RECORD_ATTR,
+            inject_otel_context,
+        )
+
+        record = _make_log_record()
+        assert not hasattr(record, OTEL_CONTEXT_RECORD_ATTR)
+
+        inject_otel_context(record)
+
+        assert hasattr(record, OTEL_CONTEXT_RECORD_ATTR)
+
+    def test_captured_context_is_the_real_ambient_context_object(self):
+        from opentelemetry import context as otel_context
+
+        from code_indexer.server.logging_utils import (
+            OTEL_CONTEXT_RECORD_ATTR,
+            inject_otel_context,
+        )
+
+        record = _make_log_record()
+        inject_otel_context(record)
+
+        captured = getattr(record, OTEL_CONTEXT_RECORD_ATTR)
+        # Identity, not mere type equivalence: proves this is the SAME
+        # ambient Context object context.get_current() resolves to on this
+        # thread right now, not an equivalent copy/synthetic stand-in.
+        assert captured is otel_context.get_current()
+
+    def test_does_not_override_already_captured_context(self):
+        from code_indexer.server.logging_utils import (
+            OTEL_CONTEXT_RECORD_ATTR,
+            inject_otel_context,
+        )
+
+        record = _make_log_record()
+        sentinel = object()
+        setattr(record, OTEL_CONTEXT_RECORD_ATTR, sentinel)
+
+        inject_otel_context(record)
+
+        assert getattr(record, OTEL_CONTEXT_RECORD_ATTR) is sentinel
+
+
+class TestInjectOtelContextReflectsActiveSpan:
+    """Discriminating test: the captured Context when a span IS active must
+    be the real ambient Context carrying that span (identity-checked, not
+    just isinstance-checked) and must differ from the no-span case -- proving
+    this genuinely reads ambient state rather than always stashing a fixed/
+    empty Context object regardless of what is actually active on the
+    calling thread."""
+
+    def test_captured_context_carries_the_real_active_span_by_identity(self):
+        from opentelemetry import context as otel_context
+        from opentelemetry import trace as otel_trace
+
+        from code_indexer.server.logging_utils import (
+            OTEL_CONTEXT_RECORD_ATTR,
+            inject_otel_context,
+        )
+        from code_indexer.server.telemetry import (
+            get_telemetry_manager,
+            reset_telemetry_manager,
+        )
+        from code_indexer.server.telemetry.spans import create_span, reset_spans_state
+        from code_indexer.server.utils.config_manager import TelemetryConfig
+
+        config = TelemetryConfig(enabled=True, export_traces=True)
+        get_telemetry_manager(config)
+        try:
+            record_without_span = _make_log_record()
+            inject_otel_context(record_without_span)
+            context_without_span = getattr(
+                record_without_span, OTEL_CONTEXT_RECORD_ATTR
+            )
+
+            with create_span("test.inject_otel_context.active"):
+                record_with_span = _make_log_record()
+                inject_otel_context(record_with_span)
+                context_with_span = getattr(record_with_span, OTEL_CONTEXT_RECORD_ATTR)
+                # Identity check while still inside the span's `with` block,
+                # where context.get_current() is guaranteed to still equal
+                # the exact object just captured.
+                assert context_with_span is otel_context.get_current()
+
+            # Extract the span recorded in each captured Context -- proves
+            # the capture reflects the REAL ambient span, not a fixed value.
+            span_without = otel_trace.get_current_span(context_without_span)
+            span_with = otel_trace.get_current_span(context_with_span)
+
+            assert not span_without.get_span_context().is_valid
+            assert span_with.get_span_context().is_valid
+        finally:
+            reset_spans_state()
+            reset_telemetry_manager()

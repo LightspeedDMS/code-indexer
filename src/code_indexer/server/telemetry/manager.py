@@ -21,7 +21,10 @@ from code_indexer import __version__ as _CIDX_VERSION
 from code_indexer.server.logging_utils import format_error_log
 
 if TYPE_CHECKING:
+    import logging as _logging_module
+
     from opentelemetry.metrics import Meter, MeterProvider
+    from opentelemetry.sdk._logs import LoggerProvider
     from opentelemetry.trace import Tracer, TracerProvider
 
     from src.code_indexer.server.utils.config_manager import TelemetryConfig
@@ -85,6 +88,11 @@ class TelemetryManager:
         self._cluster_node_id = cluster_node_id
         self._tracer_provider: Optional["TracerProvider"] = None
         self._meter_provider: Optional["MeterProvider"] = None
+        # Story #1676 AC3: only ever populated by _initialize_otel() when
+        # config.export_logs is True -- "zero OTLP log traffic, no logging
+        # provider constructed at all" is the contract when False.
+        self._logger_provider: Optional["LoggerProvider"] = None
+        self._log_bridge_handler: Optional["_logging_module.Handler"] = None
         self._is_initialized = False
 
         if config.enabled:
@@ -158,6 +166,21 @@ class TelemetryManager:
                 self._meter_provider = MeterProvider(resource=resource)
                 metrics.set_meter_provider(self._meter_provider)
 
+            # Story #1676 AC3: real OTLP log export. Deliberately NOT
+            # symmetric with the tracer/meter branches above -- those
+            # always construct a (possibly no-op) provider; a LoggerProvider
+            # is constructed ONLY when export_logs is True, so a fresh
+            # install (export_logs=False by default) produces zero OTLP log
+            # traffic and constructs no logging provider at all.
+            if self._config.export_logs:
+                from opentelemetry.sdk._logs import LoggerProvider as SDKLoggerProvider
+                from opentelemetry import _logs as otel_logs
+
+                self._logger_provider = SDKLoggerProvider(resource=resource)
+                self._setup_log_exporter()
+                otel_logs.set_logger_provider(self._logger_provider)
+                self._register_log_bridge_handler()
+
             self._is_initialized = True
             logger.info(
                 f"OpenTelemetry initialized: service={self._config.service_name}, "
@@ -208,6 +231,91 @@ class TelemetryManager:
             logger.warning(
                 format_error_log(
                     "QUERY-GENERAL-027", f"Failed to setup trace exporter: {e}"
+                )
+            )
+
+    def _setup_log_exporter(self) -> None:
+        """Configure log exporter based on protocol (Story #1676 AC3).
+
+        Mirrors _setup_trace_exporter()'s exact structure: a
+        BatchLogRecordProcessor wrapping the protocol-appropriate OTLP log
+        exporter, added to the already-constructed LoggerProvider. Failures
+        degrade gracefully (WARNING + no export) rather than aborting the
+        surrounding _initialize_otel() call.
+        """
+        if self._logger_provider is None:
+            return
+
+        try:
+            from opentelemetry.sdk._logs.export import BatchLogRecordProcessor
+
+            if self._config.collector_protocol.lower() == "grpc":
+                from opentelemetry.exporter.otlp.proto.grpc._log_exporter import (
+                    OTLPLogExporter,
+                )
+
+                exporter = OTLPLogExporter(
+                    endpoint=self._config.collector_endpoint,
+                    insecure=True,
+                )
+            else:
+                from opentelemetry.exporter.otlp.proto.http._log_exporter import (  # type: ignore[assignment]
+                    OTLPLogExporter,
+                )
+
+                # HTTP endpoint typically includes /v1/logs path
+                endpoint = self._config.collector_endpoint
+                if not endpoint.endswith("/v1/logs"):
+                    endpoint = f"{endpoint.rstrip('/')}/v1/logs"
+                exporter = OTLPLogExporter(endpoint=endpoint)
+
+            self._logger_provider.add_log_record_processor(  # type: ignore[attr-defined]
+                BatchLogRecordProcessor(exporter)
+            )
+
+        except Exception as e:
+            logger.warning(
+                format_error_log(
+                    "REPO-GENERAL-050", f"Failed to setup log exporter: {e}"
+                )
+            )
+
+    def _register_log_bridge_handler(self) -> None:
+        """Build the real OTEL logging-bridge handler, wrap it with the
+        context-aware handler, and register it with the async-logging
+        listener (Story #1676 AC3).
+
+        Failures degrade gracefully (WARNING, no handler registered) rather
+        than aborting the surrounding _initialize_otel() call -- mirrors
+        every other *_exporter/*_provider setup method in this class.
+        """
+        if self._logger_provider is None:
+            return
+
+        try:
+            from opentelemetry.instrumentation.logging.handler import (
+                LoggingHandler as OTELLoggingBridgeHandler,
+            )
+
+            from code_indexer.server.services.async_logging import (
+                register_additional_listener_handler,
+            )
+            from code_indexer.server.telemetry.log_handler import (
+                ContextAwareLogBridgeHandler,
+            )
+
+            real_handler = OTELLoggingBridgeHandler(
+                logger_provider=self._logger_provider
+            )
+            wrapper = ContextAwareLogBridgeHandler(real_handler)
+            register_additional_listener_handler(wrapper)
+            self._log_bridge_handler = wrapper
+
+        except Exception as e:
+            logger.warning(
+                format_error_log(
+                    "REPO-GENERAL-051",
+                    f"Failed to register OTEL log bridge handler: {e}",
                 )
             )
 
@@ -267,6 +375,19 @@ class TelemetryManager:
         return self._meter_provider
 
     @property
+    def logger_provider(self) -> Optional["LoggerProvider"]:
+        """Return the LoggerProvider instance (Story #1676 AC3), or None if
+        export_logs is False / not yet initialized."""
+        return self._logger_provider
+
+    @property
+    def log_bridge_handler(self) -> Optional["_logging_module.Handler"]:
+        """Return the registered context-aware OTEL log bridge handler
+        (Story #1676 AC3), or None if export_logs is False / not yet
+        initialized."""
+        return self._log_bridge_handler
+
+    @property
     def service_name(self) -> str:
         """Return the configured service name."""
         return self._config.service_name
@@ -318,42 +439,84 @@ class TelemetryManager:
         return metrics.get_meter(name, version)  # type: ignore[arg-type]
 
     def shutdown(self) -> None:
-        """Shutdown telemetry, flushing any pending data."""
+        """Shutdown telemetry, flushing any pending data.
+
+        Story #1676 AC3 Requirement 11: each provider's shutdown (and the
+        log bridge handler's unregistration) is attempted INDEPENDENTLY, in
+        its own try/except -- a failure in one must not prevent the others
+        from getting a chance to flush/detach.
+        """
         if not self._is_initialized:
             return
 
-        try:
-            if self._tracer_provider is not None:
+        if self._tracer_provider is not None:
+            try:
                 self._tracer_provider.shutdown()  # type: ignore[attr-defined]
                 logger.debug("TracerProvider shutdown complete")
+            except Exception as e:
+                logger.warning(
+                    format_error_log(
+                        "REPO-GENERAL-043",
+                        f"Error during TracerProvider shutdown: {e}",
+                    )
+                )
 
-            if self._meter_provider is not None:
+        if self._meter_provider is not None:
+            try:
                 self._meter_provider.shutdown()  # type: ignore[attr-defined]
                 logger.debug("MeterProvider shutdown complete")
-
-            logger.info("OpenTelemetry shutdown complete")
-
-        except Exception as e:
-            logger.warning(
-                format_error_log(
-                    "REPO-GENERAL-043", f"Error during OpenTelemetry shutdown: {e}"
+            except Exception as e:
+                logger.warning(
+                    format_error_log(
+                        "REPO-GENERAL-043",
+                        f"Error during MeterProvider shutdown: {e}",
+                    )
                 )
-            )
 
-        finally:
-            # Story #1676 AC5: httpx instrumentation is process-global
-            # (unlike per-app FastAPI instrumentation), so it has no
-            # per-instance teardown hook elsewhere -- unwind it here,
-            # unconditionally, so repeated lifespan start/stop cycles
-            # (e.g. the test suite, via reset_telemetry_manager()) never
-            # leave a dangling patch bound to this now-torn-down
-            # TracerProvider even if the shutdown steps above raised.
-            from code_indexer.server.telemetry.instrumentation import (
-                uninstrument_httpx,
-            )
+        if self._logger_provider is not None:
+            try:
+                self._logger_provider.shutdown()  # type: ignore[attr-defined]
+                logger.debug("LoggerProvider shutdown complete")
+            except Exception as e:
+                logger.warning(
+                    format_error_log(
+                        "REPO-GENERAL-043",
+                        f"Error during LoggerProvider shutdown: {e}",
+                    )
+                )
 
-            uninstrument_httpx()
-            self._is_initialized = False
+        if self._log_bridge_handler is not None:
+            try:
+                from code_indexer.server.services.async_logging import (
+                    unregister_additional_listener_handler,
+                )
+
+                unregister_additional_listener_handler(self._log_bridge_handler)
+                logger.debug("OTEL log bridge handler unregistered")
+            except Exception as e:
+                logger.warning(
+                    format_error_log(
+                        "REPO-GENERAL-043",
+                        f"Error unregistering OTEL log bridge handler: {e}",
+                    )
+                )
+
+        logger.info("OpenTelemetry shutdown complete")
+
+        # Story #1676 AC5: httpx instrumentation is process-global (unlike
+        # per-app FastAPI instrumentation), so it has no per-instance
+        # teardown hook elsewhere -- unwind it here, unconditionally, so
+        # repeated lifespan start/stop cycles (e.g. the test suite, via
+        # reset_telemetry_manager()) never leave a dangling patch bound to
+        # this now-torn-down TracerProvider. No try/finally needed here:
+        # each shutdown step above (Requirement 11) already catches its own
+        # exception, so nothing can propagate past this point.
+        from code_indexer.server.telemetry.instrumentation import (
+            uninstrument_httpx,
+        )
+
+        uninstrument_httpx()
+        self._is_initialized = False
 
 
 def get_telemetry_manager(
@@ -425,6 +588,16 @@ def reset_telemetry_manager() -> None:
 
     This is primarily for testing purposes. It shuts down the current
     manager (if any) and clears the singleton reference.
+
+    Story #1676 AC3 Requirement 12: this function must also unregister the
+    context-aware OTEL log bridge handler from the async-logging listener,
+    or repeated construct/reset cycles (as happen throughout this test
+    suite) would leave a handler bound to an already-shut-down
+    LoggerProvider, or accumulate duplicate handlers. That guarantee is
+    satisfied BY DELEGATION here -- ``TelemetryManager.shutdown()`` (called
+    below) already unregisters its own log bridge handler as one of its
+    independent shutdown steps (see shutdown()'s docstring), so no separate
+    unregister call is needed in this function.
     """
     global _telemetry_manager
 

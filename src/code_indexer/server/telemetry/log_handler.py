@@ -36,6 +36,7 @@ Usage:
 
 from __future__ import annotations
 
+import logging
 from typing import Dict
 
 # Zero values for when no trace context is available
@@ -103,3 +104,75 @@ def get_trace_context() -> Dict[str, str]:
         "dd.trace_id": dd_trace_id,
         "dd.span_id": dd_span_id,
     }
+
+
+class ContextAwareLogBridgeHandler(logging.Handler):
+    """Wraps a real OTEL logging-bridge handler, reattaching the log call's
+    ORIGINAL request-thread OTEL Context before invoking it (Story #1676
+    AC3).
+
+    This is the ONE handler registered with the async-logging listener via
+    ``async_logging.register_additional_listener_handler()`` -- never the
+    raw ``opentelemetry.instrumentation.logging.handler.LoggingHandler``
+    directly. On the listener thread, in order:
+
+      1. Pop ``logging_utils.OTEL_CONTEXT_RECORD_ATTR`` off the record (so
+         it can never leak into the wrapped handler's OTLP attribute
+         translation, nor -- defense in depth -- any other handler further
+         down the chain).
+      2. ``context.attach()`` the captured Context, if present.
+      3. Invoke the wrapped handler's ``emit()``. Internally, the real
+         bridge handler's ``_translate()`` calls
+         ``opentelemetry.context.get_current()`` to stamp the exported
+         OTLP LogRecord's trace_id/span_id -- by attaching the captured
+         context first, that call now resolves to the span that was
+         active on the ORIGINAL calling thread at log-call time, not
+         whatever (unrelated) context happens to be live on this listener
+         thread.
+      4. ``context.detach()`` in a ``finally`` block regardless of outcome.
+
+    A failure in the wrapped handler's ``emit()`` is reported via
+    ``self.handleError(record)`` rather than propagated: the real
+    ``logging.handlers.QueueListener._monitor()`` loop this handler runs
+    under has no try/except around ``self.handle(record)``, so an
+    unhandled exception here would permanently kill the shared
+    async-logging background thread for the whole process.
+    """
+
+    def __init__(self, wrapped_handler: logging.Handler) -> None:
+        super().__init__()
+        self._wrapped_handler = wrapped_handler
+
+    @property
+    def wrapped_handler(self) -> logging.Handler:
+        """The real OTEL logging-bridge handler this instance wraps."""
+        return self._wrapped_handler
+
+    def emit(self, record: logging.LogRecord) -> None:
+        from opentelemetry import context as otel_context
+
+        from code_indexer.server.logging_utils import OTEL_CONTEXT_RECORD_ATTR
+
+        captured_context = getattr(record, OTEL_CONTEXT_RECORD_ATTR, None)
+        if hasattr(record, OTEL_CONTEXT_RECORD_ATTR):
+            try:
+                delattr(record, OTEL_CONTEXT_RECORD_ATTR)
+            except AttributeError:  # pragma: no cover - defensive only
+                pass
+
+        token = None
+        try:
+            if captured_context is not None:
+                token = otel_context.attach(captured_context)
+            self._wrapped_handler.emit(record)
+        except Exception:
+            self.handleError(record)
+        finally:
+            if token is not None:
+                otel_context.detach(token)
+
+    def close(self) -> None:
+        try:
+            self._wrapped_handler.close()
+        finally:
+            super().close()

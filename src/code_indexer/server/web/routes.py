@@ -211,6 +211,11 @@ RESTART_REQUIRED_FIELDS = [
     # the ParentBased(TraceIdRatioBased(...)) sampler at TracerProvider
     # construction, same lifecycle as its telemetry.* siblings above.
     "trace_sample_rate",
+    # telemetry.export_logs -- Story #1676 AC3: captured once into the
+    # LoggerProvider + context-aware log bridge handler registration at
+    # TelemetryManager construction, same lifecycle as its telemetry.*
+    # siblings above.
+    "export_logs",
     # langfuse.* TRACING-CREDENTIAL fields only (frozen into an eagerly
     # created client at startup). Pull-sync fields (pull_enabled, pull_host,
     # pull_trace_age_days, pull_max_concurrent_observations, pull_projects)

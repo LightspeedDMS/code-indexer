@@ -4003,6 +4003,15 @@ function saveLlmCredsConfig() {
                         </td>
                     </tr>
                     <tr>
+                        <td class="config-label">Export Logs</td>
+                        <td class="config-value">{{ 'Yes' if config.telemetry.export_logs else 'No' }}</td>
+                        <td class="config-note">
+                            {% if 'export_logs' in restart_required_fields %}
+                            <small class="restart-note">Requires server restart</small>
+                            {% endif %}
+                        </td>
+                    </tr>
+                    <tr>
                         <td class="config-label">Machine Metrics Enabled</td>
                         <td class="config-value">{{ 'Yes' if config.telemetry.machine_metrics_enabled else 'No' }}</td>
                         <td class="config-note">
@@ -4095,6 +4104,13 @@ function saveLlmCredsConfig() {
                     <select id="telemetry-export-metrics" name="export_metrics">
                         <option value="true" {% if config.telemetry.export_metrics %}selected{% endif %}>Yes</option>
                         <option value="false" {% if not config.telemetry.export_metrics %}selected{% endif %}>No</option>
+                    </select>
+                </label>
+                <label for="telemetry-export-logs">
+                    Export Logs
+                    <select id="telemetry-export-logs" name="export_logs">
+                        <option value="true" {% if config.telemetry.export_logs %}selected{% endif %}>Yes</option>
+                        <option value="false" {% if not config.telemetry.export_logs %}selected{% endif %}>No</option>
                     </select>
                 </label>
                 <label for="telemetry-machine-metrics-enabled">

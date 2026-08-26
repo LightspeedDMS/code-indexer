@@ -251,12 +251,12 @@ class TelemetryConfig:
         logging pipeline itself (logging_utils.inject_trace_context via
         async_logging.IdentityQueueHandler.prepare()), and requires no new
         field here.
-      - AC3 (NOT yet implemented): actual OTLP log EXPORT to the collector
-        endpoint (i.e. a live `export_logs` toggle mirroring
-        export_traces/export_metrics). A prior `export_logs` field was
-        removed as dead code (Bug #938) and is still stripped from loaded
-        config dicts pending AC3 -- see load_config()'s telemetry_config
-        conversion block.
+      - AC3 (delivered): actual OTLP log EXPORT to the collector endpoint
+        via the `export_logs` field below, mirroring export_traces/
+        export_metrics. A prior `export_logs` field was removed as dead
+        code (Bug #938) and stripped from loaded config dicts pending AC3;
+        that stripping was removed once this field became live again --
+        see load_config()'s telemetry_config conversion block.
     """
 
     # Core settings
@@ -268,6 +268,11 @@ class TelemetryConfig:
     # Export settings
     export_traces: bool = True
     export_metrics: bool = True
+    # Story #1676 AC3: real OTLP log export (context-aware bridge handler +
+    # BatchLogRecordProcessor, see telemetry/manager.py's
+    # _setup_log_exporter()). Default False so a fresh install produces
+    # zero OTLP log traffic and constructs no LoggerProvider at all.
+    export_logs: bool = False
 
     # Machine metrics settings
     machine_metrics_enabled: bool = True
@@ -2329,14 +2334,7 @@ class ServerConfigManager:
         if "telemetry_config" in config_dict and isinstance(
             config_dict["telemetry_config"], dict
         ):
-            # Bug #938: strip dead fields removed from TelemetryConfig so old
-            # config.json files load cleanly without TypeError. Story #1676
-            # AC4 resurrected trace_sample_rate as a real, live field -- it
-            # must no longer be stripped here, or every config load/save
-            # cycle would silently delete an operator's configured sample
-            # rate. export_logs remains dead (AC3 not yet implemented).
             _tel = config_dict["telemetry_config"]
-            _tel.pop("export_logs", None)
             config_dict["telemetry_config"] = TelemetryConfig(**_tel)
 
         # Story #3 - Configuration Consolidation: Convert migrated config dicts
