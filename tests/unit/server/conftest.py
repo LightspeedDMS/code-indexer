@@ -347,13 +347,37 @@ def _snapshot_restore_shared_app_state_impl() -> Generator[None, None, None]:
     the first affected test, `app` is already present, and this snapshot
     guard is active for it.
 
-    Ordering: pytest runs autouse fixtures' setup BEFORE a test's own
+    Ordering (function-scoped / in-test-body `TestClient(app)` usage ONLY):
+    pytest runs autouse fixtures' setup BEFORE a test's own
     explicitly-requested fixtures (e.g. a file's `client`/`test_client`
-    fixture) within the same scope, and tears down in reverse order -- so
-    the snapshot here is taken before any `TestClient(app)` lifespan
-    context is entered, and the restore here runs AFTER that context has
-    already exited (i.e. after real lifespan shutdown has run), which is
-    exactly the ordering needed to undo whatever the lifespan mutated.
+    fixture) within the SAME scope, and tears down in reverse order -- so
+    for a function-scoped `client`/`test_client` fixture, or a bare
+    `with TestClient(app) as tc:` written directly in a test body, the
+    snapshot here is taken before that lifespan context is entered, and
+    the restore here runs AFTER that context has already exited (i.e.
+    after real lifespan shutdown has run), which is exactly the ordering
+    needed to undo whatever the lifespan mutated.
+
+    KNOWN LIMITATION -- module/class/session-scoped `TestClient(app)`
+    fixtures are NOT covered by this ordering guarantee, and this fixture
+    does NOT clean up after them. A wider-scoped fixture's setup runs
+    BEFORE this function-scoped autouse fixture's setup for the FIRST
+    test collected in that scope (pytest always enters a broader-scoped
+    fixture before a narrower-scoped one), so any `app.state` mutation
+    made by that fixture's own lifespan entry is already baked into the
+    very first snapshot this generator takes -- there is no "before" left
+    to snapshot back to. Symmetrically, that fixture's teardown (and the
+    lifespan shutdown inside it) runs AFTER this generator's own restore
+    for the LAST test in that scope, so nothing here ever runs after it to
+    undo it either. Three files in this tree currently rely on
+    module-scoped `TestClient(app)` fixtures and fall squarely in this
+    gap: `web/test_dependency_map_routes_sentinel.py`,
+    `web/test_depmap_job_status_async.py`, and
+    `web/test_recent_run_metrics_template_bug_874.py`. Despite this
+    fixture's broader tree-wide reach, those three files' own #1675-style
+    per-file save/restore patches are STILL REQUIRED protection for the
+    module-scoped leak and are NOT made redundant by this fixture -- do
+    not remove them.
     """
     if "app" not in vars(_server_app_module):
         # `app` singleton not yet constructed by anything in this pytest
