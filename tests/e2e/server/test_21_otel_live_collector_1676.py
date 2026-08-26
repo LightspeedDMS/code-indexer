@@ -274,10 +274,22 @@ def _create_tiny_local_repo(base_dir: Path) -> Path:
 def _extract_counter_value(prometheus_text: str, metric_name: str) -> float:
     """Sum all sample values for ``metric_name`` from a raw Prometheus
     text-exposition-format scrape (the collector's own :8888 self-metrics
-    endpoint). Returns 0.0 when the metric has not been emitted yet."""
+    endpoint). Returns 0.0 when the metric has not been emitted yet.
+
+    Matches the metric name EXACTLY (up to the first ``{`` label-block
+    delimiter, or the first whitespace for a label-less sample) rather than
+    via ``str.startswith`` -- a prefix match would also incorrectly match an
+    unrelated metric sharing the same prefix (e.g. a hypothetical
+    ``otelcol_receiver_accepted_log_records_created`` line). Whitespace
+    splitting uses ``split(None, ...)`` (generic whitespace, matching the
+    Prometheus text-exposition-format spec) rather than a literal ``" "``.
+    """
     total = 0.0
     for line in prometheus_text.splitlines():
-        if line.startswith("#") or not line.startswith(metric_name):
+        if line.startswith("#"):
+            continue
+        sample_name = line.split("{", 1)[0].split(None, 1)[0]
+        if sample_name != metric_name:
             continue
         _, _, value_part = line.rpartition(" ")
         try:
@@ -306,10 +318,13 @@ def otel_stack() -> Iterator[None]:
     # run under the SAME project name before starting a fresh one.
     _compose("down", "-v")
 
-    up_result = _compose(
-        "up", "-d", "--wait", "--wait-timeout", _COMPOSE_UP_WAIT_TIMEOUT_S
-    )
     try:
+        # Deliberately inside `try` (not above it): a `subprocess.TimeoutExpired`
+        # from this call must still reach `finally`'s cleanup below, rather
+        # than escaping before the stack's teardown logic exists to run.
+        up_result = _compose(
+            "up", "-d", "--wait", "--wait-timeout", _COMPOSE_UP_WAIT_TIMEOUT_S
+        )
         assert up_result.returncode == 0, (
             f"docker compose up --wait failed (rc={up_result.returncode}):\n"
             f"stdout={up_result.stdout}\nstderr={up_result.stderr}"
@@ -386,7 +401,21 @@ def telemetry_app_client(
     # pattern (peek/replace the private module global directly, restore in
     # `finally` below) so any OTHER test's already-installed singleton is
     # put back exactly as found, never left cleared for a later test.
+    #
+    # Two MORE process-wide "first call wins" singletons touched by this
+    # isolated app's construction/use also need the same save/None/restore
+    # treatment (Story #1676 AC8 round-2 review finding): `ApplicationMetrics`
+    # (metrics_instrumentation.py) and `JobMetrics` (job_metrics.py). Leaving
+    # either bound to THIS fixture's now-shut-down MeterProvider causes a
+    # later test in the same pytest session (e.g.
+    # test_20_telemetry_metrics_wiring_1586.py) to silently observe zero data
+    # points on its own freshly-installed InMemoryMetricReader -- reproduced
+    # empirically: running this module before test_20 in the same session
+    # fails test_20's AC1 assertion, while running test_20 first (or this
+    # module alone) passes.
+    import code_indexer.server.telemetry.job_metrics as _job_metrics_module
     import code_indexer.server.telemetry.manager as _telemetry_manager_module
+    import code_indexer.server.telemetry.metrics_instrumentation as _app_metrics_module
     import code_indexer.server.services.config_service as _config_service_module
 
     with _telemetry_manager_module._manager_lock:
@@ -395,9 +424,24 @@ def telemetry_app_client(
     with _CONFIG_SERVICE_SWAP_LOCK:
         previous_config_service = _config_service_module._config_service
         _config_service_module._config_service = None
+    previous_application_metrics = _app_metrics_module._application_metrics
+    _app_metrics_module._application_metrics = None
+    previous_job_metrics = _job_metrics_module._job_metrics
+    _job_metrics_module._job_metrics = None
+
+    # `code_indexer.server.app`'s module-level `app` attribute is a THIRD
+    # "first call wins" mechanism, but of a different shape: it is PEP 562
+    # lazy-`__getattr__`-backed (Bug #1638), so a bound `None` behaves
+    # differently from the key being genuinely ABSENT from `__dict__`.
+    # `__dict__.get(...)` (never a plain `getattr`) is used deliberately so
+    # reading the previous value can never itself trigger/resurrect a lazy
+    # construction when the key was absent before this fixture ran.
+    import code_indexer.server.app as _app_module
+
+    _app_module_had_app = "app" in _app_module.__dict__
+    previous_app_module_app = _app_module.__dict__.get("app")
 
     try:
-        import code_indexer.server.app as _app_module
         from code_indexer.server.app import create_app
 
         fresh_app = create_app()
@@ -442,12 +486,23 @@ def telemetry_app_client(
         # already triggered lifespan shutdown -> telemetry_manager.shutdown()
         # on the instance, but that does not clear the global singleton --
         # only reset_telemetry_manager()/manual restore below does) and put
-        # both singletons back exactly as found, so a shared-session test
-        # running later never sees an unexpectedly-cleared config/telemetry
-        # singleton.
+        # ALL FIVE singletons back exactly as found, so a shared-session test
+        # running later never sees an unexpectedly-cleared config/telemetry/
+        # metrics singleton, or an app-module `app` bound to this fixture's
+        # own throwaway isolated app.
         with _telemetry_manager_module._manager_lock:
             _telemetry_manager_module._telemetry_manager = previous_telemetry_manager
         _config_service_module._config_service = previous_config_service
+        _app_metrics_module._application_metrics = previous_application_metrics
+        _job_metrics_module._job_metrics = previous_job_metrics
+
+        # `app` is PEP 562 lazy (Bug #1638): a bound `None` and an ABSENT
+        # key are semantically different for `__getattr__`, so restoring
+        # "no prior value" must DELETE the key, never set it to `None`.
+        if _app_module_had_app:
+            _app_module.app = previous_app_module_app
+        else:
+            _app_module.__dict__.pop("app", None)
 
         if previous_data_dir is None:
             os.environ.pop("CIDX_SERVER_DATA_DIR", None)

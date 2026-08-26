@@ -55,8 +55,11 @@ is distroless -- it ships no shell and no wget/curl/busybox at all (verified:
 fails with `executable file not found in $PATH`), so there is no in-container
 binary a `healthcheck:` directive could exec. Its readiness is instead polled
 from outside the container, against its real `:13133/` health_check
-extension endpoint -- see `wait_for_otel_stack`/`_wait_for_collector_health`
-in `tests/e2e/server/test_21_otel_live_collector_1676.py`.
+extension endpoint -- see `_wait_for_collector_health`
+in `tests/e2e/server/test_21_otel_live_collector_1676.py`. That test's own
+polling loop IS the readiness check; `e2e-automation.sh`'s
+`run_otel_live_collector_subcheck()` does not implement a separate
+health-poll helper -- it simply invokes the test file via `pytest`.
 
 ## CIDX Server Configuration
 

@@ -9,6 +9,15 @@
 #
 # Tear down (removes containers AND volumes -- no orphaned state):
 #   docker compose -f tests/otel-collector/docker-compose.yml down -v
+#
+# Single-host-at-a-time constraint: every service below pins a fixed
+# `container_name:` and publishes fixed host ports (4317/4318/8888/8889/13133,
+# 16686/14269, 9090). Two concurrent invocations of this stack on the SAME
+# host (e.g. two parallel CI runners, or a developer running this test twice
+# at once) will collide on container-name or port-bind conflicts. That is a
+# LOUD `docker compose up` failure, not a silent one, so it is acceptable for
+# a single-host test -- just be aware this stack is not safe to parallelize
+# on one machine.
 
 services:
   otel-collector:
@@ -37,11 +46,14 @@ services:
     # Readiness for this service is instead polled from the HOST/test side
     # against its real health_check extension endpoint
     # (GET http://localhost:13133/ -> {"status":"Server available",...}) --
-    # see wait_for_otel_collector_health() in
-    # tests/e2e/server/test_21_otel_live_collector_1676.py and the matching
-    # helper wired into e2e-automation.sh. That is still a deterministic poll
-    # against a real endpoint, not a blind sleep -- it just runs outside the
-    # container instead of inside it.
+    # see _wait_for_collector_health() in
+    # tests/e2e/server/test_21_otel_live_collector_1676.py, which the test
+    # itself calls. e2e-automation.sh's run_otel_live_collector_subcheck()
+    # does not implement a separate health-poll helper -- it simply invokes
+    # that test file via pytest, and the polling above happens inside the
+    # test. That is still a deterministic poll against a real endpoint, not
+    # a blind sleep -- it just runs outside the container instead of inside
+    # it.
 
   jaeger:
     image: jaegertracing/all-in-one:1.62.0@sha256:836e9b69c88afbedf7683ea7162e179de63b1f981662e83f5ebb68badadc710f
