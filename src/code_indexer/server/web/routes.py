@@ -4326,18 +4326,33 @@ def golden_repo_details_partial(request: Request, alias: str):
 
 
 def _get_activated_repo_manager():
-    """Get activated repository manager, handling import lazily to avoid circular imports."""
-    from ..repositories.activated_repo_manager import ActivatedRepoManager
-    import os
-    from pathlib import Path
+    """Get activated repository manager from app state.
 
-    # Get data directory from environment or use default
-    # Must match app.py: data_dir = server_data_dir / "data"
-    server_data_dir = os.environ.get(
-        "CIDX_SERVER_DATA_DIR", os.path.expanduser("~/.cidx-server")
-    )
-    data_dir = str(Path(server_data_dir) / "data")
-    return ActivatedRepoManager(data_dir=data_dir)
+    Bug #1670: this previously constructed a brand-new
+    ActivatedRepoManager(data_dir=...) on every call, which is NEVER wired
+    with set_connection_pool() -- so it always fell back to the local
+    per-node JSON-file store regardless of storage_mode. In cluster
+    (postgres) mode, activation/deactivation/wiki-toggle writes go through
+    the properly-wired app.state.activated_repo_manager singleton (its
+    _pool is set post-hoc in lifespan.py), so a fresh, pool-less instance
+    here could never see those rows -- confirmed live: toggle_user_wiki_enabled
+    raised "Repository '...' not found" for a repo GET /api/repos correctly
+    listed as active on the same node.
+
+    Fixed to resolve the SAME shared singleton the working paths use,
+    mirroring this file's own _get_golden_repo_manager() and the
+    (already-correct) _get_activated_repo_manager() in
+    routers/activated_repos.py.
+    """
+    from code_indexer.server import app as app_module
+
+    manager = getattr(app_module.app.state, "activated_repo_manager", None)
+    if manager is None:
+        raise RuntimeError(
+            "activated_repo_manager not initialized. "
+            "Server must set app.state.activated_repo_manager during startup."
+        )
+    return manager
 
 
 def _get_all_activated_repos() -> list:
