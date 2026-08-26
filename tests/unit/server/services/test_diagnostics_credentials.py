@@ -23,9 +23,9 @@ class TestCheckGitLabToken:
     """Tests for check_gitlab_token() method (AC3)."""
 
     @pytest.mark.asyncio
-    async def test_gitlab_token_working(self):
+    async def test_gitlab_token_working(self, tmp_path):
         """Test GitLab token working with valid format and API call."""
-        service = DiagnosticsService()
+        service = DiagnosticsService(db_path=str(tmp_path / "diagnostics.db"))
 
         # Mock CITokenManager returning valid GitLab token
         mock_token_data = MagicMock()
@@ -33,7 +33,7 @@ class TestCheckGitLabToken:
         mock_token_data.base_url = "https://gitlab.com"
 
         with patch(
-            "code_indexer.server.services.diagnostics_service.CITokenManager"
+            "code_indexer.server.services.ci_token_manager.CITokenManager"
         ) as mock_manager_class:
             mock_manager = mock_manager_class.return_value
             mock_manager.get_token.return_value = mock_token_data
@@ -56,7 +56,7 @@ class TestCheckGitLabToken:
         assert result.details.get("username") == "testuser"
 
     @pytest.mark.asyncio
-    async def test_gitlab_token_not_configured(self):
+    async def test_gitlab_token_not_configured(self, tmp_path):
         """Test GitLab token not configured returns NOT_CONFIGURED.
 
         Bug #1304: patch target corrected to
@@ -66,7 +66,7 @@ class TestCheckGitLabToken:
         re-exported into diagnostics_service.py was a no-op that let this
         host's real GitLab token (e.g. from .local-testing) leak through.
         """
-        service = DiagnosticsService()
+        service = DiagnosticsService(db_path=str(tmp_path / "diagnostics.db"))
 
         with patch(
             "code_indexer.server.services.ci_token_manager.CITokenManager"
@@ -80,12 +80,12 @@ class TestCheckGitLabToken:
         assert "not configured" in result.message.lower()
 
     @pytest.mark.asyncio
-    async def test_gitlab_token_invalid_format_warning(self):
+    async def test_gitlab_token_invalid_format_warning(self, tmp_path):
         """Test GitLab token with invalid format returns WARNING.
 
         Bug #1304: same corrected patch target as test_gitlab_token_not_configured.
         """
-        service = DiagnosticsService()
+        service = DiagnosticsService(db_path=str(tmp_path / "diagnostics.db"))
 
         mock_token_data = MagicMock()
         mock_token_data.token = "invalid_token_format"
@@ -102,16 +102,16 @@ class TestCheckGitLabToken:
         assert "format" in result.message.lower()
 
     @pytest.mark.asyncio
-    async def test_gitlab_token_api_call_fails_401(self):
+    async def test_gitlab_token_api_call_fails_401(self, tmp_path):
         """Test GitLab token API call failing with 401 Unauthorized."""
-        service = DiagnosticsService()
+        service = DiagnosticsService(db_path=str(tmp_path / "diagnostics.db"))
 
         mock_token_data = MagicMock()
         mock_token_data.token = "glpat-" + "x" * 20
         mock_token_data.base_url = "https://gitlab.com"
 
         with patch(
-            "code_indexer.server.services.diagnostics_service.CITokenManager"
+            "code_indexer.server.services.ci_token_manager.CITokenManager"
         ) as mock_manager_class:
             mock_manager = mock_manager_class.return_value
             mock_manager.get_token.return_value = mock_token_data
@@ -138,16 +138,16 @@ class TestCheckGitLabToken:
         assert "401" in result.message or "unauthorized" in result.message.lower()
 
     @pytest.mark.asyncio
-    async def test_gitlab_token_timeout(self):
+    async def test_gitlab_token_timeout(self, tmp_path):
         """Test GitLab token API call timing out after 30 seconds."""
-        service = DiagnosticsService()
+        service = DiagnosticsService(db_path=str(tmp_path / "diagnostics.db"))
 
         mock_token_data = MagicMock()
         mock_token_data.token = "glpat-" + "x" * 20
         mock_token_data.base_url = "https://gitlab.com"
 
         with patch(
-            "code_indexer.server.services.diagnostics_service.CITokenManager"
+            "code_indexer.server.services.ci_token_manager.CITokenManager"
         ) as mock_manager_class:
             mock_manager = mock_manager_class.return_value
             mock_manager.get_token.return_value = mock_token_data
@@ -171,9 +171,9 @@ class TestRunCredentialDiagnostics:
     """Tests for run_credential_diagnostics() method (AC5)."""
 
     @pytest.mark.asyncio
-    async def test_run_credential_diagnostics_returns_all_checks(self):
+    async def test_run_credential_diagnostics_returns_all_checks(self, tmp_path):
         """Test run_credential_diagnostics() returns results from all 3 credential checks."""
-        service = DiagnosticsService()
+        service = DiagnosticsService(db_path=str(tmp_path / "diagnostics.db"))
 
         # Mock all credential check methods
         mock_ssh_result = MagicMock()
@@ -212,9 +212,9 @@ class TestRunCredentialDiagnostics:
         assert "GitLab Token" in result_names
 
     @pytest.mark.asyncio
-    async def test_run_credential_diagnostics_parallel_execution(self):
+    async def test_run_credential_diagnostics_parallel_execution(self, tmp_path):
         """Test run_credential_diagnostics() runs checks in parallel using asyncio.gather."""
-        service = DiagnosticsService()
+        service = DiagnosticsService(db_path=str(tmp_path / "diagnostics.db"))
 
         # Track call order to verify parallelism
         call_order = []

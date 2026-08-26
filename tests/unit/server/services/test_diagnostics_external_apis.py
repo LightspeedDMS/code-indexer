@@ -29,9 +29,15 @@ pytestmark = pytest.mark.slow
 
 
 @pytest.fixture
-def diagnostics_service():
-    """Create DiagnosticsService instance for testing."""
-    return DiagnosticsService()
+def diagnostics_service(tmp_path):
+    """Create DiagnosticsService instance for testing.
+
+    Bug #1664: MUST use an isolated db_path — a bare DiagnosticsService()
+    resolves to the developer's LIVE ~/.cidx-server database, making
+    run_category's cache-TTL short-circuit depend on unrelated real server
+    activity instead of this test's own setup.
+    """
+    return DiagnosticsService(db_path=str(tmp_path / "diagnostics.db"))
 
 
 @pytest.fixture
@@ -54,10 +60,19 @@ def mock_config_manager():
 
 @pytest.fixture
 def mock_token_manager():
-    """Mock CITokenManager for GitHub/GitLab tokens."""
-    with patch(
-        "code_indexer.server.services.diagnostics_service.CITokenManager"
-    ) as mock:
+    """Mock CITokenManager for GitHub/GitLab tokens.
+
+    Bug #1664 (masked pre-existing bug, same root cause as Bug #1304): patch
+    target corrected to code_indexer.server.services.ci_token_manager.CITokenManager
+    -- DiagnosticsService._get_token_manager() resolves CITokenManager via
+    create_token_manager() in ci_token_manager.py, so patching the name
+    re-exported into diagnostics_service.py was a no-op. This was invisible
+    while the fixture's DiagnosticsService bound to the live ~/.cidx-server
+    DB (whose real ci_tokens table happened to make the un-mocked call
+    succeed); once isolated to an empty tmp_path DB, the no-op patch surfaced
+    as "no such table: ci_tokens".
+    """
+    with patch("code_indexer.server.services.ci_token_manager.CITokenManager") as mock:
         token_data_github = MagicMock()
         token_data_github.token = "ghp_test123456789012345678901234567890"
         token_data_github.platform = "github"
