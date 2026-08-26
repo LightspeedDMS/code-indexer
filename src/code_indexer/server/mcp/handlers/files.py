@@ -88,7 +88,7 @@ def _start_auto_watch_if_needed(
     Shared by handle_create_file, handle_edit_file, handle_delete_file.
     Logs and continues on failure (auto-watch is enhancement, not critical).
 
-    Bug #1683: previously constructed a bare, unwired
+    Bug #1683 (round 1): previously constructed a bare, unwired
     `ActivatedRepoManager()` here -- its constructor hardcodes
     `Path.home()/".cidx-server"/"data"` and ignores `CIDX_SERVER_DATA_DIR`,
     so in cluster mode (or any deployment overriding the data dir) it read
@@ -96,7 +96,19 @@ def _start_auto_watch_if_needed(
     fallback) mis-triggered auto-watch/indexing on the wrong directory.
     Fixed to resolve the DI-wired singleton from app.state instead
     (`_utils._get_activated_repo_manager()`, the same Bug #1533 pattern
-    already used elsewhere in this module for the same manager).
+    already used in this handler package for the same manager -- see
+    `mcp/handlers/search.py`).
+
+    Bug #1683 (round 2): `get_activated_repo_path` is a bare
+    `os.path.join` with no existence check, so a bad/typo'd/stale
+    `repository_alias` (never activated, or deactivated by another
+    cluster node) resolves to a non-existent path that is still handed to
+    `auto_watch_manager.start_watch`. That path's `ConfigManager.
+    create_with_backtrack` finds no config up-tree and defaults
+    `codebase_dir` to `"."`, which resolves against the SERVER PROCESS's
+    CWD -- silently watching/indexing the server's own project tree
+    instead of failing loudly. Fixed with an explicit existence guard
+    below (Messi Rule 2: fail loud, never substitute a fallback location).
     """
     from code_indexer.server.services.file_crud_service import file_crud_service
     from code_indexer.server.services.auto_watch_manager import auto_watch_manager
@@ -115,6 +127,18 @@ def _start_auto_watch_if_needed(
             repo_path = activated_repo_manager.get_activated_repo_path(
                 username=user.username, user_alias=repository_alias
             )
+        if not Path(repo_path).is_dir():
+            logger.warning(
+                format_error_log(
+                    "MCP-GENERAL-220",
+                    f"Skipping auto-watch for {repository_alias}: resolved "
+                    f"path does not exist ({repo_path}) -- refusing to let "
+                    f"ConfigManager backtracking fall back to the server "
+                    f"CWD (Bug #1683 round 2)",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
+            return
         golden_repos_dir = getattr(
             _utils.app_module.app.state, "golden_repos_dir", None
         )

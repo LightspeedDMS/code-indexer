@@ -3839,6 +3839,15 @@ ERROR_REGISTRY: Dict[str, ErrorDefinition] = {
         severity=Severity.ERROR,
         action="Check forge token, repository remote URL, and write mode status",
     ),
+    "MCP-GENERAL-220": ErrorDefinition(
+        code="MCP-GENERAL-220",
+        description="Auto-watch skipped: resolved repository path does not exist",
+        severity=Severity.WARNING,
+        action=(
+            "Verify repository_alias is activated and not stale/deactivated "
+            "on another cluster node (Bug #1683 round 2)"
+        ),
+    ),
     "QUERY-GENERAL-008": ErrorDefinition(
         code="QUERY-GENERAL-008",
         description="TODO",
