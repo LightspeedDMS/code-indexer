@@ -183,11 +183,26 @@ class TestDiagnosticsService:
         assert len(status[DiagnosticCategory.SDK_PREREQUISITES]) == 3, (
             "SDK Prerequisites should have 3 results"
         )
-        assert len(status[DiagnosticCategory.EXTERNAL_APIS]) == 5, (
-            "External APIs should have 5 results"
+        # Bug #1661: was `== 5`, counting the now-removed "Claude Server"
+        # delegation check (check_claude_server). Story #1487 (commit
+        # e0e56da8) deliberately removed the entire Claude delegation
+        # feature -- including this diagnostic -- and correctly updated the
+        # sibling test_diagnostics_external_apis.py's count to 4, but missed
+        # this file. run_external_api_diagnostics() now gathers exactly 4
+        # checks: check_github_api, check_gitlab_api, check_oidc_provider,
+        # check_otel_collector.
+        assert len(status[DiagnosticCategory.EXTERNAL_APIS]) == 4, (
+            "External APIs should have 4 results"
         )
-        assert len(status[DiagnosticCategory.CREDENTIALS]) == 4, (
-            "Credentials should have 4 results"
+        # Bug #1661 (same root cause as EXTERNAL_APIS above): was `== 4`,
+        # counting the now-removed check_claude_delegation_credentials
+        # check. Story #1487 (commit e0e56da8) removed it along with the
+        # rest of the Claude delegation feature and correctly updated the
+        # sibling test_diagnostics_credentials.py's count to 3, but missed
+        # this file too. run_credential_diagnostics() now gathers exactly 3
+        # checks: check_ssh_keys, check_github_token, check_gitlab_token.
+        assert len(status[DiagnosticCategory.CREDENTIALS]) == 3, (
+            "Credentials should have 3 results"
         )
         assert len(status[DiagnosticCategory.INFRASTRUCTURE]) == 2, (
             "Infrastructure should have 2 results"
