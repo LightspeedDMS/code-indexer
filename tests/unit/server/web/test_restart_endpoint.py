@@ -11,29 +11,15 @@ TDD: These tests are written FIRST, before implementation.
 """
 
 import pytest
-import tempfile
-from pathlib import Path
 from unittest.mock import MagicMock, patch
 from fastapi.routing import APIRoute
 from fastapi.testclient import TestClient
 
-# Issue #1677: this file was marked pytest.mark.slow by commit 88eb3946 (a
-# 145-file, multi-story bulk commit for Stories #592/#593) with no
-# file-specific rationale recorded, which silently excluded it from
-# server-fast-automation.sh's "-m not slow" gate. It is exactly this kind of
-# blind spot that let #1656's 13 standing-red failures go unnoticed for
-# months. Measured standalone: 26 passed in ~4.9s (PYTHONPATH=./src python3
-# -m pytest tests/unit/server/web/test_restart_endpoint.py -v --durations=0),
-# with every individual test's own setup/call/teardown at 0.00-0.02s -- the
-# wall time is pytest/import startup overhead, not test-body slowness. Per
-# CLAUDE.md's fast-automation remediation thresholds (<5s target, >10s
-# investigate, >30s MUST exclude), this is at/under the target and nowhere
-# near the exclusion bar, so the marker is removed rather than replaced with
-# alternative coverage. `tests/unit/server/web/` is already one of
-# server-fast-automation.sh's included chunks (see the
-# `tests/unit/server/web/ tests/unit/server/repositories/
-# tests/unit/server/routers/` pytest invocation), so no script change is
-# needed for this file to rejoin the regression gate.
+# Issue #1677: this file was marked pytest.mark.slow with no file-specific
+# rationale, which silently excluded it from server-fast-automation.sh's
+# "-m not slow" gate. Measured standalone at ~4.9s for 26 tests (well under
+# CLAUDE.md's exclusion bar), so the marker is removed and the file rejoins
+# the regression gate.
 
 # Issue #1656: /restart carries `dependencies=[Depends(require_elevation())]`
 # (added by commit 21e8cc57, Story #956) at the ROUTER level. A router-level
@@ -76,6 +62,29 @@ def reset_restart_state():
     routes_module._restart_in_progress = False
     yield
     routes_module._restart_in_progress = False
+
+
+@pytest.fixture(autouse=True)
+def isolate_restart_signal(tmp_path):
+    """
+    Sandbox RESTART_SIGNAL_PATH for every test in this file.
+
+    Issue #1677 remediation: RESTART_SIGNAL_PATH is bound at import time from
+    CIDX_DATA_DIR (not server-fast-automation.sh's CIDX_SERVER_DATA_DIR), so
+    without this patch any test that reaches the real systemd branch of
+    _delayed_restart writes a real restart.signal file to the real
+    ~/.cidx-server/ directory. If cidx-auto-update.timer is active on the
+    host, its poller (auto_update/service.py) picks up a signal file younger
+    than RESTART_SIGNAL_STALENESS_THRESHOLD and executes a REAL server
+    restart, which would kill any in-flight background job. Applying this
+    autouse fixture at module scope (rather than per-test) protects every
+    test here, including ones added in the future.
+    """
+    with patch(
+        "code_indexer.server.web.routes.RESTART_SIGNAL_PATH",
+        tmp_path / "restart.signal",
+    ):
+        yield
 
 
 @pytest.fixture
@@ -540,27 +549,26 @@ class TestDelayedRestartMechanism:
 
         When _delayed_restart is called in systemd environment
         Then it writes a JSON signal file to RESTART_SIGNAL_PATH
+
+        Note: RESTART_SIGNAL_PATH is already sandboxed to a tmp_path by the
+        module-level autouse `isolate_restart_signal` fixture (Issue #1677) --
+        no per-test patch is needed here.
         """
         from code_indexer.server.web.routes import _delayed_restart
+        import code_indexer.server.web.routes as routes_module
         import json
 
-        with tempfile.TemporaryDirectory() as tmpdir:
-            mock_signal_path = Path(tmpdir) / "restart.signal"
-            with patch("time.sleep"):
-                with patch("os.environ.get") as mock_env:
-                    mock_env.return_value = "some-invocation-id"  # Systemd
-                    with patch(
-                        "code_indexer.server.web.routes.RESTART_SIGNAL_PATH",
-                        mock_signal_path,
-                    ):
-                        _delayed_restart(delay=2)
+        with patch("time.sleep"):
+            with patch("os.environ.get") as mock_env:
+                mock_env.return_value = "some-invocation-id"  # Systemd
+                _delayed_restart(delay=2)
 
-            # Signal file should have been written (assert while tmpdir still exists)
-            assert mock_signal_path.exists()
-            signal_data = json.loads(mock_signal_path.read_text())
-            assert "timestamp" in signal_data
-            assert "reason" in signal_data
-            assert signal_data["reason"] == "diagnostics_restart"
+        signal_path = routes_module.RESTART_SIGNAL_PATH
+        assert signal_path.exists()
+        signal_data = json.loads(signal_path.read_text())
+        assert "timestamp" in signal_data
+        assert "reason" in signal_data
+        assert signal_data["reason"] == "diagnostics_restart"
 
     def test_dev_mode_calls_os_execv(self):
         """
@@ -657,30 +665,29 @@ class TestErrorHandling:
         Given _delayed_restart is called in systemd mode
         When the signal file is written
         Then its content is valid JSON with 'timestamp' and 'reason' fields
+
+        Note: RESTART_SIGNAL_PATH is already sandboxed to a tmp_path by the
+        module-level autouse `isolate_restart_signal` fixture (Issue #1677) --
+        no per-test patch is needed here.
         """
         from code_indexer.server.web.routes import _delayed_restart
+        import code_indexer.server.web.routes as routes_module
         import json
 
         with patch("time.sleep"):
             with patch("os.environ.get") as mock_env:
                 mock_env.return_value = "some-invocation-id"  # Systemd mode
+                _delayed_restart(delay=2)
 
-                with tempfile.TemporaryDirectory() as tmpdir:
-                    mock_signal_path = Path(tmpdir) / "restart.signal"
-                    with patch(
-                        "code_indexer.server.web.routes.RESTART_SIGNAL_PATH",
-                        mock_signal_path,
-                    ):
-                        _delayed_restart(delay=2)
+        # Signal file should contain valid JSON
+        signal_path = routes_module.RESTART_SIGNAL_PATH
+        assert signal_path.exists()
+        content = signal_path.read_text()
+        signal_data = json.loads(content)
 
-                    # Signal file should contain valid JSON
-                    assert mock_signal_path.exists()
-                    content = mock_signal_path.read_text()
-                    signal_data = json.loads(content)
-
-                    # Verify required fields are present
-                    assert "timestamp" in signal_data
-                    assert "reason" in signal_data
+        # Verify required fields are present
+        assert "timestamp" in signal_data
+        assert "reason" in signal_data
 
     def test_os_execv_failure_is_caught(self):
         """
