@@ -99,6 +99,7 @@ from typing import Any, Callable, Generator, List, Set, Type
 
 import pytest
 
+import code_indexer.server.app as _server_app_module
 from code_indexer.server.repositories.background_jobs import BackgroundJobManager
 from code_indexer.server.telemetry.correlation_bridge import _correlation_id_var
 
@@ -289,3 +290,99 @@ def _teardown_all_background_job_managers() -> Generator[None, None, None]:
         yield from _teardown_all_background_job_managers_impl(monkeypatch)
     finally:
         monkeypatch.undo()
+
+
+def _snapshot_restore_shared_app_state_impl() -> Generator[None, None, None]:
+    """Core generator body for the `_snapshot_restore_shared_app_state`
+    autouse fixture below, extracted as a plain function so it can be
+    driven directly (via `next()`) by dedicated unit tests without needing
+    pytest's fixture machinery -- see
+    tests/unit/server/test_app_state_leak_protection_1694.py, mirroring
+    the established `_teardown_all_background_job_managers_impl` pattern
+    above.
+
+    Bug #1694 (durable generalization of Bug #1675's per-file fix):
+    several test files across this tree
+    (`web/test_dependency_map_routes_sentinel.py`,
+    `web/test_depmap_job_status_async.py`,
+    `web/test_recent_run_metrics_template_bug_874.py` -- fixed narrowly
+    for #1675 -- plus `routers/test_git_cat_endpoint.py`,
+    `routers/test_git_file_history_endpoint.py`,
+    `routers/test_git_blame_endpoint.py`,
+    `routers/test_repos_sync_status_endpoint.py`, `test_custom_group_*.py`,
+    `middleware/test_correlation_delegates_to_bridge_1632.py`, and
+    `telemetry/test_request_tracing.py`) each run
+    `with TestClient(app) as tc:` against the SHARED
+    `code_indexer.server.app.app` singleton. That runs the REAL FastAPI
+    lifespan, which wires real production services (e.g. a real
+    `DependencyMapService` bound to this machine's actual golden-repos
+    directory) onto `app.state`. Lifespan shutdown stops background
+    threads/schedulers but never resets the app.state attributes it set --
+    they stay bound to the process-wide `app` object and leak into every
+    later test in the same pytest session that reads `app.state.*`,
+    regardless of which file or directory it lives in.
+
+    Rather than adding another per-file save/restore patch every time this
+    shape is found (three times now: #1664, #1675, #1694), this generator
+    snapshots the ENTIRE `app.state` backing dict before each test and
+    restores it verbatim after -- closing the whole class of leak (any
+    app.state.* attribute a real lifespan run happens to set, not just
+    `dependency_map_service`) in one place.
+
+    CRITICAL safety property (Bug #1638): this must NEVER be the thing
+    that causes `code_indexer.server.app.app` to be constructed. `app` is
+    lazily built via PEP 562 `__getattr__` (Bug #1638) precisely so a bare
+    import stays inert; forcing construction here unconditionally, for
+    EVERY test under tests/unit/server/ (this fixture is autouse across
+    the whole ~14,500-test tree), would reintroduce exactly the
+    import-time-service-construction regression #1638 fixed, plus real
+    contention for the live local dev server's `primary_instance.lock`.
+    So this checks `"app" in vars(_server_app_module)` -- a plain dict
+    membership test that does NOT invoke `__getattr__` -- and no-ops
+    entirely when `app` has not yet been constructed by anything else in
+    the session. Every currently-known leaking test file already imports
+    `app` at MODULE level (`from code_indexer.server.app import app`),
+    which resolves during pytest's collection phase, before any fixture's
+    setup runs -- so by the time this generator's setup phase executes for
+    the first affected test, `app` is already present, and this snapshot
+    guard is active for it.
+
+    Ordering: pytest runs autouse fixtures' setup BEFORE a test's own
+    explicitly-requested fixtures (e.g. a file's `client`/`test_client`
+    fixture) within the same scope, and tears down in reverse order -- so
+    the snapshot here is taken before any `TestClient(app)` lifespan
+    context is entered, and the restore here runs AFTER that context has
+    already exited (i.e. after real lifespan shutdown has run), which is
+    exactly the ordering needed to undo whatever the lifespan mutated.
+    """
+    if "app" not in vars(_server_app_module):
+        # `app` singleton not yet constructed by anything in this pytest
+        # session -- nothing to protect, and checking must never itself
+        # trigger construction (see docstring above).
+        yield
+        return
+
+    shared_app = _server_app_module.app
+    snapshot = dict(shared_app.state._state)
+    try:
+        yield
+    finally:
+        state_dict = shared_app.state._state
+        state_dict.clear()
+        state_dict.update(snapshot)
+
+
+@pytest.fixture(autouse=True)
+def _snapshot_restore_shared_app_state() -> Generator[None, None, None]:
+    """Bug #1694: tree-wide autouse fixture that snapshots and restores
+    `code_indexer.server.app.app`'s `app.state` around every test in
+    tests/unit/server/. See `_snapshot_restore_shared_app_state_impl`
+    above for the full rationale.
+
+    Purely additive protection for the real-lifespan-singleton leak
+    pattern: a test that builds and tears down its own independent
+    `app = create_app()` instance (a different object entirely) is
+    untouched by this fixture, since only the shared module-level
+    singleton object is ever snapshotted/restored here.
+    """
+    yield from _snapshot_restore_shared_app_state_impl()
