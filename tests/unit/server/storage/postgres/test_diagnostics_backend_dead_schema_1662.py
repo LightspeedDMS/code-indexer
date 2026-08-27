@@ -231,3 +231,33 @@ class TestSatisfiesDiagnosticsBackendProtocol:
         backend = _make_backend(pool)
 
         assert isinstance(backend, DiagnosticsBackend)
+
+
+class TestDiagnosticsBackendProtocolReturnAnnotationsAreObjectTyped:
+    """Bug #1662 regression guard (code review gap): `runtime_checkable`
+    Protocol `isinstance()` checks only member PRESENCE, never method
+    signatures/type annotations. Reverting `DiagnosticsBackend.load_all_results()`/
+    `load_category_results()`'s return annotations back to the old, provably
+    false `str`-typed contract (`List[Tuple[str, str, str]]` /
+    `Optional[Tuple[str, str]]`) would leave `test_isinstance_check_against_protocol`
+    above -- and every other test in this file -- green, silently reopening
+    the exact bug this file exists to guard against. These tests introspect
+    the Protocol method's `__annotations__` directly so that specific revert
+    is caught.
+    """
+
+    def test_load_all_results_return_annotation_is_object_typed_not_str(self):
+        from code_indexer.server.storage.protocols import DiagnosticsBackend
+
+        annotation = DiagnosticsBackend.load_all_results.__annotations__["return"]
+
+        assert "object" in annotation
+        assert "Tuple[str, str, str]" not in annotation
+
+    def test_load_category_results_return_annotation_is_object_typed_not_str(self):
+        from code_indexer.server.storage.protocols import DiagnosticsBackend
+
+        annotation = DiagnosticsBackend.load_category_results.__annotations__["return"]
+
+        assert "object" in annotation
+        assert "Tuple[str, str]" not in annotation
