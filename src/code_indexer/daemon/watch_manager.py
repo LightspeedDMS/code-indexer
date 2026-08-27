@@ -146,6 +146,28 @@ class DaemonWatchManager:
             Status dictionary with success/error status, message, and statistics
         """
         with self._lock:
+            # Bug #1717: a _WatchError sentinel means the previous start
+            # attempt's construction FAILED -- nothing ever actually
+            # started, and the sentinel has no stop_watching() method.
+            # Treat it as "not running" up front (deliberate error status,
+            # not the misleading "success" a fall-through would produce)
+            # and clear the stale error state so it doesn't linger forever
+            # once the caller has been told about it.
+            if isinstance(self.watch_handler, _WatchError):
+                error = self.watch_handler.error
+                logger.warning(
+                    f"No watch running to stop (last start attempt failed: {error})"
+                )
+                self.watch_handler = None
+                self.project_path = None
+                self.start_time = None
+                return {
+                    "status": "error",
+                    "message": (
+                        f"Watch not running (last start attempt failed: {error})"
+                    ),
+                }
+
             # Check if running
             if not self.watch_handler and not self.watch_thread:
                 logger.warning("No watch running to stop")
@@ -156,7 +178,7 @@ class DaemonWatchManager:
             # Get statistics before stopping
             if (
                 self.watch_handler
-                and not isinstance(self.watch_handler, _WatchStarting)
+                and not isinstance(self.watch_handler, (_WatchStarting, _WatchError))
                 and hasattr(self.watch_handler, "get_stats")
             ):
                 try:
@@ -169,7 +191,7 @@ class DaemonWatchManager:
 
             # Stop the watch handler
             if self.watch_handler and not isinstance(
-                self.watch_handler, _WatchStarting
+                self.watch_handler, (_WatchStarting, _WatchError)
             ):
                 try:
                     self.watch_handler.stop_watching()

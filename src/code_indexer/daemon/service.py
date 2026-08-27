@@ -1232,6 +1232,18 @@ class CIDXDaemonService(Service):
                 "project_path": stats["project_path"],
                 "stats": stats,
             }
+        elif stats["status"] == "error":
+            # Bug #1717: a construction failure in the watch's background
+            # thread must be surfaced here too, not collapsed into the
+            # same payload as genuine idle -- otherwise an RPC client /
+            # CLI user is told the watch is simply "not running" and never
+            # learns why it failed.
+            return {
+                "running": False,
+                "project_path": stats.get("project_path"),
+                "error": stats.get("error"),
+                "stats": stats,
+            }
         else:
             return {
                 "running": False,
