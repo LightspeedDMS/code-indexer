@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 
 # These imports will fail initially - that's the TDD approach
 from code_indexer.server.app import create_app
+from code_indexer.server.auth import dependencies
 from code_indexer.server.auth.dependencies import require_permission
 from code_indexer.server.auth.user_manager import User, UserRole
 
@@ -28,10 +29,29 @@ class TestAuthLoginEndpoint:
         return TestClient(app)
 
     @pytest.fixture
-    def mock_user_manager(self):
-        """Create mock user manager."""
-        with patch("code_indexer.server.app.user_manager") as mock:
-            yield mock
+    def mock_user_manager(self, client):
+        """Mock authenticate_user on the REAL user_manager instance.
+
+        NOTE (#1695): /auth/login is registered by register_auth_routes()
+        (Story #409 routes extraction), whose login() handler captures
+        `user_manager` as a closure PARAMETER at create_app() time --
+        patch("code_indexer.server.app.user_manager") only reassigns the
+        app module's global name and never reaches that closure, so the
+        mock was silently never invoked (login succeeded against the real,
+        already-wired user_manager instead of the mock). Fixed using the
+        SAME patch.object-on-the-real-instance pattern already established
+        in this codebase for the identical closure-capture problem (see
+        tests/unit/server/auth/test_password_change_security.py, commit
+        5b287bfc, issue #1698): dependencies.user_manager is wired by
+        app_wiring.py to the SAME object instance passed into
+        register_auth_routes()'s user_manager closure parameter, so
+        patching a method on that real instance reaches every holder of
+        the reference, including the login() closure -- unlike reassigning
+        a module attribute, which only changes what a NEW lookup would see.
+        """
+        real_user_manager = dependencies.user_manager
+        with patch.object(real_user_manager, "authenticate_user"):
+            yield real_user_manager
 
     def test_login_with_valid_admin_credentials(self, client, mock_user_manager):
         """Test login with valid admin credentials returns JWT token."""
