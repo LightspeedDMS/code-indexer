@@ -138,3 +138,38 @@ class TestGoldenRepoReconcilerEvo66808:
         assert row["index_path"] == clone_path
         assert bool(row["enable_temporal"]) is True
         assert bool(row["enable_scip"]) is True
+
+    def test_one_repos_active_check_failure_does_not_abort_the_others(self, manager):
+        """Review MR !78: a transient is_globally_active() failure for ONE repo must
+        be recorded and skipped, NEVER abort Pass 3 for every remaining healthy repo
+        (which would also kill the Bug #1317 pointer repair)."""
+        good_clone = self._register_repo(manager, "good-repo")
+        self._register_repo(manager, "bad-repo")
+        self._make_globally_active(
+            manager, "good-repo", "/opt/old/golden-repos/good-repo"
+        )
+        self._make_globally_active(
+            manager, "bad-repo", "/opt/old/golden-repos/bad-repo"
+        )
+
+        real_is_active = manager.is_globally_active
+
+        def flaky(alias: str) -> bool:
+            if alias == "bad-repo":
+                raise RuntimeError("simulated transient registry read failure")
+            return real_is_active(alias)
+
+        manager.is_globally_active = flaky  # type: ignore[method-assign]
+
+        result = reconcile_golden_repo_registry(manager)
+
+        # Sweep did NOT abort; the good repo was still repaired, the bad one recorded.
+        assert result.aborted is False
+        assert result.index_paths_repaired == ["good-repo"]
+        assert "bad-repo" in result.pointers_repair_failed
+        assert (
+            GlobalReposSqliteBackend(manager.db_path).get_repo("good-repo-global")[
+                "index_path"
+            ]
+            == good_clone
+        )

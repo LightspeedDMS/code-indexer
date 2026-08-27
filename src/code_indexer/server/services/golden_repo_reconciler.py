@@ -624,7 +624,25 @@ def _run_sweep(
     for repo_row, actual_path in healthy_rows:
         alias = repo_row["alias"]
         global_alias = f"{alias}-global"
-        if not golden_repo_manager.is_globally_active(alias):
+
+        # is_globally_active() constructs a fresh GlobalActivator and reads the
+        # shared registry (SQLite/PostgreSQL), so a transient DB error is possible.
+        # Keep it inside a try -- a read failure for ONE alias must be recorded and
+        # skipped, never propagate out of the loop and abort Pass 3 (both the
+        # #1317 pointer repair and the EVO-66808 index_path repair) for every
+        # remaining healthy repo.
+        try:
+            globally_active = golden_repo_manager.is_globally_active(alias)
+        except Exception as active_error:  # noqa: BLE001 -- reconcile safety
+            logger.error(
+                "reconcile: failed to check global-active state for '%s': %s -- "
+                "skipping its Pass-3 repairs this sweep.",
+                alias,
+                active_error,
+            )
+            result.pointers_repair_failed.append(alias)
+            continue
+        if not globally_active:
             continue
 
         # (a) alias-pointer repair (Bug #1317)
