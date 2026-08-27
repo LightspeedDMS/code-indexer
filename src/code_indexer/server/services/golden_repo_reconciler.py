@@ -159,6 +159,10 @@ class ReconcileResult:
     orphans_failed: List[str] = field(default_factory=list)
     pointers_repaired: List[str] = field(default_factory=list)
     pointers_repair_failed: List[str] = field(default_factory=list)
+    # EVO-66808: healthy repos whose stale global_repos.index_path was repointed
+    # to the actual on-disk clone path (and those whose repair failed).
+    index_paths_repaired: List[str] = field(default_factory=list)
+    index_paths_repair_failed: List[str] = field(default_factory=list)
     healthy_count: int = 0
     aborted: bool = False
     abort_reason: Optional[str] = None
@@ -448,6 +452,7 @@ def reconcile_golden_repo_registry(
                 result={
                     "orphans_removed": len(result.orphans_removed),
                     "pointers_repaired": len(result.pointers_repaired),
+                    "index_paths_repaired": len(result.index_paths_repaired),
                 },
             )
         except Exception as complete_error:  # noqa: BLE001
@@ -594,33 +599,47 @@ def _run_sweep(
                 "start counting from zero again."
             )
 
-    # Pass 3: repair healthy global repos with a missing alias pointer (the
-    # #1315 fallback symptom) -- clone/index intact, registry says global,
-    # only the pointer JSON is gone. Never delete a healthy repo for this;
-    # just re-write the pointer (idempotent).
+    # Pass 3: repair healthy global repos (idempotent; never deletes):
+    #   (a) Bug #1317 / #1315: a MISSING alias pointer -- clone/index intact,
+    #       registry says global, only the pointer JSON is gone. Re-write it.
+    #   (b) EVO-66808: a STALE global_repos.index_path -- an absolute path baked at
+    #       registration under an older data-dir layout (e.g.
+    #       /opt/code-indexer/.cidx-server/data/golden-repos/<name>) that no longer
+    #       exists after the data dir moved (e.g. /data/data/golden-repos/<name>),
+    #       inconsistent with the on-disk codebase_dir. A resolver that trusts it
+    #       lands on a non-existent root (ENOENT / "os error 2"). Repoint it via a
+    #       TARGETED update_index_path (no other registry field disturbed) at the
+    #       actual on-disk clone path. Deliberately CONSERVATIVE: only repair when
+    #       the stored path is absent on disk AND the actual path is a real dir, so
+    #       a valid index_path is never churned.
     from code_indexer.global_repos.alias_manager import AliasManager
+    from code_indexer.global_repos.global_activation import GlobalActivator
 
     aliases_dir = os.path.join(golden_repo_manager.golden_repos_dir, "aliases")
     alias_manager = AliasManager(aliases_dir)
+    # Same shared cluster registry the read/resolve path uses (PostgreSQL in
+    # cluster mode, per-node SQLite in solo mode) -- Bug #1308 deferred resolution.
+    global_registry = GlobalActivator(golden_repo_manager.golden_repos_dir).registry
 
     for repo_row, actual_path in healthy_rows:
         alias = repo_row["alias"]
         global_alias = f"{alias}-global"
+        if not golden_repo_manager.is_globally_active(alias):
+            continue
+
+        # (a) alias-pointer repair (Bug #1317)
         try:
-            if not golden_repo_manager.is_globally_active(alias):
-                continue
-            if alias_manager.alias_exists(global_alias):
-                continue
-            alias_manager.create_alias(
-                alias_name=global_alias, target_path=actual_path, repo_name=alias
-            )
-            result.pointers_repaired.append(alias)
-            logger.warning(
-                "Bug #1317 reconcile: repaired missing alias pointer for "
-                "globally-active repo '%s' (clone healthy, pointer was "
-                "missing -- #1315 fallback symptom).",
-                alias,
-            )
+            if not alias_manager.alias_exists(global_alias):
+                alias_manager.create_alias(
+                    alias_name=global_alias, target_path=actual_path, repo_name=alias
+                )
+                result.pointers_repaired.append(alias)
+                logger.warning(
+                    "Bug #1317 reconcile: repaired missing alias pointer for "
+                    "globally-active repo '%s' (clone healthy, pointer was "
+                    "missing -- #1315 fallback symptom).",
+                    alias,
+                )
         except Exception as repair_error:  # noqa: BLE001
             logger.error(
                 "Bug #1317 reconcile: failed to repair alias pointer for '%s': %s",
@@ -628,3 +647,31 @@ def _run_sweep(
                 repair_error,
             )
             result.pointers_repair_failed.append(alias)
+
+        # (b) stale-index_path repair (EVO-66808)
+        try:
+            repo_info = global_registry.get_global_repo(global_alias)
+            stored_index_path = (repo_info or {}).get("index_path")
+            if (
+                repo_info is not None
+                and stored_index_path
+                and stored_index_path != actual_path
+                and not os.path.exists(stored_index_path)
+                and os.path.isdir(actual_path)
+            ):
+                if global_registry.update_index_path(global_alias, actual_path):
+                    result.index_paths_repaired.append(alias)
+                    logger.warning(
+                        "EVO-66808 reconcile: repointed stale index_path for "
+                        "globally-active repo '%s' (%s -> %s).",
+                        alias,
+                        stored_index_path,
+                        actual_path,
+                    )
+        except Exception as ip_error:  # noqa: BLE001
+            logger.error(
+                "EVO-66808 reconcile: failed to repair index_path for '%s': %s",
+                alias,
+                ip_error,
+            )
+            result.index_paths_repair_failed.append(alias)

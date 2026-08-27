@@ -2370,3 +2370,47 @@ class TestGoldenRepoMetadataSqliteBackend:
         assert "category_id" in cols_after
         assert "category_auto_assigned" in cols_after
         assert "wiki_enabled" in cols_after
+
+
+class TestGlobalReposUpdateIndexPath:
+    """EVO-66808: targeted update_index_path repoints a stale index_path without
+    disturbing any other registry column."""
+
+    def _backend(self, tmp_path: Path):
+        from code_indexer.server.storage.database_manager import DatabaseSchema
+        from code_indexer.server.storage.sqlite_backends import (
+            GlobalReposSqliteBackend,
+        )
+
+        db_path = tmp_path / "test.db"
+        DatabaseSchema(str(db_path)).initialize_database()
+        return GlobalReposSqliteBackend(str(db_path))
+
+    def test_update_index_path_repoints_and_returns_true(self, tmp_path: Path) -> None:
+        backend = self._backend(tmp_path)
+        backend.register_repo(
+            alias_name="repo-global",
+            repo_name="repo",
+            repo_url="https://github.com/test/repo.git",
+            index_path="/opt/old-layout/golden-repos/repo",
+            enable_temporal=True,
+            enable_scip=True,
+        )
+
+        updated = backend.update_index_path("repo-global", "/data/golden-repos/repo")
+
+        assert updated is True
+        row = backend.get_repo("repo-global")
+        assert row["index_path"] == "/data/golden-repos/repo"
+        # Targeted update must NOT reset the other columns.
+        assert bool(row["enable_temporal"]) is True
+        assert bool(row["enable_scip"]) is True
+        assert row["repo_url"] == "https://github.com/test/repo.git"
+
+    def test_update_index_path_returns_false_for_unknown_alias(
+        self, tmp_path: Path
+    ) -> None:
+        backend = self._backend(tmp_path)
+        assert (
+            backend.update_index_path("missing-global", "/data/golden-repos/x") is False
+        )

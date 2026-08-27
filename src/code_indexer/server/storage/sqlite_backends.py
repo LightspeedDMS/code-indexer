@@ -314,6 +314,35 @@ class GlobalReposSqliteBackend:
             logger.debug(f"Updated enable_scip={enable_scip} for repo: {alias_name}")
         return updated
 
+    def update_index_path(self, alias_name: str, index_path: str) -> bool:
+        """
+        Repoint a repository's on-disk index_path (EVO-66808).
+
+        A targeted single-column update (NOT a full register_repo upsert) so it
+        never resets last_refresh / enable_temporal / enable_scip / temporal_options
+        as a side effect. Used by the golden-repo reconcile to heal a stale
+        absolute index_path left behind by a data-dir layout change.
+
+        Args:
+            alias_name: Alias of the repository to update (with -global suffix)
+            index_path: New on-disk index path.
+
+        Returns:
+            True if a record was updated, False if not found.
+        """
+
+        def operation(conn):
+            cursor = conn.execute(
+                "UPDATE global_repos SET index_path = ? WHERE alias_name = ?",
+                (index_path, alias_name),
+            )
+            return cursor.rowcount > 0
+
+        updated: bool = self._conn_manager.execute_atomic(operation)
+        if updated:
+            logger.debug(f"Updated index_path={index_path} for repo: {alias_name}")
+        return updated
+
     def update_next_refresh(self, alias_name: str, next_refresh: Optional[str]) -> bool:
         """
         Update the next_refresh timestamp for a repository.
@@ -2086,9 +2115,7 @@ class GoldenRepoMetadataSqliteBackend:
             logger.info(f"Updated repo_url={repo_url} for golden repo: {alias}")
         return updated
 
-    def update_workspace_id(
-        self, alias: str, workspace_id: Optional[str]
-    ) -> bool:
+    def update_workspace_id(self, alias: str, workspace_id: Optional[str]) -> bool:
         """Update the workspace-mcp ``workspace_id`` for a golden repository.
 
         EVO-65021: persists (or clears, when ``workspace_id`` is None) the

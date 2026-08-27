@@ -336,6 +336,30 @@ class GlobalRegistry:
                 self._registry_data[alias_name]["enable_scip"] = enable_scip
                 self._save_registry()
 
+    def update_index_path(self, alias_name: str, index_path: str) -> bool:
+        """
+        Repoint a global repo's on-disk index_path (EVO-66808).
+
+        Targeted single-column update so it never resets last_refresh /
+        enable_temporal / enable_scip / temporal_options. Used by the golden-repo
+        reconcile to heal a stale absolute index_path from a data-dir layout change.
+
+        Args:
+            alias_name: Global alias name
+            index_path: New on-disk index path.
+
+        Returns:
+            True if a record was updated, False if not found.
+        """
+        if self._use_sqlite and self._sqlite_backend is not None:
+            return bool(self._sqlite_backend.update_index_path(alias_name, index_path))
+        # JSON file storage (backward compatible)
+        if alias_name in self._registry_data:
+            self._registry_data[alias_name]["index_path"] = index_path
+            self._save_registry()
+            return True
+        return False
+
     def update_next_refresh(
         self, alias_name: str, next_refresh: Optional[float]
     ) -> None:
