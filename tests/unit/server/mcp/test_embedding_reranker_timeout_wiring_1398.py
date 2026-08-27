@@ -16,30 +16,45 @@ from code_indexer.server.services.config_service import (
 )
 
 
+# Isolation hardening (Issue #1687, superseding the original #1398
+# hardening): every code path this file exercises -- search.py's
+# _compute_memory_query_vector / _compute_shared_query_vector, and
+# reranking.py's _attempt_provider_rerank -- calls
+# search_service._get_http_client_factory(), which does
+# `from ..app import app as _app`: a genuine attribute access on
+# server/app.py's `app`. Bug #1638 made that binding LAZY via a
+# module-level __getattr__ (PEP 562), so the first such access anywhere in
+# the process triggers create_app() -> ConfigService.initialize_runtime_db()
+# -> an atomic `self._config = new_config` swap on the CURRENT global
+# ConfigService singleton -- silently wiping an already-installed isolated
+# instance's configured values if it fires after the fixture below runs.
+# The original #1398 hardening (a bare `import code_indexer.server.app`)
+# relied on pre-#1638 import-time construction and became inert once #1638
+# made construction lazy. Forcing eager construction instead (tried first)
+# was confirmed empirically to leave a rarer residual window open: real
+# background services create_app() starts (BackgroundJobManager workers,
+# MemoryGovernor sampler, ...) independently call get_config_service() on
+# their own schedule and can still land mid-test over a long full-suite run.
+# _get_http_client_factory() is a documented, already-established patchable
+# seam for exactly this ("Extracted as a module-level function so unit
+# tests can patch it without needing to set up the full app.state") --
+# already used this way by test_no_embedding_cache_shortcut_1108.py and
+# test_hit_miss_once_per_key_1148.py. Patching it means this file's tests
+# never touch server/app.py at all, closing the risk at its source.
 @pytest.fixture
 def isolated_config_service(tmp_path):
-    # Isolation hardening: the tests below import
-    # code_indexer.server.mcp.handlers.search, which transitively imports
-    # code_indexer.server.app. app.py runs `app = create_app()` at MODULE
-    # scope, and create_app() -> initialize_services() ->
-    # ConfigService.initialize_runtime_db() performs an atomic
-    # `self._config = new_config` reference swap on the CURRENT global config
-    # singleton. If that one-time import fires AFTER we install our isolated
-    # ConfigService and apply update_setting(...), it silently WIPES our
-    # configured values back to defaults (embedding_provider_timeout_seconds
-    # resets 30, etc.), which made these tests fail deterministically in
-    # isolation and flakily by import order under the full suite. Force the
-    # import-time side effect to happen NOW -- against the pre-existing global
-    # config, before we install ours -- so the svc we set up next is never
-    # clobbered. Once app is in sys.modules, later imports are no-ops.
-    import code_indexer.server.app  # noqa: F401  -- import-time side effect only
-
-    svc = ConfigService(server_dir_path=str(tmp_path))
-    set_config_service(svc)
-    try:
-        yield svc
-    finally:
-        reset_config_service()
+    # Stub the external HTTP-client-factory dependency (see module comment
+    # above) so create_app() is never triggered by this file's tests.
+    with patch(
+        "code_indexer.server.services.search_service._get_http_client_factory",
+        return_value=None,
+    ):
+        svc = ConfigService(server_dir_path=str(tmp_path))
+        set_config_service(svc)
+        try:
+            yield svc
+        finally:
+            reset_config_service()
 
 
 # ---------------------------------------------------------------------------
@@ -287,6 +302,67 @@ class TestRerankerTimeoutReachesClientConstruction:
 
         MockVoyage.assert_called_once()
         assert MockVoyage.call_args.kwargs.get("timeout") == 44
+
+
+# ---------------------------------------------------------------------------
+# Issue #1687 regression: isolated_config_service must survive a LATE call
+# into search_service._get_http_client_factory() -- the real seam every
+# production function in this file goes through -- without create_app()
+# ever running and clobbering it (post Bug #1638's lazy app.py).
+# ---------------------------------------------------------------------------
+
+
+class TestIsolatedConfigServiceSurvivesLateHttpClientFactoryCall:
+    """Bug #1638 made server/app.py's `app` binding lazy via a module-level
+    __getattr__ (PEP 562): merely importing code_indexer.server.app no
+    longer triggers create_app() at all. The isolated_config_service
+    fixture's ORIGINAL #1398 hardening (`import code_indexer.server.app`)
+    relied on the pre-#1638 assumption that importing the module was enough
+    to force create_app() to run immediately, against the pre-existing
+    global ConfigService, before the fixture installs its own isolated
+    instance. Post-#1638 that assumption is false: create_app() can fire
+    LATER, on whatever first genuinely accesses the `app` attribute --
+    which every production function in this file reaches via
+    search_service._get_http_client_factory() -- and
+    ConfigService.initialize_runtime_db()'s atomic `self._config =
+    new_config` swap would then run against whatever ConfigService is
+    CURRENTLY the global singleton, silently wiping out an
+    already-configured isolated instance. The current fix patches
+    _get_http_client_factory() itself so it never reaches app.py at all."""
+
+    CONFIGURED_TIMEOUT_SECONDS = 91
+
+    def test_isolated_config_service_survives_late_http_client_factory_call(
+        self, isolated_config_service
+    ) -> None:
+        isolated_config_service.update_setting(
+            "search_timeouts",
+            "embedding_provider_timeout_seconds",
+            self.CONFIGURED_TIMEOUT_SECONDS,
+        )
+
+        # Simulate what every production function in this file does: call
+        # the same seam AFTER the isolated ConfigService has already been
+        # configured. Pre-fix, this is exactly the kind of access that
+        # fires create_app() for the first time in the process and
+        # clobbers isolated_config_service; the fixture now patches it to
+        # return None instead, so create_app() never runs.
+        from code_indexer.server.services.search_service import (
+            _get_http_client_factory,
+        )
+
+        _ = _get_http_client_factory()
+
+        current = isolated_config_service.get_config()
+        assert (
+            current.search_timeouts_config.embedding_provider_timeout_seconds
+            == self.CONFIGURED_TIMEOUT_SECONDS
+        ), (
+            "isolated_config_service's configured value was clobbered by a "
+            "late _get_http_client_factory() call -- the fixture's "
+            "isolation is not robust against Bug #1638's lazy app.py "
+            "(Issue #1687)"
+        )
 
 
 if __name__ == "__main__":
