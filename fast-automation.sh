@@ -140,9 +140,6 @@ echo "⏱️  Duration report: $DURATION_FILE"
 #   - tests/unit/cli/test_query_strategy_cli.py::TestStrategyFlagValidation::
 #     test_strategy_specific_without_provider_errors -- #1711 (--strategy/
 #     --score-fusion/--provider query CLI flags do not exist at all)
-#   - tests/unit/services/test_query_strategy.py::TestAverageFusion::
-#     test_average_both_providers -- #1712 (fuse_average/fuse_multiply
-#     consensus scoring collapses via a _normalize_scores_global key collision)
 python3 -m pytest \
     tests/unit/ \
     --durations=0 \
@@ -263,7 +260,6 @@ python3 -m pytest \
     --deselect=tests/unit/services/test_cohere_embedding.py::TestCohereRetryLoopBug595Issue1::test_network_error_on_last_attempt_raises_runtime_error \
     --deselect=tests/unit/services/test_cohere_embedding.py::TestCohereRetryLoopBug595Issue1::test_runtime_error_mentions_attempt_count \
     --deselect=tests/unit/services/test_cohere_embedding.py::TestConnectReadTimeoutSplit::test_cohere_uses_split_timeout \
-    --deselect=tests/unit/services/test_query_strategy.py::TestAverageFusion::test_average_both_providers \
     --deselect=tests/unit/services/test_single_embedding_wrapper.py::TestSingleEmbeddingWrapperIntegration::test_cli_compatibility_preserved \
     --deselect=tests/unit/services/test_single_embedding_wrapper.py::TestSingleEmbeddingWrapperIntegration::test_integration_single_embedding_via_batch \
     --deselect=tests/unit/services/test_single_embedding_wrapper.py::TestSingleEmbeddingWrapper::test_get_embedding_method_signature_unchanged \

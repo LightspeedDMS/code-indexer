@@ -54,6 +54,11 @@ SCORE_GATE_RATIO = 0.80
 SCORE_GATE_FLOOR = 0.70
 PARALLEL_TIMEOUT_SECONDS = 20
 
+# Neutral score used for a missing/single provider in fuse_multiply and
+# fuse_average (midpoint of the [0, 1] normalized range -- neither rewards
+# nor penalizes a document that only one provider returned).
+NEUTRAL_FUSION_SCORE = 0.5
+
 
 @dataclass
 class QueryResult:
@@ -211,6 +216,46 @@ def _normalize_scores_global(all_results: List[QueryResult]) -> Dict[str, float]
     return normalized
 
 
+def _normalize_scores_global_per_provider(
+    primary_results: List[QueryResult],
+    secondary_results: List[QueryResult],
+) -> "tuple[Dict[str, float], Dict[str, float]]":
+    """Min-max normalize primary and secondary results INDEPENDENTLY, using a
+    SHARED global min/max computed across the combined pool.
+
+    Bug #1712: `_normalize_scores_global` returns a single dict keyed by
+    document. When the same document appears in BOTH primary_results and
+    secondary_results (the consensus case), both results map to the same
+    key and the second write silently discards the first provider's
+    normalized value -- only one provider's contribution survives even
+    though both raw scores were used to compute the global min/max.
+
+    This helper preserves the global min/max computation (so relative score
+    gaps between documents are still preserved regardless of per-provider
+    scale, per Story #638) but keeps each provider's normalized value in its
+    own dict, so a consensus document has two independently-computed
+    normalized scores available to combine.
+    """
+    all_results = list(primary_results) + list(secondary_results)
+    if not all_results:
+        return {}, {}
+    scores_list = [r.score for r in all_results]
+    min_s = min(scores_list)
+    max_s = max(scores_list)
+
+    def _normalize(results: List[QueryResult]) -> Dict[str, float]:
+        normalized: Dict[str, float] = {}
+        for r in results:
+            key = f"{r.repository_alias}:{r.file_path}:{r.chunk_id}"
+            if max_s == min_s:
+                normalized[key] = 1.0
+            else:
+                normalized[key] = (r.score - min_s) / (max_s - min_s)
+        return normalized
+
+    return _normalize(primary_results), _normalize(secondary_results)
+
+
 def fuse_multiply(
     primary_results: List[QueryResult],
     secondary_results: List[QueryResult],
@@ -220,9 +265,15 @@ def fuse_multiply(
 
     Story #638: Uses global normalization across the combined pool so that
     score gaps between documents are preserved regardless of per-provider scale.
+
+    Bug #1712 fix: primary and secondary are normalized into SEPARATE dicts
+    (sharing the same global min/max) so a consensus document (present in
+    both providers) genuinely multiplies each provider's OWN normalized
+    score, instead of squaring whichever value happened to be written last
+    into a single collapsed dict.
     """
-    global_norm = _normalize_scores_global(
-        list(primary_results) + list(secondary_results)
+    primary_norm, secondary_norm = _normalize_scores_global_per_provider(
+        primary_results, secondary_results
     )
 
     result_map: Dict[str, QueryResult] = {}
@@ -248,8 +299,16 @@ def fuse_multiply(
     all_keys = primary_keys | secondary_keys
     scores: Dict[str, float] = {}
     for key in all_keys:
-        p = global_norm.get(key, 0.5) if key in primary_keys else 0.5
-        s = global_norm.get(key, 0.5) if key in secondary_keys else 0.5
+        p = (
+            primary_norm.get(key, NEUTRAL_FUSION_SCORE)
+            if key in primary_keys
+            else NEUTRAL_FUSION_SCORE
+        )
+        s = (
+            secondary_norm.get(key, NEUTRAL_FUSION_SCORE)
+            if key in secondary_keys
+            else NEUTRAL_FUSION_SCORE
+        )
         scores[key] = p * s
 
     sorted_keys = sorted(scores.keys(), key=lambda k: scores[k], reverse=True)
@@ -277,11 +336,18 @@ def fuse_average(
     """Average globally-normalized scores. Single-provider uses (norm + 0.5) / 2.
 
     Story #638: Uses global normalization across the combined pool.
-    - Consensus (both providers): score = global_norm[key]
+    - Consensus (both providers): score = average of each provider's OWN
+      independently-normalized score
     - Single-provider: score = (global_norm[key] + 0.5) / 2  (consensus bias)
+
+    Bug #1712 fix: primary and secondary are normalized into SEPARATE dicts
+    (sharing the same global min/max) so a consensus document (present in
+    both providers) genuinely averages each provider's OWN normalized score,
+    instead of reading whichever value happened to be written last into a
+    single collapsed dict.
     """
-    global_norm = _normalize_scores_global(
-        list(primary_results) + list(secondary_results)
+    primary_norm, secondary_norm = _normalize_scores_global_per_provider(
+        primary_results, secondary_results
     )
 
     result_map: Dict[str, QueryResult] = {}
@@ -309,13 +375,15 @@ def fuse_average(
     for key in all_keys:
         in_primary = key in primary_keys
         in_secondary = key in secondary_keys
-        norm_val = global_norm.get(key, 0.0)
         if in_primary and in_secondary:
-            # Consensus result: use global norm directly
-            scores[key] = norm_val
+            # Consensus result: average both providers' own normalized scores
+            scores[key] = (primary_norm[key] + secondary_norm[key]) / 2
+        elif in_primary:
+            # Single-provider (primary only): blend with neutral score
+            scores[key] = (primary_norm[key] + NEUTRAL_FUSION_SCORE) / 2
         else:
-            # Single-provider result: blend with neutral 0.5
-            scores[key] = (norm_val + 0.5) / 2
+            # Single-provider (secondary only): blend with neutral score
+            scores[key] = (secondary_norm[key] + NEUTRAL_FUSION_SCORE) / 2
 
     sorted_keys = sorted(scores.keys(), key=lambda k: scores[k], reverse=True)
 
