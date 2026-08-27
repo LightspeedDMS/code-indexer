@@ -30,6 +30,40 @@ if TYPE_CHECKING:
     )
 
 
+def _get_activated_repo_manager() -> "ActivatedRepoManager":
+    """Get the DI-wired ActivatedRepoManager from app.state (Bug #1692).
+
+    Mirrors stats_service.py's identical `_get_activated_repo_manager()`
+    (Bug #1683) and mcp/handlers/_utils.py's `_get_activated_repo_manager()`
+    (the same one auto_watch_manager's caller uses).
+
+    `FileCRUDService.activated_repo_manager` (the Bug #1689 lazy property)
+    is deliberately NOT used for repo-validity resolution: it constructs a
+    fresh, NODE-LOCAL, UNPOOLED `ActivatedRepoManager` whose
+    `user_has_activated_repo()`/`get_activated_repo_path()` fall back to
+    scanning node-local `{alias}_metadata.json` files
+    (`_list_user_repos_fs`). In cluster/PostgreSQL mode, activation writes
+    to the `activated_repos` DB table only (`_save_metadata_pg`) and NEVER
+    writes that JSON file -- so a genuinely activated repo looks
+    indistinguishable from an orphan to that local instance, and Bug #1692's
+    registry gate would refuse 100% of legitimate cluster writes. Both
+    front doors (the MCP module-level `file_crud_service` singleton AND
+    `routers/files.py`, which constructs a FRESH `FileCRUDService()` per
+    REST request) need this resolved AT CALL TIME rather than cached on
+    any one instance.
+    """
+    from typing import cast
+    from ..app import app as app_module
+
+    manager = getattr(app_module.state, "activated_repo_manager", None)
+    if manager is None:
+        raise RuntimeError(
+            "activated_repo_manager not initialized in app.state. "
+            "Server must set app.state.activated_repo_manager during startup."
+        )
+    return cast("ActivatedRepoManager", manager)
+
+
 class HashMismatchError(Exception):
     """
     Exception raised when content hash validation fails.
@@ -278,13 +312,21 @@ class FileCRUDService:
         # existence check below stays as defense-in-depth for the
         # different failure mode of a registered repo whose directory was
         # removed out from under it.
-        if not self.activated_repo_manager.user_has_activated_repo(
-            username, repo_alias
-        ):
+        #
+        # Resolved via the module-level _get_activated_repo_manager()
+        # (DI/app.state-wired, Bug #1692 cluster-mode fix) rather than
+        # self.activated_repo_manager (a node-local, unpooled instance
+        # whose registry check falls back to scanning local
+        # {alias}_metadata.json files -- files PostgreSQL-mode activation
+        # never writes, which misclassified every genuinely activated
+        # cluster repo as an orphan).
+        repo_manager = _get_activated_repo_manager()
+
+        if not repo_manager.user_has_activated_repo(username, repo_alias):
             raise not_activated_error
 
         # Fall back to activated repo manager
-        repo_path_str = self.activated_repo_manager.get_activated_repo_path(
+        repo_path_str = repo_manager.get_activated_repo_path(
             username=username, user_alias=repo_alias
         )
         repo_path = Path(repo_path_str)
