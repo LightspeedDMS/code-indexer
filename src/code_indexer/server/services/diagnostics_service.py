@@ -19,7 +19,7 @@ import re
 import sqlite3
 import threading
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING, Dict, List, Any, Optional, Sequence, Tuple
@@ -810,7 +810,14 @@ class DiagnosticsService:
         try:
             # Serialize results to JSON
             results_json = json.dumps([r.to_dict() for r in results])
-            run_at = datetime.now().isoformat()
+            # Bug #1663: write a timezone-AWARE UTC value, never naive-local.
+            # run_at is TIMESTAMPTZ on PostgreSQL -- a naive-local value
+            # round-trips incorrectly if the PostgreSQL session's configured
+            # timezone ever differs from this process's local timezone,
+            # skewing get_status()'s freshness/TTL comparison. An aware UTC
+            # value is unambiguous regardless of session timezone. See
+            # _coerce_run_at() for the matching read-side normalization.
+            run_at = datetime.now(timezone.utc).isoformat()
 
             if self._backend is not None:
                 self._backend.save_results(category.value, results_json, run_at)
@@ -864,6 +871,15 @@ class DiagnosticsService:
         returned. A malformed value (neither datetime nor a parseable str)
         fails soft: logs a WARNING and returns None, mirroring
         parse_json_column()'s contract.
+
+        Bug #1663: _save_results_to_db() now writes run_at as a
+        timezone-AWARE UTC value (datetime.now(timezone.utc).isoformat()),
+        so on SQLite the persisted TEXT string itself carries a UTC offset
+        (e.g. "...+00:00"). datetime.fromisoformat() parses that into a
+        tz-AWARE datetime -- the str branch below must strip/convert it
+        exactly like the isinstance(raw, datetime) branch already does,
+        otherwise the very same "naive vs aware" TypeError this method
+        exists to prevent would resurface via the str path instead.
         """
         if isinstance(raw, datetime):
             if raw.tzinfo is not None:
@@ -872,9 +888,13 @@ class DiagnosticsService:
 
         if isinstance(raw, str):
             try:
-                return datetime.fromisoformat(raw)
+                parsed = datetime.fromisoformat(raw)
             except ValueError:
                 pass
+            else:
+                if parsed.tzinfo is not None:
+                    return parsed.astimezone().replace(tzinfo=None)
+                return parsed
 
         import logging
 
