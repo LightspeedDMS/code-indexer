@@ -3654,14 +3654,27 @@ def make_lifespan(
         # constructed -- see that assignment for the full rationale.
 
         # Bug #532: Inject DiagnosticsBackend into the module-level diagnostics_service
-        # singleton. The singleton is created at import time with no backend; we inject
-        # it here after backend_registry is available.
+        # singleton. We inject it here after backend_registry is available.
+        #
+        # Bug #1686 follow-up: this used to do a bare-name
+        # `from ...routers.diagnostics import diagnostics_service as
+        # _diagnostics_service` import. Bug #1686 changed that module
+        # global's default from an eagerly-constructed instance to `None`
+        # (to stop a bare import of the router from touching the live DB),
+        # so the bare-name import here bound to None and
+        # `_diagnostics_service._backend = ...` raised
+        # `AttributeError: 'NoneType' object has no attribute '_backend'`,
+        # unconditionally crashing real server startup (this guard is
+        # always true on a real server). Calling _get_diagnostics_service()
+        # instead lazily constructs the singleton right now, at real
+        # STARTUP time -- exactly what Bug #1686 always intended to allow;
+        # only import-time construction was ever the problem.
         if backend_registry is not None and hasattr(backend_registry, "diagnostics"):
             from code_indexer.server.routers.diagnostics import (
-                diagnostics_service as _diagnostics_service,
+                _get_diagnostics_service,
             )
 
-            _diagnostics_service._backend = backend_registry.diagnostics
+            _get_diagnostics_service()._backend = backend_registry.diagnostics
             logger.info(
                 "Bug #532: DiagnosticsBackend injected into diagnostics_service singleton",
                 extra={"correlation_id": get_correlation_id()},
