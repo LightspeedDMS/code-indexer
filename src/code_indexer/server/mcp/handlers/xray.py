@@ -323,16 +323,21 @@ def handle_store_xray_pattern(params: Dict[str, Any], user: User) -> Dict[str, A
 
 
 def _resolve_repo_path(alias: str) -> Optional[str]:
-    """Resolve a global repo alias to its versioned snapshot path.
+    """Resolve a global repo alias to its on-disk path.
 
-    Delegates to repos._resolve_golden_repo_path so the alias manager is
-    exercised through the canonical code path.
+    Uses the SAME registry-backed resolution as search_code/regex_search
+    (``_utils._resolve_global_repo_path_or_index`` → ``resolve_alias_or_index_path``):
+    the AliasManager pointer file first, falling back to the registry row's
+    ``index_path`` when the pointer is missing (Bug #1315). The prior
+    pointer-only path (``repos._resolve_golden_repo_path``) returned None for
+    global repos whose alias pointer was never created by the seeder/bulk-
+    provisioning path, so xray raised ``repository_not_found`` on repos that
+    search_code/regex_search resolve fine (e.g. ``evolution-global``).
 
-    Returns None when the alias is unknown.
+    Returns None when the alias is unknown to the registry and no ``index_path``
+    fallback resolves.
     """
-    from code_indexer.server.mcp.handlers.repos import _resolve_golden_repo_path
-
-    return cast(Optional[str], _resolve_golden_repo_path(alias))
+    return cast(Optional[str], _utils._resolve_global_repo_path_or_index(alias))
 
 
 def _get_background_job_manager():

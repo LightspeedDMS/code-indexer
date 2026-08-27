@@ -206,10 +206,12 @@ def _get_arm_and_grm() -> Tuple[Any, Any]:
 
 
 def _resolve_repo_path(alias: str) -> Optional[str]:
-    """Resolve alias → versioned snapshot path. Returns None if unknown."""
-    from code_indexer.server.mcp.handlers.repos import _resolve_golden_repo_path
-
-    return cast(Optional[str], _resolve_golden_repo_path(alias))
+    """Resolve alias → on-disk path via the shared registry-backed resolver
+    (Bug #1315 index_path fallback), matching search_code/regex_search and the
+    single-repo xray handler. The prior pointer-only resolution returned None —
+    and raised repository_not_found — for global repos whose alias pointer was
+    never created (e.g. evolution-global). Returns None if unresolvable."""
+    return cast(Optional[str], _utils._resolve_global_repo_path_or_index(alias))
 
 
 def _get_xray_cell_limiter() -> Any:

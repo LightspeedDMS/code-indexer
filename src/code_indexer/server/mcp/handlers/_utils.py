@@ -307,6 +307,46 @@ def _get_global_repo(alias_name: str):
     return app_module.app.state.backend_registry.global_repos.get_repo(alias_name)
 
 
+def _resolve_global_repo_path_or_index(alias_name: str) -> Optional[str]:
+    """Resolve a global repo alias to an on-disk path WITH the registry
+    ``index_path`` fallback (Bug #1315) — the canonical read-only resolution
+    used by search_code/regex_search.
+
+    ``resolve_alias_or_index_path`` reads the AliasManager pointer file first,
+    then falls back to the registry row's ``index_path`` when the pointer was
+    never created (a bulk/seeder provisioning gap). Handlers that resolved via
+    the pointer-only path (``repos._resolve_golden_repo_path``) returned None —
+    and therefore raised ``repository_not_found`` — on global repos with a
+    missing alias pointer even though the repo is registered and searchable
+    (e.g. ``evolution-global``, which search_code/regex_search resolve fine).
+    This shared helper keeps the xray handlers consistent with the other
+    read-only search paths and is deliberately NOT wired into
+    ``_resolve_golden_repo_path`` (which the WRITE-path base-clone derivation
+    depends on decomposing a ``.versioned`` snapshot path).
+
+    Returns None only when the alias is unknown to the registry AND no valid
+    on-disk ``index_path`` fallback resolves.
+    """
+    from pathlib import Path
+
+    from code_indexer.global_repos.alias_manager import (
+        AliasManager,
+        resolve_alias_or_index_path,
+    )
+
+    # Look the entry up the same way ``search._resolve_global_repo_target`` does
+    # (``_list_global_repos()`` + match on ``alias_name``) so the two paths stay
+    # behaviourally identical (Messi Rule #4 anti-duplication).
+    repo_entry = next(
+        (r for r in _list_global_repos() if r.get("alias_name") == alias_name),
+        None,
+    )
+    alias_manager = AliasManager(str(Path(_get_golden_repos_dir()) / "aliases"))
+    return resolve_alias_or_index_path(
+        alias_manager, alias_name=alias_name, repo_entry=repo_entry
+    )
+
+
 def _get_query_tracker():
     """Get QueryTracker from app.state.
 
