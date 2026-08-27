@@ -366,22 +366,22 @@ class GlobalErrorHandler(BaseHTTPMiddleware):
             # Log at appropriate level. correlation_id is already resolved via
             # _resolve_correlation_id() (ambient-first, Bug #1648), so this
             # log line's [ID: ...] text matches the response body/header.
+            #
+            # Bug #1649: format_error_log() is a plain string-formatting
+            # helper (**context), not logger.error()/logger.warning()
+            # itself -- passing extra= here does NOT attach it to the
+            # LogRecord for the logging module; it previously got
+            # stringified into the message text as a confusing, redundant
+            # "extra={'correlation_id': ...}" suffix. Bug #1641's fix
+            # (IdentityQueueHandler.prepare() -> inject_correlation_id())
+            # already populates record.correlation_id centrally from the
+            # ambient request context, independent of any per-call-site
+            # extra= usage, so no functional propagation is lost by
+            # removing it here.
             if error_type in ["ValidationError", "HTTPException"]:
-                logger.warning(
-                    format_error_log(
-                        "REPO-GENERAL-017",
-                        log_message,
-                        extra={"correlation_id": correlation_id},
-                    )
-                )
+                logger.warning(format_error_log("REPO-GENERAL-017", log_message))
             else:
-                logger.error(
-                    format_error_log(
-                        "REPO-GENERAL-018",
-                        log_message,
-                        extra={"correlation_id": correlation_id},
-                    )
-                )
+                logger.error(format_error_log("REPO-GENERAL-018", log_message))
 
         except Exception as log_error:
             # Fallback logging if there's an error in the logging process
@@ -389,6 +389,5 @@ class GlobalErrorHandler(BaseHTTPMiddleware):
                 format_error_log(
                     "REPO-GENERAL-019",
                     f"Error logging failed [ID: {correlation_id}]: {log_error}",
-                    extra={"correlation_id": correlation_id},
                 )
             )
