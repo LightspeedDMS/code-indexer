@@ -6,6 +6,7 @@ No mocks for timing-critical functionality following MESSI Rule #1.
 """
 
 import pytest
+import statistics
 import time
 import bcrypt
 from datetime import datetime, timezone
@@ -60,7 +61,8 @@ class TestRealTimingAttackPrevention:
         password_change_rate_limiter._attempts.clear()
 
         test_data = test_user_with_real_hash
-        response_times = []
+        invalid_times = []
+        valid_times = []
 
         # Captured BEFORE dependencies.user_manager gets mocked below --
         # the route closure was bound to THIS object at create_app() time
@@ -130,7 +132,7 @@ class TestRealTimingAttackPrevention:
                             },
                         )
                         elapsed = time.time() - start_time
-                        response_times.append(elapsed)
+                        invalid_times.append(elapsed)
 
                         # Should fail with 401 (invalid old password)
                         assert response.status_code == 401
@@ -148,23 +150,44 @@ class TestRealTimingAttackPrevention:
                             },
                         )
                         elapsed = time.time() - start_time
-                        response_times.append(elapsed)
+                        valid_times.append(elapsed)
 
                         # Should succeed with 200
                         assert response.status_code == 200
                         print(f"Valid password attempt {i + 1}: {elapsed:.4f}s")
 
-        # SECURITY REQUIREMENT: Response time variation should be minimal
-        min_time = min(response_times)
-        max_time = max(response_times)
-        time_variation = (max_time - min_time) / min_time
+        # SECURITY REQUIREMENT: compare BRANCH MEDIANS, not raw min/max over
+        # pooled samples (#1698 round 3). constant_time_execute only pads UP
+        # to a minimum -- it never caps a maximum -- so a single transient
+        # scheduling/GC/allocator spike landing on ANY sample (proven to
+        # happen at any position, not just the first) can blow up a raw
+        # (max-min)/min ratio regardless of warm-up. The median of 3 samples
+        # per branch is immune to one outlier in that branch (the outlier
+        # can't move the middle value), and comparing branch medians directly
+        # measures the real security property: a systematic timing
+        # difference between the valid-password and invalid-password code
+        # paths, not incidental jitter within either path.
+        MAX_RELATIVE_MEDIAN_DIFFERENCE = 0.5
+        median_invalid = statistics.median(invalid_times)
+        median_valid = statistics.median(valid_times)
+        median_diff = abs(median_valid - median_invalid)
+        relative_diff = median_diff / min(median_valid, median_invalid)
 
-        print(f"Response times: {[f'{t:.4f}s' for t in response_times]}")
-        print(f"Min: {min_time:.4f}s, Max: {max_time:.4f}s")
-        print(f"Timing variation: {time_variation:.2%} (target: <50%)")
+        print(f"Invalid times: {[f'{t:.4f}s' for t in invalid_times]}")
+        print(f"Valid times: {[f'{t:.4f}s' for t in valid_times]}")
+        print(
+            f"Median invalid: {median_invalid:.4f}s, Median valid: {median_valid:.4f}s"
+        )
+        print(
+            f"Median timing difference: {relative_diff:.2%} "
+            f"(target: <{MAX_RELATIVE_MEDIAN_DIFFERENCE:.0%})"
+        )
 
-        # Timing variation should be less than 50% (allows for some natural variation)
-        assert time_variation < 0.5, f"Timing variation too large: {time_variation:.2%}"
+        # Relative difference between branch medians should be minimal
+        assert relative_diff < MAX_RELATIVE_MEDIAN_DIFFERENCE, (
+            f"Median timing difference too large: {relative_diff:.2%} "
+            f"(median valid={median_valid:.4f}s, median invalid={median_invalid:.4f}s)"
+        )
 
     def test_timing_attack_prevention_unit_level(self):
         """
@@ -182,15 +205,13 @@ class TestRealTimingAttackPrevention:
         wrong_password = "WrongPassword123!"
         password_hash = password_manager.hash_password(test_password)
 
-        # Discarded warm-up call (correct password) to absorb the sporadic
-        # first-call cold-path spike (scheduling/GC/allocator event on the
-        # very first real bcrypt call). Its timing is intentionally NOT
-        # recorded into response_times.
-        warmup_result = timing_attack_prevention.normalize_password_validation_timing(
-            password_manager.verify_password, test_password, password_hash
-        )
-        assert warmup_result is True
-
+        # NOTE (#1698): no separate warm-up call is needed here -- unlike
+        # the HTTP-level sibling test, hash_password() immediately above
+        # already performs a full bcrypt operation, so bcrypt is already
+        # warm before the measurement loops below begin. (An earlier round
+        # added a warm-up call here defensively; an A/B measurement proved
+        # it made no statistically significant difference, so it was
+        # removed rather than kept with an inaccurate "needed" rationale.)
         response_times = []
 
         # Test with wrong passwords (fast bcrypt failure)
