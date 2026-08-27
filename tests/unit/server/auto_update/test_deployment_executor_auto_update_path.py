@@ -9,7 +9,9 @@ those already-deployed hosts on the next auto-update deploy cycle.
 """
 
 import pwd
+from contextlib import contextmanager
 from pathlib import Path
+from typing import Iterator
 from unittest.mock import Mock, patch
 
 import pytest
@@ -318,124 +320,76 @@ WantedBy=multi-user.target
         )
 
 
+@contextmanager
+def _all_steps_except_auto_update_path(
+    executor: DeploymentExecutor,
+) -> Iterator[None]:
+    """Mock all 18 execute() steps except _ensure_auto_update_service_has_cli_path.
+
+    Shared by both TestExecuteWiring tests below to avoid duplicating this
+    patch list (mirrors test_rust_toolchain.py's _all_steps_except_rust).
+    Includes _build_hnswlib_with_fallback (Bug #1651/#1640): with a fake
+    repo_path, its unmocked fallback branch does a real `git clone`.
+    """
+    with (
+        patch.object(
+            executor, "_ensure_git_safe_directory_wildcard", return_value=True
+        ),
+        patch.object(executor, "_ensure_malloc_arena_max", return_value=True),
+        patch.object(executor, "_ensure_data_dir_env_var", return_value=True),
+        patch.object(
+            executor, "_ensure_auto_updater_uses_server_python", return_value=True
+        ),
+        patch.object(executor, "ensure_ripgrep", return_value=True),
+        patch.object(executor, "_ensure_git_safe_directory", return_value=True),
+        patch.object(executor, "_ensure_cidx_repo_root", return_value=True),
+        patch.object(executor, "_ensure_launch_config", return_value=None),
+        patch.object(executor, "pip_install", return_value=True),
+        patch.object(executor, "build_custom_hnswlib", return_value=True),
+        patch.object(executor, "_build_hnswlib_with_fallback", return_value=True),
+        patch.object(executor, "git_submodule_update", return_value=True),
+        patch.object(executor, "_calculate_auto_update_hash", return_value="same_hash"),
+        patch.object(executor, "git_pull", return_value=True),
+        patch.object(executor, "_ensure_rust_toolchain", return_value=True),
+        patch.object(executor, "_ensure_claude_cli_updated", return_value=True),
+        patch.object(executor, "_ensure_codex_cli_installed", return_value=True),
+        patch.object(executor, "_ensure_pace_maker_installed", return_value=True),
+    ):
+        yield
+
+
 @pytest.mark.slow
 class TestExecuteWiring:
     """Tests for execute() calling _ensure_auto_update_service_has_cli_path()."""
 
-    @patch.object(
-        DeploymentExecutor, "_ensure_git_safe_directory_wildcard", return_value=True
-    )
-    @patch.object(
-        DeploymentExecutor,
-        "_ensure_auto_update_service_has_cli_path",
-        return_value=True,
-    )
-    @patch.object(DeploymentExecutor, "_ensure_malloc_arena_max", return_value=True)
-    @patch.object(DeploymentExecutor, "_ensure_data_dir_env_var", return_value=True)
-    @patch.object(
-        DeploymentExecutor, "_ensure_auto_updater_uses_server_python", return_value=True
-    )
-    @patch.object(DeploymentExecutor, "ensure_ripgrep", return_value=True)
-    @patch.object(DeploymentExecutor, "_ensure_git_safe_directory", return_value=True)
-    @patch.object(DeploymentExecutor, "_ensure_cidx_repo_root", return_value=True)
-    @patch.object(DeploymentExecutor, "_ensure_launch_config", return_value=None)
-    @patch.object(DeploymentExecutor, "pip_install", return_value=True)
-    @patch.object(DeploymentExecutor, "build_custom_hnswlib", return_value=True)
-    @patch.object(DeploymentExecutor, "git_submodule_update", return_value=True)
-    @patch.object(
-        DeploymentExecutor, "_calculate_auto_update_hash", return_value="same_hash"
-    )
-    @patch.object(DeploymentExecutor, "git_pull", return_value=True)
-    @patch.object(DeploymentExecutor, "_ensure_rust_toolchain", return_value=True)
-    # Bug #1640: these three steps make real, unmocked npm/git network calls
-    # when left unpatched.
-    @patch.object(DeploymentExecutor, "_ensure_claude_cli_updated", return_value=True)
-    @patch.object(DeploymentExecutor, "_ensure_codex_cli_installed", return_value=True)
-    @patch.object(DeploymentExecutor, "_ensure_pace_maker_installed", return_value=True)
-    def test_execute_calls_ensure_auto_update_path(
-        self,
-        mock_ensure_pace_maker,
-        mock_ensure_codex,
-        mock_ensure_claude_cli_updated,
-        mock_ensure_rust,
-        mock_git_pull,
-        mock_calc_hash,
-        mock_git_submodule,
-        mock_build_hnswlib,
-        mock_pip_install,
-        mock_ensure_launch_config,
-        mock_ensure_cidx_repo,
-        mock_ensure_git_safe,
-        mock_ensure_ripgrep,
-        mock_ensure_auto_updater,
-        mock_ensure_data_dir,
-        mock_ensure_malloc_arena,
-        mock_ensure_auto_update_path,
-        mock_ensure_git_safe_wildcard,
-        executor,
-    ):
+    def test_execute_calls_ensure_auto_update_path(self, executor):
         """Test that execute() calls _ensure_auto_update_service_has_cli_path()."""
-        result = executor.execute()
+        with (
+            _all_steps_except_auto_update_path(executor),
+            patch.object(
+                executor,
+                "_ensure_auto_update_service_has_cli_path",
+                return_value=True,
+            ) as mock_ensure_auto_update_path,
+        ):
+            result = executor.execute()
 
         assert result is True
         mock_ensure_auto_update_path.assert_called_once()
 
-    @patch.object(
-        DeploymentExecutor, "_ensure_git_safe_directory_wildcard", return_value=True
-    )
-    @patch.object(
-        DeploymentExecutor,
-        "_ensure_auto_update_service_has_cli_path",
-        return_value=False,
-    )
-    @patch.object(DeploymentExecutor, "_ensure_malloc_arena_max", return_value=True)
-    @patch.object(DeploymentExecutor, "_ensure_data_dir_env_var", return_value=True)
-    @patch.object(
-        DeploymentExecutor, "_ensure_auto_updater_uses_server_python", return_value=True
-    )
-    @patch.object(DeploymentExecutor, "ensure_ripgrep", return_value=True)
-    @patch.object(DeploymentExecutor, "_ensure_git_safe_directory", return_value=True)
-    @patch.object(DeploymentExecutor, "_ensure_cidx_repo_root", return_value=True)
-    @patch.object(DeploymentExecutor, "_ensure_launch_config", return_value=None)
-    @patch.object(DeploymentExecutor, "pip_install", return_value=True)
-    @patch.object(DeploymentExecutor, "build_custom_hnswlib", return_value=True)
-    @patch.object(DeploymentExecutor, "git_submodule_update", return_value=True)
-    @patch.object(
-        DeploymentExecutor, "_calculate_auto_update_hash", return_value="same_hash"
-    )
-    @patch.object(DeploymentExecutor, "git_pull", return_value=True)
-    @patch.object(DeploymentExecutor, "_ensure_rust_toolchain", return_value=True)
-    # Bug #1640: these three steps make real, unmocked npm/git network calls
-    # when left unpatched.
-    @patch.object(DeploymentExecutor, "_ensure_claude_cli_updated", return_value=True)
-    @patch.object(DeploymentExecutor, "_ensure_codex_cli_installed", return_value=True)
-    @patch.object(DeploymentExecutor, "_ensure_pace_maker_installed", return_value=True)
-    def test_execute_continues_on_ensure_auto_update_path_failure(
-        self,
-        mock_ensure_pace_maker,
-        mock_ensure_codex,
-        mock_ensure_claude_cli_updated,
-        mock_ensure_rust,
-        mock_git_pull,
-        mock_calc_hash,
-        mock_git_submodule,
-        mock_build_hnswlib,
-        mock_pip_install,
-        mock_ensure_launch_config,
-        mock_ensure_cidx_repo,
-        mock_ensure_git_safe,
-        mock_ensure_ripgrep,
-        mock_ensure_auto_updater,
-        mock_ensure_data_dir,
-        mock_ensure_malloc_arena,
-        mock_ensure_auto_update_path,
-        mock_ensure_git_safe_wildcard,
-        executor,
-    ):
+    def test_execute_continues_on_ensure_auto_update_path_failure(self, executor):
         """Test that execute() still returns True overall when
         _ensure_auto_update_service_has_cli_path() returns False (non-fatal
         contract, matching the sibling self-heal methods' exact pattern)."""
-        result = executor.execute()
+        with (
+            _all_steps_except_auto_update_path(executor),
+            patch.object(
+                executor,
+                "_ensure_auto_update_service_has_cli_path",
+                return_value=False,
+            ) as mock_ensure_auto_update_path,
+        ):
+            result = executor.execute()
 
         assert result is True
         mock_ensure_auto_update_path.assert_called_once()
