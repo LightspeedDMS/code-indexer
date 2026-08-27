@@ -86,17 +86,25 @@ def _temporal_infrastructure_patches():
     is lazy (from ..app import _server_hnsw_cache), so we patch both the source
     and any possible bound reference.
     """
-    mock_config = MagicMock()
-    mock_config.embedding_provider = "voyage-ai"
-    mock_config.get.return_value = None
-
     mock_vector_store = MagicMock()
     mock_backend = MagicMock()
     mock_backend.get_vector_store_client.return_value = mock_vector_store
 
+    def _echo_load_verified_config(target_dir):
+        """Bug #1690: reconstruct_temporal_backend now calls
+        ConfigManager.load_verified_config(repo_path) directly and
+        verifies the returned config.codebase_dir matches repo_path --
+        echo target_dir back so this fake config always satisfies that
+        check regardless of which repo_path a given test uses."""
+        config = MagicMock()
+        config.embedding_provider = "voyage-ai"
+        config.get.return_value = None
+        config.codebase_dir = target_dir
+        return config
+
     cm_patch = patch(
-        "code_indexer.proxy.config_manager.ConfigManager.create_with_backtrack",
-        return_value=MagicMock(get_config=MagicMock(return_value=mock_config)),
+        "code_indexer.config.ConfigManager.load_verified_config",
+        side_effect=_echo_load_verified_config,
     )
     bf_patch = patch(
         "code_indexer.backends.backend_factory.BackendFactory.create",

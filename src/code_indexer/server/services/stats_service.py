@@ -198,6 +198,33 @@ class RepositoryStatsService:
 
             config = config_manager.get_config()
 
+            # Bug #1690: the config_path.exists() check above only catches
+            # "no config found anywhere" (the fully-defaulted case).
+            # ConfigManager.find_config_path() walks UP from the CWD, so a
+            # REAL ancestor .code-indexer/config.json (this dev machine
+            # genuinely has some, per Bug #1691's own test docstring)
+            # sails through that guard with a config whose codebase_dir is
+            # the ANCESTOR directory, not the server's actual CWD. Verify
+            # strict equality, mirroring the Bug #1683 round 4 fix for
+            # AutoWatchManager.start_watch. Degrades gracefully (skips the
+            # check) only if Path.cwd() itself is unavailable (deleted
+            # CWD) -- an unrelated, pre-existing edge case.
+            try:
+                resolved_cwd: Optional[Path] = Path.cwd().resolve()
+            except (FileNotFoundError, OSError):
+                resolved_cwd = None
+
+            if resolved_cwd is not None:
+                resolved_codebase_dir = Path(config.codebase_dir).resolve()
+                if resolved_codebase_dir != resolved_cwd:
+                    raise RuntimeError(
+                        f"Found .code-indexer/config.json only at an "
+                        f"ancestor of the current working directory "
+                        f"(codebase_dir={resolved_codebase_dir}, "
+                        f"cwd={resolved_cwd}); refusing to use an "
+                        "unrelated ancestor's config (Bug #1690)"
+                    )
+
             # Real FilesystemVectorStore integration - not injectable, not mockable
             index_dir = Path(config.codebase_dir) / ".code-indexer" / "index"
             return FilesystemVectorStore(

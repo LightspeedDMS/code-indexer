@@ -181,6 +181,11 @@ def real_semantic_query_manager(tmp_path):
     backend.get_vector_store_client.return_value = store
     mock_cfg = MagicMock()
     mock_cfg.embedding_provider = "voyage-ai"
+    # Bug #1690: codebase_dir must match repo_path -- ConfigManager
+    # .load_verified_config() (which _load_repo_config now routes
+    # through) verifies the resolved config.codebase_dir equals the
+    # requested target directory.
+    mock_cfg.codebase_dir = str(repo_path)
 
     with ExitStack() as stack:
         stack.enter_context(

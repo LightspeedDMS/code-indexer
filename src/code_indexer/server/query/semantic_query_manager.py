@@ -212,8 +212,12 @@ def reconstruct_temporal_backend(
     from ...proxy.config_manager import ConfigManager
     from ...backends.backend_factory import BackendFactory
 
-    config_manager = ConfigManager.create_with_backtrack(repo_path)
-    config = config_manager.get_config()
+    # Bug #1690: load_verified_config() verifies the resolved config
+    # genuinely describes repo_path itself, rather than blind-trusting
+    # create_with_backtrack()'s silent ancestor-backtrack / bare-Config()
+    # defaulting -- which would otherwise feed the temporal fusion
+    # dispatch the WRONG embedder/config settings for this repo.
+    config = ConfigManager.load_verified_config(repo_path)
 
     # Create vector store (Story #526: pass server cache)
     from ..app import _server_hnsw_cache
@@ -1397,12 +1401,19 @@ class SemanticQueryManager:
             # get_configured_providers checks env vars first, so it works
             # even with an empty config (common for server-managed repos
             # where versioned snapshots have incomplete local configs).
+            # Bug #1690: load_verified_config() verifies the resolved
+            # config genuinely describes repo_path itself, rather than
+            # blind-trusting create_with_backtrack()'s silent
+            # ancestor-backtrack / bare-Config() defaulting -- which would
+            # otherwise leak an unrelated ancestor repo's real API keys
+            # (get_configured_providers reads config.cohere.api_key
+            # directly) into THIS repo's dual-provider strategy decision.
+            # A mismatch is caught by the SAME except-Exception below,
+            # degrading to the honest env-var-only fallback.
             try:
                 from code_indexer.config import ConfigManager
 
-                config = ConfigManager.create_with_backtrack(
-                    Path(repo_path)
-                ).get_config()
+                config = ConfigManager.load_verified_config(Path(repo_path))
             except Exception as cfg_exc:
                 logger.debug(
                     "Config load failed for %s, using env-var fallback: %s",

@@ -108,11 +108,20 @@ def _load_repo_config(repo_path: str) -> Any:
     from it (NO-TTL for predicate-proven immutable .versioned/ snapshot paths;
     SHORT-TTL for mutable / not-provably-immutable paths). When absent, the
     config is loaded directly (identical to the pre-#1082 behavior).
+
+    Bug #1690: the direct-load branch used to blind-trust
+    ConfigManager.create_with_backtrack(repo_path).get_config() without
+    verifying the resolved config genuinely describes repo_path itself.
+    ConfigManager.load_verified_config() closes that gap (raises
+    ConfigVerificationError -- a ValueError subclass, so it is caught by
+    search_similar's existing "orphaned repo -> skip gracefully"
+    `except ValueError` handling) instead of silently using an unrelated
+    ancestor's or a defaulted config.
     """
     registry = _get_repo_config_cache()
     if registry is not None:
         return registry.get_config(repo_path)
-    return ConfigManager.create_with_backtrack(Path(repo_path)).get_config()
+    return ConfigManager.load_verified_config(Path(repo_path))
 
 
 def _get_golden_repos_dir() -> str:

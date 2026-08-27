@@ -35,10 +35,17 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 
-def _make_mock_config() -> MagicMock:
-    """Build a minimal mock config object accepted by _perform_semantic_search."""
+def _make_mock_config(codebase_dir: str) -> MagicMock:
+    """Build a minimal mock config object accepted by _perform_semantic_search.
+
+    Bug #1690: codebase_dir must match the repo_path under test --
+    ConfigManager.load_verified_config() (which _load_repo_config now
+    routes through) verifies the resolved config.codebase_dir equals the
+    requested target directory.
+    """
     cfg = MagicMock()
     cfg.embedding_provider = "voyage-ai"
+    cfg.codebase_dir = codebase_dir
     return cfg
 
 
@@ -76,12 +83,18 @@ class TestSemanticSearchServiceMultimodalFanOut:
     when present, and stays byte-identical to pre-fix behavior when absent."""
 
     @pytest.fixture(autouse=True)
-    def _patch_config_manager(self, monkeypatch):
+    def _patch_config_manager(self, monkeypatch, tmp_path):
         """Patch ConfigManager, set app.state.http_client_factory, and set a
         fake VOYAGE_API_KEY so MultiIndexQueryService's lazy multimodal
         provider construction (VoyageMultimodalClient.__init__) does not raise
         — the provider object is never actually used to call the network in
-        this test, since store.search() itself is fully mocked."""
+        this test, since store.search() itself is fully mocked.
+
+        Bug #1690: mock_cfg.codebase_dir is set to str(tmp_path) -- all test
+        methods use repo_path = tmp_path, and
+        ConfigManager.load_verified_config() (which _load_repo_config now
+        routes through) verifies the resolved config.codebase_dir matches
+        the requested repo_path."""
         from code_indexer.server.fault_injection.null_factory import NullFaultFactory
         import code_indexer.server.app as app_module
 
@@ -91,7 +104,7 @@ class TestSemanticSearchServiceMultimodalFanOut:
         original_factory = getattr(app_module.app.state, "http_client_factory", None)
         app_module.app.state.http_client_factory = NullFaultFactory()
 
-        mock_cfg = _make_mock_config()
+        mock_cfg = _make_mock_config(str(tmp_path))
         with patch(
             "code_indexer.server.services.search_service.ConfigManager"
             ".create_with_backtrack"

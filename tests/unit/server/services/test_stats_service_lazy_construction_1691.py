@@ -275,12 +275,19 @@ class TestVectorStoreClientReentrancyDoesNotRecurse:
     """
 
     def test_reentrant_access_during_construction_does_not_recurse(
-        self, tmp_path
+        self, tmp_path, monkeypatch
     ) -> None:
         import code_indexer.server.services.stats_service as stats_service_module
         from code_indexer.server.services.stats_service import (
             RepositoryStatsService,
         )
+
+        # Bug #1690: _build_vector_store_client now also verifies
+        # config.codebase_dir strictly equals the REAL process CWD
+        # (independent of this test's mocked ConfigManager stub). chdir
+        # into tmp_path so that check passes and this orthogonal
+        # thread-safety test can focus on re-entrancy, not path matching.
+        monkeypatch.chdir(tmp_path)
 
         config_path = _write_stub_config_file(tmp_path)
         stub_config_manager = _build_stub_config_manager(config_path, str(tmp_path))

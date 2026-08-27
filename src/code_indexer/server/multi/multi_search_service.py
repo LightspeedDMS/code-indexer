@@ -558,9 +558,14 @@ class MultiSearchService:
             # Get repository path
             repo_path = PathLib(self._get_repository_path(repo_id))
 
-            # Load repository configuration
-            config_manager = ConfigManager.create_with_backtrack(repo_path)
-            config = config_manager.get_config()
+            # Load repository configuration.
+            # Bug #1690: load_verified_config() verifies the resolved
+            # config genuinely describes repo_path itself, rather than
+            # blind-trusting create_with_backtrack()'s silent
+            # ancestor-backtrack / bare-Config() defaulting -- which would
+            # otherwise feed the temporal fusion dispatch below the WRONG
+            # embedder/config settings for this repo.
+            config = ConfigManager.load_verified_config(repo_path)
 
             # Initialize vector store for temporal search.
             # Story #1170: mirror filesystem_backend.py get_vector_store_client()

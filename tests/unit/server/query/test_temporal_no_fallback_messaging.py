@@ -73,13 +73,15 @@ def _no_temporal_index_result() -> TemporalSearchResults:
     )
 
 
-def _make_config_manager_mock():
-    """Return a mock ConfigManager that produces a minimal config."""
+def _echo_load_verified_config(target_dir):
+    """Bug #1690: reconstruct_temporal_backend now calls
+    ConfigManager.load_verified_config(repo_path) directly and verifies
+    the returned config.codebase_dir matches repo_path -- echo target_dir
+    back so this fake config always satisfies that check regardless of
+    which repo_path a given test uses."""
     config_mock = MagicMock()
-    config_mock.codebase_dir = Path(tempfile.gettempdir())
-    config_manager_mock = MagicMock()
-    config_manager_mock.get_config.return_value = config_mock
-    return config_manager_mock
+    config_mock.codebase_dir = target_dir
+    return config_mock
 
 
 @pytest.fixture
@@ -87,31 +89,30 @@ def patched_temporal_deps():
     """Patch all external dependencies needed to exercise the temporal query path.
 
     Patches (all external to SemanticQueryManager SUT):
-    - ConfigManager.create_with_backtrack — avoid needing real .code-indexer on disk
+    - ConfigManager.load_verified_config — avoid needing real .code-indexer on disk
     - BackendFactory.create — avoid real vector store initialisation
     - execute_temporal_query_with_fusion — return empty results with warning
     - _server_hnsw_cache — server module-level cache object
     """
-    config_manager_mock = _make_config_manager_mock()
     backend_mock = MagicMock()
     backend_mock.get_vector_store_client.return_value = MagicMock()
 
     with (
         patch(
-            "code_indexer.proxy.config_manager.ConfigManager.create_with_backtrack",
-            return_value=config_manager_mock,
+            "src.code_indexer.config.ConfigManager.load_verified_config",
+            side_effect=_echo_load_verified_config,
         ),
         patch(
-            "code_indexer.backends.backend_factory.BackendFactory.create",
+            "src.code_indexer.backends.backend_factory.BackendFactory.create",
             return_value=backend_mock,
         ),
         patch(
-            "code_indexer.services.temporal.temporal_fusion_dispatch"
+            "src.code_indexer.services.temporal.temporal_fusion_dispatch"
             ".execute_temporal_query_with_fusion",
             return_value=_no_temporal_index_result(),
         ),
         patch(
-            "code_indexer.server.app._server_hnsw_cache",
+            "src.code_indexer.server.app._server_hnsw_cache",
             None,
         ),
     ):

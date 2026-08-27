@@ -841,6 +841,20 @@ class Config(BaseModel):
         return v
 
 
+class ConfigVerificationError(ValueError):
+    """Raised by `ConfigManager.load_verified_config()` when the config
+    resolved via `create_with_backtrack()` does not genuinely describe the
+    requested target directory (Bug #1690).
+
+    Subclasses `ValueError` (not a bare `RuntimeError`) so it integrates
+    with existing "orphaned repo -> skip gracefully" `except ValueError`
+    handling already present at call sites such as
+    `search_service.py::search_similar` ("Skipping repo: no valid index
+    configured"), rather than requiring every caller to special-case a new
+    exception type.
+    """
+
+
 class ConfigManager:
     """Manages configuration loading, saving, and validation."""
 
@@ -1254,6 +1268,56 @@ code-indexer index --clear
 
         # DEFENSIVE: Ensure we always return a ConfigManager with the first found config
         return cls(config_path)
+
+    @classmethod
+    def load_verified_config(cls, target_dir: "Path") -> "Config":
+        """Load a Config for target_dir via create_with_backtrack(),
+        verifying the resolved config genuinely describes target_dir
+        itself -- not a backtracked-from ANCESTOR's config, nor a
+        defaulted fallback (Bug #1690).
+
+        `create_with_backtrack()` walks UP the directory tree from
+        target_dir looking for `.code-indexer/config.json`, and silently
+        returns a bare `Config()` (codebase_dir=".") when nothing is found
+        anywhere. Both outcomes leave `config.codebase_dir` pointing
+        somewhere OTHER than target_dir. A caller that then uses the
+        returned Config to resolve THIS directory's settings (embedding
+        provider, vector_store provider, exclusions, etc.) would silently
+        apply an unrelated repo's configuration instead of failing loud.
+
+        Establishes the same verification Bug #1683 round 4 applied to
+        `AutoWatchManager.start_watch`: STRICT equality between the
+        resolved target and the resolved codebase_dir (never
+        "equal-or-ancestor" -- round 4's own lesson is that permitting
+        codebase_dir to be a strict ancestor of the target is the UNSAFE
+        direction, since it lets a caller silently operate on the
+        ancestor instead of the intended directory).
+
+        Args:
+            target_dir: The directory whose OWN config is required.
+
+        Returns:
+            The verified Config.
+
+        Raises:
+            ConfigVerificationError: resolved config.codebase_dir does not
+                exactly match target_dir (backtracked ancestor OR
+                defaulted). Subclasses ValueError -- see
+                ConfigVerificationError's docstring.
+        """
+        resolved_target = Path(target_dir).resolve()
+        config = cls.create_with_backtrack(resolved_target).get_config()
+        resolved_codebase_dir = Path(config.codebase_dir).resolve()
+        if resolved_codebase_dir != resolved_target:
+            raise ConfigVerificationError(
+                f"No .code-indexer/config.json found directly at "
+                f"'{resolved_target}' (create_with_backtrack() resolved "
+                f"codebase_dir='{resolved_codebase_dir}' instead -- either "
+                "backtracked onto an unrelated ancestor config, or "
+                "defaulted with no config found anywhere). Refusing to use "
+                "it for a different directory (Bug #1690)."
+            )
+        return config
 
     def enable_daemon(self, ttl_minutes: int = 10) -> None:
         """Enable daemon mode for repository.

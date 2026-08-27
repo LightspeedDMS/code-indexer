@@ -129,12 +129,18 @@ def _build_real_collection(
 
 
 @pytest.fixture(autouse=True)
-def _patch_config_manager():
+def _patch_config_manager(tmp_path):
     """Patch ConfigManager (config content is unused — BackendFactory and
     EmbeddingProviderFactory are both patched to hand over the real
     pre-built store/provider) and set app.state.http_client_factory /
     _server_hnsw_cache, mirroring the established pattern in
-    test_search_service_precomputed_vector.py."""
+    test_search_service_precomputed_vector.py.
+
+    Bug #1690: mock_cfg.codebase_dir is set to str(tmp_path) -- both test
+    methods use repo_path = tmp_path, and ConfigManager.load_verified_config()
+    (which _load_repo_config now routes through) verifies the resolved
+    config.codebase_dir matches the requested repo_path.
+    """
     from code_indexer.server.fault_injection.null_factory import NullFaultFactory
     import code_indexer.server.app as app_module
 
@@ -144,6 +150,7 @@ def _patch_config_manager():
 
     mock_cfg = MagicMock()
     mock_cfg.embedding_provider = "voyage-ai"
+    mock_cfg.codebase_dir = str(tmp_path)
     with patch(
         "code_indexer.server.services.search_service.ConfigManager"
         ".create_with_backtrack"

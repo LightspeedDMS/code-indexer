@@ -723,9 +723,11 @@ def make_lifespan(
         if getattr(_cache_cfg, "query_path_cache_enabled", True):
 
             def _repo_config_loader(repo_path: str) -> Any:
-                return _ConfigManager.create_with_backtrack(
-                    Path(repo_path)
-                ).get_config()
+                # Bug #1690: load_verified_config() verifies the resolved
+                # config genuinely describes repo_path itself, rather than
+                # blind-trusting create_with_backtrack()'s own silent
+                # ancestor-backtrack / bare-Config() defaulting.
+                return _ConfigManager.load_verified_config(Path(repo_path))
 
             app.state.repo_config_cache = _RepoConfigCache(
                 config_ttl_seconds=float(_cache_cfg.repo_config_cache_ttl_seconds),
