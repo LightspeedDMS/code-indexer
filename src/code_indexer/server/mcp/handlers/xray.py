@@ -276,8 +276,14 @@ def _get_xray_executor() -> ThreadPoolExecutor:
 
     Raises:
         RuntimeError: If app or xray_executor is not configured.
+
+    Bug #1693: probes via `_lazy_singleton_app_or_none()` (the same
+    side-effect-free helper #1678 introduced for the setters) instead of a
+    bare `getattr(_utils.app_module, "app", None)`, which would otherwise
+    permanently construct the process-wide app singleton as a side effect
+    of merely reading it (see `_lazy_singleton_app_or_none()`'s docstring).
     """
-    app = getattr(_utils.app_module, "app", None)
+    app = _lazy_singleton_app_or_none()
     if app is None:
         raise RuntimeError("xray_executor not available: app is not configured")
     executor = getattr(app.state, "xray_executor", None)
@@ -312,8 +318,14 @@ def set_xray_cell_limiter(limiter: "ResizableLimiter") -> None:
 
 
 def _get_xray_cell_limiter() -> "Optional[ResizableLimiter]":
-    """Return the xray cell limiter from app.state, or None if not wired (CLI/test)."""
-    app = getattr(_utils.app_module, "app", None)
+    """Return the xray cell limiter from app.state, or None if not wired (CLI/test).
+
+    Bug #1693: probes via `_lazy_singleton_app_or_none()` instead of a bare
+    `getattr(_utils.app_module, "app", None)`, which would otherwise
+    permanently construct the process-wide app singleton as a side effect
+    of merely reading it.
+    """
+    app = _lazy_singleton_app_or_none()
     if app is None:
         return None
     return getattr(app.state, "xray_cell_limiter", None)
