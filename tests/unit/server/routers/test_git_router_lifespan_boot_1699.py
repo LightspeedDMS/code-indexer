@@ -1,33 +1,36 @@
-"""Bug #1699 regression: real server startup must survive the lazy
-`routers/git.py` `activated_repo_manager` singleton.
+"""Bug #1699 / Bug #1702 regression: real server startup must survive and
+correctly wire `routers/git.py`'s `_get_activated_repo_manager()`.
 
-This mirrors the "single most important check" lesson documented for the
-sibling issues #1686 and #1689: a near-identical lazy-singleton fix
-(routers/diagnostics.py) was REJECTED in its first round because it broke
-real server startup -- `startup/lifespan.py` did a bare-name `from module
-import name` against a singleton the fix had bound to `None`, and a
-downstream `_backend = ...` assignment raised `AttributeError:
-'NoneType' object has no attribute '_backend'` with no enclosing
-try/except, aborting the entire boot.
+Bug #1699 originally fixed an import-time side effect here (a bare
+`activated_repo_manager = ActivatedRepoManager(...)` running unconditionally
+at module import) by deferring construction to first call via a
+module-level double-checked-locking singleton. That fix deferred WHEN the
+manager was built but not WHICH instance -- it still constructed its own
+node-local, unpooled `ActivatedRepoManager`, entirely separate from the
+DI-wired `app.state.activated_repo_manager` singleton built in
+`startup/service_init.py`. Bug #1692 proved this exact shape causes a real
+cluster-mode outage in `file_crud_service.py` (a node-local instance's
+registry check falls back to scanning local `{alias}_metadata.json` files
+that PostgreSQL/cluster-mode activation never writes).
 
-Consumer audit performed for Bug #1699 (see
-test_git_router_lazy_activated_repo_manager_1699.py's module docstring for
-the full detail) found NO `startup/lifespan.py` or `startup/service_init.py`
-code that imports or reads `routers.git.activated_repo_manager` at all --
-unlike diagnostics_service's Bug #532 injection or file_crud_service's
-Story #197 AC1/AC4 write-exception registration. This test exists to prove
-that finding empirically rather than merely asserting it from a grep: it
-boots the REAL app lifespan (mirroring test_git_cat_endpoint.py's
-established `from code_indexer.server.app import app` +
-`with TestClient(app) as client:` pattern) with the singleton explicitly
-reset to None beforehand (simulating true fresh-server state), and confirms
-boot does not crash and the lazily-constructed manager is a real, working
-instance afterward.
+Bug #1702 converges `_get_activated_repo_manager()` on the same DI-wired
+resolution pattern already used by `routers/repository_health.py` and by
+file_crud_service.py's Bug #1692 fix: it now reads
+`app.state.activated_repo_manager` at call time instead of constructing
+its own instance. This test boots the REAL app lifespan (mirroring
+test_git_cat_endpoint.py's established `from code_indexer.server.app import
+app` + `with TestClient(app):` pattern) and proves:
+
+  1. Boot does not crash (the exact class of failure #1686 introduced and
+     #1689 had to avoid repeating).
+  2. `_get_activated_repo_manager()` returns the SAME object identity as
+     `app.state.activated_repo_manager` -- i.e. it resolves the DI-wired
+     singleton rather than constructing a separate, node-local instance.
+  3. That resolved instance is a real, functional ActivatedRepoManager.
 """
 
 from __future__ import annotations
 
-import pytest
 from fastapi.testclient import TestClient
 
 from code_indexer.server.app import app
@@ -37,48 +40,33 @@ from code_indexer.server.repositories.activated_repo_manager import (
 from code_indexer.server.routers import git as git_router_module
 
 
-@pytest.fixture()
-def activated_repo_manager_reset_to_none():
-    """Explicitly save the current `activated_repo_manager` module
-    attribute, set it to None for the duration of the test (simulating
-    true fresh-server state), and restore the original value afterward.
-    """
-    original_value = git_router_module.activated_repo_manager
-    git_router_module.activated_repo_manager = None
-    try:
-        yield
-    finally:
-        git_router_module.activated_repo_manager = original_value
+class TestRealLifespanBootWiresAppStateResolvedActivatedRepoManager:
+    """Booting the real app lifespan must not crash, and
+    `_get_activated_repo_manager()` must resolve the exact DI-wired
+    `app.state.activated_repo_manager` singleton -- never a separate,
+    node-local instance (Bug #1702)."""
 
-
-class TestRealLifespanBootSurvivesLazyActivatedRepoManagerSingleton:
-    """Booting the real app lifespan must not crash on the lazy
-    `activated_repo_manager` singleton in routers/git.py, and must leave a
-    fully-functional manager available afterward."""
-
-    def test_real_lifespan_boot_produces_working_lazy_singleton(
-        self, activated_repo_manager_reset_to_none
-    ) -> None:
-        """Booting the real app lifespan must not raise (the exact class
-        of failure #1686 introduced and #1689 must not repeat), AND the
-        lazy getter must still construct a real, functional
-        ActivatedRepoManager during/after that real server lifetime --
-        not just avoid crashing.
-        """
+    def test_real_lifespan_boot_resolves_the_app_state_singleton(self) -> None:
         with TestClient(app):
-            arm = git_router_module._get_activated_repo_manager()
-            assert isinstance(arm, ActivatedRepoManager), (
-                "BUG #1699 REGRESSION: _get_activated_repo_manager() must "
-                "construct a real ActivatedRepoManager instance during/"
-                f"after real server startup. Got: {type(arm)!r}"
+            app_state_manager = app.state.activated_repo_manager
+            assert isinstance(app_state_manager, ActivatedRepoManager), (
+                "Real server startup must wire a real ActivatedRepoManager "
+                f"onto app.state. Got: {type(app_state_manager)!r}"
             )
-            assert isinstance(arm.data_dir, str) and arm.data_dir, (
-                "The lazily-constructed ActivatedRepoManager must be a "
-                "genuinely usable instance (non-empty data_dir), not a "
-                f"half-initialized placeholder. Got: {arm.data_dir!r}"
+
+            resolved = git_router_module._get_activated_repo_manager()
+
+            assert resolved is app_state_manager, (
+                "BUG #1702 REGRESSION: routers/git.py's "
+                "_get_activated_repo_manager() must resolve the SAME "
+                "app.state.activated_repo_manager singleton, not construct "
+                "a separate node-local instance."
             )
-            assert arm is git_router_module._get_activated_repo_manager(), (
+            assert isinstance(resolved.data_dir, str) and resolved.data_dir, (
+                "The DI-wired ActivatedRepoManager must be a genuinely "
+                f"usable instance (non-empty data_dir). Got: {resolved.data_dir!r}"
+            )
+            assert resolved is git_router_module._get_activated_repo_manager(), (
                 "_get_activated_repo_manager() must return the SAME "
-                "cached singleton on repeated calls during a real "
-                "server lifetime."
+                "instance on repeated calls during a real server lifetime."
             )

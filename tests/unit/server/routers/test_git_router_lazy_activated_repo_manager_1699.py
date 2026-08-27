@@ -122,35 +122,43 @@ class TestBareImportDoesNotConstructActivatedRepoManager:
     ) -> None:
         """inline_routes.py:48 imports the git router -- this is the exact
         transitive path the issue reports (and the exact path #1686's own
-        verification stumbled on)."""
+        verification stumbled on).
+
+        Bug #1702 removed the module-level `activated_repo_manager`
+        singleton entirely (resolution now goes through app.state at call
+        time), so a bare/transitive import must leave NO such attribute
+        on the module at all -- not merely leave it set to None.
+        """
         env = _make_env(tmp_path, "transitive")
         code = (
             "import sys; "
             f"sys.path.insert(0, {SRC_ROOT!r}); "
             "import code_indexer.server.routers.inline_routes; "
             "import code_indexer.server.routers.git as m; "
-            "print('arm_is_none:', getattr(m, 'activated_repo_manager', 'MISSING') is None)"
+            "print('arm_absent:', not hasattr(m, 'activated_repo_manager'))"
         )
         stdout = _run_and_assert_ok(code, env)
-        assert "arm_is_none: True" in stdout, (
-            "BUG #1699: transitive import via inline_routes.py constructed "
-            f"ActivatedRepoManager as a side effect. Got: {stdout!r}"
+        assert "arm_absent: True" in stdout, (
+            "BUG #1699/#1702: transitive import via inline_routes.py left a "
+            f"stale activated_repo_manager module attribute. Got: {stdout!r}"
         )
 
     def test_activated_repo_manager_global_is_none_before_first_real_access(
         self, tmp_path
     ) -> None:
+        """Bug #1702 removed the module-level singleton -- a bare import
+        must leave no `activated_repo_manager` module attribute at all."""
         env = _make_env(tmp_path, "none-check")
         code = (
             "import sys; "
             f"sys.path.insert(0, {SRC_ROOT!r}); "
             "import code_indexer.server.routers.git as m; "
-            "print('arm_is_none:', getattr(m, 'activated_repo_manager', 'MISSING') is None)"
+            "print('arm_absent:', not hasattr(m, 'activated_repo_manager'))"
         )
         stdout = _run_and_assert_ok(code, env)
-        assert "arm_is_none: True" in stdout, (
-            "BUG #1699: after a bare import, the module-level "
-            f"activated_repo_manager global must be None, not constructed. Got: {stdout!r}"
+        assert "arm_absent: True" in stdout, (
+            "BUG #1699/#1702: after a bare import, the module must not have "
+            f"a stale activated_repo_manager attribute. Got: {stdout!r}"
         )
 
 
@@ -210,49 +218,51 @@ class TestExplicitAccessStillConstructsRealManagerCorrectly:
 
 
 class TestConcurrentAccessReturnsSameSingleton:
-    """Bug #1650-class re-entrancy/thread-safety guard: concurrent first
-    callers must never construct two distinct instances (double-checked
-    locking correctness)."""
+    """Bug #1650-class re-entrancy/thread-safety concern from #1699's fix
+    (double-checked-locking construction) no longer applies: Bug #1702
+    removed all node-local construction from `_get_activated_repo_manager()`
+    -- it is now a pure `getattr(app.state, ...)` read, which is
+    inherently safe under concurrent access with no lock required. This
+    test proves that property still holds: concurrent readers all observe
+    the SAME app.state-resolved instance."""
 
     def test_concurrent_get_activated_repo_manager_calls_share_one_instance(
-        self, tmp_path, monkeypatch
+        self,
     ) -> None:
-        fake_dir = tmp_path / "cidx-server-fake-concurrent"
-        monkeypatch.setenv("CIDX_SERVER_DATA_DIR", str(fake_dir))
+        from unittest.mock import MagicMock
 
+        from code_indexer.server import app as app_module
         from code_indexer.server.routers import git as git_router_module
 
-        # Reset module-level singleton to simulate fresh (unconstructed)
-        # state for this test; monkeypatch restores the original value
-        # (whatever it was) automatically at teardown.
-        monkeypatch.setattr(git_router_module, "activated_repo_manager", None)
+        sentinel_manager = MagicMock(name="sentinel-activated-repo-manager")
+        original = getattr(app_module.app.state, "activated_repo_manager", None)
+        app_module.app.state.activated_repo_manager = sentinel_manager
+        try:
+            results_queue: "queue.Queue" = queue.Queue()
+            errors_queue: "queue.Queue" = queue.Queue()
 
-        results_queue: "queue.Queue" = queue.Queue()
-        errors_queue: "queue.Queue" = queue.Queue()
+            def worker() -> None:
+                try:
+                    results_queue.put(git_router_module._get_activated_repo_manager())
+                except Exception as e:  # pragma: no cover - failure diagnostic
+                    errors_queue.put(e)
 
-        def worker() -> None:
-            try:
-                results_queue.put(git_router_module._get_activated_repo_manager())
-            except Exception as e:  # pragma: no cover - failure diagnostic
-                errors_queue.put(e)
+            threads = [threading.Thread(target=worker) for _ in range(8)]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join(timeout=THREAD_JOIN_TIMEOUT_SECONDS)
 
-        threads = [threading.Thread(target=worker) for _ in range(8)]
-        for t in threads:
-            t.start()
-        for t in threads:
-            t.join(timeout=THREAD_JOIN_TIMEOUT_SECONDS)
-
-        assert not any(t.is_alive() for t in threads), (
-            "A worker thread failed to join within the bounded timeout "
-            "(possible deadlock in _get_activated_repo_manager())"
-        )
-        errors = list(errors_queue.queue)
-        assert not errors, f"Worker threads raised: {errors}"
-        results = list(results_queue.queue)
-        assert len(results) == 8
-        first = results[0]
-        assert all(r is first for r in results), (
-            "Concurrent first-access calls to _get_activated_repo_manager() "
-            "must all observe the SAME singleton instance, never construct "
-            "distinct ones."
-        )
+            assert not any(t.is_alive() for t in threads), (
+                "A worker thread failed to join within the bounded timeout"
+            )
+            errors = list(errors_queue.queue)
+            assert not errors, f"Worker threads raised: {errors}"
+            results = list(results_queue.queue)
+            assert len(results) == 8
+            assert all(r is sentinel_manager for r in results), (
+                "Concurrent _get_activated_repo_manager() calls must all "
+                "resolve the SAME app.state singleton."
+            )
+        finally:
+            app_module.app.state.activated_repo_manager = original

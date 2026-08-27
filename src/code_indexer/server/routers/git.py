@@ -8,9 +8,7 @@ and service layer integration.
 from code_indexer.server.middleware.correlation import get_correlation_id
 
 import logging
-import os
 import subprocess
-import threading
 from typing import Any, Optional
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 
@@ -54,62 +52,47 @@ logger = logging.getLogger(__name__)
 # Create router with prefix and tags
 router = APIRouter(prefix="/api/v1/repos/{alias}/git", tags=["git"])
 
-# Bug #1699: `activated_repo_manager = ActivatedRepoManager(...)` used to
-# run unconditionally at import time. ActivatedRepoManager.__init__ with
-# golden_repo_manager=None (the default here, since this call site never
-# passes one) constructs its own GoldenRepoManager(data_dir=...,
-# resource_config=...) -- a real SQLite load -- as a construction side
-# effect. Since inline_routes.py:48 imports this router, any transitive
-# import (even a bare pytest --collect-only) read the live server DB
-# (confirmed via strace + the "Loaded 0 golden repos from SQLite" log
-# line).
-#
-# A pure module-level PEP-562 __getattr__ (the Bug #1638/#1650 pattern
-# used by server/app.py, git_operations_service.py, file_service.py) is
-# NOT viable here: three route handlers below (git_cat, git_blame,
-# git_file_history) reference `activated_repo_manager` as a bare global
-# WITHIN THIS SAME MODULE, and a bare-name global lookup (LOAD_GLOBAL)
-# never triggers a module's __getattr__ -- that hook fires only for
-# external `module.attr` access or `from module import attr` (the same
-# trap documented in Bug #1686's fix to routers/diagnostics.py).
-#
-# Fix: a real (not annotation-only) `None` default plus a
-# _get_activated_repo_manager() getter that every handler below calls
-# instead of touching the bare name directly. This also keeps
-# unittest.mock.patch("...routers.git.activated_repo_manager") (used
-# WITHOUT create=True in test_git_cat_endpoint.py et al.) working
-# correctly: patching a real `None` attribute via setattr/delattr never
-# raises AttributeError and never forces real construction at patch time.
-activated_repo_manager: Optional[ActivatedRepoManager] = None
-_activated_repo_manager_lock = threading.RLock()
 
-
+# Bug #1699 originally fixed an import-time side effect here (a bare
+# `activated_repo_manager = ActivatedRepoManager(...)` ran unconditionally
+# at module import, constructing a nested GoldenRepoManager that touched
+# the live server DB) by deferring construction to first call via a
+# module-level double-checked-locking singleton.
+#
+# That fix deferred WHEN the manager was built but not WHICH instance:
+# it still constructed its own node-local, unpooled ActivatedRepoManager,
+# entirely separate from the DI-wired `app.state.activated_repo_manager`
+# singleton built in startup/service_init.py. Bug #1692 proved this exact
+# shape causes a real cluster-mode outage in file_crud_service.py: a
+# node-local instance's user_has_activated_repo()/get_activated_repo_path()
+# fall back to scanning local {alias}_metadata.json files that
+# PostgreSQL/cluster-mode activation never writes, making every genuinely
+# activated cluster repo indistinguishable from an orphan.
+#
+# git.py's three handlers below (git_cat, git_blame, git_file_history)
+# only ever needed a WORKING manager for path resolution, not one that
+# agrees with the cluster's shared registry state -- so the divergence
+# never caused an observable bug here. But the duplicate instance is
+# inherently fragile the moment a future change starts relying on
+# agreement with the shared registry (Bug #1702).
+#
+# Fix: converge on the same DI-wired resolution pattern already used by
+# routers/repository_health.py's _get_activated_repo_manager() and by
+# file_crud_service.py's Bug #1692 fix -- resolve
+# app.state.activated_repo_manager at call time, fail loud (RuntimeError)
+# if the server hasn't wired it during startup. No node-local
+# construction and no module-level singleton/lock remain.
 def _get_activated_repo_manager() -> ActivatedRepoManager:
-    """Lazily construct and cache the module's ActivatedRepoManager singleton.
+    """Get the DI-wired ActivatedRepoManager from app.state (Bug #1702)."""
+    from code_indexer.server import app as app_module
 
-    Reads the current module-level `activated_repo_manager` global first: if
-    a caller (test or otherwise) already assigned a real instance or a test
-    double (e.g. via unittest.mock.patch), that value is returned unchanged
-    with no lock contention. Only constructs -- and touches the on-disk DB
-    via the nested GoldenRepoManager -- the first time a route handler
-    genuinely needs it.
-
-    Double-checked locking under a module-level RLock (never a plain Lock,
-    per this project's established singleton-deferral pattern) so
-    concurrent first callers never construct two distinct instances.
-    """
-    global activated_repo_manager
-    if activated_repo_manager is not None:
-        return activated_repo_manager
-    with _activated_repo_manager_lock:
-        if activated_repo_manager is None:
-            _server_data_dir = os.environ.get("CIDX_SERVER_DATA_DIR")
-            activated_repo_manager = ActivatedRepoManager(
-                data_dir=(
-                    os.path.join(_server_data_dir, "data") if _server_data_dir else None
-                )
-            )
-        return activated_repo_manager
+    manager = getattr(app_module.app.state, "activated_repo_manager", None)
+    if manager is None:
+        raise RuntimeError(
+            "activated_repo_manager not initialized. "
+            "Server must set app.state.activated_repo_manager during startup."
+        )
+    return manager
 
 
 # Git Status/Inspection Endpoints
