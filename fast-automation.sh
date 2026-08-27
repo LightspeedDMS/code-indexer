@@ -124,6 +124,25 @@ echo "⚠️  EXCLUDED: Tests requiring real servers, containers, or external AP
 # TELEMETRY: Add --durations=0 to capture ALL test durations
 echo "📊 Telemetry enabled: Results will be saved to $TELEMETRY_FILE"
 echo "⏱️  Duration report: $DURATION_FILE"
+#
+# --deselect audit (GitHub issue #1685): every --deselect below MUST be either
+# a documented live-masked failure with its own tracking issue (listed here),
+# or it should not exist -- a stale/dead deselect is a silent gate weakener.
+# Documented live-masked failures remaining below (first-batch audit):
+#   - tests/unit/cli/test_embedding_provider_option.py::TestDualEmbedOption::
+#     test_dual_embed_and_provider_mutually_exclusive -- #1710
+#   - tests/unit/cli/test_embedding_provider_option.py::TestDualEmbedOption::
+#     test_dual_embed_flag_accepted -- #1710
+#   - tests/unit/cli/test_embedding_provider_option.py::TestDualEmbedOption::
+#     test_dual_embed_flag_in_help -- #1710
+#     (all 3 above: --dual-embed CLI flag does not exist despite a
+#     dual_embed_enabled config field)
+#   - tests/unit/cli/test_query_strategy_cli.py::TestStrategyFlagValidation::
+#     test_strategy_specific_without_provider_errors -- #1711 (--strategy/
+#     --score-fusion/--provider query CLI flags do not exist at all)
+#   - tests/unit/services/test_query_strategy.py::TestAverageFusion::
+#     test_average_both_providers -- #1712 (fuse_average/fuse_multiply
+#     consensus scoring collapses via a _normalize_scores_global key collision)
 python3 -m pytest \
     tests/unit/ \
     --durations=0 \
@@ -231,46 +250,10 @@ python3 -m pytest \
     --ignore=tests/unit/storage/test_repo_category_backend.py \
     --ignore=tests/unit/storage/test_sqlite_backends_category.py \
     --ignore=tests/unit/test_scip_audit_api.py \
-    --deselect=tests/unit/cli/test_adapted_command_behavior.py::TestAdaptedStatusCommand::test_status_command_routes_to_uninitialized_mode \
-    --deselect=tests/unit/proxy/test_parallel_executor.py::TestParallelCommandExecutor::test_execute_single_repository_success \
-    --deselect=tests/unit/chunking/test_fixed_size_chunker.py::TestFixedSizeChunker::test_edge_case_very_large_file \
-    --deselect=tests/unit/storage/test_filesystem_vector_store.py::TestProgressReporting::test_progress_callback_invoked_for_each_point \
-    --deselect=tests/unit/storage/test_filesystem_vector_store.py::TestFilesystemVectorStoreCore::test_batch_upsert_performance \
-    --deselect=tests/unit/storage/test_parallel_index_loading.py::TestPerformanceRequirements::test_parallel_execution_reduces_latency \
-    --deselect=tests/unit/cli/test_cli_diff_type_and_author_filtering.py::TestCLIDiffTypeAndAuthorFiltering::test_cli_passes_author_to_temporal_service \
-    --deselect=tests/unit/cli/test_cli_diff_type_and_author_filtering.py::TestCLIDiffTypeAndAuthorFiltering::test_cli_passes_diff_type_to_temporal_service \
-    --deselect=tests/unit/cli/test_cli_temporal_file_path_bug.py::test_display_file_chunk_match_uses_path_field \
-    --deselect=tests/unit/cli/test_cli_temporal_initialization_bug.py::test_temporal_service_initialization_includes_vector_store_client \
     --deselect=tests/unit/cli/test_embedding_provider_option.py::TestDualEmbedOption::test_dual_embed_and_provider_mutually_exclusive \
     --deselect=tests/unit/cli/test_embedding_provider_option.py::TestDualEmbedOption::test_dual_embed_flag_accepted \
     --deselect=tests/unit/cli/test_embedding_provider_option.py::TestDualEmbedOption::test_dual_embed_flag_in_help \
     --deselect=tests/unit/cli/test_query_strategy_cli.py::TestStrategyFlagValidation::test_strategy_specific_without_provider_errors \
-    --deselect=tests/unit/cli/test_status_display_language_updates.py::test_temporal_index_shows_available_not_active \
-    --deselect=tests/unit/cli/test_status_temporal_error_handling.py::test_temporal_index_error_logged_not_silenced \
-    --deselect=tests/unit/cli/test_status_temporal_index_display.py::test_temporal_index_not_shown_when_missing \
-    --deselect=tests/unit/cli/test_status_temporal_macos_du_fix.py::test_empty_stdout_handled_gracefully \
-    --deselect=tests/unit/cli/test_status_temporal_macos_du_fix.py::test_gnu_du_success_path \
-    --deselect=tests/unit/cli/test_status_temporal_macos_du_fix.py::test_macos_bsd_du_fallback \
-    --deselect=tests/unit/daemon/test_cache_temporal.py::TestLoadTemporalIndexes::test_load_temporal_indexes_calls_hnsw_manager \
-    --deselect=tests/unit/daemon/test_daemon_staleness_detection.py::test_daemon_fresh_files_show_green_indicator \
-    --deselect=tests/unit/daemon/test_daemon_staleness_detection.py::test_daemon_query_includes_staleness_metadata \
-    --deselect=tests/unit/daemon/test_daemon_staleness_detection.py::test_daemon_staleness_failure_doesnt_break_query \
-    --deselect=tests/unit/daemon/test_daemon_staleness_detection.py::test_daemon_staleness_works_with_non_git_folders \
-    --deselect=tests/unit/daemon/test_daemon_staleness_ordering_bug.py::test_daemon_staleness_matches_by_file_path_not_index \
-    --deselect=tests/unit/daemon/test_service_temporal_query.py::TestExposedQueryTemporal::test_exposed_query_temporal_integrates_with_temporal_search_service \
-    --deselect=tests/unit/daemon/test_service_temporal_query.py::TestExposedQueryTemporal::test_exposed_query_temporal_loads_cache_on_first_call \
-    --deselect=tests/unit/daemon/test_service_temporal_query.py::TestExposedQueryTemporal::test_exposed_query_temporal_reloads_cache_if_stale \
-    --deselect=tests/unit/daemon/test_service_temporal_query.py::TestExposedQueryTemporal::test_exposed_query_temporal_returns_error_if_index_missing \
-    --deselect=tests/unit/daemon/test_temporal_path_filter_bug.py::TestTemporalPathFilterBug::test_daemon_handles_multiple_path_filters_correctly \
-    --deselect=tests/unit/global_repos/test_regex_search_exit_codes.py::TestGrepExitCodeHandling::test_exit_code_1_with_stderr_logs_warning \
-    --deselect=tests/unit/global_repos/test_regex_search_exit_codes.py::TestGrepExitCodeHandling::test_exit_code_2_logs_warning \
-    --deselect=tests/unit/global_repos/test_regex_search_exit_codes.py::TestRipgrepExitCodeHandling::test_exit_code_1_with_stderr_logs_warning \
-    --deselect=tests/unit/global_repos/test_regex_search_exit_codes.py::TestRipgrepExitCodeHandling::test_exit_code_2_logs_warning \
-    --deselect=tests/unit/global_repos/test_regex_search.py::TestGrepInternalDirectoryExclusion::test_excludes_code_indexer_directory \
-    --deselect=tests/unit/global_repos/test_regex_search.py::TestGrepInternalDirectoryExclusion::test_excludes_git_directory \
-    --deselect=tests/unit/global_repos/test_regex_search.py::TestRipgrepInternalDirectoryExclusion::test_excludes_code_indexer_directory \
-    --deselect=tests/unit/global_repos/test_regex_search.py::TestRipgrepInternalDirectoryExclusion::test_excludes_git_directory \
-    --deselect=tests/unit/global_repos/test_regex_search.py::TestRipgrepInternalDirectoryExclusion::test_timeout_error_includes_context \
     --deselect=tests/unit/query/test_query_parameter_parity.py::TestQueryParameterParity::test_no_extra_mcp_parameters \
     --deselect=tests/unit/query/test_query_parameter_parity.py::TestQueryParameterParity::test_parameter_name_consistency_rest_mcp \
     --deselect=tests/unit/services/temporal/test_temporal_worker_exception_logging.py::test_worker_exception_is_logged_and_propagated \
