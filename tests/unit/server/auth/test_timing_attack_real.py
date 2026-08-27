@@ -13,6 +13,7 @@ from fastapi.testclient import TestClient
 from unittest.mock import patch
 
 from code_indexer.server.app import create_app
+from code_indexer.server.auth import dependencies
 from code_indexer.server.auth.user_manager import User, UserRole
 
 
@@ -61,12 +62,26 @@ class TestRealTimingAttackPrevention:
         test_data = test_user_with_real_hash
         response_times = []
 
+        # Captured BEFORE dependencies.user_manager gets mocked below --
+        # the route closure was bound to THIS object at create_app() time
+        # (#1698: code_indexer.server.app.user_manager is unreachable from
+        # register_admin_user_routes()'s closure-bound parameter). Its
+        # .password_manager is already the REAL PasswordManager the
+        # production UserManager constructs, so timing attack prevention
+        # is exercised without any manual swap.
+        real_user_manager = dependencies.user_manager
+
         # Mock only the authentication and user retrieval (not password validation)
         with patch("code_indexer.server.auth.dependencies.jwt_manager") as mock_jwt:
             with patch(
                 "code_indexer.server.auth.dependencies.user_manager"
             ) as mock_dep_user_mgr:
-                with patch("code_indexer.server.app.user_manager") as mock_user_mgr:
+                with (
+                    patch.object(real_user_manager, "get_user") as mock_get_user,
+                    patch.object(
+                        real_user_manager, "change_password"
+                    ) as mock_change_password,
+                ):
                     # Mock JWT authentication
                     mock_jwt.validate_token.return_value = {
                         "username": "timingtest",
@@ -77,19 +92,10 @@ class TestRealTimingAttackPrevention:
 
                     # Mock user retrieval for authentication
                     mock_dep_user_mgr.get_user.return_value = test_data["user"]
-                    mock_user_mgr.get_user.return_value = test_data["user"]
-
-                    # CRITICAL: Use real password manager for verification
-                    # This ensures timing attack prevention is actually tested
-                    from code_indexer.server.auth.password_manager import (
-                        PasswordManager,
-                    )
-
-                    real_password_manager = PasswordManager()
-                    mock_user_mgr.password_manager = real_password_manager
+                    mock_get_user.return_value = test_data["user"]
 
                     # Mock only change_password to avoid actual password changes
-                    mock_user_mgr.change_password.return_value = True
+                    mock_change_password.return_value = True
 
                     # Test with incorrect passwords (should use timing attack prevention)
                     # Use only 3 attempts to avoid rate limiting (limit is 5)
