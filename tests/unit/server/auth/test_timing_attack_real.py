@@ -97,6 +97,26 @@ class TestRealTimingAttackPrevention:
                     # Mock only change_password to avoid actual password changes
                     mock_change_password.return_value = True
 
+                    # Discarded warm-up request (correct password) to absorb the
+                    # sporadic first-call cold-path spike (scheduling/GC/allocator
+                    # event on the very first real bcrypt call through the route).
+                    # PasswordChangeRateLimiter only counts FAILED attempts, so a
+                    # successful warm-up does not consume the 3-attempt budget
+                    # below. Its timing is intentionally NOT recorded.
+                    warmup_response = client.put(
+                        "/api/users/change-password",
+                        headers={"Authorization": "Bearer valid.jwt.token"},
+                        json={
+                            "old_password": test_data["correct_password"],
+                            "new_password": "NewSecure123!Pass",
+                        },
+                    )
+                    assert warmup_response.status_code == 200, (
+                        f"Warm-up request must succeed to properly prime the real "
+                        f"bcrypt path, got {warmup_response.status_code}: "
+                        f"{warmup_response.text}"
+                    )
+
                     # Test with incorrect passwords (should use timing attack prevention)
                     # Use only 3 attempts to avoid rate limiting (limit is 5)
                     for i in range(3):
@@ -161,6 +181,15 @@ class TestRealTimingAttackPrevention:
         test_password = "RealTestPassword123!"
         wrong_password = "WrongPassword123!"
         password_hash = password_manager.hash_password(test_password)
+
+        # Discarded warm-up call (correct password) to absorb the sporadic
+        # first-call cold-path spike (scheduling/GC/allocator event on the
+        # very first real bcrypt call). Its timing is intentionally NOT
+        # recorded into response_times.
+        warmup_result = timing_attack_prevention.normalize_password_validation_timing(
+            password_manager.verify_password, test_password, password_hash
+        )
+        assert warmup_result is True
 
         response_times = []
 
