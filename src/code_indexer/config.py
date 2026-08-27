@@ -1306,7 +1306,29 @@ code-indexer index --clear
                 ConfigVerificationError's docstring.
         """
         resolved_target = Path(target_dir).resolve()
-        config = cls.create_with_backtrack(resolved_target).get_config()
+        config_manager = cls.create_with_backtrack(resolved_target)
+
+        # Defense-in-depth (Bug #1690 code-review finding, mirrors
+        # auto_watch_manager.py's round-3 guard): the strict-equality
+        # check below is NOT sufficient on its own. When no config exists
+        # ANYWHERE, create_with_backtrack() returns a ConfigManager whose
+        # config_path does not exist; get_config() then returns a bare
+        # Config() whose codebase_dir defaults to the RELATIVE path ".".
+        # Path(".").resolve() equals Path.cwd() -- not target_dir. If the
+        # caller's CWD happens to equal target_dir (e.g. a server process
+        # whose CWD IS the repo it is querying), that coincidental path
+        # aliasing would satisfy the equality check below even though NO
+        # real config was ever found. Checking config_path.exists() first
+        # closes that gap unconditionally, independent of CWD.
+        if not config_manager.config_path.exists():
+            raise ConfigVerificationError(
+                f"No .code-indexer/config.json found at '{resolved_target}' "
+                "or any parent (create_with_backtrack() defaulted to a "
+                "bare Config with codebase_dir='.'). Refusing to use it "
+                "(Bug #1690)."
+            )
+
+        config = config_manager.get_config()
         resolved_codebase_dir = Path(config.codebase_dir).resolve()
         if resolved_codebase_dir != resolved_target:
             raise ConfigVerificationError(

@@ -114,6 +114,33 @@ class TestLoadVerifiedConfigRefusesNoConfigFoundAnywhere:
         with pytest.raises(ConfigVerificationError):
             ConfigManager.load_verified_config(target_dir)
 
+    def test_raises_when_cwd_equals_target_with_no_config_anywhere(
+        self, isolated_tmp_root, monkeypatch
+    ) -> None:
+        """Code-review finding on #1690: the test above only passes
+        INCIDENTALLY, because the pytest process's real CWD (this repo's
+        root) happens to differ from target_dir. When the bare-Config()
+        fallback fires, its default codebase_dir='.' is a RELATIVE path --
+        resolving it produces Path.cwd(), not target_dir. If the caller's
+        CWD happens to equal target_dir (e.g. a server process whose CWD IS
+        the repo it is querying), Path('.').resolve() == resolved_target
+        by pure coincidental path aliasing, spuriously satisfying the
+        strict-equality check even though NO real config was ever found.
+        This is the exact Bug #1691 failure shape (a stray
+        .code-indexer/index materializing relative to CWD). Discriminating
+        regression test: chdir into target_dir so this coincidence is
+        forced, proving load_verified_config must reject the defaulted
+        fallback on its own terms (config_path.exists()), not rely on the
+        equality check alone.
+        """
+        target_dir = isolated_tmp_root / "never-configured-repo-cwd"
+        target_dir.mkdir()
+        monkeypatch.setenv("CODEBASE_DIR", str(target_dir))
+        monkeypatch.chdir(target_dir)
+
+        with pytest.raises(ConfigVerificationError):
+            ConfigManager.load_verified_config(target_dir)
+
 
 class TestLoadVerifiedConfigSucceedsWhenConfigGenuinelyMatchesTarget:
     """Positive control: target_dir has its own real
