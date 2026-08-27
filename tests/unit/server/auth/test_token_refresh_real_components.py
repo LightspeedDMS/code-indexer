@@ -13,6 +13,9 @@ This test suite demonstrates elite-level TDD by using actual security components
 NO MOCKS, NO LIES, ONLY TRUTH.
 """
 
+import os
+import secrets
+import string
 import tempfile
 import shutil
 from pathlib import Path
@@ -23,6 +26,9 @@ from fastapi import status
 
 from code_indexer.server.app import create_app
 from code_indexer.server.auth.jwt_manager import JWTManager
+from code_indexer.server.auth.password_strength_validator import (
+    PasswordStrengthValidator,
+)
 from code_indexer.server.auth.user_manager import UserRole
 from code_indexer.server.auth.refresh_token_manager import RefreshTokenManager
 from code_indexer.server.auth.rate_limiter import RefreshTokenRateLimiter
@@ -33,6 +39,43 @@ from code_indexer.server.utils.jwt_secret_manager import JWTSecretManager
 import pytest
 
 pytestmark = pytest.mark.slow
+
+# Named constants for _generate_valid_test_password (avoid magic numbers).
+_GENERATED_TEST_PASSWORD_LENGTH = 20
+_MAX_PASSWORD_GENERATION_ATTEMPTS = 1000
+
+
+def _generate_valid_test_password(username: str) -> str:
+    """Generate a random password guaranteed to pass the REAL, live
+    PasswordStrengthValidator for the given username.
+
+    Not a hardcoded secret: computed fresh at module-import time by sampling
+    random characters and validating each candidate against the actual
+    validator (zero mocks) until one is accepted. This is self-adapting to
+    the validator's current policy, so it cannot drift out of sync the way a
+    static literal can when the policy changes (see issue #1681). The result
+    is used only to create an ephemeral user in a tempfile.mkdtemp()-scoped
+    SQLite database that teardown_method deletes after every test.
+    """
+    validator = PasswordStrengthValidator()
+    alphabet = string.ascii_letters + string.digits + "!@#$%^&*"
+    for _ in range(_MAX_PASSWORD_GENERATION_ATTEMPTS):
+        candidate = "".join(
+            secrets.choice(alphabet) for _ in range(_GENERATED_TEST_PASSWORD_LENGTH)
+        )
+        is_valid, _ = validator.validate(candidate, username=username)
+        if is_valid:
+            return candidate
+    raise RuntimeError(
+        f"Failed to generate a PasswordStrengthValidator-valid test password "
+        f"for username={username!r} after {_MAX_PASSWORD_GENERATION_ATTEMPTS} "
+        f"attempts"
+    )
+
+
+TEST_USER_PASSWORD = _generate_valid_test_password("testuser")
+TEST_ADMIN_PASSWORD = _generate_valid_test_password("admin_role_test_user")
+TEST_POWERUSER_PASSWORD = _generate_valid_test_password("poweruser")
 
 
 @pytest.mark.e2e
@@ -48,6 +91,21 @@ class TestTokenRefreshRealComponents:
         # Create temporary directory for test data
         self.temp_dir = tempfile.mkdtemp()
         self.temp_path = Path(self.temp_dir)
+
+        # Bug #1681 remediation: isolate this real-component test from the
+        # developer's persistent local ~/.cidx-server database. Without this,
+        # create_app() below binds UserManager to the REAL local dev server's
+        # SQLite store (server_data_dir defaults to ~/.cidx-server when this
+        # env var is unset), so repeated runs collide with pre-existing
+        # "testuser"/"admin"/"poweruser" rows from earlier sessions (stale
+        # password hashes cause spurious 401s), and any login attempt against
+        # a pre-existing real "admin" account risks contributing failed-login
+        # records toward rate-limiting/locking out the sacred admin account
+        # CLAUDE.md forbids ever touching. Same pattern as the sibling file
+        # test_password_change_security_nomock.py's `real_app` fixture.
+        # (teardown_method restores this env var — see below)
+        self._original_cidx_server_data_dir = os.environ.get("CIDX_SERVER_DATA_DIR")
+        os.environ["CIDX_SERVER_DATA_DIR"] = self.temp_dir
 
         # Initialize REAL components
         self.jwt_secret_manager = JWTSecretManager(
@@ -92,20 +150,34 @@ class TestTokenRefreshRealComponents:
         # Override app module components with our test-scoped instances
         import code_indexer.server.app as app_module
 
+        # Handle to the REAL manager the /api/auth/refresh closure captured
+        # at create_app() time -- reassigning app_module.refresh_token_manager
+        # below does not change what that closure already bound (issue #1681
+        # investigation). Some tests mutate this real object's attributes
+        # in place instead of trying to swap the object reference.
+        self._real_refresh_token_manager = app_module.refresh_token_manager
+
         app_module.refresh_token_manager = self.refresh_token_manager
         app_module.refresh_token_rate_limiter = self.rate_limiter
         app_module.password_audit_logger = self.audit_logger
 
     def teardown_method(self):
         """Clean up test environment."""
+        # Restore CIDX_SERVER_DATA_DIR before removing the temp dir it pointed to.
+        if self._original_cidx_server_data_dir is not None:
+            os.environ["CIDX_SERVER_DATA_DIR"] = self._original_cidx_server_data_dir
+        else:
+            os.environ.pop("CIDX_SERVER_DATA_DIR", None)
         shutil.rmtree(self.temp_dir, ignore_errors=True)
 
     def _create_test_users(self):
-        """Create real test users in the actual database, skipping pre-existing ones.
+        """Create real test users in this test method's isolated database.
 
-        Uses a helper to catch 'already exists' errors so that repeated setup_method
-        calls (one per test method) don't fail when dependencies.user_manager persists
-        across the test class lifetime.
+        setup_method points CIDX_SERVER_DATA_DIR at a fresh tempdir before
+        create_app() runs, so these users do not already exist going in.
+        The 'already exists' catch below is defensive-only (e.g. protects
+        against a future change that makes the store shared again), not the
+        expected steady-state.
         """
 
         def _try_create(username, password, role):
@@ -115,9 +187,9 @@ class TestTokenRefreshRealComponents:
                 if "already exists" not in str(exc):
                     raise
 
-        _try_create("testuser", "TestPass123!", UserRole.NORMAL_USER)
-        _try_create("admin", "AdminPass456!", UserRole.ADMIN)
-        _try_create("poweruser", "PowerPass789!", UserRole.POWER_USER)
+        _try_create("testuser", TEST_USER_PASSWORD, UserRole.NORMAL_USER)
+        _try_create("admin_role_test_user", TEST_ADMIN_PASSWORD, UserRole.ADMIN)
+        _try_create("poweruser", TEST_POWERUSER_PASSWORD, UserRole.POWER_USER)
 
     def _login_and_get_tokens(self, username: str, password: str) -> dict:
         """
@@ -139,7 +211,7 @@ class TestTokenRefreshRealComponents:
         ELITE TDD: Real JWT generation, real database storage, real validation.
         """
         # REAL login to get REAL tokens
-        login_data = self._login_and_get_tokens("testuser", "TestPass123!")
+        login_data = self._login_and_get_tokens("testuser", TEST_USER_PASSWORD)
         assert "refresh_token" in login_data
         assert "access_token" in login_data
 
@@ -179,22 +251,19 @@ class TestTokenRefreshRealComponents:
 
         This creates a token with short lifetime and waits for actual expiration.
         """
-        # Create a refresh token manager with very short lifetime for testing
-        short_life_manager = RefreshTokenManager(
-            jwt_manager=self.jwt_manager,
-            db_path=str(self.temp_path / "short_life_tokens.db"),
-            refresh_token_lifetime_days=0.00001,  # Very short lifetime (~1 second)
+        # Mutate the REAL manager's lifetime in place (see setup_method
+        # comment): the /api/auth/refresh closure already holds this exact
+        # object, and create_initial_refresh_token() reads this attribute
+        # dynamically at login time, so this genuinely produces a
+        # short-lived token instead of an inert substitute object.
+        original_lifetime_days = (
+            self._real_refresh_token_manager.refresh_token_lifetime_days
         )
-
-        # Override the app's refresh token manager temporarily
-        import code_indexer.server.app as app_module
-
-        original_manager = app_module.refresh_token_manager
-        app_module.refresh_token_manager = short_life_manager
+        self._real_refresh_token_manager.refresh_token_lifetime_days = 0.00001
 
         try:
             # Login to get tokens
-            login_data = self._login_and_get_tokens("testuser", "TestPass123!")
+            login_data = self._login_and_get_tokens("testuser", TEST_USER_PASSWORD)
 
             # Wait for token to expire (real time passing)
             time.sleep(2)
@@ -209,8 +278,10 @@ class TestTokenRefreshRealComponents:
             assert "expired" in error_data["detail"].lower()
 
         finally:
-            # Restore original manager
-            app_module.refresh_token_manager = original_manager
+            # Restore the real manager's original lifetime
+            self._real_refresh_token_manager.refresh_token_lifetime_days = (
+                original_lifetime_days
+            )
 
     def test_replay_attack_detection_with_real_token_families(self):
         """
@@ -220,7 +291,7 @@ class TestTokenRefreshRealComponents:
         family revocation in the real database.
         """
         # Login to get initial tokens
-        login_data = self._login_and_get_tokens("testuser", "TestPass123!")
+        login_data = self._login_and_get_tokens("testuser", TEST_USER_PASSWORD)
         initial_refresh_token = login_data["refresh_token"]
 
         # First refresh - should succeed
@@ -254,7 +325,7 @@ class TestTokenRefreshRealComponents:
         a 5-minute lockout enforced by the real rate limiter.
         """
         # Login to get a valid token for headers
-        _login_data = self._login_and_get_tokens("testuser", "TestPass123!")
+        _login_data = self._login_and_get_tokens("testuser", TEST_USER_PASSWORD)
 
         # Attempt multiple refreshes with invalid tokens to trigger rate limiting
         for i in range(10):  # RefreshTokenRateLimiter allows 10 attempts
@@ -283,7 +354,7 @@ class TestTokenRefreshRealComponents:
         but we verify the mechanism is in place.
         """
         # Login to get tokens
-        login_data = self._login_and_get_tokens("testuser", "TestPass123!")
+        login_data = self._login_and_get_tokens("testuser", TEST_USER_PASSWORD)
 
         # Single refresh should work normally
         response = self.client.post(
@@ -299,7 +370,7 @@ class TestTokenRefreshRealComponents:
         and refresh token revocation.
         """
         # Login to get tokens
-        login_data = self._login_and_get_tokens("testuser", "TestPass123!")
+        login_data = self._login_and_get_tokens("testuser", TEST_USER_PASSWORD)
         refresh_token = login_data["refresh_token"]
 
         # Change password (this should revoke all refresh tokens)
@@ -314,14 +385,31 @@ class TestTokenRefreshRealComponents:
         error_data = response.json()
         assert "revoked" in error_data["detail"].lower()
 
+    def _real_audit_log_path(self) -> Path:
+        """Path of the REAL password_audit_logger singleton's log file.
+
+        inline_auth.py binds `password_audit_logger` at MODULE SCOPE (bare
+        `from ..auth.audit_logger import password_audit_logger`), so
+        setup_method's `app_module.password_audit_logger = self.audit_logger`
+        never reaches the real route closure (issue #1681 investigation).
+        """
+        from code_indexer.server.auth.audit_logger import (
+            password_audit_logger as real_logger,
+        )
+
+        return Path(real_logger.log_file_path)
+
     def test_audit_logging_with_real_file_system(self):
         """
         Test audit logging writes to REAL log files.
 
         This verifies that security events are actually logged to disk.
         """
+        audit_path = self._real_audit_log_path()
+        size_before = audit_path.stat().st_size if audit_path.exists() else 0
+
         # Perform operations that should be logged
-        login_data = self._login_and_get_tokens("testuser", "TestPass123!")
+        login_data = self._login_and_get_tokens("testuser", TEST_USER_PASSWORD)
 
         # Successful refresh
         response = self.client.post(
@@ -335,12 +423,14 @@ class TestTokenRefreshRealComponents:
         )
         assert response.status_code == status.HTTP_401_UNAUTHORIZED
 
-        # Check that audit log file exists and contains entries
-        assert self.audit_log_path.exists()
-        log_content = self.audit_log_path.read_text()
+        # Check the real audit log received new entries from this test,
+        # scoped to bytes appended after size_before.
+        assert audit_path.exists()
+        with open(audit_path, "r") as f:
+            f.seek(size_before)
+            new_log_content = f.read()
 
-        # Verify log contains expected entries (actual file I/O)
-        assert "token_refresh" in log_content or len(log_content) > 0
+        assert "token_refresh" in new_log_content
 
     def test_token_lifetime_validation_with_real_timestamps(self):
         """
@@ -349,7 +439,7 @@ class TestTokenRefreshRealComponents:
         This verifies that refresh tokens have longer lifetime than access tokens.
         """
         # Login to get tokens
-        login_data = self._login_and_get_tokens("testuser", "TestPass123!")
+        login_data = self._login_and_get_tokens("testuser", TEST_USER_PASSWORD)
 
         # Refresh to get lifetime information
         response = self.client.post(
@@ -363,16 +453,24 @@ class TestTokenRefreshRealComponents:
             "access_token_expires_in" in refresh_data
             and "refresh_token_expires_in" in refresh_data
         ):
-            access_lifetime = refresh_data[
-                "access_token_expires_in"
-            ]  # 15 minutes = 900 seconds
-            refresh_lifetime = refresh_data[
-                "refresh_token_expires_in"
-            ]  # 7 days = 604800 seconds
+            access_lifetime = refresh_data["access_token_expires_in"]
+            refresh_lifetime = refresh_data["refresh_token_expires_in"]
 
+            # /api/auth/refresh's jwt_manager is a closure parameter bound once
+            # at create_app() time to the REAL app-wide JWTManager -- it is
+            # never re-read dynamically, so self.jwt_manager (configured with
+            # 15 minutes above) never actually reaches this response. Compare
+            # against the real, live jwt_manager instead of a disconnected
+            # hardcoded literal (see issue #1681 investigation notes).
+            from code_indexer.server.auth import dependencies
+
+            seconds_per_minute = 60
+            seven_days_in_seconds = 7 * 24 * 60 * 60
             assert refresh_lifetime > access_lifetime
-            assert access_lifetime == 15 * 60  # 15 minutes
-            assert refresh_lifetime == 7 * 24 * 60 * 60  # 7 days
+            assert access_lifetime == (
+                dependencies.jwt_manager.token_expiration_minutes * seconds_per_minute
+            )
+            assert refresh_lifetime == seven_days_in_seconds
 
     def test_user_role_preservation_with_real_user_database(self):
         """
@@ -382,9 +480,9 @@ class TestTokenRefreshRealComponents:
         """
         # Test with different user roles
         test_cases = [
-            ("testuser", "TestPass123!", "normal_user"),
-            ("admin", "AdminPass456!", "admin"),
-            ("poweruser", "PowerPass789!", "power_user"),
+            ("testuser", TEST_USER_PASSWORD, "normal_user"),
+            ("admin_role_test_user", TEST_ADMIN_PASSWORD, "admin"),
+            ("poweruser", TEST_POWERUSER_PASSWORD, "power_user"),
         ]
 
         for username, password, expected_role in test_cases:
@@ -408,7 +506,7 @@ class TestTokenRefreshRealComponents:
         This verifies that parent-child token relationships are tracked.
         """
         # Login to create initial token family
-        login_data = self._login_and_get_tokens("testuser", "TestPass123!")
+        login_data = self._login_and_get_tokens("testuser", TEST_USER_PASSWORD)
 
         # Perform multiple refreshes to create token chain
         current_refresh_token = login_data["refresh_token"]
@@ -432,7 +530,7 @@ class TestTokenRefreshRealComponents:
         in plaintext.
         """
         # Login to create tokens
-        login_data = self._login_and_get_tokens("testuser", "TestPass123!")
+        login_data = self._login_and_get_tokens("testuser", TEST_USER_PASSWORD)
         _refresh_token = login_data["refresh_token"]
 
         # Verify secure storage implementation
@@ -460,7 +558,7 @@ class TestTokenRefreshRealComponents:
         assert response.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY
 
         # Extra fields (should be ignored but request processed)
-        login_data = self._login_and_get_tokens("testuser", "TestPass123!")
+        login_data = self._login_and_get_tokens("testuser", TEST_USER_PASSWORD)
         response = self.client.post(
             "/api/auth/refresh",
             json={
