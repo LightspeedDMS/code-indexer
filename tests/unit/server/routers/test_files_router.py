@@ -52,10 +52,7 @@ def test_client(mock_user):
 
 def test_create_file_endpoint_success(test_client):
     """POST /files should successfully create a file."""
-    with patch("code_indexer.server.routers.files.FileCRUDService") as MockService:
-        mock_instance = Mock()
-        MockService.return_value = mock_instance
-
+    with patch("code_indexer.server.routers.files.file_crud_service") as mock_instance:
         # Mock service response
         mock_instance.create_file.return_value = {
             "success": True,
@@ -105,10 +102,7 @@ def test_create_file_endpoint_unauthorized():
 
 def test_create_file_endpoint_git_blocked(test_client):
     """POST /files should return 403 for .git/ directory access."""
-    with patch("code_indexer.server.routers.files.FileCRUDService") as MockService:
-        mock_instance = Mock()
-        MockService.return_value = mock_instance
-
+    with patch("code_indexer.server.routers.files.file_crud_service") as mock_instance:
         # Mock service raising PermissionError
         mock_instance.create_file.side_effect = PermissionError(
             ".git directory access blocked"
@@ -125,10 +119,7 @@ def test_create_file_endpoint_git_blocked(test_client):
 
 def test_create_file_endpoint_already_exists(test_client):
     """POST /files should return 409 if file already exists."""
-    with patch("code_indexer.server.routers.files.FileCRUDService") as MockService:
-        mock_instance = Mock()
-        MockService.return_value = mock_instance
-
+    with patch("code_indexer.server.routers.files.file_crud_service") as mock_instance:
         # Mock service raising FileExistsError
         mock_instance.create_file.side_effect = FileExistsError(
             "File already exists: existing.py"
@@ -155,10 +146,7 @@ def test_create_file_endpoint_invalid_request(test_client):
 
 def test_create_file_endpoint_repo_not_found(test_client):
     """POST /files should return 404 if repository not found."""
-    with patch("code_indexer.server.routers.files.FileCRUDService") as MockService:
-        mock_instance = Mock()
-        MockService.return_value = mock_instance
-
+    with patch("code_indexer.server.routers.files.file_crud_service") as mock_instance:
         # Mock service raising FileNotFoundError for repo not found
         mock_instance.create_file.side_effect = FileNotFoundError(
             "Repository not found: nonexistent"
@@ -180,10 +168,7 @@ def test_create_file_endpoint_repo_not_found(test_client):
 
 def test_edit_file_endpoint_success(test_client):
     """PATCH /files/{path} should successfully edit a file."""
-    with patch("code_indexer.server.routers.files.FileCRUDService") as MockService:
-        mock_instance = Mock()
-        MockService.return_value = mock_instance
-
+    with patch("code_indexer.server.routers.files.file_crud_service") as mock_instance:
         # Mock service response
         mock_instance.edit_file.return_value = {
             "success": True,
@@ -226,10 +211,7 @@ def test_edit_file_endpoint_hash_mismatch(test_client):
     """PATCH /files/{path} should return 409 for hash mismatch."""
     from code_indexer.server.services.file_crud_service import HashMismatchError
 
-    with patch("code_indexer.server.routers.files.FileCRUDService") as MockService:
-        mock_instance = Mock()
-        MockService.return_value = mock_instance
-
+    with patch("code_indexer.server.routers.files.file_crud_service") as mock_instance:
         # Mock service raising HashMismatchError
         mock_instance.edit_file.side_effect = HashMismatchError(
             "Content hash mismatch - file was modified"
@@ -251,10 +233,7 @@ def test_edit_file_endpoint_hash_mismatch(test_client):
 
 def test_edit_file_endpoint_file_not_found(test_client):
     """PATCH /files/{path} should return 404 if file doesn't exist."""
-    with patch("code_indexer.server.routers.files.FileCRUDService") as MockService:
-        mock_instance = Mock()
-        MockService.return_value = mock_instance
-
+    with patch("code_indexer.server.routers.files.file_crud_service") as mock_instance:
         # Mock service raising FileNotFoundError
         mock_instance.edit_file.side_effect = FileNotFoundError(
             "File not found: nonexistent.py"
@@ -281,10 +260,7 @@ def test_edit_file_endpoint_file_not_found(test_client):
 
 def test_delete_file_endpoint_success(test_client):
     """DELETE /files/{path} should successfully delete a file."""
-    with patch("code_indexer.server.routers.files.FileCRUDService") as MockService:
-        mock_instance = Mock()
-        MockService.return_value = mock_instance
-
+    with patch("code_indexer.server.routers.files.file_crud_service") as mock_instance:
         # Mock service response
         mock_instance.delete_file.return_value = {
             "success": True,
@@ -311,10 +287,7 @@ def test_delete_file_endpoint_success(test_client):
 
 def test_delete_file_endpoint_file_not_found(test_client):
     """DELETE /files/{path} should return 404 if file doesn't exist."""
-    with patch("code_indexer.server.routers.files.FileCRUDService") as MockService:
-        mock_instance = Mock()
-        MockService.return_value = mock_instance
-
+    with patch("code_indexer.server.routers.files.file_crud_service") as mock_instance:
         # Mock service raising FileNotFoundError
         mock_instance.delete_file.side_effect = FileNotFoundError(
             "File not found: nonexistent.py"
@@ -328,10 +301,7 @@ def test_delete_file_endpoint_file_not_found(test_client):
 
 def test_delete_file_endpoint_permission_denied(test_client):
     """DELETE /files/{path} should return 403 for .git/ directory access."""
-    with patch("code_indexer.server.routers.files.FileCRUDService") as MockService:
-        mock_instance = Mock()
-        MockService.return_value = mock_instance
-
+    with patch("code_indexer.server.routers.files.file_crud_service") as mock_instance:
         # Mock service raising PermissionError
         mock_instance.delete_file.side_effect = PermissionError(
             ".git directory access blocked"
@@ -345,10 +315,7 @@ def test_delete_file_endpoint_permission_denied(test_client):
 
 def test_delete_file_endpoint_path_with_slashes(test_client):
     """DELETE /files/{path} should handle paths with slashes correctly."""
-    with patch("code_indexer.server.routers.files.FileCRUDService") as MockService:
-        mock_instance = Mock()
-        MockService.return_value = mock_instance
-
+    with patch("code_indexer.server.routers.files.file_crud_service") as mock_instance:
         # Mock service response
         mock_instance.delete_file.return_value = {
             "success": True,
