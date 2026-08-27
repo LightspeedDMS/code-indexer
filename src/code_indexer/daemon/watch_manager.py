@@ -200,6 +200,22 @@ class DaemonWatchManager:
             Dictionary with watch status and statistics
         """
         with self._lock:
+            # Bug #1717: a construction failure in _watch_thread_worker
+            # stores a _WatchError sentinel in self.watch_handler and
+            # (post-fix) preserves it through the worker's finally block.
+            # _is_running_unsafe() would otherwise always report this case
+            # as "idle" (self.watch_thread is None once the thread exits),
+            # silently swallowing the failure -- check for the sentinel
+            # FIRST so it is correctly surfaced as an error.
+            if isinstance(self.watch_handler, _WatchError):
+                return {
+                    "status": "error",
+                    "project_path": self.project_path,
+                    "error": self.watch_handler.error,
+                    "uptime_seconds": 0,
+                    "files_processed": 0,
+                }
+
             if not self._is_running_unsafe():
                 return {
                     "status": "idle",
@@ -287,9 +303,17 @@ class DaemonWatchManager:
             logger.info(f"Watch thread exiting for {project_path}")
             with self._lock:
                 self.watch_thread = None
-                self.watch_handler = None
-                self.project_path = None
-                self.start_time = None
+                # Bug #1717: the except block above may have just stored a
+                # _WatchError sentinel in self.watch_handler to report a
+                # construction failure. Unconditionally clearing it here
+                # (the old behavior) overwrote the sentinel before any
+                # consumer (get_stats()/exposed_watch_status) could observe
+                # it, silently swallowing the error. Only reset to idle
+                # state on a normal (non-error) exit.
+                if not isinstance(self.watch_handler, _WatchError):
+                    self.watch_handler = None
+                    self.project_path = None
+                    self.start_time = None
 
     def _create_watch_handler(
         self,
