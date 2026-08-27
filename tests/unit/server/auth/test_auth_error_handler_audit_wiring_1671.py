@@ -25,8 +25,35 @@ from code_indexer.server.auth.auth_error_handler import (
     AuthErrorType,
     auth_error_handler,
 )
-from code_indexer.server.auth.audit_logger import password_audit_logger
+from code_indexer.server.auth.audit_logger import (
+    password_audit_logger,
+    PasswordChangeAuditLogger,
+)
 from code_indexer.server.services.audit_log_service import AuditLogService
+
+
+def _restore_password_audit_logger(
+    original_audit_service, original_log_file_path
+) -> None:
+    """Restore password_audit_logger to a genuinely WORKING state.
+
+    set_audit_service() (audit_logger.py) closes and removes handlers on
+    the shared, name-cached Logger object IN PLACE -- restoring only the
+    `.audit_logger`/`.log_file_path` object references afterward re-points
+    at that SAME now-handler-less Logger, permanently breaking every later
+    real-component test in the same pytest session that logs through this
+    singleton (see #1681 review / #1698). Reopen a real handler instead.
+    """
+    for handler in password_audit_logger.audit_logger.handlers[:]:
+        handler.close()
+        password_audit_logger.audit_logger.removeHandler(handler)
+    if original_audit_service is not None:
+        password_audit_logger.set_audit_service(original_audit_service)
+    elif original_log_file_path:
+        reopened = PasswordChangeAuditLogger(log_file_path=original_log_file_path)
+        password_audit_logger._audit_service = None
+        password_audit_logger.audit_logger = reopened.audit_logger
+        password_audit_logger.log_file_path = reopened.log_file_path
 
 
 class TestAuthErrorHandlerSharesWiredAuditLogger:
@@ -60,7 +87,6 @@ class TestRealAuthenticationFailureReachesAuditLogsTable:
         # process-wide singleton shared with every other test in this
         # session.
         original_audit_service = password_audit_logger._audit_service
-        original_logger = password_audit_logger.audit_logger
         original_log_file_path = password_audit_logger.log_file_path
 
         try:
@@ -93,6 +119,6 @@ class TestRealAuthenticationFailureReachesAuditLogsTable:
             assert logs[0]["admin_id"] == "attacker"
             assert logs[0]["target_id"] == "attacker"
         finally:
-            password_audit_logger._audit_service = original_audit_service
-            password_audit_logger.audit_logger = original_logger
-            password_audit_logger.log_file_path = original_log_file_path
+            _restore_password_audit_logger(
+                original_audit_service, original_log_file_path
+            )

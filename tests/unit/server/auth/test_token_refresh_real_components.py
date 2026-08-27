@@ -33,6 +33,7 @@ from code_indexer.server.auth.user_manager import UserRole
 from code_indexer.server.auth.refresh_token_manager import RefreshTokenManager
 from code_indexer.server.auth.rate_limiter import RefreshTokenRateLimiter
 from code_indexer.server.auth.audit_logger import PasswordChangeAuditLogger
+from code_indexer.server.utils.config_manager import PasswordSecurityConfig
 from code_indexer.server.utils.jwt_secret_manager import JWTSecretManager
 
 
@@ -57,7 +58,7 @@ def _generate_valid_test_password(username: str) -> str:
     is used only to create an ephemeral user in a tempfile.mkdtemp()-scoped
     SQLite database that teardown_method deletes after every test.
     """
-    validator = PasswordStrengthValidator()
+    validator = PasswordStrengthValidator(PasswordSecurityConfig())
     alphabet = string.ascii_letters + string.digits + "!@#$%^&*"
     for _ in range(_MAX_PASSWORD_GENERATION_ATTEMPTS):
         candidate = "".join(
@@ -103,72 +104,125 @@ class TestTokenRefreshRealComponents:
         # records toward rate-limiting/locking out the sacred admin account
         # CLAUDE.md forbids ever touching. Same pattern as the sibling file
         # test_password_change_security_nomock.py's `real_app` fixture.
-        # (teardown_method restores this env var — see below)
         self._original_cidx_server_data_dir = os.environ.get("CIDX_SERVER_DATA_DIR")
         os.environ["CIDX_SERVER_DATA_DIR"] = self.temp_dir
 
-        # Initialize REAL components
-        self.jwt_secret_manager = JWTSecretManager(
-            str(self.temp_path / "jwt_secret.key")
-        )
-        self.jwt_manager = JWTManager(
-            secret_key=self.jwt_secret_manager.get_or_create_secret(),
-            algorithm="HS256",
-            token_expiration_minutes=15,
-        )
-
-        # Create app first — this sets up dependencies.user_manager (the one login closure uses)
-        self.app = create_app()
-        self.client = TestClient(self.app)
-
-        # Derive user_manager from the app's own dependencies so test users
-        # are created in the same instance the login route closure captured.
-        from code_indexer.server.auth import dependencies
-
-        self.user_manager = dependencies.user_manager
-
-        # Create REAL refresh token manager with test database
-        self.refresh_db_path = self.temp_path / "refresh_tokens.db"
-        self.refresh_token_manager = RefreshTokenManager(
-            jwt_manager=self.jwt_manager,
-            db_path=str(self.refresh_db_path),
-            refresh_token_lifetime_days=7,
+        # Isolate the REAL password_audit_logger singleton too (#1681 review
+        # H1): create_app() below can trigger the REAL lifespan startup
+        # sequence's password_audit_logger.set_audit_service(...) call --
+        # confirmed live that repeated create_app() calls across this
+        # class's 16 test methods can leave the singleton's file handler
+        # closed/removed (swapped to a null logger) for the rest of the
+        # pytest session, silently disabling file-based audit logging for
+        # every later test in this file or any file that runs afterward.
+        # Reconstructing via the real class each test method self-heals
+        # regardless of what a prior test left behind, and also makes
+        # CIDX_SERVER_DATA_DIR isolation actually reach audit logging
+        # (previously it did not: audit logging always wrote to the
+        # developer's real ~/.cidx-server/password_audit.log).
+        from code_indexer.server.auth.audit_logger import (
+            password_audit_logger as real_audit_logger,
         )
 
-        # Create REAL rate limiter
-        self.rate_limiter = RefreshTokenRateLimiter()
-
-        # Use REAL audit logger with test-specific path
+        self._original_real_audit_service = real_audit_logger._audit_service
+        self._original_real_audit_log_file_path = real_audit_logger.log_file_path
         self.audit_log_path = self.temp_path / "audit.log"
-        self.audit_logger = PasswordChangeAuditLogger(
+        isolated_audit_logger = PasswordChangeAuditLogger(
             log_file_path=str(self.audit_log_path)
         )
+        real_audit_logger._audit_service = None
+        real_audit_logger.audit_logger = isolated_audit_logger.audit_logger
+        real_audit_logger.log_file_path = isolated_audit_logger.log_file_path
 
-        # Create test users in the app's real user_manager (login closure uses this)
-        self._create_test_users()
+        try:
+            # Initialize REAL components
+            self.jwt_secret_manager = JWTSecretManager(
+                str(self.temp_path / "jwt_secret.key")
+            )
+            self.jwt_manager = JWTManager(
+                secret_key=self.jwt_secret_manager.get_or_create_secret(),
+                algorithm="HS256",
+                token_expiration_minutes=15,
+            )
 
-        # Override app module components with our test-scoped instances
-        import code_indexer.server.app as app_module
+            # Create app first — this sets up dependencies.user_manager (the one login closure uses)
+            self.app = create_app()
+            self.client = TestClient(self.app)
 
-        # Handle to the REAL manager the /api/auth/refresh closure captured
-        # at create_app() time -- reassigning app_module.refresh_token_manager
-        # below does not change what that closure already bound (issue #1681
-        # investigation). Some tests mutate this real object's attributes
-        # in place instead of trying to swap the object reference.
-        self._real_refresh_token_manager = app_module.refresh_token_manager
+            # Derive user_manager from the app's own dependencies so test users
+            # are created in the same instance the login route closure captured.
+            from code_indexer.server.auth import dependencies
 
-        app_module.refresh_token_manager = self.refresh_token_manager
-        app_module.refresh_token_rate_limiter = self.rate_limiter
-        app_module.password_audit_logger = self.audit_logger
+            self.user_manager = dependencies.user_manager
+
+            # Create REAL refresh token manager with test database
+            self.refresh_db_path = self.temp_path / "refresh_tokens.db"
+            self.refresh_token_manager = RefreshTokenManager(
+                jwt_manager=self.jwt_manager,
+                db_path=str(self.refresh_db_path),
+                refresh_token_lifetime_days=7,
+            )
+
+            # Create REAL rate limiter
+            self.rate_limiter = RefreshTokenRateLimiter()
+
+            # Create test users in the app's real user_manager (login closure uses this)
+            self._create_test_users()
+
+            # Override app module components with our test-scoped instances
+            import code_indexer.server.app as app_module
+
+            # Handle to the REAL manager the /api/auth/refresh closure captured
+            # at create_app() time -- reassigning app_module.refresh_token_manager
+            # below does not change what that closure already bound (issue #1681
+            # investigation). Some tests mutate this real object's attributes
+            # in place instead of trying to swap the object reference.
+            self._real_refresh_token_manager = app_module.refresh_token_manager
+
+            app_module.refresh_token_manager = self.refresh_token_manager
+            app_module.refresh_token_rate_limiter = self.rate_limiter
+        except BaseException:
+            # pytest never calls teardown_method when setup_method raises
+            # (#1681 review M1) -- restore both isolations manually here so
+            # a failure never leaks the env var or a broken audit logger
+            # into every later create_app() in this process.
+            self._restore_env_and_audit_logger_state()
+            raise
 
     def teardown_method(self):
         """Clean up test environment."""
-        # Restore CIDX_SERVER_DATA_DIR before removing the temp dir it pointed to.
+        self._restore_env_and_audit_logger_state()
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def _restore_env_and_audit_logger_state(self):
+        """Restore CIDX_SERVER_DATA_DIR and the real password_audit_logger
+        singleton to their pre-setup_method state.
+
+        Called from both the success path (teardown_method) and the
+        failure path (setup_method's except) since pytest never calls
+        teardown_method when setup_method raises (#1681 review M1).
+        """
+        from code_indexer.server.auth.audit_logger import (
+            password_audit_logger as real_audit_logger,
+        )
+
+        for handler in real_audit_logger.audit_logger.handlers[:]:
+            handler.close()
+            real_audit_logger.audit_logger.removeHandler(handler)
+        if self._original_real_audit_service is not None:
+            real_audit_logger.set_audit_service(self._original_real_audit_service)
+        elif self._original_real_audit_log_file_path:
+            restored = PasswordChangeAuditLogger(
+                log_file_path=self._original_real_audit_log_file_path
+            )
+            real_audit_logger._audit_service = None
+            real_audit_logger.audit_logger = restored.audit_logger
+            real_audit_logger.log_file_path = restored.log_file_path
+
         if self._original_cidx_server_data_dir is not None:
             os.environ["CIDX_SERVER_DATA_DIR"] = self._original_cidx_server_data_dir
         else:
             os.environ.pop("CIDX_SERVER_DATA_DIR", None)
-        shutil.rmtree(self.temp_dir, ignore_errors=True)
 
     def _create_test_users(self):
         """Create real test users in this test method's isolated database.
@@ -385,28 +439,18 @@ class TestTokenRefreshRealComponents:
         error_data = response.json()
         assert "revoked" in error_data["detail"].lower()
 
-    def _real_audit_log_path(self) -> Path:
-        """Path of the REAL password_audit_logger singleton's log file.
-
-        inline_auth.py binds `password_audit_logger` at MODULE SCOPE (bare
-        `from ..auth.audit_logger import password_audit_logger`), so
-        setup_method's `app_module.password_audit_logger = self.audit_logger`
-        never reaches the real route closure (issue #1681 investigation).
-        """
-        from code_indexer.server.auth.audit_logger import (
-            password_audit_logger as real_logger,
-        )
-
-        return Path(real_logger.log_file_path)
-
     def test_audit_logging_with_real_file_system(self):
         """
         Test audit logging writes to REAL log files.
 
         This verifies that security events are actually logged to disk.
         """
-        audit_path = self._real_audit_log_path()
-        size_before = audit_path.stat().st_size if audit_path.exists() else 0
+        # setup_method isolates the real password_audit_logger singleton's
+        # handler to self.audit_log_path (issue #1681 review H1), so this
+        # reads the same file the real /api/auth/refresh route writes to.
+        size_before = (
+            self.audit_log_path.stat().st_size if self.audit_log_path.exists() else 0
+        )
 
         # Perform operations that should be logged
         login_data = self._login_and_get_tokens("testuser", TEST_USER_PASSWORD)
@@ -424,11 +468,13 @@ class TestTokenRefreshRealComponents:
         assert response.status_code == status.HTTP_401_UNAUTHORIZED
 
         # Check the real audit log received new entries from this test,
-        # scoped to bytes appended after size_before.
-        assert audit_path.exists()
-        with open(audit_path, "r") as f:
+        # scoped to bytes appended after size_before. Binary mode + decode
+        # avoids a text-mode seek() landing mid multi-byte UTF-8 character
+        # (a byte-count offset is not a valid text-mode seek position).
+        assert self.audit_log_path.exists()
+        with open(self.audit_log_path, "rb") as f:
             f.seek(size_before)
-            new_log_content = f.read()
+            new_log_content = f.read().decode("utf-8", errors="replace")
 
         assert "token_refresh" in new_log_content
 
@@ -448,29 +494,38 @@ class TestTokenRefreshRealComponents:
         assert response.status_code == 200
         refresh_data = response.json()
 
-        # Verify lifetimes (real values from real components)
-        if (
-            "access_token_expires_in" in refresh_data
-            and "refresh_token_expires_in" in refresh_data
-        ):
-            access_lifetime = refresh_data["access_token_expires_in"]
-            refresh_lifetime = refresh_data["refresh_token_expires_in"]
+        # Verify lifetimes (real values from real components). Asserted
+        # unconditionally -- inline_auth.py constructs both fields on every
+        # response, so a guard here would let this test pass with zero
+        # assertions run if that ever regressed (#1681 review M2).
+        assert "access_token_expires_in" in refresh_data
+        assert "refresh_token_expires_in" in refresh_data
+        access_lifetime = refresh_data["access_token_expires_in"]
+        refresh_lifetime = refresh_data["refresh_token_expires_in"]
 
-            # /api/auth/refresh's jwt_manager is a closure parameter bound once
-            # at create_app() time to the REAL app-wide JWTManager -- it is
-            # never re-read dynamically, so self.jwt_manager (configured with
-            # 15 minutes above) never actually reaches this response. Compare
-            # against the real, live jwt_manager instead of a disconnected
-            # hardcoded literal (see issue #1681 investigation notes).
-            from code_indexer.server.auth import dependencies
+        # /api/auth/refresh's jwt_manager and refresh_token_manager are
+        # closure parameters bound once at create_app() time to the REAL
+        # app-wide objects -- they are never re-read dynamically, so
+        # self.jwt_manager (configured with 15 minutes above) never
+        # actually reaches this response. Compare against the real, live
+        # objects instead of disconnected hardcoded literals (see issue
+        # #1681 investigation notes; #1681 review L4 for symmetry).
+        from code_indexer.server.auth import dependencies
 
-            seconds_per_minute = 60
-            seven_days_in_seconds = 7 * 24 * 60 * 60
-            assert refresh_lifetime > access_lifetime
-            assert access_lifetime == (
-                dependencies.jwt_manager.token_expiration_minutes * seconds_per_minute
-            )
-            assert refresh_lifetime == seven_days_in_seconds
+        seconds_per_minute = 60
+        minutes_per_hour = 60
+        hours_per_day = 24
+        expected_refresh_seconds = (
+            self._real_refresh_token_manager.refresh_token_lifetime_days
+            * hours_per_day
+            * minutes_per_hour
+            * seconds_per_minute
+        )
+        assert refresh_lifetime > access_lifetime
+        assert access_lifetime == (
+            dependencies.jwt_manager.token_expiration_minutes * seconds_per_minute
+        )
+        assert refresh_lifetime == expected_refresh_seconds
 
     def test_user_role_preservation_with_real_user_database(self):
         """
