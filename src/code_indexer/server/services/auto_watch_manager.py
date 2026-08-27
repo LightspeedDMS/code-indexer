@@ -51,17 +51,41 @@ class AutoWatchManager:
         self._lock = threading.RLock()  # Use RLock to allow reentrant calls
         self._shutdown_event = threading.Event()
 
-        # Start background timeout checker thread
-        self._timeout_thread = threading.Thread(
-            target=self._timeout_checker_loop,
-            daemon=True,
-            name="AutoWatchTimeoutChecker",
-        )
-        self._timeout_thread.start()
-        logger.info(
-            "AutoWatchManager timeout checker thread started",
-            extra={"correlation_id": get_correlation_id()},
-        )
+        # Bug #1689: the background timeout-checker thread used to start
+        # unconditionally right here, so the module-level
+        # `auto_watch_manager = AutoWatchManager()` singleton (bottom of
+        # this file) spawned a thread as a pure import-time side effect --
+        # the exact Bug #1638/#1650 anti-pattern documented in CLAUDE.md's
+        # "Module-Level Service Singletons Must Be Lazy (PEP 562)" section.
+        # __init__ must stay cheap: the thread is now started lazily, on
+        # first real start_watch() call, via
+        # _ensure_timeout_thread_started() below -- the only entry point
+        # that ever adds state for the checker to examine.
+        self._timeout_thread: Optional[threading.Thread] = None
+        self._timeout_thread_lock = threading.RLock()
+
+    def _ensure_timeout_thread_started(self) -> None:
+        """Lazily start the background timeout-checker thread on first
+        real use (Bug #1689). Idempotent and thread-safe (double-checked
+        locking): concurrent first-time start_watch() callers must only
+        ever start ONE checker thread.
+        """
+        if self._timeout_thread is not None:
+            return
+        with self._timeout_thread_lock:
+            if self._timeout_thread is not None:
+                return
+            timeout_thread = threading.Thread(
+                target=self._timeout_checker_loop,
+                daemon=True,
+                name="AutoWatchTimeoutChecker",
+            )
+            timeout_thread.start()
+            self._timeout_thread = timeout_thread
+            logger.info(
+                "AutoWatchManager timeout checker thread started",
+                extra={"correlation_id": get_correlation_id()},
+            )
 
     def is_watching(self, repo_path: str) -> bool:
         """
@@ -108,6 +132,10 @@ class AutoWatchManager:
                 "status": "disabled",
                 "message": "Auto-watch is disabled",
             }
+
+        # Bug #1689: lazily start the background timeout-checker thread on
+        # first real watch action, instead of eagerly in __init__.
+        self._ensure_timeout_thread_started()
 
         timeout_seconds = timeout if timeout is not None else self.default_timeout
 
@@ -438,8 +466,11 @@ class AutoWatchManager:
         # Signal background thread to stop
         self._shutdown_event.set()
 
-        # Wait for thread to terminate (with timeout)
-        if self._timeout_thread.is_alive():
+        # Wait for thread to terminate (with timeout). Bug #1689: the
+        # checker thread is now started lazily (may still be None if
+        # start_watch() was never called, or was only ever called while
+        # auto_watch_enabled=False) -- must not raise AttributeError.
+        if self._timeout_thread is not None and self._timeout_thread.is_alive():
             self._timeout_thread.join(timeout=self.SHUTDOWN_THREAD_JOIN_TIMEOUT_SECONDS)
             if self._timeout_thread.is_alive():
                 logger.warning(

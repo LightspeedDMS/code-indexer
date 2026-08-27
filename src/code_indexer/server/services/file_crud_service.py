@@ -17,11 +17,17 @@ Concurrency control:
 import hashlib
 import os
 import tempfile
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, TYPE_CHECKING
 
 from code_indexer.utils.file_locking import nfs_safe_fsync
+
+if TYPE_CHECKING:
+    from code_indexer.server.repositories.activated_repo_manager import (
+        ActivatedRepoManager,
+    )
 
 
 class HashMismatchError(Exception):
@@ -65,21 +71,83 @@ class FileCRUDService:
     - Uses canonical golden repo path instead of activated copy
     """
 
+    # Bug #1689 remediation: CLASS-LEVEL RLock (not per-instance), so
+    # instances created via FileCRUDService.__new__(FileCRUDService)
+    # (several existing test files bypass __init__ entirely this way)
+    # still have a lock to synchronize on instead of raising
+    # AttributeError. Mirrors the identical pattern applied to
+    # GitOperationsService and FileListingService for the same bug:
+    # importing this module (transitively) used to construct a real
+    # ActivatedRepoManager -> GoldenRepoManager -> SQLite golden-repo load,
+    # spawning bgm-worker/bgm-temporal-worker threads, as a side effect of
+    # merely constructing FileCRUDService.
+    _activated_repo_manager_lock = threading.RLock()
+
     def __init__(self):
         """Initialize file CRUD service."""
-        # Import here to avoid circular imports
-        import os
-        from ..repositories.activated_repo_manager import ActivatedRepoManager
-
-        _server_dir = os.environ.get("CIDX_SERVER_DATA_DIR")
-        self.activated_repo_manager = ActivatedRepoManager(
-            data_dir=os.path.join(_server_dir, "data") if _server_dir else None
-        )
+        # Bug #1689: ActivatedRepoManager construction (GoldenRepoManager
+        # -> SQLite golden-repo load -> bgm-worker/bgm-temporal-worker
+        # thread spawn) is deferred to first real access via the
+        # activated_repo_manager property below, instead of running
+        # unconditionally here.
+        self._activated_repo_manager_lazy: Optional["ActivatedRepoManager"] = None
         # Write exceptions map: alias -> canonical path (Story #197)
         self._global_write_exceptions: Dict[str, Path] = {}
         # Golden repos directory for write-mode marker lookup (Story #231).
         # Set at startup via set_golden_repos_dir() or directly via _golden_repos_dir.
         self._golden_repos_dir: Optional[Path] = None
+
+    @property
+    def activated_repo_manager(self) -> "ActivatedRepoManager":
+        """Lazily construct ActivatedRepoManager (Bug #1689): deferred to
+        first real access instead of FileCRUDService() construction time.
+
+        Uses getattr(..., None) rather than bare self._activated_repo_manager_lazy:
+        test files construct this service via
+        FileCRUDService.__new__(FileCRUDService) (bypassing __init__
+        entirely) and may read this property before ever assigning to it.
+
+        Guarded by a per-instance `_arm_initializing` sentinel: the RLock
+        alone stops CROSS-THREAD deadlock but not SAME-THREAD re-entrant
+        recursion -- on re-entry the double-checked `is None` test is
+        still True (the assignment happens only after the constructor
+        returns), so an unguarded re-entrant call arriving from within
+        construction would construct AGAIN. Mirrors
+        GitOperationsService.activated_repo_manager and
+        FileListingService.activated_repo_manager's identical fix exactly.
+        """
+        if getattr(self, "_activated_repo_manager_lazy", None) is None:
+            with self._activated_repo_manager_lock:
+                if getattr(self, "_arm_initializing", False):
+                    raise AttributeError(
+                        "activated_repo_manager is still under construction "
+                        "(re-entrant access)"
+                    )
+                if getattr(self, "_activated_repo_manager_lazy", None) is None:
+                    self._arm_initializing = True
+                    try:
+                        # Import here to avoid circular imports (same
+                        # reasoning as the original eager code this
+                        # replaces).
+                        import os
+                        from ..repositories.activated_repo_manager import (
+                            ActivatedRepoManager,
+                        )
+
+                        _server_dir = os.environ.get("CIDX_SERVER_DATA_DIR")
+                        self._activated_repo_manager_lazy = ActivatedRepoManager(
+                            data_dir=os.path.join(_server_dir, "data")
+                            if _server_dir
+                            else None
+                        )
+                    finally:
+                        self._arm_initializing = False
+        return self._activated_repo_manager_lazy
+
+    @activated_repo_manager.setter
+    def activated_repo_manager(self, value: "ActivatedRepoManager") -> None:
+        with self._activated_repo_manager_lock:
+            self._activated_repo_manager_lazy = value
 
     def register_write_exception(self, alias: str, canonical_path: Path) -> None:
         """
