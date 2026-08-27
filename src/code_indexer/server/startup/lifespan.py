@@ -137,6 +137,19 @@ def make_lifespan(
         # and MCP handlers can access it without re-reading config.
         app.state.storage_mode = storage_mode
 
+        # EVO-66819: expose backend_registry on app.state EARLY, alongside
+        # storage_mode. resolve_backend_registry_state() reads BOTH together, so
+        # any startup-window consumer that resolves the shared registry through
+        # app.state -- notably GlobalActivator (used by the golden-repo reconcile's
+        # is_globally_active() + index_path repair, below) -- must see it here.
+        # Previously it was only assigned much later in this lifespan, so in
+        # postgres/cluster mode the startup reconcile hit
+        # "storage_mode=postgres but backend_registry not set; falling back to
+        # SQLite", read an EMPTY per-node registry, and silently repaired nothing
+        # (0 pointers / 0 index_paths). backend_registry is a fully-built,
+        # never-mutated make_lifespan() param, so setting it here is safe.
+        app.state.backend_registry = backend_registry
+
         # Story #680: Store latency_tracker in app.state for dashboard route access.
         app.state.latency_tracker = latency_tracker
 
@@ -3260,10 +3273,9 @@ def make_lifespan(
                 extra={"correlation_id": get_correlation_id()},
             )
 
-        # Make backend_registry available to MCP handlers for BOTH modes.
-        # In SQLite mode it contains SQLite backends; in postgres mode, PG backends.
-        # MCP handlers use app.state.backend_registry unconditionally.
-        app.state.backend_registry = backend_registry
+        # backend_registry is now set on app.state EARLY (right after
+        # storage_mode, see EVO-66819) so startup-window consumers resolve the
+        # shared registry -- MCP handlers (both modes) read it from there.
 
         # Bug #532: Inject DiagnosticsBackend into the module-level diagnostics_service
         # singleton. The singleton is created at import time with no backend; we inject

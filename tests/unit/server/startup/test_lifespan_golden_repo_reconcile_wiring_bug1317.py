@@ -69,3 +69,31 @@ class TestLifespanGoldenRepoReconcileWiringBug1317:
         following = source[match.end() :]
         except_match = re.search(r"\bexcept\b", following)
         assert except_match is not None, "no 'except' found after the reconcile call"
+
+    def test_backend_registry_set_on_app_state_before_reconcile(self):
+        """EVO-66819: app.state.backend_registry must be assigned BEFORE the
+        golden-repo reconcile runs.
+
+        The reconcile's is_globally_active() + EVO-66808 index_path repair resolve
+        the shared registry via GlobalActivator -> resolve_backend_registry_state(),
+        which reads app.state.backend_registry. If that assignment happens AFTER the
+        reconcile (as it did originally, ~700 lines later), then in postgres/cluster
+        mode the startup reconcile hits "storage_mode=postgres but backend_registry
+        not set; falling back to SQLite", reads an EMPTY per-node registry, and
+        silently repairs 0 pointers / 0 index_paths. Guard the ordering.
+        """
+        source = _source()
+        assign = re.search(
+            r"app\.state\.backend_registry\s*=\s*backend_registry", source
+        )
+        assert assign is not None, (
+            "lifespan.py must assign app.state.backend_registry = backend_registry"
+        )
+        call = _CALL_RE.search(source)
+        assert call is not None
+        assert assign.start() < call.start(), (
+            "app.state.backend_registry must be set BEFORE "
+            "reconcile_golden_repo_registry() runs (EVO-66819) -- otherwise "
+            "GlobalActivator falls back to an empty per-node registry during the "
+            "startup reconcile and repairs nothing in cluster mode."
+        )
