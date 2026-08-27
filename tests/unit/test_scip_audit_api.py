@@ -8,7 +8,7 @@ Part of AC4: Enhanced Job Status API for Per-Language Audit Access.
 import pytest
 import json
 from datetime import datetime, timezone
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 from code_indexer.server.mcp.handlers import get_scip_audit_log
 from code_indexer.server.auth.user_manager import User, UserRole
 
@@ -38,10 +38,19 @@ class TestSCIPAuditLogAPI:
 
     @pytest.fixture
     def mock_audit_repo(self):
-        """Create mock SCIPAuditRepository."""
+        """Create mock SCIPAuditRepository.
+
+        Production code resolves the repository via the lazy
+        ``_get_scip_audit_repository()`` getter (see
+        ``server/mcp/handlers/_utils.py``), not a bare module-level
+        ``scip_audit_repository`` attribute (that name no longer exists --
+        Bug #1688). Patch the getter itself so it returns our mock repo.
+        """
         with patch(
-            "code_indexer.server.mcp.handlers.scip_audit_repository"
-        ) as mock_repo:
+            "code_indexer.server.mcp.handlers._get_scip_audit_repository"
+        ) as mock_get_repo:
+            mock_repo = MagicMock()
+            mock_get_repo.return_value = mock_repo
             yield mock_repo
 
     def test_get_audit_log_success_admin(self, admin_user, mock_audit_repo):
