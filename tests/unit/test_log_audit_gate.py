@@ -383,7 +383,14 @@ _json = _builtins_module.__import__("json")
 
 
 def _create_logs_db(db_path: Path) -> None:
-    """Create a minimal logs.db using the same DDL as SqliteLogHandler."""
+    """Create a minimal logs.db using the same DDL as SqliteLogHandler.
+
+    Includes trace_id/span_id (Story #1676 AC2 -- added to the real schema
+    via a backward-compatible `ALTER TABLE logs ADD COLUMN` migration in
+    SQLiteLogHandler._init_database). log_aggregator_service.py's SELECT
+    statements always request these columns, so a seeded test DB without
+    them diverges from production and breaks every query against it.
+    """
     db_path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(db_path))
     try:
@@ -400,6 +407,8 @@ def _create_logs_db(db_path: Path) -> None:
                 request_path TEXT,
                 extra_data TEXT,
                 alias TEXT,
+                trace_id TEXT,
+                span_id TEXT,
                 created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
             )
             """
