@@ -125,10 +125,23 @@ def _parse_log_details(row: dict) -> dict:
     top-level row fields with the decoded details so callers get the same shape
     that the old PasswordChangeAuditLogger flat-file parsing produced.
 
-    ``audit_logs.details`` is JSONB on PostgreSQL (psycopg deserializes it
-    directly to a native ``dict``) and TEXT on SQLite (a JSON string) --
-    see ``parse_json_column`` for the shared dual-shape handling (Bug
-    #1654, same root-cause class as Bug #1622/#1652/#1655).
+    ``audit_logs.details`` is TEXT on BOTH SQLite and PostgreSQL (see
+    ``storage/postgres/migrations/sql/002_groups_access_schema.sql`` --
+    it drops the migration-001 JSONB-shaped ``audit_logs`` table and
+    recreates it with a ``details TEXT`` column; ``PostgresAuditLogBackend
+    .log()``/``.log_raw()`` always write a ``json.dumps()`` string or
+    ``None``). This is NOT the same root-cause class as the genuinely
+    live JSONB columns fixed in Bug #1622/#1652/#1655 -- Bug #1654 was
+    filed from a static read of two call sites without checking the
+    actual DDL, and no PostgreSQL JSONB-as-dict value can reach this
+    function in production. ``parse_json_column`` is reused here purely
+    for consistency with ``admin/__init__.py``'s already-tolerant
+    dict-or-str handling of this same column, and as defense-in-depth
+    should the column ever be migrated to JSONB in the future -- not to
+    fix a live data-loss bug. Note: an empty-string ``details`` (``""``)
+    now logs a ``parse_json_column`` WARNING before yielding ``{}``
+    (previously silent); harmless in practice since every write path
+    supplies either a real JSON string or ``None``, never ``""``.
     """
     flat = dict(row)
     inner = parse_json_column(row.get("details"), dict, "audit_logs.details") or {}
