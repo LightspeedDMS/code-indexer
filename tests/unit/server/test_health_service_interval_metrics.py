@@ -15,7 +15,7 @@ import time
 from unittest.mock import patch, MagicMock
 from collections import namedtuple
 
-from src.code_indexer.server.models.api_models import SystemHealthInfo
+from code_indexer.server.models.api_models import SystemHealthInfo
 
 
 class TestSystemHealthInfoModel:
@@ -129,9 +129,7 @@ class TestHealthServiceCpuIntervalAveraged:
         """AC1: CPU should use psutil.cpu_percent(interval=None) for interval-averaging."""
         # We need to verify that the service calls cpu_percent with interval=None
         # This test verifies the implementation uses interval=None, not interval=0.1
-        with patch(
-            "src.code_indexer.server.services.health_service.psutil"
-        ) as mock_psutil:
+        with patch("code_indexer.server.services.health_service.psutil") as mock_psutil:
             # Setup mock returns
             mock_psutil.virtual_memory.return_value = MagicMock(percent=50.0)
             mock_psutil.cpu_percent.return_value = 25.0
@@ -144,7 +142,7 @@ class TestHealthServiceCpuIntervalAveraged:
             )
 
             # Import after patching
-            from src.code_indexer.server.services.health_service import (
+            from code_indexer.server.services.health_service import (
                 HealthCheckService,
             )
 
@@ -168,9 +166,7 @@ class TestHealthServiceDiskIO:
 
     def test_first_call_returns_zero_disk_io(self):
         """AC5: First call should return 0.0 for disk I/O metrics."""
-        with patch(
-            "src.code_indexer.server.services.health_service.psutil"
-        ) as mock_psutil:
+        with patch("code_indexer.server.services.health_service.psutil") as mock_psutil:
             mock_psutil.virtual_memory.return_value = MagicMock(percent=50.0)
             mock_psutil.cpu_percent.return_value = 25.0
             mock_psutil.disk_usage.return_value = MagicMock(free=100 * 1024**3)
@@ -181,7 +177,7 @@ class TestHealthServiceDiskIO:
                 bytes_recv=2000000, bytes_sent=1000000
             )
 
-            from src.code_indexer.server.services.health_service import (
+            from code_indexer.server.services.health_service import (
                 HealthCheckService,
             )
 
@@ -202,9 +198,7 @@ class TestHealthServiceDiskIO:
         """AC2: Second call should calculate disk I/O in KB/s from counter diffs."""
         DiskCounters = namedtuple("DiskCounters", ["read_bytes", "write_bytes"])
 
-        with patch(
-            "src.code_indexer.server.services.health_service.psutil"
-        ) as mock_psutil:
+        with patch("code_indexer.server.services.health_service.psutil") as mock_psutil:
             mock_psutil.virtual_memory.return_value = MagicMock(percent=50.0)
             mock_psutil.cpu_percent.return_value = 25.0
             mock_psutil.disk_usage.return_value = MagicMock(free=100 * 1024**3)
@@ -223,7 +217,7 @@ class TestHealthServiceDiskIO:
 
             mock_psutil.disk_io_counters.side_effect = [first_counters, second_counters]
 
-            from src.code_indexer.server.services.health_service import (
+            from code_indexer.server.services.health_service import (
                 HealthCheckService,
             )
 
@@ -253,9 +247,7 @@ class TestHealthServiceDiskIO:
         """AC2: Verify KB/s formula: (bytes_diff / 1024) / elapsed_seconds."""
         DiskCounters = namedtuple("DiskCounters", ["read_bytes", "write_bytes"])
 
-        with patch(
-            "src.code_indexer.server.services.health_service.psutil"
-        ) as mock_psutil:
+        with patch("code_indexer.server.services.health_service.psutil") as mock_psutil:
             mock_psutil.virtual_memory.return_value = MagicMock(percent=50.0)
             mock_psutil.cpu_percent.return_value = 25.0
             mock_psutil.disk_usage.return_value = MagicMock(free=100 * 1024**3)
@@ -271,7 +263,7 @@ class TestHealthServiceDiskIO:
 
             mock_psutil.disk_io_counters.side_effect = [first_counters, second_counters]
 
-            from src.code_indexer.server.services.health_service import (
+            from code_indexer.server.services.health_service import (
                 HealthCheckService,
             )
 
@@ -303,9 +295,7 @@ class TestHealthServiceNetworkIO:
 
     def test_first_call_returns_zero_network_io(self):
         """AC5: First call should return 0.0 for network I/O metrics."""
-        with patch(
-            "src.code_indexer.server.services.health_service.psutil"
-        ) as mock_psutil:
+        with patch("code_indexer.server.services.health_service.psutil") as mock_psutil:
             mock_psutil.virtual_memory.return_value = MagicMock(percent=50.0)
             mock_psutil.cpu_percent.return_value = 25.0
             mock_psutil.disk_usage.return_value = MagicMock(free=100 * 1024**3)
@@ -316,7 +306,7 @@ class TestHealthServiceNetworkIO:
                 bytes_recv=2000000, bytes_sent=1000000
             )
 
-            from src.code_indexer.server.services.health_service import (
+            from code_indexer.server.services.health_service import (
                 HealthCheckService,
             )
 
@@ -337,9 +327,7 @@ class TestHealthServiceNetworkIO:
         """AC3: Second call should calculate network I/O in KB/s from counter diffs."""
         NetCounters = namedtuple("NetCounters", ["bytes_recv", "bytes_sent"])
 
-        with patch(
-            "src.code_indexer.server.services.health_service.psutil"
-        ) as mock_psutil:
+        with patch("code_indexer.server.services.health_service.psutil") as mock_psutil:
             mock_psutil.virtual_memory.return_value = MagicMock(percent=50.0)
             mock_psutil.cpu_percent.return_value = 25.0
             mock_psutil.disk_usage.return_value = MagicMock(free=100 * 1024**3)
@@ -356,7 +344,7 @@ class TestHealthServiceNetworkIO:
 
             mock_psutil.net_io_counters.side_effect = [first_counters, second_counters]
 
-            from src.code_indexer.server.services.health_service import (
+            from code_indexer.server.services.health_service import (
                 HealthCheckService,
             )
 
@@ -386,9 +374,7 @@ class TestHealthServiceNetworkIO:
         """AC3: Verify KB/s formula: (bytes_diff / 1024) / elapsed_seconds."""
         NetCounters = namedtuple("NetCounters", ["bytes_recv", "bytes_sent"])
 
-        with patch(
-            "src.code_indexer.server.services.health_service.psutil"
-        ) as mock_psutil:
+        with patch("code_indexer.server.services.health_service.psutil") as mock_psutil:
             mock_psutil.virtual_memory.return_value = MagicMock(percent=50.0)
             mock_psutil.cpu_percent.return_value = 25.0
             mock_psutil.disk_usage.return_value = MagicMock(free=100 * 1024**3)
@@ -406,7 +392,7 @@ class TestHealthServiceNetworkIO:
 
             mock_psutil.net_io_counters.side_effect = [first_counters, second_counters]
 
-            from src.code_indexer.server.services.health_service import (
+            from code_indexer.server.services.health_service import (
                 HealthCheckService,
             )
 
@@ -557,9 +543,7 @@ class TestHealthServiceStatePersistence:
 
     def test_state_variables_persist_across_calls(self):
         """State variables should persist across _get_system_info calls."""
-        with patch(
-            "src.code_indexer.server.services.health_service.psutil"
-        ) as mock_psutil:
+        with patch("code_indexer.server.services.health_service.psutil") as mock_psutil:
             mock_psutil.virtual_memory.return_value = MagicMock(percent=50.0)
             mock_psutil.cpu_percent.return_value = 25.0
             mock_psutil.disk_usage.return_value = MagicMock(free=100 * 1024**3)
@@ -570,7 +554,7 @@ class TestHealthServiceStatePersistence:
                 bytes_recv=2000000, bytes_sent=1000000
             )
 
-            from src.code_indexer.server.services.health_service import (
+            from code_indexer.server.services.health_service import (
                 HealthCheckService,
             )
 
@@ -593,9 +577,7 @@ class TestHealthServiceStatePersistence:
 
     def test_zero_elapsed_time_no_division_error(self):
         """Edge case: Handle zero elapsed time without division by zero."""
-        with patch(
-            "src.code_indexer.server.services.health_service.psutil"
-        ) as mock_psutil:
+        with patch("code_indexer.server.services.health_service.psutil") as mock_psutil:
             mock_psutil.virtual_memory.return_value = MagicMock(percent=50.0)
             mock_psutil.cpu_percent.return_value = 25.0
             mock_psutil.disk_usage.return_value = MagicMock(free=100 * 1024**3)
@@ -606,7 +588,7 @@ class TestHealthServiceStatePersistence:
                 bytes_recv=2000000, bytes_sent=1000000
             )
 
-            from src.code_indexer.server.services.health_service import (
+            from code_indexer.server.services.health_service import (
                 HealthCheckService,
             )
 

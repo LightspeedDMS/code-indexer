@@ -19,9 +19,9 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from src.code_indexer.server.services.search_service import SemanticSearchService
-from src.code_indexer.server.models.api_models import SemanticSearchRequest
-from src.code_indexer.storage.filesystem_vector_store import FilesystemVectorStore
+from code_indexer.server.services.search_service import SemanticSearchService
+from code_indexer.server.models.api_models import SemanticSearchRequest
+from code_indexer.storage.filesystem_vector_store import FilesystemVectorStore
 
 
 def _make_fs_repo(temp_dir: str) -> str:
@@ -62,12 +62,12 @@ def _run_capture(repo_path: str):
     with (
         patch.object(FilesystemVectorStore, "search", tracked_search),
         patch(
-            "src.code_indexer.server.services.search_service._get_http_client_factory",
+            "code_indexer.server.services.search_service._get_http_client_factory",
             return_value=None,
         ),
     ):
         with patch(
-            "src.code_indexer.server.services.search_service.EmbeddingProviderFactory.create",
+            "code_indexer.server.services.search_service.EmbeddingProviderFactory.create",
             return_value=mock_embedding_service,
         ):
             request = SemanticSearchRequest(
@@ -89,7 +89,7 @@ class TestSearchServiceThreadsSharedExecutor:
             with tempfile.TemporaryDirectory() as temp_dir:
                 repo_path = _make_fs_repo(temp_dir)
                 with patch(
-                    "src.code_indexer.server.services.search_service._get_query_executor",
+                    "code_indexer.server.services.search_service._get_query_executor",
                     return_value=shared,
                 ):
                     captured = _run_capture(repo_path)
@@ -109,7 +109,7 @@ class TestSearchServiceThreadsSharedExecutor:
         with tempfile.TemporaryDirectory() as temp_dir:
             repo_path = _make_fs_repo(temp_dir)
             with patch(
-                "src.code_indexer.server.services.search_service._get_query_executor",
+                "code_indexer.server.services.search_service._get_query_executor",
                 return_value=None,
             ):
                 captured = _run_capture(repo_path)

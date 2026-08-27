@@ -40,7 +40,7 @@ class TestSaveTemporalOptionsGateOffRejectsAllBranches:
     """AC2/Scenario 3: gate off + all_branches=1 -> 400, not saved."""
 
     def test_gate_off_all_branches_returns_400(self):
-        from src.code_indexer.server.web.routes import save_temporal_options
+        from code_indexer.server.web.routes import save_temporal_options
 
         mock_request = _make_request()
         mock_session = _make_session()
@@ -53,23 +53,23 @@ class TestSaveTemporalOptionsGateOffRejectsAllBranches:
 
         with (
             patch(
-                "src.code_indexer.server.web.routes._require_admin_session",
+                "code_indexer.server.web.routes._require_admin_session",
                 return_value=mock_session,
             ),
             patch(
-                "src.code_indexer.server.web.routes.validate_login_csrf_token",
+                "code_indexer.server.web.routes.validate_login_csrf_token",
                 return_value=True,
             ),
             patch(
-                "src.code_indexer.server.web.routes._get_golden_repo_manager",
+                "code_indexer.server.web.routes._get_golden_repo_manager",
                 return_value=mock_manager,
             ),
             patch(
-                "src.code_indexer.server.web.routes.get_config_service",
+                "code_indexer.server.web.routes.get_config_service",
                 return_value=_make_gate_config(False),
             ),
             patch(
-                "src.code_indexer.server.web.routes.templates",
+                "code_indexer.server.web.routes.templates",
                 mock_templates,
             ),
         ):
@@ -99,7 +99,7 @@ class TestSaveTemporalOptionsGateOffRejectsAllBranches:
 
     def test_gate_off_all_branches_not_requested_saves_fine(self):
         """Gate off + all_branches not checked -> saved normally (no rejection)."""
-        from src.code_indexer.server.web.routes import save_temporal_options
+        from code_indexer.server.web.routes import save_temporal_options
 
         mock_request = _make_request()
         mock_session = _make_session()
@@ -109,23 +109,23 @@ class TestSaveTemporalOptionsGateOffRejectsAllBranches:
 
         with (
             patch(
-                "src.code_indexer.server.web.routes._require_admin_session",
+                "code_indexer.server.web.routes._require_admin_session",
                 return_value=mock_session,
             ),
             patch(
-                "src.code_indexer.server.web.routes.validate_login_csrf_token",
+                "code_indexer.server.web.routes.validate_login_csrf_token",
                 return_value=True,
             ),
             patch(
-                "src.code_indexer.server.web.routes._get_golden_repo_manager",
+                "code_indexer.server.web.routes._get_golden_repo_manager",
                 return_value=mock_manager,
             ),
             patch(
-                "src.code_indexer.server.web.routes.get_config_service",
+                "code_indexer.server.web.routes.get_config_service",
                 return_value=_make_gate_config(False),
             ),
             patch(
-                "src.code_indexer.server.web.routes._create_golden_repos_page_response",
+                "code_indexer.server.web.routes._create_golden_repos_page_response",
                 mock_page,
             ),
         ):
@@ -149,7 +149,7 @@ class TestSaveTemporalOptionsGateOnAcceptsAllBranches:
     """AC6/Scenario 6: gate on + all_branches=1 -> saved as True."""
 
     def test_gate_on_all_branches_is_saved(self):
-        from src.code_indexer.server.web.routes import save_temporal_options
+        from code_indexer.server.web.routes import save_temporal_options
 
         mock_request = _make_request()
         mock_session = _make_session()
@@ -159,23 +159,23 @@ class TestSaveTemporalOptionsGateOnAcceptsAllBranches:
 
         with (
             patch(
-                "src.code_indexer.server.web.routes._require_admin_session",
+                "code_indexer.server.web.routes._require_admin_session",
                 return_value=mock_session,
             ),
             patch(
-                "src.code_indexer.server.web.routes.validate_login_csrf_token",
+                "code_indexer.server.web.routes.validate_login_csrf_token",
                 return_value=True,
             ),
             patch(
-                "src.code_indexer.server.web.routes._get_golden_repo_manager",
+                "code_indexer.server.web.routes._get_golden_repo_manager",
                 return_value=mock_manager,
             ),
             patch(
-                "src.code_indexer.server.web.routes.get_config_service",
+                "code_indexer.server.web.routes.get_config_service",
                 return_value=_make_gate_config(True),
             ),
             patch(
-                "src.code_indexer.server.web.routes._create_golden_repos_page_response",
+                "code_indexer.server.web.routes._create_golden_repos_page_response",
                 mock_page,
             ),
         ):

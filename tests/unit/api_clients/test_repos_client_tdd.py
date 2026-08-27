@@ -7,14 +7,14 @@ and browsing functionality as defined in Story 4.
 import pytest
 from unittest.mock import Mock, patch
 
-from src.code_indexer.api_clients.repos_client import (
+from code_indexer.api_clients.repos_client import (
     ReposAPIClient,
     ActivatedRepository,
     GoldenRepository,
     RepositoryDiscoveryResult,
     RepositoryStatusSummary,
 )
-from src.code_indexer.api_clients.base_client import APIClientError, AuthenticationError
+from code_indexer.api_clients.base_client import APIClientError, AuthenticationError
 
 
 class TestReposAPIClientInitialization:
@@ -22,7 +22,7 @@ class TestReposAPIClientInitialization:
 
     def test_repos_client_inherits_from_base_client(self):
         """Test that ReposAPIClient properly inherits from CIDXRemoteAPIClient."""
-        with patch("src.code_indexer.api_clients.repos_client.CIDXRemoteAPIClient"):
+        with patch("code_indexer.api_clients.repos_client.CIDXRemoteAPIClient"):
             client = ReposAPIClient(
                 server_url="https://test.example.com",
                 credentials={"username": "test", "password": "test"},
@@ -32,7 +32,7 @@ class TestReposAPIClientInitialization:
 
     def test_repos_client_initialization_with_credentials(self):
         """Test ReposAPIClient initialization with project credentials."""
-        with patch("src.code_indexer.api_clients.repos_client.CIDXRemoteAPIClient"):
+        with patch("code_indexer.api_clients.repos_client.CIDXRemoteAPIClient"):
             from pathlib import Path
 
             client = ReposAPIClient(
@@ -49,7 +49,7 @@ class TestActivatedRepositoryOperations:
     @pytest.fixture
     def mock_client(self):
         """Create a mock ReposAPIClient for testing."""
-        with patch("src.code_indexer.api_clients.repos_client.CIDXRemoteAPIClient"):
+        with patch("code_indexer.api_clients.repos_client.CIDXRemoteAPIClient"):
             return ReposAPIClient(
                 server_url="https://test.example.com",
                 credentials={"username": "test", "password": "test"},
@@ -178,7 +178,7 @@ class TestGoldenRepositoryOperations:
     @pytest.fixture
     def mock_client(self):
         """Create a mock ReposAPIClient for testing."""
-        with patch("src.code_indexer.api_clients.repos_client.CIDXRemoteAPIClient"):
+        with patch("code_indexer.api_clients.repos_client.CIDXRemoteAPIClient"):
             return ReposAPIClient(
                 server_url="https://test.example.com",
                 credentials={"username": "test", "password": "test"},
@@ -281,7 +281,7 @@ class TestRepositoryDiscoveryOperations:
     @pytest.fixture
     def mock_client(self):
         """Create a mock ReposAPIClient for testing."""
-        with patch("src.code_indexer.api_clients.repos_client.CIDXRemoteAPIClient"):
+        with patch("code_indexer.api_clients.repos_client.CIDXRemoteAPIClient"):
             return ReposAPIClient(
                 server_url="https://test.example.com",
                 credentials={"username": "test", "password": "test"},
@@ -423,7 +423,7 @@ class TestRepositoryStatusOperations:
     @pytest.fixture
     def mock_client(self):
         """Create a mock ReposAPIClient for testing."""
-        with patch("src.code_indexer.api_clients.repos_client.CIDXRemoteAPIClient"):
+        with patch("code_indexer.api_clients.repos_client.CIDXRemoteAPIClient"):
             return ReposAPIClient(
                 server_url="https://test.example.com",
                 credentials={"username": "test", "password": "test"},
@@ -601,7 +601,7 @@ class TestErrorHandling:
     @pytest.fixture
     def mock_client(self):
         """Create a mock ReposAPIClient for testing."""
-        with patch("src.code_indexer.api_clients.repos_client.CIDXRemoteAPIClient"):
+        with patch("code_indexer.api_clients.repos_client.CIDXRemoteAPIClient"):
             return ReposAPIClient(
                 server_url="https://test.example.com",
                 credentials={"username": "test", "password": "test"},

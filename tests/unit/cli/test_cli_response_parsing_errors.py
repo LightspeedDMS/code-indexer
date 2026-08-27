@@ -10,7 +10,7 @@ from unittest.mock import AsyncMock, patch, Mock
 from click.testing import CliRunner
 import httpx
 
-from src.code_indexer.cli import cli
+from code_indexer.cli import cli
 
 
 class TestCLIResponseParsingErrors:
@@ -89,13 +89,13 @@ class TestCLIResponseParsingErrors:
                 "code_indexer.api_clients.system_client.SystemAPIClient._authenticated_request"
             ) as mock_auth_request,
             patch(
-                "src.code_indexer.disabled_commands.detect_current_mode"
+                "code_indexer.disabled_commands.detect_current_mode"
             ) as mock_detect_mode,
         ):
             # Mock mode detection to return remote mode
             mock_detect_mode.return_value = "remote"
             # Create real SystemAPIClient instance but mock its _authenticated_request
-            from src.code_indexer.api_clients.system_client import SystemAPIClient
+            from code_indexer.api_clients.system_client import SystemAPIClient
             from pathlib import Path
 
             real_client = SystemAPIClient(
@@ -195,7 +195,7 @@ class TestCorrectResponseParsing:
             mock_create_client.return_value = mock_client
 
             # Mock proper AuthStatus object (correct behavior)
-            from src.code_indexer.api_clients.auth_client import AuthStatus
+            from code_indexer.api_clients.auth_client import AuthStatus
 
             status = AuthStatus(
                 authenticated=True,
@@ -232,7 +232,7 @@ class TestCorrectResponseParsing:
                 "code_indexer.api_clients.system_client.create_system_client"
             ) as mock_create_client,
             patch(
-                "src.code_indexer.disabled_commands.detect_current_mode"
+                "code_indexer.disabled_commands.detect_current_mode"
             ) as mock_detect_mode,
         ):
             # Mock mode detection to return remote mode
@@ -274,7 +274,7 @@ class TestCorrectResponseParsing:
                 "code_indexer.api_clients.auth_client.create_auth_client"
             ) as mock_create_client,
             patch(
-                "src.code_indexer.disabled_commands.detect_current_mode"
+                "code_indexer.disabled_commands.detect_current_mode"
             ) as mock_detect_mode,
         ):
             # Mock mode detection to return remote mode
@@ -332,7 +332,7 @@ class TestEdgeCaseResponseParsing:
             mock_create_client.return_value = mock_client
 
             # Mock client that raises JSON parsing error
-            from src.code_indexer.api_clients.base_client import APIClientError
+            from code_indexer.api_clients.base_client import APIClientError
 
             mock_client.check_basic_health.side_effect = APIClientError(
                 "Invalid JSON response"
@@ -357,7 +357,7 @@ class TestEdgeCaseResponseParsing:
             mock_create_client.return_value = mock_client
 
             # Mock client that raises network error
-            from src.code_indexer.api_clients.base_client import APIClientError
+            from code_indexer.api_clients.base_client import APIClientError
 
             mock_client.get_auth_status.side_effect = APIClientError(
                 "Connection failed"

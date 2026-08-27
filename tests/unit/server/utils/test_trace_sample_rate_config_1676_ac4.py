@@ -19,7 +19,7 @@ import tempfile
 
 import pytest
 
-from src.code_indexer.server.utils.config_manager import (
+from code_indexer.server.utils.config_manager import (
     ServerConfig,
     ServerConfigManager,
     TelemetryConfig,

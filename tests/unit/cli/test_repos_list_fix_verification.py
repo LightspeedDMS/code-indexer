@@ -5,8 +5,8 @@ from click.testing import CliRunner
 from pathlib import Path
 
 # Import CLI components
-from src.code_indexer.cli import cli
-from src.code_indexer.api_clients.repos_client import ActivatedRepository
+from code_indexer.cli import cli
+from code_indexer.api_clients.repos_client import ActivatedRepository
 
 
 class TestReposListFix:
@@ -16,10 +16,10 @@ class TestReposListFix:
         """Setup test environment for each test."""
         self.runner = CliRunner()
 
-    @patch("src.code_indexer.remote.sync_execution._load_remote_configuration")
-    @patch("src.code_indexer.remote.sync_execution._load_and_decrypt_credentials")
-    @patch("src.code_indexer.mode_detection.command_mode_detector.find_project_root")
-    @patch("src.code_indexer.cli.ReposAPIClient")
+    @patch("code_indexer.remote.sync_execution._load_remote_configuration")
+    @patch("code_indexer.remote.sync_execution._load_and_decrypt_credentials")
+    @patch("code_indexer.mode_detection.command_mode_detector.find_project_root")
+    @patch("code_indexer.cli.ReposAPIClient")
     def test_repos_list_data_model_alignment_fix(
         self,
         mock_repos_client_class,

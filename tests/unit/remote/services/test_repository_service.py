@@ -4,12 +4,12 @@ import pytest
 from typing import Dict, Any, cast
 from unittest.mock import Mock, AsyncMock
 
-from src.code_indexer.remote.services.repository_service import (
+from code_indexer.remote.services.repository_service import (
     RemoteRepositoryService,
     RepositoryInfo,
     RepositoryAnalysis,
 )
-from src.code_indexer.remote.staleness_detector import StalenessDetector
+from code_indexer.remote.staleness_detector import StalenessDetector
 
 
 class MockResponse:

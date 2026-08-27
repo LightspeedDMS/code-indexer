@@ -19,8 +19,8 @@ from pathlib import Path
 
 import pytest
 
-from src.code_indexer.server.services.ci_token_manager import create_token_manager
-from src.code_indexer.server.services.git_credential_manager import (
+from code_indexer.server.services.ci_token_manager import create_token_manager
+from code_indexer.server.services.git_credential_manager import (
     create_git_credential_manager,
 )
 

@@ -25,8 +25,8 @@ from unittest.mock import MagicMock, patch
 import httpx
 import pytest
 
-from src.code_indexer.config import VoyageAIConfig
-from src.code_indexer.services.voyage_ai import VoyageAIClient
+from code_indexer.config import VoyageAIConfig
+from code_indexer.services.voyage_ai import VoyageAIClient
 
 # The module object whose `time` name voyage_ai's methods resolve at call time.
 _VOYAGE_MODULE = sys.modules[VoyageAIClient.__module__]

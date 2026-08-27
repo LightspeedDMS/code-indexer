@@ -39,7 +39,7 @@ TelemetryManager calls trace.set_tracer_provider() later during lifespan
 (telemetry/manager.py's _initialize_otel).
 
 Usage:
-    from src.code_indexer.server.telemetry.instrumentation import instrument_fastapi
+    from code_indexer.server.telemetry.instrumentation import instrument_fastapi
 
     # Instrument the app immediately after construction, in
     # create_fastapi_app() -- NEVER inside lifespan() -- gated on

@@ -26,9 +26,9 @@ from typing import List
 
 import numpy as np
 
-from src.code_indexer.storage.filesystem_vector_store import FilesystemVectorStore
-from src.code_indexer.storage.temporal_metadata_store import TemporalMetadataStore
-from src.code_indexer.services.temporal.temporal_progressive_metadata import (
+from code_indexer.storage.filesystem_vector_store import FilesystemVectorStore
+from code_indexer.storage.temporal_metadata_store import TemporalMetadataStore
+from code_indexer.services.temporal.temporal_progressive_metadata import (
     TemporalProgressiveMetadata,
 )
 
@@ -53,11 +53,14 @@ def _make_store(base: str) -> FilesystemVectorStore:
 
 
 def _get_temporal_collection_name() -> str:
-    from src.code_indexer.services.temporal.temporal_collection_naming import (
+    from code_indexer.services.temporal.temporal_collection_naming import (
         LEGACY_TEMPORAL_COLLECTION,
     )
 
-    return LEGACY_TEMPORAL_COLLECTION
+    # Issue #1696 Session 1: LEGACY_TEMPORAL_COLLECTION is a real `str`
+    # constant; mypy currently resolves the bare cross-module import to
+    # Any until Session 2's mypy_path fix lands.
+    return LEGACY_TEMPORAL_COLLECTION  # type: ignore[no-any-return]
 
 
 def _make_temporal_points(n: int, commit_hash: str = "abc1234") -> List[dict]:
@@ -398,11 +401,15 @@ class _CountingMetadataStore(TemporalMetadataStore):
 
     def save_metadata(self, point_id: str, payload: dict) -> str:  # type: ignore[override]
         self.single_save_calls += 1
-        return super().save_metadata(point_id, payload)
+        # Issue #1696 Session 1: parent's save_metadata() is really typed
+        # to return str; mypy currently resolves the bare cross-module
+        # base-class import to Any until Session 2's mypy_path fix lands.
+        return super().save_metadata(point_id, payload)  # type: ignore[no-any-return]
 
     def save_metadata_batch(self, rows: list) -> list:  # type: ignore[override]
         self.batch_save_calls += 1
-        return super().save_metadata_batch(rows)
+        # Issue #1696 Session 1: see save_metadata's comment above.
+        return super().save_metadata_batch(rows)  # type: ignore[no-any-return]
 
 
 class TestHotPathWiring:
@@ -454,7 +461,7 @@ class TestHotPathWiring:
 
         This fails until temporal_indexer.py line 1231 is updated.
         """
-        import src.code_indexer.services.temporal.temporal_indexer as ti_mod
+        import code_indexer.services.temporal.temporal_indexer as ti_mod
 
         source = inspect.getsource(ti_mod)
 

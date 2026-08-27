@@ -8,7 +8,7 @@ import pytest
 from pathlib import Path
 
 # Test fixtures will be imported from conftest
-from src.code_indexer.services.tantivy_index_manager import TantivyIndexManager
+from code_indexer.services.tantivy_index_manager import TantivyIndexManager
 
 pytestmark = pytest.mark.slow
 
@@ -559,7 +559,7 @@ class TestPathPatternMatcherIntegration:
 
         Acceptance Criteria #2 (identical behavior to semantic search)
         """
-        from src.code_indexer.services.path_pattern_matcher import PathPatternMatcher
+        from code_indexer.services.path_pattern_matcher import PathPatternMatcher
 
         pattern = "**/tests/*"
         results = indexed_tantivy_manager.search(

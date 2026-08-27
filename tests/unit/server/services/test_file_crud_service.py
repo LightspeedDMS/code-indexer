@@ -23,10 +23,10 @@ from unittest.mock import Mock
 
 import pytest
 
-from src.code_indexer.server.services import (
+from code_indexer.server.services import (
     file_crud_service as file_crud_service_module,
 )
-from src.code_indexer.server.services.file_crud_service import (
+from code_indexer.server.services.file_crud_service import (
     FileCRUDService,
     HashMismatchError,
     CRUDOperationError,

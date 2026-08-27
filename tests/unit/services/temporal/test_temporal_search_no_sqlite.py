@@ -7,7 +7,7 @@ import unittest
 from unittest.mock import Mock
 from pathlib import Path
 
-from src.code_indexer.services.temporal.temporal_search_service import (
+from code_indexer.services.temporal.temporal_search_service import (
     TemporalSearchService,
 )
 
@@ -18,7 +18,7 @@ class TestTemporalSearchNoSQLite(unittest.TestCase):
     def test_no_sqlite3_import(self):
         """Verify sqlite3 is NOT imported in temporal_search_service module."""
         # Check module imports
-        import src.code_indexer.services.temporal.temporal_search_service as tss_module
+        import code_indexer.services.temporal.temporal_search_service as tss_module
 
         # sqlite3 should NOT be in the module's namespace
         self.assertNotIn(

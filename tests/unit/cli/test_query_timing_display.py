@@ -7,7 +7,7 @@ displays timing information for both single-index and parallel multi-index queri
 
 from io import StringIO
 from rich.console import Console
-from src.code_indexer.cli import _display_query_timing
+from code_indexer.cli import _display_query_timing
 
 
 class TestQueryTimingDisplay:

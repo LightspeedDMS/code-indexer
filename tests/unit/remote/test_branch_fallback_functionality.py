@@ -9,14 +9,14 @@ import pytest
 from unittest.mock import Mock, AsyncMock
 from pathlib import Path
 
-from src.code_indexer.remote.repository_linking import (
+from code_indexer.remote.repository_linking import (
     ExactBranchMatcher,
     BranchFallbackMatcher,
     RepositoryLink,
     RepositoryType,
 )
-from src.code_indexer.services.git_topology_service import GitTopologyService
-from src.code_indexer.api_clients.repository_linking_client import (
+from code_indexer.services.git_topology_service import GitTopologyService
+from code_indexer.api_clients.repository_linking_client import (
     RepositoryLinkingClient,
     RepositoryMatch as ClientRepositoryMatch,
     RepositoryDiscoveryResponse as ClientDiscoveryResponse,

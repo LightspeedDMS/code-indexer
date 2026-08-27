@@ -8,16 +8,16 @@ All tests use real components following MESSI Rule #1: No mocks.
 
 import pytest
 
-from src.code_indexer.server.utils.config_manager import TelemetryConfig
+from code_indexer.server.utils.config_manager import TelemetryConfig
 
 
 def reset_all_singletons():
     """Reset all singletons to ensure clean test state."""
-    from src.code_indexer.server.telemetry import (
+    from code_indexer.server.telemetry import (
         reset_telemetry_manager,
         reset_machine_metrics_exporter,
     )
-    from src.code_indexer.server.services.system_metrics_collector import (
+    from code_indexer.server.services.system_metrics_collector import (
         reset_system_metrics_collector,
     )
 
@@ -36,13 +36,13 @@ class TestCustomSpansImport:
 
     def test_create_span_can_be_imported(self):
         """create_span context manager can be imported."""
-        from src.code_indexer.server.telemetry.spans import create_span
+        from code_indexer.server.telemetry.spans import create_span
 
         assert create_span is not None
 
     def test_get_tracer_can_be_imported(self):
         """get_tracer function can be imported."""
-        from src.code_indexer.server.telemetry.spans import get_tracer
+        from code_indexer.server.telemetry.spans import get_tracer
 
         assert callable(get_tracer)
 
@@ -68,8 +68,8 @@ class TestCreateSpanContextManager:
         """
         create_span() works as context manager.
         """
-        from src.code_indexer.server.telemetry import get_telemetry_manager
-        from src.code_indexer.server.telemetry.spans import create_span
+        from code_indexer.server.telemetry import get_telemetry_manager
+        from code_indexer.server.telemetry.spans import create_span
 
         config = TelemetryConfig(
             enabled=True,
@@ -86,8 +86,8 @@ class TestCreateSpanContextManager:
         """
         create_span() can set attributes on span.
         """
-        from src.code_indexer.server.telemetry import get_telemetry_manager
-        from src.code_indexer.server.telemetry.spans import create_span
+        from code_indexer.server.telemetry import get_telemetry_manager
+        from code_indexer.server.telemetry.spans import create_span
 
         config = TelemetryConfig(
             enabled=True,
@@ -106,8 +106,8 @@ class TestCreateSpanContextManager:
         """
         create_span() records exceptions in span.
         """
-        from src.code_indexer.server.telemetry import get_telemetry_manager
-        from src.code_indexer.server.telemetry.spans import create_span
+        from code_indexer.server.telemetry import get_telemetry_manager
+        from code_indexer.server.telemetry.spans import create_span
         import pytest
 
         config = TelemetryConfig(
@@ -125,11 +125,11 @@ class TestCreateSpanContextManager:
         """
         create_span() includes correlation ID when available.
         """
-        from src.code_indexer.server.telemetry import (
+        from code_indexer.server.telemetry import (
             get_telemetry_manager,
             set_current_correlation_id,
         )
-        from src.code_indexer.server.telemetry.spans import create_span
+        from code_indexer.server.telemetry.spans import create_span
 
         config = TelemetryConfig(
             enabled=True,
@@ -205,8 +205,8 @@ class TestNoopWhenDisabled:
         """
         create_span() is no-op when telemetry disabled.
         """
-        from src.code_indexer.server.telemetry import get_telemetry_manager
-        from src.code_indexer.server.telemetry.spans import create_span
+        from code_indexer.server.telemetry import get_telemetry_manager
+        from code_indexer.server.telemetry.spans import create_span
 
         config = TelemetryConfig(
             enabled=False,

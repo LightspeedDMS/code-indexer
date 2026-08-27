@@ -22,12 +22,12 @@ tests/unit/server/storage/postgres/test_background_jobs_postgres.py.
 import uuid
 from datetime import datetime, timezone
 
-from src.code_indexer.server.repositories.background_jobs import (
+from code_indexer.server.repositories.background_jobs import (
     BackgroundJob,
     BackgroundJobManager,
     JobStatus,
 )
-from src.code_indexer.server.utils.config_manager import BackgroundJobsConfig
+from code_indexer.server.utils.config_manager import BackgroundJobsConfig
 
 _MAX_CONCURRENT_JOBS = 10
 

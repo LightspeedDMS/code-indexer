@@ -7,16 +7,16 @@ All tests use real components following MESSI Rule #1: No mocks.
 """
 
 import pytest
-from src.code_indexer.server.utils.config_manager import TelemetryConfig
+from code_indexer.server.utils.config_manager import TelemetryConfig
 
 
 def reset_all_singletons():
     """Reset all singletons to ensure clean test state."""
-    from src.code_indexer.server.telemetry import (
+    from code_indexer.server.telemetry import (
         reset_telemetry_manager,
         reset_machine_metrics_exporter,
     )
-    from src.code_indexer.server.services.system_metrics_collector import (
+    from code_indexer.server.services.system_metrics_collector import (
         reset_system_metrics_collector,
     )
 
@@ -35,7 +35,7 @@ class TestInstrumentationImport:
 
     def test_instrument_fastapi_function_can_be_imported(self):
         """instrument_fastapi() function can be imported."""
-        from src.code_indexer.server.telemetry.instrumentation import (
+        from code_indexer.server.telemetry.instrumentation import (
             instrument_fastapi,
         )
 
@@ -43,7 +43,7 @@ class TestInstrumentationImport:
 
     def test_uninstrument_fastapi_function_can_be_imported(self):
         """uninstrument_fastapi() function can be imported."""
-        from src.code_indexer.server.telemetry.instrumentation import (
+        from code_indexer.server.telemetry.instrumentation import (
             uninstrument_fastapi,
         )
 
@@ -60,7 +60,7 @@ class TestCorrelationBridgeImport:
 
     def test_correlation_bridge_middleware_can_be_imported(self):
         """CorrelationBridgeMiddleware can be imported."""
-        from src.code_indexer.server.telemetry.correlation_bridge import (
+        from code_indexer.server.telemetry.correlation_bridge import (
             CorrelationBridgeMiddleware,
         )
 
@@ -68,7 +68,7 @@ class TestCorrelationBridgeImport:
 
     def test_get_current_correlation_id_can_be_imported(self):
         """get_current_correlation_id() function can be imported."""
-        from src.code_indexer.server.telemetry.correlation_bridge import (
+        from code_indexer.server.telemetry.correlation_bridge import (
             get_current_correlation_id,
         )
 
@@ -105,7 +105,7 @@ class TestFastAPIInstrumentation:
         below), never by this function.
         """
         from fastapi import FastAPI
-        from src.code_indexer.server.telemetry.instrumentation import (
+        from code_indexer.server.telemetry.instrumentation import (
             instrument_fastapi,
             uninstrument_fastapi,
         )
@@ -138,7 +138,7 @@ class TestFastAPIInstrumentation:
         TelemetryConfig is imported at module scope (see top of this
         file) alongside pytest.
         """
-        from src.code_indexer.server.telemetry import get_telemetry_manager
+        from code_indexer.server.telemetry import get_telemetry_manager
 
         # collector_endpoint intentionally omitted: export_traces=False
         # means TelemetryManager never even constructs an exporter, so no
@@ -292,7 +292,7 @@ class TestCorrelationBridgeMiddleware:
         """
         from fastapi import FastAPI
         from fastapi.testclient import TestClient
-        from src.code_indexer.server.telemetry.correlation_bridge import (
+        from code_indexer.server.telemetry.correlation_bridge import (
             CorrelationBridgeMiddleware,
             get_current_correlation_id,
         )
@@ -322,7 +322,7 @@ class TestCorrelationBridgeMiddleware:
         """
         from fastapi import FastAPI
         from fastapi.testclient import TestClient
-        from src.code_indexer.server.telemetry.correlation_bridge import (
+        from code_indexer.server.telemetry.correlation_bridge import (
             CorrelationBridgeMiddleware,
             get_current_correlation_id,
         )
@@ -352,7 +352,7 @@ class TestCorrelationBridgeMiddleware:
         """
         from fastapi import FastAPI
         from fastapi.testclient import TestClient
-        from src.code_indexer.server.telemetry.correlation_bridge import (
+        from code_indexer.server.telemetry.correlation_bridge import (
             CorrelationBridgeMiddleware,
         )
 
@@ -390,7 +390,7 @@ class TestExcludedEndpoints:
         """
         Health endpoints are excluded from tracing.
         """
-        from src.code_indexer.server.telemetry.instrumentation import (
+        from code_indexer.server.telemetry.instrumentation import (
             DEFAULT_EXCLUDED_URLS,
         )
 

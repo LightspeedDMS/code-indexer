@@ -9,10 +9,10 @@ Tests automatic trace creation on first tool call when:
 import pytest
 from unittest.mock import MagicMock, Mock
 
-from src.code_indexer.server.services.auto_span_logger import AutoSpanLogger
-from src.code_indexer.server.services.langfuse_client import LangfuseClient
-from src.code_indexer.server.services.trace_state_manager import TraceStateManager
-from src.code_indexer.server.utils.config_manager import LangfuseConfig
+from code_indexer.server.services.auto_span_logger import AutoSpanLogger
+from code_indexer.server.services.langfuse_client import LangfuseClient
+from code_indexer.server.services.trace_state_manager import TraceStateManager
+from code_indexer.server.utils.config_manager import LangfuseConfig
 
 
 @pytest.fixture

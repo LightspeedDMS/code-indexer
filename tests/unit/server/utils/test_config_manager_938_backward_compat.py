@@ -23,7 +23,7 @@ import tempfile
 
 import pytest
 
-from src.code_indexer.server.utils.config_manager import ServerConfigManager
+from code_indexer.server.utils.config_manager import ServerConfigManager
 
 
 def _write_and_load(tmpdir: str, config_dict: dict):

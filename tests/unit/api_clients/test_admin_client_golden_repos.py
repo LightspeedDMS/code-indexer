@@ -11,8 +11,8 @@ from pathlib import Path
 
 # removed unused imports: Dict, Any
 
-from src.code_indexer.api_clients.admin_client import AdminAPIClient
-from src.code_indexer.api_clients.base_client import (
+from code_indexer.api_clients.admin_client import AdminAPIClient
+from code_indexer.api_clients.base_client import (
     APIClientError,
     AuthenticationError,
     NetworkError,

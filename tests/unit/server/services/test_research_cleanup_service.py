@@ -404,7 +404,7 @@ class TestResearchCleanupScheduler:
         (Bug #1485 follow-up: NEVER folder_path strings)."""
         import sqlite3
 
-        from src.code_indexer.server.storage.database_manager import DatabaseSchema
+        from code_indexer.server.storage.database_manager import DatabaseSchema
         from code_indexer.server.services.research_cleanup_service import (
             make_db_live_session_id_provider,
         )
@@ -435,7 +435,7 @@ class TestResearchCleanupScheduler:
         """
         import sqlite3
 
-        from src.code_indexer.server.storage.database_manager import DatabaseSchema
+        from code_indexer.server.storage.database_manager import DatabaseSchema
         from code_indexer.server.services.research_cleanup_service import (
             make_db_live_session_id_provider,
         )

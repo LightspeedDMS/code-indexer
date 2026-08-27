@@ -18,16 +18,16 @@ import threading
 from unittest.mock import patch
 
 import pytest
-from src.code_indexer.server.utils.config_manager import TelemetryConfig
+from code_indexer.server.utils.config_manager import TelemetryConfig
 
 
 def reset_all_singletons():
     """Reset all singletons to ensure clean test state."""
-    from src.code_indexer.server.telemetry import (
+    from code_indexer.server.telemetry import (
         reset_telemetry_manager,
         reset_machine_metrics_exporter,
     )
-    from src.code_indexer.server.services.system_metrics_collector import (
+    from code_indexer.server.services.system_metrics_collector import (
         reset_system_metrics_collector,
     )
 
@@ -46,7 +46,7 @@ class TestLogHandlerImport:
 
     def test_get_trace_context_function_exists(self):
         """get_trace_context() function is exported."""
-        from src.code_indexer.server.telemetry.log_handler import (
+        from code_indexer.server.telemetry.log_handler import (
             get_trace_context,
         )
 
@@ -73,7 +73,7 @@ class TestTraceContextExtraction:
         """
         get_trace_context() returns dictionary with trace_id and span_id.
         """
-        from src.code_indexer.server.telemetry.log_handler import (
+        from code_indexer.server.telemetry.log_handler import (
             get_trace_context,
         )
 
@@ -87,7 +87,7 @@ class TestTraceContextExtraction:
         """
         trace_id is 32 chars, span_id is 16 chars.
         """
-        from src.code_indexer.server.telemetry.log_handler import (
+        from code_indexer.server.telemetry.log_handler import (
             get_trace_context,
         )
 
@@ -100,7 +100,7 @@ class TestTraceContextExtraction:
         """
         trace_id is all zeros when no active span.
         """
-        from src.code_indexer.server.telemetry.log_handler import (
+        from code_indexer.server.telemetry.log_handler import (
             get_trace_context,
         )
 
@@ -123,14 +123,14 @@ class TestLogCorrelationIntegration:
     def setup_method(self):
         """Reset singletons before each test."""
         reset_all_singletons()
-        from src.code_indexer.server.telemetry.spans import reset_spans_state
+        from code_indexer.server.telemetry.spans import reset_spans_state
 
         reset_spans_state()
 
     def teardown_method(self):
         """Reset singletons after each test."""
         reset_all_singletons()
-        from src.code_indexer.server.telemetry.spans import reset_spans_state
+        from code_indexer.server.telemetry.spans import reset_spans_state
 
         reset_spans_state()
 
@@ -138,9 +138,9 @@ class TestLogCorrelationIntegration:
         """
         get_trace_context() returns real trace/span IDs from active span.
         """
-        from src.code_indexer.server.telemetry import get_telemetry_manager
-        from src.code_indexer.server.telemetry.spans import create_span
-        from src.code_indexer.server.telemetry.log_handler import (
+        from code_indexer.server.telemetry import get_telemetry_manager
+        from code_indexer.server.telemetry.spans import create_span
+        from code_indexer.server.telemetry.log_handler import (
             get_trace_context,
         )
 

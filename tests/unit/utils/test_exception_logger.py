@@ -20,7 +20,7 @@ import pytest
 @pytest.fixture(autouse=True)
 def reset_exception_logger_singleton():
     """Reset ExceptionLogger singleton before each test."""
-    from src.code_indexer.utils.exception_logger import ExceptionLogger
+    from code_indexer.utils.exception_logger import ExceptionLogger
 
     ExceptionLogger._instance = None
     yield
@@ -32,7 +32,7 @@ class TestExceptionLoggerInitialization:
 
     def test_cli_mode_creates_log_file_in_project_directory(self, tmp_path):
         """Test that CLI mode creates error log in .code-indexer/ directory."""
-        from src.code_indexer.utils.exception_logger import ExceptionLogger
+        from code_indexer.utils.exception_logger import ExceptionLogger
 
         project_root = tmp_path / "test_project"
         project_root.mkdir()
@@ -54,7 +54,7 @@ class TestExceptionLoggerInitialization:
 
     def test_daemon_mode_creates_log_file_in_project_directory(self, tmp_path):
         """Test that Daemon mode creates error log in .code-indexer/ directory."""
-        from src.code_indexer.utils.exception_logger import ExceptionLogger
+        from code_indexer.utils.exception_logger import ExceptionLogger
 
         project_root = tmp_path / "test_project"
         project_root.mkdir()
@@ -67,7 +67,7 @@ class TestExceptionLoggerInitialization:
 
     def test_server_mode_creates_log_file_in_home_directory(self, tmp_path):
         """Test that Server mode creates error log in ~/.cidx-server/logs/."""
-        from src.code_indexer.utils.exception_logger import ExceptionLogger
+        from code_indexer.utils.exception_logger import ExceptionLogger
 
         with patch("pathlib.Path.home") as mock_home:
             mock_home.return_value = tmp_path
@@ -83,7 +83,7 @@ class TestExceptionLoggerInitialization:
 
     def test_log_directory_created_if_not_exists(self, tmp_path):
         """Test that log directory is created if it doesn't exist."""
-        from src.code_indexer.utils.exception_logger import ExceptionLogger
+        from code_indexer.utils.exception_logger import ExceptionLogger
 
         project_root = tmp_path / "test_project"
         project_root.mkdir()
@@ -100,7 +100,7 @@ class TestExceptionLoggerInitialization:
 
     def test_filename_contains_timestamp_and_pid(self, tmp_path):
         """Test that log filename contains timestamp and PID for uniqueness."""
-        from src.code_indexer.utils.exception_logger import ExceptionLogger
+        from code_indexer.utils.exception_logger import ExceptionLogger
 
         project_root = tmp_path / "test_project"
         project_root.mkdir()
@@ -136,7 +136,7 @@ class TestExceptionLogging:
 
     def test_log_exception_writes_json_to_file(self, tmp_path):
         """Test that logging an exception writes JSON data to the log file."""
-        from src.code_indexer.utils.exception_logger import ExceptionLogger
+        from code_indexer.utils.exception_logger import ExceptionLogger
 
         project_root = tmp_path / "test_project"
         project_root.mkdir()
@@ -171,7 +171,7 @@ class TestExceptionLogging:
 
     def test_log_exception_includes_timestamp(self, tmp_path):
         """Test that logged exception includes ISO timestamp."""
-        from src.code_indexer.utils.exception_logger import ExceptionLogger
+        from code_indexer.utils.exception_logger import ExceptionLogger
 
         project_root = tmp_path / "test_project"
         project_root.mkdir()
@@ -201,7 +201,7 @@ class TestExceptionLogging:
 
     def test_log_exception_includes_thread_info(self, tmp_path):
         """Test that logged exception includes thread name and ID."""
-        from src.code_indexer.utils.exception_logger import ExceptionLogger
+        from code_indexer.utils.exception_logger import ExceptionLogger
 
         project_root = tmp_path / "test_project"
         project_root.mkdir()
@@ -223,7 +223,7 @@ class TestExceptionLogging:
 
     def test_log_exception_includes_stack_trace(self, tmp_path):
         """Test that logged exception includes complete stack trace."""
-        from src.code_indexer.utils.exception_logger import ExceptionLogger
+        from code_indexer.utils.exception_logger import ExceptionLogger
 
         project_root = tmp_path / "test_project"
         project_root.mkdir()
@@ -254,7 +254,7 @@ class TestExceptionLogging:
 
     def test_multiple_exceptions_appended_to_same_file(self, tmp_path):
         """Test that multiple exceptions are appended with separators."""
-        from src.code_indexer.utils.exception_logger import ExceptionLogger
+        from code_indexer.utils.exception_logger import ExceptionLogger
 
         project_root = tmp_path / "test_project"
         project_root.mkdir()
@@ -305,7 +305,7 @@ class TestThreadExceptionHook:
 
     def test_install_thread_exception_hook(self, tmp_path):
         """Test that threading.excepthook can be installed globally."""
-        from src.code_indexer.utils.exception_logger import ExceptionLogger
+        from code_indexer.utils.exception_logger import ExceptionLogger
 
         project_root = tmp_path / "test_project"
         project_root.mkdir()
@@ -324,7 +324,7 @@ class TestThreadExceptionHook:
 
     def test_thread_exception_captured_and_logged(self, tmp_path):
         """Test that uncaught thread exceptions are captured and logged."""
-        from src.code_indexer.utils.exception_logger import ExceptionLogger
+        from code_indexer.utils.exception_logger import ExceptionLogger
 
         project_root = tmp_path / "test_project"
         project_root.mkdir()

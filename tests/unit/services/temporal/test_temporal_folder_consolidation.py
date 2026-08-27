@@ -15,12 +15,12 @@ from pathlib import Path
 
 import pytest
 
-from src.code_indexer.config import ConfigManager
-from src.code_indexer.services.temporal.temporal_collection_naming import (
+from code_indexer.config import ConfigManager
+from code_indexer.services.temporal.temporal_collection_naming import (
     LEGACY_TEMPORAL_COLLECTION,
 )
-from src.code_indexer.services.temporal.temporal_indexer import TemporalIndexer
-from src.code_indexer.storage.filesystem_vector_store import FilesystemVectorStore
+from code_indexer.services.temporal.temporal_indexer import TemporalIndexer
+from code_indexer.storage.filesystem_vector_store import FilesystemVectorStore
 
 
 @pytest.fixture
@@ -105,7 +105,7 @@ def test_watch_command_vector_store_initialization(temp_git_repo):
     that using the OLD way (passing collection path directly) creates
     the wrong temporal_dir, while the NEW way (using base_path) works correctly.
     """
-    from src.code_indexer.storage.filesystem_vector_store import FilesystemVectorStore
+    from code_indexer.storage.filesystem_vector_store import FilesystemVectorStore
 
     project_root = temp_git_repo
     index_dir = project_root / ".code-indexer" / "index"
@@ -157,7 +157,7 @@ def test_reconciliation_uses_collection_path(temp_git_repo):
     This verifies the fix for temporal_reconciliation.py where metadata
     file paths should use collection_path, not vector_store.base_path / "temporal"
     """
-    from src.code_indexer.storage.filesystem_vector_store import FilesystemVectorStore
+    from code_indexer.storage.filesystem_vector_store import FilesystemVectorStore
 
     project_root = temp_git_repo
     index_dir = project_root / ".code-indexer" / "index"

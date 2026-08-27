@@ -5,7 +5,7 @@ from pathlib import Path
 import subprocess
 
 
-from src.code_indexer.services.temporal.temporal_diff_scanner import TemporalDiffScanner
+from code_indexer.services.temporal.temporal_diff_scanner import TemporalDiffScanner
 
 
 class TestBlobHashModified:

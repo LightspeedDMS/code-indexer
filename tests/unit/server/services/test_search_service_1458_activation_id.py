@@ -18,9 +18,9 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from src.code_indexer.server.models.api_models import SemanticSearchRequest
-from src.code_indexer.server.services.search_service import SemanticSearchService
-from src.code_indexer.storage.filesystem_vector_store import FilesystemVectorStore
+from code_indexer.server.models.api_models import SemanticSearchRequest
+from code_indexer.server.services.search_service import SemanticSearchService
+from code_indexer.storage.filesystem_vector_store import FilesystemVectorStore
 
 
 @pytest.fixture
@@ -68,7 +68,7 @@ class TestSearchRepositoryPathThreadsActivationId:
 
         with patch.object(FilesystemVectorStore, "search", tracked_search):
             with patch(
-                "src.code_indexer.server.services.search_service.EmbeddingProviderFactory.create",
+                "code_indexer.server.services.search_service.EmbeddingProviderFactory.create",
                 return_value=mock_embedding_service,
             ):
                 search_service.search_repository_path(
@@ -96,7 +96,7 @@ class TestSearchRepositoryPathThreadsActivationId:
 
         with patch.object(FilesystemVectorStore, "search", tracked_search):
             with patch(
-                "src.code_indexer.server.services.search_service.EmbeddingProviderFactory.create",
+                "code_indexer.server.services.search_service.EmbeddingProviderFactory.create",
                 return_value=mock_embedding_service,
             ):
                 search_service.search_repository_path(
@@ -127,7 +127,7 @@ class TestSearchRepositoryPathWithProviderThreadsActivationId:
 
         with patch.object(FilesystemVectorStore, "search", tracked_search):
             with patch(
-                "src.code_indexer.server.services.search_service.EmbeddingProviderFactory.create",
+                "code_indexer.server.services.search_service.EmbeddingProviderFactory.create",
                 return_value=mock_embedding_service,
             ):
                 search_service.search_repository_path_with_provider(

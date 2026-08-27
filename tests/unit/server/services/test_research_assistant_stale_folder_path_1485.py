@@ -38,8 +38,8 @@ from pathlib import Path
 
 import pytest
 
-from src.code_indexer.server.storage.database_manager import DatabaseSchema
-from src.code_indexer.server.services.research_assistant_service import (
+from code_indexer.server.storage.database_manager import DatabaseSchema
+from code_indexer.server.services.research_assistant_service import (
     ResearchAssistantService,
 )
 
@@ -214,7 +214,7 @@ class TestRunClaudeBackgroundUsesNodeLocalWorkingDir:
         fake_result.stderr = ""
 
         with patch(
-            "src.code_indexer.server.services.research_assistant_service.subprocess.run",
+            "code_indexer.server.services.research_assistant_service.subprocess.run",
             return_value=fake_result,
         ) as mock_run:
             service._run_claude_background(

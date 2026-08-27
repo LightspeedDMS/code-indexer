@@ -17,7 +17,7 @@ no mocking, per MESSI Rule #1.
 import json
 import tempfile
 
-from src.code_indexer.server.utils.config_manager import (
+from code_indexer.server.utils.config_manager import (
     ServerConfig,
     ServerConfigManager,
     TelemetryConfig,

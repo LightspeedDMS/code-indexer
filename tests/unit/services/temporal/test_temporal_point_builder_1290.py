@@ -6,15 +6,15 @@ and commit_message populated ONLY on the head chunk (short-capped), empty on
 all others.
 """
 
-from src.code_indexer.services.temporal.commit_aggregator import (
+from code_indexer.services.temporal.commit_aggregator import (
     AggregatedCommitDocument,
     ProvenanceSection,
 )
-from src.code_indexer.services.temporal.contextual_chunker import (
+from code_indexer.services.temporal.contextual_chunker import (
     chunk_aggregated_document,
 )
-from src.code_indexer.services.temporal.models import CommitInfo
-from src.code_indexer.services.temporal.temporal_point_builder import (
+from code_indexer.services.temporal.models import CommitInfo
+from code_indexer.services.temporal.temporal_point_builder import (
     build_chunk_payload,
     build_point_id,
     short_cap_commit_message,

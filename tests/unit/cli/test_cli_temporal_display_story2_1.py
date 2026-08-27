@@ -3,7 +3,7 @@
 import unittest
 from unittest.mock import Mock, patch
 
-from src.code_indexer.cli import (
+from code_indexer.cli import (
     _display_file_chunk_match,
     _display_commit_message_match,
     display_temporal_results,
@@ -64,7 +64,7 @@ class TestCLITemporalDisplayStory21(unittest.TestCase):
         temporal_service._generate_chunk_diff.return_value = diff_output
 
         # Capture output
-        with patch("src.code_indexer.cli.console") as mock_console:
+        with patch("code_indexer.cli.console") as mock_console:
             _display_file_chunk_match(result, 1, temporal_service)
 
             # Verify display calls
@@ -122,7 +122,7 @@ Fixed issue with expired tokens not being rejected."""
         ]
 
         # Capture output
-        with patch("src.code_indexer.cli.console") as mock_console:
+        with patch("code_indexer.cli.console") as mock_console:
             _display_commit_message_match(result, 2, temporal_service)
 
             # Verify display calls
@@ -196,10 +196,10 @@ Fixed issue with expired tokens not being rejected."""
 
         # Mock the display functions to track call order
         with patch(
-            "src.code_indexer.cli._display_commit_message_match"
+            "code_indexer.cli._display_commit_message_match"
         ) as mock_commit_display:
             with patch(
-                "src.code_indexer.cli._display_file_chunk_match"
+                "code_indexer.cli._display_file_chunk_match"
             ) as mock_file_display:
                 display_temporal_results(results, temporal_service)
 
@@ -242,7 +242,7 @@ Fixed issue with expired tokens not being rejected."""
         # No diff available (initial commit or new file)
         temporal_service._generate_chunk_diff.return_value = None
 
-        with patch("src.code_indexer.cli.console") as mock_console:
+        with patch("code_indexer.cli.console") as mock_console:
             _display_file_chunk_match(result, 1, temporal_service)
 
             calls = mock_console.print.call_args_list
@@ -278,7 +278,7 @@ Fixed issue with expired tokens not being rejected."""
         ]
         temporal_service._fetch_commit_file_changes.return_value = files
 
-        with patch("src.code_indexer.cli.console") as mock_console:
+        with patch("code_indexer.cli.console") as mock_console:
             _display_commit_message_match(result, 1, temporal_service)
 
             calls = mock_console.print.call_args_list

@@ -8,7 +8,7 @@ These tests reproduce and verify fixes for:
 
 from pathlib import Path
 
-from src.code_indexer.services.claude_integration import ClaudeIntegrationService
+from code_indexer.services.claude_integration import ClaudeIntegrationService
 
 
 def test_prompt_should_not_have_excessive_blank_lines():

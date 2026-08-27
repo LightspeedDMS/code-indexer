@@ -6,8 +6,8 @@ one adapter with zero core indexer/recall change (Epic #1289 primary objective).
 
 import pytest
 
-from src.code_indexer.services.temporal.embedders.base import TemporalEmbedder
-from src.code_indexer.services.temporal.embedders.registry import (
+from code_indexer.services.temporal.embedders.base import TemporalEmbedder
+from code_indexer.services.temporal.embedders.registry import (
     create_embedder,
     register_embedder,
     registered_embedder_names,

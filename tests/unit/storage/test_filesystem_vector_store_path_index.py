@@ -24,7 +24,7 @@ from unittest.mock import patch
 
 import numpy as np
 
-from src.code_indexer.storage.filesystem_vector_store import FilesystemVectorStore
+from code_indexer.storage.filesystem_vector_store import FilesystemVectorStore
 
 
 # ---------------------------------------------------------------------------

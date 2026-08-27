@@ -2,7 +2,7 @@
 
 import pytest
 
-from src.code_indexer.api_clients.admin_client import AdminAPIClient
+from code_indexer.api_clients.admin_client import AdminAPIClient
 
 
 class TestAdminAPIClientJobsMethods:

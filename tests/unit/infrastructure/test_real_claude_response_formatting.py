@@ -10,7 +10,7 @@ from ...conftest import local_temporary_directory
 from pathlib import Path
 from io import StringIO
 
-from src.code_indexer.services.claude_integration import ClaudeIntegrationService
+from code_indexer.services.claude_integration import ClaudeIntegrationService
 from rich.console import Console
 
 

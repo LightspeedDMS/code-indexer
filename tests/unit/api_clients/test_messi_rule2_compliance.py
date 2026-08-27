@@ -9,7 +9,7 @@ This test ensures that the RemoteQueryClient adheres to Messi Rule #2:
 from pathlib import Path
 from unittest import TestCase
 
-from src.code_indexer.api_clients.remote_query_client import (
+from code_indexer.api_clients.remote_query_client import (
     RemoteQueryClient,
     RepositoryAccessError,
 )

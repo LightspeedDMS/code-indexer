@@ -34,7 +34,7 @@ class TestSaveTemporalOptionsSinceDateValidation:
         Bug fix: since_date with invalid format (e.g. 'not-a-date') must be
         rejected with a 400 error response and NOT saved to SQLite.
         """
-        from src.code_indexer.server.web.routes import save_temporal_options
+        from code_indexer.server.web.routes import save_temporal_options
 
         mock_request = _make_request()
         mock_session = _make_session()
@@ -47,19 +47,19 @@ class TestSaveTemporalOptionsSinceDateValidation:
 
         with (
             patch(
-                "src.code_indexer.server.web.routes._require_admin_session",
+                "code_indexer.server.web.routes._require_admin_session",
                 return_value=mock_session,
             ),
             patch(
-                "src.code_indexer.server.web.routes.validate_login_csrf_token",
+                "code_indexer.server.web.routes.validate_login_csrf_token",
                 return_value=True,
             ),
             patch(
-                "src.code_indexer.server.web.routes._get_golden_repo_manager",
+                "code_indexer.server.web.routes._get_golden_repo_manager",
                 return_value=mock_manager,
             ),
             patch(
-                "src.code_indexer.server.web.routes.templates",
+                "code_indexer.server.web.routes.templates",
                 mock_templates,
             ),
         ):
@@ -90,7 +90,7 @@ class TestSaveTemporalOptionsSinceDateValidation:
         """
         Bug fix: since_date with wrong separator (e.g. '2024/01/15') must be rejected.
         """
-        from src.code_indexer.server.web.routes import save_temporal_options
+        from code_indexer.server.web.routes import save_temporal_options
 
         mock_request = _make_request()
         mock_session = _make_session()
@@ -103,19 +103,19 @@ class TestSaveTemporalOptionsSinceDateValidation:
 
         with (
             patch(
-                "src.code_indexer.server.web.routes._require_admin_session",
+                "code_indexer.server.web.routes._require_admin_session",
                 return_value=mock_session,
             ),
             patch(
-                "src.code_indexer.server.web.routes.validate_login_csrf_token",
+                "code_indexer.server.web.routes.validate_login_csrf_token",
                 return_value=True,
             ),
             patch(
-                "src.code_indexer.server.web.routes._get_golden_repo_manager",
+                "code_indexer.server.web.routes._get_golden_repo_manager",
                 return_value=mock_manager,
             ),
             patch(
-                "src.code_indexer.server.web.routes.templates",
+                "code_indexer.server.web.routes.templates",
                 mock_templates,
             ),
         ):
@@ -138,7 +138,7 @@ class TestSaveTemporalOptionsSinceDateValidation:
         """
         Valid since_date in YYYY-MM-DD format must pass validation and be saved.
         """
-        from src.code_indexer.server.web.routes import save_temporal_options
+        from code_indexer.server.web.routes import save_temporal_options
 
         mock_request = _make_request()
         mock_session = _make_session()
@@ -148,19 +148,19 @@ class TestSaveTemporalOptionsSinceDateValidation:
 
         with (
             patch(
-                "src.code_indexer.server.web.routes._require_admin_session",
+                "code_indexer.server.web.routes._require_admin_session",
                 return_value=mock_session,
             ),
             patch(
-                "src.code_indexer.server.web.routes.validate_login_csrf_token",
+                "code_indexer.server.web.routes.validate_login_csrf_token",
                 return_value=True,
             ),
             patch(
-                "src.code_indexer.server.web.routes._get_golden_repo_manager",
+                "code_indexer.server.web.routes._get_golden_repo_manager",
                 return_value=mock_manager,
             ),
             patch(
-                "src.code_indexer.server.web.routes._create_golden_repos_page_response",
+                "code_indexer.server.web.routes._create_golden_repos_page_response",
                 mock_page,
             ),
         ):
@@ -184,7 +184,7 @@ class TestSaveTemporalOptionsSinceDateValidation:
         """
         Empty/blank since_date must be silently ignored (not saved, no error).
         """
-        from src.code_indexer.server.web.routes import save_temporal_options
+        from code_indexer.server.web.routes import save_temporal_options
 
         mock_request = _make_request()
         mock_session = _make_session()
@@ -194,19 +194,19 @@ class TestSaveTemporalOptionsSinceDateValidation:
 
         with (
             patch(
-                "src.code_indexer.server.web.routes._require_admin_session",
+                "code_indexer.server.web.routes._require_admin_session",
                 return_value=mock_session,
             ),
             patch(
-                "src.code_indexer.server.web.routes.validate_login_csrf_token",
+                "code_indexer.server.web.routes.validate_login_csrf_token",
                 return_value=True,
             ),
             patch(
-                "src.code_indexer.server.web.routes._get_golden_repo_manager",
+                "code_indexer.server.web.routes._get_golden_repo_manager",
                 return_value=mock_manager,
             ),
             patch(
-                "src.code_indexer.server.web.routes._create_golden_repos_page_response",
+                "code_indexer.server.web.routes._create_golden_repos_page_response",
                 mock_page,
             ),
         ):

@@ -10,7 +10,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 from click.testing import CliRunner
 
-from src.code_indexer.cli import cli
+from code_indexer.cli import cli
 
 
 class TestCLIClearTemporalProgress(unittest.TestCase):
@@ -107,12 +107,12 @@ class TestCLIClearTemporalProgress(unittest.TestCase):
         runner = CliRunner()
 
         # Mock the necessary components
-        with patch("src.code_indexer.cli.ConfigManager") as MockConfig:
+        with patch("code_indexer.cli.ConfigManager") as MockConfig:
             with patch(
-                "src.code_indexer.storage.filesystem_vector_store.FilesystemVectorStore"
+                "code_indexer.storage.filesystem_vector_store.FilesystemVectorStore"
             ) as MockVectorStore:
                 with patch(
-                    "src.code_indexer.services.temporal.temporal_indexer.TemporalIndexer"
+                    "code_indexer.services.temporal.temporal_indexer.TemporalIndexer"
                 ) as MockTemporal:
                     # Setup mocks
                     mock_config = MagicMock()

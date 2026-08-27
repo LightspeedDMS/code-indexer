@@ -14,8 +14,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from src.code_indexer.server.query.semantic_query_manager import SemanticQueryManager
-from src.code_indexer.services.temporal.temporal_search_service import (
+from code_indexer.server.query.semantic_query_manager import SemanticQueryManager
+from code_indexer.services.temporal.temporal_search_service import (
     TemporalSearchResults,
 )
 
@@ -99,20 +99,20 @@ def patched_temporal_deps():
 
     with (
         patch(
-            "src.code_indexer.config.ConfigManager.load_verified_config",
+            "code_indexer.config.ConfigManager.load_verified_config",
             side_effect=_echo_load_verified_config,
         ),
         patch(
-            "src.code_indexer.backends.backend_factory.BackendFactory.create",
+            "code_indexer.backends.backend_factory.BackendFactory.create",
             return_value=backend_mock,
         ),
         patch(
-            "src.code_indexer.services.temporal.temporal_fusion_dispatch"
+            "code_indexer.services.temporal.temporal_fusion_dispatch"
             ".execute_temporal_query_with_fusion",
             return_value=_no_temporal_index_result(),
         ),
         patch(
-            "src.code_indexer.server.app._server_hnsw_cache",
+            "code_indexer.server.app._server_hnsw_cache",
             None,
         ),
     ):

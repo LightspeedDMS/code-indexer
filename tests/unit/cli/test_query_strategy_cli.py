@@ -13,14 +13,14 @@ from click.testing import CliRunner
 from unittest.mock import patch
 from pathlib import Path
 
-from src.code_indexer.cli import cli
+from code_indexer.cli import cli
 
 
 @pytest.fixture
 def cli_runner():
     """Provide a CliRunner with find_project_root patched to a safe temp path."""
     runner = CliRunner()
-    with patch("src.code_indexer.cli.find_project_root") as mock_find_root:
+    with patch("code_indexer.cli.find_project_root") as mock_find_root:
         mock_find_root.return_value = Path("/tmp/test-project")
         yield runner
 

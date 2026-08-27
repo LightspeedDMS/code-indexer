@@ -19,8 +19,8 @@ import os
 
 import pytest
 
-import src.code_indexer.server.services.token_encryption as token_encryption_module
-from src.code_indexer.server.services.token_encryption import (
+import code_indexer.server.services.token_encryption as token_encryption_module
+from code_indexer.server.services.token_encryption import (
     decrypt_single,
     decrypt_with_fallback,
     derive_encryption_key,
@@ -138,7 +138,10 @@ class TestEncryptDecryptSingle:
     """Tests for encrypt_token() and decrypt_single() roundtrip."""
 
     def _get_test_key(self) -> bytes:
-        return derive_key_from_salt("test-key-salt")
+        # Issue #1696 Session 1: derive_key_from_salt() is really typed to
+        # return bytes; mypy currently resolves the bare cross-module
+        # import to Any until Session 2's mypy_path fix lands.
+        return derive_key_from_salt("test-key-salt")  # type: ignore[no-any-return]
 
     def test_encrypt_returns_non_empty_base64_string(self):
         import re

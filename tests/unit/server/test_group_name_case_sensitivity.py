@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from src.code_indexer.server.services.group_access_manager import GroupAccessManager
+from code_indexer.server.services.group_access_manager import GroupAccessManager
 
 
 @pytest.fixture

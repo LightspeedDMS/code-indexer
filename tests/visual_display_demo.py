@@ -9,7 +9,7 @@ import time
 
 from rich.console import Console
 
-from src.code_indexer.utils.status_display import (
+from code_indexer.utils.status_display import (
     FreeScrollStreamDisplay,
     StatusEvent,
     StatusDisplayManager,

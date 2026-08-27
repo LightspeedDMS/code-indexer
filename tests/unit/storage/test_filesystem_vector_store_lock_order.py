@@ -44,7 +44,7 @@ from typing import Dict, List
 import numpy as np
 import pytest
 
-from src.code_indexer.storage.filesystem_vector_store import FilesystemVectorStore
+from code_indexer.storage.filesystem_vector_store import FilesystemVectorStore
 
 VECTOR_SIZE = 32
 COLLECTION = "lock_order_test"

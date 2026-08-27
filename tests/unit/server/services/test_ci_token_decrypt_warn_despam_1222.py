@@ -105,7 +105,7 @@ def _insert_raw_token(db_path: str, platform: str, encrypted_token: str) -> None
 
 def _fresh_manager(server_dir, db_path):
     """Create a fresh CITokenManager via create_token_manager (mirrors production call sites)."""
-    from src.code_indexer.server.services.ci_token_manager import create_token_manager
+    from code_indexer.server.services.ci_token_manager import create_token_manager
 
     return create_token_manager(
         server_dir=str(server_dir),
@@ -125,7 +125,7 @@ def reset_despam_memo() -> Generator[None, None, None]:
     Clear the module-level de-spam memo before and after each test so tests
     are fully isolated from each other.
     """
-    from src.code_indexer.server.services import ci_token_manager as _mod
+    from code_indexer.server.services import ci_token_manager as _mod
 
     def _clear() -> None:
         if hasattr(_mod, "_DECRYPT_WARN_SEEN"):

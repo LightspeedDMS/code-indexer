@@ -27,7 +27,7 @@ if TYPE_CHECKING:
     from opentelemetry.sdk._logs import LoggerProvider
     from opentelemetry.trace import Tracer, TracerProvider
 
-    from src.code_indexer.server.utils.config_manager import TelemetryConfig
+    from code_indexer.server.utils.config_manager import TelemetryConfig
 
 logger = logging.getLogger(__name__)
 
@@ -405,7 +405,11 @@ class TelemetryManager:
     @property
     def service_name(self) -> str:
         """Return the configured service name."""
-        return self._config.service_name
+        # Issue #1696 Session 1: TelemetryConfig is a real @dataclass with a
+        # str field; mypy currently resolves the bare cross-module import
+        # (TYPE_CHECKING forward ref) to Any until Session 2's mypy_path
+        # fix lands -- see manager.py's TYPE_CHECKING import comment.
+        return self._config.service_name  # type: ignore[no-any-return]
 
     @property
     def cluster_node_id(self) -> Optional[str]:
@@ -416,12 +420,14 @@ class TelemetryManager:
     @property
     def deployment_environment(self) -> str:
         """Return the configured deployment environment."""
-        return self._config.deployment_environment
+        # Issue #1696 Session 1: see service_name's comment above.
+        return self._config.deployment_environment  # type: ignore[no-any-return]
 
     @property
     def collector_protocol(self) -> str:
         """Return the configured collector protocol."""
-        return self._config.collector_protocol
+        # Issue #1696 Session 1: see service_name's comment above.
+        return self._config.collector_protocol  # type: ignore[no-any-return]
 
     def get_tracer(self, name: str, version: Optional[str] = None) -> "Tracer":
         """

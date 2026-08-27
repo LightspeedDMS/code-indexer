@@ -19,15 +19,15 @@ import pytest
 def reset_all_singletons():
     """Reset all singletons to ensure clean test state.
 
-    Uses src.code_indexer... import paths to match module resolution in tests.
+    Uses code_indexer... import paths to match module resolution in tests.
     """
     # Reset config service singleton
-    from src.code_indexer.server.services.config_service import reset_config_service
+    from code_indexer.server.services.config_service import reset_config_service
 
     reset_config_service()
 
     # Reset telemetry manager singleton
-    from src.code_indexer.server.telemetry import (
+    from code_indexer.server.telemetry import (
         reset_telemetry_manager,
         reset_machine_metrics_exporter,
     )
@@ -84,7 +84,7 @@ class TestTelemetryAppIntegration:
             # Reset singletons INSIDE patch context so env var is set first
             reset_all_singletons()
 
-            from src.code_indexer.server.app import create_app
+            from code_indexer.server.app import create_app
 
             app = create_app()
 
@@ -116,7 +116,7 @@ class TestTelemetryDbConfigEnablesTelemetry:
         DB-backed value), with the 5 legacy telemetry env vars stripped so
         this genuinely proves config-file-only startup behavior."""
         from contextlib import contextmanager
-        from src.code_indexer.server.utils.config_manager import (
+        from code_indexer.server.utils.config_manager import (
             _IGNORED_TELEMETRY_ENV_VARS,
         )
 
@@ -132,7 +132,7 @@ class TestTelemetryDbConfigEnablesTelemetry:
                 for legacy_var in _IGNORED_TELEMETRY_ENV_VARS:
                     os.environ.pop(legacy_var, None)
                 reset_all_singletons()
-                from src.code_indexer.server.app import create_app
+                from code_indexer.server.app import create_app
 
                 yield create_app()
 
@@ -197,7 +197,7 @@ class TestApplicationMetricsStartupWiring:
 
             with patch.dict(os.environ, {"CIDX_SERVER_DATA_DIR": str(config_dir)}):
                 reset_all_singletons()
-                from src.code_indexer.server.app import create_app
+                from code_indexer.server.app import create_app
 
                 yield create_app()
 

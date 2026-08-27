@@ -65,7 +65,7 @@ class TestRPyCDaemon(TestCase):
     @pytest.mark.slow
     def test_cache_hit_performance_under_100ms(self):
         """Test that cache hit queries complete in <100ms (Issue #1)."""
-        from src.code_indexer.services.rpyc_daemon import CIDXDaemonService
+        from code_indexer.services.rpyc_daemon import CIDXDaemonService
 
         service = CIDXDaemonService()
 
@@ -132,7 +132,7 @@ class TestRPyCDaemon(TestCase):
 
     def test_daemon_shutdown_properly_exits_process(self):
         """Test that daemon shutdown properly exits the process (Issue #2)."""
-        from src.code_indexer.services.rpyc_daemon import CIDXDaemonService
+        from code_indexer.services.rpyc_daemon import CIDXDaemonService
 
         service = CIDXDaemonService()
 
@@ -192,7 +192,7 @@ class TestRPyCDaemon(TestCase):
 
     def test_socket_cleanup_on_shutdown(self):
         """Test that socket file is removed on shutdown."""
-        from src.code_indexer.services.rpyc_daemon import cleanup_socket
+        from code_indexer.services.rpyc_daemon import cleanup_socket
 
         # Create socket file
         socket_path = self.project_path / ".code-indexer" / "daemon.sock"
@@ -208,7 +208,7 @@ class TestRPyCDaemon(TestCase):
 
     def test_watch_handler_cleanup_on_shutdown(self):
         """Test that watch handler is properly cleaned up on shutdown."""
-        from src.code_indexer.services.rpyc_daemon import CIDXDaemonService
+        from code_indexer.services.rpyc_daemon import CIDXDaemonService
 
         service = CIDXDaemonService()
 
@@ -228,7 +228,7 @@ class TestRPyCDaemon(TestCase):
 
     def test_concurrent_reads_with_rlock(self):
         """Test concurrent read queries using RLock."""
-        from src.code_indexer.services.rpyc_daemon import CIDXDaemonService
+        from code_indexer.services.rpyc_daemon import CIDXDaemonService
 
         service = CIDXDaemonService()
 
@@ -268,7 +268,7 @@ class TestRPyCDaemon(TestCase):
 
     def test_serialized_writes_with_lock(self):
         """Test that writes are serialized using Lock."""
-        from src.code_indexer.services.rpyc_daemon import CIDXDaemonService
+        from code_indexer.services.rpyc_daemon import CIDXDaemonService
 
         service = CIDXDaemonService()
 
@@ -301,7 +301,7 @@ class TestRPyCDaemon(TestCase):
 
     def test_ttl_eviction_after_10_minutes(self):
         """Test TTL-based cache eviction after 10 minutes."""
-        from src.code_indexer.services.rpyc_daemon import (
+        from code_indexer.services.rpyc_daemon import (
             CIDXDaemonService,
             CacheEvictionThread,
         )
@@ -327,7 +327,7 @@ class TestRPyCDaemon(TestCase):
 
     def test_cache_invalidation_on_clean_operations(self):
         """Test that clean operations properly invalidate cache."""
-        from src.code_indexer.services.rpyc_daemon import CIDXDaemonService
+        from code_indexer.services.rpyc_daemon import CIDXDaemonService
 
         service = CIDXDaemonService()
 
@@ -346,9 +346,9 @@ class TestRPyCDaemon(TestCase):
         mock_cleanup_instance.clean_vectors.return_value = {"status": "cleaned"}
 
         # Inject the mock into the daemon module
-        import src.code_indexer.services.rpyc_daemon
+        import code_indexer.services.rpyc_daemon
 
-        src.code_indexer.services.rpyc_daemon.CleanupService = mock_cleanup_class  # type: ignore[attr-defined]
+        code_indexer.services.rpyc_daemon.CleanupService = mock_cleanup_class  # type: ignore[attr-defined]
 
         result = service.exposed_clean(str(self.project_path))
 
@@ -365,7 +365,7 @@ class TestRPyCDaemon(TestCase):
         # Test exposed_clean_data
         # Re-setup the mock
         mock_cleanup_instance.clean_data.return_value = {"status": "data_cleaned"}
-        src.code_indexer.services.rpyc_daemon.CleanupService = mock_cleanup_class  # type: ignore[attr-defined]
+        code_indexer.services.rpyc_daemon.CleanupService = mock_cleanup_class  # type: ignore[attr-defined]
 
         result = service.exposed_clean_data(str(self.project_path))
 
@@ -374,7 +374,7 @@ class TestRPyCDaemon(TestCase):
 
     def test_fts_index_caching(self):
         """Test FTS index caching for Tantivy."""
-        from src.code_indexer.services.rpyc_daemon import CIDXDaemonService
+        from code_indexer.services.rpyc_daemon import CIDXDaemonService
 
         service = CIDXDaemonService()
 
@@ -408,7 +408,7 @@ class TestRPyCDaemon(TestCase):
 
     def test_hybrid_search_parallel_execution(self):
         """Test hybrid search runs semantic and FTS in parallel."""
-        from src.code_indexer.services.rpyc_daemon import CIDXDaemonService
+        from code_indexer.services.rpyc_daemon import CIDXDaemonService
 
         service = CIDXDaemonService()
 
@@ -466,7 +466,7 @@ class TestRPyCDaemon(TestCase):
 
     def test_status_endpoint_returns_accurate_stats(self):
         """Test that status endpoint returns accurate statistics."""
-        from src.code_indexer.services.rpyc_daemon import CIDXDaemonService
+        from code_indexer.services.rpyc_daemon import CIDXDaemonService
 
         service = CIDXDaemonService()
 
@@ -504,7 +504,7 @@ class TestRPyCDaemon(TestCase):
 
     def test_watch_integration_with_cache(self):
         """Test watch mode integration with cache updates."""
-        from src.code_indexer.services.rpyc_daemon import CIDXDaemonService
+        from code_indexer.services.rpyc_daemon import CIDXDaemonService
 
         service = CIDXDaemonService()
 
@@ -512,7 +512,7 @@ class TestRPyCDaemon(TestCase):
         mock_indexer = MagicMock()
 
         with patch(
-            "src.code_indexer.services.git_aware_watch_handler.GitAwareWatchHandler",
+            "code_indexer.services.git_aware_watch_handler.GitAwareWatchHandler",
             return_value=mock_handler,
         ):
             with patch.object(

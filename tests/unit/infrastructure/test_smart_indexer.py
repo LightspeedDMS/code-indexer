@@ -383,7 +383,7 @@ class TestSmartIndexer:
                 )
 
                 # Mock high-throughput processing result for incremental indexing
-                from src.code_indexer.indexing.processor import ProcessingStats
+                from code_indexer.indexing.processor import ProcessingStats
 
                 mock_stats = ProcessingStats()
                 mock_stats.files_processed = 1

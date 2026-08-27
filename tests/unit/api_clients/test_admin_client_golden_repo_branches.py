@@ -3,8 +3,8 @@
 import pytest
 from unittest.mock import MagicMock
 
-from src.code_indexer.api_clients.admin_client import AdminAPIClient
-from src.code_indexer.api_clients.base_client import APIClientError, AuthenticationError
+from code_indexer.api_clients.admin_client import AdminAPIClient
+from code_indexer.api_clients.base_client import APIClientError, AuthenticationError
 
 
 class TestGetGoldenRepositoryBranchesErrorHandling:

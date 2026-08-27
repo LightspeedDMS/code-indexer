@@ -76,10 +76,10 @@ class TestQueryTimeGitReconstruction:
 
     def test_query_reconstructs_added_file_content(self, temp_git_repo):
         """Test that querying an added file reconstructs content from git."""
-        from src.code_indexer.services.temporal.temporal_search_service import (
+        from code_indexer.services.temporal.temporal_search_service import (
             TemporalSearchService,
         )
-        from src.code_indexer.config import ConfigManager
+        from code_indexer.config import ConfigManager
 
         repo_dir = temp_git_repo["repo_dir"]
         add_commit = temp_git_repo["add_commit"]
@@ -158,10 +158,10 @@ class TestQueryTimeGitReconstruction:
 
     def test_query_reconstructs_deleted_file_content(self, temp_git_repo):
         """Test that querying a deleted file reconstructs content from parent commit."""
-        from src.code_indexer.services.temporal.temporal_search_service import (
+        from code_indexer.services.temporal.temporal_search_service import (
             TemporalSearchService,
         )
-        from src.code_indexer.config import ConfigManager
+        from code_indexer.config import ConfigManager
         import subprocess
 
         repo_dir = temp_git_repo["repo_dir"]

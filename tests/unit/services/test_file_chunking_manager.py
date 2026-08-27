@@ -17,11 +17,11 @@ from pathlib import Path
 from concurrent.futures import Future
 from typing import Dict, List, Any, Optional
 
-from src.code_indexer.services.file_chunking_manager import (
+from code_indexer.services.file_chunking_manager import (
     FileChunkingManager,
     FileProcessingResult,
 )
-from src.code_indexer.services.clean_slot_tracker import CleanSlotTracker
+from code_indexer.services.clean_slot_tracker import CleanSlotTracker
 
 
 class MockVectorCalculationManager:
@@ -46,7 +46,7 @@ class MockVectorCalculationManager:
         # Simulate async processing
         def complete_future():
             time.sleep(self.submit_delay)
-            from src.code_indexer.services.vector_calculation_manager import (
+            from code_indexer.services.vector_calculation_manager import (
                 VectorResult,
             )
 
@@ -74,7 +74,7 @@ class MockVectorCalculationManager:
         self, chunk_texts: List[str], metadata: Dict[str, Any]
     ) -> "Future":
         """Mock submit_batch_task method for batch processing."""
-        from src.code_indexer.services.vector_calculation_manager import VectorResult
+        from code_indexer.services.vector_calculation_manager import VectorResult
 
         future: Future[VectorResult] = Future()
 
@@ -455,7 +455,7 @@ class TestFileChunkingManagerAcceptanceCriteria:
 
         # Create a mock future that returns a result with error
         failing_future: Future[Any] = Future()
-        from src.code_indexer.services.vector_calculation_manager import VectorResult
+        from code_indexer.services.vector_calculation_manager import VectorResult
 
         failing_result = VectorResult(
             task_id="failed_batch",

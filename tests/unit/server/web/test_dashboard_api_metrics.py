@@ -16,8 +16,8 @@ class TestDashboardApiMetricsIntegration:
 
     def test_dashboard_stats_includes_api_metrics(self):
         """Test that get_stats_partial includes API metrics in returned data."""
-        from src.code_indexer.server.services.dashboard_service import DashboardService
-        import src.code_indexer.server.services.api_metrics_service as ams_module
+        from code_indexer.server.services.dashboard_service import DashboardService
+        import code_indexer.server.services.api_metrics_service as ams_module
 
         expected_metrics = {
             "semantic_searches": 2,

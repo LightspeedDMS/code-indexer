@@ -19,7 +19,7 @@ except ImportError:
     sys.modules["rpyc.utils.server"] = MagicMock()
     rpyc = sys.modules["rpyc"]
 
-from src.code_indexer.daemon.service import CIDXDaemonService
+from code_indexer.daemon.service import CIDXDaemonService
 
 
 class TestExposedQueryTemporal(TestCase):

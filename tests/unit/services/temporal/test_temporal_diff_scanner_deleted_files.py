@@ -17,7 +17,7 @@ This test suite validates the fix for N+1 git calls when processing deleted file
 from pathlib import Path
 from unittest.mock import patch, MagicMock, call
 
-from src.code_indexer.services.temporal.temporal_diff_scanner import (
+from code_indexer.services.temporal.temporal_diff_scanner import (
     TemporalDiffScanner,
 )
 

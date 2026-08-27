@@ -11,7 +11,7 @@ from pathlib import Path
 from click.testing import CliRunner
 from unittest.mock import patch, AsyncMock
 
-from src.code_indexer.cli import cli
+from code_indexer.cli import cli
 
 
 class TestSystemHealthCLICommands:
@@ -49,7 +49,7 @@ class TestSystemHealthCLICommands:
     ):
         """Test basic system health command success."""
         with patch(
-            "src.code_indexer.api_clients.system_client.create_system_client"
+            "code_indexer.api_clients.system_client.create_system_client"
         ) as mock_create_client:
             # Mock system client and health check response
             mock_client = AsyncMock()
@@ -63,13 +63,13 @@ class TestSystemHealthCLICommands:
 
             # Mock find_project_root to return our temp directory
             with patch(
-                "src.code_indexer.mode_detection.command_mode_detector.find_project_root"
+                "code_indexer.mode_detection.command_mode_detector.find_project_root"
             ) as mock_find_root:
                 mock_find_root.return_value = temp_project_dir
 
                 # Mock remote configuration loading
                 with patch(
-                    "src.code_indexer.remote.config.load_remote_configuration"
+                    "code_indexer.remote.config.load_remote_configuration"
                 ) as mock_load_config:
                     mock_load_config.return_value = {
                         "server_url": "http://localhost:8000",
@@ -93,7 +93,7 @@ class TestSystemHealthCLICommands:
     ):
         """Test detailed system health command success."""
         with patch(
-            "src.code_indexer.api_clients.system_client.create_system_client"
+            "code_indexer.api_clients.system_client.create_system_client"
         ) as mock_create_client:
             # Mock system client and detailed health response
             mock_client = AsyncMock()
@@ -124,13 +124,13 @@ class TestSystemHealthCLICommands:
 
             # Mock find_project_root to return our temp directory
             with patch(
-                "src.code_indexer.mode_detection.command_mode_detector.find_project_root"
+                "code_indexer.mode_detection.command_mode_detector.find_project_root"
             ) as mock_find_root:
                 mock_find_root.return_value = temp_project_dir
 
                 # Mock remote configuration loading
                 with patch(
-                    "src.code_indexer.remote.config.load_remote_configuration"
+                    "code_indexer.remote.config.load_remote_configuration"
                 ) as mock_load_config:
                     mock_load_config.return_value = {
                         "server_url": "http://localhost:8000",
@@ -162,7 +162,7 @@ class TestSystemHealthCLICommands:
     ):
         """Test verbose system health command success."""
         with patch(
-            "src.code_indexer.api_clients.system_client.create_system_client"
+            "code_indexer.api_clients.system_client.create_system_client"
         ) as mock_create_client:
             # Mock system client and detailed health response
             mock_client = AsyncMock()
@@ -193,13 +193,13 @@ class TestSystemHealthCLICommands:
 
             # Mock find_project_root to return our temp directory
             with patch(
-                "src.code_indexer.mode_detection.command_mode_detector.find_project_root"
+                "code_indexer.mode_detection.command_mode_detector.find_project_root"
             ) as mock_find_root:
                 mock_find_root.return_value = temp_project_dir
 
                 # Mock remote configuration loading
                 with patch(
-                    "src.code_indexer.remote.config.load_remote_configuration"
+                    "code_indexer.remote.config.load_remote_configuration"
                 ) as mock_load_config:
                     mock_load_config.return_value = {
                         "server_url": "http://localhost:8000",
@@ -224,10 +224,10 @@ class TestSystemHealthCLICommands:
     ):
         """Test system health command with authentication error."""
         with patch(
-            "src.code_indexer.api_clients.system_client.create_system_client"
+            "code_indexer.api_clients.system_client.create_system_client"
         ) as mock_create_client:
             # Mock authentication error
-            from src.code_indexer.api_clients.base_client import AuthenticationError
+            from code_indexer.api_clients.base_client import AuthenticationError
 
             mock_client = AsyncMock()
             mock_client.check_basic_health.side_effect = AuthenticationError(
@@ -237,13 +237,13 @@ class TestSystemHealthCLICommands:
 
             # Mock find_project_root to return our temp directory
             with patch(
-                "src.code_indexer.mode_detection.command_mode_detector.find_project_root"
+                "code_indexer.mode_detection.command_mode_detector.find_project_root"
             ) as mock_find_root:
                 mock_find_root.return_value = temp_project_dir
 
                 # Mock remote configuration loading
                 with patch(
-                    "src.code_indexer.remote.config.load_remote_configuration"
+                    "code_indexer.remote.config.load_remote_configuration"
                 ) as mock_load_config:
                     mock_load_config.return_value = {
                         "server_url": "http://localhost:8000",
@@ -264,10 +264,10 @@ class TestSystemHealthCLICommands:
     ):
         """Test system health command with server error."""
         with patch(
-            "src.code_indexer.api_clients.system_client.create_system_client"
+            "code_indexer.api_clients.system_client.create_system_client"
         ) as mock_create_client:
             # Mock server error
-            from src.code_indexer.api_clients.base_client import APIClientError
+            from code_indexer.api_clients.base_client import APIClientError
 
             mock_client = AsyncMock()
             mock_client.check_basic_health.side_effect = APIClientError(
@@ -277,13 +277,13 @@ class TestSystemHealthCLICommands:
 
             # Mock find_project_root to return our temp directory
             with patch(
-                "src.code_indexer.mode_detection.command_mode_detector.find_project_root"
+                "code_indexer.mode_detection.command_mode_detector.find_project_root"
             ) as mock_find_root:
                 mock_find_root.return_value = temp_project_dir
 
                 # Mock remote configuration loading
                 with patch(
-                    "src.code_indexer.remote.config.load_remote_configuration"
+                    "code_indexer.remote.config.load_remote_configuration"
                 ) as mock_load_config:
                     mock_load_config.return_value = {
                         "server_url": "http://localhost:8000",
@@ -303,7 +303,7 @@ class TestSystemHealthCLICommands:
         with tempfile.TemporaryDirectory():
             # Mock find_project_root to return None (no project config)
             with patch(
-                "src.code_indexer.mode_detection.command_mode_detector.find_project_root"
+                "code_indexer.mode_detection.command_mode_detector.find_project_root"
             ) as mock_find_root:
                 mock_find_root.return_value = None
 
@@ -320,7 +320,7 @@ class TestSystemHealthCLICommands:
     ):
         """Test system health command with combined detailed and verbose options."""
         with patch(
-            "src.code_indexer.api_clients.system_client.create_system_client"
+            "code_indexer.api_clients.system_client.create_system_client"
         ) as mock_create_client:
             # Mock system client and detailed health response
             mock_client = AsyncMock()
@@ -346,13 +346,13 @@ class TestSystemHealthCLICommands:
 
             # Mock find_project_root to return our temp directory
             with patch(
-                "src.code_indexer.mode_detection.command_mode_detector.find_project_root"
+                "code_indexer.mode_detection.command_mode_detector.find_project_root"
             ) as mock_find_root:
                 mock_find_root.return_value = temp_project_dir
 
                 # Mock remote configuration loading
                 with patch(
-                    "src.code_indexer.remote.config.load_remote_configuration"
+                    "code_indexer.remote.config.load_remote_configuration"
                 ) as mock_load_config:
                     mock_load_config.return_value = {
                         "server_url": "http://localhost:8000",
