@@ -322,12 +322,32 @@ class DaemonWatchManager:
         from code_indexer.services.smart_indexer import SmartIndexer
 
         try:
-            # Initialize configuration if not provided
+            # Bug #1713: verify that a genuine `.code-indexer/config.json`
+            # exists directly at project_path itself before trusting
+            # anything derived from it -- same root-cause class as Bug
+            # #1690's server-side fix. `ConfigManager.create_with_backtrack()`
+            # walks UP the directory tree and can silently return an
+            # unrelated ANCESTOR's config, or a defaulted bare Config()
+            # (codebase_dir=".") when nothing is found anywhere.
+            # `load_verified_config()` performs that same backtrack lookup
+            # but raises `ConfigVerificationError` (a ValueError subclass)
+            # unless the resolved config.codebase_dir strictly equals
+            # project_path. This call site is a WRITE/indexing path (the
+            # SmartIndexer constructed below performs real indexing on
+            # file-watch events), so failing loud here -- consistent with
+            # how AutoWatchManager.start_watch (Bug #1683 round 4) and the
+            # #1690 server sites handle the identical hazard -- is
+            # mandatory: silently indexing into/against the wrong directory
+            # is unacceptable, not merely a stale-read risk.
+            verified_config = ConfigManager.load_verified_config(Path(project_path))
             if config is None:
-                config_manager = ConfigManager.create_with_backtrack(Path(project_path))
-                config = config_manager.get_config()
-            else:
-                config_manager = ConfigManager.create_with_backtrack(Path(project_path))
+                config = verified_config
+
+            # Now that project_path's own .code-indexer directory is
+            # verified to exist, derive paths from it directly rather than
+            # re-deriving them from a second, unverified
+            # create_with_backtrack() call.
+            code_indexer_dir = Path(project_path).resolve() / ".code-indexer"
 
             # Create embedding provider and vector store
             embedding_provider = EmbeddingProviderFactory.create(config=config)
@@ -335,7 +355,7 @@ class DaemonWatchManager:
             vector_store_client = backend.get_vector_store_client()
 
             # Initialize SmartIndexer
-            metadata_path = config_manager.config_path.parent / "metadata.json"
+            metadata_path = code_indexer_dir / "metadata.json"
             smart_indexer = SmartIndexer(
                 config, embedding_provider, vector_store_client, metadata_path
             )
@@ -350,9 +370,7 @@ class DaemonWatchManager:
 
             git_topology_service = GitTopologyService(config.codebase_dir)
 
-            watch_metadata_path = (
-                config_manager.config_path.parent / "watch_metadata.json"
-            )
+            watch_metadata_path = code_indexer_dir / "watch_metadata.json"
             watch_metadata = WatchMetadata.load_from_disk(watch_metadata_path)
 
             watch_handler = GitAwareWatchHandler(
