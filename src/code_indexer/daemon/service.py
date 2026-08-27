@@ -485,11 +485,28 @@ class CIDXDaemonService(Service):
             from code_indexer.config import ConfigManager
 
             # Bug #1300: lazy-init config_manager BEFORE first use below.
+            # Bug #1718: verify project_root's OWN config via
+            # load_verified_config() instead of blind-trusting
+            # create_with_backtrack() -- same root-cause class as #1690/
+            # #1713. create_with_backtrack() can silently backtrack onto an
+            # unrelated ANCESTOR's config, or default to a bare Config()
+            # (codebase_dir=".") when nothing is found anywhere. This is a
+            # READ path (temporal query, no mutation), so
+            # ConfigVerificationError (a ValueError subclass) is allowed to
+            # propagate naturally to the RPC caller -- there is no existing
+            # per-repo skip-gracefully wrapper at this single-repo daemon
+            # call site to route through, matching #1690's established
+            # read-path treatment.
+            #
+            # self.config_manager now caches the verified Config itself
+            # (not a ConfigManager instance) -- a daemon instance serves
+            # exactly one project for its whole lifetime, so caching the
+            # one-time verification result is safe.
             if not hasattr(self, "config_manager") or self.config_manager is None:
-                self.config_manager = ConfigManager.create_with_backtrack(project_root)
+                self.config_manager = ConfigManager.load_verified_config(project_root)
 
             assert self.config_manager is not None
-            config = self.config_manager.get_config()
+            config = self.config_manager
 
             # Convert time_range string to tuple (same logic as cli.py:4819-4840)
             if time_range == "all":
@@ -668,8 +685,27 @@ class CIDXDaemonService(Service):
                     FilesystemVectorStore,
                 )
 
-                # Only setup what's needed for temporal
-                config_manager = ConfigManager.create_with_backtrack(Path(project_path))
+                # Only setup what's needed for temporal.
+                # Bug #1718: verify project_path's OWN config before ANY
+                # indexing proceeds -- same #1683-severity WRITE-path class
+                # already fixed for other call sites in #1690/#1713.
+                # create_with_backtrack() can silently backtrack onto an
+                # unrelated ANCESTOR's config, or default to a bare
+                # Config() (codebase_dir=".") when nothing is found
+                # anywhere -- either would silently index into/against the
+                # wrong directory. load_verified_config() raises
+                # ConfigVerificationError (caught by this method's outer
+                # except below, surfaced as {"status": "error", ...}) when
+                # project_path has no genuine .code-indexer/config.json of
+                # its own. TemporalIndexer needs a real ConfigManager (not
+                # a bare Config), so once verification succeeds a fresh
+                # ConfigManager is constructed pointed exactly at
+                # project_path's OWN verified config file.
+                resolved_project_root = Path(project_path).resolve()
+                ConfigManager.load_verified_config(resolved_project_root)
+                config_manager = ConfigManager(
+                    resolved_project_root / ".code-indexer" / "config.json"
+                )
                 index_dir = Path(project_path) / ".code-indexer" / "index"
                 # Bug #1528: temporal must never write another legacy
                 # vector_*.json file. An existing collection's committed
@@ -775,9 +811,18 @@ class CIDXDaemonService(Service):
             from code_indexer.backends.backend_factory import BackendFactory
             from code_indexer.services.embedding_factory import EmbeddingProviderFactory
 
-            # Initialize configuration and backend
-            config_manager = ConfigManager.create_with_backtrack(Path(project_path))
-            config = config_manager.get_config()
+            # Initialize configuration and backend.
+            # Bug #1718: verify project_path's OWN config before ANY
+            # indexing proceeds -- same #1683-severity WRITE-path class
+            # already fixed for other call sites in #1690/#1713.
+            # load_verified_config() raises ConfigVerificationError
+            # (caught by this method's outer except below, surfaced as
+            # {"status": "error", ...}) instead of silently indexing an
+            # unrelated ANCESTOR's directory or a defaulted fallback.
+            # NOTE: metadata_path below is derived directly from
+            # project_path (not config_manager.config_path.parent) --
+            # see that line's own comment.
+            config = ConfigManager.load_verified_config(Path(project_path))
 
             # Create embedding provider and vector store
             embedding_provider = EmbeddingProviderFactory.create(config=config)
@@ -795,8 +840,14 @@ class CIDXDaemonService(Service):
             )
             vector_store_client = backend.get_vector_store_client()
 
-            # Initialize SmartIndexer
-            metadata_path = config_manager.config_path.parent / "metadata.json"
+            # Initialize SmartIndexer.
+            # Bug #1718: derive metadata_path directly from project_path's
+            # OWN (already-verified) .code-indexer directory, never from a
+            # config_manager.config_path that no longer exists here --
+            # mirrors #1713's established derivation pattern.
+            metadata_path = (
+                Path(project_path).resolve() / ".code-indexer" / "metadata.json"
+            )
             indexer = SmartIndexer(
                 config, embedding_provider, vector_store_client, metadata_path
             )
@@ -1020,10 +1071,18 @@ class CIDXDaemonService(Service):
 
             logger.info("Step 1: Importing modules complete")
 
-            # Initialize configuration and backend
+            # Initialize configuration and backend.
+            # Bug #1718: verify project_path's OWN config before ANY
+            # indexing proceeds -- same #1683-severity WRITE-path class
+            # already fixed for other call sites in #1690/#1713.
+            # load_verified_config() raises ConfigVerificationError
+            # (caught by this method's outer except below, recorded as
+            # self.indexing_error) instead of silently indexing an
+            # unrelated ANCESTOR's directory or a defaulted fallback.
+            # NOTE: this removes config_manager -- the metadata_path line
+            # below still references it and is fixed in the very next edit.
             logger.info("Step 2: Creating ConfigManager...")
-            config_manager = ConfigManager.create_with_backtrack(Path(project_path))
-            config = config_manager.get_config()
+            config = ConfigManager.load_verified_config(Path(project_path))
             logger.info(
                 f"Step 2 Complete: Config loaded (codebase_dir={config.codebase_dir})"
             )
@@ -1054,8 +1113,14 @@ class CIDXDaemonService(Service):
                 f"Step 4 Complete: Backend created ({type(vector_store_client).__name__})"
             )
 
-            # Initialize SmartIndexer with correct signature
-            metadata_path = config_manager.config_path.parent / "metadata.json"
+            # Initialize SmartIndexer with correct signature.
+            # Bug #1718: derive metadata_path directly from project_path's
+            # OWN (already-verified) .code-indexer directory, never from a
+            # config_manager.config_path that no longer exists here --
+            # mirrors #1713's established derivation pattern.
+            metadata_path = (
+                Path(project_path).resolve() / ".code-indexer" / "metadata.json"
+            )
             logger.info(
                 f"Step 5: Creating SmartIndexer (metadata_path={metadata_path})..."
             )
@@ -1749,9 +1814,14 @@ class CIDXDaemonService(Service):
             from code_indexer.backends.backend_factory import BackendFactory
             from code_indexer.services.embedding_factory import EmbeddingProviderFactory
 
-            # Initialize configuration and services
-            config_manager = ConfigManager.create_with_backtrack(Path(project_path))
-            config = config_manager.get_config()
+            # Initialize configuration and services.
+            # Bug #1718: verify project_path's OWN config -- same
+            # root-cause class already fixed in #1690's read-path sites.
+            # load_verified_config() raises ConfigVerificationError
+            # (caught by this method's outer except below, surfaced as
+            # {"error": str(e)}) instead of silently searching an
+            # unrelated ANCESTOR's directory or a defaulted fallback.
+            config = ConfigManager.load_verified_config(Path(project_path))
 
             # Create embedding provider and vector store
             embedding_provider = EmbeddingProviderFactory.create(config=config)
@@ -1988,9 +2058,16 @@ class CIDXDaemonService(Service):
             }
 
         try:
-            # Load configuration
-            config_manager = ConfigManager.create_with_backtrack(Path(project_path))
-            config = config_manager.get_config()
+            # Load configuration.
+            # Bug #1718: verify project_path's OWN config before ANY
+            # rebuild proceeds -- same #1683-severity WRITE-path class
+            # already fixed for other call sites in #1690/#1713.
+            # load_verified_config() raises ConfigVerificationError
+            # (caught by this method's outer except below, surfaced as
+            # {"status": "error", "error": str(e)}) instead of silently
+            # rebuilding an unrelated ANCESTOR's FTS index or a defaulted
+            # fallback.
+            config = ConfigManager.load_verified_config(Path(project_path))
 
             # Send progress callback: discovering files
             if callback:

@@ -105,9 +105,11 @@ def _daemon_index_env(tmp_path, backend_spy):
     config_dir = tmp_path / ".code-indexer"
     config_dir.mkdir(exist_ok=True)
 
-    fake_config_manager = MagicMock()
-    fake_config_manager.get_config.return_value = MagicMock()
-    fake_config_manager.config_path = config_dir / "config.json"
+    # Bug #1718: exposed_index_blocking's semantic branch and
+    # _run_indexing_background now call ConfigManager.load_verified_config()
+    # directly (returning the Config itself), not
+    # create_with_backtrack().get_config().
+    fake_config = MagicMock()
 
     fake_stats = MagicMock()
     fake_stats.files_processed = 3
@@ -121,8 +123,8 @@ def _daemon_index_env(tmp_path, backend_spy):
 
     with (
         patch(
-            "code_indexer.config.ConfigManager.create_with_backtrack",
-            return_value=fake_config_manager,
+            "code_indexer.config.ConfigManager.load_verified_config",
+            return_value=fake_config,
         ),
         patch(
             "code_indexer.services.embedding_factory.EmbeddingProviderFactory.create",

@@ -31,6 +31,18 @@ class TestExposedQueryTemporal(TestCase):
         self.project_path = Path(self.temp_dir) / "test_project"
         self.project_path.mkdir(parents=True, exist_ok=True)
 
+        # Bug #1718: exposed_query_temporal() now verifies project_path has
+        # its OWN genuine config via ConfigManager.load_verified_config()
+        # before proceeding. Tests in this class that mock
+        # code_indexer.config.ConfigManager wholesale are unaffected;
+        # test_exposed_query_temporal_returns_error_if_index_missing uses
+        # real (unmocked) config resolution and needs this to exist.
+        from code_indexer.config import ConfigManager
+
+        ConfigManager(
+            self.project_path / ".code-indexer" / "config.json"
+        ).create_default_config(codebase_dir=self.project_path)
+
         # Create temporal collection structure. Provider-aware name matching
         # the mock_config (embedding_provider="voyage-ai", voyage_ai.model=
         # "voyage-code-3") used by every test in this file — the real
@@ -297,12 +309,12 @@ class TestExposedQueryTemporal(TestCase):
         # Real post-__init__ state: config_manager has never been set.
         assert service.config_manager is None
 
-        # Mock ConfigManager.create_with_backtrack — the lazy-init call
+        # Mock ConfigManager.load_verified_config — the lazy-init call
+        # (Bug #1718: replaces create_with_backtrack().get_config()).
         mock_config = MagicMock()
         mock_config.embedding_provider = "voyage-ai"
         mock_config.voyage_ai.model = "voyage-code-3"
-        mock_config.get_config.return_value = mock_config
-        mock_config_manager.create_with_backtrack.return_value = mock_config
+        mock_config_manager.load_verified_config.return_value = mock_config
 
         # Mock backend factory
         mock_vector_store = MagicMock()
@@ -334,7 +346,7 @@ class TestExposedQueryTemporal(TestCase):
             )
 
         # Lazy init must have run BEFORE first use, populating config_manager
-        mock_config_manager.create_with_backtrack.assert_called_once()
+        mock_config_manager.load_verified_config.assert_called_once()
         assert service.config_manager is mock_config
         assert "error" not in result
 
