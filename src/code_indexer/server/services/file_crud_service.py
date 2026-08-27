@@ -253,11 +253,35 @@ class FileCRUDService:
 
         Raises:
             ValueError: If repo not found in either exceptions or activated repos
-            FileNotFoundError: If activated repo path does not exist on disk (Bug #394, #395)
+            FileNotFoundError: If repo_alias is not a registered activated
+                workspace for username (Bug #1692), or its activated repo
+                path does not exist on disk (Bug #394, #395)
         """
         # Check write exceptions first (Story #197 AC1)
         if repo_alias in self._global_write_exceptions:
             return self._global_write_exceptions[repo_alias]
+
+        not_activated_error = FileNotFoundError(
+            f"Repository '{repo_alias}' is not an activated workspace for user "
+            f"'{username}'. Use activate_repository to create a writable workspace, "
+            f"or check the repository alias is correct."
+        )
+
+        # Bug #1692: Gate on the registry -- the SAME authority
+        # auto_watch_manager uses via user_has_activated_repo()
+        # (mcp/handlers/files.py::_start_auto_watch_if_needed, Bug #1683
+        # round 3) -- rather than mere filesystem existence. Prior to this
+        # fix, an "orphan" repository_alias directory (exists on disk, no
+        # registry entry) was silently ACCEPTED here while the same alias
+        # was correctly REFUSED by auto_watch_manager in the same request,
+        # letting a write land in an unregistered directory. The bare
+        # existence check below stays as defense-in-depth for the
+        # different failure mode of a registered repo whose directory was
+        # removed out from under it.
+        if not self.activated_repo_manager.user_has_activated_repo(
+            username, repo_alias
+        ):
+            raise not_activated_error
 
         # Fall back to activated repo manager
         repo_path_str = self.activated_repo_manager.get_activated_repo_path(
@@ -267,14 +291,10 @@ class FileCRUDService:
 
         # Bug #394/#395: Validate the activated repo path actually exists on disk.
         # get_activated_repo_path() always constructs a path string without checking
-        # existence. If the alias is not a real activated workspace, the path won't
-        # exist. Deny operations on non-existent paths with a clear error message.
+        # existence. Even a registered alias could have its directory removed out
+        # from under it; deny operations on non-existent paths with the same error.
         if not repo_path.exists():
-            raise FileNotFoundError(
-                f"Repository '{repo_alias}' is not an activated workspace for user "
-                f"'{username}'. Use activate_repository to create a writable workspace, "
-                f"or check the repository alias is correct."
-            )
+            raise not_activated_error
 
         return repo_path
 

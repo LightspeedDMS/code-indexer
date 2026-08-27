@@ -57,6 +57,17 @@ def service_with_mock_repo(test_repo_dir, monkeypatch):
         service.activated_repo_manager, "get_activated_repo_path", mock_get_path
     )
 
+    # Bug #1692: _resolve_repo_path now gates on the registry
+    # (user_has_activated_repo), not merely on filesystem existence.
+    # This fixture simulates a genuinely registered activated repo, so
+    # the registry check must report True for every alias/user used in
+    # these tests.
+    monkeypatch.setattr(
+        service.activated_repo_manager,
+        "user_has_activated_repo",
+        lambda username, alias: True,
+    )
+
     return service
 
 
