@@ -16,6 +16,29 @@ from pathlib import Path
 pytestmark = pytest.mark.slow
 
 
+def _wait_for_server_ready(port: int, timeout: float = 20.0) -> requests.Response:
+    """Poll a freshly-spawned server subprocess's /health endpoint until it
+    responds or the timeout elapses.
+
+    A fixed short sleep is not reliable here: the real local dev cidx-server
+    commonly running on this machine holds primary_instance.lock, and every
+    new server process waits out that contention (~5s, confirmed via
+    acquire_primary_instance_lock's own WARNING log) before it finishes
+    initializing and binds its port.
+    """
+    deadline = time.time() + timeout
+    last_error: Exception = TimeoutError("no attempt made")
+    while time.time() < deadline:
+        try:
+            return requests.get(f"http://127.0.0.1:{port}/health", timeout=5)
+        except requests.exceptions.ConnectionError as exc:
+            last_error = exc
+            time.sleep(0.5)
+    raise AssertionError(
+        f"Server on port {port} never became reachable within {timeout}s: {last_error}"
+    )
+
+
 @pytest.mark.e2e
 class TestServerStartupFixIntegration:
     """Integration tests for server startup fixes."""
@@ -92,11 +115,9 @@ class TestServerStartupFixIntegration:
             assert process.is_running()
             assert "python" in process.name().lower()
 
-            # Give server time to fully start
-            time.sleep(3)
-
-            # Test server responds (even if with auth error)
-            response = requests.get(f"http://127.0.0.1:{port}/health", timeout=10)
+            # Poll until server is reachable (see _wait_for_server_ready for
+            # why a fixed sleep is unreliable here).
+            response = _wait_for_server_ready(port)
             # Auth error is expected, but server is responding
             assert response.status_code in [200, 401, 403]
 
@@ -231,11 +252,14 @@ class TestServerStartupFixIntegration:
             ][0]
             pid = int(pid_line.split(":")[1].strip())
 
-            # Give server time to start
-            time.sleep(3)
+            # Poll until server is reachable, then continue with the
+            # remaining requests (see _wait_for_server_ready for why a fixed
+            # sleep is unreliable here).
+            first_response = _wait_for_server_ready(port)
+            assert first_response.status_code in [200, 401, 403]
 
-            # Make multiple requests to ensure server stability
-            for i in range(10):
+            # Make additional requests to ensure server stability
+            for i in range(1, 10):
                 try:
                     response = requests.get(
                         f"http://127.0.0.1:{port}/health", timeout=5

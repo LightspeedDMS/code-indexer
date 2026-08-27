@@ -42,9 +42,8 @@ class TestCreateUserEndpoint:
 
     @patch("code_indexer.server.auth.dependencies.jwt_manager")
     @patch("code_indexer.server.auth.dependencies.user_manager")
-    @patch("code_indexer.server.app.user_manager")
     def test_create_user_with_valid_admin_data(
-        self, mock_app_user_manager, mock_dep_user_manager, mock_jwt_manager, client
+        self, mock_dep_user_manager, mock_jwt_manager, client
     ):
         """Test creating user with valid admin data returns 201."""
         # Setup authentication
@@ -63,25 +62,30 @@ class TestCreateUserEndpoint:
         )
         mock_dep_user_manager.get_user.return_value = admin_user
 
-        # Mock successful user creation
         new_user = User(
             username="newadmin",
             password_hash="$2b$12$newhash",
             role=UserRole.ADMIN,
             created_at=datetime.now(timezone.utc),
         )
-        mock_app_user_manager.create_user.return_value = new_user
 
-        headers = {"Authorization": "Bearer admin.jwt.token"}
-        response = client.post(
-            "/api/admin/users",
-            headers=headers,
-            json={
-                "username": "newadmin",
-                "password": "SecurePass123!",
-                "role": "admin",
-            },
-        )
+        # Patch create_user on the REAL user_manager instance captured as a
+        # closure parameter by inline_admin_users.py's route registration
+        # (Story #409-style extraction) -- patching
+        # code_indexer.server.app.user_manager never reaches it.
+        with patch.object(
+            client.app.state.user_manager, "create_user", return_value=new_user
+        ) as mock_create:
+            headers = {"Authorization": "Bearer admin.jwt.token"}
+            response = client.post(
+                "/api/admin/users",
+                headers=headers,
+                json={
+                    "username": "newadmin",
+                    "password": "SecurePass123!",
+                    "role": "admin",
+                },
+            )
 
         assert response.status_code == 201
         response_data = response.json()
@@ -92,16 +96,14 @@ class TestCreateUserEndpoint:
         assert "message" in response_data
         assert "created successfully" in response_data["message"]
 
-        # Verify create_user was called correctly
-        mock_app_user_manager.create_user.assert_called_once_with(
+        mock_create.assert_called_once_with(
             username="newadmin", password="SecurePass123!", role=UserRole.ADMIN
         )
 
     @patch("code_indexer.server.auth.dependencies.jwt_manager")
     @patch("code_indexer.server.auth.dependencies.user_manager")
-    @patch("code_indexer.server.app.user_manager")
     def test_create_user_with_valid_power_user_data(
-        self, mock_app_user_manager, mock_dep_user_manager, mock_jwt_manager, client
+        self, mock_dep_user_manager, mock_jwt_manager, client
     ):
         """Test creating power user with valid data returns 201."""
         # Setup authentication
@@ -120,25 +122,28 @@ class TestCreateUserEndpoint:
         )
         mock_dep_user_manager.get_user.return_value = admin_user
 
-        # Mock successful user creation
         new_user = User(
             username="newpoweruser",
             password_hash="$2b$12$newhash",
             role=UserRole.POWER_USER,
             created_at=datetime.now(timezone.utc),
         )
-        mock_app_user_manager.create_user.return_value = new_user
 
-        headers = {"Authorization": "Bearer admin.jwt.token"}
-        response = client.post(
-            "/api/admin/users",
-            headers=headers,
-            json={
-                "username": "newpoweruser",
-                "password": "ComplexPass456!",
-                "role": "power_user",
-            },
-        )
+        # Patch the REAL user_manager instance (closure-capture class --
+        # see test_create_user_with_valid_admin_data above).
+        with patch.object(
+            client.app.state.user_manager, "create_user", return_value=new_user
+        ) as mock_create:
+            headers = {"Authorization": "Bearer admin.jwt.token"}
+            response = client.post(
+                "/api/admin/users",
+                headers=headers,
+                json={
+                    "username": "newpoweruser",
+                    "password": "ComplexPass456!",
+                    "role": "power_user",
+                },
+            )
 
         assert response.status_code == 201
         response_data = response.json()
@@ -146,7 +151,7 @@ class TestCreateUserEndpoint:
         assert response_data["user"]["username"] == "newpoweruser"
         assert response_data["user"]["role"] == "power_user"
 
-        mock_app_user_manager.create_user.assert_called_once_with(
+        mock_create.assert_called_once_with(
             username="newpoweruser",
             password="ComplexPass456!",
             role=UserRole.POWER_USER,
@@ -154,9 +159,8 @@ class TestCreateUserEndpoint:
 
     @patch("code_indexer.server.auth.dependencies.jwt_manager")
     @patch("code_indexer.server.auth.dependencies.user_manager")
-    @patch("code_indexer.server.app.user_manager")
     def test_create_user_with_valid_normal_user_data(
-        self, mock_app_user_manager, mock_dep_user_manager, mock_jwt_manager, client
+        self, mock_dep_user_manager, mock_jwt_manager, client
     ):
         """Test creating normal user with valid data returns 201."""
         # Setup authentication
@@ -175,25 +179,28 @@ class TestCreateUserEndpoint:
         )
         mock_dep_user_manager.get_user.return_value = admin_user
 
-        # Mock successful user creation
         new_user = User(
             username="newnormaluser",
             password_hash="$2b$12$newhash",
             role=UserRole.NORMAL_USER,
             created_at=datetime.now(timezone.utc),
         )
-        mock_app_user_manager.create_user.return_value = new_user
 
-        headers = {"Authorization": "Bearer admin.jwt.token"}
-        response = client.post(
-            "/api/admin/users",
-            headers=headers,
-            json={
-                "username": "newnormaluser",
-                "password": "SimplePass789!",
-                "role": "normal_user",
-            },
-        )
+        # Patch the REAL user_manager instance (closure-capture class --
+        # see test_create_user_with_valid_admin_data above).
+        with patch.object(
+            client.app.state.user_manager, "create_user", return_value=new_user
+        ) as mock_create:
+            headers = {"Authorization": "Bearer admin.jwt.token"}
+            response = client.post(
+                "/api/admin/users",
+                headers=headers,
+                json={
+                    "username": "newnormaluser",
+                    "password": "SimplePass789!",
+                    "role": "normal_user",
+                },
+            )
 
         assert response.status_code == 201
         response_data = response.json()
@@ -201,7 +208,7 @@ class TestCreateUserEndpoint:
         assert response_data["user"]["username"] == "newnormaluser"
         assert response_data["user"]["role"] == "normal_user"
 
-        mock_app_user_manager.create_user.assert_called_once_with(
+        mock_create.assert_called_once_with(
             username="newnormaluser",
             password="SimplePass789!",
             role=UserRole.NORMAL_USER,
@@ -468,9 +475,8 @@ class TestUpdateUserEndpoint:
 
     @patch("code_indexer.server.auth.dependencies.jwt_manager")
     @patch("code_indexer.server.auth.dependencies.user_manager")
-    @patch("code_indexer.server.app.user_manager")
     def test_update_user_role_returns_200(
-        self, mock_app_user_manager, mock_dep_user_manager, mock_jwt_manager, client
+        self, mock_dep_user_manager, mock_jwt_manager, client
     ):
         """Test updating user role returns 200."""
         # Setup authentication
@@ -489,22 +495,27 @@ class TestUpdateUserEndpoint:
         )
         mock_dep_user_manager.get_user.return_value = admin_user
 
-        # Mock successful update
-        mock_app_user_manager.update_user_role.return_value = True
-
-        # Mock user exists
         existing_user = User(
             username="testuser",
             password_hash="$2b$12$hash",
             role=UserRole.POWER_USER,
             created_at=datetime.now(timezone.utc),
         )
-        mock_app_user_manager.get_user.return_value = existing_user
 
-        headers = {"Authorization": "Bearer admin.jwt.token"}
-        response = client.put(
-            "/api/admin/users/testuser", headers=headers, json={"role": "admin"}
-        )
+        # Patch the REAL user_manager instance (closure-capture class --
+        # see test_create_user_with_valid_admin_data above).
+        with (
+            patch.object(
+                client.app.state.user_manager, "get_user", return_value=existing_user
+            ),
+            patch.object(
+                client.app.state.user_manager, "update_user_role", return_value=True
+            ) as mock_update_role,
+        ):
+            headers = {"Authorization": "Bearer admin.jwt.token"}
+            response = client.put(
+                "/api/admin/users/testuser", headers=headers, json={"role": "admin"}
+            )
 
         assert response.status_code == 200
         response_data = response.json()
@@ -512,9 +523,7 @@ class TestUpdateUserEndpoint:
         assert "message" in response_data
         assert "updated successfully" in response_data["message"]
 
-        mock_app_user_manager.update_user_role.assert_called_once_with(
-            "testuser", UserRole.ADMIN
-        )
+        mock_update_role.assert_called_once_with("testuser", UserRole.ADMIN)
 
     @patch("code_indexer.server.auth.dependencies.jwt_manager")
     @patch("code_indexer.server.auth.dependencies.user_manager")
@@ -624,9 +633,8 @@ class TestDeleteUserEndpoint:
 
     @patch("code_indexer.server.auth.dependencies.jwt_manager")
     @patch("code_indexer.server.auth.dependencies.user_manager")
-    @patch("code_indexer.server.app.user_manager")
     def test_delete_user_returns_200(
-        self, mock_app_user_manager, mock_dep_user_manager, mock_jwt_manager, client
+        self, mock_dep_user_manager, mock_jwt_manager, client
     ):
         """Test deleting user returns 200."""
         # Setup authentication
@@ -645,11 +653,27 @@ class TestDeleteUserEndpoint:
         )
         mock_dep_user_manager.get_user.return_value = admin_user
 
-        # Mock successful deletion
-        mock_app_user_manager.delete_user.return_value = True
+        existing_user = User(
+            username="testuser",
+            password_hash="$2b$12$hash",
+            role=UserRole.POWER_USER,
+            created_at=datetime.now(timezone.utc),
+        )
 
-        headers = {"Authorization": "Bearer admin.jwt.token"}
-        response = client.delete("/api/admin/users/testuser", headers=headers)
+        # Patch the REAL user_manager instance (closure-capture class --
+        # see test_create_user_with_valid_admin_data above). get_user must
+        # return a non-admin user so the last-admin-protection branch is
+        # skipped (get_all_users is only called for an admin target).
+        with (
+            patch.object(
+                client.app.state.user_manager, "get_user", return_value=existing_user
+            ),
+            patch.object(
+                client.app.state.user_manager, "delete_user", return_value=True
+            ) as mock_delete,
+        ):
+            headers = {"Authorization": "Bearer admin.jwt.token"}
+            response = client.delete("/api/admin/users/testuser", headers=headers)
 
         assert response.status_code == 200
         response_data = response.json()
@@ -657,7 +681,7 @@ class TestDeleteUserEndpoint:
         assert "message" in response_data
         assert "deleted successfully" in response_data["message"]
 
-        mock_app_user_manager.delete_user.assert_called_once_with("testuser")
+        mock_delete.assert_called_once_with("testuser")
 
     @patch("code_indexer.server.auth.dependencies.jwt_manager")
     @patch("code_indexer.server.auth.dependencies.user_manager")
@@ -723,9 +747,8 @@ class TestDeleteUserEndpoint:
 
     @patch("code_indexer.server.auth.dependencies.jwt_manager")
     @patch("code_indexer.server.auth.dependencies.user_manager")
-    @patch("code_indexer.server.app.user_manager")
     def test_delete_last_admin_user_returns_400(
-        self, mock_app_user_manager, mock_dep_user_manager, mock_jwt_manager, client
+        self, mock_dep_user_manager, mock_jwt_manager, client
     ):
         """Test deleting the last admin user returns 400 with proper error message.
 
@@ -747,7 +770,7 @@ class TestDeleteUserEndpoint:
         )
         mock_dep_user_manager.get_user.return_value = admin_user
 
-        # Mock system with only one admin user
+        # System with only one admin user
         all_users = [
             User(
                 username="admin",
@@ -768,12 +791,22 @@ class TestDeleteUserEndpoint:
                 created_at=datetime.now(timezone.utc),
             ),
         ]
-        # Mock the get_user call for the user being deleted (admin)
-        mock_app_user_manager.get_user.return_value = all_users[0]  # admin user
-        mock_app_user_manager.get_all_users.return_value = all_users
 
-        headers = {"Authorization": "Bearer admin.jwt.token"}
-        response = client.delete("/api/admin/users/admin", headers=headers)
+        # Patch the REAL user_manager instance (closure-capture class --
+        # see test_create_user_with_valid_admin_data above).
+        with (
+            patch.object(
+                client.app.state.user_manager, "get_user", return_value=all_users[0]
+            ),
+            patch.object(
+                client.app.state.user_manager,
+                "get_all_users",
+                return_value=all_users,
+            ),
+            patch.object(client.app.state.user_manager, "delete_user") as mock_delete,
+        ):
+            headers = {"Authorization": "Bearer admin.jwt.token"}
+            response = client.delete("/api/admin/users/admin", headers=headers)
 
         # Should return 400 Bad Request (or 409 Conflict)
         assert response.status_code in [400, 409]
@@ -796,13 +829,12 @@ class TestDeleteUserEndpoint:
         )
 
         # Verify delete_user was NOT called
-        mock_app_user_manager.delete_user.assert_not_called()
+        mock_delete.assert_not_called()
 
     @patch("code_indexer.server.auth.dependencies.jwt_manager")
     @patch("code_indexer.server.auth.dependencies.user_manager")
-    @patch("code_indexer.server.app.user_manager")
     def test_delete_admin_with_multiple_admins_succeeds(
-        self, mock_app_user_manager, mock_dep_user_manager, mock_jwt_manager, client
+        self, mock_dep_user_manager, mock_jwt_manager, client
     ):
         """Test deleting admin user succeeds when multiple admins exist."""
         # Setup authentication
@@ -821,7 +853,7 @@ class TestDeleteUserEndpoint:
         )
         mock_dep_user_manager.get_user.return_value = admin_user
 
-        # Mock system with multiple admin users
+        # System with multiple admin users
         all_users = [
             User(
                 username="admin1",
@@ -842,15 +874,24 @@ class TestDeleteUserEndpoint:
                 created_at=datetime.now(timezone.utc),
             ),
         ]
-        # Mock the get_user call for the user being deleted (admin2)
-        mock_app_user_manager.get_user.return_value = all_users[1]  # admin2 user
-        mock_app_user_manager.get_all_users.return_value = all_users
 
-        # Mock successful deletion
-        mock_app_user_manager.delete_user.return_value = True
-
-        headers = {"Authorization": "Bearer admin1.jwt.token"}
-        response = client.delete("/api/admin/users/admin2", headers=headers)
+        # Patch the REAL user_manager instance (closure-capture class --
+        # see test_create_user_with_valid_admin_data above).
+        with (
+            patch.object(
+                client.app.state.user_manager, "get_user", return_value=all_users[1]
+            ),
+            patch.object(
+                client.app.state.user_manager,
+                "get_all_users",
+                return_value=all_users,
+            ),
+            patch.object(
+                client.app.state.user_manager, "delete_user", return_value=True
+            ) as mock_delete,
+        ):
+            headers = {"Authorization": "Bearer admin1.jwt.token"}
+            response = client.delete("/api/admin/users/admin2", headers=headers)
 
         assert response.status_code == 200
         response_data = response.json()
@@ -858,14 +899,12 @@ class TestDeleteUserEndpoint:
         assert "message" in response_data
         assert "deleted successfully" in response_data["message"]
 
-        # Verify delete_user was called
-        mock_app_user_manager.delete_user.assert_called_once_with("admin2")
+        mock_delete.assert_called_once_with("admin2")
 
     @patch("code_indexer.server.auth.dependencies.jwt_manager")
     @patch("code_indexer.server.auth.dependencies.user_manager")
-    @patch("code_indexer.server.app.user_manager")
     def test_delete_non_admin_user_succeeds_regardless_of_admin_count(
-        self, mock_app_user_manager, mock_dep_user_manager, mock_jwt_manager, client
+        self, mock_dep_user_manager, mock_jwt_manager, client
     ):
         """Test deleting non-admin users always succeeds, regardless of admin count."""
         # Setup authentication
@@ -884,7 +923,7 @@ class TestDeleteUserEndpoint:
         )
         mock_dep_user_manager.get_user.return_value = admin_user
 
-        # Mock system with only one admin but multiple other users
+        # System with only one admin but multiple other users
         all_users = [
             User(
                 username="admin",
@@ -905,15 +944,19 @@ class TestDeleteUserEndpoint:
                 created_at=datetime.now(timezone.utc),
             ),
         ]
-        # Mock the get_user call for the user being deleted (poweruser1)
-        mock_app_user_manager.get_user.return_value = all_users[1]  # poweruser1
-        mock_app_user_manager.get_all_users.return_value = all_users
 
-        # Mock successful deletion of non-admin user
-        mock_app_user_manager.delete_user.return_value = True
-
-        headers = {"Authorization": "Bearer admin.jwt.token"}
-        response = client.delete("/api/admin/users/poweruser1", headers=headers)
+        # Patch the REAL user_manager instance (closure-capture class --
+        # see test_create_user_with_valid_admin_data above).
+        with (
+            patch.object(
+                client.app.state.user_manager, "get_user", return_value=all_users[1]
+            ),
+            patch.object(
+                client.app.state.user_manager, "delete_user", return_value=True
+            ) as mock_delete,
+        ):
+            headers = {"Authorization": "Bearer admin.jwt.token"}
+            response = client.delete("/api/admin/users/poweruser1", headers=headers)
 
         assert response.status_code == 200
         response_data = response.json()
@@ -921,8 +964,7 @@ class TestDeleteUserEndpoint:
         assert "message" in response_data
         assert "deleted successfully" in response_data["message"]
 
-        # Verify delete_user was called for the power user
-        mock_app_user_manager.delete_user.assert_called_once_with("poweruser1")
+        mock_delete.assert_called_once_with("poweruser1")
 
 
 @pytest.mark.e2e
@@ -937,11 +979,18 @@ class TestChangePasswordEndpoints:
 
     @patch("code_indexer.server.auth.dependencies.jwt_manager")
     @patch("code_indexer.server.auth.dependencies.user_manager")
-    @patch("code_indexer.server.app.user_manager")
     def test_current_user_change_password_returns_200(
-        self, mock_app_user_manager, mock_dep_user_manager, mock_jwt_manager, client
+        self, mock_dep_user_manager, mock_jwt_manager, client
     ):
-        """Test current user changing own password returns 200."""
+        """Test current user changing own password returns 200.
+
+        NOTE: /api/users/change-password is registered by inline_admin_users.py
+        (Story #409 closure-capture class). The handler independently verifies
+        old_password via user_manager.password_manager.verify_password against
+        the real user_manager.get_user()-returned user before calling
+        change_password -- mirrors the established fix pattern from commit
+        5b287bfc's test_password_change_security.py.
+        """
         # Setup authentication for power user
         mock_jwt_manager.validate_token.return_value = {
             "username": "poweruser",
@@ -958,15 +1007,28 @@ class TestChangePasswordEndpoints:
         )
         mock_dep_user_manager.get_user.return_value = power_user
 
-        # Mock successful password change
-        mock_app_user_manager.change_password.return_value = True
-
-        headers = {"Authorization": "Bearer power.jwt.token"}
-        response = client.put(
-            "/api/users/change-password",
-            headers=headers,
-            json={"old_password": "TestPass123!", "new_password": "NewSecurePass123!"},
-        )
+        with (
+            patch.object(
+                client.app.state.user_manager, "get_user", return_value=power_user
+            ),
+            patch.object(
+                client.app.state.user_manager.password_manager,
+                "verify_password",
+                return_value=True,
+            ),
+            patch.object(
+                client.app.state.user_manager, "change_password", return_value=True
+            ) as mock_change_password,
+        ):
+            headers = {"Authorization": "Bearer power.jwt.token"}
+            response = client.put(
+                "/api/users/change-password",
+                headers=headers,
+                json={
+                    "old_password": "TestPass123!",
+                    "new_password": "NewSecurePass123!",
+                },
+            )
 
         assert response.status_code == 200
         response_data = response.json()
@@ -974,9 +1036,7 @@ class TestChangePasswordEndpoints:
         assert "message" in response_data
         assert "changed successfully" in response_data["message"]
 
-        mock_app_user_manager.change_password.assert_called_once_with(
-            "poweruser", "NewSecurePass123!"
-        )
+        mock_change_password.assert_called_once_with("poweruser", "NewSecurePass123!")
 
     @patch("code_indexer.server.auth.dependencies.jwt_manager")
     @patch("code_indexer.server.auth.dependencies.user_manager")
@@ -1022,9 +1082,8 @@ class TestChangePasswordEndpoints:
 
     @patch("code_indexer.server.auth.dependencies.jwt_manager")
     @patch("code_indexer.server.auth.dependencies.user_manager")
-    @patch("code_indexer.server.app.user_manager")
     def test_admin_change_any_user_password_returns_200(
-        self, mock_app_user_manager, mock_dep_user_manager, mock_jwt_manager, client
+        self, mock_dep_user_manager, mock_jwt_manager, client
     ):
         """Test admin changing any user's password returns 200."""
         # Setup authentication for admin
@@ -1043,15 +1102,18 @@ class TestChangePasswordEndpoints:
         )
         mock_dep_user_manager.get_user.return_value = admin_user
 
-        # Mock successful password change
-        mock_app_user_manager.change_password.return_value = True
-
-        headers = {"Authorization": "Bearer admin.jwt.token"}
-        response = client.put(
-            "/api/admin/users/testuser/change-password",
-            headers=headers,
-            json={"old_password": "unused", "new_password": "AdminSetPass456!"},
-        )
+        # Patch change_password on the REAL user_manager instance (closure-
+        # capture class -- see test_create_user_with_valid_admin_data above).
+        # This route does not verify the old password (admin override).
+        with patch.object(
+            client.app.state.user_manager, "change_password", return_value=True
+        ) as mock_change_password:
+            headers = {"Authorization": "Bearer admin.jwt.token"}
+            response = client.put(
+                "/api/admin/users/testuser/change-password",
+                headers=headers,
+                json={"old_password": "unused", "new_password": "AdminSetPass456!"},
+            )
 
         assert response.status_code == 200
         response_data = response.json()
@@ -1059,9 +1121,7 @@ class TestChangePasswordEndpoints:
         assert "message" in response_data
         assert "changed successfully" in response_data["message"]
 
-        mock_app_user_manager.change_password.assert_called_once_with(
-            "testuser", "AdminSetPass456!"
-        )
+        mock_change_password.assert_called_once_with("testuser", "AdminSetPass456!")
 
     @patch("code_indexer.server.auth.dependencies.jwt_manager")
     @patch("code_indexer.server.auth.dependencies.user_manager")

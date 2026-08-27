@@ -100,10 +100,70 @@ from typing import Any, Callable, Generator, List, Set, Type
 import pytest
 
 import code_indexer.server.app as _server_app_module
+from code_indexer.server.auth.login_rate_limiter import (
+    login_rate_limiter as _login_lockout_limiter,
+)
+from code_indexer.server.auth.token_bucket import rate_limiter as _login_token_bucket
 from code_indexer.server.repositories.background_jobs import BackgroundJobManager
 from code_indexer.server.telemetry.correlation_bridge import _correlation_id_var
 
 logger = logging.getLogger(__name__)
+
+
+def _reset_login_rate_limiter_state() -> None:
+    """Clear the process-wide login rate-limiter singletons to a clean
+    state (#1707).
+
+    `token_bucket.rate_limiter` (TokenBucketManager, Story #555) and
+    `login_rate_limiter.login_rate_limiter` (LoginRateLimiter, Story #557)
+    are module-level singletons shared by every real `/auth/login` call
+    across the WHOLE pytest process, regardless of which `create_app()`
+    instance handles the request. Neither had a reset wired into this
+    tree-wide conftest.py: the auth/ subdirectory's own `reset_singletons`
+    fixture (tests/unit/server/auth/conftest.py, #1698) does not cover
+    either of these two singletons, and does not apply outside that one
+    subdirectory anyway.
+
+    Confirmed live (2026-08-27):
+    `test_health_check_endpoint.py`'s `admin_token` fixture deliberately
+    logs in with a WRONG password once per test (14 real failed attempts
+    against username "admin" in that one file alone). LoginRateLimiter
+    locks an account out for 15 minutes after 5 failures in its sliding
+    window, so every LATER test in the same pytest process that performs a
+    real login as "admin" -- `test_login_validation.py`,
+    `test_placeholder_endpoints_501.py`,
+    `test_jwt_restart_persistence_e2e.py` -- got HTTP 429 instead of a
+    real auth outcome. Resetting both singletons' internal dicts directly
+    (there is no public reset() method on either class) mirrors the
+    established #1698 TokenBlacklist reset pattern.
+
+    Both singletons guard their internal dicts with their own
+    `threading.Lock` for real request-time consume()/refund()/is_locked()
+    access -- clearing must acquire the SAME lock objects to avoid racing
+    a concurrent in-flight login request in this process (e.g. a
+    background thread from a prior test's not-yet-finished server).
+    """
+    with _login_token_bucket._lock:
+        _login_token_bucket._buckets.clear()
+        _login_token_bucket._last_access.clear()
+    with _login_lockout_limiter._lock:
+        _login_lockout_limiter._failures.clear()
+        _login_lockout_limiter._lockout_until.clear()
+
+
+@pytest.fixture(autouse=True)
+def _reset_login_rate_limiters() -> Generator[None, None, None]:
+    """Bug #1707: tree-wide autouse fixture that resets the login
+    token-bucket and account-lockout singletons before and after every
+    test under tests/unit/server/. See `_reset_login_rate_limiter_state`
+    above for the full rationale and the measured leak evidence this
+    replaces.
+    """
+    _reset_login_rate_limiter_state()
+    try:
+        yield
+    finally:
+        _reset_login_rate_limiter_state()
 
 
 @pytest.fixture(autouse=True)
