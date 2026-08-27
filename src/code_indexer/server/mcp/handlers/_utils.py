@@ -109,7 +109,7 @@ def cap_breach_response(breach: CapBreach) -> "Dict[str, Any]":
         "cap": breach.configured_cap,
         "remediation": _cap_breach_message(breach),
     }
-    return {"content": [{"type": "text", "text": json.dumps(payload)}]}
+    return _mcp_response(payload)
 
 
 def cap_breach_http_exception(breach: CapBreach) -> None:
