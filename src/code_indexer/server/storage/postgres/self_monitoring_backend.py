@@ -18,9 +18,18 @@ migration's TIMESTAMPTZ columns (declared TEXT here) -- removed rather
 than re-synced so there is no second copy left to drift again; its two
 indexes not already mirrored by a migration, idx_sm_scans_started_at and
 idx_sm_issues_created_at, were moved to 049_backend_indexes_1697.sql first
-so no coverage gap was introduced. NOTE: unlike research_sessions_backend.py,
-this backend's read paths do NOT normalize TIMESTAMPTZ-vs-TEXT drift --
-see the separate follow-up issue filed for that masked caller-side bug).
+so no coverage gap was introduced).
+
+Bug #1701 fix: list_scans(), list_issues(), get_last_started_at(), and
+fetch_stored_fingerprints() now normalize TIMESTAMPTZ columns (psycopg
+deserializes these to native datetime objects, never str) to ISO-8601 str
+via pg_utils.sanitize_row()/to_iso() -- the SAME pattern
+research_sessions_backend.py already used. Without this, web/routes.py's
+datetime.fromisoformat() calls on these values raised TypeError, silently
+degrading scan-duration/next-scan-time display to "N/A" in cluster mode.
+cleanup_orphaned_scans() needed no change: it only ever compares a str
+cutoff parameter against the TIMESTAMPTZ column server-side (PostgreSQL
+implicitly casts), it never returns a timestamp value to normalize.
 """
 
 from __future__ import annotations
@@ -29,6 +38,7 @@ from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 
 from .connection_pool import ConnectionPool
+from .pg_utils import sanitize_row, to_iso
 
 
 class SelfMonitoringPostgresBackend:
@@ -128,7 +138,7 @@ class SelfMonitoringPostgresBackend:
             row = conn.execute(
                 "SELECT started_at FROM self_monitoring_scans ORDER BY started_at DESC LIMIT 1"
             ).fetchone()
-        return row[0] if row else None  # type: ignore[no-any-return]
+        return to_iso(row[0]) if row else None  # type: ignore[no-any-return]
 
     def fetch_stored_fingerprints(
         self, retention_days: int
@@ -143,7 +153,7 @@ class SelfMonitoringPostgresBackend:
                 "ORDER BY created_at DESC",
                 (cutoff,),
             ).fetchall()
-        return [(row[0], row[1], row[2], row[3], row[4]) for row in rows]
+        return [(row[0], row[1], row[2], row[3], to_iso(row[4])) for row in rows]
 
     def store_issue_metadata(
         self,
@@ -210,7 +220,7 @@ class SelfMonitoringPostgresBackend:
             "issues_created",
             "error_message",
         ]
-        return [dict(zip(cols, row)) for row in rows]
+        return [sanitize_row(dict(zip(cols, row))) for row in rows]
 
     def list_issues(self, limit: int = 100) -> List[Dict[str, Any]]:
         """Return issue records, most recent first.
@@ -246,7 +256,7 @@ class SelfMonitoringPostgresBackend:
             "source_files",
             "created_at",
         ]
-        return [dict(zip(cols, row)) for row in rows]
+        return [sanitize_row(dict(zip(cols, row))) for row in rows]
 
     def get_running_scan_count(self) -> int:
         """Return count of scans where completed_at IS NULL (currently running)."""
