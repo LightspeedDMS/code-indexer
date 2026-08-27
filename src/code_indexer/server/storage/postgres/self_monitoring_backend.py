@@ -5,19 +5,30 @@ Drop-in replacement for SelfMonitoringSqliteBackend using psycopg v3 sync
 connections via ConnectionPool.  Satisfies the SelfMonitoringBackend Protocol
 (protocols.py).
 
-Tables created on first use (CREATE TABLE IF NOT EXISTS) so no separate
-migration step is required.
+Schema (`self_monitoring_scans`, `self_monitoring_issues` tables and their
+indexes) is owned entirely by the SQL migrations
+(storage/postgres/migrations/sql/001_initial_schema.sql,
+049_backend_indexes_1697.sql) -- this backend does NOT create or alter any
+table. `service_init.py` always runs `MigrationRunner` before
+`StorageFactory.create_backends()` constructs this class, so schema is
+guaranteed present by the time any instance exists (Issue #1697, mirroring
+Bug #1655/#1662: a previous self-heal `CREATE TABLE IF NOT EXISTS` here was
+dead code in every real deployment, and had ALSO drifted from the
+migration's TIMESTAMPTZ columns (declared TEXT here) -- removed rather
+than re-synced so there is no second copy left to drift again; its two
+indexes not already mirrored by a migration, idx_sm_scans_started_at and
+idx_sm_issues_created_at, were moved to 049_backend_indexes_1697.sql first
+so no coverage gap was introduced. NOTE: unlike research_sessions_backend.py,
+this backend's read paths do NOT normalize TIMESTAMPTZ-vs-TEXT drift --
+see the separate follow-up issue filed for that masked caller-side bug).
 """
 
 from __future__ import annotations
 
-import logging
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 
 from .connection_pool import ConnectionPool
-
-logger = logging.getLogger(__name__)
 
 
 class SelfMonitoringPostgresBackend:
@@ -30,60 +41,15 @@ class SelfMonitoringPostgresBackend:
 
     def __init__(self, pool: ConnectionPool) -> None:
         """
-        Initialize with a shared connection pool and ensure tables exist.
+        Initialize with a shared connection pool.
+
+        Schema is assumed to already exist (see module docstring) -- this
+        constructor does not touch the database.
 
         Args:
             pool: ConnectionPool instance providing psycopg v3 connections.
         """
         self._pool = pool
-        self._ensure_schema()
-
-    def _ensure_schema(self) -> None:
-        """Create self_monitoring tables and indexes if they do not already exist."""
-        try:
-            with self._pool.connection() as conn:
-                conn.execute(
-                    """
-                    CREATE TABLE IF NOT EXISTS self_monitoring_scans (
-                        scan_id TEXT PRIMARY KEY,
-                        started_at TEXT NOT NULL,
-                        status TEXT NOT NULL,
-                        log_id_start INTEGER NOT NULL,
-                        log_id_end INTEGER,
-                        completed_at TEXT,
-                        issues_created INTEGER,
-                        error_message TEXT
-                    )
-                    """
-                )
-                conn.execute(
-                    """
-                    CREATE TABLE IF NOT EXISTS self_monitoring_issues (
-                        id SERIAL PRIMARY KEY,
-                        scan_id TEXT NOT NULL,
-                        github_issue_number INTEGER,
-                        github_issue_url TEXT,
-                        classification TEXT NOT NULL,
-                        title TEXT NOT NULL,
-                        error_codes TEXT,
-                        fingerprint TEXT NOT NULL,
-                        source_log_ids TEXT,
-                        source_files TEXT,
-                        created_at TEXT NOT NULL
-                    )
-                    """
-                )
-                conn.execute(
-                    "CREATE INDEX IF NOT EXISTS idx_sm_scans_started_at ON self_monitoring_scans(started_at)"
-                )
-                conn.execute(
-                    "CREATE INDEX IF NOT EXISTS idx_sm_issues_created_at ON self_monitoring_issues(created_at)"
-                )
-                conn.commit()
-        except Exception as exc:
-            logger.warning(
-                "SelfMonitoringPostgresBackend: schema setup failed: %s", exc
-            )
 
     def create_scan_record(
         self,

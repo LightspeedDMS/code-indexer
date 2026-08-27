@@ -7,6 +7,16 @@ Protocol (protocols.py).
 
 Embeddings are stored as bytea (raw float32 little-endian bytes), identical to
 the SQLite BLOB representation.
+
+Schema (`query_embedding_cache` table and its index) is owned entirely by
+the SQL migration (storage/postgres/migrations/sql/028_query_embedding_cache.sql)
+-- this backend does NOT create or alter any table. `service_init.py`
+always runs `MigrationRunner` before `StorageFactory.create_backends()`
+constructs this class, so schema is guaranteed present by the time any
+instance exists (Issue #1697, mirroring Bug #1655/#1662: a previous
+self-heal `CREATE TABLE IF NOT EXISTS` here was dead code in every real
+deployment -- removed rather than kept as a second, drift-prone copy of
+the schema).
 """
 
 from __future__ import annotations
@@ -30,43 +40,15 @@ class QueryEmbeddingCachePostgresBackend:
 
     def __init__(self, pool: ConnectionPool) -> None:
         """
-        Initialize with a shared connection pool and ensure the table exists.
+        Initialize with a shared connection pool.
+
+        Schema is assumed to already exist (see module docstring) -- this
+        constructor does not touch the database.
 
         Args:
             pool: ConnectionPool instance providing psycopg v3 connections.
         """
         self._pool = pool
-        self._ensure_schema()
-
-    def _ensure_schema(self) -> None:
-        """Create the query_embedding_cache table and index if absent."""
-        try:
-            with self._pool.connection() as conn:
-                conn.execute(
-                    """
-                    CREATE TABLE IF NOT EXISTS query_embedding_cache (
-                        cache_key  TEXT    NOT NULL,
-                        provider   TEXT    NOT NULL,
-                        model      TEXT    NOT NULL,
-                        dimension  INTEGER NOT NULL,
-                        embedding  BYTEA   NOT NULL,
-                        created_at DOUBLE PRECISION NOT NULL,
-                        last_used  DOUBLE PRECISION NOT NULL,
-                        PRIMARY KEY (cache_key, provider, model, dimension)
-                    )
-                    """
-                )
-                conn.execute(
-                    """
-                    CREATE INDEX IF NOT EXISTS idx_qec_last_used
-                    ON query_embedding_cache (last_used)
-                    """
-                )
-                conn.commit()
-        except Exception as exc:
-            logger.warning(
-                "QueryEmbeddingCachePostgresBackend: schema setup failed: %s", exc
-            )
 
     def lookup(
         self,

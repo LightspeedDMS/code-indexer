@@ -8,10 +8,19 @@ ONLY the storage engine (schema/operations are identical to the SQLite
 backend) with PostgreSQL -- eliminating the NFS bottleneck.
 
 Satisfies the TemporalMetadataBackend Protocol
-(code_indexer/storage/temporal_metadata_backend.py). Table created on first
-use via the migration (033_temporal_metadata.sql); ``_ensure_schema`` also
-runs a CREATE TABLE IF NOT EXISTS defensively (mirrors
-payload_cache_backend.py, which has no separate migration).
+(code_indexer/storage/temporal_metadata_backend.py). Schema (the
+``temporal_metadata`` table and its two indexes) is owned entirely by the
+SQL migration (storage/postgres/migrations/sql/033_temporal_metadata.sql)
+-- this backend does NOT create or alter any table. `service_init.py`
+always runs `MigrationRunner` before `StorageFactory.create_backends()`
+builds the backend_registry, and this backend's only production
+construction path (a factory installed in `startup/lifespan.py`) runs
+strictly after that same backend_registry already exists -- so schema is
+guaranteed present by the time any instance is constructed (Issue #1697,
+mirroring Bug #1655/#1662: the previous defensive
+``CREATE TABLE IF NOT EXISTS`` self-heal here -- byte-identical to the
+migration -- was dead code in every real deployment, removed rather than
+kept as a second copy of the schema).
 
 Unlike SQLite (one .db file per collection), one PostgreSQL table holds every
 collection's rows -- all operations are scoped by ``collection_key`` (derived
@@ -44,7 +53,10 @@ class TemporalMetadataPostgresBackend:
     """
 
     def __init__(self, pool: Any, collection_key: str) -> None:
-        """Initialize with a shared connection pool and ensure the table exists.
+        """Initialize with a shared connection pool.
+
+        Schema is assumed to already exist (see module docstring) -- this
+        constructor does not touch the database.
 
         Args:
             pool: A psycopg v3 ConnectionPool instance (see connection_pool.py).
@@ -57,63 +69,6 @@ class TemporalMetadataPostgresBackend:
         """
         self._pool = pool
         self._collection_key = collection_key
-        self._ensure_schema()
-
-    def _ensure_schema(self) -> None:
-        """Create the temporal_metadata table and indexes if not already
-        present.
-
-        Additive/idempotent -- the migration (033_temporal_metadata.sql) is
-        the primary path; this is a defensive fallback mirroring
-        payload_cache_backend.py's _ensure_schema. The DDL below is
-        byte-consistent with 033_temporal_metadata.sql (same table, same
-        columns/types, same primary key, same two indexes).
-
-        Bug #1313 round-2 rework (Codex Finding B): a failure here MUST NOT
-        be swallowed. Previously this method caught every exception, logged
-        a warning, and returned a constructed backend anyway -- so a missing
-        migration, wrong DB permissions, or a broken table would defer the
-        failure to the first temporal write/read instead of failing at
-        storage initialization. Log at ERROR then re-raise so construction
-        itself fails loudly.
-        """
-        try:
-            with self._pool.connection() as conn:
-                conn.execute(
-                    """
-                    CREATE TABLE IF NOT EXISTS temporal_metadata (
-                        collection_key TEXT NOT NULL,
-                        hash_prefix TEXT NOT NULL,
-                        point_id TEXT NOT NULL,
-                        commit_hash TEXT,
-                        file_path TEXT,
-                        chunk_index INTEGER,
-                        created_at TEXT,
-                        format_version INTEGER NOT NULL DEFAULT 2,
-                        PRIMARY KEY (collection_key, hash_prefix)
-                    )
-                    """
-                )
-                conn.execute(
-                    """
-                    CREATE UNIQUE INDEX IF NOT EXISTS idx_temporal_meta_pointid
-                        ON temporal_metadata (collection_key, point_id)
-                    """
-                )
-                conn.execute(
-                    """
-                    CREATE INDEX IF NOT EXISTS idx_temporal_meta_commit
-                        ON temporal_metadata (collection_key, commit_hash)
-                    """
-                )
-                conn.commit()
-        except Exception as exc:
-            logger.error(
-                "TemporalMetadataPostgresBackend: schema setup failed: %s",
-                exc,
-                exc_info=True,
-            )
-            raise
 
     # Bug #1313 review Finding 4: hash_prefix is deterministically derived
     # from point_id via generate_hash_prefix (sha256(point_id)[:16]); since

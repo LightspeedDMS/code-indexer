@@ -4,8 +4,15 @@ PostgreSQL backend for operational log storage (Story #501).
 Drop-in replacement for LogsSqliteBackend using psycopg v3 sync connections
 via ConnectionPool.  Satisfies the LogsBackend Protocol (protocols.py).
 
-Table created on first use (CREATE TABLE IF NOT EXISTS) so no separate
-migration step is required for the logs table.
+Schema (`logs` table and its indexes) is owned entirely by the SQL
+migrations (storage/postgres/migrations/sql/020_logs_alias_column.sql,
+048_logs_trace_span_columns.sql) -- this backend does NOT create or alter
+any table. `service_init.py` always runs `MigrationRunner` before
+`StorageFactory.create_backends()` constructs this class, so schema is
+guaranteed present by the time any instance exists (Issue #1697, mirroring
+Bug #1655/#1662: a previous self-heal `CREATE TABLE IF NOT EXISTS` here was
+dead code in every real deployment -- removed rather than kept as a second,
+drift-prone copy of the schema).
 
 Unlike the other PostgreSQL backends, log insert failures are caught and
 logged as warnings rather than propagated -- a failed log write must never
@@ -42,73 +49,25 @@ class LogsPostgresBackend:
 
     def __init__(self, pool: ConnectionPool) -> None:
         """
-        Initialize with a shared connection pool and ensure the table exists.
+        Initialize with a shared connection pool.
+
+        Schema is assumed to already exist (see module docstring) -- this
+        constructor does not touch the database.
 
         Args:
             pool: ConnectionPool instance providing psycopg v3 connections.
         """
         self._pool = pool
-        self._ensure_schema()
 
     # Story #1676 AC2: shared column list for the logs table's INSERT
     # statements, so insert_log/insert_log_batch stay in sync with each
-    # other and with the schema in _ensure_schema (single source of truth).
+    # other and with the migration-owned schema (single source of truth).
     _INSERT_COLUMNS = (
         "timestamp, level, source, message, correlation_id, "
         "user_id, request_path, extra_data, node_id, alias, "
         "trace_id, span_id"
     )
     _INSERT_PLACEHOLDERS = "%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s"
-
-    def _ensure_schema(self) -> None:
-        """Create the logs table and indexes if they do not already exist."""
-        try:
-            with self._pool.connection() as conn:
-                conn.execute(
-                    """
-                    CREATE TABLE IF NOT EXISTS logs (
-                        id SERIAL PRIMARY KEY,
-                        timestamp TEXT NOT NULL,
-                        level TEXT NOT NULL,
-                        source TEXT,
-                        message TEXT,
-                        correlation_id TEXT,
-                        user_id TEXT,
-                        request_path TEXT,
-                        extra_data TEXT,
-                        node_id TEXT,
-                        alias TEXT,
-                        trace_id TEXT,
-                        span_id TEXT,
-                        created_at TIMESTAMPTZ DEFAULT NOW()
-                    )
-                    """
-                )
-                # Story #876 Phase C: tag rows with repo alias so operators
-                # can filter lifecycle-runner failures by repo. ALTER is idempotent
-                # so legacy deployments migrate cleanly on next boot.
-                conn.execute("ALTER TABLE logs ADD COLUMN IF NOT EXISTS alias TEXT")
-                # Story #1676 AC2: OTEL trace/span correlation columns.
-                conn.execute("ALTER TABLE logs ADD COLUMN IF NOT EXISTS trace_id TEXT")
-                conn.execute("ALTER TABLE logs ADD COLUMN IF NOT EXISTS span_id TEXT")
-                conn.execute(
-                    "CREATE INDEX IF NOT EXISTS idx_logs_pg_timestamp ON logs(timestamp)"
-                )
-                conn.execute(
-                    "CREATE INDEX IF NOT EXISTS idx_logs_pg_level ON logs(level)"
-                )
-                conn.execute(
-                    "CREATE INDEX IF NOT EXISTS idx_logs_pg_node_id ON logs(node_id)"
-                )
-                conn.execute(
-                    "CREATE INDEX IF NOT EXISTS idx_logs_pg_correlation_id ON logs(correlation_id)"
-                )
-                conn.execute(
-                    "CREATE INDEX IF NOT EXISTS idx_logs_pg_alias ON logs(alias)"
-                )
-                conn.commit()
-        except Exception as exc:
-            logger.warning("LogsPostgresBackend: schema setup failed: %s", exc)
 
     def insert_log(
         self,
