@@ -7,7 +7,6 @@ PR history, cleanup history, cleanup workspaces, and cleanup status.
 
 from __future__ import annotations
 
-import json
 import logging
 from typing import Dict, Any, Optional
 
@@ -17,6 +16,7 @@ from code_indexer.server.telemetry.correlation_bridge import (
     get_current_correlation_id as get_correlation_id,
 )
 from code_indexer.server.services.config_service import get_config_service
+from code_indexer.server.storage.json_column import parse_json_column
 from code_indexer.server.services.query_admission_gate import (
     check_query_admission,
     memory_pressure_mcp_payload,
@@ -124,14 +124,14 @@ def _parse_log_details(row: dict) -> dict:
     payload lives inside the ``details`` JSON column.  This helper merges the
     top-level row fields with the decoded details so callers get the same shape
     that the old PasswordChangeAuditLogger flat-file parsing produced.
+
+    ``audit_logs.details`` is JSONB on PostgreSQL (psycopg deserializes it
+    directly to a native ``dict``) and TEXT on SQLite (a JSON string) --
+    see ``parse_json_column`` for the shared dual-shape handling (Bug
+    #1654, same root-cause class as Bug #1622/#1652/#1655).
     """
     flat = dict(row)
-    details_str = row.get("details") or "{}"
-    try:
-        inner = json.loads(details_str)
-    except (ValueError, TypeError) as e:
-        logger.warning("Failed to parse audit log details JSON: %s", e)
-        inner = {}
+    inner = parse_json_column(row.get("details"), dict, "audit_logs.details") or {}
     flat.update(inner)
     return flat
 
