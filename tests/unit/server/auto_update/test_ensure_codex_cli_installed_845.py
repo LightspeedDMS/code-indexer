@@ -21,6 +21,7 @@ import os
 import subprocess
 from contextlib import contextmanager
 from pathlib import Path
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -86,9 +87,19 @@ def _patch_execute_siblings(executor, *, claude_side_effect=None):
 
     # Use ExitStack to avoid Python 3.9 "too many statically nested blocks" limit
     # when combining more than ~20 context managers in a single with (...) expression.
-    from contextlib import ExitStack
+    from contextlib import AbstractContextManager, ExitStack
 
-    patches = [
+    # Explicit annotation: the list mixes several unittest.mock._patch[...]
+    # specializations (patch.object with different return_value/side_effect
+    # types) plus patch.dict's return type. Without this, mypy widens the
+    # list's inferred element type to the bare `object`, which
+    # ExitStack.enter_context() rejects (it expects
+    # AbstractContextManager[...]). unittest.mock.patch/patch.object/patch.dict
+    # all return objects implementing __enter__/__exit__ ("Any" import is at
+    # module top, line 24), so they genuinely satisfy the
+    # AbstractContextManager protocol -- this is a correct annotation, not
+    # error suppression.
+    patches: list[AbstractContextManager[Any]] = [
         patch.object(executor, "git_pull", return_value=True),
         patch.object(executor, "git_submodule_update", return_value=True),
         patch.object(executor, "_build_hnswlib_with_fallback", return_value=True),
