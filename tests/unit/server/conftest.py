@@ -203,7 +203,37 @@ def _snapshot_restore_auth_dependencies_impl() -> Generator[None, None, None]:
     """Core generator body for `_snapshot_restore_auth_dependencies` below;
     extracted so a unit test can drive it via `next()` without pytest's
     fixture machinery (mirrors `_snapshot_restore_shared_app_state_impl`).
+
+    Follow-up to Bug #1727/#1732 (found via bisection of a real
+    server-fast-automation.sh chunk-5 -- `mcp/ + telemetry/ + handlers/` --
+    failure): `code_indexer.server.app`'s lazily-constructed singleton
+    (Bug #1638 PEP 562 `__getattr__`) runs `create_app()` -- and therefore
+    `create_fastapi_app()`'s ONE-AND-ONLY atomic assignment of every
+    tracked `dependencies.*` attribute -- AT MOST ONCE per process,
+    triggered by the FIRST genuine access of any of app.py's lazy
+    attributes. That first access can happen incidentally, inside a test
+    that has nothing to do with auth (e.g.
+    `tests/unit/server/mcp/test_add_golden_repo_handler.py`'s
+    `with patch("code_indexer.server.app.golden_repo_manager")`, whose
+    entry must `getattr()` the original value to save it for restore).
+
+    If this generator's OWN setup snapshots the pre-construction defaults
+    (`None`, since nothing had touched app.py yet) and that same test's
+    body is what triggers the one-time construction, restoring to the
+    stale pre-construction snapshot on teardown would permanently discard
+    the real managers for the rest of the pytest session -- `create_app()`
+    never runs again to rebuild them. Detect that exact transition
+    (`code_indexer.server.app._initialized` flipping False -> True during
+    this generator's active window) and skip the restore in that case,
+    letting the freshly-constructed values become the new ambient state.
+    This mirrors the already-established `_snapshot_restore_shared_app_state`
+    (Bug #1694) principle of never reverting state a lazy singleton's
+    one-time construction just established. When `_initialized` does NOT
+    transition (the ordinary case -- construction already happened in an
+    earlier test, or never happens at all), behavior is unchanged: restore
+    the snapshot exactly as before.
     """
+    was_initialized = _server_app_module._initialized
     snapshot = {
         attr: getattr(_auth_dependencies_module, attr)
         for attr in _AUTH_DEPENDENCIES_ATTRS
@@ -211,8 +241,12 @@ def _snapshot_restore_auth_dependencies_impl() -> Generator[None, None, None]:
     try:
         yield
     finally:
-        for attr, value in snapshot.items():
-            setattr(_auth_dependencies_module, attr, value)
+        construction_happened_this_test = (
+            not was_initialized and _server_app_module._initialized
+        )
+        if not construction_happened_this_test:
+            for attr, value in snapshot.items():
+                setattr(_auth_dependencies_module, attr, value)
 
 
 @pytest.fixture(autouse=True)
