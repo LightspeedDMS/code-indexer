@@ -121,6 +121,45 @@ def _patch_execute_siblings(executor, *, claude_side_effect=None):
         patch.object(executor, "_ensure_rust_toolchain", return_value=True),
         patch.object(executor, "_calculate_auto_update_hash", return_value="abc123"),
         patch.object(executor, "_ensure_cli_dependencies_synced", return_value=True),
+        # Bug #1731: these 3 execute() siblings were unpatched and only
+        # "bounded by accident, not explicit isolation" -- confirmed via a
+        # runtime spy probe that execute()'s control flow DOES reach them
+        # (no earlier `return False` short-circuits it out), and that their
+        # real implementations were only no-op'ing today because this
+        # machine's on-disk ~/.cidx-server/config.json happens to have
+        # clone_backend="local" (_restart_auto_update_service's own guard
+        # is a patched _calculate_auto_update_hash constant above, which
+        # makes it genuinely unreached -- patched here anyway for the same
+        # explicit-isolation discipline as its siblings).
+        patch.object(executor, "_restart_auto_update_service", return_value=True),
+        patch.object(
+            executor,
+            "_ensure_activated_repos_symlink_for_cow_daemon",
+            return_value=True,
+        ),
+        patch.object(executor, "_ensure_daemon_storage_path", return_value=True),
+        # Found during this same fix's due-diligence pass over the issue's
+        # "lower priority" list: _deploy_tmpdir is unconditionally called by
+        # execute() with NO internal guard at all (the very first thing
+        # execute() does) and performs a real mkdir(parents=True,
+        # exist_ok=True) on the live filesystem every test run. Its return
+        # value is only ever assigned into os.environ["TMPDIR"] in this
+        # test's fully-mocked execute() run (no real subprocess in these
+        # scenarios reads it back), so a plain synthetic sentinel string is
+        # used here -- mirroring the "abc123" sentinel already used above
+        # for _calculate_auto_update_hash -- rather than a real filesystem
+        # path.
+        # _ensure_golden_repos_symlink_for_cow_daemon and
+        # _ensure_cow_storage_mount_options share the identical
+        # clone_backend != "cow-daemon" accidental short-circuit as the two
+        # Bug #1731-named methods above, so the same fix applies to them.
+        patch.object(
+            executor, "_deploy_tmpdir", return_value="test-deploy-tmp-sentinel"
+        ),
+        patch.object(
+            executor, "_ensure_golden_repos_symlink_for_cow_daemon", return_value=True
+        ),
+        patch.object(executor, "_ensure_cow_storage_mount_options", return_value=True),
     ]
     with ExitStack() as stack:
         for p in patches:
