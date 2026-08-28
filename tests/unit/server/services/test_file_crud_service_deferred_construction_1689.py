@@ -1,45 +1,65 @@
 """Bug #1689 remediation: FileCRUDService.__init__ must be cheap.
 
-`FileCRUDService.__init__` eagerly constructs a real `ActivatedRepoManager`
-(-> GoldenRepoManager -> SQLite golden-repo load, spawning
-bgm-worker/bgm-temporal-worker threads per the documented Bug #1650
-measurement), and the module-level statement
+`FileCRUDService.__init__` used to eagerly construct a real
+`ActivatedRepoManager` (-> GoldenRepoManager -> SQLite golden-repo load,
+spawning bgm-worker/bgm-temporal-worker threads per the documented Bug
+#1650 measurement), and the module-level statement
 `file_crud_service = FileCRUDService()` at the bottom of
-file_crud_service.py runs that constructor unconditionally at import
-time -- so any bare or transitive import of the module paid the full
+file_crud_service.py ran that constructor unconditionally at import time
+-- so any bare or transitive import of the module paid the full
 construction cost as a side effect, with no explicit opt-in. This is the
 exact Bug #1638/#1650 anti-pattern documented in CLAUDE.md's "Module-Level
 Service Singletons Must Be Lazy (PEP 562)" section, filed as its own issue
 (#1689) after being spotted during #1683's round-4 review.
 
 Consumer audit (exhaustive grep across src/ and tests/, see issue #1689
-work):
-  - `mcp/handlers/files.py`: every reference is a FUNCTION-LOCAL
-    `from ...file_crud_service import file_crud_service` inside handler
-    functions (handle_create_file, handle_edit_file, handle_delete_file,
-    _prepare_write_mode_context, handle_enter_write_mode,
-    _start_auto_watch_if_needed) -- never module-level.
-  - `routers/files.py`: module-level import, but only of the CLASS
-    (`FileCRUDService`) and an exception (`HashMismatchError`) -- NOT the
-    singleton instance.
-  - `startup/service_init.py`: imports the singleton instance, but
-    FUNCTION-LOCAL, inside the real startup lifespan coroutine (the
-    legitimate place for real construction to happen -- at server startup,
-    not at bare import time).
-There is therefore NO module-level `from module import file_crud_service`
-production consumer anywhere -- an even cleaner case than
-git_operations_service.py's Bug #1650 fix (which kept a defense-in-depth
-module-level `__getattr__` because 5 real consumers DID bind the name at
-module scope). Given that, and mirroring `file_service.py`'s Bug #1650
-remediation (which also has zero such consumers), the fix here is
-Layer-2-only: make `FileCRUDService.__init__` itself cheap by deferring
-`ActivatedRepoManager` construction to a lazy `activated_repo_manager`
-property, and keep the module-level singleton binding eager (harmless once
-construction is side-effect-free).
+work): there was NO module-level `from module import file_crud_service`
+production consumer anywhere, so the original fix (this file's earlier
+revision) deferred `ActivatedRepoManager` construction via a lazy
+`activated_repo_manager` property on the instance.
 
-Patch target note: `ActivatedRepoManager` is imported LOCALLY inside
-`FileCRUDService.__init__` (not module-level in file_crud_service.py), so
-the correct patch target is the SOURCE module
+Bug #1703 follow-up (THIS revision): a later fix for Bug #1692 moved
+`_resolve_repo_path`'s ONLY call site off `self.activated_repo_manager`
+and onto the module-level, DI/app.state-wired `_get_activated_repo_manager()`
+function instead (that node-local, unpooled property instance can't see
+PostgreSQL-mode activation state in cluster deployments -- see
+`_get_activated_repo_manager()`'s docstring). That left the
+`activated_repo_manager` property with ZERO production consumers -- a
+Messi Rule 12 (anti-orphan-code) violation and a latent trap for
+reintroducing #1692's exact cluster-outage defect class if a future
+developer reached for it again.
+
+Consumer audit re-run for #1703 (exhaustive grep across src/ and tests/):
+confirmed zero references to `self.activated_repo_manager` /
+`.activated_repo_manager` on a `FileCRUDService` instance anywhere in
+production code. The only test consumers were this file's own
+Bug #1689 property-mechanism tests (removed below) and one inert,
+already-non-functional mock patch in
+`tests/unit/server/mcp/test_write_mode_tools.py` (fixed separately in the
+same commit -- that patch target was never actually consulted by
+`_resolve_repo_path` after #1692 landed, so removing it changes no
+tested behavior).
+
+Given all of that, the property (and the per-instance lazy-construction
+state it alone existed to support: `_activated_repo_manager_lazy`,
+`_activated_repo_manager_lock`, `_arm_initializing`) was DELETED entirely,
+mirroring the identical precedent set by Bug #1702 for
+`routers/git.py`'s analogous module-level singleton (see
+`test_git_router_uses_app_state_1702.py::TestNoModuleLevelSingletonRemains`).
+
+This revision keeps the two tests below that protect the actual Bug #1689
+regression (eager construction as an import/construction-time side
+effect) -- neither of which ever depended on the property existing -- and
+replaces the property-specific tests (first-access-constructs-once,
+same-thread re-entrancy, setter-roundtrip-for-test-patching) with
+tests asserting the orphaned property and its backing state are actually
+gone, so a future re-introduction of a node-local
+`self.activated_repo_manager` (the exact shape of #1692's defect) is
+caught immediately.
+
+Patch target note: `ActivatedRepoManager` is imported LOCALLY (not
+module-level) wherever it is still constructed in this codebase, so the
+correct patch target remains the SOURCE module
 (`code_indexer.server.repositories.activated_repo_manager.ActivatedRepoManager`),
 matching the established pattern in
 test_file_service_deferred_construction_1650.py and
@@ -50,15 +70,13 @@ from __future__ import annotations
 
 import subprocess
 import sys
-import threading
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 
 SRC_ROOT = str(Path(__file__).parent.parent.parent.parent.parent / "src")
 SUBPROCESS_TIMEOUT_SECONDS = 30
-THREAD_JOIN_TIMEOUT_SECONDS = 10
 
 
 @pytest.fixture
@@ -73,7 +91,10 @@ class TestInitDoesNotEagerlyConstructActivatedRepoManager:
     """__init__ must not build ActivatedRepoManager (and therefore not
     GoldenRepoManager, not the SQLite golden-repo load, not the
     bgm-worker/bgm-temporal-worker threads) as a side effect of merely
-    constructing FileCRUDService.
+    constructing FileCRUDService. This holds regardless of whether a lazy
+    `activated_repo_manager` property exists at all (#1703 removed it) --
+    what matters is that __init__ itself never touches
+    ActivatedRepoManager construction.
     """
 
     def test_construction_does_not_call_activated_repo_manager_constructor(
@@ -84,8 +105,7 @@ class TestInitDoesNotEagerlyConstructActivatedRepoManager:
         FileCRUDService()
         assert mock_activated_repo_manager_cls.call_count == 0, (
             "BUG #1689 REGRESSION: FileCRUDService.__init__ must not "
-            "construct ActivatedRepoManager eagerly -- it should be "
-            "deferred to first real access. "
+            "construct ActivatedRepoManager eagerly. "
             f"call_count={mock_activated_repo_manager_cls.call_count}"
         )
 
@@ -128,121 +148,70 @@ class TestInitDoesNotEagerlyConstructActivatedRepoManager:
             f"import-time side effect. Subprocess output: {result.stdout!r}"
         )
 
-    def test_first_access_constructs_activated_repo_manager_exactly_once(
-        self, mock_activated_repo_manager_cls
-    ) -> None:
-        from code_indexer.server.services.file_crud_service import FileCRUDService
 
-        mock_activated_repo_manager_cls.return_value = "constructed-instance"
-        service = FileCRUDService()
-        first = service.activated_repo_manager
-        second = service.activated_repo_manager
+class TestOrphanedActivatedRepoManagerPropertyIsRemoved:
+    """Bug #1703: the Bug #1689 lazy `activated_repo_manager` property lost
+    its only production consumer when Bug #1692 redirected
+    `_resolve_repo_path` onto the module-level, DI/app.state-wired
+    `_get_activated_repo_manager()` function. Per Messi Rule 12
+    (anti-orphan-code), the orphaned property -- and the per-instance
+    lazy-construction state that existed only to support it -- was
+    deleted entirely rather than merely documented as deprecated, mirroring
+    the identical precedent Bug #1702 set for routers/git.py's analogous
+    module-level singleton.
 
-        assert mock_activated_repo_manager_cls.call_count == 1, (
-            "ActivatedRepoManager must be constructed exactly once, "
-            "lazily, on first real access. "
-            f"call_count={mock_activated_repo_manager_cls.call_count}"
-        )
-        assert first == "constructed-instance"
-        assert first is second
-
-
-class TestActivatedRepoManagerReentrancyDoesNotRecurse:
-    """The activated_repo_manager lazy property's RLock stops cross-thread
-    deadlock but NOT same-thread re-entrant recursion -- on re-entry the
-    double-checked `is None` test is still True (the assignment happens
-    only after the constructor returns), so an unguarded re-entrant call
-    during construction would construct AGAIN. Mirrors
-    test_file_service_deferred_construction_1650.py's identical test
-    exactly, using a background thread with a bounded join(timeout=...).
+    These tests guard against silent reintroduction: a future developer
+    reaching for `self.activated_repo_manager` on `FileCRUDService` would
+    construct a fresh, NODE-LOCAL, UNPOOLED `ActivatedRepoManager` whose
+    registry check can't see PostgreSQL-mode activation state -- the exact
+    #1692 cluster-outage defect class.
     """
 
-    def test_reentrant_access_during_construction_does_not_recurse(self) -> None:
+    def test_no_activated_repo_manager_property_on_class(self) -> None:
+        from code_indexer.server.services.file_crud_service import FileCRUDService
+
+        assert not hasattr(FileCRUDService, "activated_repo_manager"), (
+            "BUG #1703 REGRESSION: FileCRUDService must not retain the "
+            "orphaned Bug #1689 `activated_repo_manager` lazy property -- "
+            "it has zero production consumers since Bug #1692 redirected "
+            "_resolve_repo_path onto the module-level "
+            "_get_activated_repo_manager() function. Reintroducing it "
+            "re-opens the exact #1692 cluster-outage defect class for any "
+            "new caller that reaches for it."
+        )
+
+    def test_no_activated_repo_manager_attribute_on_fresh_instance(self) -> None:
         from code_indexer.server.services.file_crud_service import FileCRUDService
 
         service = FileCRUDService()
-
-        construction_count = {"n": 0}
-        reentrant_outcome: dict = {}
-
-        class ReentrantARM:
-            def __init__(self, *args, **kwargs):
-                construction_count["n"] += 1
-                if construction_count["n"] == 1:
-                    # Re-entrant probe from WITHIN construction, same thread.
-                    try:
-                        reentrant_outcome["value"] = service.activated_repo_manager
-                    except Exception as e:  # noqa: BLE001 - captured for assertion
-                        reentrant_outcome["exception"] = e
-
-        result: dict = {}
-
-        def worker() -> None:
-            try:
-                with patch(
-                    "code_indexer.server.repositories.activated_repo_manager.ActivatedRepoManager",
-                    ReentrantARM,
-                ):
-                    result["value"] = service.activated_repo_manager
-            except Exception as e:  # noqa: BLE001 - captured for assertion
-                result["exception"] = e
-
-        t = threading.Thread(target=worker, daemon=True)
-        t.start()
-        t.join(timeout=THREAD_JOIN_TIMEOUT_SECONDS)
-
-        assert not t.is_alive(), (
-            "REGRESSION: re-entrant access during construction hung "
-            "(unbounded recursion or deadlock)."
-        )
-        assert construction_count["n"] == 1, (
-            "BUG #1689 REGRESSION: the constructor must run EXACTLY ONCE "
-            "-- a re-entrant call arriving mid-construction must not "
-            "trigger a second/recursive construction. "
-            f"construction_count={construction_count['n']}"
-        )
-        assert "exception" in reentrant_outcome, (
-            "The re-entrant call must raise (matching pre-fix unbound "
-            f"semantics), not silently return a value. Got: {reentrant_outcome}"
-        )
-        assert "value" in result, f"outer call must succeed: {result}"
-        assert "exception" not in result, (
-            f"outer (original) call must not raise: {result}"
+        assert not hasattr(service, "activated_repo_manager"), (
+            "BUG #1703 REGRESSION: a freshly constructed FileCRUDService "
+            "must not expose an `activated_repo_manager` attribute -- the "
+            "orphaned lazy property was removed entirely."
         )
 
-
-class TestActivatedRepoManagerSetterStillWorksForTestPatching:
-    """Several existing test files assign `service.activated_repo_manager`
-    directly (test_file_crud_unicode_bom.py), and some construct the
-    service via `FileCRUDService.__new__(FileCRUDService)` (bypassing
-    __init__ entirely) before assigning (test_file_crud_write_mode.py).
-    Both patterns must be unaffected by converting activated_repo_manager
-    from a plain instance attribute into a lazy property with a setter.
-    """
-
-    def test_direct_assignment_and_readback(
-        self, mock_activated_repo_manager_cls
-    ) -> None:
-        from code_indexer.server.services.file_crud_service import FileCRUDService
-
-        service = FileCRUDService()
-
-        sentinel = object()
-        service.activated_repo_manager = sentinel
-        assert service.activated_repo_manager is sentinel
-
-        service.activated_repo_manager = None
-        mock_activated_repo_manager_cls.return_value = "fresh-instance"
-        assert service.activated_repo_manager == "fresh-instance"
-
-    def test_new_bypass_then_direct_assignment(self) -> None:
-        """Mirrors test_file_crud_unicode_bom.py's fixture pattern:
-        FileCRUDService.__new__(FileCRUDService) bypasses __init__
-        entirely, then the test assigns activated_repo_manager directly.
+    def test_no_lazy_backing_state_attributes(self) -> None:
+        """The per-instance lazy-construction state
+        (`_activated_repo_manager_lazy`, `_arm_initializing`) and the
+        class-level `_activated_repo_manager_lock` existed only to back
+        the now-removed property -- nothing else in FileCRUDService reads
+        them, so they must be gone too, not left behind as dead state.
         """
         from code_indexer.server.services.file_crud_service import FileCRUDService
 
-        service = FileCRUDService.__new__(FileCRUDService)
-        mock_arm = MagicMock()
-        service.activated_repo_manager = mock_arm
-        assert service.activated_repo_manager is mock_arm
+        service = FileCRUDService()
+        assert not hasattr(FileCRUDService, "_activated_repo_manager_lock"), (
+            "BUG #1703 REGRESSION: FileCRUDService must not retain the "
+            "class-level lock that existed only to guard the removed "
+            "lazy-construction property."
+        )
+        assert not hasattr(service, "_activated_repo_manager_lazy"), (
+            "BUG #1703 REGRESSION: FileCRUDService.__init__ must not set "
+            "the per-instance lazy-construction slot that existed only to "
+            "back the removed property."
+        )
+        assert not hasattr(service, "_arm_initializing"), (
+            "BUG #1703 REGRESSION: FileCRUDService must not retain the "
+            "re-entrancy sentinel that existed only to guard the removed "
+            "lazy-construction property."
+        )

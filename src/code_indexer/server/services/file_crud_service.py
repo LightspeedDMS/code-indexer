@@ -17,7 +17,6 @@ Concurrency control:
 import hashlib
 import os
 import tempfile
-import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, Any, Optional, TYPE_CHECKING
@@ -37,20 +36,25 @@ def _get_activated_repo_manager() -> "ActivatedRepoManager":
     (Bug #1683) and mcp/handlers/_utils.py's `_get_activated_repo_manager()`
     (the same one auto_watch_manager's caller uses).
 
-    `FileCRUDService.activated_repo_manager` (the Bug #1689 lazy property)
-    is deliberately NOT used for repo-validity resolution: it constructs a
-    fresh, NODE-LOCAL, UNPOOLED `ActivatedRepoManager` whose
+    A per-instance `FileCRUDService.activated_repo_manager` lazy property
+    (the Bug #1689 fix) used to exist and was deliberately NOT used for
+    repo-validity resolution: it would have constructed a fresh,
+    NODE-LOCAL, UNPOOLED `ActivatedRepoManager` whose
     `user_has_activated_repo()`/`get_activated_repo_path()` fall back to
     scanning node-local `{alias}_metadata.json` files
     (`_list_user_repos_fs`). In cluster/PostgreSQL mode, activation writes
     to the `activated_repos` DB table only (`_save_metadata_pg`) and NEVER
     writes that JSON file -- so a genuinely activated repo looks
     indistinguishable from an orphan to that local instance, and Bug #1692's
-    registry gate would refuse 100% of legitimate cluster writes. Both
-    front doors (the MCP module-level `file_crud_service` singleton AND
-    `routers/files.py`, which constructs a FRESH `FileCRUDService()` per
-    REST request) need this resolved AT CALL TIME rather than cached on
-    any one instance.
+    registry gate would refuse 100% of legitimate cluster writes. Bug #1703
+    removed that property entirely once it was confirmed to have zero
+    remaining production consumers (its only call site was this function,
+    since #1692). Both front doors (the MCP module-level `file_crud_service`
+    singleton AND `routers/files.py`, which constructs a FRESH
+    `FileCRUDService()` per REST request) need this resolved AT CALL TIME
+    via app.state rather than cached on any one instance -- do NOT
+    reintroduce a per-instance node-local `ActivatedRepoManager` property
+    on this class for repo-validity resolution.
     """
     from typing import cast
     from ..app import app as app_module
@@ -105,83 +109,24 @@ class FileCRUDService:
     - Uses canonical golden repo path instead of activated copy
     """
 
-    # Bug #1689 remediation: CLASS-LEVEL RLock (not per-instance), so
-    # instances created via FileCRUDService.__new__(FileCRUDService)
-    # (several existing test files bypass __init__ entirely this way)
-    # still have a lock to synchronize on instead of raising
-    # AttributeError. Mirrors the identical pattern applied to
-    # GitOperationsService and FileListingService for the same bug:
-    # importing this module (transitively) used to construct a real
-    # ActivatedRepoManager -> GoldenRepoManager -> SQLite golden-repo load,
-    # spawning bgm-worker/bgm-temporal-worker threads, as a side effect of
-    # merely constructing FileCRUDService.
-    _activated_repo_manager_lock = threading.RLock()
-
     def __init__(self):
         """Initialize file CRUD service."""
-        # Bug #1689: ActivatedRepoManager construction (GoldenRepoManager
+        # Bug #1689 (construction is cheap): FileCRUDService.__init__ must
+        # never construct a real ActivatedRepoManager (-> GoldenRepoManager
         # -> SQLite golden-repo load -> bgm-worker/bgm-temporal-worker
-        # thread spawn) is deferred to first real access via the
-        # activated_repo_manager property below, instead of running
-        # unconditionally here.
-        self._activated_repo_manager_lazy: Optional["ActivatedRepoManager"] = None
+        # thread spawn) as a side effect of mere instantiation. Bug #1703
+        # removed the lazy `activated_repo_manager` property that used to
+        # exist here (and the per-instance/class-level state that backed
+        # it) once it was confirmed to have zero production consumers:
+        # _resolve_repo_path resolves the manager via the module-level,
+        # DI/app.state-wired _get_activated_repo_manager() function
+        # instead (Bug #1692) -- do NOT reintroduce a per-instance
+        # node-local ActivatedRepoManager property on this class.
         # Write exceptions map: alias -> canonical path (Story #197)
         self._global_write_exceptions: Dict[str, Path] = {}
         # Golden repos directory for write-mode marker lookup (Story #231).
         # Set at startup via set_golden_repos_dir() or directly via _golden_repos_dir.
         self._golden_repos_dir: Optional[Path] = None
-
-    @property
-    def activated_repo_manager(self) -> "ActivatedRepoManager":
-        """Lazily construct ActivatedRepoManager (Bug #1689): deferred to
-        first real access instead of FileCRUDService() construction time.
-
-        Uses getattr(..., None) rather than bare self._activated_repo_manager_lazy:
-        test files construct this service via
-        FileCRUDService.__new__(FileCRUDService) (bypassing __init__
-        entirely) and may read this property before ever assigning to it.
-
-        Guarded by a per-instance `_arm_initializing` sentinel: the RLock
-        alone stops CROSS-THREAD deadlock but not SAME-THREAD re-entrant
-        recursion -- on re-entry the double-checked `is None` test is
-        still True (the assignment happens only after the constructor
-        returns), so an unguarded re-entrant call arriving from within
-        construction would construct AGAIN. Mirrors
-        GitOperationsService.activated_repo_manager and
-        FileListingService.activated_repo_manager's identical fix exactly.
-        """
-        if getattr(self, "_activated_repo_manager_lazy", None) is None:
-            with self._activated_repo_manager_lock:
-                if getattr(self, "_arm_initializing", False):
-                    raise AttributeError(
-                        "activated_repo_manager is still under construction "
-                        "(re-entrant access)"
-                    )
-                if getattr(self, "_activated_repo_manager_lazy", None) is None:
-                    self._arm_initializing = True
-                    try:
-                        # Import here to avoid circular imports (same
-                        # reasoning as the original eager code this
-                        # replaces).
-                        import os
-                        from ..repositories.activated_repo_manager import (
-                            ActivatedRepoManager,
-                        )
-
-                        _server_dir = os.environ.get("CIDX_SERVER_DATA_DIR")
-                        self._activated_repo_manager_lazy = ActivatedRepoManager(
-                            data_dir=os.path.join(_server_dir, "data")
-                            if _server_dir
-                            else None
-                        )
-                    finally:
-                        self._arm_initializing = False
-        return self._activated_repo_manager_lazy
-
-    @activated_repo_manager.setter
-    def activated_repo_manager(self, value: "ActivatedRepoManager") -> None:
-        with self._activated_repo_manager_lock:
-            self._activated_repo_manager_lazy = value
 
     def register_write_exception(self, alias: str, canonical_path: Path) -> None:
         """
@@ -314,12 +259,15 @@ class FileCRUDService:
         # removed out from under it.
         #
         # Resolved via the module-level _get_activated_repo_manager()
-        # (DI/app.state-wired, Bug #1692 cluster-mode fix) rather than
-        # self.activated_repo_manager (a node-local, unpooled instance
-        # whose registry check falls back to scanning local
-        # {alias}_metadata.json files -- files PostgreSQL-mode activation
-        # never writes, which misclassified every genuinely activated
-        # cluster repo as an orphan).
+        # (DI/app.state-wired, Bug #1692 cluster-mode fix) rather than a
+        # per-instance self.activated_repo_manager property (a node-local,
+        # unpooled instance whose registry check falls back to scanning
+        # local {alias}_metadata.json files -- files PostgreSQL-mode
+        # activation never writes, which misclassified every genuinely
+        # activated cluster repo as an orphan). That property has since
+        # been removed entirely (Bug #1703): once #1692 redirected this
+        # call site away from it, it had zero remaining production
+        # consumers. Do NOT reintroduce it.
         repo_manager = _get_activated_repo_manager()
 
         if not repo_manager.user_has_activated_repo(username, repo_alias):
