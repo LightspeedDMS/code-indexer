@@ -100,6 +100,7 @@ from typing import Any, Callable, Generator, List, Set, Type
 import pytest
 
 import code_indexer.server.app as _server_app_module
+import code_indexer.server.auth.dependencies as _auth_dependencies_module
 from code_indexer.server.auth.login_rate_limiter import (
     login_rate_limiter as _login_lockout_limiter,
 )
@@ -174,6 +175,43 @@ def _reset_login_rate_limiters() -> Generator[None, None, None]:
         yield
     finally:
         _reset_login_rate_limiter_state()
+
+
+# Bug #1727: the auth-dependency block `create_fastapi_app()` rebinds
+# atomically (app_wiring.py:220-227) with no save/restore. Absolute import
+# there means only this canonical module ever needs handling (no
+# `src.`-prefixed alias, unlike BackgroundJobManager above).
+_AUTH_DEPENDENCIES_ATTRS = (
+    "jwt_manager",
+    "user_manager",
+    "oauth_manager",
+    "mcp_credential_manager",
+    "api_key_manager",
+)
+
+
+def _snapshot_restore_auth_dependencies_impl() -> Generator[None, None, None]:
+    """Core generator body for `_snapshot_restore_auth_dependencies` below;
+    extracted so a unit test can drive it via `next()` without pytest's
+    fixture machinery (mirrors `_snapshot_restore_shared_app_state_impl`).
+    """
+    snapshot = {
+        attr: getattr(_auth_dependencies_module, attr)
+        for attr in _AUTH_DEPENDENCIES_ATTRS
+    }
+    try:
+        yield
+    finally:
+        for attr, value in snapshot.items():
+            setattr(_auth_dependencies_module, attr, value)
+
+
+@pytest.fixture(autouse=True)
+def _snapshot_restore_auth_dependencies() -> Generator[None, None, None]:
+    """Bug #1727: snapshot and restore the auth-dependencies module-global
+    block around every test under tests/unit/server/.
+    """
+    yield from _snapshot_restore_auth_dependencies_impl()
 
 
 @pytest.fixture(autouse=True)
