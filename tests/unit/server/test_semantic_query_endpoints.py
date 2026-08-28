@@ -228,16 +228,19 @@ class TestSemanticQueryEndpoint:
 
     @patch("code_indexer.server.auth.dependencies.jwt_manager")
     @patch("code_indexer.server.auth.dependencies.user_manager")
-    @patch("code_indexer.server.app.semantic_query_manager")
     def test_semantic_query_with_invalid_parameters(
         self,
-        mock_semantic_manager,
         mock_dep_user_manager,
         mock_jwt_manager,
         client,
         mock_normal_user,
     ):
-        """Test semantic query with invalid parameters returns 400."""
+        """Test semantic query with invalid parameters returns 422.
+
+        #1707 Finding 3 cleanup: no manager patch needed -- Pydantic
+        validation rejects the empty query_text before the route handler
+        (and its semantic_query_manager closure) ever runs.
+        """
         # Setup authentication
         mock_jwt_manager.validate_token.return_value = {
             "username": "testuser",
@@ -256,16 +259,21 @@ class TestSemanticQueryEndpoint:
 
     @patch("code_indexer.server.auth.dependencies.jwt_manager")
     @patch("code_indexer.server.auth.dependencies.user_manager")
-    @patch("code_indexer.server.app.semantic_query_manager")
     def test_semantic_query_with_no_repositories(
         self,
-        mock_semantic_manager,
         mock_dep_user_manager,
         mock_jwt_manager,
         client,
         mock_normal_user,
     ):
-        """Test semantic query when user has no activated repositories returns 400."""
+        """Test semantic query when user has no activated repositories returns 400.
+
+        #1707 Finding 3 cleanup: patch the REAL semantic_query_manager
+        instance (closure-capture class -- see
+        test_semantic_query_with_valid_request above) and assert the mock
+        is actually called, instead of relying on "testuser" coincidentally
+        having no real activated repositories.
+        """
         # Setup authentication
         mock_jwt_manager.validate_token.return_value = {
             "username": "testuser",
@@ -273,21 +281,22 @@ class TestSemanticQueryEndpoint:
         }
         mock_dep_user_manager.get_user.return_value = mock_normal_user
 
-        # Mock semantic query manager to raise error for no repositories
         from code_indexer.server.query.semantic_query_manager import (
             SemanticQueryError,
         )
 
-        mock_semantic_manager.query_user_repositories.side_effect = SemanticQueryError(
-            "No activated repositories found"
-        )
+        with patch.object(
+            client.app.state.semantic_query_manager,
+            "query_user_repositories",
+            side_effect=SemanticQueryError("No activated repositories found"),
+        ) as mock_query:
+            response = client.post(
+                "/api/query",
+                json={"query_text": "test"},
+                headers={"Authorization": "Bearer test-token"},
+            )
 
-        # Make request
-        response = client.post(
-            "/api/query",
-            json={"query_text": "test"},
-            headers={"Authorization": "Bearer test-token"},
-        )
+        mock_query.assert_called_once()
 
         # Verify error response
         assert response.status_code == 400
@@ -411,16 +420,19 @@ class TestSemanticQueryEndpoint:
 
     @patch("code_indexer.server.auth.dependencies.jwt_manager")
     @patch("code_indexer.server.auth.dependencies.user_manager")
-    @patch("code_indexer.server.app.semantic_query_manager")
     def test_semantic_query_validates_limit_range(
         self,
-        mock_semantic_manager,
         mock_dep_user_manager,
         mock_jwt_manager,
         client,
         mock_normal_user,
     ):
-        """Test semantic query validates limit parameter range."""
+        """Test semantic query validates limit parameter range.
+
+        #1707 Finding 3 cleanup: no manager patch needed -- Pydantic
+        validation rejects the out-of-range limit before the route handler
+        (and its semantic_query_manager closure) ever runs.
+        """
         # Setup authentication
         mock_jwt_manager.validate_token.return_value = {
             "username": "testuser",
@@ -439,16 +451,19 @@ class TestSemanticQueryEndpoint:
 
     @patch("code_indexer.server.auth.dependencies.jwt_manager")
     @patch("code_indexer.server.auth.dependencies.user_manager")
-    @patch("code_indexer.server.app.semantic_query_manager")
     def test_semantic_query_validates_min_score_range(
         self,
-        mock_semantic_manager,
         mock_dep_user_manager,
         mock_jwt_manager,
         client,
         mock_normal_user,
     ):
-        """Test semantic query validates min_score parameter range."""
+        """Test semantic query validates min_score parameter range.
+
+        #1707 Finding 3 cleanup: no manager patch needed -- Pydantic
+        validation rejects the out-of-range min_score before the route
+        handler (and its semantic_query_manager closure) ever runs.
+        """
         # Setup authentication
         mock_jwt_manager.validate_token.return_value = {
             "username": "testuser",

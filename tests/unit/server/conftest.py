@@ -142,13 +142,23 @@ def _reset_login_rate_limiter_state() -> None:
     access -- clearing must acquire the SAME lock objects to avoid racing
     a concurrent in-flight login request in this process (e.g. a
     background thread from a prior test's not-yet-finished server).
+
+    Also resets `_pool` to None on both singletons (#1707 review
+    remediation, Finding 4), mirroring the established #1698
+    TokenBlacklist reset pattern: `app_wiring.py` calls
+    `.set_connection_pool(...)` on these same singletons whenever a
+    PostgreSQL backend is configured, and without this reset a future
+    postgres-mode app-construction test would permanently switch every
+    later test in the process onto a stale PG pool.
     """
     with _login_token_bucket._lock:
         _login_token_bucket._buckets.clear()
         _login_token_bucket._last_access.clear()
+        _login_token_bucket._pool = None
     with _login_lockout_limiter._lock:
         _login_lockout_limiter._failures.clear()
         _login_lockout_limiter._lockout_until.clear()
+        _login_lockout_limiter._pool = None
 
 
 @pytest.fixture(autouse=True)

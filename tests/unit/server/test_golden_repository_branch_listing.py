@@ -6,7 +6,7 @@ Following TDD methodology - these are failing tests that define expected behavio
 """
 
 import pytest
-from unittest.mock import MagicMock, patch, Mock
+from unittest.mock import MagicMock, Mock
 from datetime import datetime, timezone
 from fastapi.testclient import TestClient
 from fastapi import status
@@ -147,16 +147,17 @@ class TestGoldenRepositoryBranchListingEndpoint:
         assert main_branch["branch_type"] == "main"
         assert main_branch["last_commit_hash"] == "abc123456"
 
-    @patch("code_indexer.server.app.golden_repo_manager")
-    def test_list_branches_for_nonexistent_golden_repository(
-        self, mock_golden_repo_manager
-    ):
+    def test_list_branches_for_nonexistent_golden_repository(self):
         """Test listing branches for non-existent golden repository returns 404."""
         # Setup authentication
         self._setup_authenticated_user("admin_user", "admin")
 
-        # Setup golden repo manager to indicate repo doesn't exist
-        mock_golden_repo_manager.golden_repo_exists = MagicMock(return_value=False)
+        # Assign the mock directly onto the REAL golden_repo_manager
+        # instance (closure-capture class -- see
+        # test_list_branches_for_existing_golden_repository above).
+        self.app.state.golden_repo_manager.golden_repo_exists = MagicMock(
+            return_value=False
+        )
 
         response = self.client.get("/api/repos/golden/nonexistent-repo/branches")
 

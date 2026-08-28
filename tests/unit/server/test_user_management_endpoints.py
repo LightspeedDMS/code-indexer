@@ -10,6 +10,8 @@ Tests CRUD operations for user management:
 - PUT /api/admin/users/{username}/change-password (admin password change)
 """
 
+import uuid
+
 import pytest
 from fastapi.testclient import TestClient
 from unittest.mock import patch
@@ -216,11 +218,18 @@ class TestCreateUserEndpoint:
 
     @patch("code_indexer.server.auth.dependencies.jwt_manager")
     @patch("code_indexer.server.auth.dependencies.user_manager")
-    @patch("code_indexer.server.app.user_manager")
     def test_create_user_with_duplicate_username_returns_400(
-        self, mock_app_user_manager, mock_dep_user_manager, mock_jwt_manager, client
+        self, mock_dep_user_manager, mock_jwt_manager, client
     ):
-        """Test creating user with duplicate username returns 400."""
+        """Test creating user with duplicate username returns 400.
+
+        #1707 Finding 2: the old version patched the dead
+        code_indexer.server.app.user_manager module attribute (closure-
+        capture bug) and only passed via a coincidental real "existinguser"
+        row in the developer's persistent DB. Fixed: patch the REAL
+        client.app.state.user_manager instance and use a randomized
+        username so no real-DB collision can mask the outcome.
+        """
         # Setup authentication
         mock_jwt_manager.validate_token.return_value = {
             "username": "admin",
@@ -237,20 +246,32 @@ class TestCreateUserEndpoint:
         )
         mock_dep_user_manager.get_user.return_value = admin_user
 
-        # Mock duplicate user error
-        mock_app_user_manager.create_user.side_effect = ValueError(
-            "User already exists: existinguser"
-        )
+        duplicate_username = f"existinguser-{uuid.uuid4().hex}"
 
-        headers = {"Authorization": "Bearer admin.jwt.token"}
-        response = client.post(
-            "/api/admin/users",
-            headers=headers,
-            json={
-                "username": "existinguser",
-                "password": "AnyPassword123!",
-                "role": "normal_user",
-            },
+        # Patch create_user on the REAL user_manager instance (closure-
+        # capture class -- see docstring above).
+        with patch.object(
+            client.app.state.user_manager,
+            "create_user",
+            side_effect=ValueError(f"User already exists: {duplicate_username}"),
+        ) as mock_create:
+            headers = {"Authorization": "Bearer admin.jwt.token"}
+            response = client.post(
+                "/api/admin/users",
+                headers=headers,
+                json={
+                    "username": duplicate_username,
+                    "password": "AnyPassword123!",
+                    "role": "normal_user",
+                },
+            )
+
+        # Proves the mock actually intercepted the real route closure's
+        # call -- not developer-machine-state-dependent.
+        mock_create.assert_called_once_with(
+            username=duplicate_username,
+            password="AnyPassword123!",
+            role=UserRole.NORMAL_USER,
         )
 
         assert response.status_code == 400
@@ -527,11 +548,16 @@ class TestUpdateUserEndpoint:
 
     @patch("code_indexer.server.auth.dependencies.jwt_manager")
     @patch("code_indexer.server.auth.dependencies.user_manager")
-    @patch("code_indexer.server.app.user_manager")
     def test_update_nonexistent_user_returns_404(
-        self, mock_app_user_manager, mock_dep_user_manager, mock_jwt_manager, client
+        self, mock_dep_user_manager, mock_jwt_manager, client
     ):
-        """Test updating nonexistent user returns 404."""
+        """Test updating nonexistent user returns 404.
+
+        #1707 Finding 3 cleanup: patch the REAL user_manager instance
+        (closure-capture class -- see test_create_user_with_valid_admin_data
+        above) and assert the mock is actually called, instead of relying
+        on "nonexistent" coincidentally having no real DB row.
+        """
         # Setup authentication
         mock_jwt_manager.validate_token.return_value = {
             "username": "admin",
@@ -548,13 +574,17 @@ class TestUpdateUserEndpoint:
         )
         mock_dep_user_manager.get_user.return_value = admin_user
 
-        # Mock user doesn't exist
-        mock_app_user_manager.get_user.return_value = None
+        with patch.object(
+            client.app.state.user_manager, "get_user", return_value=None
+        ) as mock_get_user:
+            headers = {"Authorization": "Bearer admin.jwt.token"}
+            response = client.put(
+                "/api/admin/users/nonexistent",
+                headers=headers,
+                json={"role": "power_user"},
+            )
 
-        headers = {"Authorization": "Bearer admin.jwt.token"}
-        response = client.put(
-            "/api/admin/users/nonexistent", headers=headers, json={"role": "power_user"}
-        )
+        mock_get_user.assert_called_once_with("nonexistent")
 
         assert response.status_code == 404
         response_data = response.json()
@@ -685,11 +715,22 @@ class TestDeleteUserEndpoint:
 
     @patch("code_indexer.server.auth.dependencies.jwt_manager")
     @patch("code_indexer.server.auth.dependencies.user_manager")
-    @patch("code_indexer.server.app.user_manager")
     def test_delete_nonexistent_user_returns_404(
-        self, mock_app_user_manager, mock_dep_user_manager, mock_jwt_manager, client
+        self, mock_dep_user_manager, mock_jwt_manager, client
     ):
-        """Test deleting nonexistent user returns 404."""
+        """Test deleting nonexistent user returns 404.
+
+        #1707 Finding 3 cleanup: patch the REAL user_manager instance
+        (closure-capture class -- see test_create_user_with_valid_admin_data
+        above) and assert the mock is actually called, instead of relying
+        on "nonexistent" coincidentally having no real DB row.
+
+        The real route (inline_admin_users.py's delete_user handler) calls
+        get_user() FIRST and returns 404 immediately if it is None --
+        delete_user() itself is never reached for this scenario (confirmed
+        live: patching delete_user alone left it uncalled). get_user is the
+        real interception point here, not delete_user.
+        """
         # Setup authentication
         mock_jwt_manager.validate_token.return_value = {
             "username": "admin",
@@ -706,11 +747,13 @@ class TestDeleteUserEndpoint:
         )
         mock_dep_user_manager.get_user.return_value = admin_user
 
-        # Mock user doesn't exist
-        mock_app_user_manager.delete_user.return_value = False
+        with patch.object(
+            client.app.state.user_manager, "get_user", return_value=None
+        ) as mock_get_user:
+            headers = {"Authorization": "Bearer admin.jwt.token"}
+            response = client.delete("/api/admin/users/nonexistent", headers=headers)
 
-        headers = {"Authorization": "Bearer admin.jwt.token"}
-        response = client.delete("/api/admin/users/nonexistent", headers=headers)
+        mock_get_user.assert_called_once_with("nonexistent")
 
         assert response.status_code == 404
         response_data = response.json()
@@ -1125,11 +1168,16 @@ class TestChangePasswordEndpoints:
 
     @patch("code_indexer.server.auth.dependencies.jwt_manager")
     @patch("code_indexer.server.auth.dependencies.user_manager")
-    @patch("code_indexer.server.app.user_manager")
     def test_admin_change_nonexistent_user_password_returns_404(
-        self, mock_app_user_manager, mock_dep_user_manager, mock_jwt_manager, client
+        self, mock_dep_user_manager, mock_jwt_manager, client
     ):
-        """Test admin changing nonexistent user's password returns 404."""
+        """Test admin changing nonexistent user's password returns 404.
+
+        #1707 Finding 3 cleanup: patch the REAL user_manager instance
+        (closure-capture class -- see test_create_user_with_valid_admin_data
+        above) and assert the mock is actually called, instead of relying
+        on "nonexistent" coincidentally having no real DB row.
+        """
         # Setup authentication for admin
         mock_jwt_manager.validate_token.return_value = {
             "username": "admin",
@@ -1146,15 +1194,17 @@ class TestChangePasswordEndpoints:
         )
         mock_dep_user_manager.get_user.return_value = admin_user
 
-        # Mock user doesn't exist
-        mock_app_user_manager.change_password.return_value = False
+        with patch.object(
+            client.app.state.user_manager, "change_password", return_value=False
+        ) as mock_change_password:
+            headers = {"Authorization": "Bearer admin.jwt.token"}
+            response = client.put(
+                "/api/admin/users/nonexistent/change-password",
+                headers=headers,
+                json={"old_password": "unused", "new_password": "ValidPass123!"},
+            )
 
-        headers = {"Authorization": "Bearer admin.jwt.token"}
-        response = client.put(
-            "/api/admin/users/nonexistent/change-password",
-            headers=headers,
-            json={"old_password": "unused", "new_password": "ValidPass123!"},
-        )
+        mock_change_password.assert_called_once_with("nonexistent", "ValidPass123!")
 
         assert response.status_code == 404
         response_data = response.json()
