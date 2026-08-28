@@ -106,7 +106,8 @@ def _rust_env(tmp_path: Path) -> Iterator[MagicMock]:
 
 @contextmanager
 def _all_steps_except_rust(executor: DeploymentExecutor) -> Iterator[None]:
-    """Context manager that mocks all execute() steps except _ensure_rust_toolchain."""
+    """Context manager that mocks the execute() steps this file's tests must
+    isolate, except _ensure_rust_toolchain."""
     with (
         patch.object(executor, "_calculate_auto_update_hash", return_value="hash"),
         patch.object(executor, "git_pull", return_value=True),
@@ -122,6 +123,11 @@ def _all_steps_except_rust(executor: DeploymentExecutor) -> Iterator[None]:
         # for real.
         patch.object(executor, "_build_hnswlib_with_fallback", return_value=True),
         patch.object(executor, "pip_install", return_value=True),
+        # Bug #1715: same real-subprocess defect class as the
+        # _build_hnswlib_with_fallback note above -- with a fake/temp
+        # repo_path, the unmocked branch of _ensure_cli_dependencies_synced
+        # does a real `pip install -e .`.
+        patch.object(executor, "_ensure_cli_dependencies_synced", return_value=True),
         patch.object(executor, "ensure_ripgrep", return_value=True),
         patch.object(executor, "_ensure_sudoers_restart", return_value=True),
         patch.object(executor, "_ensure_memory_overcommit", return_value=True),
