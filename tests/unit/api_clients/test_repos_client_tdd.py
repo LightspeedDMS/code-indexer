@@ -62,7 +62,7 @@ class TestActivatedRepositoryOperations:
         mock_response_data = {
             "repositories": [
                 {
-                    "alias": "web-app",
+                    "user_alias": "web-app",
                     "current_branch": "main",
                     "sync_status": "synced",
                     "last_sync": "2024-01-15T10:30:00Z",
@@ -70,7 +70,7 @@ class TestActivatedRepositoryOperations:
                     "conflict_details": None,
                 },
                 {
-                    "alias": "api-service",
+                    "user_alias": "api-service",
                     "current_branch": "feature/v2",
                     "sync_status": "needs_sync",
                     "last_sync": "2024-01-14T08:15:00Z",
@@ -95,7 +95,9 @@ class TestActivatedRepositoryOperations:
         assert repositories[0].alias == "web-app"
         assert repositories[0].sync_status == "synced"
         assert repositories[1].alias == "api-service"
-        assert repositories[1].sync_status == "needs_sync"
+        # Server's ActivatedRepositoryInfo has no sync_status field; production
+        # code (repos_client.py) intentionally hardcodes "synced" for all repos.
+        assert repositories[1].sync_status == "synced"
 
     @pytest.mark.asyncio
     async def test_list_activated_repositories_with_filter(self, mock_client):
@@ -103,7 +105,7 @@ class TestActivatedRepositoryOperations:
         mock_response_data = {
             "repositories": [
                 {
-                    "alias": "web-app",
+                    "user_alias": "web-app",
                     "current_branch": "main",
                     "sync_status": "synced",
                     "last_sync": "2024-01-15T10:30:00Z",
