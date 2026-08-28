@@ -197,9 +197,7 @@ class TestCIDXRemoteAPIClientRealRequests:
     @pytest.mark.asyncio
     async def test_real_authenticated_get_request(self, authenticated_api_client):
         """Test real authenticated GET request."""
-        response = authenticated_api_client._authenticated_request(
-            "GET", "/api/repositories"
-        )
+        response = authenticated_api_client._authenticated_request("GET", "/api/repos")
 
         assert response.status_code == 200
         data = response.json()
@@ -608,9 +606,7 @@ class TestRealEndToEndIntegration:
                 assert token is not None
 
                 # 2. Real repository listing
-                repos_response = client._authenticated_request(
-                    "GET", "/api/repositories"
-                )
+                repos_response = client._authenticated_request("GET", "/api/repos")
                 assert repos_response.status_code == 200
                 repos_data = repos_response.json()
                 assert len(repos_data["repositories"]) == 1
