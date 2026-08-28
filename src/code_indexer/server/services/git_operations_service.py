@@ -3116,6 +3116,30 @@ def __getattr__(name: str) -> Any:
     The entire read (init-if-needed + globals()/_lazy_values lookup) runs
     under `_lazy_init_lock` so a concurrent reader on another thread never
     observes `_initialized`/`_lazy_values` mid-mutation.
+
+    Issue #1659 hazard note -- this mechanism makes hasattr()/getattr()/
+    delattr() semantically misleading against this module for any name in
+    _LAZY_INIT_ATTRS:
+
+      * hasattr(module, name) for any name in _LAZY_INIT_ATTRS always
+        returns True, even before real construction has happened, because
+        this __getattr__ synthesizes the value on demand instead of
+        raising.
+      * getattr(module, name, default) -- even one written defensively,
+        expecting the attribute might legitimately be absent -- triggers
+        full lazy construction as a side effect on first access (a real
+        GitOperationsService construction), which a caller expecting a
+        cheap read-only probe almost certainly does not want.
+      * delattr(module, name) bypasses this __getattr__ entirely (PEP 562
+        defines no __delattr__ hook, so it is plain __dict__ removal) and
+        can raise AttributeError even though hasattr() just reported the
+        attribute exists (concrete breakage: issue #1658, caused by the
+        _lazy_values snapshot fallback above keeping hasattr()/getattr()
+        resolving a name whose real __dict__ entry is already gone).
+
+      A caller that needs a genuinely side-effect-free existence check
+      should inspect _initialized/_lazy_values directly instead of calling
+      hasattr()/getattr() on this module.
     """
     if name not in _LAZY_INIT_ATTRS:
         raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
