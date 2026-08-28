@@ -10,7 +10,7 @@ import socket
 import threading
 import time
 from datetime import datetime, timedelta, timezone
-from typing import Dict, Any, Optional, List, cast
+from typing import Dict, Any, Optional, List, Set, cast
 from dataclasses import dataclass, asdict
 
 import jwt
@@ -120,6 +120,20 @@ class QueryRequest(BaseModel):
     min_score: float = Field(default=0.0, ge=0.0, le=1.0)
     language: Optional[str] = None
     path_filter: Optional[str] = None
+
+
+class ElevateRequest(BaseModel):
+    """Elevate session request model (Bug #1737).
+
+    Minimal mirror of the real production model's shape
+    (server/auth/elevation_routes.py's ElevateRequest field name,
+    ``totp_code``). Deliberately does NOT verify the code -- this fake has
+    no TOTP/MFA simulation infrastructure; per Bug #1737's scope, any
+    well-formed elevate call for a valid bearer token succeeds, which is
+    enough to exercise the client-side 403-then-retry contract shape.
+    """
+
+    totp_code: Optional[str] = None
 
 
 class CreateUserRequest(BaseModel):
@@ -241,6 +255,24 @@ class TestCIDXServer:
         self.should_simulate_timeout = False
         self.error_endpoints: List[str] = []
 
+        # Bug #1737: opt-in TOTP elevation simulation toggle. Defaults to
+        # False (current behavior -- role-only gating), so the 12+ existing
+        # consumer files of this fake server are entirely unaffected. When a
+        # test flips this to True, _create_user and _change_user_password
+        # (the two routes the real server gates with
+        # dependencies.require_elevation() in inline_admin_users.py) return
+        # 403 {"error": "elevation_required"} on any request whose bearer
+        # token has not yet completed a round trip through the fake's new
+        # POST /auth/elevate route -- just enough of the real 403-then-retry
+        # contract shape (see server/auth/dependencies.py's
+        # _elevation_required_exc) to exercise admin_client.py's
+        # _check_elevation_required/ElevationRequiredError handling and the
+        # CLI's with_elevation_retry single-retry wrapper for real. No TOTP
+        # code verification is simulated -- any well-formed /auth/elevate
+        # call for a valid bearer token succeeds.
+        self.simulate_elevation_required = False
+        self._elevated_tokens: Set[str] = set()
+
     def _create_app(self) -> FastAPI:
         """Create FastAPI application with real endpoints."""
         app = FastAPI(title="Test CIDX Server", version="1.0.0")
@@ -248,6 +280,12 @@ class TestCIDXServer:
         # Authentication endpoints
         app.post("/auth/login")(self._login)
         app.post("/auth/refresh")(self._refresh_token)
+        # Bug #1737: matches the real production route registered in
+        # server/auth/elevation_routes.py ("POST /auth/elevate"). Only
+        # meaningful when self.simulate_elevation_required is True; see
+        # _elevate_session for the (deliberately code-verification-free)
+        # fake elevation semantics.
+        app.post("/auth/elevate")(self._elevate_session)
 
         # Repository endpoints
         # NOTE: real production server registers this list endpoint at
@@ -888,6 +926,53 @@ class TestCIDXServer:
         self._require_admin_user(current_user)
         return cast(Dict[str, Any], current_user)
 
+    def _check_elevation_gate(self, credentials: HTTPAuthorizationCredentials) -> None:
+        """Raise 403 elevation_required when the elevation toggle is on
+        and this bearer token has not completed the fake elevate round trip.
+
+        Bug #1737. Mirrors server/auth/dependencies.py's
+        _elevation_required_exc response shape (403,
+        detail={"error": "elevation_required", ...}) closely enough for
+        admin_client.py's _check_elevation_required() to recognize it.
+        Called AFTER the admin-role check in each gated handler, matching
+        the real dependency chain order documented on require_elevation()
+        ("Chains after get_current_admin_user_hybrid").
+
+        No-op (returns immediately) when self.simulate_elevation_required
+        is False -- the default, preserving every existing consumer's
+        role-only-gated behavior.
+        """
+        if not self.simulate_elevation_required:
+            return
+        if credentials.credentials in self._elevated_tokens:
+            return
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "error": "elevation_required",
+                "message": "TOTP elevation required for this operation.",
+            },
+        )
+
+    async def _elevate_session(
+        self,
+        elevate_request: ElevateRequest,
+        credentials: HTTPAuthorizationCredentials = Depends(HTTPBearer()),
+    ):
+        """Fake TOTP elevation (Bug #1737).
+
+        Deliberately does NOT verify ``elevate_request.totp_code`` -- this
+        fake has no TOTP/MFA simulation infrastructure (see
+        AdminChangePasswordRequest's docstring for the original rationale
+        this bug follows up on). Any well-formed elevate call for a valid,
+        currently-active bearer token marks that token elevated, matching
+        just enough of the real POST /auth/elevate contract (200 on
+        success) for elevation.py's elevate() to proceed and retry.
+        """
+        self._verify_jwt_token(credentials.credentials)
+        self._elevated_tokens.add(credentials.credentials)
+        return {"message": "Elevated successfully"}
+
     # Admin User Management Endpoints
 
     async def _create_user(
@@ -905,6 +990,8 @@ class TestCIDXServer:
         self._verify_jwt_token(credentials.credentials)
         current_user = self.active_tokens[credentials.credentials]["user_data"]
         self._require_admin_user(current_user)
+        # Bug #1737: no-op unless self.simulate_elevation_required is True.
+        self._check_elevation_gate(credentials)
 
         username = user_request.username
         if username in self.users:
@@ -1067,6 +1154,8 @@ class TestCIDXServer:
         self._verify_jwt_token(credentials.credentials)
         current_user = self.active_tokens[credentials.credentials]["user_data"]
         self._require_admin_user(current_user)
+        # Bug #1737: no-op unless self.simulate_elevation_required is True.
+        self._check_elevation_gate(credentials)
 
         if username not in self.users:
             raise HTTPException(status_code=404, detail=f"User '{username}' not found")
