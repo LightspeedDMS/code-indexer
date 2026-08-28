@@ -17,6 +17,7 @@ which patches sibling _ensure_* methods to isolate the step under test.
 """
 
 import logging
+import os
 import subprocess
 from contextlib import contextmanager
 from pathlib import Path
@@ -143,12 +144,14 @@ def _patch_execute_siblings(executor, *, claude_side_effect=None):
         # execute() with NO internal guard at all (the very first thing
         # execute() does) and performs a real mkdir(parents=True,
         # exist_ok=True) on the live filesystem every test run. Its return
-        # value is only ever assigned into os.environ["TMPDIR"] in this
-        # test's fully-mocked execute() run (no real subprocess in these
-        # scenarios reads it back), so a plain synthetic sentinel string is
-        # used here -- mirroring the "abc123" sentinel already used above
-        # for _calculate_auto_update_hash -- rather than a real filesystem
-        # path.
+        # value is assigned by execute() into the PROCESS-GLOBAL
+        # os.environ["TMPDIR"] (nothing else reads it back in these fully
+        # mocked scenarios), so a plain synthetic sentinel string is used
+        # here -- mirroring the "abc123" sentinel already used above for
+        # _calculate_auto_update_hash -- and the patch.dict(os.environ)
+        # entry below restores the real environment on exit so this
+        # sentinel never leaks into a later test in the same pytest
+        # process.
         # _ensure_golden_repos_symlink_for_cow_daemon and
         # _ensure_cow_storage_mount_options share the identical
         # clone_backend != "cow-daemon" accidental short-circuit as the two
@@ -160,6 +163,38 @@ def _patch_execute_siblings(executor, *, claude_side_effect=None):
             executor, "_ensure_golden_repos_symlink_for_cow_daemon", return_value=True
         ),
         patch.object(executor, "_ensure_cow_storage_mount_options", return_value=True),
+        # Code review fix (935dfaa4 REQUIRED FIX 1): _ensure_cli_hnswlib_capability
+        # was previously left unguarded on the mistaken belief that the
+        # tests' own shutil.which patches cover it the same way they cover
+        # ensure_scip_python. They do NOT: _get_cli_python_interpreter()
+        # (deployment_executor.py:1245) proceeds past shutil.which("cidx")
+        # to a real Path(cidx_bin).read_text() call regardless of what
+        # shutil.which returns, and on a host where /usr/bin/cidx genuinely
+        # exists (a plausible layout for a root-level pip install or a CI
+        # container -- just not this dev machine, where the real cidx is at
+        # ~/.local/bin/cidx) this reaches a real subprocess.run call that
+        # would consume test_execute_continues_when_ensure_codex_fails's
+        # single-element subprocess.run side_effect list meant for a
+        # different call site, crashing with StopIteration. Guarding this
+        # explicitly removes the accidental, machine-state-dependent safety
+        # this exact method previously relied on.
+        patch.object(executor, "_ensure_cli_hnswlib_capability", return_value=True),
+        # Optional consistency fix noted in code review: _write_status_file
+        # shares the identical dead-branch gate (_calculate_auto_update_hash
+        # patched to a constant above) as _restart_auto_update_service,
+        # which is already guarded above for explicit-isolation-discipline
+        # consistency -- guarded here for the same reason.
+        patch.object(executor, "_write_status_file", return_value=None),
+        # Code review fix (935dfaa4 REQUIRED FIX 2): execute() assigns
+        # _deploy_tmpdir()'s return value into the PROCESS-GLOBAL
+        # os.environ["TMPDIR"] with nothing restoring it afterward.
+        # patch.dict(os.environ) snapshots the real environment on enter
+        # and restores it verbatim on exit, so this test's sentinel value
+        # can never leak into a later test in the same pytest process
+        # (relevant under pytest-randomly reordering, and for any later
+        # test that spawns a subprocess trusting TMPDIR -- pip, npm, git,
+        # cargo, ripgrep).
+        patch.dict(os.environ),
     ]
     with ExitStack() as stack:
         for p in patches:
