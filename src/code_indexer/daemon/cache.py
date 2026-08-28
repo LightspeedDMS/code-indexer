@@ -69,6 +69,12 @@ class CacheEntry:
         hnsw_index: HNSW index for semantic search (None if not loaded)
         id_mapping: Mapping from point IDs to file paths (None if not loaded)
         collection_name: Name of the loaded collection (None if not loaded)
+        hnsw_cache_key: Bug #1730 -- the EXACT cache key
+            FilesystemVectorStore.search() would key this collection's HNSW
+            entry under (via hnsw_cache_key_for_collection()). Lets
+            DaemonHNSWCacheAdapter defensively verify a query's cache_key
+            actually matches the cached collection before trusting it
+            (None if not loaded).
         vector_dim: Vector dimension of the loaded collection (1536 default)
         tantivy_index: Tantivy FTS index (None if not loaded)
         tantivy_searcher: Tantivy searcher instance (None if not loaded)
@@ -93,6 +99,7 @@ class CacheEntry:
         self.hnsw_index: Optional[Any] = None
         self.id_mapping: Optional[Dict[str, Any]] = None
         self.collection_name: Optional[str] = None
+        self.hnsw_cache_key: Optional[str] = None
         self.vector_dim: int = 1536
 
         # FTS indexes
@@ -174,15 +181,25 @@ class CacheEntry:
                 del self.query_cache[query_key]
         return None
 
-    def set_semantic_indexes(self, hnsw_index: Any, id_mapping: Dict[str, Any]) -> None:
+    def set_semantic_indexes(
+        self,
+        hnsw_index: Any,
+        id_mapping: Dict[str, Any],
+        hnsw_cache_key: Optional[str] = None,
+    ) -> None:
         """Set semantic search indexes.
 
         Args:
             hnsw_index: HNSW index for vector search
             id_mapping: Mapping from point IDs to file paths
+            hnsw_cache_key: Bug #1730 -- the exact cache key this
+                collection was cached under (see class docstring). None
+                (default) preserves the pre-#1730 call shape for any
+                caller that has not been updated to pass it.
         """
         self.hnsw_index = hnsw_index
         self.id_mapping = id_mapping
+        self.hnsw_cache_key = hnsw_cache_key
 
     def set_fts_indexes(self, tantivy_index: Any, tantivy_searcher: Any) -> None:
         """Set FTS indexes.
@@ -209,6 +226,7 @@ class CacheEntry:
         self.hnsw_index = None
         self.id_mapping = None
         self.collection_name = None
+        self.hnsw_cache_key = None
         self.vector_dim = 1536  # Reset to default
         self.tantivy_index = None
         self.tantivy_searcher = None
@@ -297,19 +315,31 @@ class DaemonHNSWCacheAdapter:
     ``server.cache.hnsw_index_cache.HNSWIndexCache`` -- was considered and
     rejected: any non-None ``hnsw_index_cache`` also flips several unrelated
     "are we the server" branches in
-    ``FilesystemBackend.get_vector_store_client()`` (id_index_cache /
-    collection_meta_cache / chunk_store_cache global singletons, Postgres-
-    storage-mode probes), which transitively import the entire FastAPI/
-    Starlette server stack into the lightweight CLI daemon process on every
-    query (confirmed via direct import measurement: ~790 extra modules).
+    ``FilesystemBackend.get_vector_store_client()`` (injecting global
+    id_index_cache/collection_meta_cache/chunk_store_cache singletons and
+    running Postgres-storage-mode probes) that only make sense for a real
+    multi-worker server process sharing caches across many concurrent
+    requests -- semantics this single-project CLI daemon was never designed
+    to run under, independent of raw import cost.
 
     This adapter does no caching or eviction of its own -- the daemon's own
     CacheEntry (with its TTL and rebuild-version invalidation; see
     ``_ensure_cache_loaded``) is the single source of truth for the loaded
-    index. It is a pure pass-through: if the entry already has an index
-    loaded, hand it straight to the caller; otherwise (e.g. the initial
-    load genuinely failed) fall back to running the supplied loader,
-    matching the pre-existing uncached "load directly" behavior exactly.
+    index.
+
+    Correctness-critical (Bug #1730 code-review remediation): the daemon
+    caches AT MOST one collection at a time, but a project can have
+    MULTIPLE collections on disk simultaneously (a switched embedding
+    model, temporal shards, ...). ``_execute_semantic_search`` gates the
+    fast path on ``cache_entry.collection_name`` matching the query's own
+    resolved collection before ever constructing this adapter -- but
+    ``get_or_load`` ALSO independently verifies the ``cache_key`` it is
+    handed against the key the cached collection was actually stored under
+    (``cache_entry.hnsw_cache_key``, computed via
+    ``FilesystemVectorStore.hnsw_cache_key_for_collection()`` at load
+    time). A mismatch always falls through to ``loader()`` -- there is no
+    code path where a stale or wrong-collection graph can be served
+    silently, even if the gating in ``_execute_semantic_search`` has a bug.
     """
 
     def __init__(self, cache_entry: CacheEntry) -> None:
@@ -321,8 +351,16 @@ class DaemonHNSWCacheAdapter:
         loader: Any,
         index_file: Optional[Path] = None,
     ) -> Any:
-        """Return the cached (hnsw_index, id_mapping) pair, or run loader."""
-        if self._cache_entry.hnsw_index is not None:
+        """Return the cached (hnsw_index, id_mapping) pair ONLY when
+        cache_key matches the key the cached collection was actually
+        stored under; otherwise run loader() (the real, correct
+        disk-loading fallback -- never a silently wrong-collection graph).
+        """
+        if (
+            self._cache_entry.hnsw_index is not None
+            and self._cache_entry.hnsw_cache_key is not None
+            and self._cache_entry.hnsw_cache_key == cache_key
+        ):
             return self._cache_entry.hnsw_index, self._cache_entry.id_mapping
         return loader()
 
