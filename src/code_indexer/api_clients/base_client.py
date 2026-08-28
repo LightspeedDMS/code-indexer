@@ -894,6 +894,30 @@ class CIDXRemoteAPIClient:
         """Context manager exit."""
         self.close()
 
+    async def __aenter__(self):
+        """Async context manager entry.
+
+        This client's HTTP session (`httpx.Client`) and every request method
+        on this class are synchronous by design (thread-lock-based auth
+        guarding, see `_auth_lock`) -- there is no `httpx.AsyncClient` to
+        stand up. Async context-manager support exists purely so callers
+        (and tests) can structure `async with ClientClass(...) as client:`
+        around a client whose individual method calls remain synchronous,
+        matching every other sync method on this class already being
+        invoked without `await` from inside `async def` test functions.
+        """
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        """Async context manager exit.
+
+        Delegates to the same synchronous `close()` used by `__exit__`.
+        `close()` only closes a local connection pool and zeroes an
+        in-memory token -- fast, non-blocking, safe to call directly from
+        async context without `anyio.to_thread.run_sync`.
+        """
+        self.close()
+
     def __del__(self):
         """Cleanup when object is destroyed."""
         if self._session and not self._session.is_closed:

@@ -665,9 +665,10 @@ class TestRealRepositoryLinkingClientResourceManagement:
             assert hasattr(client2, "discover_repositories")
 
         finally:
-            # Real cleanup of both clients
-            await client1.close()
-            await client2.close()
+            # Real cleanup of both clients. close() is synchronous (not a
+            # coroutine) on CIDXRemoteAPIClient/RepositoryLinkingClient.
+            client1.close()
+            client2.close()
 
     @pytest.mark.asyncio
     async def test_real_concurrent_client_operations(self, test_credentials):
