@@ -4,10 +4,10 @@ Tests comprehensive timeout handling including job cancellation, progress callba
 and cleanup of partial operations.
 """
 
-import asyncio
+import time
 import pytest
 from pathlib import Path
-from unittest.mock import Mock, AsyncMock, patch
+from unittest.mock import Mock, MagicMock, patch
 
 from code_indexer.remote.polling import (
     JobPollingEngine,
@@ -26,7 +26,7 @@ class TestJobPollingEngineTimeout:
     def mock_api_client(self):
         """Create mock API client."""
         client = Mock(spec=CIDXRemoteAPIClient)
-        client.get_job_status = AsyncMock()
+        client.get_job_status = Mock()
         return client
 
     @pytest.fixture
@@ -53,8 +53,7 @@ class TestJobPollingEngineTimeout:
             config=timeout_config,
         )
 
-    @pytest.mark.asyncio
-    async def test_timeout_during_polling_raises_timeout_error(
+    def test_timeout_during_polling_raises_timeout_error(
         self, polling_engine, mock_api_client
     ):
         """Test that polling times out and raises JobTimeoutError."""
@@ -71,7 +70,7 @@ class TestJobPollingEngineTimeout:
 
         # Execute: Start polling with timeout
         with pytest.raises(JobTimeoutError) as exc_info:
-            await polling_engine.start_polling("test-job-123")
+            polling_engine.start_polling("test-job-123")
 
         # Verify: Timeout error contains expected message
         assert "timed out after 2.0 seconds" in str(exc_info.value)
@@ -79,8 +78,7 @@ class TestJobPollingEngineTimeout:
         # Verify: Progress callback was called during polling
         assert polling_engine.progress_callback.call_count > 0
 
-    @pytest.mark.asyncio
-    async def test_timeout_countdown_progress_updates(
+    def test_timeout_countdown_progress_updates(
         self, polling_engine, mock_api_client, progress_callback
     ):
         """Test that progress callbacks show remaining time during timeout countdown."""
@@ -102,7 +100,7 @@ class TestJobPollingEngineTimeout:
 
         # Execute: Start polling that will timeout
         with pytest.raises(JobTimeoutError):
-            await polling_engine.start_polling("test-job-123")
+            polling_engine.start_polling("test-job-123")
 
         # Verify: Progress callback received multiple updates
         assert progress_callback.call_count >= 2
@@ -120,10 +118,7 @@ class TestJobPollingEngineTimeout:
                 keyword in info.lower() for keyword in ["files", "emb/s", "indexing"]
             )
 
-    @pytest.mark.asyncio
-    async def test_timeout_during_different_job_phases(
-        self, polling_engine, mock_api_client
-    ):
+    def test_timeout_during_different_job_phases(self, polling_engine, mock_api_client):
         """Test timeout behavior during different job phases."""
         job_phases = ["setup", "git_pull", "indexing", "validation"]
 
@@ -140,14 +135,13 @@ class TestJobPollingEngineTimeout:
 
             # Test timeout in this phase
             with pytest.raises(JobTimeoutError) as exc_info:
-                await polling_engine.start_polling(f"test-job-{phase}")
+                polling_engine.start_polling(f"test-job-{phase}")
 
             # Verify error message mentions timeout
             assert "timed out" in str(exc_info.value)
             assert "2.0 seconds" in str(exc_info.value)
 
-    @pytest.mark.asyncio
-    async def test_successful_completion_before_timeout(
+    def test_successful_completion_before_timeout(
         self, polling_engine, mock_api_client
     ):
         """Test that job completion before timeout works normally."""
@@ -171,16 +165,13 @@ class TestJobPollingEngineTimeout:
         mock_api_client.get_job_status.side_effect = iter(mock_responses)
 
         # Execute: Start polling
-        result = await polling_engine.start_polling("test-job-123")
+        result = polling_engine.start_polling("test-job-123")
 
         # Verify: Job completed successfully
         assert result.status == "completed"
         assert result.message == "Sync completed successfully"
 
-    @pytest.mark.asyncio
-    async def test_custom_timeout_configuration(
-        self, mock_api_client, progress_callback
-    ):
+    def test_custom_timeout_configuration(self, mock_api_client, progress_callback):
         """Test polling with custom timeout configuration."""
         # Create engine with longer timeout
         long_timeout_config = PollingConfig(
@@ -205,14 +196,14 @@ class TestJobPollingEngineTimeout:
         }
 
         # Start time tracking
-        start_time = asyncio.get_event_loop().time()
+        start_time = time.time()
 
         # Execute: Should timeout after ~5 seconds
         with pytest.raises(JobTimeoutError):
-            await engine.start_polling("test-job-123")
+            engine.start_polling("test-job-123")
 
         # Verify: Timeout occurred after approximately the configured time
-        elapsed_time = asyncio.get_event_loop().time() - start_time
+        elapsed_time = time.time() - start_time
         assert 4.8 <= elapsed_time <= 5.5  # Allow some variance for test execution
 
 
@@ -360,8 +351,7 @@ class TestTimeoutConfiguration:
 
         assert config.timeout == 600.0
 
-    @pytest.mark.asyncio
-    async def test_execute_repository_sync_with_timeout(self):
+    def test_execute_repository_sync_with_timeout(self):
         """Test execute_repository_sync respects timeout parameter."""
         project_root = Path("/tmp/test-project")
 
@@ -386,7 +376,7 @@ class TestTimeoutConfiguration:
             with patch(
                 "code_indexer.remote.sync_execution.SyncClient"
             ) as mock_client_class:
-                mock_client = AsyncMock()
+                mock_client = MagicMock()
                 mock_client_class.return_value = mock_client
 
                 # Mock sync_repository to return a job result
@@ -403,7 +393,7 @@ class TestTimeoutConfiguration:
                 ) as mock_poll:
                     # Execute with custom timeout
                     custom_timeout = 450
-                    await execute_repository_sync(
+                    execute_repository_sync(
                         repository_alias=None,
                         project_root=project_root,
                         timeout=custom_timeout,
@@ -425,12 +415,11 @@ class TestTimeoutConfiguration:
 class TestTimeoutErrorMessagesAndRecovery:
     """Test timeout error messages and recovery suggestions."""
 
-    @pytest.mark.asyncio
-    async def test_timeout_error_contains_recovery_suggestions(self):
+    def test_timeout_error_contains_recovery_suggestions(self):
         """Test that timeout errors provide helpful recovery suggestions."""
         # Create engine with short timeout
         mock_client = Mock(spec=CIDXRemoteAPIClient)
-        mock_client.get_job_status = AsyncMock(
+        mock_client.get_job_status = Mock(
             return_value={
                 "job_id": "test-job-123",
                 "status": "running",
@@ -449,18 +438,17 @@ class TestTimeoutErrorMessagesAndRecovery:
 
         # Execute and catch timeout error
         with pytest.raises(JobTimeoutError) as exc_info:
-            await engine.start_polling("test-job-123")
+            engine.start_polling("test-job-123")
 
         # Verify error message structure
         error_message = str(exc_info.value)
         assert "timed out after 1.0 seconds" in error_message
         assert "test-job-123" in error_message or "Job polling" in error_message
 
-    @pytest.mark.asyncio
-    async def test_partial_operation_cleanup_on_timeout(self):
+    def test_partial_operation_cleanup_on_timeout(self):
         """Test that partial operations are cleaned up when timeout occurs."""
         mock_client = Mock(spec=CIDXRemoteAPIClient)
-        mock_client.get_job_status = AsyncMock(
+        mock_client.get_job_status = Mock(
             return_value={
                 "job_id": "test-job-123",
                 "status": "running",
@@ -483,7 +471,7 @@ class TestTimeoutErrorMessagesAndRecovery:
 
         # Execute and timeout
         with pytest.raises(JobTimeoutError):
-            await engine.start_polling("test-job-123")
+            engine.start_polling("test-job-123")
 
         # Verify cleanup occurred
         assert not engine.is_polling
@@ -505,8 +493,7 @@ class TestTimeoutErrorMessagesAndRecovery:
 class TestIntegrationTimeoutScenarios:
     """Integration tests for timeout scenarios across components."""
 
-    @pytest.mark.asyncio
-    async def test_end_to_end_timeout_scenario(self, tmp_path):
+    def test_end_to_end_timeout_scenario(self, tmp_path):
         """Test complete timeout scenario from CLI to job cancellation."""
         # This test would require significant mocking but demonstrates
         # the integration pattern for timeout handling
@@ -530,7 +517,7 @@ class TestIntegrationTimeoutScenarios:
             with patch(
                 "code_indexer.remote.sync_execution.SyncClient"
             ) as mock_client_class:
-                mock_client = AsyncMock()
+                mock_client = MagicMock()
                 mock_client_class.return_value = mock_client
 
                 # Setup job that will timeout
@@ -558,7 +545,7 @@ class TestIntegrationTimeoutScenarios:
 
                 # This should timeout and demonstrate the full flow
                 try:
-                    await execute_repository_sync(
+                    execute_repository_sync(
                         repository_alias="test-repo",
                         project_root=tmp_path,
                         timeout=1,  # Very short timeout

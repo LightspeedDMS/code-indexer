@@ -5,7 +5,7 @@ branch ancestry prioritization, and fallback repository matching functionality.
 """
 
 import pytest
-from unittest.mock import Mock, AsyncMock
+from unittest.mock import Mock, MagicMock
 
 from code_indexer.remote.repository_linking import (
     ExactBranchMatcher,
@@ -28,7 +28,7 @@ class TestBranchFallbackMatcher:
     def mock_repository_linking_client(self):
         """Create mock repository linking client."""
         client = Mock(spec=RepositoryLinkingClient)
-        client.discover_repositories = AsyncMock()
+        client.discover_repositories = MagicMock()
         client.server_url = "https://cidx.example.com"
         return client
 
@@ -112,8 +112,7 @@ class TestBranchFallbackMatcher:
 
         return tmp_path
 
-    @pytest.mark.asyncio
-    async def test_fallback_to_main_branch_when_exact_match_fails(
+    def test_fallback_to_main_branch_when_exact_match_fails(
         self,
         exact_branch_matcher,
         complex_git_repo,
@@ -146,7 +145,7 @@ class TestBranchFallbackMatcher:
         )
 
         # Execute the method
-        result = await exact_branch_matcher.find_exact_branch_match(
+        result = exact_branch_matcher.find_exact_branch_match(
             complex_git_repo, "https://github.com/company/auth-service.git"
         )
 
@@ -383,7 +382,7 @@ class TestFallbackIntegrationScenarios:
     def mock_repository_linking_client(self):
         """Create mock repository linking client."""
         client = Mock(spec=RepositoryLinkingClient)
-        client.discover_repositories = AsyncMock()
+        client.discover_repositories = MagicMock()
         client.server_url = "https://cidx.example.com"
         return client
 
@@ -415,8 +414,7 @@ class TestFallbackIntegrationScenarios:
             ),
         ]
 
-    @pytest.mark.asyncio
-    async def test_fallback_integration_scenario_not_implemented_yet(
+    def test_fallback_integration_scenario_not_implemented_yet(
         self,
         mock_repository_linking_client,
         tmp_path,
@@ -448,7 +446,7 @@ class TestFallbackIntegrationScenarios:
         )
 
         # Execute the method - should return None until fallback is implemented
-        result = await exact_branch_matcher.find_exact_branch_match(  # type: ignore[misc]
+        result = exact_branch_matcher.find_exact_branch_match(  # type: ignore[misc]
             tmp_path, "https://github.com/company/auth-service.git"
         )
 
