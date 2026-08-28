@@ -335,6 +335,11 @@ class TestExecuteStep3DeployMode:
             _patch.object(executor, "_ensure_claude_cli_updated", return_value=True),
             _patch.object(executor, "_ensure_pace_maker_installed", return_value=True),
             _patch.object(executor, "_ensure_rust_toolchain", return_value=True),
+            # Bug #1722: _ensure_cli_dependencies_synced performs a real
+            # `pip install -e .` subprocess call when left unpatched.
+            _patch.object(
+                executor, "_ensure_cli_dependencies_synced", return_value=True
+            ),
         ]
 
         with ExitStack() as stack:

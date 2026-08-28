@@ -662,6 +662,11 @@ class TestExecuteWiresEnsureNodejsBeforeNpmConsumers:
             # unwanted real npm/git side effects on the host running the test.
             patch.object(executor, "_ensure_claude_cli_updated", return_value=True),
             patch.object(executor, "_ensure_pace_maker_installed", return_value=True),
+            # Bug #1722: _ensure_cli_dependencies_synced performs a real
+            # `pip install -e .` subprocess call when left unpatched.
+            patch.object(
+                executor, "_ensure_cli_dependencies_synced", return_value=True
+            ),
             patch.object(
                 executor, "ensure_nodejs", side_effect=record("ensure_nodejs")
             ),
