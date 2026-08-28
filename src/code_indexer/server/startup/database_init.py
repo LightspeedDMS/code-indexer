@@ -113,7 +113,7 @@ def initialize_scip_audit_database(server_data_dir: str) -> Optional[Path]:
                 "MCP-GENERAL-196",
                 f"Failed to initialize SCIP audit database: {e}",
                 exc_info=True,
-                extra={"server_data_dir": server_data_dir},
+                server_data_dir=server_data_dir,
             )
         )
         return None
