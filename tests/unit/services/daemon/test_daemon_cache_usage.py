@@ -28,6 +28,17 @@ class TestDaemonCacheUsage:
         code_indexer_dir = project_path / ".code-indexer"
         code_indexer_dir.mkdir()
 
+        # Bug #1718: _execute_semantic_search verifies project_path's OWN
+        # config via ConfigManager.load_verified_config() before doing
+        # anything else -- without a genuine config.json here, that call
+        # raises ConfigVerificationError and the method returns early,
+        # never reaching the cache-bypass code path this test exercises.
+        from code_indexer.config import ConfigManager
+
+        ConfigManager(code_indexer_dir / "config.json").create_default_config(
+            codebase_dir=project_path
+        )
+
         # Create index directory with collection
         index_dir = code_indexer_dir / "index"
         index_dir.mkdir()

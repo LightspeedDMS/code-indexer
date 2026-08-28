@@ -27,9 +27,27 @@ def mock_chunker():
     chunker = Mock()
     # Return 3 chunks with predictable content
     chunker.chunk_file.return_value = [
-        {"text": "chunk_1_content", "line_start": 1, "line_end": 5},
-        {"text": "chunk_2_content", "line_start": 6, "line_end": 10},
-        {"text": "chunk_3_content", "line_start": 11, "line_end": 15},
+        {
+            "text": "chunk_1_content",
+            "line_start": 1,
+            "line_end": 5,
+            "chunk_index": 0,
+            "total_chunks": 3,
+        },
+        {
+            "text": "chunk_2_content",
+            "line_start": 6,
+            "line_end": 10,
+            "chunk_index": 1,
+            "total_chunks": 3,
+        },
+        {
+            "text": "chunk_3_content",
+            "line_start": 11,
+            "line_end": 15,
+            "chunk_index": 2,
+            "total_chunks": 3,
+        },
     ]
     return chunker
 
@@ -410,6 +428,8 @@ class TestFileChunkBatchingOptimization:
                 "text": f"chunk_{i}_content",
                 "line_start": i * 10,
                 "line_end": (i * 10) + 5,
+                "chunk_index": i,
+                "total_chunks": 10,
             }
             for i in range(10)  # 10 chunks = 10x reduction
         ]
@@ -521,7 +541,13 @@ class TestBatchProcessingEdgeCases:
         # Configure single chunk
         mock_chunker = file_chunking_manager.chunker
         mock_chunker.chunk_file.return_value = [
-            {"text": "single_chunk", "line_start": 1, "line_end": 5}
+            {
+                "text": "single_chunk",
+                "line_start": 1,
+                "line_end": 5,
+                "chunk_index": 0,
+                "total_chunks": 1,
+            }
         ]
 
         # Configure batch response for single chunk
