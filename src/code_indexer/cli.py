@@ -5458,6 +5458,35 @@ def _annotate_staleness(
         "Only meaningful when --rerank-query is also provided."
     ),
 )
+@click.option(
+    "--strategy",
+    type=click.Choice(["primary_only", "failover", "parallel", "specific"]),
+    default=None,
+    help=(
+        "Multi-provider query routing strategy (Story #488 Phase 2): "
+        "primary_only (default, no failover), failover (switch to secondary "
+        "on primary failure), parallel (query both providers and fuse scores "
+        "with --score-fusion), specific (use the provider named by --provider). "
+        "Requires --semantic (server-side multi-provider routing only)."
+    ),
+)
+@click.option(
+    "--score-fusion",
+    "score_fusion",
+    type=click.Choice(["rrf", "multiply", "average"]),
+    default=None,
+    help=(
+        "Score fusion method for --strategy parallel: rrf (Reciprocal Rank "
+        "Fusion, default), multiply (normalized score multiplication), "
+        "average (normalized score averaging). Requires --strategy parallel."
+    ),
+)
+@click.option(
+    "--provider",
+    type=click.Choice(["voyage-ai", "cohere"]),
+    default=None,
+    help="Explicit embedding provider to use with --strategy specific.",
+)
 @click.pass_context
 @require_mode("local", "remote", "proxy")
 def query(
@@ -5489,6 +5518,9 @@ def query(
     repos: Optional[str],
     rerank_query: Optional[str],
     rerank_instruction: Optional[str],
+    strategy: Optional[str] = None,
+    score_fusion: Optional[str] = None,
+    provider: Optional[str] = None,
     file_extensions: Optional[str] = None,
 ):
     """Search the indexed codebase using semantic similarity.
@@ -5575,6 +5607,34 @@ def query(
             "  [cyan]cidx query 'refactor' --time-range 2024-01-01..2024-12-31 --chunk-type commit_diff[/cyan]"
         )
         sys.exit(1)
+
+    def _fail_strategy_validation(error_message: str, example: str) -> None:
+        """Print a --strategy/--score-fusion/--provider validation error and exit(1)."""
+        error_console = Console()
+        error_console.print(f"[red]❌ Error: {error_message}[/red]")
+        error_console.print()
+        error_console.print(f"  [cyan]{example}[/cyan]")
+        sys.exit(1)
+
+    # Story #488 Phase 2: Validate --strategy / --score-fusion / --provider flags
+    if score_fusion and strategy != "parallel":
+        _fail_strategy_validation(
+            "--score-fusion requires --strategy parallel",
+            "cidx query 'auth' --strategy parallel --score-fusion rrf",
+        )
+
+    if strategy == "specific" and not provider:
+        _fail_strategy_validation(
+            "--strategy specific requires --provider",
+            "cidx query 'auth' --strategy specific --provider voyage-ai",
+        )
+
+    if strategy and fts and not semantic:
+        _fail_strategy_validation(
+            "--strategy requires --semantic (multi-provider routing does not "
+            "apply to pure --fts search)",
+            "cidx query 'auth' --strategy failover --fts --semantic",
+        )
 
     # Get mode information from context
     mode = ctx.obj.get("mode", "uninitialized")
