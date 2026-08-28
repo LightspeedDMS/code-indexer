@@ -115,13 +115,16 @@ class TestEnsureRipgrepDelegation:
 
 @contextmanager
 def _all_steps_except_ripgrep(executor: DeploymentExecutor) -> Iterator[None]:
-    """Mock all execute() steps except ensure_ripgrep.
+    """Mock the execute() steps this file's tests must isolate, except
+    ensure_ripgrep.
 
     Shared by the TestExecuteMethodIntegration tests below to avoid
     duplicating this patch list (mirrors test_rust_toolchain.py's
     _all_steps_except_rust). Includes _build_hnswlib_with_fallback (Bug
     #1651/#1640): with a fake repo_path, its unmocked fallback branch does
-    a real `git clone`.
+    a real `git clone`. Also includes _ensure_cli_dependencies_synced (Bug
+    #1715): with a fake repo_path, its unmocked branch does a real
+    `pip install -e .`.
     """
     with (
         patch.object(
@@ -133,6 +136,7 @@ def _all_steps_except_ripgrep(executor: DeploymentExecutor) -> Iterator[None]:
         patch.object(executor, "build_custom_hnswlib", return_value=True),
         patch.object(executor, "_build_hnswlib_with_fallback", return_value=True),
         patch.object(executor, "pip_install", return_value=True),
+        patch.object(executor, "_ensure_cli_dependencies_synced", return_value=True),
         patch.object(executor, "_ensure_rust_toolchain", return_value=True),
         patch.object(executor, "_ensure_claude_cli_updated", return_value=True),
         patch.object(executor, "_ensure_codex_cli_installed", return_value=True),

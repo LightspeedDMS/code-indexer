@@ -324,12 +324,15 @@ WantedBy=multi-user.target
 def _all_steps_except_auto_update_path(
     executor: DeploymentExecutor,
 ) -> Iterator[None]:
-    """Mock all 18 execute() steps except _ensure_auto_update_service_has_cli_path.
+    """Mock the 19 execute() steps this file's tests must isolate, except
+    _ensure_auto_update_service_has_cli_path.
 
     Shared by both TestExecuteWiring tests below to avoid duplicating this
     patch list (mirrors test_rust_toolchain.py's _all_steps_except_rust).
     Includes _build_hnswlib_with_fallback (Bug #1651/#1640): with a fake
-    repo_path, its unmocked fallback branch does a real `git clone`.
+    repo_path, its unmocked fallback branch does a real `git clone`. Also
+    includes _ensure_cli_dependencies_synced (Bug #1715): with a fake
+    repo_path, its unmocked branch does a real `pip install -e .`.
     """
     with (
         patch.object(
@@ -345,6 +348,7 @@ def _all_steps_except_auto_update_path(
         patch.object(executor, "_ensure_cidx_repo_root", return_value=True),
         patch.object(executor, "_ensure_launch_config", return_value=None),
         patch.object(executor, "pip_install", return_value=True),
+        patch.object(executor, "_ensure_cli_dependencies_synced", return_value=True),
         patch.object(executor, "build_custom_hnswlib", return_value=True),
         patch.object(executor, "_build_hnswlib_with_fallback", return_value=True),
         patch.object(executor, "git_submodule_update", return_value=True),
