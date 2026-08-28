@@ -257,9 +257,9 @@ class LogAggregatorService:
                 format_error_log(
                     "GIT-GENERAL-046",
                     f"Database error querying logs: {e}",
-                    exc_info=True,
                     extra={"correlation_id": get_correlation_id()},
-                )
+                ),
+                exc_info=True,
             )
             return self._empty_response(page, page_size)
 
@@ -317,9 +317,9 @@ class LogAggregatorService:
                 format_error_log(
                     "GIT-GENERAL-047",
                     f"Database error querying all logs: {e}",
-                    exc_info=True,
                     extra={"correlation_id": get_correlation_id()},
-                )
+                ),
+                exc_info=True,
             )
             return []
 
@@ -346,9 +346,9 @@ class LogAggregatorService:
                 format_error_log(
                     "GIT-GENERAL-048",
                     f"Database error counting logs: {e}",
-                    exc_info=True,
                     extra={"correlation_id": get_correlation_id()},
-                )
+                ),
+                exc_info=True,
             )
             return 0
 

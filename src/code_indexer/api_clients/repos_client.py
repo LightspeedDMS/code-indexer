@@ -163,16 +163,23 @@ class ReposAPIClient(CIDXRemoteAPIClient):
                 response_data = response.json()
                 repositories_data = response_data["repositories"]
 
-                # Map server ActivatedRepositoryInfo format to client ActivatedRepository format
+                # Map server ActivatedRepositoryInfo format to client ActivatedRepository
+                # format. The list endpoint itself carries no sync_status field (#1740):
+                # resolving a genuine per-repo value would require an extra HTTP round
+                # trip per repo (N+1) to GET /api/repos/{alias}/sync-status, which the
+                # #1740 review found is not worth the cost for this low-traffic display
+                # column (and, as of the review, that endpoint itself still only returns
+                # a hardcoded default -- see #1740 for the follow-up server-side fix).
+                # Report "unknown" honestly rather than a false hardcoded "synced".
                 mapped_repositories = []
                 for repo_data in repositories_data:
                     mapped_repo = ActivatedRepository(
                         alias=repo_data["user_alias"],
                         current_branch=repo_data["current_branch"],
-                        sync_status="synced",  # Default status - server doesn't provide this yet
+                        sync_status="unknown",
                         last_sync=repo_data.get("last_accessed", ""),
                         activation_date=repo_data.get("activated_at", ""),
-                        conflict_details=None,  # Server doesn't provide this yet
+                        conflict_details=None,  # Server doesn't provide free-text details yet
                     )
                     mapped_repositories.append(mapped_repo)
 

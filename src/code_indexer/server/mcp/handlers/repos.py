@@ -236,9 +236,9 @@ def list_repo_categories(params: Dict[str, Any], user: User) -> Dict[str, Any]:
             format_error_log(
                 "MCP-GENERAL-035",
                 f"Failed to list repository categories: {e}",
-                exc_info=True,
                 extra={"correlation_id": get_correlation_id()},
-            )
+            ),
+            exc_info=True,
         )
         return _mcp_response(
             {"success": False, "error": str(e), "categories": [], "total": 0}
@@ -349,7 +349,15 @@ def check_health(params: Dict[str, Any], user: User) -> Dict[str, Any]:
         from code_indexer.server.services.health_service import health_service
 
         health_response = health_service.get_system_health()
-        node_id = getattr(_utils.app_module.app.state, "node_id", None)
+        # Bug #1709: probes via _utils._lazy_module_attr_or_none("app")
+        # instead of a bare _utils.app_module.app.state attribute chain,
+        # which would otherwise permanently construct the process-wide app
+        # singleton as a side effect of merely reading it.
+        node_id = getattr(
+            getattr(_utils._lazy_module_attr_or_none("app"), "state", None),
+            "node_id",
+            None,
+        )
 
         return _mcp_response(
             {
@@ -632,9 +640,9 @@ def _append_global_repos_to_status(status_summary: list, user: User) -> None:
             format_error_log(
                 "MCP-GENERAL-036",
                 f"Failed to load global repos status: {e}",
-                exc_info=True,
                 extra={"correlation_id": get_correlation_id()},
-            )
+            ),
+            exc_info=True,
         )
 
 
@@ -664,7 +672,11 @@ def _build_mcp_deactivating_map() -> dict:
     Fetches with is_admin=True so admin-submitted deactivations appear for all users.
     Filters client-side for operation_type=deactivate_repository and pending/running status.
     """
-    bjm = getattr(_utils.app_module, "background_job_manager", None)
+    # Bug #1709: probes via _utils._lazy_module_attr_or_none() instead of a
+    # bare getattr(_utils.app_module, name, None), which would otherwise
+    # permanently construct the process-wide app singleton as a side
+    # effect of merely reading it.
+    bjm = _utils._lazy_module_attr_or_none("background_job_manager")
     if bjm is None:
         return {}
     try:
@@ -725,9 +737,9 @@ def _load_global_repos_normalized() -> list:
             format_error_log(
                 "MCP-GENERAL-033",
                 f"Failed to load global repos from storage backend: {e}",
-                exc_info=True,
                 extra={"correlation_id": get_correlation_id()},
-            )
+            ),
+            exc_info=True,
         )
     return result
 
@@ -882,8 +894,12 @@ def get_branches(params: Dict[str, Any], user: User) -> Dict[str, Any]:
         if isinstance(repository_alias, str) and not repository_alias.endswith(
             "-global"
         ):
-            _arm = getattr(_utils.app_module, "activated_repo_manager", None)
-            _grm = getattr(_utils.app_module, "golden_repo_manager", None)
+            # Bug #1709: probes via _utils._lazy_module_attr_or_none()
+            # instead of a bare getattr(_utils.app_module, name, None),
+            # which would otherwise permanently construct the process-wide
+            # app singleton as a side effect of merely reading it.
+            _arm = _utils._lazy_module_attr_or_none("activated_repo_manager")
+            _grm = _utils._lazy_module_attr_or_none("golden_repo_manager")
             if _arm is not None and _grm is not None:
                 if not _arm.user_has_activated_repo(user.username, repository_alias):
                     from ._global_fallback import try_global_fallback
@@ -1145,7 +1161,8 @@ def handle_add_golden_repo_index(args: Dict[str, Any], user: User) -> Dict[str, 
         )
 
     try:
-        golden_repo_manager = getattr(_utils.app_module, "golden_repo_manager", None)
+        # Bug #1709: safe lazy probe -- avoids PEP-562 construction side effect.
+        golden_repo_manager = _utils._lazy_module_attr_or_none("golden_repo_manager")
         if not golden_repo_manager:
             return _mcp_response(
                 {"success": False, "error": "Golden repository manager not available"}
@@ -1185,7 +1202,8 @@ def handle_get_golden_repo_indexes(args: Dict[str, Any], user: User) -> Dict[str
         )
 
     try:
-        golden_repo_manager = getattr(_utils.app_module, "golden_repo_manager", None)
+        # Bug #1709: safe lazy probe -- avoids PEP-562 construction side effect.
+        golden_repo_manager = _utils._lazy_module_attr_or_none("golden_repo_manager")
         if not golden_repo_manager:
             return _mcp_response(
                 {"success": False, "error": "Golden repository manager not available"}
@@ -1771,7 +1789,8 @@ def _set_enable_temporal_flag(repo_alias: str) -> None:
     if not repo_alias:
         return
 
-    grm = getattr(_utils.app_module, "golden_repo_manager", None)
+    # Bug #1709: safe lazy probe -- avoids PEP-562 construction side effect.
+    grm = _utils._lazy_module_attr_or_none("golden_repo_manager")
     if grm is None:
         logger.warning(
             "_set_enable_temporal_flag: golden_repo_manager unavailable, "
@@ -1813,7 +1832,11 @@ def _set_enable_temporal_flag(repo_alias: str) -> None:
 
     global_alias = f"{bare_alias}{_GLOBAL_SUFFIX}"
     try:
-        _app_state = getattr(_utils.app_module.app, "state", None)
+        # Bug #1709: safe lazy probe -- avoids PEP-562 construction side
+        # effect. getattr()'s default parameter safely handles a None
+        # return from _lazy_module_attr_or_none() (Python's getattr never
+        # raises when a default is supplied, regardless of object type).
+        _app_state = getattr(_utils._lazy_module_attr_or_none("app"), "state", None)
         _storage_mode = (
             getattr(_app_state, "storage_mode", None) if _app_state else None
         )

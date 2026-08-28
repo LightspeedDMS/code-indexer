@@ -185,8 +185,11 @@ def _start_auto_watch_if_needed(
                 )
             )
             return
+        # Bug #1709: safe lazy probe -- avoids PEP-562 construction side effect.
         golden_repos_dir = getattr(
-            _utils.app_module.app.state, "golden_repos_dir", None
+            getattr(_utils._lazy_module_attr_or_none("app"), "state", None),
+            "golden_repos_dir",
+            None,
         )
         if not _is_write_mode_active(repository_alias, golden_repos_dir):
             auto_watch_manager.start_watch(repo_path)
@@ -802,8 +805,12 @@ def list_files(params: Dict[str, Any], user: User) -> Dict[str, Any]:
         if isinstance(repository_alias, str) and not repository_alias.endswith(
             "-global"
         ):
-            _arm = getattr(_utils.app_module, "activated_repo_manager", None)
-            _grm = getattr(_utils.app_module, "golden_repo_manager", None)
+            # Bug #1709: probes via _utils._lazy_module_attr_or_none()
+            # instead of a bare getattr(_utils.app_module, name, None),
+            # which would otherwise permanently construct the process-wide
+            # app singleton as a side effect of merely reading it.
+            _arm = _utils._lazy_module_attr_or_none("activated_repo_manager")
+            _grm = _utils._lazy_module_attr_or_none("golden_repo_manager")
             if _arm is not None and _grm is not None:
                 if not _arm.user_has_activated_repo(user.username, repository_alias):
                     from ._global_fallback import try_global_fallback
@@ -877,8 +884,12 @@ def get_file_content(params: Dict[str, Any], user: User) -> Dict[str, Any]:
         if isinstance(repository_alias, str) and not repository_alias.endswith(
             "-global"
         ):
-            _arm = getattr(_utils.app_module, "activated_repo_manager", None)
-            _grm = getattr(_utils.app_module, "golden_repo_manager", None)
+            # Bug #1709: probes via _utils._lazy_module_attr_or_none()
+            # instead of a bare getattr(_utils.app_module, name, None),
+            # which would otherwise permanently construct the process-wide
+            # app singleton as a side effect of merely reading it.
+            _arm = _utils._lazy_module_attr_or_none("activated_repo_manager")
+            _grm = _utils._lazy_module_attr_or_none("golden_repo_manager")
             if _arm is not None and _grm is not None:
                 if not _arm.user_has_activated_repo(user.username, repository_alias):
                     from ._global_fallback import try_global_fallback
@@ -1000,7 +1011,8 @@ def _recover_file_content_via_global(
     if not isinstance(repository_alias, str) or repository_alias.endswith("-global"):
         return None
 
-    _grm = getattr(_utils.app_module, "golden_repo_manager", None)
+    # Bug #1709: safe lazy probe -- avoids PEP-562 construction side effect.
+    _grm = _utils._lazy_module_attr_or_none("golden_repo_manager")
     if _grm is None:
         return None
 
@@ -1071,8 +1083,12 @@ def browse_directory(params: Dict[str, Any], user: User) -> Dict[str, Any]:
         if isinstance(repository_alias, str) and not repository_alias.endswith(
             "-global"
         ):
-            _arm = getattr(_utils.app_module, "activated_repo_manager", None)
-            _grm = getattr(_utils.app_module, "golden_repo_manager", None)
+            # Bug #1709: probes via _utils._lazy_module_attr_or_none()
+            # instead of a bare getattr(_utils.app_module, name, None),
+            # which would otherwise permanently construct the process-wide
+            # app singleton as a side effect of merely reading it.
+            _arm = _utils._lazy_module_attr_or_none("activated_repo_manager")
+            _grm = _utils._lazy_module_attr_or_none("golden_repo_manager")
             if _arm is not None and _grm is not None:
                 if not _arm.user_has_activated_repo(user.username, repository_alias):
                     from ._global_fallback import try_global_fallback
@@ -1493,8 +1509,12 @@ def handle_directory_tree(args: Dict[str, Any], user: User) -> Dict[str, Any]:
 
     # Story #1039: bare-to-global alias fallback (read-only handler).
     if isinstance(repository_alias, str) and not repository_alias.endswith("-global"):
-        _arm = getattr(_utils.app_module, "activated_repo_manager", None)
-        _grm = getattr(_utils.app_module, "golden_repo_manager", None)
+        # Bug #1709: probes via _utils._lazy_module_attr_or_none() instead
+        # of a bare getattr(_utils.app_module, name, None), which would
+        # otherwise permanently construct the process-wide app singleton
+        # as a side effect of merely reading it.
+        _arm = _utils._lazy_module_attr_or_none("activated_repo_manager")
+        _grm = _utils._lazy_module_attr_or_none("golden_repo_manager")
         if _arm is not None and _grm is not None:
             if not _arm.user_has_activated_repo(user.username, repository_alias):
                 from ._global_fallback import try_global_fallback

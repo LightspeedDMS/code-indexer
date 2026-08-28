@@ -60,15 +60,10 @@ def _wait_for_terminal(
     while time.monotonic() < deadline_at:
         status = manager.get_job_status(job_id, username=username, is_admin=True)
         if status and status.get("status") in terminal_statuses:
-            # Issue #1696 Session 1: get_job_status() is really typed to
-            # return Optional[Dict[str, Any]]; mypy currently resolves the
-            # bare cross-module import to Any until Session 2's mypy_path
-            # fix lands.
-            return status  # type: ignore[no-any-return]
+            return status
         time.sleep(_POLL_INTERVAL)
     # Return whatever get_job_status says at timeout (may still be "running")
-    # Issue #1696 Session 1: see comment above.
-    return manager.get_job_status(job_id, username=username, is_admin=True)  # type: ignore[no-any-return]
+    return manager.get_job_status(job_id, username=username, is_admin=True)
 
 
 def _wait_for_not_in_running_jobs(
@@ -184,10 +179,7 @@ class TestTerminalPersistEviction:
                 # Simulate a silently-swallowed SQLite failure (return False,
                 # do NOT raise — see docstring for why raising is wrong here)
                 return False
-            # Issue #1696 Session 1: original() is really typed to return
-            # bool; mypy currently resolves the bare cross-module import
-            # to Any until Session 2's mypy_path fix lands.
-            return original(job_id)  # type: ignore[no-any-return]
+            return original(job_id)
 
         self.manager._persist_single_job_sqlite = patched  # type: ignore[method-assign]
         return tracker

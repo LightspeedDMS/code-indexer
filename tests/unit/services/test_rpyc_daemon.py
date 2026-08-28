@@ -92,7 +92,7 @@ class TestRPyCDaemon(TestCase):
                 result1 = service.exposed_query(
                     str(self.project_path), "test query", limit=10
                 )
-                self.assertEqual(len(result1), 1)
+                self.assertEqual(len(result1["results"]), 1)
 
                 # Verify indexes were loaded
                 mock_load.assert_called_once()

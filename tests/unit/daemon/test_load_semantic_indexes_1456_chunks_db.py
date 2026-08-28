@@ -19,6 +19,18 @@ class TestLoadSemanticIndexesChunksDbGate:
     def test_installs_semantic_index_without_id_index_bin(self, tmp_path):
         project_path = tmp_path / "project"
         index_dir = project_path / ".code-indexer" / "index"
+
+        # Bug #1730: _load_semantic_indexes now resolves the CONFIGURED
+        # collection (via a real config.json) before selecting one. Set
+        # the configured model to "coll" -- the exact collection this test
+        # builds -- so resolution is genuinely real, no mocking needed.
+        from code_indexer.config import ConfigManager
+
+        config_manager = ConfigManager(project_path / ".code-indexer" / "config.json")
+        config = config_manager.create_default_config(codebase_dir=project_path)
+        config.voyage_ai.model = "coll"
+        config_manager.save(config)
+
         store = FilesystemVectorStore(
             base_path=index_dir, use_chunks_db_for_new_collections=True
         )

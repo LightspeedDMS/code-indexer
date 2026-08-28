@@ -201,9 +201,9 @@ class SubprocessExecutor:
                 format_error_log(
                     "MCP-GENERAL-184",
                     f"Unexpected error executing command: {e}",
-                    exc_info=True,
                     extra={"correlation_id": get_correlation_id()},
-                )
+                ),
+                exc_info=True,
             )
             return SearchExecutionResult(
                 status=ExecutionStatus.ERROR,
@@ -426,9 +426,9 @@ class SubprocessExecutor:
                 format_error_log(
                     "MCP-GENERAL-187",
                     f"Error running subprocess: {e}",
-                    exc_info=True,
                     extra={"correlation_id": get_correlation_id()},
-                )
+                ),
+                exc_info=True,
             )
             return SearchExecutionResult(
                 status=ExecutionStatus.ERROR,

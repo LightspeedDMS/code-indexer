@@ -53,6 +53,10 @@ class TestLoadSemanticIndexesMetadata:
             # Mock FilesystemVectorStore.list_collections()
             mock_vector_store = Mock()
             mock_vector_store.list_collections.return_value = [collection_name]
+            # Bug #1730: _load_semantic_indexes now resolves the CONFIGURED
+            # collection via resolve_collection_name() before selecting it
+            # (never blindly list_collections()[0]) -- pin it to match.
+            mock_vector_store.resolve_collection_name.return_value = collection_name
             mock_vector_store_class.return_value = mock_vector_store
 
             # Mock HNSW and ID index loading

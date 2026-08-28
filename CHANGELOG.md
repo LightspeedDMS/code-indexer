@@ -7,6 +7,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [12.27.0] - 2026-08-28
+
+### Fixed
+
+- **Bug #1730 (CRITICAL)**: daemon mode completely bypassed HNSW/FTS caches on every query
+  and could silently serve one collection's results for a query against a different
+  collection -- fixed with a 3-layer defense (query-time collection-name gating, cache-key
+  validation, root-cause fix to warm the configured collection instead of an arbitrary one).
+- **Bug #1732**: Story #563's non-SSO API restriction was fully inert since its original
+  commit (`dependencies.server_config` declared but never assigned) -- wired correctly;
+  confirmed dormant/disabled by default with zero operator-reachable surface today.
+- **Bug #1728**: 103 `exc_info=` call sites across 23 files were silently absorbed by
+  `format_error_log()`'s `**context`, losing real tracebacks in server logs -- relocated to
+  the enclosing `logger.X()` call, mechanically proven via AST-equivalence.
+- **Bug #1739**: `tests/unit/remote/` had 80 failing tests (entirely excluded from the
+  enforced test gate) -- traced to one root cause (stale async tests against fully
+  synchronous production code) and fixed; the directory is re-enrolled in the enforced gate.
+- **Bug #1740**: `cidx repos list` always reported every repo as `Synced`; now reports an
+  honest `unknown` instead of a false claim (the underlying server-side sync-status write
+  path remains a tracked follow-up, confirmed non-hot-path).
+- **Bug #1741**: a hardcoded 0.08s test-timing floor flaked on fast hosts -- replaced with
+  bounded adaptive calibration.
+- **Bug #1736**: pinned HNSW warm/query cache-key equivalence with a regression test;
+  documented two dead code paths carrying the same collection-identity hazard as #1730.
+- **Bug #1737**: added a TOTP elevation-simulation toggle to the test infrastructure,
+  giving the CLI's elevation-retry logic its first real-HTTP round-trip coverage.
+- Fixed a real, load-triggered test-isolation leak in `tests/unit/server/`'s shared
+  auth-dependencies fixture, surfaced by a PEP-562 lazy-singleton first-construction race
+  during a genuine `server-fast-automation.sh` run.
+- Additional fixes: #1696 (mypy cross-module type resolution), #1700, #1709, #1716 (partial),
+  #1719-#1727, #1729, #1731, #1733-#1735, #1738 -- stale test fixtures, flaky tests, and
+  dead-code removal across the server and CLI test suites.
+
 ## [12.26.0] - 2026-08-27
 
 ### Fixed

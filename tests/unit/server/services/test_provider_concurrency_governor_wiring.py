@@ -51,11 +51,7 @@ class TestIndexingPathIsolation:
         )
 
     def test_governor_absent_from_vector_calculation_manager(self):
-        # Try both possible locations
-        try:
-            src = _read("code_indexer/services/vector_calculation_manager.py")
-        except FileNotFoundError:
-            src = _read("code_indexer/services/dual_vector_calculation_manager.py")
+        src = _read("code_indexer/services/vector_calculation_manager.py")
         assert "ProviderConcurrencyGovernor" not in src, (
             "VectorCalculationManager must NOT reference ProviderConcurrencyGovernor"
         )

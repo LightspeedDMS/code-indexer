@@ -158,9 +158,9 @@ def trigger_reindex(
             format_error_log(
                 "WEB-GENERAL-017",
                 f"Trigger reindex failed for {alias}: {e}",
-                exc_info=True,
                 extra={"correlation_id": get_correlation_id()},
-            )
+            ),
+            exc_info=True,
         )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -284,9 +284,9 @@ def get_index_status(
             format_error_log(
                 "WEB-GENERAL-019",
                 f"Get index status failed for {alias}: {e}",
-                exc_info=True,
                 extra={"correlation_id": get_correlation_id()},
-            )
+            ),
+            exc_info=True,
         )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -341,9 +341,9 @@ def get_temporal_status(
             format_error_log(
                 "WEB-GENERAL-021",
                 f"Get temporal status failed for {alias}: {e}",
-                exc_info=True,
                 extra={"correlation_id": get_correlation_id()},
-            )
+            ),
+            exc_info=True,
         )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,

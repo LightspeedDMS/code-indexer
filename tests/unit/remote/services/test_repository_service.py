@@ -2,7 +2,7 @@
 
 import pytest
 from typing import Dict, Any, cast
-from unittest.mock import Mock, AsyncMock
+from unittest.mock import Mock
 
 from code_indexer.remote.services.repository_service import (
     RemoteRepositoryService,
@@ -79,7 +79,7 @@ class MockAPIClient:
         }
         self._fallback_response = MockResponse(404, {"error": "Not found"})
 
-    async def get(self, endpoint: str, **kwargs) -> MockResponse:
+    def get(self, endpoint: str, **kwargs) -> MockResponse:
         """Get response for endpoint."""
         return cast(
             MockResponse, self._responses.get(endpoint, self._fallback_response)
@@ -101,8 +101,8 @@ class TestRemoteRepositoryService:
 
     @pytest.fixture
     def mock_api_client(self):
-        """Create async mock API client for testing error scenarios."""
-        return AsyncMock()
+        """Create mock API client for testing error scenarios."""
+        return Mock()
 
     @pytest.fixture
     def mock_staleness_detector(self):
@@ -142,11 +142,10 @@ class TestRemoteRepositoryService:
         assert service.api_client == test_api_client
         assert service.staleness_detector == test_staleness_detector
 
-    @pytest.mark.asyncio
-    async def test_fetch_repositories_success(self, repository_service):
+    def test_fetch_repositories_success(self, repository_service):
         """Test successful repository fetching."""
         # Execute - no mocking, uses real MockAPIClient
-        repositories = await repository_service._fetch_repositories()
+        repositories = repository_service._fetch_repositories()
 
         # Verify - real data from MockAPIClient
         assert len(repositories) == 3
@@ -154,10 +153,7 @@ class TestRemoteRepositoryService:
         assert repositories[0]["url"] == "https://github.com/user/repo1.git"
         assert repositories[0]["is_active"] is True
 
-    @pytest.mark.asyncio
-    async def test_fetch_repositories_failure(
-        self, test_staleness_detector, mock_api_client
-    ):
+    def test_fetch_repositories_failure(self, test_staleness_detector, mock_api_client):
         """Test repository fetching failure."""
         # Create service with mock API client
         service = RemoteRepositoryService(mock_api_client, test_staleness_detector)
@@ -168,13 +164,12 @@ class TestRemoteRepositoryService:
         mock_api_client.get.return_value = mock_response
 
         # Execute
-        repositories = await service._fetch_repositories()  # type: ignore[misc]
+        repositories = service._fetch_repositories()  # type: ignore[misc]
 
         # Verify empty list returned on failure
         assert repositories == []
 
-    @pytest.mark.asyncio
-    async def test_fetch_repositories_exception(
+    def test_fetch_repositories_exception(
         self, test_staleness_detector, mock_api_client
     ):
         """Test repository fetching with exception."""
@@ -185,7 +180,7 @@ class TestRemoteRepositoryService:
         mock_api_client.get.side_effect = Exception("Network error")
 
         # Execute
-        repositories = await service._fetch_repositories()  # type: ignore[misc]
+        repositories = service._fetch_repositories()  # type: ignore[misc]
 
         # Verify empty list returned on exception
         assert repositories == []
@@ -249,8 +244,7 @@ class TestRemoteRepositoryService:
         normalized = repository_service._normalize_url(https_url)
         assert normalized == expected
 
-    @pytest.mark.asyncio
-    async def test_calculate_staleness_for_repos(
+    def test_calculate_staleness_for_repos(
         self, mock_api_client, mock_staleness_detector
     ):
         """Test staleness calculation for repositories."""
@@ -285,7 +279,7 @@ class TestRemoteRepositoryService:
         mock_api_client.get.side_effect = mock_get_side_effect
 
         # Execute
-        await repository_service._calculate_staleness_for_repos(repositories, "main")
+        repository_service._calculate_staleness_for_repos(repositories, "main")
 
         # Verify timestamps were set and basic staleness calculation occurred
         assert repositories[0].local_timestamp == "2024-01-01T10:00:00Z"
@@ -298,8 +292,7 @@ class TestRemoteRepositoryService:
         assert repositories[1].staleness_info is not None
         assert repositories[1].staleness_info["is_stale"] is False  # Local is newer
 
-    @pytest.mark.asyncio
-    async def test_get_repository_timestamps_success(
+    def test_get_repository_timestamps_success(
         self, mock_api_client, mock_staleness_detector
     ):
         """Test successful timestamp retrieval."""
@@ -318,7 +311,7 @@ class TestRemoteRepositoryService:
         mock_api_client.get.return_value = mock_response
 
         # Execute
-        timestamps = await repository_service._get_repository_timestamps(  # type: ignore[misc]
+        timestamps = repository_service._get_repository_timestamps(  # type: ignore[misc]
             "repo1", "main"
         )
 
@@ -330,8 +323,7 @@ class TestRemoteRepositoryService:
             "/repositories/repo1/branches/main/timestamps"
         )
 
-    @pytest.mark.asyncio
-    async def test_get_repository_timestamps_not_found(
+    def test_get_repository_timestamps_not_found(
         self, mock_api_client, mock_staleness_detector
     ):
         """Test timestamp retrieval when not found."""
@@ -346,7 +338,7 @@ class TestRemoteRepositoryService:
         mock_api_client.get.return_value = mock_response
 
         # Execute
-        timestamps = await repository_service._get_repository_timestamps(  # type: ignore[misc]
+        timestamps = repository_service._get_repository_timestamps(  # type: ignore[misc]
             "repo1", "main"
         )
 
@@ -379,8 +371,7 @@ class TestRemoteRepositoryService:
         assert summary["fresh_repositories"] == ["repo2"]
         assert summary["unknown_repositories"] == ["repo3"]
 
-    @pytest.mark.asyncio
-    async def test_get_repository_analysis_full_flow(
+    def test_get_repository_analysis_full_flow(
         self,
         mock_api_client,
         mock_staleness_detector,
@@ -399,7 +390,7 @@ class TestRemoteRepositoryService:
         mock_api_client.get.return_value = mock_response
 
         # Execute
-        analysis = await repository_service.get_repository_analysis(  # type: ignore[misc]
+        analysis = repository_service.get_repository_analysis(  # type: ignore[misc]
             "https://github.com/user/repo1.git", "main"
         )
 
@@ -412,8 +403,7 @@ class TestRemoteRepositoryService:
         assert len(analysis.non_matching_repos) == 2  # repo2 and repo3 don't match
         assert isinstance(analysis.staleness_summary, dict)
 
-    @pytest.mark.asyncio
-    async def test_get_repository_details_success(
+    def test_get_repository_details_success(
         self, mock_api_client, mock_staleness_detector
     ):
         """Test successful repository details retrieval."""
@@ -433,7 +423,7 @@ class TestRemoteRepositoryService:
         mock_api_client.get.return_value = mock_response
 
         # Execute
-        details = await repository_service.get_repository_details("repo1")  # type: ignore[misc]
+        details = repository_service.get_repository_details("repo1")  # type: ignore[misc]
 
         # Verify
         assert details is not None
@@ -441,8 +431,7 @@ class TestRemoteRepositoryService:
         assert details["status"] == "active"
         mock_api_client.get.assert_called_once_with("/repositories/repo1")
 
-    @pytest.mark.asyncio
-    async def test_get_repository_details_not_found(
+    def test_get_repository_details_not_found(
         self, mock_api_client, mock_staleness_detector
     ):
         """Test repository details when not found."""
@@ -457,13 +446,12 @@ class TestRemoteRepositoryService:
         mock_api_client.get.return_value = mock_response
 
         # Execute
-        details = await repository_service.get_repository_details("repo1")  # type: ignore[misc]
+        details = repository_service.get_repository_details("repo1")  # type: ignore[misc]
 
         # Verify
         assert details is None
 
-    @pytest.mark.asyncio
-    async def test_get_repository_branches_success(
+    def test_get_repository_branches_success(
         self, mock_api_client, mock_staleness_detector
     ):
         """Test successful repository branches retrieval."""
@@ -481,14 +469,13 @@ class TestRemoteRepositoryService:
         mock_api_client.get.return_value = mock_response
 
         # Execute
-        branches = await repository_service.get_repository_branches("repo1")  # type: ignore[misc]
+        branches = repository_service.get_repository_branches("repo1")  # type: ignore[misc]
 
         # Verify
         assert branches == ["main", "develop", "feature/test"]
         mock_api_client.get.assert_called_once_with("/repositories/repo1/branches")
 
-    @pytest.mark.asyncio
-    async def test_get_repository_branches_failure(
+    def test_get_repository_branches_failure(
         self, mock_api_client, mock_staleness_detector
     ):
         """Test repository branches retrieval failure."""
@@ -503,13 +490,12 @@ class TestRemoteRepositoryService:
         mock_api_client.get.return_value = mock_response
 
         # Execute
-        branches = await repository_service.get_repository_branches("repo1")  # type: ignore[misc]
+        branches = repository_service.get_repository_branches("repo1")  # type: ignore[misc]
 
         # Verify
         assert branches == []
 
-    @pytest.mark.asyncio
-    async def test_get_repository_branches_exception(
+    def test_get_repository_branches_exception(
         self, mock_api_client, mock_staleness_detector
     ):
         """Test repository branches retrieval with exception."""
@@ -522,7 +508,7 @@ class TestRemoteRepositoryService:
         mock_api_client.get.side_effect = Exception("Network error")
 
         # Execute
-        branches = await repository_service.get_repository_branches("repo1")  # type: ignore[misc]
+        branches = repository_service.get_repository_branches("repo1")  # type: ignore[misc]
 
         # Verify
         assert branches == []

@@ -4,10 +4,26 @@ This test ensures that the RemoteQueryClient adheres to Messi Rule #2:
 - No fallbacks with fake data
 - Graceful failure with clear error messages
 - No unsafe type casting
+
+Note on HTTP transport stubbing: MockIsolationManager.mock_server_response()
+(tests/unit/api_clients/test_isolation_utils.py) is a documented placeholder
+that does not actually intercept HTTP traffic -- without a real transport
+stub, RemoteQueryClient would attempt a genuine network call to the
+(non-listening) test port and fail with a connection error rather than
+exercising the real get_repository_statistics() response-handling logic
+this test suite is meant to validate. Each test therefore configures its
+mock response via self._mock_response(), and _authenticated_request is
+patched to return a real httpx.Response built from that configuration --
+only the network transport boundary is stubbed; the production parsing/
+validation/error logic under test still executes for real.
 """
 
 from pathlib import Path
+from typing import Any, Dict
 from unittest import TestCase
+from unittest.mock import patch
+
+import httpx
 
 from code_indexer.api_clients.remote_query_client import (
     RemoteQueryClient,
@@ -32,18 +48,55 @@ class TestMessiRule2Compliance(TestCase):
             server_url=f"http://localhost:{self.server_config['port']}",
             credentials=credentials,
         )
+        self._endpoint_responses: Dict[str, Dict[str, Any]] = {}
+        self._authenticated_request_patcher = patch.object(
+            self.client,
+            "_authenticated_request",
+            side_effect=self._fake_authenticated_request,
+        )
+        self._authenticated_request_patcher.start()
 
     def tearDown(self):
         """Clean up test environment."""
+        if hasattr(self, "_authenticated_request_patcher"):
+            self._authenticated_request_patcher.stop()
         if hasattr(self, "client"):
             self.client.close()
         if hasattr(self, "isolation"):
             self.isolation.cleanup()
 
+    def _mock_response(
+        self, endpoint: str, response_data: dict, status_code: int = 200
+    ) -> None:
+        """Configure the stubbed HTTP transport to answer `endpoint`.
+
+        Delegates to MockIsolationManager.mock_server_response() to preserve
+        its existing bookkeeping, then additionally records the response so
+        _fake_authenticated_request() can serve it via a real httpx.Response.
+        """
+        self.isolation.mock_server_response(
+            endpoint, response_data, status_code=status_code
+        )
+        self._endpoint_responses[endpoint] = {
+            "data": response_data,
+            "status_code": status_code,
+        }
+
+    def _fake_authenticated_request(
+        self, method: str, endpoint: str, **kwargs: Any
+    ) -> httpx.Response:
+        """Stand in for the real network call, using the configured mock."""
+        config = self._endpoint_responses[endpoint]
+        return httpx.Response(
+            status_code=config["status_code"],
+            json=config["data"],
+            request=httpx.Request(method, f"{self.client.server_url}{endpoint}"),
+        )
+
     def test_no_fake_statistics_fallback(self):
         """Test that missing statistics raise error instead of returning fake data."""
         # Mock a response without statistics
-        self.isolation.mock_server_response(
+        self._mock_response(
             "/api/repositories/test-repo",
             {"name": "test-repo", "path": "/path/to/repo"},
             status_code=200,
@@ -61,7 +114,7 @@ class TestMessiRule2Compliance(TestCase):
     def test_invalid_statistics_format_error(self):
         """Test that invalid statistics format raises proper error."""
         # Mock a response with invalid statistics type
-        self.isolation.mock_server_response(
+        self._mock_response(
             "/api/repositories/test-repo",
             {"name": "test-repo", "statistics": "invalid_string_not_dict"},
             status_code=200,
@@ -88,7 +141,7 @@ class TestMessiRule2Compliance(TestCase):
         }
 
         # Mock a response with valid statistics
-        self.isolation.mock_server_response(
+        self._mock_response(
             "/api/repositories/test-repo",
             {"name": "test-repo", "statistics": expected_stats},
             status_code=200,
@@ -120,7 +173,7 @@ class TestMessiRule2Compliance(TestCase):
     def test_error_messages_are_actionable(self):
         """Test that error messages provide actionable information."""
         # Test 404 error
-        self.isolation.mock_server_response(
+        self._mock_response(
             "/api/repositories/nonexistent",
             {"detail": "Repository not found"},
             status_code=404,
@@ -133,7 +186,7 @@ class TestMessiRule2Compliance(TestCase):
         self.assertIn("not found", error_msg.lower())
 
         # Test 403 error
-        self.isolation.mock_server_response(
+        self._mock_response(
             "/api/repositories/forbidden",
             {"detail": "Access denied"},
             status_code=403,

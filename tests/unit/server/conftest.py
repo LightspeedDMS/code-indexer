@@ -100,6 +100,7 @@ from typing import Any, Callable, Generator, List, Set, Type
 import pytest
 
 import code_indexer.server.app as _server_app_module
+import code_indexer.server.auth.dependencies as _auth_dependencies_module
 from code_indexer.server.auth.login_rate_limiter import (
     login_rate_limiter as _login_lockout_limiter,
 )
@@ -174,6 +175,86 @@ def _reset_login_rate_limiters() -> Generator[None, None, None]:
         yield
     finally:
         _reset_login_rate_limiter_state()
+
+
+# Bug #1727: the auth-dependency block `create_fastapi_app()` rebinds
+# atomically (app_wiring.py:220-227) with no save/restore. Absolute import
+# there means only this canonical module ever needs handling (no
+# `src.`-prefixed alias, unlike BackgroundJobManager above).
+#
+# Bug #1732 Finding 2: `server_config` added once app_wiring.py started
+# actually assigning `dependencies.server_config = server_config` (Story
+# #563's non-SSO API restriction wiring, previously missing since that
+# story's original commit). Without tracking it here too, the newly-wired
+# attribute would leak across tests exactly like the other 5 -- any test
+# building a real create_app()/create_fastapi_app() would permanently set
+# it with no restore.
+_AUTH_DEPENDENCIES_ATTRS = (
+    "jwt_manager",
+    "user_manager",
+    "oauth_manager",
+    "mcp_credential_manager",
+    "api_key_manager",
+    "server_config",
+)
+
+
+def _snapshot_restore_auth_dependencies_impl() -> Generator[None, None, None]:
+    """Core generator body for `_snapshot_restore_auth_dependencies` below;
+    extracted so a unit test can drive it via `next()` without pytest's
+    fixture machinery (mirrors `_snapshot_restore_shared_app_state_impl`).
+
+    Follow-up to Bug #1727/#1732 (found via bisection of a real
+    server-fast-automation.sh chunk-5 -- `mcp/ + telemetry/ + handlers/` --
+    failure): `code_indexer.server.app`'s lazily-constructed singleton
+    (Bug #1638 PEP 562 `__getattr__`) runs `create_app()` -- and therefore
+    `create_fastapi_app()`'s ONE-AND-ONLY atomic assignment of every
+    tracked `dependencies.*` attribute -- AT MOST ONCE per process,
+    triggered by the FIRST genuine access of any of app.py's lazy
+    attributes. That first access can happen incidentally, inside a test
+    that has nothing to do with auth (e.g.
+    `tests/unit/server/mcp/test_add_golden_repo_handler.py`'s
+    `with patch("code_indexer.server.app.golden_repo_manager")`, whose
+    entry must `getattr()` the original value to save it for restore).
+
+    If this generator's OWN setup snapshots the pre-construction defaults
+    (`None`, since nothing had touched app.py yet) and that same test's
+    body is what triggers the one-time construction, restoring to the
+    stale pre-construction snapshot on teardown would permanently discard
+    the real managers for the rest of the pytest session -- `create_app()`
+    never runs again to rebuild them. Detect that exact transition
+    (`code_indexer.server.app._initialized` flipping False -> True during
+    this generator's active window) and skip the restore in that case,
+    letting the freshly-constructed values become the new ambient state.
+    This mirrors the already-established `_snapshot_restore_shared_app_state`
+    (Bug #1694) principle of never reverting state a lazy singleton's
+    one-time construction just established. When `_initialized` does NOT
+    transition (the ordinary case -- construction already happened in an
+    earlier test, or never happens at all), behavior is unchanged: restore
+    the snapshot exactly as before.
+    """
+    was_initialized = _server_app_module._initialized
+    snapshot = {
+        attr: getattr(_auth_dependencies_module, attr)
+        for attr in _AUTH_DEPENDENCIES_ATTRS
+    }
+    try:
+        yield
+    finally:
+        construction_happened_this_test = (
+            not was_initialized and _server_app_module._initialized
+        )
+        if not construction_happened_this_test:
+            for attr, value in snapshot.items():
+                setattr(_auth_dependencies_module, attr, value)
+
+
+@pytest.fixture(autouse=True)
+def _snapshot_restore_auth_dependencies() -> Generator[None, None, None]:
+    """Bug #1727: snapshot and restore the auth-dependencies module-global
+    block around every test under tests/unit/server/.
+    """
+    yield from _snapshot_restore_auth_dependencies_impl()
 
 
 @pytest.fixture(autouse=True)

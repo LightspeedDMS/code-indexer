@@ -167,9 +167,9 @@ def create_file(
             format_error_log(
                 "STORE-GENERAL-022",
                 f"Create file failed for {alias}/{request.file_path}: {e}",
-                exc_info=True,
                 extra={"correlation_id": get_correlation_id()},
-            )
+            ),
+            exc_info=True,
         )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -267,9 +267,9 @@ def edit_file(
             format_error_log(
                 "SVC-GENERAL-002",
                 f"Edit file failed for {alias}/{file_path}: {e}",
-                exc_info=True,
                 extra={"correlation_id": get_correlation_id()},
-            )
+            ),
+            exc_info=True,
         )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -346,9 +346,9 @@ def delete_file(
             format_error_log(
                 "SVC-GENERAL-005",
                 f"Delete file failed for {alias}/{file_path}: {e}",
-                exc_info=True,
                 extra={"correlation_id": get_correlation_id()},
-            )
+            ),
+            exc_info=True,
         )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,

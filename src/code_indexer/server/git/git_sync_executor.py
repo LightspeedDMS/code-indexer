@@ -206,9 +206,9 @@ class GitSyncExecutor:
                     format_error_log(
                         "GIT-GENERAL-025",
                         f"Pre-pull clearing failed (non-blocking): {e}",
-                        exc_info=True,
                         extra={"correlation_id": get_correlation_id()},
-                    )
+                    ),
+                    exc_info=True,
                 )
 
         if not validation.can_pull:
@@ -771,9 +771,9 @@ class GitSyncExecutor:
                 format_error_log(
                     "GIT-GENERAL-035",
                     f"Internal CIDX indexing failed: {e}",
-                    exc_info=True,
                     extra={"correlation_id": get_correlation_id()},
-                )
+                ),
+                exc_info=True,
             )
             return False
 

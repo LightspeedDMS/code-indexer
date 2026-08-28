@@ -145,9 +145,9 @@ def register_admin_ops_routes(
                 format_error_log(
                     "APP-GENERAL-030",
                     f"SCIP workspace cleanup failed: {e}",
-                    exc_info=True,
                     extra={"correlation_id": get_correlation_id()},
-                )
+                ),
+                exc_info=True,
             )
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -183,9 +183,9 @@ def register_admin_ops_routes(
                 format_error_log(
                     "APP-GENERAL-031",
                     f"Failed to get SCIP cleanup status: {e}",
-                    exc_info=True,
                     extra={"correlation_id": get_correlation_id()},
-                )
+                ),
+                exc_info=True,
             )
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -1169,9 +1169,9 @@ def register_admin_ops_routes(
                 format_error_log(
                     "APP-SEL-001",
                     f"Failed to query search event log: {e}",
-                    exc_info=True,
                     extra={"correlation_id": get_correlation_id()},
-                )
+                ),
+                exc_info=True,
             )
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,

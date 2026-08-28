@@ -310,9 +310,9 @@ def register_misc_routes(
                 format_error_log(
                     "APP-GENERAL-060",
                     f"Liveness probe (/healthz) failed: {e}",
-                    exc_info=True,
                     extra={"correlation_id": get_correlation_id()},
-                )
+                ),
+                exc_info=True,
             )
             return JSONResponse(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -392,9 +392,9 @@ def register_misc_routes(
                 format_error_log(
                     "APP-GENERAL-029",
                     f"Error retrieving cache statistics: {e}",
-                    exc_info=True,
                     extra={"correlation_id": get_correlation_id()},
-                )
+                ),
+                exc_info=True,
             )
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,

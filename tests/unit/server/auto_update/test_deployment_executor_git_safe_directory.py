@@ -627,6 +627,9 @@ class TestExecuteCallsGitSafeDirectoryWildcard:
             "_ensure_daemon_storage_path",
             "_ensure_systemd_claude_path",
             "_ensure_rust_toolchain",
+            # Bug #1722: _ensure_cli_dependencies_synced performs a real
+            # `pip install -e .` subprocess call when left unpatched.
+            "_ensure_cli_dependencies_synced",
         ]
 
         from contextlib import ExitStack

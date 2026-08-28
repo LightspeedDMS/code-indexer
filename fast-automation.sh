@@ -132,7 +132,6 @@ python3 -m pytest \
     tests/unit/ \
     --durations=0 \
     --ignore=tests/unit/server/ \
-    --ignore=tests/unit/remote/ \
     --ignore=tests/unit/infrastructure/ \
     --ignore=tests/unit/api_clients/test_base_cidx_remote_api_client_real.py \
     --ignore=tests/unit/api_clients/test_remote_query_client_real.py \

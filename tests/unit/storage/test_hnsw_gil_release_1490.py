@@ -190,12 +190,39 @@ class TestResizeIndexReleasesGIL:
     """resize_index() reallocates the internal storage arrays sized by the
     NEW max_elements -- starting from a tiny index keeps the fixture build
     cheap while the resize target alone makes the single call meaningfully
-    long. dim=32 bounds peak RSS to roughly 300MB."""
+    long. dim=32 bounds peak RSS to roughly 300MB at the initial target.
+
+    Bug #1741: a fixed resize target (originally 9,000,000) reliably cleared
+    MIN_CALL_SECONDS on the hardware this test was authored against, but a
+    sufficiently fast host completes that same call in under the floor
+    (observed live: ~0.0698s vs the 0.08s floor) -- the test then fails on
+    its own workload-too-small calibration guard inside _max_recorder_gap
+    before it ever reaches the GIL-release assertion it exists to verify.
+    Lowering the floor would only narrow the window this bug describes, not
+    fix it, so instead the workload self-calibrates: if a single
+    resize_index() call at the current target doesn't clear
+    MIN_CALL_SECONDS, the target is grown by RESIZE_TARGET_GROWTH_FACTOR and
+    re-measured as a fresh, independent single-call attempt, bounded by
+    MAX_CALIBRATION_ATTEMPTS so a pathologically fast host fails loudly with
+    a clear diagnostic instead of retrying forever (anti-unbounded-loop).
+    resize_index() supports being called again with a larger target on the
+    same index (hnswalg.h's resizeIndex() only requires
+    new_max_elements >= cur_element_count), so growing the target across
+    calibration attempts on the shared `tiny_index` fixture is valid.
+
+    This does NOT reintroduce the module docstring's forbidden
+    same-call-looping pattern: each calibration attempt is still exactly
+    ONE native call, timed in its own dedicated _max_recorder_gap()
+    invocation (its own recorder thread, its own warmup/cooldown) -- the
+    loop is across separate, independent measurements, never inside the
+    timed blocking_fn() region itself."""
 
     DIM = 32
     TINY_ELEMENTS = 1_000
-    RESIZE_TARGET = 9_000_000
+    INITIAL_RESIZE_TARGET = 9_000_000
+    RESIZE_TARGET_GROWTH_FACTOR = 1.5
     MIN_CALL_SECONDS = 0.08
+    MAX_CALIBRATION_ATTEMPTS = 5
 
     @pytest.fixture(scope="class")
     def tiny_index(self):
@@ -204,12 +231,36 @@ class TestResizeIndexReleasesGIL:
         return index
 
     def test_resize_index_releases_gil_during_native_call(self, tiny_index):
-        def _do_resize():
-            tiny_index.resize_index(self.RESIZE_TARGET)
+        target = self.INITIAL_RESIZE_TARGET
+        max_gap = None
+        call_duration = None
 
-        max_gap, call_duration = _max_recorder_gap(
-            _do_resize, min_call_seconds=self.MIN_CALL_SECONDS
-        )
+        for attempt in range(1, self.MAX_CALIBRATION_ATTEMPTS + 1):
+
+            def _do_resize(resize_target=target):
+                tiny_index.resize_index(resize_target)
+
+            try:
+                max_gap, call_duration = _max_recorder_gap(
+                    _do_resize, min_call_seconds=self.MIN_CALL_SECONDS
+                )
+                break
+            except AssertionError as exc:
+                if "too fast to meaningfully exercise" not in str(exc):
+                    raise
+                if attempt == self.MAX_CALIBRATION_ATTEMPTS:
+                    raise AssertionError(
+                        "resize_index() calibration failed to produce a "
+                        f"call lasting >= {self.MIN_CALL_SECONDS}s after "
+                        f"{self.MAX_CALIBRATION_ATTEMPTS} attempts (largest "
+                        f"attempted resize target={target}) -- this host is "
+                        "too fast to measure resize_index()'s GIL-release "
+                        "behavior even at the largest attempted workload; "
+                        "raise INITIAL_RESIZE_TARGET or "
+                        "RESIZE_TARGET_GROWTH_FACTOR"
+                    ) from exc
+                target = int(target * self.RESIZE_TARGET_GROWTH_FACTOR)
+
         _assert_gil_released(max_gap, call_duration, native_call_name="resize_index()")
 
 

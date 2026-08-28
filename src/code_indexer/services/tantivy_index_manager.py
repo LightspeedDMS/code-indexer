@@ -425,6 +425,56 @@ class TantivyIndexManager:
         assert self._writer is None, "open_for_search() must never create a writer"
         logger.debug(f"Opened Tantivy index for read-only search at {self.index_dir}")
 
+    def open_from_cached_index(self, index: "Index") -> None:
+        """Adopt an already-open Tantivy Index object with NO disk I/O.
+
+        Bug #1730: daemon mode keeps one already-open ``tantivy.Index`` per
+        project resident in its own long-lived in-memory cache
+        (``CacheEntry.tantivy_index``). Constructing a brand new
+        TantivyIndexManager per query and reopening from disk via
+        ``initialize_index()``/``open_for_search()`` defeats that cache on
+        every single query — and ``initialize_index()`` additionally
+        acquires the exclusive writer lock on every read (Bug #1233). This
+        method adopts the caller-supplied, already-open index directly: no
+        ``Index.open()`` call, no writer lock, only the cheap, purely
+        in-memory schema rebuild ``search()`` needs.
+
+        Invariants (mirrors ``open_for_search()``):
+          - self._index is set so search() works normally.
+          - self._schema is rebuilt so _build_search_query()/regex helpers work.
+          - self._writer remains None — no writer lock is ever acquired here.
+
+        Args:
+            index: An already-open tantivy.Index instance (e.g. from a
+                daemon's in-memory CacheEntry). Typed as the real
+                ``tantivy.Index`` (imported under TYPE_CHECKING at module
+                top, matching ``self._index``'s own annotation) rather than
+                ``Any``, since callers are expected to hand this method a
+                genuine already-open index, never an arbitrary object.
+
+        Raises:
+            ValueError: If index is None -- callers must check
+                cache-availability themselves and fall back to
+                open_for_search() instead of calling this method with
+                nothing to adopt.
+        """
+        if index is None:
+            raise ValueError(
+                "open_from_cached_index() requires an already-open Index; "
+                "got None. Callers must fall back to open_for_search() "
+                "when no cached index is available."
+            )
+
+        self._index = index
+        self._create_schema()
+
+        assert self._writer is None, (
+            "open_from_cached_index() must never create a writer"
+        )
+        logger.debug(
+            f"Adopted cached Tantivy index for read-only search at {self.index_dir}"
+        )
+
     def get_writer_heap_size(self) -> int:
         """
         Get the configured writer heap size.

@@ -49,12 +49,21 @@ def get_correlation_id() -> Optional[str]:
         Optional[str]: Current correlation ID or None if not set
 
     Example:
-        >>> correlation_id = get_correlation_id()
-        >>> if correlation_id:
-        logger.error(
-            format_error_log("APP-MIGRATE-001", "Error occurred", extra={"correlation_id": correlation_id}),
-            extra=get_log_extra("APP-MIGRATE-001")
-        )
+        Bug #1716: ``format_error_log()`` is a plain string-formatting
+        helper (``**context`` -> ``"key=value"`` text), NOT
+        ``logger.error()``/``logger.warning()`` -- it does not understand
+        an ``extra=`` keyword. Passing ``extra={"correlation_id": ...}``
+        into it gets stringified verbatim into the message text instead of
+        reaching Python logging's real ``extra=`` mechanism. The correct
+        pattern keeps the two calls separate: ``format_error_log()`` takes
+        no ``extra=``, and ``extra=get_log_extra(...)`` is passed to
+        ``logger.error()`` itself, which is where Python logging's
+        ``extra=`` keyword is actually understood.
+
+        >>> logger.error(
+        ...     format_error_log("APP-MIGRATE-001", "Error occurred"),
+        ...     extra=get_log_extra("APP-MIGRATE-001"),
+        ... )
     """
     from code_indexer.server.telemetry.correlation_bridge import (
         get_current_correlation_id,

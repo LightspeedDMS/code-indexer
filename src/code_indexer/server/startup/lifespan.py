@@ -620,9 +620,8 @@ def make_lifespan(
                 format_error_log(
                     "APP-GENERAL-008",
                     f"Failed to initialize SQLite log handler: {e}",
-                    exc_info=True,
-                    extra={"correlation_id": get_correlation_id()},
-                )
+                ),
+                exc_info=True,
             )
 
         # Bootstrap-only: bump anyio threadpool size so concurrent sync handlers
@@ -870,9 +869,8 @@ def make_lifespan(
                 format_error_log(
                     "APP-GENERAL-009",
                     f"Failed to initialize SQLite database or run migrations: {e}",
-                    exc_info=True,
-                    extra={"correlation_id": get_correlation_id()},
-                )
+                ),
+                exc_info=True,
             )
 
         # Startup: Initialize ApiMetricsService with database for multi-worker support
@@ -906,9 +904,8 @@ def make_lifespan(
                 format_error_log(
                     "APP-GENERAL-010",
                     f"Failed to initialize ApiMetricsService: {e}",
-                    exc_info=True,
-                    extra={"correlation_id": get_correlation_id()},
-                )
+                ),
+                exc_info=True,
             )
 
         # Issue #1159: Initialize SearchEventLogWriter (per-query operational stats).
@@ -1032,7 +1029,6 @@ def make_lifespan(
                 format_error_log(
                     "APP-GENERAL-1392",
                     f"Failed to run hnswlib capability check on startup: {e}",
-                    extra={"correlation_id": get_correlation_id()},
                 ),
                 exc_info=True,
             )
@@ -1074,9 +1070,8 @@ def make_lifespan(
                 format_error_log(
                     "APP-GENERAL-012",
                     f"Failed to run SSH key migration on startup: {e}",
-                    exc_info=True,
-                    extra={"correlation_id": get_correlation_id()},
-                )
+                ),
+                exc_info=True,
             )
             app.state.ssh_migration_result = None
 
@@ -1192,7 +1187,6 @@ def make_lifespan(
                         format_error_log(
                             "APP-GENERAL-013",
                             f"Failed to seed existing golden repos or admin users: {seed_error}",
-                            extra={"correlation_id": get_correlation_id()},
                         )
                     )
 
@@ -1214,9 +1208,8 @@ def make_lifespan(
                 format_error_log(
                     "APP-GENERAL-014",
                     f"Failed to initialize GroupAccessManager: {e}",
-                    exc_info=True,
-                    extra={"correlation_id": get_correlation_id()},
-                )
+                ),
+                exc_info=True,
             )
 
         # Startup: Initialize and start global repos background services
@@ -1298,9 +1291,8 @@ def make_lifespan(
                         f"Failed to initialize VersionedSnapshotManager "
                         f"(clone_backend={getattr(server_config, 'clone_backend', 'unknown')}): "
                         f"{snap_exc}",
-                        exc_info=True,
-                        extra={"correlation_id": get_correlation_id()},
-                    )
+                    ),
+                    exc_info=True,
                 )
                 app.state.snapshot_manager = None
 
@@ -1411,7 +1403,6 @@ def make_lifespan(
                                 "clone) will fail on this node until the "
                                 "underlying issue is resolved and the server "
                                 "is restarted.",
-                                extra={"correlation_id": get_correlation_id()},
                             )
                         )
                 else:
@@ -1428,7 +1419,6 @@ def make_lifespan(
                             "None. Repository activation (CoW clone) will "
                             "fail on this node until the underlying issue is "
                             "resolved and the server is restarted.",
-                            extra={"correlation_id": get_correlation_id()},
                         )
                     )
                 # Direct wire into refresh_scheduler (belt-and-suspenders)
@@ -1453,7 +1443,6 @@ def make_lifespan(
                         "for the root cause). Repository activation (CoW "
                         "clone) will fail on this node until the underlying "
                         "issue is resolved and the server is restarted.",
-                        extra={"correlation_id": get_correlation_id()},
                     )
                 )
 
@@ -1468,9 +1457,8 @@ def make_lifespan(
                 format_error_log(
                     "APP-GENERAL-015",
                     f"Failed to start global repos background services: {e}",
-                    exc_info=True,
-                    extra={"correlation_id": get_correlation_id()},
-                )
+                ),
+                exc_info=True,
             )
 
         # Startup: Initialize PayloadCache for semantic search result truncation (Story #679)
@@ -1520,9 +1508,8 @@ def make_lifespan(
                 format_error_log(
                     "APP-GENERAL-016",
                     f"Failed to initialize PayloadCache: {e}",
-                    exc_info=True,
-                    extra={"correlation_id": get_correlation_id()},
-                )
+                ),
+                exc_info=True,
             )
             # Set payload_cache to None so handlers know it's unavailable
             app.state.payload_cache = None
@@ -1575,7 +1562,6 @@ def make_lifespan(
                             "and connection_pool both None); ConfigService will stay "
                             "on bootstrap SQLite config, and API key seeding below "
                             "will NOT see PG-backed VoyageAI/Cohere keys",
-                            extra={"correlation_id": get_correlation_id()},
                         )
                     )
             except Exception as _early_pool_exc:
@@ -1584,7 +1570,6 @@ def make_lifespan(
                         "APP-GENERAL-053",
                         f"Early ConfigService pool set failed (schedulers will use "
                         f"bootstrap defaults): {_early_pool_exc}",
-                        extra={"correlation_id": get_correlation_id()},
                     )
                 )
 
@@ -1665,7 +1650,6 @@ def make_lifespan(
                             f"reads/writes fail LOUD instead of silently "
                             f"degrading to the NFS-backed SQLite backend "
                             f"(Bug #1313)",
-                            extra={"correlation_id": get_correlation_id()},
                         )
                     )
             except Exception as _temporal_backend_exc:
@@ -1694,9 +1678,8 @@ def make_lifespan(
                         f"installed a poison factory so temporal reads/writes "
                         f"fail LOUD instead of silently degrading to the "
                         f"NFS-backed SQLite backend: {_temporal_backend_exc}",
-                        exc_info=True,
-                        extra={"correlation_id": get_correlation_id()},
-                    )
+                    ),
+                    exc_info=True,
                 )
 
         # Startup: Auto-seed API keys if server config is blank (Story #20)
@@ -1745,7 +1728,6 @@ def make_lifespan(
                 format_error_log(
                     "APP-GENERAL-017",
                     f"Failed to auto-seed API keys on startup: {e}",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
 
@@ -1821,7 +1803,6 @@ def make_lifespan(
                     format_error_log(
                         "APP-GENERAL-018",
                         "ClaudeCliManager initialization failed (smart descriptions may be unavailable)",
-                        extra={"correlation_id": get_correlation_id()},
                     )
                 )
 
@@ -1831,7 +1812,6 @@ def make_lifespan(
                 format_error_log(
                     "APP-GENERAL-019",
                     f"Failed to initialize ClaudeCliManager on startup: {e}",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
 
@@ -1854,7 +1834,6 @@ def make_lifespan(
                 format_error_log(
                     "APP-GENERAL-050",
                     f"Failed to initialize Codex CLI credential management on startup: {e}",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
 
@@ -1899,7 +1878,6 @@ def make_lifespan(
                 format_error_log(
                     "APP-GENERAL-020",
                     f"Failed to initialize scheduled catch-up service: {e}",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
 
@@ -2102,7 +2080,6 @@ def make_lifespan(
                         f"_check_lifecycle_backfill_wiring(). Fix: ensure "
                         f"global_lifecycle_manager initializes successfully BEFORE "
                         f"the description scheduler wiring block (lifespan.py ~895).",
-                        extra={"correlation_id": get_correlation_id()},
                     )
                 )
 
@@ -2128,7 +2105,6 @@ def make_lifespan(
                 format_error_log(
                     "APP-GENERAL-021",
                     f"Failed to initialize description refresh scheduler: {e}",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
 
@@ -2170,7 +2146,6 @@ def make_lifespan(
                 format_error_log(
                     "APP-GENERAL-033",
                     f"Failed to initialize data retention scheduler: {e}",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
 
@@ -2247,7 +2222,6 @@ def make_lifespan(
                 format_error_log(
                     "APP-GENERAL-054",
                     f"Failed to initialize research cleanup scheduler: {e}",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
 
@@ -2330,7 +2304,6 @@ def make_lifespan(
                 format_error_log(
                     "APP-GENERAL-036",
                     f"Failed to initialize activated reaper scheduler: {e}",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
 
@@ -2377,7 +2350,6 @@ def make_lifespan(
                 format_error_log(
                     "APP-GENERAL-090",
                     f"Failed to initialize HNSW orphan repair sweep scheduler: {e}",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
 
@@ -2421,7 +2393,6 @@ def make_lifespan(
                 format_error_log(
                     "APP-GENERAL-091",
                     f"Failed to initialize fleet migration scheduler: {e}",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
 
@@ -2486,7 +2457,6 @@ def make_lifespan(
                 format_error_log(
                     "APP-GENERAL-1418",
                     f"Failed to initialize embedding stats writer: {e}",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
 
@@ -2527,7 +2497,6 @@ def make_lifespan(
                 format_error_log(
                     "APP-GENERAL-1420",
                     f"Failed to initialize embedding stats retention scheduler: {e}",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
 
@@ -2980,7 +2949,6 @@ def make_lifespan(
                 format_error_log(
                     "APP-GENERAL-022",
                     f"Failed to initialize dependency map scheduler: {e}",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
 
@@ -3048,7 +3016,6 @@ def make_lifespan(
                         format_error_log(
                             "MONITOR-GENERAL-010",
                             "Self-monitoring enabled but could not detect GitHub repo from git remote - service disabled",
-                            extra={"correlation_id": get_correlation_id()},
                         )
                     )
                     app.state.self_monitoring_service = None
@@ -3137,7 +3104,6 @@ def make_lifespan(
                 format_error_log(
                     "MONITOR-GENERAL-011",
                     f"Failed to start self-monitoring service: {e}",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
             app.state.self_monitoring_service = None
@@ -3205,9 +3171,8 @@ def make_lifespan(
                 format_error_log(
                     "APP-GENERAL-021",
                     f"Failed to initialize MCP Session cleanup: {e}",
-                    exc_info=True,
-                    extra={"correlation_id": get_correlation_id()},
-                )
+                ),
+                exc_info=True,
             )
 
         # Startup: Initialize TelemetryManager for OTEL (Story #695)
@@ -3402,9 +3367,8 @@ def make_lifespan(
                 format_error_log(
                     "APP-GENERAL-022",
                     f"Failed to initialize TelemetryManager: {e}",
-                    exc_info=True,
-                    extra={"correlation_id": get_correlation_id()},
-                )
+                ),
+                exc_info=True,
             )
             app.state.telemetry_manager = None
             app.state.machine_metrics_exporter = None
@@ -3482,9 +3446,8 @@ def make_lifespan(
                 format_error_log(
                     "APP-GENERAL-023",
                     f"Failed to initialize OIDC: {e}",
-                    exc_info=True,
-                    extra={"correlation_id": get_correlation_id()},
-                )
+                ),
+                exc_info=True,
             )
             logger.info(
                 "OIDC routes registered but manager not initialized - SSO login will return 404 until configured",
@@ -3568,9 +3531,8 @@ def make_lifespan(
                             format_error_log(
                                 "APP-GENERAL-030",
                                 f"Failed to generate Langfuse READMEs after sync: {readme_err}",
-                                exc_info=True,
-                                extra={"correlation_id": get_correlation_id()},
-                            )
+                            ),
+                            exc_info=True,
                         )
 
                 elapsed = time.monotonic() - _callback_start
@@ -3621,9 +3583,8 @@ def make_lifespan(
                 format_error_log(
                     "APP-GENERAL-029",
                     f"Failed to initialize Langfuse Trace Sync Service: {e}",
-                    exc_info=True,
-                    extra={"correlation_id": get_correlation_id()},
-                )
+                ),
+                exc_info=True,
             )
             app.state.langfuse_sync_service = None
 
@@ -4728,9 +4689,8 @@ def make_lifespan(
                 format_error_log(
                     "APP-GENERAL-032",
                     f"Failed to start NodeMetricsWriterService: {e}",
-                    exc_info=True,
-                    extra={"correlation_id": get_correlation_id()},
-                )
+                ),
+                exc_info=True,
             )
             app.state.node_metrics_writer = None
             app.state.node_metrics_backend = None
@@ -4754,9 +4714,8 @@ def make_lifespan(
                 format_error_log(
                     "APP-GENERAL-034",
                     f"Failed to start DatabaseConnectionManager cleanup daemon: {e}",
-                    exc_info=True,
-                    extra={"correlation_id": get_correlation_id()},
-                )
+                ),
+                exc_info=True,
             )
 
         # Story #1079 Phase E: build the embedding coalescer registry ONCE, after
@@ -4790,9 +4749,8 @@ def make_lifespan(
                     "APP-GENERAL-1079",
                     f"Failed to build embedding coalescer registry "
                     f"(queries will use the direct governed call): {e}",
-                    exc_info=True,
-                    extra={"correlation_id": get_correlation_id()},
-                )
+                ),
+                exc_info=True,
             )
 
         # Story #1105: build the query embedding cache ONCE after providers +
@@ -4842,9 +4800,8 @@ def make_lifespan(
                     "APP-GENERAL-1105",
                     f"Failed to build query embedding cache "
                     f"(queries will use the live path): {e}",
-                    exc_info=True,
-                    extra={"correlation_id": get_correlation_id()},
-                )
+                ),
+                exc_info=True,
             )
 
         # Story #1295 (Epic #1288 final): build EmbeddingCacheOtelMetrics --
@@ -4922,9 +4879,8 @@ def make_lifespan(
                     "APP-GENERAL-1295",
                     f"Failed to build EmbeddingCacheOtelMetrics "
                     f"(cache OTEL metrics will be disabled): {e}",
-                    exc_info=True,
-                    extra={"correlation_id": get_correlation_id()},
-                )
+                ),
+                exc_info=True,
             )
 
         # Story #1290: startup blank-out sweep — hard-delete legacy/version<2
@@ -5291,9 +5247,8 @@ def make_lifespan(
                     format_error_log(
                         "APP-GENERAL-033",
                         f"Error stopping NodeMetricsWriterService: {e}",
-                        exc_info=True,
-                        extra={"correlation_id": get_correlation_id()},
-                    )
+                    ),
+                    exc_info=True,
                 )
 
         # Shutdown: Stop global repos background services BEFORE other cleanup
@@ -5313,9 +5268,8 @@ def make_lifespan(
                     format_error_log(
                         "APP-GENERAL-024",
                         f"Error stopping global repos background services: {e}",
-                        exc_info=True,
-                        extra={"correlation_id": get_correlation_id()},
-                    )
+                    ),
+                    exc_info=True,
                 )
 
         # Shutdown: Stop PayloadCache background cleanup (Story #679)
@@ -5331,9 +5285,8 @@ def make_lifespan(
                     format_error_log(
                         "APP-GENERAL-025",
                         f"Error stopping PayloadCache: {e}",
-                        exc_info=True,
-                        extra={"correlation_id": get_correlation_id()},
-                    )
+                    ),
+                    exc_info=True,
                 )
 
         # Shutdown: Stop DependencyLatencyTracker background flush (Story #680)
@@ -5349,9 +5302,8 @@ def make_lifespan(
                     format_error_log(
                         "APP-GENERAL-027",
                         f"Error stopping DependencyLatencyTracker: {e}",
-                        exc_info=True,
-                        extra={"correlation_id": get_correlation_id()},
-                    )
+                    ),
+                    exc_info=True,
                 )
 
         # Shutdown: Stop MCP Session cleanup (Story #731)
@@ -5367,9 +5319,8 @@ def make_lifespan(
                     format_error_log(
                         "APP-GENERAL-026",
                         f"Error stopping MCP Session cleanup: {e}",
-                        exc_info=True,
-                        extra={"correlation_id": get_correlation_id()},
-                    )
+                    ),
+                    exc_info=True,
                 )
 
         # Shutdown: Stop data retention scheduler (Story #401)
@@ -5388,9 +5339,8 @@ def make_lifespan(
                     format_error_log(
                         "APP-GENERAL-034",
                         f"Error stopping data retention scheduler: {e}",
-                        exc_info=True,
-                        extra={"correlation_id": get_correlation_id()},
-                    )
+                    ),
+                    exc_info=True,
                 )
 
         # Shutdown: Stop fleet migration scheduler (Story #1458, Epic
@@ -5413,9 +5363,8 @@ def make_lifespan(
                     format_error_log(
                         "APP-GENERAL-1458",
                         f"Error stopping fleet migration scheduler: {e}",
-                        exc_info=True,
-                        extra={"correlation_id": get_correlation_id()},
-                    )
+                    ),
+                    exc_info=True,
                 )
 
         temporal_legacy_scheduler_state = getattr(
@@ -5451,9 +5400,8 @@ def make_lifespan(
                     format_error_log(
                         "APP-GENERAL-055",
                         f"Error stopping research cleanup scheduler: {e}",
-                        exc_info=True,
-                        extra={"correlation_id": get_correlation_id()},
-                    )
+                    ),
+                    exc_info=True,
                 )
 
         # Shutdown: Stop activated reaper scheduler (Story #967)
@@ -5472,9 +5420,8 @@ def make_lifespan(
                     format_error_log(
                         "APP-GENERAL-037",
                         f"Error stopping activated reaper scheduler: {e}",
-                        exc_info=True,
-                        extra={"correlation_id": get_correlation_id()},
-                    )
+                    ),
+                    exc_info=True,
                 )
 
         # Shutdown: Stop embedding stats writer (Story #1418 Phase 3)
@@ -5497,9 +5444,8 @@ def make_lifespan(
                     format_error_log(
                         "APP-GENERAL-1419",
                         f"Error stopping embedding stats writer: {e}",
-                        exc_info=True,
-                        extra={"correlation_id": get_correlation_id()},
-                    )
+                    ),
+                    exc_info=True,
                 )
 
         # Shutdown: Stop embedding stats retention scheduler (Story #1418
@@ -5519,9 +5465,8 @@ def make_lifespan(
                     format_error_log(
                         "APP-GENERAL-1421",
                         f"Error stopping embedding stats retention scheduler: {e}",
-                        exc_info=True,
-                        extra={"correlation_id": get_correlation_id()},
-                    )
+                    ),
+                    exc_info=True,
                 )
 
         # Shutdown: Stop description refresh scheduler (Story #190)
@@ -5540,9 +5485,8 @@ def make_lifespan(
                     format_error_log(
                         "APP-GENERAL-027",
                         f"Error stopping description refresh scheduler: {e}",
-                        exc_info=True,
-                        extra={"correlation_id": get_correlation_id()},
-                    )
+                    ),
+                    exc_info=True,
                 )
 
         # --- LLM Lease Lifecycle shutdown ---
@@ -5582,9 +5526,8 @@ def make_lifespan(
                     format_error_log(
                         "APP-GENERAL-029",
                         f"Error stopping cidx-meta refresh debouncer: {e}",
-                        exc_info=True,
-                        extra={"correlation_id": get_correlation_id()},
-                    )
+                    ),
+                    exc_info=True,
                 )
 
         # Shutdown: Stop dependency map scheduler (Story #193)
@@ -5603,9 +5546,8 @@ def make_lifespan(
                     format_error_log(
                         "APP-GENERAL-028",
                         f"Error stopping dependency map scheduler: {e}",
-                        exc_info=True,
-                        extra={"correlation_id": get_correlation_id()},
-                    )
+                    ),
+                    exc_info=True,
                 )
 
         # Shutdown: Stop self-monitoring service (Epic #71)
@@ -5621,9 +5563,8 @@ def make_lifespan(
                     format_error_log(
                         "APP-GENERAL-028",
                         f"Error stopping self-monitoring service: {e}",
-                        exc_info=True,
-                        extra={"correlation_id": get_correlation_id()},
-                    )
+                    ),
+                    exc_info=True,
                 )
 
         # Shutdown: Stop Langfuse Trace Sync Service (Story #168)
@@ -5639,9 +5580,8 @@ def make_lifespan(
                     format_error_log(
                         "APP-GENERAL-030",
                         f"Error stopping Langfuse Trace Sync Service: {e}",
-                        exc_info=True,
-                        extra={"correlation_id": get_correlation_id()},
-                    )
+                    ),
+                    exc_info=True,
                 )
 
         # Shutdown: Stop TelemetryManager and flush pending telemetry (Story #695)
@@ -5657,9 +5597,8 @@ def make_lifespan(
                     format_error_log(
                         "APP-GENERAL-027",
                         f"Error stopping TelemetryManager: {e}",
-                        exc_info=True,
-                        extra={"correlation_id": get_correlation_id()},
-                    )
+                    ),
+                    exc_info=True,
                 )
 
         # Bug #878 Fix A.2: stop the DatabaseConnectionManager cleanup daemon.
@@ -5677,9 +5616,8 @@ def make_lifespan(
                 format_error_log(
                     "APP-GENERAL-035",
                     f"Error stopping DatabaseConnectionManager cleanup daemon: {e}",
-                    exc_info=True,
-                    extra={"correlation_id": get_correlation_id()},
-                )
+                ),
+                exc_info=True,
             )
 
         # Shutdown: Clean up other resources

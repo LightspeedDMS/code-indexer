@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import types
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -42,8 +41,13 @@ def _get_cidx_meta_path() -> Path:
 
     Raises:
         RuntimeError: If golden_repo_manager is not configured in the app module.
+
+    Bug #1709: probes via `_utils._lazy_module_attr_or_none()` instead of a
+    bare `getattr(_utils.app_module, "golden_repo_manager", None)`, which
+    would otherwise permanently construct the process-wide app singleton as
+    a side effect of merely reading it.
     """
-    grm = getattr(_utils.app_module, "golden_repo_manager", None)
+    grm = _utils._lazy_module_attr_or_none("golden_repo_manager")
     if grm is None:
         raise RuntimeError(
             "cidx-meta path not available: golden_repo_manager not configured in app module"
@@ -233,20 +237,21 @@ def _lazy_singleton_app_or_none() -> Any:
     and caches the process-wide singleton the first time an INDEPENDENTLY
     created app (e.g. a test fixture's own `create_app()` call) starts its
     own lifespan -- leaking that fixture's stale services into the singleton
-    for the rest of the process. Reading `__dict__.get("app")` is a plain
-    dict lookup: it never invokes `__getattr__`, so it returns None until the
-    singleton has genuinely already been constructed elsewhere.
+    for the rest of the process.
 
-    Only the real `code_indexer.server.app` module needs this treatment --
-    tests that replace `_utils.app_module` with a `MagicMock()` stand-in
-    (e.g. test_xray_cell_limiter.py) rely on plain `getattr()` triggering
-    Mock's normal attribute-interception, which a raw `__dict__` read would
-    bypass entirely.
+    Bug #1709 (code review remediation of commit 45e7fa4e, Blocker 1): this
+    is now a thin alias for `_utils._lazy_module_attr_or_none("app")` -- the
+    generalized form of this exact function, which ALSO recovers via
+    `app_module._lazy_values` after a `unittest.mock.patch.object(app_module,
+    "app", ...)` (no `create=True`) delattr-then-hasattr teardown sequence
+    elsewhere in a test session (see that helper's own docstring for the
+    full rationale). This function's original raw `__dict__.get("app")`
+    read missed that recovery path and permanently returned `None` for the
+    rest of the process once such a teardown had occurred -- kept as a
+    named alias (rather than inlined at each call site) so #1693's existing
+    call sites need zero changes.
     """
-    app_module = _utils.app_module
-    if isinstance(app_module, types.ModuleType):
-        return app_module.__dict__.get("app")
-    return getattr(app_module, "app", None)
+    return _utils._lazy_module_attr_or_none("app")
 
 
 def set_xray_executor(executor: ThreadPoolExecutor) -> None:
@@ -337,8 +342,14 @@ def _get_job_tracker() -> Any:
     Bug #1070: xray uses register_job() directly (no conflict check) instead of
     submit_job() which calls register_job_if_no_conflict() — that gate serializes
     concurrent xray calls on the same repo, which is wrong for read-only operations.
+
+    Bug #1709: probes via `_utils._lazy_module_attr_or_none()` instead of a
+    direct unconditional `_utils.app_module.job_tracker` attribute access,
+    which would otherwise permanently construct the process-wide app
+    singleton as a side effect of merely reading it (same fix already
+    applied to `_get_background_job_manager()` immediately above).
     """
-    return _utils.app_module.job_tracker
+    return _utils._lazy_module_attr_or_none("job_tracker")
 
 
 def handle_store_xray_pattern(params: Dict[str, Any], user: User) -> Dict[str, Any]:
@@ -408,8 +419,32 @@ def _get_background_job_manager():
     """Return the live BackgroundJobManager from the app module.
 
     Extracted for easy mocking in unit tests.
+
+    Bug #1709: probes via `_utils._lazy_module_attr_or_none()` instead of a
+    direct unconditional `_utils.app_module.background_job_manager`
+    attribute access, which -- for the same PEP-562 `__getattr__` reason as
+    the other lazy attribute probes fixed in this module -- would otherwise
+    permanently construct the process-wide app singleton as a side effect
+    of merely reading it. In real production usage this handler only ever
+    runs after the app singleton is fully constructed, so the returned
+    value is identical; only premature/test access now safely observes
+    `None` instead of forcing construction.
+
+    Returns:
+        The live BackgroundJobManager. Callers in this module dereference
+        the result unconditionally (e.g. `bjm.register_child_process(...)`,
+        `bjm.cancel_job(...)`) without a None-check -- this is safe because
+        a real MCP request handler only ever executes after server startup
+        has genuinely constructed and wired the singleton; a `None` result
+        is reachable only via premature/test access (see above), which no
+        real request path can trigger. A guard here that raised
+        `RuntimeError` (mirroring `_get_xray_executor()`'s shape) was
+        deliberately NOT added: doing so would turn this function into an
+        eager-construction trigger again for the exact test scenarios this
+        fix targets, where `None` is the correct, expected, and harmless
+        transient value.
     """
-    return _utils.app_module.background_job_manager
+    return _utils._lazy_module_attr_or_none("background_job_manager")
 
 
 async def _await_xray_future(
@@ -771,8 +806,13 @@ async def handle_xray_search(params: Dict[str, Any], user: User) -> Dict[str, An
 
     # Story #1039: bare-to-global alias fallback (read-only handler).
     if isinstance(repo_alias_parsed, str) and not repo_alias_parsed.endswith("-global"):
-        _arm = getattr(_utils.app_module, "activated_repo_manager", None)
-        _grm = getattr(_utils.app_module, "golden_repo_manager", None)
+        # Bug #1709: probes via _utils._lazy_module_attr_or_none() (the
+        # generalized form of Bug #1693's _lazy_singleton_app_or_none())
+        # instead of a bare getattr(_utils.app_module, name, None), which
+        # would otherwise permanently construct the process-wide app
+        # singleton as a side effect of merely reading it.
+        _arm = _utils._lazy_module_attr_or_none("activated_repo_manager")
+        _grm = _utils._lazy_module_attr_or_none("golden_repo_manager")
         if _arm is not None and _grm is not None:
             if not _arm.user_has_activated_repo(user.username, repo_alias_parsed):
                 from ._global_fallback import try_global_fallback
@@ -1404,8 +1444,13 @@ async def handle_xray_explore(params: Dict[str, Any], user: User) -> Dict[str, A
 
     # Story #1039: bare-to-global alias fallback (read-only handler).
     if isinstance(repo_alias_parsed, str) and not repo_alias_parsed.endswith("-global"):
-        _arm = getattr(_utils.app_module, "activated_repo_manager", None)
-        _grm = getattr(_utils.app_module, "golden_repo_manager", None)
+        # Bug #1709: probes via _utils._lazy_module_attr_or_none() (the
+        # generalized form of Bug #1693's _lazy_singleton_app_or_none())
+        # instead of a bare getattr(_utils.app_module, name, None), which
+        # would otherwise permanently construct the process-wide app
+        # singleton as a side effect of merely reading it.
+        _arm = _utils._lazy_module_attr_or_none("activated_repo_manager")
+        _grm = _utils._lazy_module_attr_or_none("golden_repo_manager")
         if _arm is not None and _grm is not None:
             if not _arm.user_has_activated_repo(user.username, repo_alias_parsed):
                 from ._global_fallback import try_global_fallback
@@ -1537,8 +1582,13 @@ def handle_xray_dump_ast(params: Dict[str, Any], user: User) -> Dict[str, Any]:
 
     # Story #1039: bare-to-global alias fallback (read-only handler).
     if isinstance(repo_alias, str) and not repo_alias.endswith("-global"):
-        _arm = getattr(_utils.app_module, "activated_repo_manager", None)
-        _grm = getattr(_utils.app_module, "golden_repo_manager", None)
+        # Bug #1709: probes via _utils._lazy_module_attr_or_none() (the
+        # generalized form of Bug #1693's _lazy_singleton_app_or_none())
+        # instead of a bare getattr(_utils.app_module, name, None), which
+        # would otherwise permanently construct the process-wide app
+        # singleton as a side effect of merely reading it.
+        _arm = _utils._lazy_module_attr_or_none("activated_repo_manager")
+        _grm = _utils._lazy_module_attr_or_none("golden_repo_manager")
         if _arm is not None and _grm is not None:
             if not _arm.user_has_activated_repo(user.username, repo_alias):
                 from ._global_fallback import try_global_fallback
@@ -1689,7 +1739,13 @@ def handle_cidx_fetch_cached_payload(
             }
         )
 
-    payload_cache = getattr(_utils.app_module.app.state, "payload_cache", None)
+    # Bug #1709: probes via _lazy_singleton_app_or_none() instead of a bare
+    # _utils.app_module.app.state attribute chain, which would otherwise
+    # permanently construct the process-wide app singleton as a side effect
+    # of merely reading it (see _lazy_singleton_app_or_none()'s docstring).
+    payload_cache = getattr(
+        getattr(_lazy_singleton_app_or_none(), "state", None), "payload_cache", None
+    )
     if payload_cache is None:
         return _mcp_response(
             {
@@ -1752,7 +1808,13 @@ def _truncate_xray_result(result: Dict[str, Any]) -> Dict[str, Any]:
     """
     import json
 
-    payload_cache = getattr(_utils.app_module.app.state, "payload_cache", None)
+    # Bug #1709: probes via _lazy_singleton_app_or_none() instead of a bare
+    # _utils.app_module.app.state attribute chain, which would otherwise
+    # permanently construct the process-wide app singleton as a side effect
+    # of merely reading it (see _lazy_singleton_app_or_none()'s docstring).
+    payload_cache = getattr(
+        getattr(_lazy_singleton_app_or_none(), "state", None), "payload_cache", None
+    )
     if payload_cache is None:
         return result
 

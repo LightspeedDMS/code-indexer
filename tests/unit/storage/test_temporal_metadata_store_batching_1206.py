@@ -120,11 +120,7 @@ class TestSaveMetadataBatch:
                     )
                     for i in range(rows_per_thread)
                 ]
-                # Issue #1696 Session 1: save_metadata_batch() is really
-                # typed to return List[str]; mypy currently resolves the
-                # bare cross-module import to Any until Session 2's
-                # mypy_path fix lands.
-                return store.save_metadata_batch(rows)  # type: ignore[no-any-return]
+                return store.save_metadata_batch(rows)
 
             with ThreadPoolExecutor(max_workers=n_threads) as pool:
                 futures = [pool.submit(worker, tid) for tid in range(n_threads)]

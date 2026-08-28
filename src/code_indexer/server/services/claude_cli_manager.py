@@ -162,9 +162,9 @@ class ClaudeCliManager:
                 format_error_log(
                     "APP-GENERAL-064",
                     f"Failed to sync API key via ApiKeySyncService: {e}",
-                    exc_info=True,
                     extra={"correlation_id": get_correlation_id()},
-                )
+                ),
+                exc_info=True,
             )
 
     def sync_api_key(self) -> None:
@@ -258,9 +258,9 @@ class ClaudeCliManager:
                 format_error_log(
                     "AUTH-GENERAL-010",
                     f"Failed to sync API key: {e}",
-                    exc_info=True,
                     extra={"correlation_id": get_correlation_id()},
-                )
+                ),
+                exc_info=True,
             )
             raise
 
@@ -707,9 +707,9 @@ class ClaudeCliManager:
                     format_error_log(
                         "AUTH-GENERAL-016",
                         f"{thread_name} error: {e}",
-                        exc_info=True,
                         extra={"correlation_id": get_correlation_id()},
-                    )
+                    ),
+                    exc_info=True,
                 )
 
         logger.debug(
@@ -781,9 +781,9 @@ class ClaudeCliManager:
                 format_error_log(
                     "AUTH-GENERAL-018",
                     f"Error processing {repo_path}: {e}",
-                    exc_info=True,
                     extra={"correlation_id": get_correlation_id()},
-                )
+                ),
+                exc_info=True,
             )
             callback(False, str(e))
 

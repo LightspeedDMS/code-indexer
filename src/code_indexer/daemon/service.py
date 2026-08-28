@@ -1639,19 +1639,25 @@ class CIDXDaemonService(Service):
                 self.cache_entry is not None
                 and self.cache_entry.project_path == project_path_obj
             ):
-                # Same project - check if rebuild occurred
+                # Same project - check if rebuild occurred.
+                # Bug #1730 FINDING 2: resolve collection_path from the
+                # collection ACTUALLY cached (cache_entry.collection_name),
+                # never an arbitrary iterdir()-order pick -- a project can
+                # have multiple collections on disk, and comparing an
+                # unrelated collection's index_rebuild_uuid can silently
+                # miss a genuine out-of-band rebuild of the collection
+                # actually cached (or incorrectly invalidate a fresh one).
                 index_dir = project_path_obj / ".code-indexer" / "index"
-                if index_dir.exists():
-                    # Find collection directory (assume single collection)
-                    collections = [d for d in index_dir.iterdir() if d.is_dir()]
-                    if collections:
-                        collection_path = collections[0]
-                        if self.cache_entry.is_stale_after_rebuild(collection_path):
-                            logger.info(
-                                "Background rebuild detected, invalidating cache"
-                            )
-                            self.cache_entry.invalidate()
-                            self.cache_entry = None
+                cached_collection_name = self.cache_entry.collection_name
+                if index_dir.exists() and cached_collection_name:
+                    collection_path = index_dir / cached_collection_name
+                    if (
+                        collection_path.is_dir()
+                        and self.cache_entry.is_stale_after_rebuild(collection_path)
+                    ):
+                        logger.info("Background rebuild detected, invalidating cache")
+                        self.cache_entry.invalidate()
+                        self.cache_entry = None
 
             # Check if we need to load or replace cache
             if (
@@ -1698,8 +1704,42 @@ class CIDXDaemonService(Service):
                 logger.warning("No collections found in index")
                 return
 
-            # Load first collection (single collection per project)
-            collection_name = collections[0]
+            # Bug #1730 (code-review remediation, root cause): warm the
+            # CONFIGURED collection -- the one _execute_semantic_search
+            # will actually resolve to via resolve_collection_name() --
+            # never an arbitrary list_collections()/iterdir() order pick.
+            # A single project can have MULTIPLE collections on disk (a
+            # switched embedding model, temporal shards, ...); caching the
+            # wrong one used to be merely wasteful (the query path re-read
+            # the correct index from disk anyway) but became actively
+            # unsafe once the query path started trusting the cache.
+            from code_indexer.config import ConfigManager
+            from code_indexer.services.embedding_factory import (
+                EmbeddingProviderFactory,
+            )
+
+            try:
+                config = ConfigManager.load_verified_config(entry.project_path)
+                embedding_provider = EmbeddingProviderFactory.create(config=config)
+                configured_collection_name = vector_store.resolve_collection_name(
+                    config, embedding_provider
+                )
+            except Exception as e:
+                logger.warning(
+                    f"Could not resolve configured collection for semantic "
+                    f"cache warm-up, leaving semantic cache cold: {e}"
+                )
+                return
+
+            if configured_collection_name not in collections:
+                logger.warning(
+                    f"Configured collection '{configured_collection_name}' not "
+                    f"found on disk (available: {collections}); semantic cache "
+                    f"stays cold until it exists"
+                )
+                return
+
+            collection_name = configured_collection_name
             collection_path = index_dir / collection_name
 
             # Read collection metadata to get vector dimension
@@ -1740,7 +1780,19 @@ class CIDXDaemonService(Service):
 
             # Set semantic indexes
             if hnsw_index and (id_index or is_chunks_db):
-                entry.set_semantic_indexes(hnsw_index, id_index)
+                # Bug #1730: the EXACT cache key search() would key this
+                # collection's HNSW entry under -- see
+                # hnsw_cache_key_for_collection()'s own docstring (Bug
+                # #1538) for why callers must never hand-reconstruct this
+                # format. Stored so DaemonHNSWCacheAdapter can defensively
+                # verify a query's cache_key actually matches the cached
+                # collection before ever trusting it.
+                hnsw_cache_key = vector_store.hnsw_cache_key_for_collection(
+                    collection_path
+                )
+                entry.set_semantic_indexes(
+                    hnsw_index, id_index, hnsw_cache_key=hnsw_cache_key
+                )
                 # Store collection metadata for search execution
                 entry.collection_name = collection_name
                 entry.vector_dim = vector_dim
@@ -1812,7 +1864,12 @@ class CIDXDaemonService(Service):
         try:
             from code_indexer.config import ConfigManager
             from code_indexer.backends.backend_factory import BackendFactory
+            from code_indexer.backends.filesystem_backend import FilesystemBackend
             from code_indexer.services.embedding_factory import EmbeddingProviderFactory
+            from code_indexer.storage.filesystem_vector_store import (
+                FilesystemVectorStore,
+            )
+            from .cache import DaemonHNSWCacheAdapter
 
             # Initialize configuration and services.
             # Bug #1718: verify project_path's OWN config -- same
@@ -1826,7 +1883,45 @@ class CIDXDaemonService(Service):
             # Create embedding provider and vector store
             embedding_provider = EmbeddingProviderFactory.create(config=config)
             backend = BackendFactory.create(config, Path(project_path))
-            vector_store = backend.get_vector_store_client()
+
+            # Bug #1730 (code-review remediation): the daemon's cache holds
+            # AT MOST one collection's HNSW index, but a project can have
+            # MULTIPLE collections on disk (a switched embedding model,
+            # temporal shards, ...). Taking the fast direct-construction
+            # path is only safe when THIS QUERY's own resolved collection
+            # is the exact one currently cached -- never merely on
+            # cache_entry.hnsw_index being non-None. Resolve the collection
+            # name via a throwaway direct-construction instance (cheap:
+            # in-memory state + one idempotent mkdir, no HNSW/FTS disk I/O)
+            # BEFORE deciding which path to take; on a match, reuse that
+            # same instance with the cache adapter attached.
+            #
+            # get_vector_store_client() gates a slew of unrelated "server
+            # mode" behavior on hnsw_index_cache being non-None (global
+            # id_index_cache/collection_meta_cache/chunk_store_cache
+            # singletons, Postgres-storage-mode probes) that only make
+            # sense for a real multi-worker server process sharing caches
+            # across many concurrent requests -- semantics this
+            # single-project CLI daemon was never designed to run under.
+            # See DaemonHNSWCacheAdapter's docstring for detail.
+            vector_store = None
+            if isinstance(backend, FilesystemBackend):
+                candidate_store = FilesystemVectorStore(
+                    base_path=backend.vectors_dir, project_root=backend.project_root
+                )
+                resolved_collection_name = candidate_store.resolve_collection_name(
+                    config, embedding_provider
+                )
+                if (
+                    self.cache_entry is not None
+                    and self.cache_entry.collection_name == resolved_collection_name
+                ):
+                    candidate_store.hnsw_index_cache = DaemonHNSWCacheAdapter(
+                        self.cache_entry
+                    )
+                    vector_store = candidate_store
+            if vector_store is None:
+                vector_store = backend.get_vector_store_client()
 
             # Get collection name
             collection_name = vector_store.resolve_collection_name(
@@ -1990,7 +2085,23 @@ class CIDXDaemonService(Service):
                 return []
 
             tantivy_manager = TantivyIndexManager(fts_index_dir)
-            tantivy_manager.initialize_index(create_new=False)
+
+            # Bug #1730: use the daemon's own warm CacheEntry.tantivy_index
+            # (loaded once by _load_fts_indexes / _ensure_cache_loaded) when
+            # available -- adopting it directly does zero disk I/O and never
+            # touches the exclusive writer lock. Only fall back to opening
+            # from disk (via open_for_search(), the documented-correct
+            # read-path entry point -- NEVER initialize_index(), which
+            # always acquires the writer lock per Bug #1233) when the cache
+            # genuinely has nothing loaded (e.g. FTS index did not exist yet
+            # at cache-load time).
+            if (
+                self.cache_entry is not None
+                and self.cache_entry.tantivy_index is not None
+            ):
+                tantivy_manager.open_from_cached_index(self.cache_entry.tantivy_index)
+            else:
+                tantivy_manager.open_for_search()
 
             # Extract FTS search parameters
             limit = kwargs.get("limit", 10)

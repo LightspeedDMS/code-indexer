@@ -409,7 +409,7 @@ class TestCollaboratorNotCalledOnDeniedProvesRealGateOrdering:
             # effect of merely being patched. Patching xray's own
             # extracted-for-mocking wrapper functions instead (mirroring
             # test_xray_cell_limiter.py's established pattern) verifies the
-            # exact same ordering without ever touching the real singleton.
+            # exact same ordering without the patch-time construction side effect.
             patch.object(xray, "_get_job_tracker", return_value=mock_job_tracker),
             patch.object(xray, "_get_xray_executor", return_value=MagicMock()),
         ):

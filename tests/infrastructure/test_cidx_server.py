@@ -7,9 +7,10 @@ This server responds to actual HTTP requests with real JWT tokens and authentica
 import asyncio
 import logging
 import socket
+import threading
 import time
 from datetime import datetime, timedelta, timezone
-from typing import Dict, Any, Optional, List, cast
+from typing import Dict, Any, Optional, List, Set, cast
 from dataclasses import dataclass, asdict
 
 import jwt
@@ -18,7 +19,15 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from fastapi import FastAPI, HTTPException, Depends
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
+
+# Bug #1725: reuse the real production password-complexity validator so the
+# fake's AdminChangePasswordRequest mirrors server/models/auth.py's model
+# exactly (min_length + complexity), instead of drifting from it again.
+from code_indexer.server.auth.password_validator import (
+    validate_password_complexity,
+    get_password_complexity_error_message,
+)
 
 # Configure logging to avoid interference with test output
 logging.getLogger("uvicorn").setLevel(logging.WARNING)
@@ -96,13 +105,35 @@ class JobCancelRequest(BaseModel):
 
 
 class QueryRequest(BaseModel):
-    """Query request model."""
+    """Query request model.
 
-    query: str = Field(..., min_length=1)
+    Bug #1725: field renamed from ``query`` to ``query_text`` to match the
+    real production request body (SemanticQueryRequest,
+    server/models/query.py) and the real client's actual payload
+    (RemoteQueryClient.execute_query() sends "query_text", not "query" --
+    see remote_query_client.py). The route existed on both sides pre-#1708;
+    only this request-body field name had drifted.
+    """
+
+    query_text: str = Field(..., min_length=1)
     limit: int = Field(default=10, ge=1, le=100)
     min_score: float = Field(default=0.0, ge=0.0, le=1.0)
     language: Optional[str] = None
     path_filter: Optional[str] = None
+
+
+class ElevateRequest(BaseModel):
+    """Elevate session request model (Bug #1737).
+
+    Minimal mirror of the real production model's shape
+    (server/auth/elevation_routes.py's ElevateRequest field name,
+    ``totp_code``). Deliberately does NOT verify the code -- this fake has
+    no TOTP/MFA simulation infrastructure; per Bug #1737's scope, any
+    well-formed elevate call for a valid bearer token succeeds, which is
+    enough to exercise the client-side 403-then-retry contract shape.
+    """
+
+    totp_code: Optional[str] = None
 
 
 class CreateUserRequest(BaseModel):
@@ -117,6 +148,41 @@ class UpdateUserRequest(BaseModel):
     """Update user request model."""
 
     role: str = Field(..., min_length=1)
+
+
+class AdminChangePasswordRequest(BaseModel):
+    """Admin change password request model.
+
+    Bug #1725 (supersedes #1720 Finding 2): mirrors the real production
+    model (server/models/auth.py's AdminChangePasswordRequest) exactly --
+    ``min_length=1``, ``max_length=1000``, plus the shared complexity
+    validator -- so an empty or weak password produces the same HTTP 422
+    the real server returns, instead of the fake's previous deliberate 400.
+
+    Deliberately does NOT mirror the real route's ``require_elevation()``
+    (TOTP step-up) gating: this fake server has no TOTP/MFA simulation
+    infrastructure at all (no TOTP setup flow, no elevation token
+    issuance/verification), so replicating that gate here would mean
+    building a large, unrelated subsystem to cover a single admin-only
+    endpoint. Every existing test against this endpoint only exercises
+    role-based (403) and validation (422) failure paths, never elevation --
+    so the gap is currently inert. If a future test needs to assert on
+    ``elevation_required`` specifically, add that as a deliberate, documented
+    fake-server extension at that time rather than assuming it already works
+    here.
+    """
+
+    new_password: str = Field(..., min_length=1, max_length=1000)
+
+    @field_validator("new_password")
+    @classmethod
+    def validate_new_password(cls, v: str) -> str:
+        """Validate new password complexity (mirrors the real model exactly)."""
+        if not v or not v.strip():
+            raise ValueError("Password cannot be empty or contain only whitespace")
+        if not validate_password_complexity(v):
+            raise ValueError(get_password_complexity_error_message())
+        return v
 
 
 class TestCIDXServer:
@@ -138,7 +204,15 @@ class TestCIDXServer:
         """
         self.port = port
         self.server_process: Optional[uvicorn.Server] = None
-        self._server_task: Optional[asyncio.Task] = None
+        # Bug #1720 investigation: uvicorn runs on its OWN thread (with its
+        # own event loop, via uvicorn.Server.run()) rather than as an
+        # asyncio.Task on the test's event loop. Running it on the same loop
+        # deterministically deadlocked every synchronous real-network client
+        # call (httpx.Client) made from the test coroutine: the blocking
+        # socket read holds the only thread able to service the server's
+        # request handling, so the client's request never gets answered
+        # until its own read-timeout fires.
+        self._server_thread: Optional[threading.Thread] = None
         self.actual_port: Optional[int] = None
         self.base_url: Optional[str] = None
 
@@ -167,6 +241,9 @@ class TestCIDXServer:
         self.refresh_tokens: Dict[str, Dict[str, Any]] = {}
         # Initialize with test users for admin operations
         self.users: Dict[str, Dict[str, Any]] = dict(TEST_USERS)
+        # Bug #1725: golden repository store backing the admin golden-repos
+        # maintenance routes (list/refresh) added below.
+        self.golden_repos: Dict[str, Dict[str, Any]] = {}
 
         # Server configuration
         self.app = self._create_app()
@@ -178,6 +255,24 @@ class TestCIDXServer:
         self.should_simulate_timeout = False
         self.error_endpoints: List[str] = []
 
+        # Bug #1737: opt-in TOTP elevation simulation toggle. Defaults to
+        # False (current behavior -- role-only gating), so the 12+ existing
+        # consumer files of this fake server are entirely unaffected. When a
+        # test flips this to True, _create_user and _change_user_password
+        # (the two routes the real server gates with
+        # dependencies.require_elevation() in inline_admin_users.py) return
+        # 403 {"error": "elevation_required"} on any request whose bearer
+        # token has not yet completed a round trip through the fake's new
+        # POST /auth/elevate route -- just enough of the real 403-then-retry
+        # contract shape (see server/auth/dependencies.py's
+        # _elevation_required_exc) to exercise admin_client.py's
+        # _check_elevation_required/ElevationRequiredError handling and the
+        # CLI's with_elevation_retry single-retry wrapper for real. No TOTP
+        # code verification is simulated -- any well-formed /auth/elevate
+        # call for a valid bearer token succeeds.
+        self.simulate_elevation_required = False
+        self._elevated_tokens: Set[str] = set()
+
     def _create_app(self) -> FastAPI:
         """Create FastAPI application with real endpoints."""
         app = FastAPI(title="Test CIDX Server", version="1.0.0")
@@ -185,6 +280,12 @@ class TestCIDXServer:
         # Authentication endpoints
         app.post("/auth/login")(self._login)
         app.post("/auth/refresh")(self._refresh_token)
+        # Bug #1737: matches the real production route registered in
+        # server/auth/elevation_routes.py ("POST /auth/elevate"). Only
+        # meaningful when self.simulate_elevation_required is True; see
+        # _elevate_session for the (deliberately code-verification-free)
+        # fake elevation semantics.
+        app.post("/auth/elevate")(self._elevate_session)
 
         # Repository endpoints
         # NOTE: real production server registers this list endpoint at
@@ -196,19 +297,11 @@ class TestCIDXServer:
 
         # Job management endpoints
         app.get("/api/jobs")(self._list_jobs)
-        # KNOWN EXCEPTION (Bug #1708 audit, tracked follow-up #1720): the real
-        # production server has NO "/status"-suffixed route -- only
-        # "GET /api/jobs/{job_id}" (see inline_jobs.py). This fake route is a
-        # superset by the strict route-table definition, but it is left in
-        # place deliberately: real production client code
-        # (base_client.py's get_job_status(), used by cli.py and
-        # remote/polling.py) genuinely calls this exact "/status" URL, which
-        # 404s against the real server. ~15+ currently-passing tests across
-        # multiple files depend on this route to exercise that (buggy) real
-        # client method. Removing it here would silently delete that
-        # coverage without fixing the underlying client bug. See #1720 for
-        # the correct fix (align base_client.py's URL with the real route).
-        app.get("/api/jobs/{job_id}/status")(self._get_job_status)
+        # Matches the real production server's only job-status route (see
+        # inline_jobs.py: "GET /api/jobs/{job_id}", no "/status" suffix).
+        # base_client.py's get_job_status() was fixed to call this exact URL
+        # (Bug #1720 Finding 1); this fake route was renamed to match.
+        app.get("/api/jobs/{job_id}")(self._get_job_status)
         app.delete("/api/jobs/{job_id}")(self._cancel_job)
 
         # Query endpoints
@@ -219,6 +312,26 @@ class TestCIDXServer:
         app.get("/api/admin/users")(self._list_users)
         app.put("/api/admin/users/{username}")(self._update_user)
         app.delete("/api/admin/users/{username}")(self._delete_user)
+        # Matches the real production route registered in
+        # inline_admin_users.py: "PUT /api/admin/users/{username}/change-password"
+        # (Bug #1720 Finding 2 -- added to replace the pre-#1708 fictional
+        # "POST /api/admin/users/{username}/password" route that had no real
+        # production counterpart).
+        app.put("/api/admin/users/{username}/change-password")(
+            self._change_user_password
+        )
+
+        # Golden repository maintenance endpoints (Bug #1725). Matches the
+        # real production routes registered in inline_admin_ops.py:
+        # "GET /api/admin/golden-repos" and
+        # "POST /api/admin/golden-repos/{alias}/refresh" (202). These were
+        # entirely absent from the fake, so any golden-repos-maintenance
+        # request against it 404'd immediately.
+        app.get("/api/admin/golden-repos")(self._list_golden_repos)
+        app.post(
+            "/api/admin/golden-repos/{alias}/refresh",
+            status_code=202,
+        )(self._refresh_golden_repo)
 
         # Health endpoint
         app.get("/health")(self._health_check)
@@ -259,8 +372,15 @@ class TestCIDXServer:
 
         self.server_process = uvicorn.Server(config)
 
-        # Start server in background task
-        self._server_task = asyncio.create_task(self.server_process.serve())
+        # Start server on its own thread with its own event loop (Bug #1720
+        # investigation fix -- see __init__'s comment on _server_thread for
+        # why this must NOT be asyncio.create_task() on the test's loop).
+        # uvicorn.Server.run() internally does asyncio.run(self.serve()),
+        # giving this thread a fresh event loop independent of the caller's.
+        self._server_thread = threading.Thread(
+            target=self.server_process.run, daemon=True
+        )
+        self._server_thread.start()
 
         # Wait for server to be ready with timeout
         max_wait_time = 5.0
@@ -295,6 +415,17 @@ class TestCIDXServer:
 
             while self.server_process.started and time.time() - start_time < max_wait:
                 await asyncio.sleep(0.1)
+
+            if self._server_thread is not None:
+                # Join off the event loop thread so a slow shutdown never
+                # blocks this coroutine's own loop.
+                await asyncio.to_thread(self._server_thread.join, 3.0)
+                if self._server_thread.is_alive():
+                    logging.getLogger(__name__).warning(
+                        "TestCIDXServer: server thread did not stop within "
+                        "3.0s shutdown timeout -- leaking thread"
+                    )
+                self._server_thread = None
 
             self.server_process = None
 
@@ -730,7 +861,7 @@ class TestCIDXServer:
             {
                 "file_path": "/src/main.py",
                 "line_number": 42,
-                "code_snippet": f"def example_function(): # matches '{query_request.query}'",
+                "code_snippet": f"def example_function(): # matches '{query_request.query_text}'",
                 "similarity_score": 0.95,
                 "repository_alias": "default",
                 "file_last_modified": None,
@@ -739,7 +870,7 @@ class TestCIDXServer:
             {
                 "file_path": "/src/utils.py",
                 "line_number": 15,
-                "code_snippet": f"class ExampleClass: # related to '{query_request.query}'",
+                "code_snippet": f"class ExampleClass: # related to '{query_request.query_text}'",
                 "similarity_score": 0.78,
                 "repository_alias": "default",
                 "file_last_modified": None,
@@ -760,7 +891,7 @@ class TestCIDXServer:
         return {
             "results": limited_results,
             "total": len(limited_results),
-            "query": query_request.query,
+            "query_text": query_request.query_text,
         }
 
     def _require_admin_user(self, user_data: Dict[str, Any]) -> None:
@@ -774,6 +905,73 @@ class TestCIDXServer:
         """
         if user_data.get("role") != "admin":
             raise HTTPException(status_code=403, detail="Admin privileges required")
+
+    def _authenticate_admin_user(
+        self, credentials: HTTPAuthorizationCredentials
+    ) -> Dict[str, Any]:
+        """Verify the bearer token and enforce admin role in one call.
+
+        Shared by the golden-repos maintenance handlers (Bug #1725) to
+        avoid re-inlining the verify-token/lookup-user/require-admin
+        sequence used throughout this file.
+
+        Returns:
+            The current user's data dict.
+
+        Raises:
+            HTTPException: If the token is invalid or the user isn't admin.
+        """
+        self._verify_jwt_token(credentials.credentials)
+        current_user = self.active_tokens[credentials.credentials]["user_data"]
+        self._require_admin_user(current_user)
+        return cast(Dict[str, Any], current_user)
+
+    def _check_elevation_gate(self, credentials: HTTPAuthorizationCredentials) -> None:
+        """Raise 403 elevation_required when the elevation toggle is on
+        and this bearer token has not completed the fake elevate round trip.
+
+        Bug #1737. Mirrors server/auth/dependencies.py's
+        _elevation_required_exc response shape (403,
+        detail={"error": "elevation_required", ...}) closely enough for
+        admin_client.py's _check_elevation_required() to recognize it.
+        Called AFTER the admin-role check in each gated handler, matching
+        the real dependency chain order documented on require_elevation()
+        ("Chains after get_current_admin_user_hybrid").
+
+        No-op (returns immediately) when self.simulate_elevation_required
+        is False -- the default, preserving every existing consumer's
+        role-only-gated behavior.
+        """
+        if not self.simulate_elevation_required:
+            return
+        if credentials.credentials in self._elevated_tokens:
+            return
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "error": "elevation_required",
+                "message": "TOTP elevation required for this operation.",
+            },
+        )
+
+    async def _elevate_session(
+        self,
+        elevate_request: ElevateRequest,
+        credentials: HTTPAuthorizationCredentials = Depends(HTTPBearer()),
+    ):
+        """Fake TOTP elevation (Bug #1737).
+
+        Deliberately does NOT verify ``elevate_request.totp_code`` -- this
+        fake has no TOTP/MFA simulation infrastructure (see
+        AdminChangePasswordRequest's docstring for the original rationale
+        this bug follows up on). Any well-formed elevate call for a valid,
+        currently-active bearer token marks that token elevated, matching
+        just enough of the real POST /auth/elevate contract (200 on
+        success) for elevation.py's elevate() to proceed and retry.
+        """
+        self._verify_jwt_token(credentials.credentials)
+        self._elevated_tokens.add(credentials.credentials)
+        return {"message": "Elevated successfully"}
 
     # Admin User Management Endpoints
 
@@ -792,11 +990,18 @@ class TestCIDXServer:
         self._verify_jwt_token(credentials.credentials)
         current_user = self.active_tokens[credentials.credentials]["user_data"]
         self._require_admin_user(current_user)
+        # Bug #1737: no-op unless self.simulate_elevation_required is True.
+        self._check_elevation_gate(credentials)
 
         username = user_request.username
         if username in self.users:
+            # Bug #1725: real production returns 400 (not 409) here -- see
+            # inline_admin_users.py's create_user route, which converts
+            # UserManager.create_user()'s ValueError("User already exists:
+            # {username}") into HTTPException(400, str(e)). The fake's prior
+            # 409 + differently-worded detail was fictional.
             raise HTTPException(
-                status_code=409, detail=f"User '{username}' already exists"
+                status_code=400, detail=f"User already exists: {username}"
             )
 
         # Validate role
@@ -931,6 +1136,82 @@ class TestCIDXServer:
         del self.users[username]
 
         return {"message": f"User '{username}' deleted successfully"}
+
+    async def _change_user_password(
+        self,
+        username: str,
+        password_request: AdminChangePasswordRequest,
+        credentials: HTTPAuthorizationCredentials = Depends(HTTPBearer()),
+    ):
+        """Change a user's password (admin only).
+
+        Args:
+            username: Username whose password to change
+            password_request: New password data
+            credentials: JWT token credentials
+        """
+        # Verify JWT token and get current user
+        self._verify_jwt_token(credentials.credentials)
+        current_user = self.active_tokens[credentials.credentials]["user_data"]
+        self._require_admin_user(current_user)
+        # Bug #1737: no-op unless self.simulate_elevation_required is True.
+        self._check_elevation_gate(credentials)
+
+        if username not in self.users:
+            raise HTTPException(status_code=404, detail=f"User '{username}' not found")
+
+        # Note: an empty/weak new_password never reaches this point -- the
+        # AdminChangePasswordRequest model's min_length=1 + complexity
+        # field_validator (Bug #1725) rejects it at request-validation time
+        # (HTTP 422) before the handler body runs.
+
+        # Update the user's password
+        self.users[username]["password"] = password_request.new_password
+
+        return {"message": f"Password changed successfully for user '{username}'"}
+
+    async def _list_golden_repos(
+        self,
+        credentials: HTTPAuthorizationCredentials = Depends(HTTPBearer()),
+    ):
+        """List all golden repositories (admin only).
+
+        Mirrors the real production route: GET /api/admin/golden-repos
+        (see inline_admin_ops.py's list_golden_repos). Bug #1725.
+        """
+        self._authenticate_admin_user(credentials)
+
+        repos = list(self.golden_repos.values())
+        return {
+            "golden_repositories": repos,
+            "total": len(repos),
+        }
+
+    async def _refresh_golden_repo(
+        self,
+        alias: str,
+        credentials: HTTPAuthorizationCredentials = Depends(HTTPBearer()),
+    ):
+        """Refresh a golden repository (admin only) -- async job stub.
+
+        Mirrors the real production route:
+        POST /api/admin/golden-repos/{alias}/refresh (see
+        inline_admin_ops.py's refresh_golden_repo). Bug #1725.
+        """
+        self._authenticate_admin_user(credentials)
+
+        if alias not in self.golden_repos:
+            raise HTTPException(
+                status_code=404, detail=f"Golden repository '{alias}' not found"
+            )
+
+        job_id = f"refresh-{alias}-{int(time.time())}"
+        self.add_test_job(job_id, alias, "pending", 0)
+
+        return {
+            "job_id": job_id,
+            "message": f"Golden repository '{alias}' refresh started",
+        }
 
     async def _health_check(self):
         """Health check endpoint.

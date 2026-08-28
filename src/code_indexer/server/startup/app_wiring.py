@@ -221,6 +221,11 @@ def create_fastapi_app(services: Dict[str, Any], lifespan: Callable) -> FastAPI:
     dependencies.user_manager = user_manager
     dependencies.oauth_manager = oauth_manager
     dependencies.mcp_credential_manager = mcp_credential_manager
+    # Bug #1732 Finding 2: wire server_config so Story #563's non-SSO API
+    # restriction (_check_non_sso_api_restriction) can actually enforce --
+    # this assignment was missing since Story #563's original commit,
+    # leaving the restriction permanently inert regardless of config.
+    dependencies.server_config = server_config
     # Bug #1144: Wire API key bearer authentication
     from code_indexer.server.auth.api_key_manager import ApiKeyManager as _ApiKeyManager
 

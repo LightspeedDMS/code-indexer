@@ -57,10 +57,7 @@ def _get_temporal_collection_name() -> str:
         LEGACY_TEMPORAL_COLLECTION,
     )
 
-    # Issue #1696 Session 1: LEGACY_TEMPORAL_COLLECTION is a real `str`
-    # constant; mypy currently resolves the bare cross-module import to
-    # Any until Session 2's mypy_path fix lands.
-    return LEGACY_TEMPORAL_COLLECTION  # type: ignore[no-any-return]
+    return LEGACY_TEMPORAL_COLLECTION
 
 
 def _make_temporal_points(n: int, commit_hash: str = "abc1234") -> List[dict]:
@@ -401,15 +398,11 @@ class _CountingMetadataStore(TemporalMetadataStore):
 
     def save_metadata(self, point_id: str, payload: dict) -> str:  # type: ignore[override]
         self.single_save_calls += 1
-        # Issue #1696 Session 1: parent's save_metadata() is really typed
-        # to return str; mypy currently resolves the bare cross-module
-        # base-class import to Any until Session 2's mypy_path fix lands.
-        return super().save_metadata(point_id, payload)  # type: ignore[no-any-return]
+        return super().save_metadata(point_id, payload)
 
     def save_metadata_batch(self, rows: list) -> list:  # type: ignore[override]
         self.batch_save_calls += 1
-        # Issue #1696 Session 1: see save_metadata's comment above.
-        return super().save_metadata_batch(rows)  # type: ignore[no-any-return]
+        return super().save_metadata_batch(rows)
 
 
 class TestHotPathWiring:
