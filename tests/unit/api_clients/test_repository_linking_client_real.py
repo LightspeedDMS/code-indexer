@@ -527,14 +527,6 @@ class TestRealRepositoryLinkingClientErrorHandling:
                     "invalid",
                     "credentials",
                     "login",
-                    # No live test server is guaranteed to be running for this test
-                    # (no _is_test_server_available() guard by design), so the
-                    # observed error is often the connection-refused wrapper text
-                    # from network_error_handler.py's _handle_connect_error
-                    # ("Cannot connect to server. Check if server is running and
-                    # accessible."), not a real HTTP 401. Match that too.
-                    "connect",
-                    "server",
                 ]
             )
 
@@ -564,12 +556,6 @@ class TestRealRepositoryLinkingClientErrorHandling:
                     "refused",
                     "timeout",
                     "unreachable",
-                    # Actual production wording from network_error_handler.py's
-                    # _handle_connect_error ("Cannot connect to server. Check if
-                    # server is running and accessible.") uses "connect"/"server",
-                    # not the literal words above. Match the real wording too.
-                    "connect",
-                    "server",
                 ]
             )
 
