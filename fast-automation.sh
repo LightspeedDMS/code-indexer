@@ -129,14 +129,6 @@ echo "⏱️  Duration report: $DURATION_FILE"
 # a documented live-masked failure with its own tracking issue (listed here),
 # or it should not exist -- a stale/dead deselect is a silent gate weakener.
 # Documented live-masked failures remaining below (first-batch audit):
-#   - tests/unit/cli/test_embedding_provider_option.py::TestDualEmbedOption::
-#     test_dual_embed_and_provider_mutually_exclusive -- #1710
-#   - tests/unit/cli/test_embedding_provider_option.py::TestDualEmbedOption::
-#     test_dual_embed_flag_accepted -- #1710
-#   - tests/unit/cli/test_embedding_provider_option.py::TestDualEmbedOption::
-#     test_dual_embed_flag_in_help -- #1710
-#     (all 3 above: --dual-embed CLI flag does not exist despite a
-#     dual_embed_enabled config field)
 #   - tests/unit/cli/test_query_strategy_cli.py::TestStrategyFlagValidation::
 #     test_strategy_specific_without_provider_errors -- #1711 (--strategy/
 #     --score-fusion/--provider query CLI flags do not exist at all)
@@ -247,9 +239,6 @@ python3 -m pytest \
     --ignore=tests/unit/storage/test_repo_category_backend.py \
     --ignore=tests/unit/storage/test_sqlite_backends_category.py \
     --ignore=tests/unit/test_scip_audit_api.py \
-    --deselect=tests/unit/cli/test_embedding_provider_option.py::TestDualEmbedOption::test_dual_embed_and_provider_mutually_exclusive \
-    --deselect=tests/unit/cli/test_embedding_provider_option.py::TestDualEmbedOption::test_dual_embed_flag_accepted \
-    --deselect=tests/unit/cli/test_embedding_provider_option.py::TestDualEmbedOption::test_dual_embed_flag_in_help \
     --deselect=tests/unit/cli/test_query_strategy_cli.py::TestStrategyFlagValidation::test_strategy_specific_without_provider_errors \
     --deselect=tests/unit/query/test_query_parameter_parity.py::TestQueryParameterParity::test_no_extra_mcp_parameters \
     --deselect=tests/unit/query/test_query_parameter_parity.py::TestQueryParameterParity::test_parameter_name_consistency_rest_mcp \
