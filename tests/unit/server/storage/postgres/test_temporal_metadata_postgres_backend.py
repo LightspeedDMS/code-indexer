@@ -135,8 +135,23 @@ class TestTemporalMetadataPostgresBackendProtocolCompliance:
 # ---------------------------------------------------------------------------
 
 
-class TestEnsureSchema:
-    def test_constructor_creates_table_idempotently(self):
+class TestConstructorDoesNotCreateTables:
+    """Issue #1697 (mirrors Bug #1655/#1662): the defensive self-heal
+    `_ensure_schema()` block (CREATE TABLE + two CREATE INDEX statements,
+    byte-consistent with migration 033_temporal_metadata.sql) was dead code
+    in production -- `service_init.py` always runs MigrationRunner before
+    any PostgreSQL backend is constructed in postgres storage mode, and this
+    backend's only production construction path (the factory installed in
+    `startup/lifespan.py`) runs strictly after that same backend_registry
+    has already been built post-migration. The dead block is removed
+    entirely, so construction no longer talks to the database at all --
+    which also means a DDL/connectivity failure can no longer surface at
+    construction time (Bug #1313 round-2's fail-loud-at-construction
+    behavior is moot once there is no more DDL to fail on); any real
+    connectivity problem now surfaces on the first actual read/write.
+    """
+
+    def test_constructor_issues_zero_conn_execute_calls(self):
         from code_indexer.server.storage.postgres.temporal_metadata_backend import (
             TemporalMetadataPostgresBackend,
         )
@@ -144,58 +159,7 @@ class TestEnsureSchema:
         mock_pool, mock_conn, _ = _make_mock_pool()
         TemporalMetadataPostgresBackend(mock_pool, collection_key="abc123")
 
-        executed_sql = " ".join(
-            call.args[0] for call in mock_conn.execute.call_args_list
-        )
-        assert "CREATE TABLE IF NOT EXISTS temporal_metadata" in executed_sql
-
-    def test_constructor_creates_indexes_matching_migration_033(self):
-        """Bug #1313 round-2 rework (Codex Finding B): the defensive
-        _ensure_schema DDL must be byte-consistent with migration
-        033_temporal_metadata.sql, which creates a UNIQUE index on
-        (collection_key, point_id) and a plain index on
-        (collection_key, commit_hash) in addition to the table itself."""
-        from code_indexer.server.storage.postgres.temporal_metadata_backend import (
-            TemporalMetadataPostgresBackend,
-        )
-
-        mock_pool, mock_conn, _ = _make_mock_pool()
-        TemporalMetadataPostgresBackend(mock_pool, collection_key="abc123")
-
-        executed_sql = " ".join(
-            call.args[0] for call in mock_conn.execute.call_args_list
-        )
-        assert (
-            "CREATE UNIQUE INDEX IF NOT EXISTS idx_temporal_meta_pointid"
-            in executed_sql
-        )
-        assert "collection_key, point_id" in executed_sql
-        assert "CREATE INDEX IF NOT EXISTS idx_temporal_meta_commit" in executed_sql
-        assert "collection_key, commit_hash" in executed_sql
-
-
-# ---------------------------------------------------------------------------
-# Schema setup failures must fail loud (Bug #1313 round-2 rework, Finding B)
-# ---------------------------------------------------------------------------
-
-
-class TestEnsureSchemaFailsLoud:
-    def test_schema_setup_failure_raises_not_swallowed(self):
-        """Prior to this fix, _ensure_schema wrapped the DDL in a bare
-        except Exception that logged a warning and returned a constructed
-        backend anyway -- so a broken/missing migration, or a permissions
-        error, was silently deferred to the first temporal write/read
-        instead of failing at storage initialization. Construction must now
-        raise."""
-        from code_indexer.server.storage.postgres.temporal_metadata_backend import (
-            TemporalMetadataPostgresBackend,
-        )
-
-        mock_pool, mock_conn, _ = _make_mock_pool()
-        mock_conn.execute.side_effect = RuntimeError("boom: DDL failed")
-
-        with pytest.raises(RuntimeError, match="boom: DDL failed"):
-            TemporalMetadataPostgresBackend(mock_pool, collection_key="abc123")
+        assert mock_conn.execute.call_count == 0
 
 
 # ---------------------------------------------------------------------------

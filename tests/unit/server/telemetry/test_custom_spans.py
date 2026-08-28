@@ -1,23 +1,23 @@
 """
 TDD Tests for Custom Spans (Story #700).
 
-Tests @traced decorator, create_span() context manager, and span helpers.
+Tests create_span() context manager and span helpers.
 
 All tests use real components following MESSI Rule #1: No mocks.
 """
 
 import pytest
 
-from src.code_indexer.server.utils.config_manager import TelemetryConfig
+from code_indexer.server.utils.config_manager import TelemetryConfig
 
 
 def reset_all_singletons():
     """Reset all singletons to ensure clean test state."""
-    from src.code_indexer.server.telemetry import (
+    from code_indexer.server.telemetry import (
         reset_telemetry_manager,
         reset_machine_metrics_exporter,
     )
-    from src.code_indexer.server.services.system_metrics_collector import (
+    from code_indexer.server.services.system_metrics_collector import (
         reset_system_metrics_collector,
     )
 
@@ -34,143 +34,17 @@ def reset_all_singletons():
 class TestCustomSpansImport:
     """Tests for custom spans module import behavior."""
 
-    def test_traced_decorator_can_be_imported(self):
-        """traced decorator can be imported."""
-        from src.code_indexer.server.telemetry.spans import traced
-
-        assert traced is not None
-        assert callable(traced)
-
     def test_create_span_can_be_imported(self):
         """create_span context manager can be imported."""
-        from src.code_indexer.server.telemetry.spans import create_span
+        from code_indexer.server.telemetry.spans import create_span
 
         assert create_span is not None
 
     def test_get_tracer_can_be_imported(self):
         """get_tracer function can be imported."""
-        from src.code_indexer.server.telemetry.spans import get_tracer
+        from code_indexer.server.telemetry.spans import get_tracer
 
         assert callable(get_tracer)
-
-
-# =============================================================================
-# @traced Decorator Tests
-# =============================================================================
-
-
-@pytest.mark.slow
-class TestTracedDecorator:
-    """Tests for @traced decorator functionality."""
-
-    def setup_method(self):
-        """Reset singletons before each test."""
-        reset_all_singletons()
-
-    def teardown_method(self):
-        """Reset singletons after each test."""
-        reset_all_singletons()
-
-    def test_traced_decorator_creates_span_with_function_name(self):
-        """
-        @traced decorator creates span named after function.
-        """
-        from src.code_indexer.server.telemetry import get_telemetry_manager
-        from src.code_indexer.server.telemetry.spans import traced
-
-        config = TelemetryConfig(
-            enabled=True,
-            export_traces=True,
-            collector_endpoint="http://localhost:4317",
-        )
-        _telemetry_manager = get_telemetry_manager(config)  # noqa: F841
-
-        @traced()
-        def sample_function():
-            return "result"
-
-        # Call the decorated function - should not raise
-        result = sample_function()
-        assert result == "result"
-
-    def test_traced_decorator_with_custom_name(self):
-        """
-        @traced decorator can use custom span name.
-        """
-        from src.code_indexer.server.telemetry import get_telemetry_manager
-        from src.code_indexer.server.telemetry.spans import traced
-
-        config = TelemetryConfig(
-            enabled=True,
-            export_traces=True,
-            collector_endpoint="http://localhost:4317",
-        )
-        get_telemetry_manager(config)
-
-        @traced(name="cidx.custom.operation")
-        def another_function():
-            return 42
-
-        result = another_function()
-        assert result == 42
-
-    def test_traced_decorator_preserves_function_signature(self):
-        """
-        @traced decorator preserves function name and docstring.
-        """
-        from src.code_indexer.server.telemetry.spans import traced
-
-        @traced()
-        def documented_function(arg1: str, arg2: int = 10) -> str:
-            """This is the docstring."""
-            return f"{arg1}:{arg2}"
-
-        assert documented_function.__name__ == "documented_function"
-        assert documented_function.__doc__ is not None
-        assert "docstring" in documented_function.__doc__
-
-    def test_traced_decorator_handles_exceptions(self):
-        """
-        @traced decorator records exception in span and re-raises.
-        """
-        from src.code_indexer.server.telemetry import get_telemetry_manager
-        from src.code_indexer.server.telemetry.spans import traced
-        import pytest
-
-        config = TelemetryConfig(
-            enabled=True,
-            export_traces=True,
-            collector_endpoint="http://localhost:4317",
-        )
-        get_telemetry_manager(config)
-
-        @traced()
-        def failing_function():
-            raise ValueError("intentional error")
-
-        with pytest.raises(ValueError, match="intentional error"):
-            failing_function()
-
-    def test_traced_decorator_with_attributes(self):
-        """
-        @traced decorator can add custom attributes to span.
-        """
-        from src.code_indexer.server.telemetry import get_telemetry_manager
-        from src.code_indexer.server.telemetry.spans import traced
-
-        config = TelemetryConfig(
-            enabled=True,
-            export_traces=True,
-            collector_endpoint="http://localhost:4317",
-        )
-        get_telemetry_manager(config)
-
-        @traced(attributes={"operation.type": "search", "repository": "test-repo"})
-        def search_with_attrs():
-            return "found"
-
-        result = search_with_attrs()
-        assert result == "found"
 
 
 # =============================================================================
@@ -194,8 +68,8 @@ class TestCreateSpanContextManager:
         """
         create_span() works as context manager.
         """
-        from src.code_indexer.server.telemetry import get_telemetry_manager
-        from src.code_indexer.server.telemetry.spans import create_span
+        from code_indexer.server.telemetry import get_telemetry_manager
+        from code_indexer.server.telemetry.spans import create_span
 
         config = TelemetryConfig(
             enabled=True,
@@ -212,8 +86,8 @@ class TestCreateSpanContextManager:
         """
         create_span() can set attributes on span.
         """
-        from src.code_indexer.server.telemetry import get_telemetry_manager
-        from src.code_indexer.server.telemetry.spans import create_span
+        from code_indexer.server.telemetry import get_telemetry_manager
+        from code_indexer.server.telemetry.spans import create_span
 
         config = TelemetryConfig(
             enabled=True,
@@ -232,8 +106,8 @@ class TestCreateSpanContextManager:
         """
         create_span() records exceptions in span.
         """
-        from src.code_indexer.server.telemetry import get_telemetry_manager
-        from src.code_indexer.server.telemetry.spans import create_span
+        from code_indexer.server.telemetry import get_telemetry_manager
+        from code_indexer.server.telemetry.spans import create_span
         import pytest
 
         config = TelemetryConfig(
@@ -251,11 +125,11 @@ class TestCreateSpanContextManager:
         """
         create_span() includes correlation ID when available.
         """
-        from src.code_indexer.server.telemetry import (
+        from code_indexer.server.telemetry import (
             get_telemetry_manager,
             set_current_correlation_id,
         )
-        from src.code_indexer.server.telemetry.spans import create_span
+        from code_indexer.server.telemetry.spans import create_span
 
         config = TelemetryConfig(
             enabled=True,
@@ -327,32 +201,12 @@ class TestNoopWhenDisabled:
         """Reset singletons after each test."""
         reset_all_singletons()
 
-    def test_traced_decorator_noop_when_disabled(self):
-        """
-        @traced decorator is no-op when telemetry disabled.
-        """
-        from src.code_indexer.server.telemetry import get_telemetry_manager
-        from src.code_indexer.server.telemetry.spans import traced
-
-        config = TelemetryConfig(
-            enabled=False,
-            collector_endpoint="http://localhost:4317",
-        )
-        get_telemetry_manager(config)
-
-        @traced()
-        def disabled_function():
-            return "still works"
-
-        result = disabled_function()
-        assert result == "still works"
-
     def test_create_span_noop_when_disabled(self):
         """
         create_span() is no-op when telemetry disabled.
         """
-        from src.code_indexer.server.telemetry import get_telemetry_manager
-        from src.code_indexer.server.telemetry.spans import create_span
+        from code_indexer.server.telemetry import get_telemetry_manager
+        from code_indexer.server.telemetry.spans import create_span
 
         config = TelemetryConfig(
             enabled=False,
@@ -363,47 +217,6 @@ class TestNoopWhenDisabled:
         with create_span("cidx.test.disabled") as _span:  # noqa: F841
             # Should still work even with dummy span
             pass
-
-
-# =============================================================================
-# Async Support Tests
-# =============================================================================
-
-
-@pytest.mark.slow
-class TestAsyncSupport:
-    """Tests for async function support."""
-
-    def setup_method(self):
-        """Reset singletons before each test."""
-        reset_all_singletons()
-
-    def teardown_method(self):
-        """Reset singletons after each test."""
-        reset_all_singletons()
-
-    def test_traced_decorator_supports_async(self):
-        """
-        @traced decorator works with async functions.
-        """
-        from src.code_indexer.server.telemetry import get_telemetry_manager
-        from src.code_indexer.server.telemetry.spans import traced
-        import asyncio
-
-        config = TelemetryConfig(
-            enabled=True,
-            export_traces=True,
-            collector_endpoint="http://localhost:4317",
-        )
-        get_telemetry_manager(config)
-
-        @traced()
-        async def async_operation():
-            await asyncio.sleep(0.01)
-            return "async result"
-
-        result = asyncio.run(async_operation())
-        assert result == "async result"
 
 
 class TestCorrelationIdImportRobustness:
@@ -477,3 +290,38 @@ class TestSingletonHelperLifoRestore:
             # never cleared to None, and never shut down along the way.
             assert peek_telemetry_manager() is outer_manager
             assert outer_manager.is_initialized is True
+
+
+class TestDeadSpanUtilitiesRemoved:
+    """Anti-Orphan-Code regression guard (Story #1676, AC7).
+
+    add_span_attribute(), add_span_event(), and the @traced decorator were
+    confirmed to have zero call sites anywhere in src/ outside spans.py
+    itself and telemetry/__init__.py's re-export (independently
+    re-verified via `grep -rn "add_span_attribute\\|add_span_event\\|@traced\\b" src/`
+    during this AC), then deleted. This structural test proves the three
+    symbols are actually gone from both the spans module and the
+    telemetry package's public exports, so they cannot silently be
+    reintroduced without a test failure calling it out.
+    """
+
+    @pytest.mark.parametrize(
+        "symbol_name", ["traced", "add_span_attribute", "add_span_event"]
+    )
+    def test_dead_symbol_no_longer_exists(self, symbol_name):
+        from code_indexer.server.telemetry import spans
+        import code_indexer.server.telemetry as telemetry_package
+
+        assert not hasattr(spans, symbol_name)
+        assert not hasattr(telemetry_package, symbol_name)
+        assert symbol_name not in telemetry_package.__all__
+
+    def test_kept_symbols_still_exported(self):
+        """Confirms the deletion did not collateral-damage the symbols
+        this AC explicitly requires to be kept."""
+        from code_indexer.server.telemetry import spans
+
+        assert hasattr(spans, "create_span")
+        assert hasattr(spans, "get_tracer")
+        assert hasattr(spans, "reset_spans_state")
+        assert hasattr(spans, "_NoOpSpan")

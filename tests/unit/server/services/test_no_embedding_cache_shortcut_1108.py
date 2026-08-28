@@ -881,6 +881,13 @@ class TestTemporalEntryPointValueFlow:
             def get_config(self):
                 return _FakeConfig()
 
+            # Bug #1690: reconstruct_temporal_backend now calls
+            # ConfigManager.load_verified_config(repo_path) instead of
+            # create_with_backtrack(...).get_config().
+            @classmethod
+            def load_verified_config(cls, p):
+                return _FakeConfig()
+
         monkeypatch.setattr(config_mod, "ConfigManager", _FakeCM)
 
         class _FakeVS:
@@ -975,6 +982,13 @@ class TestTemporalEntryPointValueFlow:
                 return cls()
 
             def get_config(self):
+                return _FakeConfig()
+
+            # Bug #1690: _search_temporal_sync now calls
+            # ConfigManager.load_verified_config(repo_path) instead of
+            # create_with_backtrack(...).get_config().
+            @classmethod
+            def load_verified_config(cls, p):
                 return _FakeConfig()
 
         monkeypatch.setattr(config_mod2, "ConfigManager", _FakeCM)

@@ -133,6 +133,9 @@ def _get_wiki_cache_for_handler():
     is called). Returns None when golden_repo_manager is unavailable.
     """
     from code_indexer.server.wiki.wiki_cache import WikiCache
+    from code_indexer.server.utils.registry_factory import (
+        resolve_backend_registry_attr,
+    )
 
     grm = getattr(_utils.app_module, "golden_repo_manager", None)
     if grm is None:
@@ -140,7 +143,13 @@ def _get_wiki_cache_for_handler():
     db_path = getattr(grm, "db_path", None)
     if not db_path:
         return None
-    return WikiCache(db_path)
+    # Bug #1665: resolve the shared PostgreSQL wiki_cache backend in
+    # cluster mode so this handler sees the same store regardless of which
+    # node handles the request.
+    wiki_backend, _ = resolve_backend_registry_attr(
+        "wiki_cache", caller_name="guides._get_wiki_cache_for_handler"
+    )
+    return WikiCache(db_path, storage_backend=wiki_backend)
 
 
 def _wiki_analytics_filter_by_search(

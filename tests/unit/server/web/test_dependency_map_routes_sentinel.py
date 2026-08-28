@@ -268,24 +268,46 @@ def client(app):
 
     _bypass_elevation(app, dependency_map_router)
 
-    with TestClient(app) as tc:
-        login_page = tc.get("/login")
-        assert login_page.status_code == _HTTP_OK
-        match = re.search(r'name="csrf_token" value="([^"]+)"', login_page.text)
-        assert match, "Could not extract CSRF token"
-        csrf_token = match.group(1)
-        resp = tc.post(
-            "/login",
-            data={
-                "username": _ADMIN_USERNAME,
-                "password": _ADMIN_PASSWORD,
-                "csrf_token": csrf_token,
-            },
-            follow_redirects=False,
-        )
-        assert resp.status_code == _HTTP_REDIRECT
-        tc.cookies.set("session", resp.cookies["session"])
-        yield tc
+    # Bug #1675: `with TestClient(app)` runs the REAL FastAPI lifespan, which
+    # wires app.state.dependency_map_service to a genuine DependencyMapService
+    # bound to this machine's actual golden-repos dir -- the SAME directory
+    # the live local cidx-server.service continuously appends real activity
+    # journal entries to. Lifespan shutdown stops the scheduler thread but
+    # never resets the app.state attribute, so the stale real service (and
+    # its real, ever-growing _activity.md) leaks into every test file that
+    # runs afterward in the same pytest session and reads
+    # app.state.dependency_map_service (e.g. test_depmap_activity_journal_
+    # endpoint.py's "no active journal" tests). Save/restore the pre-existing
+    # value so this fixture never permanently overwrites shared app state.
+    #
+    # NOTE (Bug #1694): this `client` fixture is MODULE-scoped, so its setup
+    # (and the `with TestClient(app)` lifespan entry above) runs BEFORE
+    # conftest.py's tree-wide `_snapshot_restore_shared_app_state` autouse
+    # fixture takes its snapshot for the first test in this module -- that
+    # fixture's snapshot/restore does NOT cover this leak. This per-file
+    # save/restore patch is still required and is NOT redundant with #1694.
+    original_dependency_map_service = getattr(app.state, "dependency_map_service", None)
+    try:
+        with TestClient(app) as tc:
+            login_page = tc.get("/login")
+            assert login_page.status_code == _HTTP_OK
+            match = re.search(r'name="csrf_token" value="([^"]+)"', login_page.text)
+            assert match, "Could not extract CSRF token"
+            csrf_token = match.group(1)
+            resp = tc.post(
+                "/login",
+                data={
+                    "username": _ADMIN_USERNAME,
+                    "password": _ADMIN_PASSWORD,
+                    "csrf_token": csrf_token,
+                },
+                follow_redirects=False,
+            )
+            assert resp.status_code == _HTTP_REDIRECT
+            tc.cookies.set("session", resp.cookies["session"])
+            yield tc
+    finally:
+        app.state.dependency_map_service = original_dependency_map_service
 
 
 # ---------------------------------------------------------------------------

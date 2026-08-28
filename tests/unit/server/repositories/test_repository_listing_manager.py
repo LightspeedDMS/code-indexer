@@ -16,15 +16,15 @@ from unittest.mock import patch
 
 import pytest
 
-from src.code_indexer.server.repositories.repository_listing_manager import (
+from code_indexer.server.repositories.repository_listing_manager import (
     RepositoryListingManager,
     RepositoryListingError,
 )
-from src.code_indexer.server.repositories.golden_repo_manager import (
+from code_indexer.server.repositories.golden_repo_manager import (
     GoldenRepoManager,
     GoldenRepo,
 )
-from src.code_indexer.server.repositories.activated_repo_manager import (
+from code_indexer.server.repositories.activated_repo_manager import (
     ActivatedRepoManager,
 )
 
@@ -288,7 +288,7 @@ class TestRepositoryListingManager:
         """Test getting available branches for a repository."""
         # Mock git branch listing
         with patch(
-            "src.code_indexer.server.repositories.repository_listing_manager.subprocess.run"
+            "code_indexer.server.repositories.repository_listing_manager.subprocess.run"
         ) as mock_run:
             mock_run.return_value.returncode = 0
             mock_run.return_value.stdout = (

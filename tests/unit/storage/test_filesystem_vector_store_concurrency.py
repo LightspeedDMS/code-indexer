@@ -10,7 +10,7 @@ import numpy as np
 import threading
 import time
 from pathlib import Path
-from src.code_indexer.storage.filesystem_vector_store import FilesystemVectorStore
+from code_indexer.storage.filesystem_vector_store import FilesystemVectorStore
 
 
 class TestConcurrentUpserts:

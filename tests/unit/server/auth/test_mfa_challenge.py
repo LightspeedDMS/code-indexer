@@ -26,6 +26,42 @@ def manager():
 # ------------------------------------------------------------------
 
 
+class _PgStyleSqliteCursor:
+    """SQLite cursor presenting psycopg3 v3's conn.cursor(row_factory=...)
+    context-manager interface (`with conn.cursor(...) as cur: cur.execute(
+    ...).fetchone()`), used by mfa_challenge.py's _get_challenge_pg/
+    _consume_pg. row_factory is accepted but ignored: the underlying
+    sqlite3 connection already has row_factory=sqlite3.Row set, which
+    supports the same dict-style row["column"] access as psycopg's
+    dict_row.
+    """
+
+    def __init__(self, sqlite_conn, row_factory=None):
+        self._conn = sqlite_conn
+        self._cursor: "sqlite3.Cursor | None" = None
+
+    def __enter__(self):
+        self._cursor = self._conn.cursor()
+        return self
+
+    def __exit__(self, *args):
+        assert self._cursor is not None
+        self._cursor.close()
+
+    def execute(self, query, params=None):
+        assert self._cursor is not None
+        translated = _PgStyleSqliteConn._translate_query(query)
+        if params:
+            self._cursor.execute(translated, params)
+        else:
+            self._cursor.execute(translated)
+        return self
+
+    def fetchone(self):
+        assert self._cursor is not None
+        return self._cursor.fetchone()
+
+
 class _PgStyleSqliteConn:
     """SQLite connection presenting psycopg-style interface.
 
@@ -46,6 +82,9 @@ class _PgStyleSqliteConn:
         if params:
             return self._conn.execute(translated, params)
         return self._conn.execute(translated)
+
+    def cursor(self, row_factory=None):
+        return _PgStyleSqliteCursor(self._conn, row_factory=row_factory)
 
     def commit(self):
         self._conn.commit()

@@ -11,7 +11,7 @@ TDD red phase: tests written FIRST to define expected model shape.
 Production file: src/code_indexer/server/models/api_models.py
 """
 
-from src.code_indexer.server.models.api_models import SemanticSearchRequest
+from code_indexer.server.models.api_models import SemanticSearchRequest
 
 
 class TestSemanticSearchRequestFilterFields:

@@ -25,8 +25,8 @@ import pytest
 from fastapi.testclient import TestClient
 from httpx import Response
 
-from src.code_indexer.server.app import create_app
-from src.code_indexer.server.services.health_service import HealthCheckService
+from code_indexer.server.app import create_app
+from code_indexer.server.services.health_service import HealthCheckService
 
 HEALTHZ_PATH = "/healthz"
 INLINE_MISC_MODULE_PATH = "code_indexer.server.routers.inline_misc"

@@ -14,9 +14,9 @@ from pathlib import Path
 import sys
 
 # Import CLI components
-from src.code_indexer.cli import cli
-from src.code_indexer.api_clients.repos_client import ActivatedRepository
-from src.code_indexer.api_clients.base_client import APIClientError
+from code_indexer.cli import cli
+from code_indexer.api_clients.repos_client import ActivatedRepository
+from code_indexer.api_clients.base_client import APIClientError
 
 
 class TestCLIIssuesFix:
@@ -32,10 +32,10 @@ class TestCLIIssuesFix:
 
             importlib.reload(sys.modules["code_indexer.cli"])
 
-    @patch("src.code_indexer.remote.sync_execution._load_remote_configuration")
-    @patch("src.code_indexer.remote.sync_execution._load_and_decrypt_credentials")
-    @patch("src.code_indexer.mode_detection.command_mode_detector.find_project_root")
-    @patch("src.code_indexer.api_clients.repos_client.ReposAPIClient")
+    @patch("code_indexer.remote.sync_execution._load_remote_configuration")
+    @patch("code_indexer.remote.sync_execution._load_and_decrypt_credentials")
+    @patch("code_indexer.mode_detection.command_mode_detector.find_project_root")
+    @patch("code_indexer.api_clients.repos_client.ReposAPIClient")
     def test_repos_list_pydantic_validation_error_reproduction(
         self,
         mock_repos_client_class,
@@ -111,12 +111,12 @@ class TestCLIIssuesFix:
         # Verify the client method was called
         mock_client.list_activated_repositories.assert_called_once()
 
-    @patch("src.code_indexer.mode_detection.command_mode_detector.find_project_root")
-    @patch("src.code_indexer.remote.config.load_remote_configuration")
-    @patch("src.code_indexer.remote.credential_manager.ProjectCredentialManager")
-    @patch("src.code_indexer.remote.credential_manager.load_encrypted_credentials")
-    @patch("src.code_indexer.api_clients.admin_client.AdminAPIClient")
-    @patch("src.code_indexer.utils.async_helper.run_async")
+    @patch("code_indexer.mode_detection.command_mode_detector.find_project_root")
+    @patch("code_indexer.remote.config.load_remote_configuration")
+    @patch("code_indexer.remote.credential_manager.ProjectCredentialManager")
+    @patch("code_indexer.remote.credential_manager.load_encrypted_credentials")
+    @patch("code_indexer.api_clients.admin_client.AdminAPIClient")
+    @patch("code_indexer.utils.async_helper.run_async")
     def test_admin_repos_list_credential_manager_type_error_reproduction(
         self,
         mock_run_async,
@@ -180,10 +180,10 @@ class TestCLIIssuesFix:
         # Verify the credential manager was instantiated
         mock_credential_manager_class.assert_called_once()
 
-    @patch("src.code_indexer.cli.CommandModeDetector")
-    @patch("src.code_indexer.cli.find_project_root")
-    @patch("src.code_indexer.cli._load_remote_configuration")
-    @patch("src.code_indexer.cli._load_and_decrypt_credentials")
+    @patch("code_indexer.cli.CommandModeDetector")
+    @patch("code_indexer.cli.find_project_root")
+    @patch("code_indexer.cli._load_remote_configuration")
+    @patch("code_indexer.cli._load_and_decrypt_credentials")
     def test_api_client_resource_cleanup_warnings_reproduction(
         self,
         mock_load_credentials,
@@ -214,7 +214,7 @@ class TestCLIIssuesFix:
             # Create a real client instance to test resource management
             # This will help us detect actual resource cleanup warnings
             with patch(
-                "src.code_indexer.api_clients.repos_client.ReposAPIClient"
+                "code_indexer.api_clients.repos_client.ReposAPIClient"
             ) as mock_client_class:
                 mock_client = Mock()
 
@@ -264,16 +264,16 @@ class TestCLIIssuesFix:
 
         with (
             patch(
-                "src.code_indexer.mode_detection.command_mode_detector.find_project_root"
+                "code_indexer.mode_detection.command_mode_detector.find_project_root"
             ) as mock_find_root,
             patch(
-                "src.code_indexer.remote.sync_execution._load_remote_configuration"
+                "code_indexer.remote.sync_execution._load_remote_configuration"
             ) as mock_config,
             patch(
-                "src.code_indexer.remote.sync_execution._load_and_decrypt_credentials"
+                "code_indexer.remote.sync_execution._load_and_decrypt_credentials"
             ) as mock_creds,
             patch(
-                "src.code_indexer.api_clients.repos_client.ReposAPIClient"
+                "code_indexer.api_clients.repos_client.ReposAPIClient"
             ) as mock_client_class,
         ):
             # Setup mocks
@@ -318,21 +318,21 @@ class TestCLIIssuesFix:
         """
         with (
             patch(
-                "src.code_indexer.mode_detection.command_mode_detector.find_project_root"
+                "code_indexer.mode_detection.command_mode_detector.find_project_root"
             ) as mock_find_root,
             patch(
-                "src.code_indexer.remote.config.load_remote_configuration"
+                "code_indexer.remote.config.load_remote_configuration"
             ) as mock_config,
             patch(
-                "src.code_indexer.remote.credential_manager.ProjectCredentialManager"
+                "code_indexer.remote.credential_manager.ProjectCredentialManager"
             ) as mock_cred_mgr,
             patch(
-                "src.code_indexer.remote.credential_manager.load_encrypted_credentials"
+                "code_indexer.remote.credential_manager.load_encrypted_credentials"
             ) as mock_creds,
             patch(
-                "src.code_indexer.api_clients.admin_client.AdminAPIClient"
+                "code_indexer.api_clients.admin_client.AdminAPIClient"
             ) as mock_admin_class,
-            patch("src.code_indexer.utils.async_helper.run_async") as mock_run_async,
+            patch("code_indexer.utils.async_helper.run_async") as mock_run_async,
         ):
             # Setup mocks
             mock_find_root.return_value = Path("/fake/project")

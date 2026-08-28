@@ -7,7 +7,7 @@ Following TDD methodology - write failing tests first, then fix the test pattern
 import pytest
 from unittest.mock import Mock, AsyncMock
 
-from src.code_indexer.remote.services.repository_service import (
+from code_indexer.remote.services.repository_service import (
     RemoteRepositoryService,
     RepositoryInfo,
 )

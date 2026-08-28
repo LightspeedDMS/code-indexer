@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import types
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -220,20 +221,53 @@ _AWAIT_SECONDS_WARN_THRESHOLD: float = 30.0
 _AWAIT_POLL_INTERVAL = 0.05
 
 
+def _lazy_singleton_app_or_none() -> Any:
+    """The already-constructed `code_indexer.server.app` singleton, or None.
+
+    Bug #1678: `code_indexer.server.app.app` is a PEP 562 `__getattr__` lazy
+    singleton (Bug #1638) -- a bare `getattr(_utils.app_module, "app", None)`
+    is NOT side-effect-free, since Python invokes `__getattr__` whenever
+    normal attribute lookup fails, and `getattr()` only catches the resulting
+    AttributeError afterward. Calling that from a lifespan startup path
+    (as set_xray_executor/set_xray_cell_limiter do) permanently constructs
+    and caches the process-wide singleton the first time an INDEPENDENTLY
+    created app (e.g. a test fixture's own `create_app()` call) starts its
+    own lifespan -- leaking that fixture's stale services into the singleton
+    for the rest of the process. Reading `__dict__.get("app")` is a plain
+    dict lookup: it never invokes `__getattr__`, so it returns None until the
+    singleton has genuinely already been constructed elsewhere.
+
+    Only the real `code_indexer.server.app` module needs this treatment --
+    tests that replace `_utils.app_module` with a `MagicMock()` stand-in
+    (e.g. test_xray_cell_limiter.py) rely on plain `getattr()` triggering
+    Mock's normal attribute-interception, which a raw `__dict__` read would
+    bypass entirely.
+    """
+    app_module = _utils.app_module
+    if isinstance(app_module, types.ModuleType):
+        return app_module.__dict__.get("app")
+    return getattr(app_module, "app", None)
+
+
 def set_xray_executor(executor: ThreadPoolExecutor) -> None:
     """Store the dedicated xray ThreadPoolExecutor on app.state (called from lifespan).
 
     Bug #1070: xray compute must run on a dedicated pool isolated from the 5-worker
     BackgroundJobManager pool. lifespan calls this after constructing the executor.
 
-    Raises:
-        RuntimeError: If the app instance is not yet available (startup wiring error).
+    Bug #1678: this mirror-write onto the process-wide singleton is a no-op
+    (not an error) when that singleton hasn't been constructed yet -- e.g. a
+    test fixture that built its own app via `create_app()` directly, whose
+    lifespan already set `app.state.xray_executor` on the real, correct app
+    object immediately before calling this function.
     """
-    app = getattr(_utils.app_module, "app", None)
+    app = _lazy_singleton_app_or_none()
     if app is None:
-        raise RuntimeError(
-            "set_xray_executor called before app is available — startup wiring error"
+        logger.debug(
+            "set_xray_executor: no process-wide app singleton yet -- skipping "
+            "mirror write (expected for an independently-constructed app)"
         )
+        return
     app.state.xray_executor = executor
 
 
@@ -242,8 +276,14 @@ def _get_xray_executor() -> ThreadPoolExecutor:
 
     Raises:
         RuntimeError: If app or xray_executor is not configured.
+
+    Bug #1693: probes via `_lazy_singleton_app_or_none()` (the same
+    side-effect-free helper #1678 introduced for the setters) instead of a
+    bare `getattr(_utils.app_module, "app", None)`, which would otherwise
+    permanently construct the process-wide app singleton as a side effect
+    of merely reading it (see `_lazy_singleton_app_or_none()`'s docstring).
     """
-    app = getattr(_utils.app_module, "app", None)
+    app = _lazy_singleton_app_or_none()
     if app is None:
         raise RuntimeError("xray_executor not available: app is not configured")
     executor = getattr(app.state, "xray_executor", None)
@@ -260,20 +300,32 @@ def set_xray_cell_limiter(limiter: "ResizableLimiter") -> None:
     All xray scan executions (xray_search, xray_explore, xray_search_batch cells)
     compete for the same N slots globally. N is driven by xray_worker_threads config.
 
-    Raises:
-        RuntimeError: If the app instance is not yet available (startup wiring error).
+    Bug #1678: this mirror-write onto the process-wide singleton is a no-op
+    (not an error) when that singleton hasn't been constructed yet -- see
+    `_lazy_singleton_app_or_none()` and `set_xray_executor()` for the full
+    rationale (lifespan already set `app.state.xray_cell_limiter` on the
+    real, correct app object immediately before calling this function).
     """
-    app = getattr(_utils.app_module, "app", None)
+    app = _lazy_singleton_app_or_none()
     if app is None:
-        raise RuntimeError(
-            "set_xray_cell_limiter called before app is available — startup wiring error"
+        logger.debug(
+            "set_xray_cell_limiter: no process-wide app singleton yet -- "
+            "skipping mirror write (expected for an independently-"
+            "constructed app)"
         )
+        return
     app.state.xray_cell_limiter = limiter
 
 
 def _get_xray_cell_limiter() -> "Optional[ResizableLimiter]":
-    """Return the xray cell limiter from app.state, or None if not wired (CLI/test)."""
-    app = getattr(_utils.app_module, "app", None)
+    """Return the xray cell limiter from app.state, or None if not wired (CLI/test).
+
+    Bug #1693: probes via `_lazy_singleton_app_or_none()` instead of a bare
+    `getattr(_utils.app_module, "app", None)`, which would otherwise
+    permanently construct the process-wide app singleton as a side effect
+    of merely reading it.
+    """
+    app = _lazy_singleton_app_or_none()
     if app is None:
         return None
     return getattr(app.state, "xray_cell_limiter", None)

@@ -7,7 +7,7 @@ Story #540: Fix duplicate chunks bug.
 import tempfile
 import numpy as np
 from pathlib import Path
-from src.code_indexer.storage.filesystem_vector_store import (
+from code_indexer.storage.filesystem_vector_store import (
     FilesystemVectorStore,
     PathIndex,
 )

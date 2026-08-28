@@ -5,7 +5,9 @@ from code_indexer.server.auto_update.deployment_executor import (
     PENDING_REDEPLOY_MARKER,
     AUTO_UPDATE_SERVICE_NAME,
 )
+from contextlib import contextmanager
 from pathlib import Path
+from typing import Iterator
 from unittest.mock import Mock, patch
 import pytest
 import sys
@@ -366,88 +368,70 @@ class TestPipInstallUsesServerPython:
         assert result is True
 
 
+@contextmanager
+def _all_steps_except_auto_updater_python(
+    executor: DeploymentExecutor,
+) -> Iterator[None]:
+    """Mock all execute() steps except _ensure_auto_updater_uses_server_python.
+
+    Shared by both TestExecuteCallsEnsureAutoUpdater tests below to avoid
+    duplicating this patch list (mirrors test_rust_toolchain.py's
+    _all_steps_except_rust). Includes _build_hnswlib_with_fallback (Bug
+    #1651/#1640): with a fake repo_path, its unmocked fallback branch does
+    a real `git clone`.
+    """
+    with (
+        patch.object(
+            executor, "_ensure_git_safe_directory_wildcard", return_value=True
+        ),
+        patch.object(executor, "ensure_ripgrep", return_value=True),
+        patch.object(executor, "_ensure_git_safe_directory", return_value=True),
+        patch.object(executor, "_ensure_cidx_repo_root", return_value=True),
+        patch.object(executor, "_ensure_launch_config", return_value=None),
+        patch.object(executor, "pip_install", return_value=True),
+        patch.object(executor, "build_custom_hnswlib", return_value=True),
+        patch.object(executor, "_build_hnswlib_with_fallback", return_value=True),
+        patch.object(executor, "git_submodule_update", return_value=True),
+        patch.object(executor, "_calculate_auto_update_hash", return_value="same_hash"),
+        patch.object(executor, "git_pull", return_value=True),
+        patch.object(executor, "_ensure_rust_toolchain", return_value=True),
+        patch.object(executor, "_ensure_claude_cli_updated", return_value=True),
+        patch.object(executor, "_ensure_codex_cli_installed", return_value=True),
+        patch.object(executor, "_ensure_pace_maker_installed", return_value=True),
+    ):
+        yield
+
+
 @pytest.mark.slow
 class TestExecuteCallsEnsureAutoUpdater:
     """Tests for execute() calling _ensure_auto_updater_uses_server_python()."""
 
-    @patch.object(
-        DeploymentExecutor, "_ensure_git_safe_directory_wildcard", return_value=True
-    )
-    @patch.object(
-        DeploymentExecutor, "_ensure_auto_updater_uses_server_python", return_value=True
-    )
-    @patch.object(DeploymentExecutor, "ensure_ripgrep", return_value=True)
-    @patch.object(DeploymentExecutor, "_ensure_git_safe_directory", return_value=True)
-    @patch.object(DeploymentExecutor, "_ensure_cidx_repo_root", return_value=True)
-    @patch.object(DeploymentExecutor, "_ensure_launch_config", return_value=None)
-    @patch.object(DeploymentExecutor, "pip_install", return_value=True)
-    @patch.object(DeploymentExecutor, "build_custom_hnswlib", return_value=True)
-    @patch.object(DeploymentExecutor, "git_submodule_update", return_value=True)
-    @patch.object(
-        DeploymentExecutor, "_calculate_auto_update_hash", return_value="same_hash"
-    )
-    @patch.object(DeploymentExecutor, "git_pull", return_value=True)
-    @patch.object(DeploymentExecutor, "_ensure_rust_toolchain", return_value=True)
-    def test_execute_calls_ensure_auto_updater(
-        self,
-        mock_ensure_rust,
-        mock_git_pull,
-        mock_calc_hash,
-        mock_git_submodule,
-        mock_build_hnswlib,
-        mock_pip_install,
-        mock_ensure_workers,
-        mock_ensure_cidx_repo,
-        mock_ensure_git_safe,
-        mock_ensure_ripgrep,
-        mock_ensure_auto_updater,
-        mock_ensure_git_safe_wildcard,
-        executor,
-    ):
+    def test_execute_calls_ensure_auto_updater(self, executor):
         """Test that execute() calls _ensure_auto_updater_uses_server_python()."""
-        result = executor.execute()
+        with (
+            _all_steps_except_auto_updater_python(executor),
+            patch.object(
+                executor,
+                "_ensure_auto_updater_uses_server_python",
+                return_value=True,
+            ) as mock_ensure_auto_updater,
+        ):
+            result = executor.execute()
 
         assert result is True
         mock_ensure_auto_updater.assert_called_once()
 
-    @patch.object(
-        DeploymentExecutor, "_ensure_git_safe_directory_wildcard", return_value=True
-    )
-    @patch.object(
-        DeploymentExecutor,
-        "_ensure_auto_updater_uses_server_python",
-        return_value=False,
-    )
-    @patch.object(DeploymentExecutor, "ensure_ripgrep", return_value=True)
-    @patch.object(DeploymentExecutor, "_ensure_git_safe_directory", return_value=True)
-    @patch.object(DeploymentExecutor, "_ensure_cidx_repo_root", return_value=True)
-    @patch.object(DeploymentExecutor, "_ensure_launch_config", return_value=None)
-    @patch.object(DeploymentExecutor, "pip_install", return_value=True)
-    @patch.object(DeploymentExecutor, "build_custom_hnswlib", return_value=True)
-    @patch.object(DeploymentExecutor, "git_submodule_update", return_value=True)
-    @patch.object(
-        DeploymentExecutor, "_calculate_auto_update_hash", return_value="same_hash"
-    )
-    @patch.object(DeploymentExecutor, "git_pull", return_value=True)
-    @patch.object(DeploymentExecutor, "_ensure_rust_toolchain", return_value=True)
-    def test_execute_continues_on_ensure_auto_updater_failure(
-        self,
-        mock_ensure_rust,
-        mock_git_pull,
-        mock_calc_hash,
-        mock_git_submodule,
-        mock_build_hnswlib,
-        mock_pip_install,
-        mock_ensure_workers,
-        mock_ensure_cidx_repo,
-        mock_ensure_git_safe,
-        mock_ensure_ripgrep,
-        mock_ensure_auto_updater,
-        mock_ensure_git_safe_wildcard,
-        executor,
-    ):
+    def test_execute_continues_on_ensure_auto_updater_failure(self, executor):
         """Test that execute() continues even if _ensure_auto_updater_uses_server_python fails."""
-        result = executor.execute()
+        with (
+            _all_steps_except_auto_updater_python(executor),
+            patch.object(
+                executor,
+                "_ensure_auto_updater_uses_server_python",
+                return_value=False,
+            ),
+        ):
+            result = executor.execute()
 
         # execute() should still return True overall (non-fatal error)
         assert result is True

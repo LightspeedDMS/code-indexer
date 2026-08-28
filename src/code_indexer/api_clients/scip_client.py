@@ -18,6 +18,12 @@ logger = logging.getLogger(__name__)
 # scip/database/queries.py, which this mirrors.
 _MAX_CALLCHAIN_DEPTH = 3
 
+# Bug #1639: real, server-enforced upper bound for impact's depth -- see
+# MAX_TRAVERSAL_DEPTH in scip/query/composites.py, which this mirrors.
+# A deliberately DIFFERENT constant from _MAX_CALLCHAIN_DEPTH above (both
+# operations happen to have their own independent caps).
+_MAX_IMPACT_DEPTH = 10
+
 
 class SCIPQueryError(APIClientError):
     """Exception raised when SCIP query execution fails."""
@@ -238,21 +244,33 @@ class SCIPAPIClient(CIDXRemoteAPIClient):
         Args:
             symbol: Symbol name to analyze
             repository_alias: Repository alias to query (required for remote)
-            depth: Analysis depth (default: 3, max: 10)
+            depth: Analysis depth (default: 3, must be between 1 and
+                _MAX_IMPACT_DEPTH inclusive -- Bug #1639)
             project: Optional project path filter
 
         Returns:
             Dictionary with results, metadata, and errors from server
+
+        Raises:
+            ValueError: if depth is outside [1, _MAX_IMPACT_DEPTH]
         """
         if not symbol or not isinstance(symbol, str):
             raise ValueError("Symbol cannot be empty")
         if not repository_alias:
             raise ValueError("repository_alias is required for remote SCIP queries")
+        if depth < 1:
+            raise ValueError(f"depth must be at least 1, got {depth}")
+        if depth > _MAX_IMPACT_DEPTH:
+            # Bug #1639: reject symmetrically with the < 1 case above
+            # instead of silently clamping -- a caller asking for depth 15
+            # should get a clear rejection, not a silently downgraded
+            # depth-10 result.
+            raise ValueError(f"depth must be at most {_MAX_IMPACT_DEPTH}, got {depth}")
 
         payload = self._build_request_payload(
             symbol=symbol,
             repositories=[repository_alias],
-            max_depth=min(depth, 10),
+            max_depth=depth,
             project=project,
         )
         return self._execute_scip_request("/api/scip/multi/dependents", payload)

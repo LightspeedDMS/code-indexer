@@ -22,13 +22,13 @@ v2-marked collections are still preserved.
 
 from pathlib import Path
 
-from src.code_indexer.services.temporal.temporal_blank_out import (
+from code_indexer.services.temporal.temporal_blank_out import (
     blank_out_legacy_temporal_collections,
 )
-from src.code_indexer.services.temporal.temporal_collection_naming import (
+from code_indexer.services.temporal.temporal_collection_naming import (
     LEGACY_TEMPORAL_COLLECTION,
 )
-from src.code_indexer.services.temporal.temporal_structure_marker import (
+from code_indexer.services.temporal.temporal_structure_marker import (
     write_structure_marker,
 )
 
@@ -39,7 +39,10 @@ def _make_bookkeeping_dir(index_path: Path) -> Path:
     coll_dir.mkdir(parents=True)
     (coll_dir / "temporal_metadata.db").write_bytes(b"sqlite-bytes-here")
     (coll_dir / "temporal_progress.json").write_text('{"done": true}')
-    return coll_dir
+    # Issue #1696 Session 1: LEGACY_TEMPORAL_COLLECTION is a real `str`
+    # constant; mypy currently resolves the bare cross-module import to
+    # Any until Session 2's mypy_path fix lands.
+    return coll_dir  # type: ignore[no-any-return]
 
 
 def _make_legacy_collection_with_hnsw(index_path: Path, name: str) -> Path:

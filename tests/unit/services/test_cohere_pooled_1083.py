@@ -12,8 +12,8 @@ from typing import Any, Dict
 
 import httpx
 
-from src.code_indexer.config import CohereConfig
-from src.code_indexer.services.cohere_embedding import CohereEmbeddingProvider
+from code_indexer.config import CohereConfig
+from code_indexer.services.cohere_embedding import CohereEmbeddingProvider
 
 
 _FAKE_KEY = "test-cohere-key-1083"

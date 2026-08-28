@@ -17,7 +17,7 @@ import asyncio
 import logging
 import threading
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 from fastapi import (
     APIRouter,
@@ -68,8 +68,52 @@ templates.env.globals["get_server_time"] = _get_server_time_for_template
 # Router
 router = APIRouter(prefix="/admin/diagnostics", tags=["diagnostics"])
 
-# Service instance (singleton pattern)
-diagnostics_service = DiagnosticsService()
+# Bug #1686: `diagnostics_service = DiagnosticsService()` used to run
+# unconditionally at import time. DiagnosticsService.__init__ with no
+# db_path resolves to CIDX_SERVER_DATA_DIR (or ~/.cidx-server/data/
+# cidx_server.db by default) and calls _load_results_from_db() -- a real
+# SQLite read -- as a construction side effect. Since inline_routes.py:54
+# imports this router, any transitive import (even a bare
+# pytest --collect-only) read the live server DB.
+#
+# A pure module-level PEP-562 __getattr__ (the Bug #1638/#1650 pattern used
+# by server/app.py, git_operations_service.py, file_service.py) is NOT
+# viable here: the route handlers below reference `diagnostics_service` as
+# a bare global WITHIN THIS SAME MODULE, and a bare-name global lookup
+# (LOAD_GLOBAL) never triggers a module's __getattr__ -- that hook fires
+# only for external `module.attr` access or `from module import attr`.
+#
+# Fix: a real (not annotation-only) `None` default plus a
+# _get_diagnostics_service() getter that every handler below calls instead
+# of touching the bare name directly. This also keeps
+# unittest.mock.patch("...routers.diagnostics.diagnostics_service") (used
+# WITHOUT create=True in test_diagnostics_router.py) working correctly:
+# patching a real `None` attribute via setattr/delattr never raises
+# AttributeError and never forces real construction at patch time.
+diagnostics_service: Optional[DiagnosticsService] = None
+_diagnostics_service_lock = threading.RLock()
+
+
+def _get_diagnostics_service() -> DiagnosticsService:
+    """Lazily construct and cache the module's DiagnosticsService singleton.
+
+    Reads the current module-level `diagnostics_service` global first: if a
+    caller (test or otherwise) already assigned a real instance or a test
+    double (e.g. via unittest.mock.patch), that value is returned unchanged
+    with no lock contention. Only constructs -- and touches the on-disk
+    DB -- the first time a route handler genuinely needs it.
+
+    Double-checked locking under a module-level RLock (never a plain Lock,
+    per this project's established singleton-deferral pattern) so
+    concurrent first callers never construct two distinct instances.
+    """
+    global diagnostics_service
+    if diagnostics_service is not None:
+        return diagnostics_service
+    with _diagnostics_service_lock:
+        if diagnostics_service is None:
+            diagnostics_service = DiagnosticsService()
+        return diagnostics_service
 
 
 @router.get("", response_class=HTMLResponse)
@@ -98,9 +142,14 @@ def get_diagnostics_page(
         HTML response with diagnostics page
     """
     try:
+        # Bug #1686: resolve via the lazy getter instead of the bare
+        # module global, so this handler works regardless of whether the
+        # singleton has been constructed yet.
+        svc = _get_diagnostics_service()
+
         # Get current status
-        status = diagnostics_service.get_status()
-        is_running = diagnostics_service.is_running()
+        status = svc.get_status()
+        is_running = svc.is_running()
 
         # Get CSRF token from session cookie, or generate new if none exists (Story #205, Code Review Issues #1 and #2)
         csrf_token = get_csrf_token_from_cookie(request)
@@ -158,14 +207,18 @@ def run_all_diagnostics(
         HTML response with diagnostics status partial (starts polling)
     """
     try:
+        # Bug #1686: resolve via the lazy getter instead of the bare
+        # module global.
+        svc = _get_diagnostics_service()
+
         # Story #1491 AC4 (report Finding B4): register the SYNC entry point.
         # Starlette awaits an async background task ON the event loop, which
         # froze every other connection for the whole diagnostics run; a sync
         # background task is dispatched to Starlette's threadpool instead.
-        background_tasks.add_task(diagnostics_service.run_all_diagnostics_sync)
+        background_tasks.add_task(svc.run_all_diagnostics_sync)
 
         # Get current status (will be empty/not-run initially)
-        status = diagnostics_service.get_status()
+        status = svc.get_status()
 
         # Return HTML partial with polling enabled
         return templates.TemplateResponse(
@@ -222,12 +275,16 @@ def run_category_diagnostics(
                 detail=f"Invalid category: {category}. Valid categories: {[c.value for c in DiagnosticCategory]}",
             )
 
+        # Bug #1686: resolve via the lazy getter instead of the bare
+        # module global.
+        svc = _get_diagnostics_service()
+
         # Story #1491 AC4: sync entry point, threadpooled by Starlette (see
         # the run-all route above for the full rationale).
-        background_tasks.add_task(diagnostics_service.run_category_sync, category_enum)
+        background_tasks.add_task(svc.run_category_sync, category_enum)
 
         # Get current status
-        status = diagnostics_service.get_status()
+        status = svc.get_status()
 
         # Return HTML partial with polling enabled
         return templates.TemplateResponse(
@@ -276,9 +333,13 @@ def get_diagnostics_status(
         HTML response with status partial
     """
     try:
+        # Bug #1686: resolve via the lazy getter instead of the bare
+        # module global.
+        svc = _get_diagnostics_service()
+
         # Get current status
-        status = diagnostics_service.get_status()
-        is_running = diagnostics_service.is_running()
+        status = svc.get_status()
+        is_running = svc.is_running()
 
         # Render status partial
         html_content = templates.TemplateResponse(

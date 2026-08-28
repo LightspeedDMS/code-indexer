@@ -41,12 +41,12 @@ class TestRefreshGoldenRepoRoute:
 
     def test_refresh_requires_admin_session(self):
         """Refresh endpoint must require a valid admin session -- 401 when absent."""
-        from src.code_indexer.server.web.routes import refresh_golden_repo
+        from code_indexer.server.web.routes import refresh_golden_repo
 
         mock_request = _make_request()
 
         with patch(
-            "src.code_indexer.server.web.routes._require_admin_session",
+            "code_indexer.server.web.routes._require_admin_session",
             return_value=None,
         ):
             result = refresh_golden_repo(
@@ -60,22 +60,22 @@ class TestRefreshGoldenRepoRoute:
 
     def test_refresh_rejects_missing_csrf_token(self):
         """CSRF protection on refresh endpoint: missing token must be rejected."""
-        from src.code_indexer.server.web.routes import refresh_golden_repo
+        from code_indexer.server.web.routes import refresh_golden_repo
 
         mock_request = _make_request()
         mock_session = _make_session()
 
         with (
             patch(
-                "src.code_indexer.server.web.routes._require_admin_session",
+                "code_indexer.server.web.routes._require_admin_session",
                 return_value=mock_session,
             ),
             patch(
-                "src.code_indexer.server.web.routes.validate_login_csrf_token",
+                "code_indexer.server.web.routes.validate_login_csrf_token",
                 return_value=False,
             ),
             patch(
-                "src.code_indexer.server.web.routes._create_golden_repos_page_response"
+                "code_indexer.server.web.routes._create_golden_repos_page_response"
             ) as mock_page,
         ):
             mock_page.return_value = HTMLResponse(content="<html>error</html>")
@@ -93,7 +93,7 @@ class TestRefreshGoldenRepoRoute:
 
     def test_refresh_rejects_invalid_csrf_token(self):
         """Invalid CSRF token must be rejected before reaching the scheduler."""
-        from src.code_indexer.server.web.routes import refresh_golden_repo
+        from code_indexer.server.web.routes import refresh_golden_repo
 
         mock_request = _make_request()
         mock_session = _make_session()
@@ -109,19 +109,19 @@ class TestRefreshGoldenRepoRoute:
 
         with (
             patch(
-                "src.code_indexer.server.web.routes._require_admin_session",
+                "code_indexer.server.web.routes._require_admin_session",
                 return_value=mock_session,
             ),
             patch(
-                "src.code_indexer.server.web.routes.validate_login_csrf_token",
+                "code_indexer.server.web.routes.validate_login_csrf_token",
                 return_value=False,
             ),
             patch(
-                "src.code_indexer.server.web.routes._get_golden_repo_manager",
+                "code_indexer.server.web.routes._get_golden_repo_manager",
                 return_value=mock_manager,
             ),
             patch(
-                "src.code_indexer.server.web.routes._create_golden_repos_page_response"
+                "code_indexer.server.web.routes._create_golden_repos_page_response"
             ) as mock_page,
         ):
             import code_indexer.server.app as app_module
@@ -143,7 +143,7 @@ class TestRefreshGoldenRepoRoute:
 
     def test_refresh_success_calls_trigger_refresh_for_repo(self):
         """Successful refresh must call trigger_refresh_for_repo(alias, submitter_username=...)."""
-        from src.code_indexer.server.web.routes import refresh_golden_repo
+        from code_indexer.server.web.routes import refresh_golden_repo
 
         mock_request = _make_request()
         mock_session = _make_session(username="admin")
@@ -159,19 +159,19 @@ class TestRefreshGoldenRepoRoute:
 
         with (
             patch(
-                "src.code_indexer.server.web.routes._require_admin_session",
+                "code_indexer.server.web.routes._require_admin_session",
                 return_value=mock_session,
             ),
             patch(
-                "src.code_indexer.server.web.routes.validate_login_csrf_token",
+                "code_indexer.server.web.routes.validate_login_csrf_token",
                 return_value=True,
             ),
             patch(
-                "src.code_indexer.server.web.routes._get_golden_repo_manager",
+                "code_indexer.server.web.routes._get_golden_repo_manager",
                 return_value=mock_manager,
             ),
             patch(
-                "src.code_indexer.server.web.routes._create_golden_repos_page_response"
+                "code_indexer.server.web.routes._create_golden_repos_page_response"
             ) as mock_page,
         ):
             import code_indexer.server.app as app_module
@@ -196,7 +196,7 @@ class TestRefreshGoldenRepoRoute:
 
     def test_refresh_success_response_includes_job_id(self):
         """Success response must include job ID."""
-        from src.code_indexer.server.web.routes import refresh_golden_repo
+        from code_indexer.server.web.routes import refresh_golden_repo
 
         mock_request = _make_request()
         mock_session = _make_session(username="admin")
@@ -212,19 +212,19 @@ class TestRefreshGoldenRepoRoute:
 
         with (
             patch(
-                "src.code_indexer.server.web.routes._require_admin_session",
+                "code_indexer.server.web.routes._require_admin_session",
                 return_value=mock_session,
             ),
             patch(
-                "src.code_indexer.server.web.routes.validate_login_csrf_token",
+                "code_indexer.server.web.routes.validate_login_csrf_token",
                 return_value=True,
             ),
             patch(
-                "src.code_indexer.server.web.routes._get_golden_repo_manager",
+                "code_indexer.server.web.routes._get_golden_repo_manager",
                 return_value=mock_manager,
             ),
             patch(
-                "src.code_indexer.server.web.routes._create_golden_repos_page_response"
+                "code_indexer.server.web.routes._create_golden_repos_page_response"
             ) as mock_page,
         ):
             import code_indexer.server.app as app_module
@@ -249,7 +249,7 @@ class TestRefreshGoldenRepoRoute:
     def test_refresh_error_when_repo_not_found(self):
         """Error response when repo genuinely absent (both golden_repos AND
         get_golden_repo() report no such repo)."""
-        from src.code_indexer.server.web.routes import refresh_golden_repo
+        from code_indexer.server.web.routes import refresh_golden_repo
 
         mock_request = _make_request()
         mock_session = _make_session()
@@ -260,19 +260,19 @@ class TestRefreshGoldenRepoRoute:
 
         with (
             patch(
-                "src.code_indexer.server.web.routes._require_admin_session",
+                "code_indexer.server.web.routes._require_admin_session",
                 return_value=mock_session,
             ),
             patch(
-                "src.code_indexer.server.web.routes.validate_login_csrf_token",
+                "code_indexer.server.web.routes.validate_login_csrf_token",
                 return_value=True,
             ),
             patch(
-                "src.code_indexer.server.web.routes._get_golden_repo_manager",
+                "code_indexer.server.web.routes._get_golden_repo_manager",
                 return_value=mock_manager,
             ),
             patch(
-                "src.code_indexer.server.web.routes._create_golden_repos_page_response"
+                "code_indexer.server.web.routes._create_golden_repos_page_response"
             ) as mock_page,
         ):
             mock_page.return_value = HTMLResponse(content="<html>error</html>")
@@ -294,7 +294,7 @@ class TestRefreshGoldenRepoRoute:
         authoritative `get_golden_repo()` read, not the raw per-worker
         cache dict.
         """
-        from src.code_indexer.server.web.routes import refresh_golden_repo
+        from code_indexer.server.web.routes import refresh_golden_repo
 
         mock_request = _make_request()
         mock_session = _make_session(username="admin")
@@ -315,19 +315,19 @@ class TestRefreshGoldenRepoRoute:
 
         with (
             patch(
-                "src.code_indexer.server.web.routes._require_admin_session",
+                "code_indexer.server.web.routes._require_admin_session",
                 return_value=mock_session,
             ),
             patch(
-                "src.code_indexer.server.web.routes.validate_login_csrf_token",
+                "code_indexer.server.web.routes.validate_login_csrf_token",
                 return_value=True,
             ),
             patch(
-                "src.code_indexer.server.web.routes._get_golden_repo_manager",
+                "code_indexer.server.web.routes._get_golden_repo_manager",
                 return_value=mock_manager,
             ),
             patch(
-                "src.code_indexer.server.web.routes._create_golden_repos_page_response"
+                "code_indexer.server.web.routes._create_golden_repos_page_response"
             ) as mock_page,
         ):
             import code_indexer.server.app as app_module
@@ -355,7 +355,7 @@ class TestRefreshGoldenRepoRoute:
 
     def test_refresh_error_when_scheduler_not_available(self):
         """Error response when RefreshScheduler is not available."""
-        from src.code_indexer.server.web.routes import refresh_golden_repo
+        from code_indexer.server.web.routes import refresh_golden_repo
 
         mock_request = _make_request()
         mock_session = _make_session()
@@ -368,19 +368,19 @@ class TestRefreshGoldenRepoRoute:
 
         with (
             patch(
-                "src.code_indexer.server.web.routes._require_admin_session",
+                "code_indexer.server.web.routes._require_admin_session",
                 return_value=mock_session,
             ),
             patch(
-                "src.code_indexer.server.web.routes.validate_login_csrf_token",
+                "code_indexer.server.web.routes.validate_login_csrf_token",
                 return_value=True,
             ),
             patch(
-                "src.code_indexer.server.web.routes._get_golden_repo_manager",
+                "code_indexer.server.web.routes._get_golden_repo_manager",
                 return_value=mock_manager,
             ),
             patch(
-                "src.code_indexer.server.web.routes._create_golden_repos_page_response"
+                "code_indexer.server.web.routes._create_golden_repos_page_response"
             ) as mock_page,
         ):
             import code_indexer.server.app as app_module

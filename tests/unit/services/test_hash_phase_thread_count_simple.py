@@ -4,7 +4,7 @@ Simplified unit tests for hash phase thread count bug.
 This test directly verifies the bug without needing full processor setup.
 """
 
-from src.code_indexer.services.clean_slot_tracker import CleanSlotTracker
+from code_indexer.services.clean_slot_tracker import CleanSlotTracker
 
 
 class TestThreadCountCalculation:
@@ -63,7 +63,7 @@ class TestThreadCountCalculation:
         vector_thread_count = 8
         slot_tracker = CleanSlotTracker(max_slots=vector_thread_count + 2)
 
-        from src.code_indexer.services.clean_slot_tracker import FileData, FileStatus
+        from code_indexer.services.clean_slot_tracker import FileData, FileStatus
 
         # Simulate workers acquiring and releasing slots
         slot_ids = []
@@ -202,7 +202,7 @@ class TestBugReproduction:
             max_slots=vector_thread_count + 2
         )  # 10 slots
 
-        from src.code_indexer.services.clean_slot_tracker import FileData, FileStatus
+        from code_indexer.services.clean_slot_tracker import FileData, FileStatus
 
         # Simulate all slots being occupied during busy hash phase
         for i in range(10):

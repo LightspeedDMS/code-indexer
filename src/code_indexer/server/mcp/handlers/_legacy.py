@@ -381,7 +381,6 @@ from .scip import (  # noqa: F401, E402
     handle_scip_cleanup_history,
     handle_scip_cleanup_workspaces,
     handle_scip_cleanup_status,
-    _filter_audit_entries as _filter_audit_entries,
     _parse_log_details as _parse_log_details,
     _get_pr_logs_from_service as _get_pr_logs_from_service,
     _get_cleanup_logs_from_service as _get_cleanup_logs_from_service,

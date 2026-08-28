@@ -60,7 +60,7 @@ class TestBug187SQLiteWrongDBTableCheck:
             mock_config.server_dir = str(tmp_path)
             mock_get_config_svc.return_value.get_config.return_value = mock_config
 
-            service = DiagnosticsService()
+            service = DiagnosticsService(db_path=str(tmp_path / "diagnostics.db"))
             result = await service.check_sqlite_database()
 
             # Should pass without requiring groups tables
@@ -98,7 +98,7 @@ class TestBug188VectorStorageTemporalCollections:
         for hex_dir in ["49", "55", "a6"]:
             (collection_dir / hex_dir).mkdir()
 
-        service = DiagnosticsService()
+        service = DiagnosticsService(db_path=str(tmp_path / "diagnostics.db"))
         result = service._check_collection_health(
             collection_dir, "test-repo", "code-indexer-temporal"
         )
@@ -131,7 +131,7 @@ class TestBug188VectorStorageTemporalCollections:
             mock_manager.load_index.return_value = Mock()  # Simulate successful load
             mock_hnsw_class.return_value = mock_manager
 
-            service = DiagnosticsService()
+            service = DiagnosticsService(db_path=str(tmp_path / "diagnostics.db"))
             result = service._check_collection_health(
                 collection_dir, "test-repo", "voyage-code-3"
             )
@@ -151,7 +151,7 @@ class TestBug188VectorStorageTemporalCollections:
         # Only create temporal_metadata.db, missing projection_matrix.npy and collection_meta.json
         (collection_dir / "temporal_metadata.db").touch()
 
-        service = DiagnosticsService()
+        service = DiagnosticsService(db_path=str(tmp_path / "diagnostics.db"))
         result = service._check_collection_health(
             collection_dir, "test-repo", "code-indexer-temporal"
         )

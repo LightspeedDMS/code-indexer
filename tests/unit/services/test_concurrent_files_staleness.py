@@ -16,8 +16,8 @@ EVIDENCE from /tmp/display_debug.log:
 - Some calls have FRESH data, others have STALE data
 """
 
-from src.code_indexer.services.clean_slot_tracker import CleanSlotTracker, FileStatus
-from src.code_indexer.progress.multi_threaded_display import (
+from code_indexer.services.clean_slot_tracker import CleanSlotTracker, FileStatus
+from code_indexer.progress.multi_threaded_display import (
     MultiThreadedProgressManager,
 )
 from rich.console import Console
@@ -34,7 +34,7 @@ def test_concurrent_files_staleness_bug():
     4. Call get_concurrent_files_data() - should NOT return stale data for slots 0, 1, 3, 4
     5. Verify all returned files are current (no stale data)
     """
-    from src.code_indexer.services.clean_slot_tracker import FileData
+    from code_indexer.services.clean_slot_tracker import FileData
 
     # Setup: Create slot tracker with 8 slots
     slot_tracker = CleanSlotTracker(max_slots=8)

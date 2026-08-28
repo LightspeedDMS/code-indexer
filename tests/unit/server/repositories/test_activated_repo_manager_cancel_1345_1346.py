@@ -34,25 +34,27 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from src.code_indexer.server.repositories.activated_repo_manager import (
+from code_indexer.server.repositories.activated_repo_manager import (
     ActivatedRepoError,
     ActivatedRepoManager,
 )
-from src.code_indexer.server.repositories.golden_repo_manager import GoldenRepo
+from code_indexer.server.repositories.golden_repo_manager import GoldenRepo
 
-# NOTE: imported WITHOUT the "src." prefix, matching the absolute import
-# `from code_indexer.server.utils.cancellable_subprocess import
+# NOTE: imported via the bare `code_indexer` path, matching the absolute
+# import `from code_indexer.server.utils.cancellable_subprocess import
 # SubprocessCancelledError` used inside activated_repo_manager.py itself.
-# Under PYTHONPATH=./src, "src.code_indexer...." and "code_indexer...." are
-# two distinct entries in sys.modules with two distinct class objects of
-# the same name -- importing via "src." here would make isinstance() checks
-# in the production code (which always resolves the plain, non-"src."
-# absolute import) silently fail to recognize this test's exception
-# instances as cancellations.
+# Issue #1696 Session 1 eliminated this file's other imports' previous
+# "src.code_indexer"-prefixed spelling (ActivatedRepoManager/GoldenRepo/
+# ServerResourceConfig above), so every import in this file now resolves
+# to the SAME `code_indexer.*` module identity as the production code --
+# isinstance() checks on SubprocessCancelledError are correct regardless
+# of import order. Kept as a bare import (rather than re-adding a "src."
+# prefix) since bare is what activated_repo_manager.py's own internal
+# absolute import resolves to.
 from code_indexer.server.utils.cancellable_subprocess import (
     SubprocessCancelledError,
 )
-from src.code_indexer.server.utils.config_manager import ServerResourceConfig
+from code_indexer.server.utils.config_manager import ServerResourceConfig
 
 
 @pytest.fixture
@@ -117,7 +119,7 @@ def activated_repo_manager(
 
 def _patch_committer():
     return patch(
-        "src.code_indexer.server.repositories.activated_repo_manager"
+        "code_indexer.server.repositories.activated_repo_manager"
         ".CommitterResolutionService"
     )
 
@@ -164,7 +166,7 @@ class TestClonePhaseOrphanCleanup1345:
 
         with (
             patch(
-                "src.code_indexer.server.repositories.activated_repo_manager"
+                "code_indexer.server.repositories.activated_repo_manager"
                 ".os.path.exists",
                 side_effect=_flaky_exists,
             ),
@@ -213,7 +215,7 @@ class TestReindexPhaseOrphanCleanupRegression1345:
 
         with (
             patch(
-                "src.code_indexer.server.repositories.activated_repo_manager"
+                "code_indexer.server.repositories.activated_repo_manager"
                 ".subprocess.run",
                 return_value=successful_git,
             ),
@@ -327,7 +329,7 @@ class TestDoActivateRepositoryCancelLogging1346:
 
         with (
             patch(
-                "src.code_indexer.server.repositories.activated_repo_manager"
+                "code_indexer.server.repositories.activated_repo_manager"
                 ".subprocess.run",
                 return_value=successful_git,
             ),

@@ -8,16 +8,16 @@ All tests use real components following MESSI Rule #1: No mocks.
 
 import pytest
 
-from src.code_indexer.server.utils.config_manager import TelemetryConfig
+from code_indexer.server.utils.config_manager import TelemetryConfig
 
 
 def reset_all_singletons():
     """Reset all singletons to ensure clean test state."""
-    from src.code_indexer.server.telemetry import (
+    from code_indexer.server.telemetry import (
         reset_telemetry_manager,
         reset_machine_metrics_exporter,
     )
-    from src.code_indexer.server.services.system_metrics_collector import (
+    from code_indexer.server.services.system_metrics_collector import (
         reset_system_metrics_collector,
     )
 
@@ -36,7 +36,7 @@ class TestJobMetricsImport:
 
     def test_job_metrics_can_be_imported(self):
         """JobMetrics class can be imported."""
-        from src.code_indexer.server.telemetry.job_metrics import (
+        from code_indexer.server.telemetry.job_metrics import (
             JobMetrics,
         )
 
@@ -44,7 +44,7 @@ class TestJobMetricsImport:
 
     def test_get_job_metrics_function_exists(self):
         """get_job_metrics() function is exported."""
-        from src.code_indexer.server.telemetry.job_metrics import (
+        from code_indexer.server.telemetry.job_metrics import (
             get_job_metrics,
         )
 
@@ -63,7 +63,7 @@ class TestJobMetricsCreation:
     def setup_method(self):
         """Reset singletons before each test."""
         reset_all_singletons()
-        from src.code_indexer.server.telemetry.job_metrics import (
+        from code_indexer.server.telemetry.job_metrics import (
             reset_job_metrics,
         )
 
@@ -72,7 +72,7 @@ class TestJobMetricsCreation:
     def teardown_method(self):
         """Reset singletons after each test."""
         reset_all_singletons()
-        from src.code_indexer.server.telemetry.job_metrics import (
+        from code_indexer.server.telemetry.job_metrics import (
             reset_job_metrics,
         )
 
@@ -82,8 +82,8 @@ class TestJobMetricsCreation:
         """
         JobMetrics is created when telemetry is enabled.
         """
-        from src.code_indexer.server.telemetry import get_telemetry_manager
-        from src.code_indexer.server.telemetry.job_metrics import (
+        from code_indexer.server.telemetry import get_telemetry_manager
+        from code_indexer.server.telemetry.job_metrics import (
             JobMetrics,
         )
 
@@ -103,8 +103,8 @@ class TestJobMetricsCreation:
         """
         JobMetrics is not active when telemetry disabled.
         """
-        from src.code_indexer.server.telemetry import get_telemetry_manager
-        from src.code_indexer.server.telemetry.job_metrics import (
+        from code_indexer.server.telemetry import get_telemetry_manager
+        from code_indexer.server.telemetry.job_metrics import (
             JobMetrics,
         )
 
@@ -132,7 +132,7 @@ class TestJobCounterMetrics:
     def setup_method(self):
         """Reset singletons before each test."""
         reset_all_singletons()
-        from src.code_indexer.server.telemetry.job_metrics import (
+        from code_indexer.server.telemetry.job_metrics import (
             reset_job_metrics,
         )
 
@@ -141,7 +141,7 @@ class TestJobCounterMetrics:
     def teardown_method(self):
         """Reset singletons after each test."""
         reset_all_singletons()
-        from src.code_indexer.server.telemetry.job_metrics import (
+        from code_indexer.server.telemetry.job_metrics import (
             reset_job_metrics,
         )
 
@@ -151,8 +151,8 @@ class TestJobCounterMetrics:
         """
         record_job_completed() increments the completed jobs counter.
         """
-        from src.code_indexer.server.telemetry import get_telemetry_manager
-        from src.code_indexer.server.telemetry.job_metrics import (
+        from code_indexer.server.telemetry import get_telemetry_manager
+        from code_indexer.server.telemetry.job_metrics import (
             JobMetrics,
         )
 
@@ -177,8 +177,8 @@ class TestJobCounterMetrics:
         """
         record_job_failed() increments the failed jobs counter with error_type.
         """
-        from src.code_indexer.server.telemetry import get_telemetry_manager
-        from src.code_indexer.server.telemetry.job_metrics import (
+        from code_indexer.server.telemetry import get_telemetry_manager
+        from code_indexer.server.telemetry.job_metrics import (
             JobMetrics,
         )
 
@@ -204,8 +204,8 @@ class TestJobCounterMetrics:
         """
         record_job_completed() records duration in histogram.
         """
-        from src.code_indexer.server.telemetry import get_telemetry_manager
-        from src.code_indexer.server.telemetry.job_metrics import (
+        from code_indexer.server.telemetry import get_telemetry_manager
+        from code_indexer.server.telemetry.job_metrics import (
             JobMetrics,
         )
 
@@ -239,7 +239,7 @@ class TestJobGaugeMetrics:
     def setup_method(self):
         """Reset singletons before each test."""
         reset_all_singletons()
-        from src.code_indexer.server.telemetry.job_metrics import (
+        from code_indexer.server.telemetry.job_metrics import (
             reset_job_metrics,
         )
 
@@ -248,7 +248,7 @@ class TestJobGaugeMetrics:
     def teardown_method(self):
         """Reset singletons after each test."""
         reset_all_singletons()
-        from src.code_indexer.server.telemetry.job_metrics import (
+        from code_indexer.server.telemetry.job_metrics import (
             reset_job_metrics,
         )
 
@@ -258,8 +258,8 @@ class TestJobGaugeMetrics:
         """
         set_job_counts_callback() registers callback for active/queued gauges.
         """
-        from src.code_indexer.server.telemetry import get_telemetry_manager
-        from src.code_indexer.server.telemetry.job_metrics import (
+        from code_indexer.server.telemetry import get_telemetry_manager
+        from code_indexer.server.telemetry.job_metrics import (
             JobMetrics,
         )
 
@@ -284,8 +284,8 @@ class TestJobGaugeMetrics:
         """
         Observable gauges for active and queued jobs are registered.
         """
-        from src.code_indexer.server.telemetry import get_telemetry_manager
-        from src.code_indexer.server.telemetry.job_metrics import (
+        from code_indexer.server.telemetry import get_telemetry_manager
+        from code_indexer.server.telemetry.job_metrics import (
             JobMetrics,
         )
 
@@ -314,7 +314,7 @@ class TestRepositoryMetrics:
     def setup_method(self):
         """Reset singletons before each test."""
         reset_all_singletons()
-        from src.code_indexer.server.telemetry.job_metrics import (
+        from code_indexer.server.telemetry.job_metrics import (
             reset_job_metrics,
         )
 
@@ -323,7 +323,7 @@ class TestRepositoryMetrics:
     def teardown_method(self):
         """Reset singletons after each test."""
         reset_all_singletons()
-        from src.code_indexer.server.telemetry.job_metrics import (
+        from code_indexer.server.telemetry.job_metrics import (
             reset_job_metrics,
         )
 
@@ -333,8 +333,8 @@ class TestRepositoryMetrics:
         """
         set_repository_counts_callback() registers callback for repo gauges.
         """
-        from src.code_indexer.server.telemetry import get_telemetry_manager
-        from src.code_indexer.server.telemetry.job_metrics import (
+        from code_indexer.server.telemetry import get_telemetry_manager
+        from code_indexer.server.telemetry.job_metrics import (
             JobMetrics,
         )
 
@@ -359,8 +359,8 @@ class TestRepositoryMetrics:
         """
         Observable gauges for repository counts are registered.
         """
-        from src.code_indexer.server.telemetry import get_telemetry_manager
-        from src.code_indexer.server.telemetry.job_metrics import (
+        from code_indexer.server.telemetry import get_telemetry_manager
+        from code_indexer.server.telemetry.job_metrics import (
             JobMetrics,
         )
 
@@ -380,8 +380,8 @@ class TestRepositoryMetrics:
         """
         record_repository_refresh() records refresh duration histogram.
         """
-        from src.code_indexer.server.telemetry import get_telemetry_manager
-        from src.code_indexer.server.telemetry.job_metrics import (
+        from code_indexer.server.telemetry import get_telemetry_manager
+        from code_indexer.server.telemetry.job_metrics import (
             JobMetrics,
         )
 
@@ -415,7 +415,7 @@ class TestNoopWhenDisabled:
     def setup_method(self):
         """Reset singletons before each test."""
         reset_all_singletons()
-        from src.code_indexer.server.telemetry.job_metrics import (
+        from code_indexer.server.telemetry.job_metrics import (
             reset_job_metrics,
         )
 
@@ -424,7 +424,7 @@ class TestNoopWhenDisabled:
     def teardown_method(self):
         """Reset singletons after each test."""
         reset_all_singletons()
-        from src.code_indexer.server.telemetry.job_metrics import (
+        from code_indexer.server.telemetry.job_metrics import (
             reset_job_metrics,
         )
 
@@ -434,8 +434,8 @@ class TestNoopWhenDisabled:
         """
         All recording methods are no-op when telemetry is disabled.
         """
-        from src.code_indexer.server.telemetry import get_telemetry_manager
-        from src.code_indexer.server.telemetry.job_metrics import (
+        from code_indexer.server.telemetry import get_telemetry_manager
+        from code_indexer.server.telemetry.job_metrics import (
             JobMetrics,
         )
 

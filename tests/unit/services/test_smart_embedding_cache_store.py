@@ -14,7 +14,7 @@ TDD: These tests are written BEFORE implementation. They should fail initially.
 
 import hashlib
 
-from src.code_indexer.storage.filesystem_vector_store import FilesystemVectorStore
+from code_indexer.storage.filesystem_vector_store import FilesystemVectorStore
 
 
 def _sha256(text: str) -> str:

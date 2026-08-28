@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Dict, List, Optional
 
 from code_indexer.server.storage.database_manager import DatabaseConnectionManager
+from code_indexer.server.storage.json_column import parse_json_column
 
 if TYPE_CHECKING:
     from code_indexer.server.storage.protocols import WikiCacheBackend
@@ -240,14 +241,9 @@ class WikiCache:
             metadata: Optional[Dict] = None
             stored_metadata_json = row_dict.get("metadata_json")
             if stored_metadata_json:
-                try:
-                    metadata = json.loads(stored_metadata_json)
-                except (ValueError, TypeError):
-                    logger.warning(
-                        "Failed to parse cached metadata_json for %s/%s",
-                        repo_alias,
-                        article_path,
-                    )
+                metadata = parse_json_column(
+                    stored_metadata_json, dict, "metadata_json"
+                )
             return {
                 "html": row_dict["rendered_html"],
                 "title": row_dict["title"],
@@ -266,14 +262,7 @@ class WikiCache:
             return None
         metadata = None
         if stored_metadata_json:
-            try:
-                metadata = json.loads(stored_metadata_json)
-            except (ValueError, TypeError):
-                logger.warning(
-                    "Failed to parse cached metadata_json for %s/%s",
-                    repo_alias,
-                    article_path,
-                )
+            metadata = parse_json_column(stored_metadata_json, dict, "metadata_json")
         return {"html": stored_html, "title": stored_title, "metadata": metadata}
 
     def put_article(
@@ -343,7 +332,10 @@ class WikiCache:
             raw = self._backend.get_sidebar(repo_alias)
             if raw is None:
                 return None
-            return json.loads(raw)  # type: ignore[no-any-return]
+            # mypy cannot parametrize parse_json_column's Type[T] generic from
+            # a bare `list` argument in a return-statement context (confirmed
+            # via an isolated minimal repro against the shared helper).
+            return parse_json_column(raw, list, "sidebar_json")  # type: ignore[no-any-return]
         # Bug #1532 follow-up: route the raw connection through
         # guarded_connection() so close_all() cannot close it mid-read.
         with self._conn_manager.guarded_connection() as conn:
@@ -353,7 +345,10 @@ class WikiCache:
             ).fetchone()
         if row is None:
             return None
-        return json.loads(row[0])  # type: ignore[no-any-return]
+        # mypy cannot parametrize parse_json_column's Type[T] generic from a
+        # bare `list` argument in a return-statement context (same limitation
+        # as the backend-path branch above).
+        return parse_json_column(row[0], list, "sidebar_json")  # type: ignore[no-any-return]
 
     def put_sidebar(self, repo_alias: str, sidebar_data: List, repo_dir: Path) -> None:
         """Store sidebar JSON with current max_mtime of .md files."""

@@ -25,10 +25,10 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from code_indexer.global_repos.query_tracker import QueryTracker
-from src.code_indexer.server.repositories.activated_repo_manager import (
+from code_indexer.server.repositories.activated_repo_manager import (
     ActivatedRepoManager,
 )
-from src.code_indexer.server.repositories.golden_repo_manager import GoldenRepo
+from code_indexer.server.repositories.golden_repo_manager import GoldenRepo
 
 
 @pytest.fixture
@@ -93,7 +93,7 @@ class TestDeactivationDrainWiring:
 
         drain_calls = []
         activated_repo_manager_module = __import__(
-            "src.code_indexer.server.repositories.activated_repo_manager",
+            "code_indexer.server.repositories.activated_repo_manager",
             fromlist=["wait_for_activated_repo_query_drain"],
         )
         original_drain = (
@@ -105,7 +105,7 @@ class TestDeactivationDrainWiring:
             return original_drain(query_tracker, refcount_key, **kwargs)
 
         with patch(
-            "src.code_indexer.server.repositories.activated_repo_manager."
+            "code_indexer.server.repositories.activated_repo_manager."
             "wait_for_activated_repo_query_drain",
             spy_drain,
         ):

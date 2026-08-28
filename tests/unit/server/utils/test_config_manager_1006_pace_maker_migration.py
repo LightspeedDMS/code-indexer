@@ -16,7 +16,7 @@ import json
 import logging
 import tempfile
 
-from src.code_indexer.server.utils.config_manager import ServerConfigManager
+from code_indexer.server.utils.config_manager import ServerConfigManager
 
 
 def _write_config(tmpdir: str, extra_fields: dict) -> ServerConfigManager:

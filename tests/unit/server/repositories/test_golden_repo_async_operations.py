@@ -13,11 +13,11 @@ from unittest.mock import patch, MagicMock
 
 import pytest
 
-from src.code_indexer.server.repositories.golden_repo_manager import (
+from code_indexer.server.repositories.golden_repo_manager import (
     GoldenRepoManager,
     GoldenRepoError,
 )
-from src.code_indexer.server.repositories.background_jobs import BackgroundJobManager
+from code_indexer.server.repositories.background_jobs import BackgroundJobManager
 
 
 @pytest.mark.e2e
@@ -53,7 +53,7 @@ class TestGoldenRepoAsyncOperations:
         os.makedirs(clone_path, exist_ok=True)
 
         # Add repo to manager
-        from src.code_indexer.server.repositories.golden_repo_manager import GoldenRepo
+        from code_indexer.server.repositories.golden_repo_manager import GoldenRepo
         from datetime import datetime, timezone
 
         golden_repo = GoldenRepo(
@@ -119,7 +119,7 @@ class TestGoldenRepoAsyncOperations:
     def test_add_golden_repo_validates_before_job_submission(self, golden_repo_manager):
         """Test that add_golden_repo validates limits/duplicates before submitting job."""
         # Manually add a repo to test duplicate alias validation
-        from src.code_indexer.server.repositories.golden_repo_manager import GoldenRepo
+        from code_indexer.server.repositories.golden_repo_manager import GoldenRepo
         from datetime import datetime, timezone
 
         golden_repo = GoldenRepo(
@@ -268,7 +268,7 @@ class TestGoldenRepoAsyncOperations:
             background_worker = call_args[1]["func"]
 
             # Execute background worker - should raise GitOperationError when cleanup fails
-            from src.code_indexer.server.repositories.golden_repo_manager import (
+            from code_indexer.server.repositories.golden_repo_manager import (
                 GitOperationError,
             )
 
@@ -387,14 +387,14 @@ class TestGoldenRepoAsyncOperations:
         import json
         import sqlite3
 
-        from src.code_indexer.server.repositories.golden_repo_manager import (
+        from code_indexer.server.repositories.golden_repo_manager import (
             GoldenRepo,
             GoldenRepoManager,
         )
-        from src.code_indexer.server.repositories.activated_repo_manager import (
+        from code_indexer.server.repositories.activated_repo_manager import (
             ActivatedRepoManager,
         )
-        from src.code_indexer.server.storage.sqlite_backends import (
+        from code_indexer.server.storage.sqlite_backends import (
             GlobalReposSqliteBackend,
         )
 
@@ -448,7 +448,7 @@ class TestGoldenRepoAsyncOperations:
         # --- Register in global_repos table (same db_path) ---
         db_path = os.path.join(temp_data_dir, "cidx_server.db")
         # Initialize the full DB schema so global_repos table exists
-        from src.code_indexer.server.storage.database_manager import DatabaseSchema
+        from code_indexer.server.storage.database_manager import DatabaseSchema
 
         DatabaseSchema(db_path).initialize_database()
         global_backend = GlobalReposSqliteBackend(db_path)

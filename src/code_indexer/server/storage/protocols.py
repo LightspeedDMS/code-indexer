@@ -18,7 +18,7 @@ Usage:
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 from typing import Protocol, runtime_checkable
 
 
@@ -952,6 +952,8 @@ class LogsBackend(Protocol):
         extra_data: Optional[str] = None,
         node_id: Optional[str] = None,
         alias: Optional[str] = None,
+        trace_id: Optional[str] = None,
+        span_id: Optional[str] = None,
     ) -> None:
         """Insert a single log record.
 
@@ -967,6 +969,10 @@ class LogsBackend(Protocol):
             node_id: Optional cluster node identifier (NULL in standalone).
             alias: Optional repo alias (Story #876 Phase C). Tags lifecycle-runner
                 ERROR rows so the admin UI can filter logs by repo.
+            trace_id: Optional OTEL trace ID (Story #1676 AC2). 32-char hex,
+                or the documented zero-value when no span was active.
+            span_id: Optional OTEL span ID (Story #1676 AC2). 16-char hex,
+                or the documented zero-value when no span was active.
         """
         ...
 
@@ -1599,12 +1605,31 @@ class DiagnosticsBackend(Protocol):
         """Persist (upsert) diagnostic results for a category."""
         ...
 
-    def load_all_results(self) -> "List[Tuple[str, str, str]]":
-        """Return all rows as list of (category, results_json, run_at) tuples."""
+    def load_all_results(self) -> "Sequence[Tuple[str, object, object]]":
+        """Return all rows as list of (category, results_json, run_at) tuples.
+
+        Bug #1662: `results_json`/`run_at` are honestly typed `object`, not
+        `str`. The real PostgreSQL schema (`001_initial_schema.sql`)
+        declares `results_json JSONB` and `run_at TIMESTAMPTZ` -- psycopg
+        deserializes both to native Python objects (dict/list, and a
+        real, often tz-aware, datetime) before the row reaches
+        application code. SQLite's TEXT columns return genuine `str`
+        values instead. A caller MUST normalize either shape (e.g. via
+        `parse_json_column()` for the JSON field and a datetime-coercion
+        helper for the timestamp field) rather than assuming `str` --
+        that false assumption is exactly the bug class that slipped
+        through review for Bug #1653. The return type is `Sequence`
+        rather than `List` so a backend may return any list-like
+        container without narrowing.
+        """
         ...
 
-    def load_category_results(self, category: str) -> "Optional[Tuple[str, str]]":
-        """Return (results_json, run_at) for a category, or None if absent."""
+    def load_category_results(self, category: str) -> "Optional[Tuple[object, object]]":
+        """Return (results_json, run_at) for a category, or None if absent.
+
+        Same dual-shape (JSONB dict/list, TIMESTAMPTZ datetime vs. SQLite
+        TEXT str) contract as `load_all_results()` -- see its docstring.
+        """
         ...
 
     def close(self) -> None:

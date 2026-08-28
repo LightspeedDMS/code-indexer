@@ -29,8 +29,8 @@ from pathlib import Path
 from typing import Any, Dict, List
 from unittest.mock import Mock
 
-from src.code_indexer.services.clean_slot_tracker import CleanSlotTracker
-from src.code_indexer.services.file_chunking_manager import FileChunkingManager
+from code_indexer.services.clean_slot_tracker import CleanSlotTracker
+from code_indexer.services.file_chunking_manager import FileChunkingManager
 
 
 class _FakeVectorManager:
@@ -48,7 +48,7 @@ class _FakeVectorManager:
     def submit_batch_task(
         self, chunk_texts: List[str], metadata: Dict[str, Any]
     ) -> "Future[Any]":
-        from src.code_indexer.services.vector_calculation_manager import VectorResult
+        from code_indexer.services.vector_calculation_manager import VectorResult
 
         self.batches.append(list(chunk_texts))
         future: "Future[Any]" = Future()
@@ -74,7 +74,7 @@ class _FakeVectorManagerWithFalsyEmbedding(_FakeVectorManager):
     def submit_batch_task(
         self, chunk_texts: List[str], metadata: Dict[str, Any]
     ) -> "Future[Any]":
-        from src.code_indexer.services.vector_calculation_manager import VectorResult
+        from code_indexer.services.vector_calculation_manager import VectorResult
 
         self.batches.append(list(chunk_texts))
         future: "Future[Any]" = Future()

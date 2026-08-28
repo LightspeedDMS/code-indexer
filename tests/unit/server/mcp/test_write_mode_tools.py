@@ -712,8 +712,16 @@ class TestFileCRUDServiceWriteModeEnforcement:
             "code_indexer.server.services.api_metrics_service.api_metrics_service"
         ) as mock_metrics:
             mock_metrics.increment_other_api_call.return_value = None
+            # Bug #1703: this used to patch
+            # service.activated_repo_manager.get_activated_repo_path, but
+            # that was already inert -- _resolve_repo_path resolves the
+            # manager via the module-level _get_activated_repo_manager()
+            # function (Bug #1692), never via the per-instance
+            # activated_repo_manager property (since deleted entirely --
+            # zero production consumers). Patching an unrelated MagicMock
+            # here preserves the original no-op structure.
             with patch.object(
-                service.activated_repo_manager,
+                MagicMock(),
                 "get_activated_repo_path",
                 return_value=str(golden_repos_dir / "some-other-repo"),
             ):

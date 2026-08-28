@@ -418,8 +418,28 @@ def analyze_impact(
 
     Returns:
         ImpactAnalysisResult with affected symbols and file summary
+
+    Raises:
+        ValueError: if depth is not a positive integer.
     """
-    depth = min(depth, MAX_TRAVERSAL_DEPTH)
+    # Bug #1639: reject a non-positive depth loudly instead of letting it
+    # flow straight into the BFS traversal with undefined behavior --
+    # mirrors the engine-level lower-bound raise already enforced by
+    # trace_call_chain_v2_batched's MAX_DEPTH_CAP guard (database/queries.py).
+    # The upper bound keeps its pre-existing silent-clamp safety net here
+    # (now paired with a warning) because the real front doors -- CLI
+    # (`cidx scip impact --depth`) and the remote SCIPAPIClient -- already
+    # reject an out-of-range depth loudly before ever reaching this
+    # function.
+    if depth < 1:
+        raise ValueError(f"depth must be at least 1, got {depth}")
+
+    if depth > MAX_TRAVERSAL_DEPTH:
+        logger.warning(
+            f"Requested depth {depth} exceeds cap of {MAX_TRAVERSAL_DEPTH}. "
+            f"Capping at {MAX_TRAVERSAL_DEPTH} to prevent performance degradation."
+        )
+        depth = MAX_TRAVERSAL_DEPTH
 
     # Find target definition
     target_location = _find_target_definition(symbol, scip_dir)

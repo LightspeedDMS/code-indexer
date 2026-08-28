@@ -399,17 +399,19 @@ class TestCollaboratorNotCalledOnDeniedProvesRealGateOrdering:
                 "_resolve_repo_path",
                 return_value=_FAKE_REPO_PATH,
             ),
-            patch.object(_handlers_utils.app_module, "job_tracker", mock_job_tracker),
-            # _get_xray_executor() is called BEFORE job_tracker.register_job()
-            # and raises RuntimeError when app.state.xray_executor is unset
-            # (real lifespan never ran in this unit test) -- must be patched
-            # so execution reaches register_job at all.
-            patch.object(
-                _handlers_utils.app_module.app.state,
-                "xray_executor",
-                MagicMock(),
-                create=True,
-            ),
+            # Bug #1693 regression note: patching the raw lazy-singleton
+            # module attributes (_handlers_utils.app_module.job_tracker /
+            # .app.state.xray_executor) forces unittest.mock to read the
+            # ORIGINAL value for later restoration via a bare getattr(),
+            # which -- for a PEP-562 lazily-constructed attribute that has
+            # never been touched yet -- triggers real, unconditional
+            # construction of the process-wide app singleton as a side
+            # effect of merely being patched. Patching xray's own
+            # extracted-for-mocking wrapper functions instead (mirroring
+            # test_xray_cell_limiter.py's established pattern) verifies the
+            # exact same ordering without ever touching the real singleton.
+            patch.object(xray, "_get_job_tracker", return_value=mock_job_tracker),
+            patch.object(xray, "_get_xray_executor", return_value=MagicMock()),
         ):
             params = {
                 "repository_alias": "myrepo",
@@ -445,17 +447,12 @@ class TestCollaboratorNotCalledOnDeniedProvesRealGateOrdering:
                 "_resolve_repo_path",
                 return_value=_FAKE_REPO_PATH,
             ),
-            patch.object(_handlers_utils.app_module, "job_tracker", mock_job_tracker),
-            # _get_xray_executor() is called BEFORE job_tracker.register_job()
-            # and raises RuntimeError when app.state.xray_executor is unset
-            # (real lifespan never ran in this unit test) -- must be patched
-            # so execution reaches register_job at all.
-            patch.object(
-                _handlers_utils.app_module.app.state,
-                "xray_executor",
-                MagicMock(),
-                create=True,
-            ),
+            # Bug #1693 regression note: see test_xray_handle_xray_search
+            # above -- patching xray's own extracted-for-mocking wrapper
+            # functions avoids ever touching the real, lazily-constructed
+            # process-wide app singleton.
+            patch.object(xray, "_get_job_tracker", return_value=mock_job_tracker),
+            patch.object(xray, "_get_xray_executor", return_value=MagicMock()),
         ):
             params = {
                 "repository_alias": "myrepo",

@@ -207,6 +207,15 @@ RESTART_REQUIRED_FIELDS = [
     "machine_metrics_enabled",
     "machine_metrics_interval_seconds",
     "deployment_environment",
+    # telemetry.trace_sample_rate -- Story #1676 AC4: captured once into
+    # the ParentBased(TraceIdRatioBased(...)) sampler at TracerProvider
+    # construction, same lifecycle as its telemetry.* siblings above.
+    "trace_sample_rate",
+    # telemetry.export_logs -- Story #1676 AC3: captured once into the
+    # LoggerProvider + context-aware log bridge handler registration at
+    # TelemetryManager construction, same lifecycle as its telemetry.*
+    # siblings above.
+    "export_logs",
     # langfuse.* TRACING-CREDENTIAL fields only (frozen into an eagerly
     # created client at startup). Pull-sync fields (pull_enabled, pull_host,
     # pull_trace_age_days, pull_max_concurrent_observations, pull_projects)
@@ -3708,8 +3717,15 @@ def toggle_wiki_enabled(
             from ..wiki.wiki_cache import WikiCache
             from ..wiki.wiki_service import WikiService
             from ...global_repos.alias_manager import AliasManager
+            from ..utils.registry_factory import resolve_backend_registry_attr
 
-            cache = WikiCache(manager.db_path)
+            # Bug #1665: resolve the shared PostgreSQL wiki_cache backend in
+            # cluster mode so this hook sees the same store regardless of
+            # which node handles the request.
+            wiki_backend, _ = resolve_backend_registry_attr(
+                "wiki_cache", caller_name="web.routes.toggle_wiki_enabled"
+            )
+            cache = WikiCache(manager.db_path, storage_backend=wiki_backend)
             cache.ensure_tables()
             aliases_dir = str(Path(manager.golden_repos_dir) / "aliases")
             actual_path = AliasManager(aliases_dir).read_alias(f"{alias}-global")
@@ -3874,9 +3890,15 @@ def refresh_wiki_cache(
             status_code=400,
         )
     from ..wiki.wiki_cache import WikiCache
+    from ..utils.registry_factory import resolve_backend_registry_attr
 
     manager = _get_golden_repo_manager()
-    cache = WikiCache(manager.db_path)
+    # Bug #1665: resolve the shared PostgreSQL wiki_cache backend in
+    # cluster mode so this invalidation is visible to every node.
+    wiki_backend, _ = resolve_backend_registry_attr(
+        "wiki_cache", caller_name="web.routes.refresh_wiki_cache"
+    )
+    cache = WikiCache(manager.db_path, storage_backend=wiki_backend)
     cache.invalidate_repo(alias)
     return _create_golden_repos_page_response(
         request, session, success_message="Wiki cache cleared"
@@ -4304,18 +4326,33 @@ def golden_repo_details_partial(request: Request, alias: str):
 
 
 def _get_activated_repo_manager():
-    """Get activated repository manager, handling import lazily to avoid circular imports."""
-    from ..repositories.activated_repo_manager import ActivatedRepoManager
-    import os
-    from pathlib import Path
+    """Get activated repository manager from app state.
 
-    # Get data directory from environment or use default
-    # Must match app.py: data_dir = server_data_dir / "data"
-    server_data_dir = os.environ.get(
-        "CIDX_SERVER_DATA_DIR", os.path.expanduser("~/.cidx-server")
-    )
-    data_dir = str(Path(server_data_dir) / "data")
-    return ActivatedRepoManager(data_dir=data_dir)
+    Bug #1670: this previously constructed a brand-new
+    ActivatedRepoManager(data_dir=...) on every call, which is NEVER wired
+    with set_connection_pool() -- so it always fell back to the local
+    per-node JSON-file store regardless of storage_mode. In cluster
+    (postgres) mode, activation/deactivation/wiki-toggle writes go through
+    the properly-wired app.state.activated_repo_manager singleton (its
+    _pool is set post-hoc in lifespan.py), so a fresh, pool-less instance
+    here could never see those rows -- confirmed live: toggle_user_wiki_enabled
+    raised "Repository '...' not found" for a repo GET /api/repos correctly
+    listed as active on the same node.
+
+    Fixed to resolve the SAME shared singleton the working paths use,
+    mirroring this file's own _get_golden_repo_manager() and the
+    (already-correct) _get_activated_repo_manager() in
+    routers/activated_repos.py.
+    """
+    from code_indexer.server import app as app_module
+
+    manager = getattr(app_module.app.state, "activated_repo_manager", None)
+    if manager is None:
+        raise RuntimeError(
+            "activated_repo_manager not initialized. "
+            "Server must set app.state.activated_repo_manager during startup."
+        )
+    return manager
 
 
 def _get_all_activated_repos() -> list:
@@ -4794,9 +4831,16 @@ def toggle_user_wiki_enabled(
         if not enabling:
             try:
                 from ..wiki.wiki_cache import WikiCache
+                from ..utils.registry_factory import resolve_backend_registry_attr
 
                 golden_manager = _get_golden_repo_manager()
-                cache = WikiCache(golden_manager.db_path)
+                # Bug #1665: resolve the shared PostgreSQL wiki_cache
+                # backend in cluster mode so this invalidation is visible
+                # to every node.
+                wiki_backend, _ = resolve_backend_registry_attr(
+                    "wiki_cache", caller_name="web.routes.toggle_user_wiki_enabled"
+                )
+                cache = WikiCache(golden_manager.db_path, storage_backend=wiki_backend)
                 cache.invalidate_user_wiki(username, alias)
             except Exception as cache_exc:
                 logger.warning(
@@ -7150,6 +7194,23 @@ def _validate_config_section(section: str, data: dict) -> Optional[str]:
                     return "Machine metrics interval must be at least 1 second"
             except (ValueError, TypeError):
                 return "Machine metrics interval must be a valid number"
+
+        # Story #1676 AC4: validate trace_sample_rate is in [0.0, 1.0].
+        # Rejected, never clamped.
+        _TRACE_SAMPLE_RATE_MIN = 0.0
+        _TRACE_SAMPLE_RATE_MAX = 1.0
+        trace_sample_rate = data.get("trace_sample_rate")
+        if trace_sample_rate is not None:
+            try:
+                trace_sample_rate_float = float(trace_sample_rate)
+                if not (
+                    _TRACE_SAMPLE_RATE_MIN
+                    <= trace_sample_rate_float
+                    <= _TRACE_SAMPLE_RATE_MAX
+                ):
+                    return "Trace sample rate must be between 0.0 and 1.0"
+            except (ValueError, TypeError):
+                return "Trace sample rate must be a valid number"
 
     elif section == "langfuse":
         # Validate Langfuse host URL format

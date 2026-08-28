@@ -9,7 +9,7 @@ from code_indexer.server.middleware.correlation import get_correlation_id
 
 import os
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple, cast
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, cast
 import logging
 
 from ..models.api_models import (
@@ -25,6 +25,16 @@ from code_indexer.server.services.search_embed_event_emit import (
     emit_embed_error_event,
     emit_embed_event,
 )
+
+if TYPE_CHECKING:
+    # Bug #1638 remediation (mypy Blocker #4): server/app.py's `app` global is
+    # now resolved via a PEP 562 module __getattr__() that returns `Any`
+    # (needed for lazy initialization), which erased the concrete FastAPI
+    # type mypy previously inferred from the old `app = create_app()` direct
+    # assignment. This TYPE_CHECKING-only import + cast("FastAPI", ...) below
+    # restores static typing at each call site without a blanket
+    # `# type: ignore` (which would silence unrelated real errors too).
+    from fastapi import FastAPI
 
 logger = logging.getLogger(__name__)
 
@@ -48,7 +58,7 @@ def _get_http_client_factory() -> Any:
     """
     from ..app import app as _app
 
-    return getattr(_app.state, "http_client_factory", None)
+    return getattr(cast("FastAPI", _app).state, "http_client_factory", None)
 
 
 def _get_query_executor() -> Any:
@@ -70,7 +80,7 @@ def _get_query_executor() -> Any:
     """
     from ..app import app as _app
 
-    return getattr(_app.state, "query_executor", None)
+    return getattr(cast("FastAPI", _app).state, "query_executor", None)
 
 
 def _get_repo_config_cache() -> Any:
@@ -88,7 +98,7 @@ def _get_repo_config_cache() -> Any:
     """
     from ..app import app as _app
 
-    return getattr(_app.state, "repo_config_cache", None)
+    return getattr(cast("FastAPI", _app).state, "repo_config_cache", None)
 
 
 def _load_repo_config(repo_path: str) -> Any:
@@ -98,11 +108,20 @@ def _load_repo_config(repo_path: str) -> Any:
     from it (NO-TTL for predicate-proven immutable .versioned/ snapshot paths;
     SHORT-TTL for mutable / not-provably-immutable paths). When absent, the
     config is loaded directly (identical to the pre-#1082 behavior).
+
+    Bug #1690: the direct-load branch used to blind-trust
+    ConfigManager.create_with_backtrack(repo_path).get_config() without
+    verifying the resolved config genuinely describes repo_path itself.
+    ConfigManager.load_verified_config() closes that gap (raises
+    ConfigVerificationError -- a ValueError subclass, so it is caught by
+    search_similar's existing "orphaned repo -> skip gracefully"
+    `except ValueError` handling) instead of silently using an unrelated
+    ancestor's or a defaulted config.
     """
     registry = _get_repo_config_cache()
     if registry is not None:
         return registry.get_config(repo_path)
-    return ConfigManager.create_with_backtrack(Path(repo_path)).get_config()
+    return ConfigManager.load_verified_config(Path(repo_path))
 
 
 def _get_golden_repos_dir() -> str:
@@ -111,7 +130,8 @@ def _get_golden_repos_dir() -> str:
     from ..app import app as app_module
 
     golden_repos_dir: Optional[str] = cast(
-        Optional[str], getattr(app_module.state, "golden_repos_dir", None)
+        Optional[str],
+        getattr(cast("FastAPI", app_module).state, "golden_repos_dir", None),
     )
     if golden_repos_dir:
         return golden_repos_dir
@@ -851,7 +871,9 @@ class SemanticSearchService:
         golden_repos_dir = _get_golden_repos_dir()
 
         # Look up global repo via BackendRegistry
-        backend_registry = getattr(app_module.app.state, "backend_registry", None)
+        backend_registry = getattr(
+            cast("FastAPI", app_module.app).state, "backend_registry", None
+        )
         if backend_registry:
             repos_dict = backend_registry.global_repos.list_repos()
             global_repos = list(repos_dict.values())

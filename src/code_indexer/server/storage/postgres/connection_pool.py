@@ -50,6 +50,31 @@ _SLOW_ACQUISITION_THRESHOLD = 5.0
 _PsycopgPool: Optional[Any] = None
 
 
+def _configure_session(conn: Any) -> None:
+    """Pin every pooled connection's session TimeZone to UTC.
+
+    Bug #1663: without this, a PostgreSQL session's configured timezone can
+    differ from the application process's local timezone, and naive
+    datetimes written/read by application code would be silently
+    (mis)interpreted according to whichever timezone happened to be
+    configured. Application code (e.g. diagnostics_service.py) now writes
+    timezone-AWARE UTC values specifically to be robust to this, but pinning
+    the session explicitly is cheap defense-in-depth at this one shared
+    choke point every PostgreSQL backend in this project already goes
+    through -- it removes the hazard for any future naive-datetime write
+    site too, not just the one this bug was filed against.
+
+    psycopg_pool requires a connection returned from a `configure` callback
+    to be left IDLE, never mid-transaction -- confirmed live against a real
+    local PostgreSQL instance: without the trailing commit() below, every
+    new pooled connection was discarded with "connection left in status
+    INTRANS by configure function ...: discarded" and the pool never
+    became usable.
+    """
+    conn.execute("SET TIME ZONE 'UTC'")
+    conn.commit()
+
+
 class ConnectionPool:
     """
     Thin wrapper around psycopg_pool.ConnectionPool providing a simplified
@@ -99,6 +124,7 @@ class ConnectionPool:
             min_size=min_size,
             max_size=max_size,
             timeout=timeout,
+            configure=_configure_session,
             open=True,
         )
 

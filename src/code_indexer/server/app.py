@@ -1,7 +1,8 @@
 """FastAPI application for CIDX Server — multi-user semantic code search with JWT auth."""
 
 import logging
-from typing import Optional, Any
+import threading
+from typing import Dict, Optional, Any
 
 logger = logging.getLogger(__name__)
 
@@ -37,20 +38,97 @@ from .models.jobs import AddIndexRequest as AddIndexRequest  # noqa: F401
 from .models.auth import ChangePasswordRequest as ChangePasswordRequest  # noqa: F401
 
 
-# Global managers (initialized in create_app)
-jwt_manager: Optional[JWTManager] = None
-user_manager: Optional[UserManager] = None
-refresh_token_manager: Optional[RefreshTokenManager] = None
-golden_repo_manager: Optional[GoldenRepoManager] = None
-background_job_manager: Optional[BackgroundJobManager] = None
-job_tracker: Optional[Any] = None  # Story #311: JobTracker instance
-activated_repo_manager: Optional[ActivatedRepoManager] = None
-repository_listing_manager: Optional[RepositoryListingManager] = None
-semantic_query_manager: Optional[SemanticQueryManager] = None
-workspace_cleanup_service: Optional[WorkspaceCleanupService] = None
-langfuse_sync_service: Optional[Any] = None  # Story #168: Langfuse trace sync service
-_server_hnsw_cache: Optional[Any] = None  # Server-wide HNSW cache (Story #526)
-_server_fts_cache: Optional[Any] = None  # Server-wide FTS cache
+# Global managers (initialized in create_app).
+#
+# Bug #1638: these are ANNOTATION-ONLY (no `= None` binding) so they are
+# absent from this module's __dict__ until create_app() actually runs.
+# That absence is what lets the module-level __getattr__() below (PEP 562)
+# detect "not yet initialized" and defer initialize_services() until one of
+# these names -- or `app` -- is genuinely accessed, instead of running it
+# unconditionally as an import-time side effect. A bare `import
+# code_indexer.server.app` (or a transitive import of it, e.g. via
+# `from code_indexer.server import app as app_module`) no longer runs
+# ConfigService/SQLite/DependencyLatencyTracker/MCPSelfRegistrationService
+# startup or contends for the live server's primary_instance.lock file.
+jwt_manager: Optional[JWTManager]
+user_manager: Optional[UserManager]
+refresh_token_manager: Optional[RefreshTokenManager]
+golden_repo_manager: Optional[GoldenRepoManager]
+background_job_manager: Optional[BackgroundJobManager]
+job_tracker: Optional[Any]  # Story #311: JobTracker instance
+activated_repo_manager: Optional[ActivatedRepoManager]
+repository_listing_manager: Optional[RepositoryListingManager]
+semantic_query_manager: Optional[SemanticQueryManager]
+workspace_cleanup_service: Optional[WorkspaceCleanupService]
+langfuse_sync_service: Optional[Any]  # Story #168: Langfuse trace sync service
+_server_hnsw_cache: Optional[Any]  # Server-wide HNSW cache (Story #526)
+_server_fts_cache: Optional[Any]  # Server-wide FTS cache
+
+# Names whose first attribute access on this module should trigger lazy
+# app construction (Bug #1638). Kept as a plain module-level set (not a
+# function-local literal) so __getattr__ stays a simple membership check.
+_LAZY_INIT_ATTRS = frozenset(
+    {
+        "app",
+        "jwt_manager",
+        "user_manager",
+        "refresh_token_manager",
+        "golden_repo_manager",
+        "background_job_manager",
+        "job_tracker",
+        "activated_repo_manager",
+        "repository_listing_manager",
+        "semantic_query_manager",
+        "workspace_cleanup_service",
+        "langfuse_sync_service",
+        "_server_hnsw_cache",
+        "_server_fts_cache",
+    }
+)
+
+# Bug #1638 remediation (post-review): the lazy-init lock MUST be an RLock,
+# not a plain Lock. create_app()'s own execution path (initialize_services()
+# -> bootstrap_cidx_meta() -> golden_repo_manager.register_local_repo() ->
+# global_activator.activate_golden_repo() -> registry ->
+# server/utils/registry_factory.py's resolve_backend_registry_attr() ->
+# _running_server_app_state()) calls getattr(app_module, "app", None) on
+# THIS SAME MODULE, re-entering __getattr__ on the SAME thread while
+# create_app() is still running. A plain Lock would self-deadlock there
+# (first boot only -- masked whenever cidx-meta is already bootstrapped,
+# which is every dev/test environment). The RLock lets the re-entrant call
+# back in; the _initializing sentinel below (not the lock) is what stops it
+# from recursively re-running create_app() -- it makes the re-entrant call
+# return AttributeError (-> None via getattr(..., None)) instead, which is
+# EXACTLY the pre-fix behavior: before this bug existed, `app` was simply
+# unbound until the module-level `app = create_app()` assignment completed,
+# so any code reading it mid-bootstrap via getattr(..., None) already got
+# None.
+_lazy_init_lock = threading.RLock()
+
+# Snapshot of every _LAZY_INIT_ATTRS value, taken immediately after the one
+# real create_app() call completes. This is the fallback __getattr__ reads
+# when a name is momentarily (or permanently, for langfuse_sync_service --
+# see Blocker #3 below) absent from globals(). Two concrete cases need it:
+#
+#   * langfuse_sync_service is listed in _LAZY_INIT_ATTRS but create_app()
+#     never actually assigns it via a `global` statement (only lifespan.py's
+#     own function scope does). Pre-fix, reading it returned None (its old
+#     `= None` default). Without this snapshot, globals()["langfuse_sync_service"]
+#     would raise KeyError -- not even AttributeError -- breaking the
+#     getattr(module, name, default)/hasattr() protocol.
+#   * unittest.mock.patch's teardown: when a test patches a name that was
+#     never yet materialized in globals(), mock records local=False and its
+#     __exit__ calls delattr(module, name) then hasattr(module, name) to
+#     decide whether to also restore via setattr. That hasattr() call
+#     re-enters __getattr__ with the name freshly deleted from globals() --
+#     without this snapshot fallback, globals()[name] raises KeyError (not
+#     AttributeError), which hasattr() does NOT catch, so it propagates and
+#     poisons the module (every later read of that name raises KeyError for
+#     the rest of the process). The snapshot fallback makes that lookup
+#     resolve cleanly instead.
+_lazy_values: Dict[str, Any] = {}
+_initialized = False
+_initializing = False
 
 # Module-level service singletons (imported for backward compat with handlers.py app_module pattern)
 from .services.file_service import file_service as file_service  # noqa: F401
@@ -302,5 +380,97 @@ def create_app():
     return app
 
 
-# Create app instance for uvicorn
-app = create_app()
+def _ensure_initialized() -> None:
+    """Run create_app() exactly once, tolerating re-entrant probes.
+
+    MUST be called while `_lazy_init_lock` is already held by the caller
+    (an RLock, so the SAME thread re-entering is a cheap no-op re-acquire,
+    not a deadlock). An explicit `_initializing` sentinel -- not the lock --
+    is what stops a re-entrant call from recursing into a second
+    create_app(): it simply returns, leaving `app` and friends absent from
+    globals() until the ORIGINAL call finishes. See the module-level
+    comment above `_lazy_init_lock` for the full re-entrancy rationale.
+    """
+    global _initialized, _initializing
+    if _initialized or _initializing:
+        return
+    _initializing = True
+    try:
+        globals()["app"] = create_app()
+        _initialized = True
+        # Snapshot every lazy name now that create_app() has run, so
+        # __getattr__ has a stable fallback independent of globals()
+        # mutation (mock.patch delattr, etc.) -- see _lazy_values above.
+        for n in _LAZY_INIT_ATTRS:
+            _lazy_values[n] = globals().get(n)
+    finally:
+        _initializing = False
+
+
+def __getattr__(name: str) -> Any:
+    """PEP 562 lazy module attribute access (Bug #1638).
+
+    `app = create_app()` used to run unconditionally at import time, so a
+    bare `import code_indexer.server.app` -- or a transitive import of it,
+    e.g. `code_indexer.server.mcp.handlers._utils` does
+    `from code_indexer.server import app as app_module` -- ran full service
+    initialization (ConfigService load, SQLite golden-repo enumeration,
+    DependencyLatencyTracker startup, MCPSelfRegistrationService singleton
+    registration, primary_instance.lock contention) as a side effect, with
+    no explicit opt-in.
+
+    `__getattr__` is only invoked by Python when normal attribute lookup on
+    this module fails (i.e. the name is absent from this module's
+    __dict__). Since `app` is no longer assigned at module level, and the
+    service globals above are annotation-only, importing this module is
+    now inert -- initialize_services() only runs the first time real code
+    actually reaches for one of these names (e.g. `app_module.app`,
+    `from code_indexer.server.app import golden_repo_manager`, or the
+    production `uvicorn code_indexer.server.app:app` entrypoint resolving
+    its `app` target), never on a bare import.
+
+    Mid-construction (a re-entrant call arriving while create_app() is
+    still executing on this same thread), this deliberately raises
+    AttributeError rather than blocking or returning a partial value --
+    so `getattr(app_module, "app", None)` from inside create_app()'s own
+    call chain correctly yields None, matching pre-fix semantics exactly
+    (pre-fix, `app` was genuinely unbound until the module-level assignment
+    line completed).
+
+    The entire read (init-if-needed + globals()/_lazy_values lookup) runs
+    under `_lazy_init_lock` so a concurrent reader on another thread never
+    observes `_initialized`/`_lazy_values` mid-mutation.
+
+    Issue #1659 hazard note -- this mechanism makes hasattr()/getattr()/
+    delattr() semantically misleading against this module for any name in
+    _LAZY_INIT_ATTRS:
+
+      * hasattr(module, name) for any name in _LAZY_INIT_ATTRS always
+        returns True, even before real construction has happened, because
+        this __getattr__ synthesizes the value on demand instead of
+        raising.
+      * getattr(module, name, default) -- even one written defensively,
+        expecting the attribute might legitimately be absent -- triggers
+        full lazy construction as a side effect on first access (real DB
+        reads, background thread spawns), which a caller expecting a cheap
+        read-only probe almost certainly does not want.
+      * delattr(module, name) bypasses this __getattr__ entirely (PEP 562
+        defines no __delattr__ hook, so it is plain __dict__ removal) and
+        can raise AttributeError even though hasattr() just reported the
+        attribute exists (concrete breakage: issue #1658, caused by the
+        _lazy_values snapshot fallback above keeping hasattr()/getattr()
+        resolving a name whose real __dict__ entry is already gone).
+
+      A caller that needs a genuinely side-effect-free existence check
+      should inspect _initialized/_lazy_values directly instead of calling
+      hasattr()/getattr() on this module.
+    """
+    if name not in _LAZY_INIT_ATTRS:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    with _lazy_init_lock:
+        _ensure_initialized()
+        if name in globals():
+            return globals()[name]
+        if _initialized and name in _lazy_values:
+            return _lazy_values[name]
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

@@ -11,8 +11,8 @@ import psutil
 from fastapi.testclient import TestClient
 from unittest.mock import patch
 
-from src.code_indexer.server.app import create_app
-from src.code_indexer.server.models.api_models import (
+from code_indexer.server.app import create_app
+from code_indexer.server.models.api_models import (
     HealthCheckResponse,
     ServiceHealthInfo,
     SystemHealthInfo,
@@ -325,9 +325,11 @@ class TestHealthCheckEndpoint:
         assert response.status_code in [200, 401, 403]
 
         if response.status_code == 401:
-            # If auth required, should return proper error
+            # If auth required, should return proper error. Production
+            # returns FastAPI's standard {"detail": "..."} shape (e.g.
+            # "Missing authentication credentials"), not a "message" key.
             error_data = response.json()
-            assert "unauthorized" in error_data.get("message", "").lower()
+            assert "credentials" in error_data.get("detail", "").lower()
 
     def test_health_check_concurrent_requests(self, client, admin_token):
         """Test health check endpoint handles concurrent requests properly."""

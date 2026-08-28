@@ -9,6 +9,7 @@ from code_indexer.scip.query.composites import (
     get_smart_context,
     ImpactAnalysisResult,
     SmartContextResult,
+    MAX_TRAVERSAL_DEPTH,
 )
 from code_indexer.scip.query.primitives import SCIPQueryEngine, QueryResult
 
@@ -682,3 +683,30 @@ class TestAnalyzeImpactEarlyOut:
 
         mock_bfs.assert_called_once()  # traversal runs when a definition exists
         assert result.target_location is sentinel_loc
+
+
+class TestAnalyzeImpactDepthValidation:
+    """Bug #1639: analyze_impact() silently clamped an out-of-range depth
+    to MAX_TRAVERSAL_DEPTH with `depth = min(depth, MAX_TRAVERSAL_DEPTH)`
+    and had NO lower-bound check at all -- depth=0/-5 flowed straight into
+    the BFS traversal undefined. This mirrors the engine-level lower-bound
+    raise already enforced by trace_call_chain_v2_batched's MAX_DEPTH_CAP
+    guard (queries.py): reject non-positive depth loudly; the upper bound
+    keeps its existing silent-clamp safety net here since the real front
+    doors (CLI, remote API client) now reject out-of-range values before
+    ever reaching this function."""
+
+    DEPTH_ABOVE_CAP = MAX_TRAVERSAL_DEPTH + 1
+
+    @pytest.mark.parametrize("depth", [0, -1, -5])
+    def test_rejects_non_positive_depth(self, scip_dir, depth):
+        with pytest.raises(ValueError, match="depth"):
+            analyze_impact(symbol="some_function", scip_dir=scip_dir, depth=depth)
+
+    def test_depth_above_cap_is_clamped_not_raised(self, scip_dir):
+        """Upper bound is unchanged behavior (engine-level safety net):
+        a too-high depth is clamped, not rejected, at this layer."""
+        result = analyze_impact(
+            symbol="some_function", scip_dir=scip_dir, depth=self.DEPTH_ABOVE_CAP
+        )
+        assert result.depth_analyzed == MAX_TRAVERSAL_DEPTH

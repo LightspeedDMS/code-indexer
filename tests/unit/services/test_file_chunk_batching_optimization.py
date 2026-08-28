@@ -17,8 +17,8 @@ from unittest.mock import Mock
 from concurrent.futures import Future
 from typing import List, Dict, Any
 
-from src.code_indexer.services.file_chunking_manager import FileChunkingManager
-from src.code_indexer.services.vector_calculation_manager import VectorResult
+from code_indexer.services.file_chunking_manager import FileChunkingManager
+from code_indexer.services.vector_calculation_manager import VectorResult
 
 
 @pytest.fixture

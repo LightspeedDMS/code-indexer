@@ -146,6 +146,28 @@ class DaemonWatchManager:
             Status dictionary with success/error status, message, and statistics
         """
         with self._lock:
+            # Bug #1717: a _WatchError sentinel means the previous start
+            # attempt's construction FAILED -- nothing ever actually
+            # started, and the sentinel has no stop_watching() method.
+            # Treat it as "not running" up front (deliberate error status,
+            # not the misleading "success" a fall-through would produce)
+            # and clear the stale error state so it doesn't linger forever
+            # once the caller has been told about it.
+            if isinstance(self.watch_handler, _WatchError):
+                error = self.watch_handler.error
+                logger.warning(
+                    f"No watch running to stop (last start attempt failed: {error})"
+                )
+                self.watch_handler = None
+                self.project_path = None
+                self.start_time = None
+                return {
+                    "status": "error",
+                    "message": (
+                        f"Watch not running (last start attempt failed: {error})"
+                    ),
+                }
+
             # Check if running
             if not self.watch_handler and not self.watch_thread:
                 logger.warning("No watch running to stop")
@@ -156,7 +178,7 @@ class DaemonWatchManager:
             # Get statistics before stopping
             if (
                 self.watch_handler
-                and not isinstance(self.watch_handler, _WatchStarting)
+                and not isinstance(self.watch_handler, (_WatchStarting, _WatchError))
                 and hasattr(self.watch_handler, "get_stats")
             ):
                 try:
@@ -169,7 +191,7 @@ class DaemonWatchManager:
 
             # Stop the watch handler
             if self.watch_handler and not isinstance(
-                self.watch_handler, _WatchStarting
+                self.watch_handler, (_WatchStarting, _WatchError)
             ):
                 try:
                     self.watch_handler.stop_watching()
@@ -200,6 +222,22 @@ class DaemonWatchManager:
             Dictionary with watch status and statistics
         """
         with self._lock:
+            # Bug #1717: a construction failure in _watch_thread_worker
+            # stores a _WatchError sentinel in self.watch_handler and
+            # (post-fix) preserves it through the worker's finally block.
+            # _is_running_unsafe() would otherwise always report this case
+            # as "idle" (self.watch_thread is None once the thread exits),
+            # silently swallowing the failure -- check for the sentinel
+            # FIRST so it is correctly surfaced as an error.
+            if isinstance(self.watch_handler, _WatchError):
+                return {
+                    "status": "error",
+                    "project_path": self.project_path,
+                    "error": self.watch_handler.error,
+                    "uptime_seconds": 0,
+                    "files_processed": 0,
+                }
+
             if not self._is_running_unsafe():
                 return {
                     "status": "idle",
@@ -287,9 +325,17 @@ class DaemonWatchManager:
             logger.info(f"Watch thread exiting for {project_path}")
             with self._lock:
                 self.watch_thread = None
-                self.watch_handler = None
-                self.project_path = None
-                self.start_time = None
+                # Bug #1717: the except block above may have just stored a
+                # _WatchError sentinel in self.watch_handler to report a
+                # construction failure. Unconditionally clearing it here
+                # (the old behavior) overwrote the sentinel before any
+                # consumer (get_stats()/exposed_watch_status) could observe
+                # it, silently swallowing the error. Only reset to idle
+                # state on a normal (non-error) exit.
+                if not isinstance(self.watch_handler, _WatchError):
+                    self.watch_handler = None
+                    self.project_path = None
+                    self.start_time = None
 
     def _create_watch_handler(
         self,
@@ -322,12 +368,32 @@ class DaemonWatchManager:
         from code_indexer.services.smart_indexer import SmartIndexer
 
         try:
-            # Initialize configuration if not provided
+            # Bug #1713: verify that a genuine `.code-indexer/config.json`
+            # exists directly at project_path itself before trusting
+            # anything derived from it -- same root-cause class as Bug
+            # #1690's server-side fix. `ConfigManager.create_with_backtrack()`
+            # walks UP the directory tree and can silently return an
+            # unrelated ANCESTOR's config, or a defaulted bare Config()
+            # (codebase_dir=".") when nothing is found anywhere.
+            # `load_verified_config()` performs that same backtrack lookup
+            # but raises `ConfigVerificationError` (a ValueError subclass)
+            # unless the resolved config.codebase_dir strictly equals
+            # project_path. This call site is a WRITE/indexing path (the
+            # SmartIndexer constructed below performs real indexing on
+            # file-watch events), so failing loud here -- consistent with
+            # how AutoWatchManager.start_watch (Bug #1683 round 4) and the
+            # #1690 server sites handle the identical hazard -- is
+            # mandatory: silently indexing into/against the wrong directory
+            # is unacceptable, not merely a stale-read risk.
+            verified_config = ConfigManager.load_verified_config(Path(project_path))
             if config is None:
-                config_manager = ConfigManager.create_with_backtrack(Path(project_path))
-                config = config_manager.get_config()
-            else:
-                config_manager = ConfigManager.create_with_backtrack(Path(project_path))
+                config = verified_config
+
+            # Now that project_path's own .code-indexer directory is
+            # verified to exist, derive paths from it directly rather than
+            # re-deriving them from a second, unverified
+            # create_with_backtrack() call.
+            code_indexer_dir = Path(project_path).resolve() / ".code-indexer"
 
             # Create embedding provider and vector store
             embedding_provider = EmbeddingProviderFactory.create(config=config)
@@ -335,7 +401,7 @@ class DaemonWatchManager:
             vector_store_client = backend.get_vector_store_client()
 
             # Initialize SmartIndexer
-            metadata_path = config_manager.config_path.parent / "metadata.json"
+            metadata_path = code_indexer_dir / "metadata.json"
             smart_indexer = SmartIndexer(
                 config, embedding_provider, vector_store_client, metadata_path
             )
@@ -350,9 +416,7 @@ class DaemonWatchManager:
 
             git_topology_service = GitTopologyService(config.codebase_dir)
 
-            watch_metadata_path = (
-                config_manager.config_path.parent / "watch_metadata.json"
-            )
+            watch_metadata_path = code_indexer_dir / "watch_metadata.json"
             watch_metadata = WatchMetadata.load_from_disk(watch_metadata_path)
 
             watch_handler = GitAwareWatchHandler(

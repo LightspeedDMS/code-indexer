@@ -88,6 +88,81 @@ from ..app_helpers import (
 logger = logging.getLogger(__name__)
 
 
+def _check_filesystem_backend_health(repo_path: str) -> Dict[str, Any]:
+    """Determine filesystem-backend health/status fields for a single
+    activated repo (extracted from get_repository_info's inline health
+    check for testability; Bug #1690).
+
+    Bug #1690: this used to blind-trust
+    ConfigManager.create_with_backtrack(repo_path).get_config() without
+    verifying the resolved config genuinely describes repo_path itself.
+    repo_path comes from activated_repo_manager.get_activated_repo_path(),
+    which should always carry its own .code-indexer/config.json -- but
+    when that invariant is violated (a dangling registry entry, a
+    partially-failed activation), create_with_backtrack silently
+    backtracks onto an unrelated ANCESTOR's config instead of failing
+    loud, and is_filesystem would then report container_status/query_ready
+    for the WRONG repository's configuration.
+
+    ConfigManager.load_verified_config() closes that gap by raising
+    ConfigVerificationError (a ValueError subclass) instead -- caught by
+    the except Exception below, which preserves the exact original
+    fail-open display semantics ("Unable to determine container status")
+    rather than crashing the whole health/status response, but now logs
+    a warning so the fallback is observable instead of fully silent.
+
+    Returns:
+        Partial health_info field updates: container_status, query_ready,
+        services, issues, recommendations.
+    """
+    updates: Dict[str, Any] = {
+        "container_status": "unknown",
+        "query_ready": False,
+        "services": {},
+        "issues": [],
+        "recommendations": [],
+    }
+
+    # Container status check removed (Story #506: container management deprecated)
+    # Filesystem backend is always ready
+    try:
+        from ...config import ConfigManager
+
+        config = ConfigManager.load_verified_config(Path(repo_path))
+
+        # Check if using filesystem backend
+        is_filesystem = (
+            hasattr(config, "vector_store")
+            and config.vector_store
+            and config.vector_store.provider == "filesystem"
+        )
+
+        if is_filesystem:
+            updates["container_status"] = "not_applicable"
+            updates["query_ready"] = True
+
+            # Filesystem backend doesn't have service dependencies
+            updates["services"]["vector_store"] = {
+                "status": "healthy",
+                "type": "filesystem",
+            }
+        else:
+            updates["container_status"] = "stopped"
+            updates["recommendations"].append(
+                "Containers are stopped. Query operations will auto-start them."
+            )
+
+    except Exception as e:
+        logger.warning(
+            "Unable to determine filesystem backend health for %s: %s",
+            repo_path,
+            e,
+        )
+        updates["issues"].append("Unable to determine container status")
+
+    return updates
+
+
 def register_repo_routes(
     app: FastAPI,
     *,
@@ -1519,38 +1594,28 @@ def register_repo_routes(
                 }
 
                 # Container status check removed (Story #506: container management deprecated)
-                # Filesystem backend is always ready
+                # Filesystem backend is always ready.
+                # Bug #1690: delegated to the standalone
+                # _check_filesystem_backend_health() helper, which verifies
+                # the resolved config genuinely describes repo_path itself
+                # before trusting it (see the helper's own docstring). The
+                # helper already wraps its own body in try/except and never
+                # raises; this outer try/except is a defensive belt so the
+                # route handler stays resilient even if that contract ever
+                # changes.
                 try:
-                    from ...config import ConfigManager
-
-                    config_manager = ConfigManager.create_with_backtrack(
-                        Path(repo_path)
-                    )
-                    config = config_manager.get_config()
-
-                    # Check if using filesystem backend
-                    is_filesystem = (
-                        hasattr(config, "vector_store")
-                        and config.vector_store
-                        and config.vector_store.provider == "filesystem"
-                    )
-
-                    if is_filesystem:
-                        health_info["container_status"] = "not_applicable"
-                        health_info["query_ready"] = True
-
-                        # Filesystem backend doesn't have service dependencies
-                        health_info["services"]["vector_store"] = {
-                            "status": "healthy",
-                            "type": "filesystem",
-                        }
-                    else:
-                        health_info["container_status"] = "stopped"
-                        health_info["recommendations"].append(
-                            "Containers are stopped. Query operations will auto-start them."
-                        )
-
+                    fs_health = _check_filesystem_backend_health(repo_path)
+                    health_info["container_status"] = fs_health["container_status"]
+                    health_info["query_ready"] = fs_health["query_ready"]
+                    health_info["services"].update(fs_health["services"])
+                    health_info["issues"].extend(fs_health["issues"])
+                    health_info["recommendations"].extend(fs_health["recommendations"])
                 except Exception:
+                    logger.warning(
+                        "Unexpected failure computing filesystem backend health for %s",
+                        repo_path,
+                        exc_info=True,
+                    )
                     health_info["issues"].append("Unable to determine container status")
 
                 result["health"] = health_info

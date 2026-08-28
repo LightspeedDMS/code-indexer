@@ -9,7 +9,7 @@ class TestDaemonFTSSnippetLinesZero:
 
     def test_cli_daemon_fast_parses_snippet_lines_parameter(self):
         """Test that cli_daemon_fast properly parses --snippet-lines parameter."""
-        from src.code_indexer.cli_daemon_fast import parse_query_args
+        from code_indexer.cli_daemon_fast import parse_query_args
 
         # Test parsing --snippet-lines 0
         args = ["voyage", "--fts", "--snippet-lines", "0", "--limit", "2"]
@@ -34,7 +34,7 @@ class TestDaemonFTSSnippetLinesZero:
         Tests that snippet_lines=0 parameter is properly forwarded from CLI → Daemon → TantivyIndexManager.
         This validates the production code path for --snippet-lines 0 functionality.
         """
-        from src.code_indexer.daemon.service import CIDXDaemonService
+        from code_indexer.daemon.service import CIDXDaemonService
 
         service = CIDXDaemonService()
 
@@ -86,7 +86,7 @@ class TestDaemonFTSSnippetLinesZero:
 
     def test_tantivy_extract_snippet_returns_empty_for_zero_lines(self):
         """Test that TantivyIndexManager._extract_snippet returns empty snippet when snippet_lines=0."""
-        from src.code_indexer.services.tantivy_index_manager import TantivyIndexManager
+        from code_indexer.services.tantivy_index_manager import TantivyIndexManager
 
         # Create instance with mocked init
         with patch.object(TantivyIndexManager, "__init__", return_value=None):

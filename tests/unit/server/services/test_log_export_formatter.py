@@ -226,6 +226,38 @@ class TestLogExportFormatterCSV:
         assert "user_id" in header
         assert "request_path" in header
 
+    def test_to_csv_includes_trace_id_and_span_id_columns(self):
+        """Story #1676 AC2: CSV export must include trace_id/span_id columns."""
+        formatter = LogExportFormatter()
+        logs = [
+            {
+                "id": 1,
+                "timestamp": "2026-01-02T10:00:00Z",
+                "level": "ERROR",
+                "source": "server",
+                "message": "traced error",
+                "correlation_id": "corr-001",
+                "user_id": "admin",
+                "request_path": "/",
+                "trace_id": "a" * 32,
+                "span_id": "b" * 16,
+            }
+        ]
+
+        result = formatter.to_csv(logs)
+
+        lines = result.strip().split("\n")
+        header = lines[0]
+        if header.startswith("﻿"):
+            header = header[1:]
+
+        assert "trace_id" in header
+        assert "span_id" in header
+
+        data_row = lines[1]
+        assert "a" * 32 in data_row
+        assert "b" * 16 in data_row
+
     def test_to_csv_includes_utf8_bom_for_excel(self):
         """to_csv() includes UTF-8 BOM for Excel compatibility."""
         formatter = LogExportFormatter()

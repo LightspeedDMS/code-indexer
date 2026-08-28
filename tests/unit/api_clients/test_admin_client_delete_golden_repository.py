@@ -9,8 +9,8 @@ import pytest
 from unittest.mock import MagicMock
 from pathlib import Path
 
-from src.code_indexer.api_clients.admin_client import AdminAPIClient
-from src.code_indexer.api_clients.base_client import (
+from code_indexer.api_clients.admin_client import AdminAPIClient
+from code_indexer.api_clients.base_client import (
     APIClientError,
     AuthenticationError,
     NetworkError,

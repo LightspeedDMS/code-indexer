@@ -16,6 +16,7 @@ This file holds the detailed per-story/per-bug implementation invariants extract
 - [Auto-Updater and Pace-Maker](#auto-updater-and-pace-maker)
 - [Description-Refresh](#description-refresh)
 - [Dep-Map and cidx-meta](#dep-map-and-cidx-meta)
+- [Server Startup and App Construction](#server-startup-and-app-construction)
 - [Server Memory and Pooling](#server-memory-and-pooling)
 - [Background Jobs](#background-jobs)
 - [Global Repo Alias Fallback](#global-repo-alias-fallback)
@@ -860,6 +861,25 @@ Dep-map analysis coordination state lives on the NFS-shared `cidx-meta` filesyst
 Repairs graph-channel anomalies (SELF_LOOP, MALFORMED_YAML, GARBAGE_DOMAIN_REJECTED deterministic; BIDIRECTIONAL_MISMATCH Claude-audited). Bootstrap flag `enable_graph_channel_repair` (default True). Append-only JSONL journal at `~/.cidx-server/dep_map_repair_journal.jsonl`. Prompt template externalized to `bidirectional_mismatch_audit.md`.
 
 -> Full reference: `docs/depmap-phase37-architecture.md`
+
+---
+
+## Server Startup and App Construction
+
+### Lazy App Construction — create_app() Deferred to First Attribute Access (Bug #1638)
+
+`server/app.py` used to run `app = create_app()` as an unconditional module-level statement, so a bare `import code_indexer.server.app` -- or any transitive import of it (e.g. `code_indexer.server.mcp.handlers._utils` does `from code_indexer.server import app as app_module`) -- ran full `initialize_services()` as an import-time side effect: a real `ConfigService` load, SQLite golden-repo enumeration, `DependencyLatencyTracker` startup, `MCPSelfRegistrationService` singleton registration, and contention for the live server's `primary_instance.lock` file, with no explicit opt-in. This was the root mechanism behind Bug #1629 (a test-isolation defect worked around with a per-test singleton-reset fixture).
+
+Fix: `app`, and every module-level service global normally set by `create_app()` (`jwt_manager`, `user_manager`, `refresh_token_manager`, `golden_repo_manager`, `background_job_manager`, `job_tracker`, `activated_repo_manager`, `repository_listing_manager`, `semantic_query_manager`, `workspace_cleanup_service`, `langfuse_sync_service`, `_server_hnsw_cache`, `_server_fts_cache`), are declared ANNOTATION-ONLY (no `= None` binding) so they are absent from the module's `__dict__` until `create_app()` actually runs. A PEP 562 module-level `__getattr__(name)` lazily and thread-safely calls `create_app()` (once, guarded by `_lazy_init_lock`, idempotency-checked via `"app" not in globals()`) the first time any of those names is genuinely accessed as an attribute, and raises `AttributeError` for anything else.
+
+**Key invariants -- NEVER violate:**
+- A bare `import code_indexer.server.app` (module-object import, no attribute access) MUST remain completely inert -- no `ConfigService`, no DB I/O, no singleton registration, no lock contention.
+- `from code_indexer.server.app import <name>` and attribute access (`app_module.app`, `app_module.golden_repo_manager`, ...) are explicit references to the service and MUST still trigger full, correct initialization exactly once -- this is the production path (`uvicorn code_indexer.server.app:app` resolves `app` via exactly this mechanism) and the pattern used internally by many call sites (`services/dashboard_service.py`, `services/search_service.py`, `mcp/handlers/search.py`, `web/routes.py`, etc.) and by 100+ existing tests that call `create_app()` directly.
+- `create_app()` itself is untouched and remains fully synchronous and idempotent-per-call; `__getattr__` only decides WHEN it runs, never HOW.
+- Do not add a new module-level service global to `app.py` with a `= None` (or any other) binding -- that would silently exempt it from the lazy-init check `"app" not in globals()`. New globals belong in `_LAZY_INIT_ATTRS` with an annotation-only declaration.
+- No call site inside `create_app()`'s own transitive import chain (`startup/service_init.py`, `startup/lifespan.py`, `startup/app_wiring.py`, `auth/dependencies.py`) may import one of the lazy names from `code_indexer.server.app` at ITS OWN module top level -- that would re-enter `__getattr__` while `_lazy_init_lock` is already held (deadlock). All existing such imports are function-scoped (deferred to call time, well after `create_app()` has returned), and any new one must be too.
+
+Guard: `tests/unit/server/test_app_import_no_side_effects_1638.py` (subprocess-isolated, mirrors the `tests/unit/xray/test_lazy_load.py` pattern) -- proves both that a bare/transitive import stays inert and that explicit access (`app_module.app`, `create_app()`, `from ... import golden_repo_manager`) still fully initializes.
 
 ---
 

@@ -1578,8 +1578,18 @@ class GoldenRepoManager:
             # Lifecycle hook: Delete wiki article view records (Story #287, AC4)
             try:
                 from code_indexer.server.wiki.wiki_cache import WikiCache
+                from code_indexer.server.utils.registry_factory import (
+                    resolve_backend_registry_attr,
+                )
 
-                wiki_cache = WikiCache(self.db_path)
+                # Bug #1665: resolve the shared PostgreSQL wiki_cache backend
+                # in cluster mode so this hook (and every other reader/writer)
+                # sees the same store regardless of which node handles it.
+                wiki_backend, _ = resolve_backend_registry_attr(
+                    "wiki_cache",
+                    caller_name="golden_repo_manager.remove_golden_repo",
+                )
+                wiki_cache = WikiCache(self.db_path, storage_backend=wiki_backend)
                 wiki_cache.delete_views_for_repo(alias)
             except Exception as hook_error:
                 logging.error(

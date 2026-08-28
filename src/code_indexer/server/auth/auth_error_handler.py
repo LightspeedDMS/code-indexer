@@ -17,7 +17,7 @@ import bcrypt
 
 # datetime imports removed - not needed for this implementation
 
-from .audit_logger import PasswordChangeAuditLogger
+from .audit_logger import password_audit_logger
 from .timing_attack_prevention import TimingAttackPrevention
 
 # Static bcrypt hash used ONLY for timing-equalization work when no real
@@ -109,7 +109,15 @@ class AuthErrorHandler:
         """
         self.minimum_response_time_seconds = minimum_response_time_ms / 1000.0
         self.timing_prevention = TimingAttackPrevention(minimum_response_time_ms)
-        self.audit_logger = PasswordChangeAuditLogger()
+        # Bug #1671: route through the SAME shared singleton startup/lifespan.py
+        # wires via password_audit_logger.set_audit_service(audit_service) --
+        # never construct a private PasswordChangeAuditLogger() here, since a
+        # private instance never receives that wiring and every audit write it
+        # attempts silently no-ops (structurally disconnected from the real
+        # AuditLogService). Matches the established pattern already used by
+        # refresh_token_manager.py, oauth/routes.py, inline_auth.py, and
+        # mcp/handlers/admin/__init__.py.
+        self.audit_logger = password_audit_logger
 
         # Generic messages that don't leak information
         self._generic_messages = {

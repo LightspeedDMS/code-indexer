@@ -87,12 +87,58 @@ def _start_auto_watch_if_needed(
 
     Shared by handle_create_file, handle_edit_file, handle_delete_file.
     Logs and continues on failure (auto-watch is enhancement, not critical).
+
+    Bug #1683 (round 1): previously constructed a bare, unwired
+    `ActivatedRepoManager()` here -- its constructor hardcodes
+    `Path.home()/".cidx-server"/"data"` and ignores `CIDX_SERVER_DATA_DIR`,
+    so in cluster mode (or any deployment overriding the data dir) it read
+    from the WRONG per-node store, found nothing, and (via the caller's
+    fallback) mis-triggered auto-watch/indexing on the wrong directory.
+    Fixed to resolve the DI-wired singleton from app.state instead
+    (`_utils._get_activated_repo_manager()`, the same Bug #1533 pattern
+    already used in this handler package for the same manager -- see
+    `mcp/handlers/search.py`).
+
+    Bug #1683 (round 2): `get_activated_repo_path` is a bare
+    `os.path.join` with no existence check, so a bad/typo'd/stale
+    `repository_alias` (never activated, or deactivated by another
+    cluster node) resolves to a non-existent path that is still handed to
+    `auto_watch_manager.start_watch`. That path's `ConfigManager.
+    create_with_backtrack` finds no config up-tree and defaults
+    `codebase_dir` to `"."`, which resolves against the SERVER PROCESS's
+    CWD -- silently watching/indexing the server's own project tree
+    instead of failing loudly. Round 2 added a `Path.is_dir()` existence
+    guard, but this was REJECTED in review on two independently-reproduced
+    grounds: (1) an activated-repo directory that EXISTS but was never
+    indexed (an orphan clone from a partially-failed activation, or a repo
+    deactivated on another cluster node -- the real-world `admin/tstwiki`
+    shape) sails straight through `is_dir()` and still lands on the CWD
+    fallback; (2) the guard is self-defeating -- for a genuinely
+    non-existent alias, the FIRST errant `start_watch` call (via
+    `BackendFactory...get_vector_store_client()`, downstream of
+    `DaemonWatchManager.start_watch`) materializes
+    `<repo_path>/.code-indexer/index` as a side effect, so `is_dir()`
+    returns True on every subsequent call and the guard permanently
+    disables itself for that alias.
+
+    Bug #1683 (round 3): replaced the filesystem probe with the
+    established, registry/DB-backed authority already used at 10+ other
+    sites in this handler package --
+    `activated_repo_manager.user_has_activated_repo(username, alias)`
+    (`activated_repo_manager.py`, Story #1039) -- which answers "is this a
+    real, currently-activated repo for this user" rather than "does
+    something exist on disk at the path we'd compute", and is therefore
+    immune to on-disk residue left by any prior errant run. The bare
+    `Path(repo_path).is_dir()` check is retained as defense-in-depth (it
+    also covers the `is_write_exception` branch, which
+    `user_has_activated_repo` does not), but no longer the primary guard
+    for the activated-repo branch (Messi Rule 2: fail loud, never
+    substitute a fallback location). The root-cause fix for EVERY caller
+    of `AutoWatchManager.start_watch` (not just this one) lives in
+    `services/auto_watch_manager.py` itself.
     """
     from code_indexer.server.services.file_crud_service import file_crud_service
     from code_indexer.server.services.auto_watch_manager import auto_watch_manager
-    from code_indexer.server.repositories.activated_repo_manager import (
-        ActivatedRepoManager,
-    )
 
     try:
         if file_crud_service.is_write_exception(repository_alias):
@@ -100,10 +146,45 @@ def _start_auto_watch_if_needed(
                 file_crud_service.get_write_exception_path(repository_alias)
             )
         else:
-            activated_repo_manager = ActivatedRepoManager()
+            activated_repo_manager = _utils._get_activated_repo_manager()
+            if activated_repo_manager is None:
+                raise RuntimeError(
+                    "activated_repo_manager not initialized on app.state"
+                )
+            if not activated_repo_manager.user_has_activated_repo(
+                user.username, repository_alias
+            ):
+                # Bug #1683 round 3; round 2's code 220 collided with 9
+                # pre-existing list_pull_requests sites and used an
+                # is_dir() check that a prior errant run's own side
+                # effects could permanently satisfy.
+                logger.warning(
+                    format_error_log(
+                        "MCP-GENERAL-223",
+                        f"Skipping auto-watch for {repository_alias}: not a "
+                        f"registered activated repo for {user.username} -- "
+                        f"refusing an orphan/stale directory that a "
+                        f"filesystem-existence check alone cannot detect "
+                        f"(Bug #1683 round 3)",
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                )
+                return
             repo_path = activated_repo_manager.get_activated_repo_path(
                 username=user.username, user_alias=repository_alias
             )
+        if not Path(repo_path).is_dir():
+            logger.warning(
+                format_error_log(
+                    "MCP-GENERAL-223",
+                    f"Skipping auto-watch for {repository_alias}: resolved "
+                    f"path does not exist ({repo_path}) -- refusing to let "
+                    f"ConfigManager backtracking fall back to the server "
+                    f"CWD (Bug #1683 round 2/3)",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
+            return
         golden_repos_dir = getattr(
             _utils.app_module.app.state, "golden_repos_dir", None
         )

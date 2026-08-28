@@ -15,6 +15,7 @@ from unittest.mock import patch
 from fastapi.testclient import TestClient
 
 from code_indexer.server.app import create_app
+from code_indexer.server.auth import dependencies
 from code_indexer.server.auth.user_manager import User, UserRole
 
 
@@ -41,12 +42,30 @@ class TestPasswordChangeSecurityVulnerability:
 
         CRITICAL: This is the main vulnerability - endpoint should validate old password.
         Currently FAILING because endpoint doesn't validate old password.
+
+        NOTE (#1698): /api/users/change-password is registered by
+        register_admin_user_routes() (Story #409 routes extraction), which
+        captures `user_manager` as a closure PARAMETER at create_app() time
+        -- patch("code_indexer.server.app.user_manager") never reaches it.
+        The route handler is steered by patching methods directly on the
+        REAL dependencies.user_manager instance (captured here BEFORE it
+        gets mocked below for the auth layer, which reads it dynamically).
         """
+        real_user_manager = dependencies.user_manager
+
         with patch("code_indexer.server.auth.dependencies.jwt_manager") as mock_jwt:
             with patch(
                 "code_indexer.server.auth.dependencies.user_manager"
             ) as mock_dep_user_mgr:
-                with patch("code_indexer.server.app.user_manager") as mock_user_mgr:
+                with (
+                    patch.object(real_user_manager, "get_user") as mock_get_user,
+                    patch.object(
+                        real_user_manager.password_manager, "verify_password"
+                    ) as mock_verify_password,
+                    patch.object(
+                        real_user_manager, "change_password"
+                    ) as mock_change_password,
+                ):
                     # Mock JWT authentication
                     mock_jwt.validate_token.return_value = {
                         "username": "testuser",
@@ -67,11 +86,11 @@ class TestPasswordChangeSecurityVulnerability:
                     mock_dep_user_mgr.get_user.return_value = test_user
 
                     # Mock user retrieval for password change endpoint
-                    mock_user_mgr.get_user.return_value = test_user
+                    mock_get_user.return_value = test_user
 
                     # Mock password verification to fail
-                    mock_user_mgr.password_manager.verify_password.return_value = False
-                    mock_user_mgr.change_password.return_value = True
+                    mock_verify_password.return_value = False
+                    mock_change_password.return_value = True
 
                     response = client.put(
                         "/api/users/change-password",
@@ -87,19 +106,34 @@ class TestPasswordChangeSecurityVulnerability:
                     assert "Invalid old password" in response.json()["detail"]
 
                     # SECURITY REQUIREMENT: Password must NOT be changed
-                    mock_user_mgr.change_password.assert_not_called()
+                    mock_change_password.assert_not_called()
 
     def test_password_change_succeeds_with_valid_old_password(
         self, client, authenticated_user_headers
     ):
         """
         SECURITY TEST: Password change must succeed with valid old password.
+
+        NOTE (#1698): see test_password_change_rejects_invalid_old_password
+        above for why user_manager is patched via patch.object on the REAL
+        dependencies.user_manager instance rather than on the
+        code_indexer.server.app module attribute.
         """
+        real_user_manager = dependencies.user_manager
+
         with patch("code_indexer.server.auth.dependencies.jwt_manager") as mock_jwt:
             with patch(
                 "code_indexer.server.auth.dependencies.user_manager"
             ) as mock_dep_user_mgr:
-                with patch("code_indexer.server.app.user_manager") as mock_user_mgr:
+                with (
+                    patch.object(real_user_manager, "get_user") as mock_get_user,
+                    patch.object(
+                        real_user_manager.password_manager, "verify_password"
+                    ) as mock_verify_password,
+                    patch.object(
+                        real_user_manager, "change_password"
+                    ) as mock_change_password,
+                ):
                     # Mock JWT authentication
                     mock_jwt.validate_token.return_value = {
                         "username": "testuser",
@@ -120,11 +154,11 @@ class TestPasswordChangeSecurityVulnerability:
                     mock_dep_user_mgr.get_user.return_value = test_user
 
                     # Mock user retrieval for password change endpoint
-                    mock_user_mgr.get_user.return_value = test_user
+                    mock_get_user.return_value = test_user
 
                     # Mock password verification to succeed
-                    mock_user_mgr.password_manager.verify_password.return_value = True
-                    mock_user_mgr.change_password.return_value = True
+                    mock_verify_password.return_value = True
+                    mock_change_password.return_value = True
 
                     response = client.put(
                         "/api/users/change-password",
@@ -140,7 +174,7 @@ class TestPasswordChangeSecurityVulnerability:
                     assert "Password changed successfully" in response.json()["message"]
 
                     # Password should be changed
-                    mock_user_mgr.change_password.assert_called_once_with(
+                    mock_change_password.assert_called_once_with(
                         "testuser", "NewSecure123!Pass"
                     )
 
@@ -383,11 +417,25 @@ class TestPasswordChangeConcurrencyProtection:
             ConcurrencyConflictError,
         )
 
+        # Captured BEFORE dependencies.user_manager gets mocked below --
+        # the route closure was bound to THIS object at create_app() time
+        # (#1698: code_indexer.server.app.user_manager is unreachable from
+        # register_admin_user_routes()'s closure-bound parameter).
+        real_user_manager = dependencies.user_manager
+
         with patch("code_indexer.server.auth.dependencies.jwt_manager") as mock_jwt:
             with patch(
                 "code_indexer.server.auth.dependencies.user_manager"
             ) as mock_dep_user_mgr:
-                with patch("code_indexer.server.app.user_manager") as mock_user_mgr:
+                with (
+                    patch.object(real_user_manager, "get_user") as mock_get_user,
+                    patch.object(
+                        real_user_manager.password_manager, "verify_password"
+                    ) as mock_verify_password,
+                    patch.object(
+                        real_user_manager, "change_password"
+                    ) as mock_change_password,
+                ):
                     with patch(
                         "code_indexer.server.routers.inline_admin_users.password_change_rate_limiter"
                     ) as mock_rate_limiter:
@@ -435,11 +483,11 @@ class TestPasswordChangeConcurrencyProtection:
 
                                 # Mock user retrieval
                                 mock_dep_user_mgr.get_user.return_value = test_user
-                                mock_user_mgr.get_user.return_value = test_user
+                                mock_get_user.return_value = test_user
 
                                 # Mock password verification and change
-                                mock_user_mgr.password_manager.verify_password.return_value = True
-                                mock_user_mgr.change_password.return_value = True
+                                mock_verify_password.return_value = True
+                                mock_change_password.return_value = True
 
                                 # Mock rate limiter - no limits for this test
                                 mock_rate_limiter.check_rate_limit.return_value = None
@@ -530,11 +578,21 @@ class TestPasswordChangeAuditLogging:
         """
         SECURITY TEST: Successful password changes must be audit logged.
         """
+        real_user_manager = dependencies.user_manager
+
         with patch("code_indexer.server.auth.dependencies.jwt_manager") as mock_jwt:
             with patch(
                 "code_indexer.server.auth.dependencies.user_manager"
             ) as mock_dep_user_mgr:
-                with patch("code_indexer.server.app.user_manager") as mock_user_mgr:
+                with (
+                    patch.object(real_user_manager, "get_user") as mock_get_user,
+                    patch.object(
+                        real_user_manager.password_manager, "verify_password"
+                    ) as mock_verify_password,
+                    patch.object(
+                        real_user_manager, "change_password"
+                    ) as mock_change_password,
+                ):
                     with patch(
                         "code_indexer.server.routers.inline_admin_users.password_change_rate_limiter"
                     ) as mock_rate_limiter:
@@ -559,11 +617,11 @@ class TestPasswordChangeAuditLogging:
 
                             # Mock user retrieval
                             mock_dep_user_mgr.get_user.return_value = test_user
-                            mock_user_mgr.get_user.return_value = test_user
+                            mock_get_user.return_value = test_user
 
                             # Mock password operations
-                            mock_user_mgr.password_manager.verify_password.return_value = True
-                            mock_user_mgr.change_password.return_value = True
+                            mock_verify_password.return_value = True
+                            mock_change_password.return_value = True
 
                             # Mock rate limiter - no limits for this test
                             mock_rate_limiter.check_rate_limit.return_value = None
@@ -595,11 +653,18 @@ class TestPasswordChangeAuditLogging:
         """
         SECURITY TEST: Failed password changes must be audit logged.
         """
+        real_user_manager = dependencies.user_manager
+
         with patch("code_indexer.server.auth.dependencies.jwt_manager") as mock_jwt:
             with patch(
                 "code_indexer.server.auth.dependencies.user_manager"
             ) as mock_dep_user_mgr:
-                with patch("code_indexer.server.app.user_manager") as mock_user_mgr:
+                with (
+                    patch.object(real_user_manager, "get_user") as mock_get_user,
+                    patch.object(
+                        real_user_manager.password_manager, "verify_password"
+                    ) as mock_verify_password,
+                ):
                     with patch(
                         "code_indexer.server.routers.inline_admin_users.password_change_rate_limiter"
                     ) as mock_rate_limiter:
@@ -624,10 +689,10 @@ class TestPasswordChangeAuditLogging:
 
                             # Mock user retrieval
                             mock_dep_user_mgr.get_user.return_value = test_user
-                            mock_user_mgr.get_user.return_value = test_user
+                            mock_get_user.return_value = test_user
 
                             # Mock password verification to fail
-                            mock_user_mgr.password_manager.verify_password.return_value = False
+                            mock_verify_password.return_value = False
 
                             # Mock rate limiter - no limits for this test
                             mock_rate_limiter.check_rate_limit.return_value = None
@@ -695,11 +760,21 @@ class TestPasswordChangeSessionInvalidation:
         """
         SECURITY TEST: All user sessions must be invalidated after password change.
         """
+        real_user_manager = dependencies.user_manager
+
         with patch("code_indexer.server.auth.dependencies.jwt_manager") as mock_jwt:
             with patch(
                 "code_indexer.server.auth.dependencies.user_manager"
             ) as mock_dep_user_mgr:
-                with patch("code_indexer.server.app.user_manager") as mock_user_mgr:
+                with (
+                    patch.object(real_user_manager, "get_user") as mock_get_user,
+                    patch.object(
+                        real_user_manager.password_manager, "verify_password"
+                    ) as mock_verify_password,
+                    patch.object(
+                        real_user_manager, "change_password"
+                    ) as mock_change_password,
+                ):
                     with patch(
                         "code_indexer.server.routers.inline_admin_users.password_change_rate_limiter"
                     ) as mock_rate_limiter:
@@ -727,11 +802,11 @@ class TestPasswordChangeSessionInvalidation:
 
                                 # Mock user retrieval
                                 mock_dep_user_mgr.get_user.return_value = test_user
-                                mock_user_mgr.get_user.return_value = test_user
+                                mock_get_user.return_value = test_user
 
                                 # Mock password operations
-                                mock_user_mgr.password_manager.verify_password.return_value = True
-                                mock_user_mgr.change_password.return_value = True
+                                mock_verify_password.return_value = True
+                                mock_change_password.return_value = True
 
                                 # Mock rate limiter - no limits for this test
                                 mock_rate_limiter.check_rate_limit.return_value = None
@@ -762,11 +837,21 @@ class TestPasswordChangeSessionInvalidation:
         """
         SECURITY TEST: Current session should remain valid after password change.
         """
+        real_user_manager = dependencies.user_manager
+
         with patch("code_indexer.server.auth.dependencies.jwt_manager") as mock_jwt:
             with patch(
                 "code_indexer.server.auth.dependencies.user_manager"
             ) as mock_dep_user_mgr:
-                with patch("code_indexer.server.app.user_manager") as mock_user_mgr:
+                with (
+                    patch.object(real_user_manager, "get_user") as mock_get_user,
+                    patch.object(
+                        real_user_manager.password_manager, "verify_password"
+                    ) as mock_verify_password,
+                    patch.object(
+                        real_user_manager, "change_password"
+                    ) as mock_change_password,
+                ):
                     with patch(
                         "code_indexer.server.routers.inline_admin_users.password_change_rate_limiter"
                     ) as mock_rate_limiter:
@@ -794,11 +879,11 @@ class TestPasswordChangeSessionInvalidation:
 
                                 # Mock user retrieval
                                 mock_dep_user_mgr.get_user.return_value = test_user
-                                mock_user_mgr.get_user.return_value = test_user
+                                mock_get_user.return_value = test_user
 
                                 # Mock password operations
-                                mock_user_mgr.password_manager.verify_password.return_value = True
-                                mock_user_mgr.change_password.return_value = True
+                                mock_verify_password.return_value = True
+                                mock_change_password.return_value = True
 
                                 # Mock rate limiter - no limits for this test
                                 mock_rate_limiter.check_rate_limit.return_value = None

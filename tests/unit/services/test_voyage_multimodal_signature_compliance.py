@@ -12,9 +12,9 @@ from unittest.mock import MagicMock, Mock, patch
 
 import pytest
 
-from src.code_indexer.config import VoyageAIConfig, VOYAGE_MULTIMODAL_MODEL
-from src.code_indexer.services.embedding_provider import EmbeddingProvider
-from src.code_indexer.services.voyage_multimodal import VoyageMultimodalClient
+from code_indexer.config import VoyageAIConfig, VOYAGE_MULTIMODAL_MODEL
+from code_indexer.services.embedding_provider import EmbeddingProvider
+from code_indexer.services.voyage_multimodal import VoyageMultimodalClient
 
 # ---------------------------------------------------------------------------
 # Test-local named constants — no magic numbers anywhere in this file
@@ -91,7 +91,7 @@ def multimodal_service(mock_api_key, voyage_config, tmp_path, mock_httpx_client)
 
     Returns (service, real_multimodal_client) so tests can spy on get_embedding.
     """
-    from src.code_indexer.services.multi_index_query_service import (
+    from code_indexer.services.multi_index_query_service import (
         MultiIndexQueryService,
     )
 

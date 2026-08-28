@@ -11,7 +11,7 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 import pytest
 
-from src.code_indexer.services.high_throughput_processor import HighThroughputProcessor
+from code_indexer.services.high_throughput_processor import HighThroughputProcessor
 from typing import Any
 from concurrent.futures import Future
 
@@ -103,7 +103,7 @@ class TestParallelProcessingPerformance:
 
         def mock_submit_chunk(text, metadata):
             """Mock chunk submission that tracks concurrent execution."""
-            from src.code_indexer.services.vector_calculation_manager import (
+            from code_indexer.services.vector_calculation_manager import (
                 VectorResult,
             )
 
@@ -146,7 +146,7 @@ class TestParallelProcessingPerformance:
         # Mock submit_batch_task for batch processing
         def mock_submit_batch(texts, metadata_list):
             """Mock batch submission that returns proper VectorResult."""
-            from src.code_indexer.services.vector_calculation_manager import (
+            from code_indexer.services.vector_calculation_manager import (
                 VectorResult,
             )
 
@@ -191,7 +191,7 @@ class TestParallelProcessingPerformance:
             mock_tokenizer.count_tokens.return_value = 10  # tokens per text
 
             with patch(
-                "src.code_indexer.services.high_throughput_processor.VectorCalculationManager",
+                "code_indexer.services.high_throughput_processor.VectorCalculationManager",
                 return_value=mock_vcm_instance,
             ):
                 start_time = time.time()

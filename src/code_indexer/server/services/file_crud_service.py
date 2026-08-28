@@ -19,9 +19,53 @@ import os
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, TYPE_CHECKING
 
 from code_indexer.utils.file_locking import nfs_safe_fsync
+
+if TYPE_CHECKING:
+    from code_indexer.server.repositories.activated_repo_manager import (
+        ActivatedRepoManager,
+    )
+
+
+def _get_activated_repo_manager() -> "ActivatedRepoManager":
+    """Get the DI-wired ActivatedRepoManager from app.state (Bug #1692).
+
+    Mirrors stats_service.py's identical `_get_activated_repo_manager()`
+    (Bug #1683) and mcp/handlers/_utils.py's `_get_activated_repo_manager()`
+    (the same one auto_watch_manager's caller uses).
+
+    A per-instance `FileCRUDService.activated_repo_manager` lazy property
+    (the Bug #1689 fix) used to exist and was deliberately NOT used for
+    repo-validity resolution: it would have constructed a fresh,
+    NODE-LOCAL, UNPOOLED `ActivatedRepoManager` whose
+    `user_has_activated_repo()`/`get_activated_repo_path()` fall back to
+    scanning node-local `{alias}_metadata.json` files
+    (`_list_user_repos_fs`). In cluster/PostgreSQL mode, activation writes
+    to the `activated_repos` DB table only (`_save_metadata_pg`) and NEVER
+    writes that JSON file -- so a genuinely activated repo looks
+    indistinguishable from an orphan to that local instance, and Bug #1692's
+    registry gate would refuse 100% of legitimate cluster writes. Bug #1703
+    removed that property entirely once it was confirmed to have zero
+    remaining production consumers (its only call site was this function,
+    since #1692). Both front doors (the MCP module-level `file_crud_service`
+    singleton AND `routers/files.py`, which constructs a FRESH
+    `FileCRUDService()` per REST request) need this resolved AT CALL TIME
+    via app.state rather than cached on any one instance -- do NOT
+    reintroduce a per-instance node-local `ActivatedRepoManager` property
+    on this class for repo-validity resolution.
+    """
+    from typing import cast
+    from ..app import app as app_module
+
+    manager = getattr(app_module.state, "activated_repo_manager", None)
+    if manager is None:
+        raise RuntimeError(
+            "activated_repo_manager not initialized in app.state. "
+            "Server must set app.state.activated_repo_manager during startup."
+        )
+    return cast("ActivatedRepoManager", manager)
 
 
 class HashMismatchError(Exception):
@@ -67,14 +111,17 @@ class FileCRUDService:
 
     def __init__(self):
         """Initialize file CRUD service."""
-        # Import here to avoid circular imports
-        import os
-        from ..repositories.activated_repo_manager import ActivatedRepoManager
-
-        _server_dir = os.environ.get("CIDX_SERVER_DATA_DIR")
-        self.activated_repo_manager = ActivatedRepoManager(
-            data_dir=os.path.join(_server_dir, "data") if _server_dir else None
-        )
+        # Bug #1689 (construction is cheap): FileCRUDService.__init__ must
+        # never construct a real ActivatedRepoManager (-> GoldenRepoManager
+        # -> SQLite golden-repo load -> bgm-worker/bgm-temporal-worker
+        # thread spawn) as a side effect of mere instantiation. Bug #1703
+        # removed the lazy `activated_repo_manager` property that used to
+        # exist here (and the per-instance/class-level state that backed
+        # it) once it was confirmed to have zero production consumers:
+        # _resolve_repo_path resolves the manager via the module-level,
+        # DI/app.state-wired _get_activated_repo_manager() function
+        # instead (Bug #1692) -- do NOT reintroduce a per-instance
+        # node-local ActivatedRepoManager property on this class.
         # Write exceptions map: alias -> canonical path (Story #197)
         self._global_write_exceptions: Dict[str, Path] = {}
         # Golden repos directory for write-mode marker lookup (Story #231).
@@ -185,28 +232,59 @@ class FileCRUDService:
 
         Raises:
             ValueError: If repo not found in either exceptions or activated repos
-            FileNotFoundError: If activated repo path does not exist on disk (Bug #394, #395)
+            FileNotFoundError: If repo_alias is not a registered activated
+                workspace for username (Bug #1692), or its activated repo
+                path does not exist on disk (Bug #394, #395)
         """
         # Check write exceptions first (Story #197 AC1)
         if repo_alias in self._global_write_exceptions:
             return self._global_write_exceptions[repo_alias]
 
+        not_activated_error = FileNotFoundError(
+            f"Repository '{repo_alias}' is not an activated workspace for user "
+            f"'{username}'. Use activate_repository to create a writable workspace, "
+            f"or check the repository alias is correct."
+        )
+
+        # Bug #1692: Gate on the registry -- the SAME authority
+        # auto_watch_manager uses via user_has_activated_repo()
+        # (mcp/handlers/files.py::_start_auto_watch_if_needed, Bug #1683
+        # round 3) -- rather than mere filesystem existence. Prior to this
+        # fix, an "orphan" repository_alias directory (exists on disk, no
+        # registry entry) was silently ACCEPTED here while the same alias
+        # was correctly REFUSED by auto_watch_manager in the same request,
+        # letting a write land in an unregistered directory. The bare
+        # existence check below stays as defense-in-depth for the
+        # different failure mode of a registered repo whose directory was
+        # removed out from under it.
+        #
+        # Resolved via the module-level _get_activated_repo_manager()
+        # (DI/app.state-wired, Bug #1692 cluster-mode fix) rather than a
+        # per-instance self.activated_repo_manager property (a node-local,
+        # unpooled instance whose registry check falls back to scanning
+        # local {alias}_metadata.json files -- files PostgreSQL-mode
+        # activation never writes, which misclassified every genuinely
+        # activated cluster repo as an orphan). That property has since
+        # been removed entirely (Bug #1703): once #1692 redirected this
+        # call site away from it, it had zero remaining production
+        # consumers. Do NOT reintroduce it.
+        repo_manager = _get_activated_repo_manager()
+
+        if not repo_manager.user_has_activated_repo(username, repo_alias):
+            raise not_activated_error
+
         # Fall back to activated repo manager
-        repo_path_str = self.activated_repo_manager.get_activated_repo_path(
+        repo_path_str = repo_manager.get_activated_repo_path(
             username=username, user_alias=repo_alias
         )
         repo_path = Path(repo_path_str)
 
         # Bug #394/#395: Validate the activated repo path actually exists on disk.
         # get_activated_repo_path() always constructs a path string without checking
-        # existence. If the alias is not a real activated workspace, the path won't
-        # exist. Deny operations on non-existent paths with a clear error message.
+        # existence. Even a registered alias could have its directory removed out
+        # from under it; deny operations on non-existent paths with the same error.
         if not repo_path.exists():
-            raise FileNotFoundError(
-                f"Repository '{repo_alias}' is not an activated workspace for user "
-                f"'{username}'. Use activate_repository to create a writable workspace, "
-                f"or check the repository alias is correct."
-            )
+            raise not_activated_error
 
         return repo_path
 

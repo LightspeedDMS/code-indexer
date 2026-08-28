@@ -6,7 +6,7 @@ incoming requests into OTEL span attributes, enabling correlation between
 existing request tracking and OTEL traces.
 
 Usage:
-    from src.code_indexer.server.telemetry.correlation_bridge import (
+    from code_indexer.server.telemetry.correlation_bridge import (
         CorrelationBridgeMiddleware,
         get_current_correlation_id,
     )

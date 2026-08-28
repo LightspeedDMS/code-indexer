@@ -83,6 +83,17 @@ class _FakeConfigManager:
     def create_with_backtrack(cls, project_root: Path) -> "_FakeConfigManager":
         return cls(Path(project_root))
 
+    @classmethod
+    def load_verified_config(cls, target_dir: Path) -> "_FakeConfig":
+        # Bug #1718: production code (exposed_index_blocking's semantic
+        # branch, _run_indexing_background) now calls
+        # ConfigManager.load_verified_config() instead of
+        # create_with_backtrack().get_config() -- this fake mirrors that
+        # by returning the Config directly, with no ancestor-backtrack
+        # simulation needed (these tests are not exercising Bug #1718's
+        # verification behavior itself).
+        return _FakeConfig(Path(target_dir))
+
     def get_config(self) -> Any:
         return _FakeConfig(self.project_path)
 

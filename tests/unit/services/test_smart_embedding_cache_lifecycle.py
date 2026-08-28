@@ -13,10 +13,10 @@ TDD: These tests are written BEFORE implementation. They should fail initially.
 
 # mypy: ignore-errors
 
-from src.code_indexer.services.file_chunking_manager import (
+from code_indexer.services.file_chunking_manager import (
     FileProcessingResult,
 )
-from src.code_indexer.services.clean_slot_tracker import CleanSlotTracker
+from code_indexer.services.clean_slot_tracker import CleanSlotTracker
 
 # Re-use helpers from the hash test module
 from tests.unit.services.test_smart_embedding_cache_hash import (

@@ -6,10 +6,10 @@ when item_type parameter is passed.
 
 from rich.console import Console
 
-from src.code_indexer.progress.multi_threaded_display import (
+from code_indexer.progress.multi_threaded_display import (
     MultiThreadedProgressManager,
 )
-from src.code_indexer.progress.aggregate_progress import AggregateProgressDisplay
+from code_indexer.progress.aggregate_progress import AggregateProgressDisplay
 
 
 class TestItemTypeParameter:

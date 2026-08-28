@@ -18,7 +18,7 @@ class TestServerTimeEndpoint:
     @pytest.fixture
     def client(self):
         """Create test client."""
-        from src.code_indexer.server.app import app
+        from code_indexer.server.app import app
 
         return TestClient(app)
 

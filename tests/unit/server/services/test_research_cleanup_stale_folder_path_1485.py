@@ -43,7 +43,7 @@ import sqlite3
 import time
 from pathlib import Path
 
-from src.code_indexer.server.storage.database_manager import DatabaseSchema
+from code_indexer.server.storage.database_manager import DatabaseSchema
 from code_indexer.server.services.research_cleanup_service import (
     ResearchCleanupService,
     make_db_live_session_id_provider,

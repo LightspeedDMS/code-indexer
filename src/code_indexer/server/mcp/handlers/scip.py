@@ -7,9 +7,8 @@ PR history, cleanup history, cleanup workspaces, and cleanup status.
 
 from __future__ import annotations
 
-import json
 import logging
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional
 
 from code_indexer.server.auth.user_manager import User, UserRole
 from code_indexer.server.logging_utils import format_error_log
@@ -17,6 +16,7 @@ from code_indexer.server.telemetry.correlation_bridge import (
     get_current_correlation_id as get_correlation_id,
 )
 from code_indexer.server.services.config_service import get_config_service
+from code_indexer.server.storage.json_column import parse_json_column
 from code_indexer.server.services.query_admission_gate import (
     check_query_admission,
     memory_pressure_mcp_payload,
@@ -58,11 +58,10 @@ _MIN_AUDIT_LIMIT = 1
 _MAX_AUDIT_LIMIT = 1000
 
 # Depth bounds shared by scip_impact, scip_dependents, and
-# scip_dependencies (Bug #1599 / Bug #1602 / Bug #1604). scip_impact
-# still clamps an out-of-range depth to this range; scip_dependents and
-# scip_dependencies now REJECT (success: False) an out-of-range depth
-# instead of clamping, matching scip_callchain's loud-reject contract
-# (Bug #1614).
+# scip_dependencies (Bug #1599 / Bug #1602 / Bug #1604). All three now
+# REJECT (success: False) an out-of-range depth instead of clamping,
+# matching scip_callchain's loud-reject contract (Bug #1614 for
+# dependents/dependencies, Bug #1672 for impact).
 _MIN_SCIP_DEPTH = 1
 _MAX_SCIP_DEPTH = 10
 
@@ -118,36 +117,6 @@ def _compute_fetch_limit(requested_limit: int, rerank_query: Optional[str]) -> i
 # ---------------------------------------------------------------------------
 
 
-def _filter_audit_entries(
-    entries: List[Dict[str, Any]],
-    filter_user: Optional[str],
-    action: Optional[str],
-    from_date: Optional[str],
-    to_date: Optional[str],
-    limit: int,
-) -> List[Dict[str, Any]]:
-    """Filter audit log entries by user, action, and date range.
-
-    Used by both handle_scip_pr_history/handle_scip_cleanup_history (this module)
-    and handle_query_audit_logs (currently in _legacy.py, to be extracted to
-    admin.py in a future Story #496 step).
-    """
-    filtered = entries
-    if filter_user:
-        filtered = [
-            e for e in filtered if e.get("user", "").lower() == filter_user.lower()
-        ]
-    if action:
-        filtered = [
-            e for e in filtered if action.lower() in e.get("action", "").lower()
-        ]
-    if from_date:
-        filtered = [e for e in filtered if e.get("timestamp", "") >= from_date]
-    if to_date:
-        filtered = [e for e in filtered if e.get("timestamp", "") <= to_date]
-    return filtered[:limit]
-
-
 def _parse_log_details(row: dict) -> dict:
     """Parse the details JSON field of an audit_logs row into a flat dict.
 
@@ -155,14 +124,27 @@ def _parse_log_details(row: dict) -> dict:
     payload lives inside the ``details`` JSON column.  This helper merges the
     top-level row fields with the decoded details so callers get the same shape
     that the old PasswordChangeAuditLogger flat-file parsing produced.
+
+    ``audit_logs.details`` is TEXT on BOTH SQLite and PostgreSQL (see
+    ``storage/postgres/migrations/sql/002_groups_access_schema.sql`` --
+    it drops the migration-001 JSONB-shaped ``audit_logs`` table and
+    recreates it with a ``details TEXT`` column; ``PostgresAuditLogBackend
+    .log()``/``.log_raw()`` always write a ``json.dumps()`` string or
+    ``None``). This is NOT the same root-cause class as the genuinely
+    live JSONB columns fixed in Bug #1622/#1652/#1655 -- Bug #1654 was
+    filed from a static read of two call sites without checking the
+    actual DDL, and no PostgreSQL JSONB-as-dict value can reach this
+    function in production. ``parse_json_column`` is reused here purely
+    for consistency with ``admin/__init__.py``'s already-tolerant
+    dict-or-str handling of this same column, and as defense-in-depth
+    should the column ever be migrated to JSONB in the future -- not to
+    fix a live data-loss bug. Note: an empty-string ``details`` (``""``)
+    now logs a ``parse_json_column`` WARNING before yielding ``{}``
+    (previously silent); harmless in practice since every write path
+    supplies either a real JSON string or ``None``, never ``""``.
     """
     flat = dict(row)
-    details_str = row.get("details") or "{}"
-    try:
-        inner = json.loads(details_str)
-    except (ValueError, TypeError) as e:
-        logger.warning("Failed to parse audit log details JSON: %s", e)
-        inner = {}
+    inner = parse_json_column(row.get("details"), dict, "audit_logs.details") or {}
     flat.update(inner)
     return flat
 
@@ -707,7 +689,8 @@ def scip_impact(params: Dict[str, Any], user: User) -> Dict[str, Any]:
     Args:
         params: Dictionary containing:
             - symbol: Symbol name to analyze
-            - depth: Optional traversal depth (default 3, max 10)
+            - depth: Optional traversal depth (default 3). Must be between
+              1 and 10 (inclusive); out-of-range values are rejected.
             - repository_alias: Optional repository name to filter SCIP indexes
         user: Authenticated user (for permission checking)
 
@@ -723,9 +706,33 @@ def scip_impact(params: Dict[str, Any], user: User) -> Dict[str, Any]:
         depth = _coerce_int(params.get("depth"), 3)
         repository_alias = params.get("repository_alias")
 
-        # Bug #1599: clamp depth to a safe range, mirroring the clamp used
-        # by scip_callchain below.
-        depth = max(_MIN_SCIP_DEPTH, min(_MAX_SCIP_DEPTH, depth))
+        # Bug #1672: reject (not clamp) an out-of-range depth, mirroring
+        # scip_dependencies/scip_dependents above (Bug #1614) and
+        # scip_callchain's loud-reject contract for max_depth (Bug #1603).
+        # The prior Bug #1599 fix silently clamped out-of-range depth to
+        # [1, 10] with no error/warning field, hiding the caller's mistake
+        # behind a misleading success:true -- the exact anti-pattern #1614
+        # already fixed on the two sibling handlers in this file, and #1639
+        # fixed at the CLI/remote-client/engine layers for this same
+        # `impact` operation (deliberately leaving this MCP handler
+        # untouched as a separate, later fix). Consistency across sibling
+        # tools sharing the identical depth parameter semantics outweighs
+        # preserving the historical one-off clamp exception. Response
+        # fields (affected_symbols/affected_files) match this handler's own
+        # existing error contract below, not the siblings' `results` field.
+        if depth < _MIN_SCIP_DEPTH or depth > _MAX_SCIP_DEPTH:
+            return _mcp_response(
+                {
+                    "success": False,
+                    "error": (
+                        f"depth must be between {_MIN_SCIP_DEPTH} and "
+                        f"{_MAX_SCIP_DEPTH}, got {depth}"
+                    ),
+                    "affected_symbols": [],
+                    "affected_files": [],
+                    "symbol": symbol,
+                }
+            )
 
         if not symbol:
             return _mcp_response(

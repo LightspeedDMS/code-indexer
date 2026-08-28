@@ -8,7 +8,7 @@ This test reproduces the bug by directly calling the filter method with realisti
 
 from unittest.mock import MagicMock
 
-from src.code_indexer.services.temporal.temporal_search_service import (
+from code_indexer.services.temporal.temporal_search_service import (
     TemporalSearchService,
 )
 

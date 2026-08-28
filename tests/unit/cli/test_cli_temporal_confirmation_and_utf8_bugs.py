@@ -10,8 +10,8 @@ from pathlib import Path
 from unittest.mock import patch, MagicMock
 from click.testing import CliRunner
 
-from src.code_indexer.cli import cli
-from src.code_indexer.services.temporal.temporal_diff_scanner import (
+from code_indexer.cli import cli
+from code_indexer.services.temporal.temporal_diff_scanner import (
     TemporalDiffScanner,
 )
 
@@ -20,7 +20,7 @@ class TestTemporalConfirmationPromptBug:
     """Test suite for Bug 1: Confirmation prompt blocks batch usage."""
 
     @patch("click.confirm")
-    @patch("src.code_indexer.services.temporal.temporal_indexer.TemporalIndexer")
+    @patch("code_indexer.services.temporal.temporal_indexer.TemporalIndexer")
     @patch("subprocess.run")
     def test_all_branches_flag_does_not_prompt_for_confirmation(
         self,
@@ -72,7 +72,7 @@ class TestTemporalConfirmationPromptBug:
             assert "Cancelled" not in result.output
 
     @patch("click.confirm")
-    @patch("src.code_indexer.services.temporal.temporal_indexer.TemporalIndexer")
+    @patch("code_indexer.services.temporal.temporal_indexer.TemporalIndexer")
     @patch("subprocess.run")
     def test_all_branches_without_flag_also_does_not_prompt(
         self,

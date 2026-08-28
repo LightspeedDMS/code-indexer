@@ -26,13 +26,26 @@ import subprocess
 import threading
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
 from cachetools import TTLCache
 
 from code_indexer.server.utils.config_manager import ServerConfigManager
 from code_indexer.utils.git_runner import run_git_command
 from code_indexer.server.logging_utils import format_error_log
+
+if TYPE_CHECKING:
+    # Bug #1650: type-only imports for the lazily-constructed attributes
+    # below. Kept under TYPE_CHECKING (never imported at runtime here) so
+    # the real imports stay local to the properties that need them, for the
+    # same circular-import-avoidance reason as the original eager code.
+    from code_indexer.server.utils.config_manager import (
+        GitTimeoutsConfig,
+        ApiLimitsConfig,
+    )
+    from code_indexer.server.repositories.activated_repo_manager import (
+        ActivatedRepoManager,
+    )
 
 # Module logger
 logger = logging.getLogger(__name__)
@@ -90,6 +103,21 @@ class GitCommandError(Exception):
 class GitOperationsService:
     """Service for executing git operations with subprocess."""
 
+    # Bug #1650 remediation: CLASS-LEVEL locks (not per-instance). Two
+    # reasons: (1) instances created via
+    # GitOperationsService.__new__(GitOperationsService) in 5+ existing test
+    # files (bypassing __init__ entirely) must still have a lock to
+    # synchronize on instead of raising AttributeError when a setter/getter
+    # below runs; (2) RLock, not a plain Lock, so re-entrant same-thread
+    # access (e.g. a mocked constructor calling back into this instance
+    # during a test) never deadlocks -- same rationale as the module-level
+    # RLock pattern from Bug #1638/#1650's __getattr__ fix. Sharing one lock
+    # across instances is an accepted trade-off: production runs a single
+    # long-lived GitOperationsService singleton, so there is no real
+    # multi-instance contention this coarsens away.
+    _config_lazy_lock = threading.RLock()
+    _activated_repo_manager_lock = threading.RLock()
+
     def __init__(self, config_manager: Optional[ServerConfigManager] = None):
         """
         Initialize GitOperationsService with configuration.
@@ -107,36 +135,184 @@ class GitOperationsService:
         )
         self._tokens_lock = threading.RLock()
 
-        # Use config service for runtime config (for REST router compatibility)
-        if config_manager is None:
-            from code_indexer.server.services.config_service import get_config_service
+        # Bug #1650 remediation: code review of the first fix attempt
+        # (commit 2085fe9a, module-level PEP 562 lazy-init only) proved
+        # deferring the module-level `git_operations_service` singleton
+        # binding alone does NOT fix the reported symptom -- PEP 562's
+        # __getattr__ fires transparently on `from module import name` too,
+        # and all five real consumers (routers/git.py,
+        # mcp/handlers/{git_read,git_write,__init__,_legacy}.py) bind the
+        # name at module scope, so importing any MCP handler module still
+        # forces this __init__ to run. The actual fix is making __init__
+        # itself cheap: both the config-service resolution/read (relevant to
+        # the Bug #1428 credential-bleed path -- get_config_service() can
+        # return real provider API keys) and the ActivatedRepoManager
+        # construction (-> GoldenRepoManager -> SQLite golden-repo load,
+        # spawning bgm-worker/bgm-temporal-worker threads) are deferred to
+        # first REAL use via the properties defined below __init__, instead
+        # of running here unconditionally.
+        self._config_manager_arg = config_manager
+        self._config_manager_lazy: Optional[ServerConfigManager] = None
+        self._config_loaded = False
+        self._git_timeouts_lazy: Optional["GitTimeoutsConfig"] = None
+        self._api_limits_lazy: Optional["ApiLimitsConfig"] = None
 
-            config_manager = get_config_service()
+        self._activated_repo_manager_lazy: Optional["ActivatedRepoManager"] = None
 
-        self.config_manager = config_manager
-        config = config_manager.get_config()
+    @property
+    def config_manager(self) -> ServerConfigManager:
+        """Lazily resolve the config service (Bug #1650): get_config_service()
+        is only invoked on first genuine need, not at construction time."""
+        if self._config_manager_lazy is None:
+            with self._config_lazy_lock:
+                if self._config_manager_lazy is None:
+                    if self._config_manager_arg is not None:
+                        self._config_manager_lazy = self._config_manager_arg
+                    else:
+                        from code_indexer.server.services.config_service import (
+                            get_config_service,
+                        )
 
-        # Bug #83 Phase 1: Load timeout configuration from config_manager
-        # Handle case where no config file exists (e.g., CI/CD parity tests)
-        if config is not None:
-            self._git_timeouts = config.git_timeouts_config
-            self._api_limits = config.api_limits_config
-        else:
-            # Use defaults when no config file exists
-            from ..utils.config_manager import GitTimeoutsConfig, ApiLimitsConfig
+                        self._config_manager_lazy = get_config_service()
+        return self._config_manager_lazy
 
-            self._git_timeouts = GitTimeoutsConfig()
-            self._api_limits = ApiLimitsConfig()
+    @config_manager.setter
+    def config_manager(self, value: ServerConfigManager) -> None:
+        with self._config_lazy_lock:
+            self._config_manager_lazy = value
+            # Invalidate previously-derived timeout/limit config so a newly
+            # assigned config_manager takes effect on next access, instead
+            # of silently continuing to serve values derived from the
+            # config_manager this one replaces.
+            self._config_loaded = False
+            self._git_timeouts_lazy = None
+            self._api_limits_lazy = None
 
-        # Import ActivatedRepoManager for resolving repo aliases to paths
-        # (import here to avoid circular imports)
-        import os
-        from ..repositories.activated_repo_manager import ActivatedRepoManager
+    def _ensure_config_loaded(self) -> None:
+        """Run the config read (Bug #83 Phase 1 timeout/limit derivation)
+        exactly once, on first real need -- not at construction time.
 
-        _server_dir = os.environ.get("CIDX_SERVER_DATA_DIR")
-        self.activated_repo_manager = ActivatedRepoManager(
-            data_dir=os.path.join(_server_dir, "data") if _server_dir else None
-        )
+        The is-not-None/else branch below is an unmodified relocation of
+        the pre-existing Bug #83 Phase 1 logic that used to run
+        unconditionally inside __init__ -- only WHEN it runs changed
+        (deferred to first access), not WHAT it does.
+        """
+        if self._config_loaded:
+            return
+        with self._config_lazy_lock:
+            if self._config_loaded:
+                return
+            config = self.config_manager.get_config()
+            # Handle case where no config file exists (e.g., CI/CD parity tests)
+            #
+            # Bug #1650 round-2 remediation (M1): each slot is only filled
+            # if still None. Without this guard, a caller that explicitly
+            # sets _git_timeouts (e.g. a test's mock/sentinel, via the
+            # setter below) and then reads _api_limits for the first time
+            # would silently have its _git_timeouts overwritten here too --
+            # this method fills BOTH slots unconditionally on every run
+            # (there being no way to derive one without the other from a
+            # single config read), so it must not clobber a slot that was
+            # already independently populated.
+            if config is not None:
+                if self._git_timeouts_lazy is None:
+                    self._git_timeouts_lazy = config.git_timeouts_config
+                if self._api_limits_lazy is None:
+                    self._api_limits_lazy = config.api_limits_config
+            else:
+                # Use defaults when no config file exists
+                from ..utils.config_manager import GitTimeoutsConfig, ApiLimitsConfig
+
+                if self._git_timeouts_lazy is None:
+                    self._git_timeouts_lazy = GitTimeoutsConfig()
+                if self._api_limits_lazy is None:
+                    self._api_limits_lazy = ApiLimitsConfig()
+            self._config_loaded = True
+
+    @property
+    def _git_timeouts(self) -> "GitTimeoutsConfig":
+        if self._git_timeouts_lazy is None:
+            self._ensure_config_loaded()
+        return self._git_timeouts_lazy
+
+    @_git_timeouts.setter
+    def _git_timeouts(self, value: "GitTimeoutsConfig") -> None:
+        # `_config_lazy_lock` is a CLASS-LEVEL attribute (declared above
+        # __init__), so it resolves via normal attribute lookup even on
+        # instances created via GitOperationsService.__new__(...) that
+        # bypass __init__ entirely (5+ existing test files use exactly this
+        # pattern to set _git_timeouts directly) -- verified: a bare
+        # __new__(GitOperationsService) instance has `_config_lazy_lock`
+        # available and lockable with no AttributeError. Deliberately does
+        # not mark _config_loaded=True: those bypass callers only ever
+        # set/read _git_timeouts, never _api_limits, so there is no real
+        # config to invalidate/derive-from here.
+        with self._config_lazy_lock:
+            self._git_timeouts_lazy = value
+
+    @property
+    def _api_limits(self) -> "ApiLimitsConfig":
+        if self._api_limits_lazy is None:
+            self._ensure_config_loaded()
+        return self._api_limits_lazy
+
+    @_api_limits.setter
+    def _api_limits(self, value: "ApiLimitsConfig") -> None:
+        with self._config_lazy_lock:
+            self._api_limits_lazy = value
+
+    @property
+    def activated_repo_manager(self) -> "ActivatedRepoManager":
+        """Lazily construct ActivatedRepoManager (Bug #1650): this is the
+        expensive GoldenRepoManager -> SQLite golden-repo load and
+        bgm-worker/bgm-temporal-worker thread spawn, deferred to first real
+        git operation instead of GitOperationsService() construction time.
+
+        Guarded by a per-instance `_arm_initializing` sentinel (Bug #1650
+        round-2 remediation, M2): the RLock alone stops CROSS-THREAD
+        deadlock but not SAME-THREAD re-entrant recursion -- on re-entry
+        the double-checked `is None` test is still True (the assignment
+        happens only after the constructor returns), so an unguarded
+        re-entrant call arriving from within construction would construct
+        AGAIN (proven: reaches construction depth 6+ unguarded; uncapped
+        that is unbounded recursion -> RecursionError). Mirrors this
+        module's own __getattr__ `_initializing` sentinel pattern exactly.
+        Uses getattr(..., default) throughout: GitOperationsService.__new__(...)
+        -bypassed test instances may read this property without __init__
+        ever having run.
+        """
+        if getattr(self, "_activated_repo_manager_lazy", None) is None:
+            with self._activated_repo_manager_lock:
+                if getattr(self, "_arm_initializing", False):
+                    raise AttributeError(
+                        "activated_repo_manager is still under construction "
+                        "(re-entrant access)"
+                    )
+                if getattr(self, "_activated_repo_manager_lazy", None) is None:
+                    self._arm_initializing = True
+                    try:
+                        # Import here to avoid circular imports (same
+                        # reasoning as the original eager code this
+                        # replaces).
+                        import os
+                        from ..repositories.activated_repo_manager import (
+                            ActivatedRepoManager,
+                        )
+
+                        _server_dir = os.environ.get("CIDX_SERVER_DATA_DIR")
+                        self._activated_repo_manager_lazy = ActivatedRepoManager(
+                            data_dir=os.path.join(_server_dir, "data")
+                            if _server_dir
+                            else None
+                        )
+                    finally:
+                        self._arm_initializing = False
+        return self._activated_repo_manager_lazy
+
+    @activated_repo_manager.setter
+    def activated_repo_manager(self, value: "ActivatedRepoManager") -> None:
+        with self._activated_repo_manager_lock:
+            self._activated_repo_manager_lazy = value
 
     # REST API Wrapper Methods (resolve repo_alias to repo_path)
 
@@ -2810,17 +2986,167 @@ class GitOperationsService:
             )
 
 
+# Bug #1650 (mirrors Bug #1638): the lazy-init lock MUST be an RLock, not a
+# plain Lock. If any future call chain inside GitOperationsService.__init__
+# (directly or via a dependency such as ActivatedRepoManager/
+# GoldenRepoManager) ever reads this module's `git_operations_service`
+# attribute again before construction finishes, that re-entrant call arrives
+# on the SAME thread while the lock is already held. A plain Lock would
+# self-deadlock there; the RLock lets the re-entrant call back in, and the
+# `_initializing` sentinel (defined below) -- not the lock -- is what stops
+# it from recursively re-running the constructor: it returns AttributeError
+# (-> None via getattr(..., None)) instead, matching the exact pre-fix
+# semantics (before this fix, `git_operations_service` was simply unbound
+# until the module-level assignment completed). Declared before
+# _get_git_operations_service() so every reader/writer of the singleton --
+# whether reached via __getattr__ or called directly -- serializes on the
+# same lock.
+_lazy_init_lock = threading.RLock()
+
 # Global service instance (lazy initialization to avoid circular imports)
-_git_operations_service_instance = None
+_git_operations_service_instance: Optional[GitOperationsService] = None
 
 
-def _get_git_operations_service():
-    """Get or create the global GitOperationsService instance."""
+def _get_git_operations_service() -> GitOperationsService:
+    """Get or create the global GitOperationsService instance.
+
+    Guarded by `_lazy_init_lock` (an RLock) so concurrent/direct callers
+    cannot race and construct two distinct instances; the module's
+    `__getattr__` already holds this same lock when it calls here, and the
+    RLock's re-entrancy makes that nested acquisition a cheap no-op.
+    """
     global _git_operations_service_instance
-    if _git_operations_service_instance is None:
-        _git_operations_service_instance = GitOperationsService()
-    return _git_operations_service_instance
+    with _lazy_init_lock:
+        if _git_operations_service_instance is None:
+            _git_operations_service_instance = GitOperationsService()
+        return _git_operations_service_instance
 
 
-# Global service instance for easy import
-git_operations_service = _get_git_operations_service()
+# Global service instance for easy import.
+#
+# Bug #1650: `git_operations_service` is ANNOTATION-ONLY (no `= ...` binding)
+# so it is absent from this module's __dict__ until real code genuinely
+# accesses it. That absence is what lets the module-level __getattr__()
+# below (PEP 562) detect "not yet initialized" and defer
+# _get_git_operations_service() until the name is actually read, instead of
+# running it unconditionally as an import-time side effect. This mirrors
+# Bug #1638's fix in server/app.py -- see that module's docstring/comments
+# for the full rationale. Before this fix, a bare
+# `import code_indexer.server.services.git_operations_service` (or a
+# transitive import of it) ran GitOperationsService() ->
+# ActivatedRepoManager() -> GoldenRepoManager() ->
+# _load_metadata_from_sqlite(), spawning ~14 bgm-worker/bgm-temporal-worker
+# background threads, with no explicit opt-in.
+git_operations_service: GitOperationsService
+
+# Names whose first attribute access on this module should trigger lazy
+# construction. Only one name here (unlike app.py's many globals), but the
+# same frozenset-membership-check shape is kept for consistency with the
+# validated #1638 pattern.
+_LAZY_INIT_ATTRS = frozenset({"git_operations_service"})
+
+# Snapshot of the `git_operations_service` value, taken immediately after
+# the one real _get_git_operations_service() call completes. This is the
+# fallback __getattr__ reads when the name is momentarily absent from
+# globals() -- e.g. unittest.mock.patch's teardown calling delattr() then
+# hasattr() re-enters __getattr__ with the name freshly deleted; without
+# this snapshot, globals()[name] would raise KeyError (not AttributeError),
+# which hasattr() does not catch, permanently poisoning the module for every
+# later read of that name.
+_lazy_values: Dict[str, Any] = {}
+_initialized = False
+_initializing = False
+
+
+def _ensure_initialized() -> None:
+    """Run _get_git_operations_service() exactly once, tolerating re-entrant
+    probes.
+
+    MUST be called while `_lazy_init_lock` is already held by the caller
+    (an RLock, so the SAME thread re-entering is a cheap no-op re-acquire,
+    not a deadlock). An explicit `_initializing` sentinel -- not the lock --
+    is what stops a re-entrant call from recursing into a second
+    _get_git_operations_service() call: it simply returns, leaving
+    `git_operations_service` absent from globals() until the ORIGINAL call
+    finishes. See the module-level comment above `_lazy_init_lock` for the
+    full re-entrancy rationale.
+    """
+    global _initialized, _initializing
+    if _initialized or _initializing:
+        return
+    _initializing = True
+    try:
+        globals()["git_operations_service"] = _get_git_operations_service()
+        _initialized = True
+        # Snapshot now that construction has run, so __getattr__ has a
+        # stable fallback independent of globals() mutation (mock.patch
+        # delattr, etc.) -- see _lazy_values above.
+        for n in _LAZY_INIT_ATTRS:
+            _lazy_values[n] = globals().get(n)
+    finally:
+        _initializing = False
+
+
+def __getattr__(name: str) -> Any:
+    """PEP 562 lazy module attribute access (Bug #1650, mirrors Bug #1638).
+
+    `git_operations_service = _get_git_operations_service()` used to run
+    unconditionally at import time, so a bare
+    `import code_indexer.server.services.git_operations_service` -- or a
+    transitive import of it -- ran full GitOperationsService construction as
+    a side effect, with no explicit opt-in.
+
+    `__getattr__` is only invoked by Python when normal attribute lookup on
+    this module fails (i.e. the name is absent from this module's
+    __dict__). Since `git_operations_service` is no longer assigned at
+    module level, importing this module is now inert --
+    _get_git_operations_service() only runs the first time real code
+    actually reaches for the name (e.g. `gos_module.git_operations_service`,
+    or `from code_indexer.server.services.git_operations_service import
+    git_operations_service`, the pattern used by routers/git.py and the MCP
+    git handlers), never on a bare import.
+
+    Mid-construction (a re-entrant call arriving while
+    _get_git_operations_service() is still executing on this same thread),
+    this deliberately raises AttributeError rather than blocking or
+    returning a partial value -- so `getattr(gos_module,
+    "git_operations_service", None)` from inside the construction call
+    chain correctly yields None, matching pre-fix semantics exactly.
+
+    The entire read (init-if-needed + globals()/_lazy_values lookup) runs
+    under `_lazy_init_lock` so a concurrent reader on another thread never
+    observes `_initialized`/`_lazy_values` mid-mutation.
+
+    Issue #1659 hazard note -- this mechanism makes hasattr()/getattr()/
+    delattr() semantically misleading against this module for any name in
+    _LAZY_INIT_ATTRS:
+
+      * hasattr(module, name) for any name in _LAZY_INIT_ATTRS always
+        returns True, even before real construction has happened, because
+        this __getattr__ synthesizes the value on demand instead of
+        raising.
+      * getattr(module, name, default) -- even one written defensively,
+        expecting the attribute might legitimately be absent -- triggers
+        full lazy construction as a side effect on first access (a real
+        GitOperationsService construction), which a caller expecting a
+        cheap read-only probe almost certainly does not want.
+      * delattr(module, name) bypasses this __getattr__ entirely (PEP 562
+        defines no __delattr__ hook, so it is plain __dict__ removal) and
+        can raise AttributeError even though hasattr() just reported the
+        attribute exists (concrete breakage: issue #1658, caused by the
+        _lazy_values snapshot fallback above keeping hasattr()/getattr()
+        resolving a name whose real __dict__ entry is already gone).
+
+      A caller that needs a genuinely side-effect-free existence check
+      should inspect _initialized/_lazy_values directly instead of calling
+      hasattr()/getattr() on this module.
+    """
+    if name not in _LAZY_INIT_ATTRS:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    with _lazy_init_lock:
+        _ensure_initialized()
+        if name in globals():
+            return globals()[name]
+        if _initialized and name in _lazy_values:
+            return _lazy_values[name]
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

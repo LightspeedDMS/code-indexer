@@ -1711,6 +1711,18 @@ class TestAnalyzeImpactScoping:
         assert result["affected_files"] == []
         assert result["target_symbol"] == "LSAuthenticator"
 
+    def test_depth_below_one_raises_value_error_before_no_index_early_return(self):
+        """Bug #1672: depth < 1 must raise ValueError explicitly rather than
+        silently flowing into the no-index early return, where
+        `min(depth, 10)` would otherwise report a nonsensical
+        depth_analyzed: 0."""
+        service = self._service()
+
+        with pytest.raises(ValueError, match="depth must be at least 1"):
+            service.analyze_impact(
+                "LSAuthenticator", depth=0, repository_alias="evolution-global"
+            )
+
     def test_scopes_composite_to_project_scip_dir(self):
         """When an index exists, the composite is pointed at the repo's own
         .code-indexer/scip dir, not the whole golden-repos root."""

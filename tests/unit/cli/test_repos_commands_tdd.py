@@ -8,8 +8,8 @@ import pytest
 from unittest.mock import Mock, patch, AsyncMock
 from click.testing import CliRunner
 
-from src.code_indexer.cli import cli
-from src.code_indexer.api_clients.repos_client import (
+from code_indexer.cli import cli
+from code_indexer.api_clients.repos_client import (
     ActivatedRepository,
     GoldenRepository,
     RepositoryDiscoveryResult,
@@ -19,7 +19,7 @@ from src.code_indexer.api_clients.repos_client import (
     AvailableRepositorySummary,
     RecentActivity,
 )
-from src.code_indexer.api_clients.base_client import APIClientError, AuthenticationError
+from code_indexer.api_clients.base_client import APIClientError, AuthenticationError
 
 
 class TestReposCommandGroup:
@@ -51,7 +51,7 @@ class TestReposCommandGroup:
 
         # Mock mode detection to return local mode
         with patch(
-            "src.code_indexer.disabled_commands.detect_current_mode"
+            "code_indexer.disabled_commands.detect_current_mode"
         ) as mock_detect_mode:
             mock_detect_mode.return_value = "local"
 
@@ -73,7 +73,7 @@ class TestReposListCommand:
     def mock_repos_client(self):
         """Create a mock ReposAPIClient for testing."""
         with patch(
-            "src.code_indexer.api_clients.repos_client.ReposAPIClient"
+            "code_indexer.api_clients.repos_client.ReposAPIClient"
         ) as mock_class:
             mock_client = Mock()
             # Make the async methods async mocks
@@ -92,7 +92,7 @@ class TestReposListCommand:
         assert result.exit_code == 0
         assert "list" in result.output
 
-    @patch("src.code_indexer.cli.CommandModeDetector")
+    @patch("code_indexer.cli.CommandModeDetector")
     def test_repos_list_command_success_with_repositories(
         self, mock_detector, mock_repos_client
     ):
@@ -131,7 +131,7 @@ class TestReposListCommand:
         mock_repos_client.list_activated_repositories.return_value = mock_repositories
 
         with patch(
-            "src.code_indexer.api_clients.repos_client.ReposAPIClient",
+            "code_indexer.api_clients.repos_client.ReposAPIClient",
             return_value=mock_repos_client,
         ):
             runner = CliRunner()
@@ -154,7 +154,7 @@ class TestReposListCommand:
         )
         assert "✗" in result.output or "conflict" in result.output
 
-    @patch("src.code_indexer.cli.CommandModeDetector")
+    @patch("code_indexer.cli.CommandModeDetector")
     def test_repos_list_command_empty_repositories(
         self, mock_detector, mock_repos_client
     ):
@@ -165,7 +165,7 @@ class TestReposListCommand:
         mock_repos_client.list_activated_repositories.return_value = []
 
         with patch(
-            "src.code_indexer.api_clients.repos_client.ReposAPIClient",
+            "code_indexer.api_clients.repos_client.ReposAPIClient",
             return_value=mock_repos_client,
         ):
             runner = CliRunner()
@@ -175,7 +175,7 @@ class TestReposListCommand:
         assert "No repositories activated" in result.output
         assert "activate" in result.output.lower()  # Should provide guidance
 
-    @patch("src.code_indexer.cli.CommandModeDetector")
+    @patch("code_indexer.cli.CommandModeDetector")
     def test_repos_list_command_with_filter(self, mock_detector, mock_repos_client):
         """Test repos list command with filter option."""
         # Setup mode detection
@@ -195,7 +195,7 @@ class TestReposListCommand:
         mock_repos_client.list_activated_repositories.return_value = mock_repositories
 
         with patch(
-            "src.code_indexer.api_clients.repos_client.ReposAPIClient",
+            "code_indexer.api_clients.repos_client.ReposAPIClient",
             return_value=mock_repos_client,
         ):
             runner = CliRunner()
@@ -208,7 +208,7 @@ class TestReposListCommand:
         )
         assert "web-app" in result.output
 
-    @patch("src.code_indexer.cli.CommandModeDetector")
+    @patch("code_indexer.cli.CommandModeDetector")
     def test_repos_list_command_authentication_error(
         self, mock_detector, mock_repos_client
     ):
@@ -221,7 +221,7 @@ class TestReposListCommand:
         )
 
         with patch(
-            "src.code_indexer.api_clients.repos_client.ReposAPIClient",
+            "code_indexer.api_clients.repos_client.ReposAPIClient",
             return_value=mock_repos_client,
         ):
             runner = CliRunner()
@@ -233,7 +233,7 @@ class TestReposListCommand:
             or "token" in result.output.lower()
         )
 
-    @patch("src.code_indexer.cli.CommandModeDetector")
+    @patch("code_indexer.cli.CommandModeDetector")
     def test_repos_list_command_network_error(self, mock_detector, mock_repos_client):
         """Test repos list command handling network errors."""
         # Setup mode detection
@@ -244,7 +244,7 @@ class TestReposListCommand:
         )
 
         with patch(
-            "src.code_indexer.api_clients.repos_client.ReposAPIClient",
+            "code_indexer.api_clients.repos_client.ReposAPIClient",
             return_value=mock_repos_client,
         ):
             runner = CliRunner()
@@ -261,7 +261,7 @@ class TestReposAvailableCommand:
     def mock_repos_client(self):
         """Create a mock ReposAPIClient for testing."""
         with patch(
-            "src.code_indexer.api_clients.repos_client.ReposAPIClient"
+            "code_indexer.api_clients.repos_client.ReposAPIClient"
         ) as mock_class:
             mock_client = Mock()
             # Make the async methods async mocks
@@ -272,7 +272,7 @@ class TestReposAvailableCommand:
             mock_class.return_value = mock_client
             return mock_client
 
-    @patch("src.code_indexer.cli.CommandModeDetector")
+    @patch("code_indexer.cli.CommandModeDetector")
     def test_repos_available_command_success(self, mock_detector, mock_repos_client):
         """Test successful execution of repos available command."""
         # Setup mode detection
@@ -301,7 +301,7 @@ class TestReposAvailableCommand:
         mock_repos_client.list_available_repositories.return_value = mock_repositories
 
         with patch(
-            "src.code_indexer.api_clients.repos_client.ReposAPIClient",
+            "code_indexer.api_clients.repos_client.ReposAPIClient",
             return_value=mock_repos_client,
         ):
             runner = CliRunner()
@@ -318,7 +318,7 @@ class TestReposAvailableCommand:
         # Check activation status indicators
         assert "Already activated" in result.output or "activated" in result.output
 
-    @patch("src.code_indexer.cli.CommandModeDetector")
+    @patch("code_indexer.cli.CommandModeDetector")
     def test_repos_available_command_with_search(
         self, mock_detector, mock_repos_client
     ):
@@ -340,7 +340,7 @@ class TestReposAvailableCommand:
         mock_repos_client.list_available_repositories.return_value = mock_repositories
 
         with patch(
-            "src.code_indexer.api_clients.repos_client.ReposAPIClient",
+            "code_indexer.api_clients.repos_client.ReposAPIClient",
             return_value=mock_repos_client,
         ):
             runner = CliRunner()
@@ -353,7 +353,7 @@ class TestReposAvailableCommand:
         )
         assert "web-framework" in result.output
 
-    @patch("src.code_indexer.cli.CommandModeDetector")
+    @patch("code_indexer.cli.CommandModeDetector")
     def test_repos_available_command_empty_repositories(
         self, mock_detector, mock_repos_client
     ):
@@ -364,7 +364,7 @@ class TestReposAvailableCommand:
         mock_repos_client.list_available_repositories.return_value = []
 
         with patch(
-            "src.code_indexer.api_clients.repos_client.ReposAPIClient",
+            "code_indexer.api_clients.repos_client.ReposAPIClient",
             return_value=mock_repos_client,
         ):
             runner = CliRunner()
@@ -381,7 +381,7 @@ class TestReposDiscoverCommand:
     def mock_repos_client(self):
         """Create a mock ReposAPIClient for testing."""
         with patch(
-            "src.code_indexer.api_clients.repos_client.ReposAPIClient"
+            "code_indexer.api_clients.repos_client.ReposAPIClient"
         ) as mock_class:
             mock_client = Mock()
             # Make the async methods async mocks
@@ -392,7 +392,7 @@ class TestReposDiscoverCommand:
             mock_class.return_value = mock_client
             return mock_client
 
-    @patch("src.code_indexer.cli.CommandModeDetector")
+    @patch("code_indexer.cli.CommandModeDetector")
     def test_repos_discover_command_success(self, mock_detector, mock_repos_client):
         """Test successful execution of repos discover command."""
         # Setup mode detection
@@ -428,7 +428,7 @@ class TestReposDiscoverCommand:
         mock_repos_client.discover_repositories.return_value = mock_result
 
         with patch(
-            "src.code_indexer.api_clients.repos_client.ReposAPIClient",
+            "code_indexer.api_clients.repos_client.ReposAPIClient",
             return_value=mock_repos_client,
         ):
             runner = CliRunner()
@@ -446,7 +446,7 @@ class TestReposDiscoverCommand:
             "github.com/myorg"
         )
 
-    @patch("src.code_indexer.cli.CommandModeDetector")
+    @patch("code_indexer.cli.CommandModeDetector")
     def test_repos_discover_command_with_access_errors(
         self, mock_detector, mock_repos_client
     ):
@@ -478,7 +478,7 @@ class TestReposDiscoverCommand:
         mock_repos_client.discover_repositories.return_value = mock_result
 
         with patch(
-            "src.code_indexer.api_clients.repos_client.ReposAPIClient",
+            "code_indexer.api_clients.repos_client.ReposAPIClient",
             return_value=mock_repos_client,
         ):
             runner = CliRunner()
@@ -491,7 +491,7 @@ class TestReposDiscoverCommand:
         assert "requires authentication" in result.output
         assert "archived" in result.output
 
-    @patch("src.code_indexer.cli.CommandModeDetector")
+    @patch("code_indexer.cli.CommandModeDetector")
     def test_repos_discover_command_missing_source(self, mock_detector):
         """Test repos discover command without required source parameter."""
         # Setup mode detection
@@ -503,7 +503,7 @@ class TestReposDiscoverCommand:
         assert result.exit_code != 0
         assert "source" in result.output.lower()
 
-    @patch("src.code_indexer.cli.CommandModeDetector")
+    @patch("code_indexer.cli.CommandModeDetector")
     def test_repos_discover_command_invalid_source(
         self, mock_detector, mock_repos_client
     ):
@@ -516,7 +516,7 @@ class TestReposDiscoverCommand:
         )
 
         with patch(
-            "src.code_indexer.api_clients.repos_client.ReposAPIClient",
+            "code_indexer.api_clients.repos_client.ReposAPIClient",
             return_value=mock_repos_client,
         ):
             runner = CliRunner()
@@ -535,7 +535,7 @@ class TestReposStatusCommand:
     def mock_repos_client(self):
         """Create a mock ReposAPIClient for testing."""
         with patch(
-            "src.code_indexer.api_clients.repos_client.ReposAPIClient"
+            "code_indexer.api_clients.repos_client.ReposAPIClient"
         ) as mock_class:
             mock_client = Mock()
             # Make the async methods async mocks
@@ -546,7 +546,7 @@ class TestReposStatusCommand:
             mock_class.return_value = mock_client
             return mock_client
 
-    @patch("src.code_indexer.cli.CommandModeDetector")
+    @patch("code_indexer.cli.CommandModeDetector")
     def test_repos_status_command_success(self, mock_detector, mock_repos_client):
         """Test successful execution of repos status command."""
         # Setup mode detection
@@ -584,7 +584,7 @@ class TestReposStatusCommand:
         mock_repos_client.get_repository_status_summary.return_value = mock_summary
 
         with patch(
-            "src.code_indexer.api_clients.repos_client.ReposAPIClient",
+            "code_indexer.api_clients.repos_client.ReposAPIClient",
             return_value=mock_repos_client,
         ):
             runner = CliRunner()
@@ -600,7 +600,7 @@ class TestReposStatusCommand:
         assert "api-service" in result.output  # recommendations
         assert "mobile-app" in result.output
 
-    @patch("src.code_indexer.cli.CommandModeDetector")
+    @patch("code_indexer.cli.CommandModeDetector")
     def test_repos_status_command_empty_state(self, mock_detector, mock_repos_client):
         """Test repos status command with no repositories."""
         # Setup mode detection
@@ -627,7 +627,7 @@ class TestReposStatusCommand:
         mock_repos_client.get_repository_status_summary.return_value = mock_summary
 
         with patch(
-            "src.code_indexer.api_clients.repos_client.ReposAPIClient",
+            "code_indexer.api_clients.repos_client.ReposAPIClient",
             return_value=mock_repos_client,
         ):
             runner = CliRunner()
@@ -663,7 +663,7 @@ class TestTableFormatting:
         ]
 
         # Import and test the formatting function
-        from src.code_indexer.cli import format_repository_list
+        from code_indexer.cli import format_repository_list
 
         formatted_output = format_repository_list(repositories)
 
@@ -689,7 +689,7 @@ class TestTableFormatting:
         ]
 
         # Import and test the formatting function
-        from src.code_indexer.cli import format_available_repositories
+        from code_indexer.cli import format_available_repositories
 
         formatted_output = format_available_repositories(repositories)
 
@@ -718,7 +718,7 @@ class TestTableFormatting:
         )
 
         # Import and test the formatting function
-        from src.code_indexer.cli import format_discovery_results
+        from code_indexer.cli import format_discovery_results
 
         formatted_output = format_discovery_results(discovery_result)
 
@@ -745,7 +745,7 @@ class TestTableFormatting:
         )
 
         # Import and test the formatting function
-        from src.code_indexer.cli import format_status_summary
+        from code_indexer.cli import format_status_summary
 
         formatted_output = format_status_summary(summary)
 

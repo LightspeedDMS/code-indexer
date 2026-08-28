@@ -7200,6 +7200,35 @@ class FilesystemVectorStore:
         projection matrix to allow faster re-indexing. The collection metadata
         (quantization_range) is recreated on next index operation.
 
+        The preserved ``collection_meta.json`` has its ``chunks_db`` layout
+        discriminator and authoritative ``vector_count`` cross-check field
+        stripped, if present, before being restored -- both fields describe a
+        ``chunks.db`` store that was just deleted by this same clear (see
+        ``chunk_layout.clear_chunks_db_discriminator`` and
+        ``collection_migration.strip_authoritative_vector_count``).
+
+        Bug #1644 round 3 (ON-DISK-TRUTHFUL fix; supersedes round 2's
+        in-memory ``self._chunks_db_mode`` write-intent flag, commit
+        b97f7432, which was rejected because that flag is per-process RAM
+        that does not survive a process boundary -- e.g. ``cidx clean``
+        exiting, or the daemon ``clean`` RPC returning, followed by a
+        brand-new ``cidx index`` process -- silently downgrading the next
+        index run to legacy SHARDED_JSON, and because a read-only method
+        trusting the in-memory intent while nothing backed it on disk could
+        create ``chunks.db`` as a side effect of merely reading):
+
+        When the pre-clear on-disk layout (captured via
+        ``resolve_chunk_layout()`` before the rmtree) was CHUNKS_DB, this
+        method makes the ON-DISK state itself truthful and durable instead
+        of recording an in-process flag: it creates a fresh, empty
+        ``chunks.db`` file in the cleared collection directory and
+        re-commits the ``chunks_db`` discriminator via
+        ``write_chunks_db_discriminator()``. Any store instance, in any
+        process, that later inspects this collection therefore sees a
+        genuinely consistent CHUNKS_DB collection -- discriminator present,
+        ``chunks.db`` physically exists, both facts agreeing -- with zero
+        reliance on which instance performed the clear.
+
         Args:
             collection_name: Name of the collection to clear
             remove_projection_matrix: If True, also remove projection matrix (default: False)
@@ -7215,6 +7244,20 @@ class FilesystemVectorStore:
         try:
             import shutil
 
+            from code_indexer.storage.shared.chunk_layout import (
+                ChunkLayout,
+                clear_chunks_db_discriminator,
+                resolve_chunk_layout,
+                write_chunks_db_discriminator,
+            )
+            from code_indexer.storage.shared.collection_migration import (
+                strip_authoritative_vector_count,
+            )
+
+            was_chunks_db = (
+                resolve_chunk_layout(collection_path) == ChunkLayout.CHUNKS_DB
+            )
+
             # Save projection matrix and metadata if we need to preserve them
             matrix_file = collection_path / "projection_matrix.npy"
             metadata_file = collection_path / "collection_meta.json"
@@ -7226,6 +7269,8 @@ class FilesystemVectorStore:
                     matrix_data = matrix_file.read_bytes()
                 if metadata_file.exists():
                     metadata_data = metadata_file.read_bytes()
+                    metadata_data = clear_chunks_db_discriminator(metadata_data)
+                    metadata_data = strip_authoritative_vector_count(metadata_data)
 
             # Remove entire collection directory
             shutil.rmtree(collection_path)
@@ -7245,6 +7290,22 @@ class FilesystemVectorStore:
                     matrix_file.write_bytes(matrix_data)
                 if metadata_data is not None:
                     metadata_file.write_bytes(metadata_data)
+
+            # Bug #1644 round 3: recommit the CHUNKS_DB layout ON DISK,
+            # truthfully, for a collection that was CHUNKS_DB before the
+            # clear -- a fresh empty chunks.db plus a freshly re-committed
+            # discriminator, so ANY store instance in ANY process sees a
+            # genuinely consistent CHUNKS_DB collection. Only applicable
+            # when metadata was actually restored (remove_projection_matrix
+            # =True skips metadata restoration entirely, and the collection
+            # ceases to exist per collection_exists(), so there is nothing
+            # to make consistent in that branch).
+            if was_chunks_db and metadata_data is not None:
+                from code_indexer.storage.sqlite_chunk_store import ChunkStore
+
+                with ChunkStore(collection_path / "chunks.db"):
+                    pass
+                write_chunks_db_discriminator(collection_path)
 
             return True
 

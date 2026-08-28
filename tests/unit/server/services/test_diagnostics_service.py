@@ -133,9 +133,9 @@ class TestDiagnosticResult:
 class TestDiagnosticsService:
     """Test DiagnosticsService functionality."""
 
-    def test_service_initialization(self):
+    def test_service_initialization(self, tmp_path):
         """Test service can be initialized."""
-        service = DiagnosticsService()
+        service = DiagnosticsService(db_path=str(tmp_path / "diagnostics.db"))
         assert service is not None
 
     def test_get_status_returns_not_run_initially(self):
@@ -169,9 +169,9 @@ class TestDiagnosticsService:
                 os.unlink(tmp_db_path)
 
     @pytest.mark.asyncio
-    async def test_run_all_diagnostics_placeholder(self):
+    async def test_run_all_diagnostics_placeholder(self, tmp_path):
         """Test run_all_diagnostics calls actual diagnostic methods and returns complete results."""
-        service = DiagnosticsService()
+        service = DiagnosticsService(db_path=str(tmp_path / "diagnostics.db"))
         await service.run_all_diagnostics()
 
         status = service.get_status()
@@ -183,11 +183,26 @@ class TestDiagnosticsService:
         assert len(status[DiagnosticCategory.SDK_PREREQUISITES]) == 3, (
             "SDK Prerequisites should have 3 results"
         )
-        assert len(status[DiagnosticCategory.EXTERNAL_APIS]) == 5, (
-            "External APIs should have 5 results"
+        # Bug #1661: was `== 5`, counting the now-removed "Claude Server"
+        # delegation check (check_claude_server). Story #1487 (commit
+        # e0e56da8) deliberately removed the entire Claude delegation
+        # feature -- including this diagnostic -- and correctly updated the
+        # sibling test_diagnostics_external_apis.py's count to 4, but missed
+        # this file. run_external_api_diagnostics() now gathers exactly 4
+        # checks: check_github_api, check_gitlab_api, check_oidc_provider,
+        # check_otel_collector.
+        assert len(status[DiagnosticCategory.EXTERNAL_APIS]) == 4, (
+            "External APIs should have 4 results"
         )
-        assert len(status[DiagnosticCategory.CREDENTIALS]) == 4, (
-            "Credentials should have 4 results"
+        # Bug #1661 (same root cause as EXTERNAL_APIS above): was `== 4`,
+        # counting the now-removed check_claude_delegation_credentials
+        # check. Story #1487 (commit e0e56da8) removed it along with the
+        # rest of the Claude delegation feature and correctly updated the
+        # sibling test_diagnostics_credentials.py's count to 3, but missed
+        # this file too. run_credential_diagnostics() now gathers exactly 3
+        # checks: check_ssh_keys, check_github_token, check_gitlab_token.
+        assert len(status[DiagnosticCategory.CREDENTIALS]) == 3, (
+            "Credentials should have 3 results"
         )
         assert len(status[DiagnosticCategory.INFRASTRUCTURE]) == 2, (
             "Infrastructure should have 2 results"
@@ -208,9 +223,9 @@ class TestDiagnosticsService:
                     f"{result.name} status should not be NOT_RUN"
                 )
 
-    def test_cache_stores_results(self):
+    def test_cache_stores_results(self, tmp_path):
         """Test results are cached after execution."""
-        service = DiagnosticsService()
+        service = DiagnosticsService(db_path=str(tmp_path / "diagnostics.db"))
 
         # First call should execute
         status1 = service.get_status()
@@ -226,9 +241,9 @@ class TestDiagnosticsService:
             if len(results1) > 0 and len(results2) > 0:
                 assert results1[0].timestamp == results2[0].timestamp
 
-    def test_cache_expiration_after_10_minutes(self):
+    def test_cache_expiration_after_10_minutes(self, tmp_path):
         """Test cache expires after 10 minutes."""
-        service = DiagnosticsService()
+        service = DiagnosticsService(db_path=str(tmp_path / "diagnostics.db"))
 
         # Set initial cache
         service.get_status()
@@ -247,9 +262,9 @@ class TestDiagnosticsService:
             assert status is not None
 
     @pytest.mark.asyncio
-    async def test_run_category_clears_category_cache(self):
+    async def test_run_category_clears_category_cache(self, tmp_path):
         """Test running a category clears only that category's cache."""
-        service = DiagnosticsService()
+        service = DiagnosticsService(db_path=str(tmp_path / "diagnostics.db"))
 
         # Run all diagnostics first
         await service.run_all_diagnostics()
@@ -282,9 +297,9 @@ class TestDiagnosticsService:
                     == status_after[category][0].timestamp
                 )
 
-    def test_is_running_flag(self):
+    def test_is_running_flag(self, tmp_path):
         """Test service tracks running state."""
-        service = DiagnosticsService()
+        service = DiagnosticsService(db_path=str(tmp_path / "diagnostics.db"))
 
         # Initially not running
         assert service.is_running() is False
@@ -292,9 +307,9 @@ class TestDiagnosticsService:
         # After starting a run, should be running
         # (This will be tested with proper async handling)
 
-    def test_placeholder_has_at_least_one_diagnostic_per_category(self):
+    def test_placeholder_has_at_least_one_diagnostic_per_category(self, tmp_path):
         """Test placeholder returns at least one diagnostic item per category."""
-        service = DiagnosticsService()
+        service = DiagnosticsService(db_path=str(tmp_path / "diagnostics.db"))
         status = service.get_status()
 
         for category in DiagnosticCategory:
@@ -304,9 +319,9 @@ class TestDiagnosticsService:
             )
 
     @pytest.mark.asyncio
-    async def test_concurrent_run_all_diagnostics_thread_safety(self):
+    async def test_concurrent_run_all_diagnostics_thread_safety(self, tmp_path):
         """Test concurrent calls to run_all_diagnostics are thread-safe."""
-        service = DiagnosticsService()
+        service = DiagnosticsService(db_path=str(tmp_path / "diagnostics.db"))
 
         # Start two concurrent diagnostic runs
         import asyncio
@@ -322,9 +337,9 @@ class TestDiagnosticsService:
         assert len(status) == 5  # All categories present
 
     @pytest.mark.asyncio
-    async def test_concurrent_run_category_thread_safety(self):
+    async def test_concurrent_run_category_thread_safety(self, tmp_path):
         """Test concurrent calls to run_category are thread-safe."""
-        service = DiagnosticsService()
+        service = DiagnosticsService(db_path=str(tmp_path / "diagnostics.db"))
 
         # Start concurrent category runs
         import asyncio
@@ -341,11 +356,11 @@ class TestDiagnosticsService:
         assert DiagnosticCategory.SDK_PREREQUISITES in status
 
     @pytest.mark.asyncio
-    async def test_run_all_diagnostics_continues_on_category_failure(self):
+    async def test_run_all_diagnostics_continues_on_category_failure(self, tmp_path):
         """Test that failure in one category doesn't stop other categories from running."""
         from unittest.mock import patch
 
-        service = DiagnosticsService()
+        service = DiagnosticsService(db_path=str(tmp_path / "diagnostics.db"))
 
         # Mock run_external_api_diagnostics to raise an exception
         async def failing_api_check():

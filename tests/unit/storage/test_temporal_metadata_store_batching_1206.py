@@ -19,7 +19,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import List, Tuple
 
-from src.code_indexer.storage.temporal_metadata_store import TemporalMetadataStore
+from code_indexer.storage.temporal_metadata_store import TemporalMetadataStore
 
 
 class TestSaveMetadataBatch:
@@ -120,7 +120,11 @@ class TestSaveMetadataBatch:
                     )
                     for i in range(rows_per_thread)
                 ]
-                return store.save_metadata_batch(rows)
+                # Issue #1696 Session 1: save_metadata_batch() is really
+                # typed to return List[str]; mypy currently resolves the
+                # bare cross-module import to Any until Session 2's
+                # mypy_path fix lands.
+                return store.save_metadata_batch(rows)  # type: ignore[no-any-return]
 
             with ThreadPoolExecutor(max_workers=n_threads) as pool:
                 futures = [pool.submit(worker, tid) for tid in range(n_threads)]

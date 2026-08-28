@@ -10,8 +10,8 @@ from pathlib import Path
 
 import pytest
 
-from src.code_indexer.scip.database.schema import DatabaseManager
-from src.code_indexer.scip.database.builder import SCIPDatabaseBuilder
+from code_indexer.scip.database.schema import DatabaseManager
+from code_indexer.scip.database.builder import SCIPDatabaseBuilder
 
 
 class TestSymbolReferencesSchema:
@@ -213,7 +213,7 @@ class TestSymbolReferencesQuery:
             builder.build(scip_file, db_path)
 
             # Test trace_call_chain_v2
-            from src.code_indexer.scip.database import queries
+            from code_indexer.scip.database import queries
 
             conn = sqlite3.connect(db_path)
 

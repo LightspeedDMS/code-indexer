@@ -9,7 +9,7 @@ from 330ms (10-12 git calls) to 33ms (1 git call) per commit using unified diff 
 from pathlib import Path
 from unittest.mock import patch, MagicMock, call
 
-from src.code_indexer.services.temporal.temporal_diff_scanner import (
+from code_indexer.services.temporal.temporal_diff_scanner import (
     TemporalDiffScanner,
 )
 

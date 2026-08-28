@@ -1,5 +1,17 @@
-# OpenTelemetry Collector Configuration for CIDX Testing
-# This configuration receives OTLP telemetry and exports to Jaeger/Prometheus
+# OpenTelemetry Collector Configuration for CIDX Testing (Story #1676 AC8)
+#
+# Receives OTLP telemetry (traces, metrics, logs) from CIDX Server and
+# exports:
+#   - traces    -> Jaeger, via OTLP (Jaeger all-in-one >= 1.35 accepts OTLP
+#                  natively on 4317/4318 -- NOT the legacy `jaeger:` gRPC
+#                  exporter, which was removed along with the old Jaeger
+#                  Thrift/gRPC collector ports this stack no longer runs)
+#   - metrics   -> Prometheus, via the `prometheus` exporter's scrape endpoint
+#   - all three -> `debug` exporter, for the log-signal acceptance-evidence
+#                  path (Story #1676 AC8: log delivery is verified via
+#                  collector self-metrics counters PLUS this debug output,
+#                  not a content-level query -- there is no log-query UI in
+#                  this stack)
 
 receivers:
   otlp:
@@ -20,28 +32,46 @@ processors:
     limit_mib: 512
     spike_limit_mib: 128
 
+extensions:
+  # Exposes GET http://0.0.0.0:13133/ -> {"status":"Server available",...}.
+  # This is the ONLY readiness signal available for this service: the
+  # otel/opentelemetry-collector-contrib image is distroless (no shell, no
+  # wget/curl) so it cannot host a Docker-level `healthcheck:` directive --
+  # see docker-compose.yml's otel-collector service comment. Tests/scripts
+  # poll this endpoint directly from outside the container instead.
+  health_check:
+    endpoint: 0.0.0.0:13133
+
 exporters:
-  # Export traces to Jaeger
-  jaeger:
-    endpoint: jaeger:14250
+  # Export traces to Jaeger via native OTLP ingestion (verified against the
+  # pinned jaegertracing/all-in-one:1.62.0 image: collector.otlp.enabled
+  # defaults to true, gRPC on :4317, HTTP on :4318).
+  otlp/jaeger:
+    endpoint: jaeger:4317
     tls:
       insecure: true
 
-  # Export metrics to Prometheus
+  # Export metrics to Prometheus (scraped by the prometheus service via
+  # prometheus.yml's otel-collector job, targeting this exporter's :8889).
   prometheus:
     endpoint: "0.0.0.0:8889"
     namespace: cidx
 
-  # Debug output for troubleshooting
+  # Debug output for troubleshooting AND as the log-signal acceptance
+  # evidence path (Story #1676 AC8) -- there is no log backend/query UI in
+  # this stack, so a captured debug-exporter log line is the corroborating
+  # content-level evidence, paired with the otelcol_receiver_accepted_log_records
+  # self-metrics counter for acceptance-level evidence.
   debug:
     verbosity: detailed
 
 service:
+  extensions: [health_check]
   pipelines:
     traces:
       receivers: [otlp]
       processors: [memory_limiter, batch]
-      exporters: [jaeger, debug]
+      exporters: [otlp/jaeger, debug]
     metrics:
       receivers: [otlp]
       processors: [memory_limiter, batch]
@@ -51,7 +81,9 @@ service:
       processors: [memory_limiter, batch]
       exporters: [debug]
 
-  # Enable telemetry on the collector itself
+  # Enable telemetry on the collector itself (self-metrics on :8888,
+  # including otelcol_receiver_accepted_spans / _metric_points / _log_records
+  # -- the acceptance-counter evidence Story #1676 AC8 relies on).
   telemetry:
     logs:
       level: info

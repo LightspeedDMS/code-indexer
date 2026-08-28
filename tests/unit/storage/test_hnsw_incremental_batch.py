@@ -9,7 +9,7 @@ from typing import List, Dict, Any
 
 import numpy as np
 
-from src.code_indexer.storage.filesystem_vector_store import FilesystemVectorStore
+from code_indexer.storage.filesystem_vector_store import FilesystemVectorStore
 
 # test_incremental_hnsw_update_vs_full_rebuild constants (Issue #1548 review
 # finding 8).

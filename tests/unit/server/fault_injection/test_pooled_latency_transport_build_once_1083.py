@@ -267,9 +267,9 @@ class _StubFactory:
 
 class TestProvidersDoNotBuildLatencyTransportOnPooledPath:
     def test_voyage_does_not_build_latency_transport(self) -> None:
-        from src.code_indexer.config import VoyageAIConfig
-        from src.code_indexer.services import voyage_ai as voyage_mod
-        from src.code_indexer.services.voyage_ai import VoyageAIClient
+        from code_indexer.config import VoyageAIConfig
+        from code_indexer.services import voyage_ai as voyage_mod
+        from code_indexer.services.voyage_ai import VoyageAIClient
 
         with patch.dict(os.environ, {"VOYAGE_API_KEY": "k-1083"}):
             client = VoyageAIClient(VoyageAIConfig(model="voyage-code-3"))
@@ -293,9 +293,9 @@ class TestProvidersDoNotBuildLatencyTransportOnPooledPath:
         )
 
     def test_cohere_does_not_build_latency_transport(self) -> None:
-        from src.code_indexer.config import CohereConfig
-        from src.code_indexer.services import cohere_embedding as cohere_mod
-        from src.code_indexer.services.cohere_embedding import CohereEmbeddingProvider
+        from code_indexer.config import CohereConfig
+        from code_indexer.services import cohere_embedding as cohere_mod
+        from code_indexer.services.cohere_embedding import CohereEmbeddingProvider
 
         with patch.dict(os.environ, {"CO_API_KEY": "k-1083"}):
             provider = CohereEmbeddingProvider(CohereConfig(model="embed-v4.0"))

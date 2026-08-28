@@ -38,17 +38,17 @@ class TestForceResyncRoute:
         AC8: Force re-sync endpoint must require valid admin session.
         When no session, redirect to login.
         """
-        from src.code_indexer.server.web.routes import force_resync_golden_repo
+        from code_indexer.server.web.routes import force_resync_golden_repo
 
         mock_request = _make_request()
 
         with (
             patch(
-                "src.code_indexer.server.web.routes._require_admin_session",
+                "code_indexer.server.web.routes._require_admin_session",
                 return_value=None,
             ),
             patch(
-                "src.code_indexer.server.web.routes._create_login_redirect"
+                "code_indexer.server.web.routes._create_login_redirect"
             ) as mock_redirect,
         ):
             mock_redirect.return_value = HTMLResponse(content="", status_code=401)
@@ -68,22 +68,22 @@ class TestForceResyncRoute:
         AC8: CSRF protection on force re-sync endpoint.
         POST with missing CSRF token must be rejected with error page.
         """
-        from src.code_indexer.server.web.routes import force_resync_golden_repo
+        from code_indexer.server.web.routes import force_resync_golden_repo
 
         mock_request = _make_request()
         mock_session = _make_session()
 
         with (
             patch(
-                "src.code_indexer.server.web.routes._require_admin_session",
+                "code_indexer.server.web.routes._require_admin_session",
                 return_value=mock_session,
             ),
             patch(
-                "src.code_indexer.server.web.routes.validate_login_csrf_token",
+                "code_indexer.server.web.routes.validate_login_csrf_token",
                 return_value=False,
             ),
             patch(
-                "src.code_indexer.server.web.routes._create_golden_repos_page_response"
+                "code_indexer.server.web.routes._create_golden_repos_page_response"
             ) as mock_page,
         ):
             mock_page.return_value = HTMLResponse(content="<html>error</html>")
@@ -105,7 +105,7 @@ class TestForceResyncRoute:
         AC8: POST with invalid CSRF token must be rejected.
         No force re-sync operation triggered (verified by scheduler not called).
         """
-        from src.code_indexer.server.web.routes import force_resync_golden_repo
+        from code_indexer.server.web.routes import force_resync_golden_repo
 
         mock_request = _make_request()
         mock_session = _make_session()
@@ -121,19 +121,19 @@ class TestForceResyncRoute:
 
         with (
             patch(
-                "src.code_indexer.server.web.routes._require_admin_session",
+                "code_indexer.server.web.routes._require_admin_session",
                 return_value=mock_session,
             ),
             patch(
-                "src.code_indexer.server.web.routes.validate_login_csrf_token",
+                "code_indexer.server.web.routes.validate_login_csrf_token",
                 return_value=False,  # Invalid CSRF
             ),
             patch(
-                "src.code_indexer.server.web.routes._get_golden_repo_manager",
+                "code_indexer.server.web.routes._get_golden_repo_manager",
                 return_value=mock_manager,
             ),
             patch(
-                "src.code_indexer.server.web.routes._create_golden_repos_page_response"
+                "code_indexer.server.web.routes._create_golden_repos_page_response"
             ) as mock_page,
         ):
             import code_indexer.server.app as app_module
@@ -159,7 +159,7 @@ class TestForceResyncRoute:
         AC3: Successful force re-sync must call
         trigger_refresh_for_repo(alias, force_reset=True).
         """
-        from src.code_indexer.server.web.routes import force_resync_golden_repo
+        from code_indexer.server.web.routes import force_resync_golden_repo
 
         mock_request = _make_request()
         mock_session = _make_session(username="admin")
@@ -175,19 +175,19 @@ class TestForceResyncRoute:
 
         with (
             patch(
-                "src.code_indexer.server.web.routes._require_admin_session",
+                "code_indexer.server.web.routes._require_admin_session",
                 return_value=mock_session,
             ),
             patch(
-                "src.code_indexer.server.web.routes.validate_login_csrf_token",
+                "code_indexer.server.web.routes.validate_login_csrf_token",
                 return_value=True,
             ),
             patch(
-                "src.code_indexer.server.web.routes._get_golden_repo_manager",
+                "code_indexer.server.web.routes._get_golden_repo_manager",
                 return_value=mock_manager,
             ),
             patch(
-                "src.code_indexer.server.web.routes._create_golden_repos_page_response"
+                "code_indexer.server.web.routes._create_golden_repos_page_response"
             ) as mock_page,
         ):
             import code_indexer.server.app as app_module
@@ -216,7 +216,7 @@ class TestForceResyncRoute:
         """
         AC3: Success response must include job ID.
         """
-        from src.code_indexer.server.web.routes import force_resync_golden_repo
+        from code_indexer.server.web.routes import force_resync_golden_repo
 
         mock_request = _make_request()
         mock_session = _make_session(username="admin")
@@ -232,19 +232,19 @@ class TestForceResyncRoute:
 
         with (
             patch(
-                "src.code_indexer.server.web.routes._require_admin_session",
+                "code_indexer.server.web.routes._require_admin_session",
                 return_value=mock_session,
             ),
             patch(
-                "src.code_indexer.server.web.routes.validate_login_csrf_token",
+                "code_indexer.server.web.routes.validate_login_csrf_token",
                 return_value=True,
             ),
             patch(
-                "src.code_indexer.server.web.routes._get_golden_repo_manager",
+                "code_indexer.server.web.routes._get_golden_repo_manager",
                 return_value=mock_manager,
             ),
             patch(
-                "src.code_indexer.server.web.routes._create_golden_repos_page_response"
+                "code_indexer.server.web.routes._create_golden_repos_page_response"
             ) as mock_page,
         ):
             import code_indexer.server.app as app_module
@@ -271,7 +271,7 @@ class TestForceResyncRoute:
         """
         AC3: Error response when repo not found in golden_repos.
         """
-        from src.code_indexer.server.web.routes import force_resync_golden_repo
+        from code_indexer.server.web.routes import force_resync_golden_repo
 
         mock_request = _make_request()
         mock_session = _make_session()
@@ -282,19 +282,19 @@ class TestForceResyncRoute:
 
         with (
             patch(
-                "src.code_indexer.server.web.routes._require_admin_session",
+                "code_indexer.server.web.routes._require_admin_session",
                 return_value=mock_session,
             ),
             patch(
-                "src.code_indexer.server.web.routes.validate_login_csrf_token",
+                "code_indexer.server.web.routes.validate_login_csrf_token",
                 return_value=True,
             ),
             patch(
-                "src.code_indexer.server.web.routes._get_golden_repo_manager",
+                "code_indexer.server.web.routes._get_golden_repo_manager",
                 return_value=mock_manager,
             ),
             patch(
-                "src.code_indexer.server.web.routes._create_golden_repos_page_response"
+                "code_indexer.server.web.routes._create_golden_repos_page_response"
             ) as mock_page,
         ):
             mock_page.return_value = HTMLResponse(content="<html>error</html>")
@@ -318,7 +318,7 @@ class TestForceResyncRoute:
         authoritative `get_golden_repo()` read, not the raw per-worker
         cache dict.
         """
-        from src.code_indexer.server.web.routes import force_resync_golden_repo
+        from code_indexer.server.web.routes import force_resync_golden_repo
 
         mock_request = _make_request()
         mock_session = _make_session(username="admin")
@@ -339,19 +339,19 @@ class TestForceResyncRoute:
 
         with (
             patch(
-                "src.code_indexer.server.web.routes._require_admin_session",
+                "code_indexer.server.web.routes._require_admin_session",
                 return_value=mock_session,
             ),
             patch(
-                "src.code_indexer.server.web.routes.validate_login_csrf_token",
+                "code_indexer.server.web.routes.validate_login_csrf_token",
                 return_value=True,
             ),
             patch(
-                "src.code_indexer.server.web.routes._get_golden_repo_manager",
+                "code_indexer.server.web.routes._get_golden_repo_manager",
                 return_value=mock_manager,
             ),
             patch(
-                "src.code_indexer.server.web.routes._create_golden_repos_page_response"
+                "code_indexer.server.web.routes._create_golden_repos_page_response"
             ) as mock_page,
         ):
             import code_indexer.server.app as app_module
@@ -384,7 +384,7 @@ class TestForceResyncRoute:
         """
         AC3: Error response when RefreshScheduler is not available.
         """
-        from src.code_indexer.server.web.routes import force_resync_golden_repo
+        from code_indexer.server.web.routes import force_resync_golden_repo
 
         mock_request = _make_request()
         mock_session = _make_session()
@@ -397,19 +397,19 @@ class TestForceResyncRoute:
 
         with (
             patch(
-                "src.code_indexer.server.web.routes._require_admin_session",
+                "code_indexer.server.web.routes._require_admin_session",
                 return_value=mock_session,
             ),
             patch(
-                "src.code_indexer.server.web.routes.validate_login_csrf_token",
+                "code_indexer.server.web.routes.validate_login_csrf_token",
                 return_value=True,
             ),
             patch(
-                "src.code_indexer.server.web.routes._get_golden_repo_manager",
+                "code_indexer.server.web.routes._get_golden_repo_manager",
                 return_value=mock_manager,
             ),
             patch(
-                "src.code_indexer.server.web.routes._create_golden_repos_page_response"
+                "code_indexer.server.web.routes._create_golden_repos_page_response"
             ) as mock_page,
         ):
             import code_indexer.server.app as app_module

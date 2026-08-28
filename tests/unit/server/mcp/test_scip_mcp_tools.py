@@ -381,63 +381,44 @@ class TestSCIPContextTool:
 
 
 class TestSCIPImpactDepthClamp:
-    """Tests for scip_impact depth clamping (Bug #1599).
+    """Tests for scip_impact depth validation (Bug #1599 depth-clamp family;
+    contract corrected by Bug #1672).
 
-    scip_impact's depth parameter must be clamped to [1, 10] at the handler
-    layer, mirroring the existing clamp pattern scip_callchain already uses
-    for its max_depth parameter.
+    Bug #1672: scip_impact's depth parameter must be REJECTED (success:
+    False, empty affected_symbols/affected_files, service never called) when
+    out of the documented [1, 10] range -- mirroring scip_dependencies'/
+    scip_dependents' loud-reject contract (Bug #1614) and scip_callchain's
+    loud-reject contract for max_depth (Bug #1603). The prior Bug #1599 fix
+    silently clamped out-of-range depth to the nearest bound (the behavior
+    this test class replaces), hiding the caller's mistake behind a
+    misleading success:true.
     """
 
-    def test_scip_impact_depth_far_above_max_is_clamped_to_10(self, mock_user):
-        """depth=100000 must be clamped down to the documented max of 10."""
+    @pytest.mark.parametrize("raw_depth", [100000, 11, 0, -5])
+    def test_scip_impact_depth_out_of_range_is_rejected(self, mock_user, raw_depth):
+        """depth outside [1, 10] (above max or below min) must be rejected
+        loudly rather than silently clamped to the nearest bound."""
         from code_indexer.server.mcp.handlers import scip_impact
 
-        params = {"symbol": "UserService", "depth": 100000}
-
         mock_service = Mock()
-        mock_service.analyze_impact.return_value = {
-            "target_symbol": "com.example.UserService",
-            "depth_analyzed": 10,
-            "total_affected": 0,
-            "truncated": False,
-            "affected_symbols": [],
-            "affected_files": [],
-        }
+        mock_service.analyze_impact.return_value = {}
 
         with patch(
             "code_indexer.server.mcp.handlers._get_scip_query_service",
             return_value=mock_service,
         ):
-            scip_impact(params, mock_user)
+            response = scip_impact(
+                {"symbol": "UserService", "depth": raw_depth}, mock_user
+            )
 
-        _, kwargs = mock_service.analyze_impact.call_args
-        assert kwargs["depth"] == 10
-
-    @pytest.mark.parametrize("raw_depth", [0, -5])
-    def test_scip_impact_depth_below_min_is_clamped_to_1(self, mock_user, raw_depth):
-        """depth=0 or a negative depth must be clamped up to the min of 1."""
-        from code_indexer.server.mcp.handlers import scip_impact
-
-        params = {"symbol": "UserService", "depth": raw_depth}
-
-        mock_service = Mock()
-        mock_service.analyze_impact.return_value = {
-            "target_symbol": "com.example.UserService",
-            "depth_analyzed": 1,
-            "total_affected": 0,
-            "truncated": False,
-            "affected_symbols": [],
-            "affected_files": [],
-        }
-
-        with patch(
-            "code_indexer.server.mcp.handlers._get_scip_query_service",
-            return_value=mock_service,
-        ):
-            scip_impact(params, mock_user)
-
-        _, kwargs = mock_service.analyze_impact.call_args
-        assert kwargs["depth"] == 1
+        data = json.loads(response["content"][0]["text"])
+        assert data["success"] is False
+        assert "depth" in data["error"]
+        assert str(raw_depth) in data["error"]
+        assert data["affected_symbols"] == []
+        assert data["affected_files"] == []
+        assert data["symbol"] == "UserService"
+        mock_service.analyze_impact.assert_not_called()
 
     def test_scip_impact_default_depth_unchanged(self, mock_user):
         """No depth param supplied must still default to 3, unaffected by
@@ -464,6 +445,37 @@ class TestSCIPImpactDepthClamp:
 
         _, kwargs = mock_service.analyze_impact.call_args
         assert kwargs["depth"] == 3
+
+    @pytest.mark.parametrize("valid_depth", [1, 5, 10])
+    def test_scip_impact_depth_within_range_still_succeeds(
+        self, mock_user, valid_depth
+    ):
+        """Every depth within the documented [1, 10] range must still
+        succeed unaffected by the new rejection guard."""
+        from code_indexer.server.mcp.handlers import scip_impact
+
+        mock_service = Mock()
+        mock_service.analyze_impact.return_value = {
+            "target_symbol": "com.example.UserService",
+            "depth_analyzed": valid_depth,
+            "total_affected": 0,
+            "truncated": False,
+            "affected_symbols": [],
+            "affected_files": [],
+        }
+
+        with patch(
+            "code_indexer.server.mcp.handlers._get_scip_query_service",
+            return_value=mock_service,
+        ):
+            response = scip_impact(
+                {"symbol": "UserService", "depth": valid_depth}, mock_user
+            )
+
+        data = json.loads(response["content"][0]["text"])
+        assert data["success"] is True
+        _, kwargs = mock_service.analyze_impact.call_args
+        assert kwargs["depth"] == valid_depth
 
     @pytest.mark.parametrize("bad_max_depth", [100000, -3])
     def test_scip_callchain_max_depth_out_of_range_is_rejected(

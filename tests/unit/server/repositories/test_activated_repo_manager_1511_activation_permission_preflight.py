@@ -29,11 +29,11 @@ from typing import Any, Dict, List, Tuple
 
 import pytest
 
-from src.code_indexer.server.repositories.activated_repo_manager import (
+from code_indexer.server.repositories.activated_repo_manager import (
     ActivatedRepoManager,
 )
-from src.code_indexer.server.repositories.golden_repo_manager import GoldenRepo
-from src.code_indexer.server.utils.config_manager import ServerResourceConfig
+from code_indexer.server.repositories.golden_repo_manager import GoldenRepo
+from code_indexer.server.utils.config_manager import ServerResourceConfig
 
 
 def _mode(path: Path) -> int:

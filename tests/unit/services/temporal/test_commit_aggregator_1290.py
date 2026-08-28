@@ -15,12 +15,12 @@ from pathlib import Path
 
 import pytest
 
-from src.code_indexer.services.temporal.commit_aggregator import (
+from code_indexer.services.temporal.commit_aggregator import (
     build_aggregated_document,
     commit_kind,
     get_file_changes,
 )
-from src.code_indexer.services.temporal.models import CommitInfo
+from code_indexer.services.temporal.models import CommitInfo
 
 
 _GIT_ENV_EXTRA = {

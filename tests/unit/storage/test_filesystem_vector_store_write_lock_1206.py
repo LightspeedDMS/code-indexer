@@ -23,7 +23,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
-from src.code_indexer.storage.filesystem_vector_store import FilesystemVectorStore
+from code_indexer.storage.filesystem_vector_store import FilesystemVectorStore
 
 
 def _make_store(base: str) -> FilesystemVectorStore:

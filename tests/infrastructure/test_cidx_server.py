@@ -119,12 +119,6 @@ class UpdateUserRequest(BaseModel):
     role: str = Field(..., min_length=1)
 
 
-class ChangePasswordRequest(BaseModel):
-    """Change password request model."""
-
-    new_password: str = Field(..., min_length=1)
-
-
 class TestCIDXServer:
     """Real CIDX server for testing with authentic JWT and HTTP operations.
 
@@ -191,30 +185,40 @@ class TestCIDXServer:
         # Authentication endpoints
         app.post("/auth/login")(self._login)
         app.post("/auth/refresh")(self._refresh_token)
-        app.get("/auth/me")(self._get_current_user)
 
         # Repository endpoints
-        app.get("/api/repositories")(self._list_repositories)
+        # NOTE: real production server registers this list endpoint at
+        # "/api/repos" (see RemoteQueryClient.list_repositories()), not
+        # "/api/repositories" -- kept aligned with the real route (Bug #1708).
+        app.get("/api/repos")(self._list_repositories)
         app.get("/api/repositories/{repo_id}")(self._get_repository)
         app.post("/api/repositories/{repo_id}/sync")(self._sync_repository)
-        app.delete("/api/repositories/{repo_id}")(self._delete_repository)
 
         # Job management endpoints
         app.get("/api/jobs")(self._list_jobs)
+        # KNOWN EXCEPTION (Bug #1708 audit, tracked follow-up #1720): the real
+        # production server has NO "/status"-suffixed route -- only
+        # "GET /api/jobs/{job_id}" (see inline_jobs.py). This fake route is a
+        # superset by the strict route-table definition, but it is left in
+        # place deliberately: real production client code
+        # (base_client.py's get_job_status(), used by cli.py and
+        # remote/polling.py) genuinely calls this exact "/status" URL, which
+        # 404s against the real server. ~15+ currently-passing tests across
+        # multiple files depend on this route to exercise that (buggy) real
+        # client method. Removing it here would silently delete that
+        # coverage without fixing the underlying client bug. See #1720 for
+        # the correct fix (align base_client.py's URL with the real route).
         app.get("/api/jobs/{job_id}/status")(self._get_job_status)
         app.delete("/api/jobs/{job_id}")(self._cancel_job)
 
         # Query endpoints
         app.post("/api/query")(self._query_code)
-        app.get("/api/v1/repositories/{repo_id}/query")(self._query_repository_code)
 
         # Admin endpoints - Foundation #1 compliant (no mocking, real implementation)
         app.post("/api/admin/users", status_code=201)(self._create_user)
         app.get("/api/admin/users")(self._list_users)
-        app.get("/api/admin/users/{username}")(self._get_user)
         app.put("/api/admin/users/{username}")(self._update_user)
         app.delete("/api/admin/users/{username}")(self._delete_user)
-        app.post("/api/admin/users/{username}/password")(self._change_user_password)
 
         # Health endpoint
         app.get("/health")(self._health_check)
@@ -497,22 +501,6 @@ class TestCIDXServer:
         except jwt.InvalidTokenError:
             raise HTTPException(status_code=401, detail="Invalid token")
 
-    async def _get_current_user(
-        self, credentials: HTTPAuthorizationCredentials = Depends(HTTPBearer())
-    ):
-        """Get current user from JWT token.
-
-        Args:
-            credentials: HTTP authorization credentials
-
-        Returns:
-            Current user data
-        """
-        # Verify token but don't need the payload for current user data
-        self._verify_jwt_token(credentials.credentials)  # Verify token is valid
-        user_data = self.active_tokens[credentials.credentials]["user_data"]
-        return user_data
-
     # API Endpoints
 
     async def _login(self, login_request: LoginRequest):
@@ -616,22 +604,6 @@ class TestCIDXServer:
             "status": "started",
             "repository_id": repo_id,
         }
-
-    async def _delete_repository(self, repo_id: str, user=Depends(lambda: None)):
-        """Delete repository.
-
-        Args:
-            repo_id: Repository ID
-
-        Returns:
-            Deletion confirmation
-        """
-        if repo_id not in self.repositories:
-            raise HTTPException(status_code=404, detail="Repository not found")
-
-        del self.repositories[repo_id]
-
-        return {"message": f"Repository {repo_id} deleted successfully"}
 
     async def _list_jobs(
         self,
@@ -791,112 +763,6 @@ class TestCIDXServer:
             "query": query_request.query,
         }
 
-    async def _query_repository_code(
-        self,
-        repo_id: str,
-        query: str,
-        limit: int = 10,
-        include_source: bool = True,
-        min_score: float = 0.0,
-        language: Optional[str] = None,
-        path: Optional[str] = None,
-        user=Depends(lambda: None),
-    ):
-        """Execute semantic code query on specific repository.
-
-        Args:
-            repo_id: Repository ID to query
-            query: Search query text
-            limit: Maximum number of results
-            include_source: Whether to include source code
-            min_score: Minimum relevance score
-            language: Language filter
-            path: Path filter
-
-        Returns:
-            Query results for the repository
-        """
-        # Verify repository exists
-        if repo_id not in self.repositories:
-            raise HTTPException(status_code=404, detail="Repository not found")
-
-        # Simulate repository-specific query results with correct QueryResultItem schema
-        mock_results = [
-            {
-                "file_path": f"/{repo_id}/src/auth.py",
-                "line_number": 25,
-                "code_snippet": (
-                    f"def authenticate_user(): # matches '{query}'"
-                    if include_source
-                    else ""
-                ),
-                "similarity_score": 0.92,
-                "repository_alias": repo_id,
-                "file_last_modified": None,
-                "indexed_timestamp": None,
-            },
-            {
-                "file_path": f"/{repo_id}/src/login.py",
-                "line_number": 12,
-                "code_snippet": (
-                    f"class LoginManager: # related to '{query}'"
-                    if include_source
-                    else ""
-                ),
-                "similarity_score": 0.85,
-                "repository_alias": repo_id,
-                "file_last_modified": None,
-                "indexed_timestamp": None,
-            },
-            {
-                "file_path": f"/{repo_id}/tests/test_auth.py",
-                "line_number": 8,
-                "code_snippet": (
-                    f"def test_authentication(): # test for '{query}'"
-                    if include_source
-                    else ""
-                ),
-                "similarity_score": 0.73,
-                "repository_alias": repo_id,
-                "file_last_modified": None,
-                "indexed_timestamp": None,
-            },
-        ]
-
-        # Apply language filter if specified
-        if language:
-            mock_results = [
-                r
-                for r in mock_results
-                if cast(str, r["file_path"]).endswith(f".{language}")
-            ]
-
-        # Apply path filter if specified
-        if path:
-            # Simple path matching - in real implementation would be more sophisticated
-            mock_results = [
-                r
-                for r in mock_results
-                if path.replace("*", "") in r["file_path"]  # type: ignore[operator]
-            ]
-
-        # Filter by minimum score
-        filtered_results = [
-            r
-            for r in mock_results
-            if r["similarity_score"] >= min_score  # type: ignore[operator]
-        ]
-
-        # Apply limit
-        limited_results = filtered_results[:limit]
-
-        return {
-            "results": limited_results,
-            "total": len(limited_results),
-            "query": query,
-            "repository_id": repo_id,
-        }
-
     def _require_admin_user(self, user_data: Dict[str, Any]) -> None:
         """Check if current user has admin privileges.
 
@@ -999,35 +865,6 @@ class TestCIDXServer:
             "total": total,
         }
 
-    async def _get_user(
-        self,
-        username: str,
-        credentials: HTTPAuthorizationCredentials = Depends(HTTPBearer()),
-    ):
-        """Get user by username (admin only).
-
-        Args:
-            username: Username to retrieve
-            credentials: JWT token credentials
-        """
-        # Verify JWT token and get current user
-        self._verify_jwt_token(credentials.credentials)
-        current_user = self.active_tokens[credentials.credentials]["user_data"]
-        self._require_admin_user(current_user)
-
-        if username not in self.users:
-            raise HTTPException(status_code=404, detail=f"User '{username}' not found")
-
-        user_data = self.users[username]
-        user_response = {
-            "username": user_data["username"],
-            "user_id": user_data["user_id"],
-            "role": user_data["role"],
-            "created_at": user_data["created_at"],
-        }
-
-        return {"user": user_response}
-
     async def _update_user(
         self,
         username: str,
@@ -1094,36 +931,6 @@ class TestCIDXServer:
         del self.users[username]
 
         return {"message": f"User '{username}' deleted successfully"}
-
-    async def _change_user_password(
-        self,
-        username: str,
-        password_request: ChangePasswordRequest,
-        credentials: HTTPAuthorizationCredentials = Depends(HTTPBearer()),
-    ):
-        """Change user password (admin only).
-
-        Args:
-            username: Username whose password to change
-            password_request: New password data
-            credentials: JWT token credentials
-        """
-        # Verify JWT token and get current user
-        self._verify_jwt_token(credentials.credentials)
-        current_user = self.active_tokens[credentials.credentials]["user_data"]
-        self._require_admin_user(current_user)
-
-        if username not in self.users:
-            raise HTTPException(status_code=404, detail=f"User '{username}' not found")
-
-        # Validate password (basic validation - non-empty)
-        if not password_request.new_password:
-            raise HTTPException(status_code=400, detail="Password cannot be empty")
-
-        # Change password
-        self.users[username]["password"] = password_request.new_password
-
-        return {"message": f"Password changed successfully for user '{username}'"}
 
     async def _health_check(self):
         """Health check endpoint.

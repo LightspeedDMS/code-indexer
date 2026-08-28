@@ -8,16 +8,16 @@ All tests use real components following MESSI Rule #1: No mocks.
 
 import pytest
 
-from src.code_indexer.server.utils.config_manager import TelemetryConfig
+from code_indexer.server.utils.config_manager import TelemetryConfig
 
 
 def reset_all_singletons():
     """Reset all singletons to ensure clean test state."""
-    from src.code_indexer.server.telemetry import (
+    from code_indexer.server.telemetry import (
         reset_telemetry_manager,
         reset_machine_metrics_exporter,
     )
-    from src.code_indexer.server.services.system_metrics_collector import (
+    from code_indexer.server.services.system_metrics_collector import (
         reset_system_metrics_collector,
     )
 
@@ -37,7 +37,7 @@ class TestMetricsInstrumentationImport:
 
     def test_application_metrics_can_be_imported(self):
         """ApplicationMetrics class can be imported."""
-        from src.code_indexer.server.telemetry.metrics_instrumentation import (
+        from code_indexer.server.telemetry.metrics_instrumentation import (
             ApplicationMetrics,
         )
 
@@ -45,7 +45,7 @@ class TestMetricsInstrumentationImport:
 
     def test_get_application_metrics_function_exists(self):
         """get_application_metrics() function is exported."""
-        from src.code_indexer.server.telemetry.metrics_instrumentation import (
+        from code_indexer.server.telemetry.metrics_instrumentation import (
             get_application_metrics,
         )
 
@@ -64,7 +64,7 @@ class TestApplicationMetricsCreation:
     def setup_method(self):
         """Reset singletons before each test."""
         reset_all_singletons()
-        from src.code_indexer.server.telemetry.metrics_instrumentation import (
+        from code_indexer.server.telemetry.metrics_instrumentation import (
             reset_application_metrics,
         )
 
@@ -73,7 +73,7 @@ class TestApplicationMetricsCreation:
     def teardown_method(self):
         """Reset singletons after each test."""
         reset_all_singletons()
-        from src.code_indexer.server.telemetry.metrics_instrumentation import (
+        from code_indexer.server.telemetry.metrics_instrumentation import (
             reset_application_metrics,
         )
 
@@ -83,8 +83,8 @@ class TestApplicationMetricsCreation:
         """
         ApplicationMetrics is created when telemetry is enabled.
         """
-        from src.code_indexer.server.telemetry import get_telemetry_manager
-        from src.code_indexer.server.telemetry.metrics_instrumentation import (
+        from code_indexer.server.telemetry import get_telemetry_manager
+        from code_indexer.server.telemetry.metrics_instrumentation import (
             ApplicationMetrics,
         )
 
@@ -104,8 +104,8 @@ class TestApplicationMetricsCreation:
         """
         ApplicationMetrics is not active when telemetry disabled.
         """
-        from src.code_indexer.server.telemetry import get_telemetry_manager
-        from src.code_indexer.server.telemetry.metrics_instrumentation import (
+        from code_indexer.server.telemetry import get_telemetry_manager
+        from code_indexer.server.telemetry.metrics_instrumentation import (
             ApplicationMetrics,
         )
 
@@ -133,7 +133,7 @@ class TestSearchMetrics:
     def setup_method(self):
         """Reset singletons before each test."""
         reset_all_singletons()
-        from src.code_indexer.server.telemetry.metrics_instrumentation import (
+        from code_indexer.server.telemetry.metrics_instrumentation import (
             reset_application_metrics,
         )
 
@@ -142,7 +142,7 @@ class TestSearchMetrics:
     def teardown_method(self):
         """Reset singletons after each test."""
         reset_all_singletons()
-        from src.code_indexer.server.telemetry.metrics_instrumentation import (
+        from code_indexer.server.telemetry.metrics_instrumentation import (
             reset_application_metrics,
         )
 
@@ -152,8 +152,8 @@ class TestSearchMetrics:
         """
         record_search_request() increments the search requests counter.
         """
-        from src.code_indexer.server.telemetry import get_telemetry_manager
-        from src.code_indexer.server.telemetry.metrics_instrumentation import (
+        from code_indexer.server.telemetry import get_telemetry_manager
+        from code_indexer.server.telemetry.metrics_instrumentation import (
             ApplicationMetrics,
         )
 
@@ -181,8 +181,8 @@ class TestSearchMetrics:
         """
         record_search_request() records duration in histogram.
         """
-        from src.code_indexer.server.telemetry import get_telemetry_manager
-        from src.code_indexer.server.telemetry.metrics_instrumentation import (
+        from code_indexer.server.telemetry import get_telemetry_manager
+        from code_indexer.server.telemetry.metrics_instrumentation import (
             ApplicationMetrics,
         )
 
@@ -210,8 +210,8 @@ class TestSearchMetrics:
         """
         record_search_request() records results count in histogram.
         """
-        from src.code_indexer.server.telemetry import get_telemetry_manager
-        from src.code_indexer.server.telemetry.metrics_instrumentation import (
+        from code_indexer.server.telemetry import get_telemetry_manager
+        from code_indexer.server.telemetry.metrics_instrumentation import (
             ApplicationMetrics,
         )
 
@@ -248,7 +248,7 @@ class TestFTSMetrics:
     def setup_method(self):
         """Reset singletons before each test."""
         reset_all_singletons()
-        from src.code_indexer.server.telemetry.metrics_instrumentation import (
+        from code_indexer.server.telemetry.metrics_instrumentation import (
             reset_application_metrics,
         )
 
@@ -257,7 +257,7 @@ class TestFTSMetrics:
     def teardown_method(self):
         """Reset singletons after each test."""
         reset_all_singletons()
-        from src.code_indexer.server.telemetry.metrics_instrumentation import (
+        from code_indexer.server.telemetry.metrics_instrumentation import (
             reset_application_metrics,
         )
 
@@ -267,8 +267,8 @@ class TestFTSMetrics:
         """
         record_fts_request() increments the FTS requests counter.
         """
-        from src.code_indexer.server.telemetry import get_telemetry_manager
-        from src.code_indexer.server.telemetry.metrics_instrumentation import (
+        from code_indexer.server.telemetry import get_telemetry_manager
+        from code_indexer.server.telemetry.metrics_instrumentation import (
             ApplicationMetrics,
         )
 
@@ -304,7 +304,7 @@ class TestEmbeddingMetrics:
     def setup_method(self):
         """Reset singletons before each test."""
         reset_all_singletons()
-        from src.code_indexer.server.telemetry.metrics_instrumentation import (
+        from code_indexer.server.telemetry.metrics_instrumentation import (
             reset_application_metrics,
         )
 
@@ -313,7 +313,7 @@ class TestEmbeddingMetrics:
     def teardown_method(self):
         """Reset singletons after each test."""
         reset_all_singletons()
-        from src.code_indexer.server.telemetry.metrics_instrumentation import (
+        from code_indexer.server.telemetry.metrics_instrumentation import (
             reset_application_metrics,
         )
 
@@ -323,8 +323,8 @@ class TestEmbeddingMetrics:
         """
         record_embedding_request() increments the embedding requests counter.
         """
-        from src.code_indexer.server.telemetry import get_telemetry_manager
-        from src.code_indexer.server.telemetry.metrics_instrumentation import (
+        from code_indexer.server.telemetry import get_telemetry_manager
+        from code_indexer.server.telemetry.metrics_instrumentation import (
             ApplicationMetrics,
         )
 
@@ -351,8 +351,8 @@ class TestEmbeddingMetrics:
         """
         record_embedding_request() records token count.
         """
-        from src.code_indexer.server.telemetry import get_telemetry_manager
-        from src.code_indexer.server.telemetry.metrics_instrumentation import (
+        from code_indexer.server.telemetry import get_telemetry_manager
+        from code_indexer.server.telemetry.metrics_instrumentation import (
             ApplicationMetrics,
         )
 
@@ -388,7 +388,7 @@ class TestMetricsAttributes:
     def setup_method(self):
         """Reset singletons before each test."""
         reset_all_singletons()
-        from src.code_indexer.server.telemetry.metrics_instrumentation import (
+        from code_indexer.server.telemetry.metrics_instrumentation import (
             reset_application_metrics,
         )
 
@@ -397,7 +397,7 @@ class TestMetricsAttributes:
     def teardown_method(self):
         """Reset singletons after each test."""
         reset_all_singletons()
-        from src.code_indexer.server.telemetry.metrics_instrumentation import (
+        from code_indexer.server.telemetry.metrics_instrumentation import (
             reset_application_metrics,
         )
 
@@ -407,8 +407,8 @@ class TestMetricsAttributes:
         """
         Search metrics can record error status.
         """
-        from src.code_indexer.server.telemetry import get_telemetry_manager
-        from src.code_indexer.server.telemetry.metrics_instrumentation import (
+        from code_indexer.server.telemetry import get_telemetry_manager
+        from code_indexer.server.telemetry.metrics_instrumentation import (
             ApplicationMetrics,
         )
 
@@ -435,8 +435,8 @@ class TestMetricsAttributes:
         """
         Recording metrics is a no-op when telemetry is disabled.
         """
-        from src.code_indexer.server.telemetry import get_telemetry_manager
-        from src.code_indexer.server.telemetry.metrics_instrumentation import (
+        from code_indexer.server.telemetry import get_telemetry_manager
+        from code_indexer.server.telemetry.metrics_instrumentation import (
             ApplicationMetrics,
         )
 

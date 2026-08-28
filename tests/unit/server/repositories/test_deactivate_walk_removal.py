@@ -17,7 +17,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from src.code_indexer.server.repositories.activated_repo_manager import (
+from code_indexer.server.repositories.activated_repo_manager import (
     ActivatedRepoManager,
 )
 
@@ -152,7 +152,7 @@ class TestNoLeakDetectionOnSuccessPathByDefault:
             manager, "_detect_resource_leaks", side_effect=tracking_detect
         ):
             with patch(
-                "src.code_indexer.server.repositories.activated_repo_manager._predeactivation_leak_scan_enabled",
+                "code_indexer.server.repositories.activated_repo_manager._predeactivation_leak_scan_enabled",
                 return_value=False,
             ):
                 result = manager._do_deactivate_single(username, alias, metadata)
@@ -199,11 +199,11 @@ class TestLeakDetectionOnRmtreeFailurePath:
             manager, "_detect_resource_leaks", side_effect=tracking_detect
         ):
             with patch(
-                "src.code_indexer.server.repositories.activated_repo_manager.os.rename",
+                "code_indexer.server.repositories.activated_repo_manager.os.rename",
                 side_effect=rename_raises,
             ):
                 with patch(
-                    "src.code_indexer.server.repositories.activated_repo_manager._predeactivation_leak_scan_enabled",
+                    "code_indexer.server.repositories.activated_repo_manager._predeactivation_leak_scan_enabled",
                     return_value=False,
                 ):
                     result = manager._do_deactivate_single(username, alias, metadata)
@@ -248,7 +248,7 @@ class TestLeakDetectionRestoredByFlag:
             manager, "_detect_resource_leaks", side_effect=tracking_detect
         ):
             with patch(
-                "src.code_indexer.server.repositories.activated_repo_manager._predeactivation_leak_scan_enabled",
+                "code_indexer.server.repositories.activated_repo_manager._predeactivation_leak_scan_enabled",
                 return_value=True,
             ):
                 result = manager._do_deactivate_single(username, alias, metadata)
@@ -299,7 +299,7 @@ class TestCompositeNoWalkOnSuccessPath:
         # Mock _stop_composite_services and ProxyConfigManager to isolate
         with patch.object(manager, "_stop_composite_services"):
             with patch(
-                "src.code_indexer.server.repositories.activated_repo_manager.os.walk",
+                "code_indexer.server.repositories.activated_repo_manager.os.walk",
                 side_effect=walk_raises,
             ):
                 try:
@@ -358,11 +358,11 @@ class TestCompositeLeakDetectionOnRmtreeFailure:
         ):
             with patch.object(manager, "_stop_composite_services"):
                 with patch(
-                    "src.code_indexer.server.repositories.activated_repo_manager._fd_anchored_phase1_rename",
+                    "code_indexer.server.repositories.activated_repo_manager._fd_anchored_phase1_rename",
                     side_effect=rename_raises,
                 ):
                     with patch(
-                        "src.code_indexer.server.repositories.activated_repo_manager._predeactivation_leak_scan_enabled",
+                        "code_indexer.server.repositories.activated_repo_manager._predeactivation_leak_scan_enabled",
                         return_value=False,
                     ):
                         try:
@@ -408,7 +408,7 @@ class TestTelemetryShape:
 
         with patch.object(manager.logger, "warning", side_effect=capture_warning):
             with patch(
-                "src.code_indexer.server.repositories.activated_repo_manager._predeactivation_leak_scan_enabled",
+                "code_indexer.server.repositories.activated_repo_manager._predeactivation_leak_scan_enabled",
                 return_value=False,
             ):
                 manager._do_deactivate_single(username, alias, metadata)
@@ -438,7 +438,7 @@ class TestBootstrapConfigFlag:
     """enable_predeactivation_leak_scan must exist in ServerConfig and default to False."""
 
     def test_flag_exists_and_defaults_false(self):
-        from src.code_indexer.server.utils.config_manager import ServerConfig
+        from code_indexer.server.utils.config_manager import ServerConfig
 
         config = ServerConfig(server_dir="/tmp/test-cidx-server")
         assert hasattr(config, "enable_predeactivation_leak_scan"), (
@@ -449,7 +449,7 @@ class TestBootstrapConfigFlag:
         )
 
     def test_flag_is_in_bootstrap_keys(self):
-        from src.code_indexer.server.services.config_service import BOOTSTRAP_KEYS
+        from code_indexer.server.services.config_service import BOOTSTRAP_KEYS
 
         assert "enable_predeactivation_leak_scan" in BOOTSTRAP_KEYS, (
             "'enable_predeactivation_leak_scan' must be in BOOTSTRAP_KEYS"

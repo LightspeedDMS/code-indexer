@@ -12,7 +12,7 @@ inputSchema:
       description: Filter by username
     action:
       type: string
-      description: Filter by action type (e.g., 'login', 'password_change', 'token_refresh')
+      description: "Filter by exact action_type (exact, case-sensitive match; e.g. 'password_change_success', 'token_refresh_failure', 'pr_creation_success', 'git_cleanup', 'group_create'). Prefixes such as 'password_change' or 'pr_creation' do NOT match."
     from_date:
       type: string
       description: Start date for time range filter (ISO 8601 format, e.g., '2024-01-01')
@@ -25,6 +25,11 @@ inputSchema:
       default: 100
       minimum: 1
       maximum: 1000
+    page:
+      type: integer
+      description: Page number for pagination (1-based)
+      default: 1
+      minimum: 1
   required: []
 ---
 
@@ -38,13 +43,15 @@ USE CASES:
 
 INPUTS:
 - user (optional): Filter by username
-- action (optional): Filter by action type (e.g., 'login', 'password_change')
+- action (optional): Filter by exact action_type (exact, case-sensitive match; e.g. 'password_change_success', 'token_refresh_failure', 'pr_creation_success', 'git_cleanup', 'group_create'). Prefixes such as 'password_change' or 'pr_creation' do NOT match.
 - from_date (optional): Start date for time range (ISO 8601 format)
 - to_date (optional): End date for time range (ISO 8601 format)
 - limit (optional): Maximum number of entries to return (default: 100)
+- page (optional): Page number for pagination (1-based, default: 1)
 
 RETURNS:
 - entries: Array of audit log entries with timestamp, user, action, resource, and details fields
+- total: True count of all matching entries across every page (not just len(entries))
 
 PERMISSIONS: Requires manage_users (admin only).
 

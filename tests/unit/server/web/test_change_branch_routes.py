@@ -50,12 +50,12 @@ class TestChangeBranchRoute:
     @pytest.mark.asyncio
     async def test_change_branch_requires_admin_session(self):
         """Auth check: no session returns 401."""
-        from src.code_indexer.server.web.routes import change_golden_repo_branch
+        from code_indexer.server.web.routes import change_golden_repo_branch
 
         mock_request = _make_request()
 
         with patch(
-            "src.code_indexer.server.web.routes._require_admin_session",
+            "code_indexer.server.web.routes._require_admin_session",
             return_value=None,
         ):
             result = await change_golden_repo_branch(
@@ -72,13 +72,13 @@ class TestChangeBranchRoute:
     @pytest.mark.asyncio
     async def test_change_branch_missing_branch_field_returns_400(self):
         """Returns 400 when JSON body is missing 'branch' field."""
-        from src.code_indexer.server.web.routes import change_golden_repo_branch
+        from code_indexer.server.web.routes import change_golden_repo_branch
 
         mock_request = _make_request()
         mock_request.json = AsyncMock(return_value={})  # no 'branch' key
 
         with patch(
-            "src.code_indexer.server.web.routes._require_admin_session",
+            "code_indexer.server.web.routes._require_admin_session",
             return_value=_make_session(),
         ):
             result = await change_golden_repo_branch(
@@ -95,7 +95,7 @@ class TestChangeBranchRoute:
     @pytest.mark.asyncio
     async def test_change_branch_success(self):
         """Returns 202 with job_id when manager.change_branch_async succeeds."""
-        from src.code_indexer.server.web.routes import change_golden_repo_branch
+        from code_indexer.server.web.routes import change_golden_repo_branch
 
         mock_request = _make_request()
         mock_request.json = AsyncMock(return_value={"branch": "feature/new"})
@@ -108,11 +108,11 @@ class TestChangeBranchRoute:
 
         with (
             patch(
-                "src.code_indexer.server.web.routes._require_admin_session",
+                "code_indexer.server.web.routes._require_admin_session",
                 return_value=_make_session(),
             ),
             patch(
-                "src.code_indexer.server.web.routes._get_golden_repo_manager",
+                "code_indexer.server.web.routes._get_golden_repo_manager",
                 return_value=mock_manager,
             ),
         ):
@@ -134,7 +134,7 @@ class TestChangeBranchRoute:
     @pytest.mark.asyncio
     async def test_change_branch_returns_404_on_not_found(self):
         """Returns 404 when FileNotFoundError raised by change_branch_async."""
-        from src.code_indexer.server.web.routes import change_golden_repo_branch
+        from code_indexer.server.web.routes import change_golden_repo_branch
 
         mock_request = _make_request()
         mock_request.json = AsyncMock(return_value={"branch": "main"})
@@ -146,11 +146,11 @@ class TestChangeBranchRoute:
 
         with (
             patch(
-                "src.code_indexer.server.web.routes._require_admin_session",
+                "code_indexer.server.web.routes._require_admin_session",
                 return_value=_make_session(),
             ),
             patch(
-                "src.code_indexer.server.web.routes._get_golden_repo_manager",
+                "code_indexer.server.web.routes._get_golden_repo_manager",
                 return_value=mock_manager,
             ),
         ):
@@ -172,7 +172,7 @@ class TestChangeBranchRoute:
         409 conflict is now exclusively for DuplicateJobError (covered in
         TestChangeBranchAsyncRoute.test_change_branch_async_returns_409_on_duplicate_job_error).
         """
-        from src.code_indexer.server.web.routes import change_golden_repo_branch
+        from code_indexer.server.web.routes import change_golden_repo_branch
 
         mock_request = _make_request()
         mock_request.json = AsyncMock(return_value={"branch": "main"})
@@ -184,11 +184,11 @@ class TestChangeBranchRoute:
 
         with (
             patch(
-                "src.code_indexer.server.web.routes._require_admin_session",
+                "code_indexer.server.web.routes._require_admin_session",
                 return_value=_make_session(),
             ),
             patch(
-                "src.code_indexer.server.web.routes._get_golden_repo_manager",
+                "code_indexer.server.web.routes._get_golden_repo_manager",
                 return_value=mock_manager,
             ),
         ):
@@ -202,7 +202,7 @@ class TestChangeBranchRoute:
     @pytest.mark.asyncio
     async def test_change_branch_returns_400_on_value_error(self):
         """Returns 400 when ValueError raised by change_branch_async (e.g. invalid branch name)."""
-        from src.code_indexer.server.web.routes import change_golden_repo_branch
+        from code_indexer.server.web.routes import change_golden_repo_branch
 
         mock_request = _make_request()
         mock_request.json = AsyncMock(return_value={"branch": "invalid branch!"})
@@ -212,11 +212,11 @@ class TestChangeBranchRoute:
 
         with (
             patch(
-                "src.code_indexer.server.web.routes._require_admin_session",
+                "code_indexer.server.web.routes._require_admin_session",
                 return_value=_make_session(),
             ),
             patch(
-                "src.code_indexer.server.web.routes._get_golden_repo_manager",
+                "code_indexer.server.web.routes._get_golden_repo_manager",
                 return_value=mock_manager,
             ),
         ):
@@ -238,7 +238,7 @@ class TestChangeBranchAsyncRoute:
     @pytest.mark.asyncio
     async def test_change_branch_async_returns_202_with_job_id(self):
         """Route calls change_branch_async() and returns HTTP 202 with job_id."""
-        from src.code_indexer.server.web.routes import change_golden_repo_branch
+        from code_indexer.server.web.routes import change_golden_repo_branch
 
         mock_request = _make_request()
         mock_request.json = AsyncMock(return_value={"branch": "feature/new"})
@@ -251,11 +251,11 @@ class TestChangeBranchAsyncRoute:
 
         with (
             patch(
-                "src.code_indexer.server.web.routes._require_admin_session",
+                "code_indexer.server.web.routes._require_admin_session",
                 return_value=_make_session(),
             ),
             patch(
-                "src.code_indexer.server.web.routes._get_golden_repo_manager",
+                "code_indexer.server.web.routes._get_golden_repo_manager",
                 return_value=mock_manager,
             ),
         ):
@@ -280,7 +280,7 @@ class TestChangeBranchAsyncRoute:
     @pytest.mark.asyncio
     async def test_change_branch_async_returns_200_when_already_on_branch(self):
         """Route returns HTTP 200 when job_id is None (already on target branch)."""
-        from src.code_indexer.server.web.routes import change_golden_repo_branch
+        from code_indexer.server.web.routes import change_golden_repo_branch
 
         mock_request = _make_request()
         mock_request.json = AsyncMock(return_value={"branch": "main"})
@@ -293,11 +293,11 @@ class TestChangeBranchAsyncRoute:
 
         with (
             patch(
-                "src.code_indexer.server.web.routes._require_admin_session",
+                "code_indexer.server.web.routes._require_admin_session",
                 return_value=_make_session(),
             ),
             patch(
-                "src.code_indexer.server.web.routes._get_golden_repo_manager",
+                "code_indexer.server.web.routes._get_golden_repo_manager",
                 return_value=mock_manager,
             ),
         ):
@@ -317,7 +317,7 @@ class TestChangeBranchAsyncRoute:
     @pytest.mark.asyncio
     async def test_change_branch_async_returns_409_on_duplicate_job_error(self):
         """Route returns HTTP 409 when DuplicateJobError is raised."""
-        from src.code_indexer.server.web.routes import change_golden_repo_branch
+        from code_indexer.server.web.routes import change_golden_repo_branch
         from code_indexer.server.repositories.background_jobs import DuplicateJobError
 
         mock_request = _make_request()
@@ -330,11 +330,11 @@ class TestChangeBranchAsyncRoute:
 
         with (
             patch(
-                "src.code_indexer.server.web.routes._require_admin_session",
+                "code_indexer.server.web.routes._require_admin_session",
                 return_value=_make_session(),
             ),
             patch(
-                "src.code_indexer.server.web.routes._get_golden_repo_manager",
+                "code_indexer.server.web.routes._get_golden_repo_manager",
                 return_value=mock_manager,
             ),
         ):
@@ -357,7 +357,7 @@ class TestChangeBranchAsyncRoute:
     @pytest.mark.asyncio
     async def test_change_branch_async_passes_submitter_username(self):
         """Route passes session username as submitter_username to change_branch_async()."""
-        from src.code_indexer.server.web.routes import change_golden_repo_branch
+        from code_indexer.server.web.routes import change_golden_repo_branch
 
         mock_request = _make_request()
         mock_request.json = AsyncMock(return_value={"branch": "feature/new"})
@@ -370,11 +370,11 @@ class TestChangeBranchAsyncRoute:
 
         with (
             patch(
-                "src.code_indexer.server.web.routes._require_admin_session",
+                "code_indexer.server.web.routes._require_admin_session",
                 return_value=_make_session(username="alice"),
             ),
             patch(
-                "src.code_indexer.server.web.routes._get_golden_repo_manager",
+                "code_indexer.server.web.routes._get_golden_repo_manager",
                 return_value=mock_manager,
             ),
         ):
@@ -393,12 +393,12 @@ class TestGetBranchesRoute:
 
     def test_get_branches_requires_admin_session(self):
         """Auth check: no session returns 401."""
-        from src.code_indexer.server.web.routes import get_golden_repo_branches
+        from code_indexer.server.web.routes import get_golden_repo_branches
 
         mock_request = _make_request()
 
         with patch(
-            "src.code_indexer.server.web.routes._require_admin_session",
+            "code_indexer.server.web.routes._require_admin_session",
             return_value=None,
         ):
             result = get_golden_repo_branches(
@@ -414,17 +414,17 @@ class TestGetBranchesRoute:
 
     def test_get_branches_service_not_available_returns_500(self):
         """Returns 500 when golden_repo_branch_service is not on app.state."""
-        from src.code_indexer.server.web.routes import get_golden_repo_branches
+        from code_indexer.server.web.routes import get_golden_repo_branches
 
         mock_request = _make_request()
 
         with (
             patch(
-                "src.code_indexer.server.web.routes._require_admin_session",
+                "code_indexer.server.web.routes._require_admin_session",
                 return_value=_make_session(),
             ),
             patch(
-                "src.code_indexer.server.web.routes._get_golden_repo_branch_service",
+                "code_indexer.server.web.routes._get_golden_repo_branch_service",
                 return_value=None,
             ),
         ):
@@ -441,7 +441,7 @@ class TestGetBranchesRoute:
 
     def test_get_branches_returns_branch_list(self):
         """Returns 200 with list of branches when service is available."""
-        from src.code_indexer.server.web.routes import get_golden_repo_branches
+        from code_indexer.server.web.routes import get_golden_repo_branches
 
         mock_request = _make_request()
 
@@ -455,11 +455,11 @@ class TestGetBranchesRoute:
 
         with (
             patch(
-                "src.code_indexer.server.web.routes._require_admin_session",
+                "code_indexer.server.web.routes._require_admin_session",
                 return_value=_make_session(),
             ),
             patch(
-                "src.code_indexer.server.web.routes._get_golden_repo_branch_service",
+                "code_indexer.server.web.routes._get_golden_repo_branch_service",
                 return_value=mock_branch_service,
             ),
         ):
@@ -481,7 +481,7 @@ class TestGetBranchesRoute:
 
     def test_get_branches_returns_404_on_not_found(self):
         """Returns 404 when FileNotFoundError raised by branch service."""
-        from src.code_indexer.server.web.routes import get_golden_repo_branches
+        from code_indexer.server.web.routes import get_golden_repo_branches
 
         mock_request = _make_request()
 
@@ -492,11 +492,11 @@ class TestGetBranchesRoute:
 
         with (
             patch(
-                "src.code_indexer.server.web.routes._require_admin_session",
+                "code_indexer.server.web.routes._require_admin_session",
                 return_value=_make_session(),
             ),
             patch(
-                "src.code_indexer.server.web.routes._get_golden_repo_branch_service",
+                "code_indexer.server.web.routes._get_golden_repo_branch_service",
                 return_value=mock_branch_service,
             ),
         ):

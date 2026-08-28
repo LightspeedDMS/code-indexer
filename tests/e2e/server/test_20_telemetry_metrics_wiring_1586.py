@@ -20,7 +20,9 @@ BEFORE making the MCP request -- it would still pass even if
 startup/lifespan.py stopped constructing/storing ApplicationMetrics
 entirely. TestLifespanRealStartupWiring (bottom of this file) closes that
 gap: it creates a genuinely FRESH app via create_app() with real startup
-config (CIDX_TELEMETRY_ENABLED=true) and asserts, by object IDENTITY, that
+config (telemetry_config.enabled=true seeded into config.json -- the
+DB-backed value; Story #1676 AC1 removed the CIDX_TELEMETRY_ENABLED env var
+override) and asserts, by object IDENTITY, that
 app.state.application_metrics/job_metrics are the exact singletons
 lifespan.py's own code resolves through get_application_metrics()/
 get_job_metrics() -- proving the real startup wiring itself, not merely
@@ -29,6 +31,7 @@ that metric-recording works once a private singleton is already in place.
 
 from __future__ import annotations
 
+import json
 import os
 
 from fastapi.testclient import TestClient
@@ -96,12 +99,22 @@ class TestLifespanRealStartupWiring:
         shutdown would close the SQLite connection the rest of the E2E
         session still needs (observed directly: a later session-teardown
         fixture failed with "Cannot operate on a closed database" before
-        this isolation fix)."""
+        this isolation fix).
+
+        Story #1676 AC1: telemetry configuration is managed exclusively via
+        the Web UI Config Screen (DB-backed) -- environment variables no
+        longer enable it. Telemetry is enabled here by seeding
+        telemetry_config.enabled=true directly into config.json at the
+        isolated data dir before create_app() runs (the DB-backed
+        bootstrap-equivalent value), not via CIDX_TELEMETRY_ENABLED."""
         previous_data_dir = os.environ.get("CIDX_SERVER_DATA_DIR")
-        previous_telemetry_env = os.environ.get("CIDX_TELEMETRY_ENABLED")
-        os.environ["CIDX_SERVER_DATA_DIR"] = str(tmp_path / "isolated-data-dir")
-        os.environ["CIDX_TELEMETRY_ENABLED"] = "true"
+        isolated_data_dir = tmp_path / "isolated-data-dir"
+        os.environ["CIDX_SERVER_DATA_DIR"] = str(isolated_data_dir)
         try:
+            isolated_data_dir.mkdir(parents=True, exist_ok=True)
+            (isolated_data_dir / "config.json").write_text(
+                json.dumps({"telemetry_config": {"enabled": True}})
+            )
             with active_application_metrics_singleton() as (app_metrics, _areader):
                 with active_job_metrics_singleton() as (job_metrics, _jreader):
                     fresh_app = create_app()
@@ -122,7 +135,3 @@ class TestLifespanRealStartupWiring:
                 os.environ.pop("CIDX_SERVER_DATA_DIR", None)
             else:
                 os.environ["CIDX_SERVER_DATA_DIR"] = previous_data_dir
-            if previous_telemetry_env is None:
-                os.environ.pop("CIDX_TELEMETRY_ENABLED", None)
-            else:
-                os.environ["CIDX_TELEMETRY_ENABLED"] = previous_telemetry_env

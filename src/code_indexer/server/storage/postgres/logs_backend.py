@@ -4,8 +4,15 @@ PostgreSQL backend for operational log storage (Story #501).
 Drop-in replacement for LogsSqliteBackend using psycopg v3 sync connections
 via ConnectionPool.  Satisfies the LogsBackend Protocol (protocols.py).
 
-Table created on first use (CREATE TABLE IF NOT EXISTS) so no separate
-migration step is required for the logs table.
+Schema (`logs` table and its indexes) is owned entirely by the SQL
+migrations (storage/postgres/migrations/sql/020_logs_alias_column.sql,
+048_logs_trace_span_columns.sql) -- this backend does NOT create or alter
+any table. `service_init.py` always runs `MigrationRunner` before
+`StorageFactory.create_backends()` constructs this class, so schema is
+guaranteed present by the time any instance exists (Issue #1697, mirroring
+Bug #1655/#1662: a previous self-heal `CREATE TABLE IF NOT EXISTS` here was
+dead code in every real deployment -- removed rather than kept as a second,
+drift-prone copy of the schema).
 
 Unlike the other PostgreSQL backends, log insert failures are caught and
 logged as warnings rather than propagated -- a failed log write must never
@@ -42,58 +49,25 @@ class LogsPostgresBackend:
 
     def __init__(self, pool: ConnectionPool) -> None:
         """
-        Initialize with a shared connection pool and ensure the table exists.
+        Initialize with a shared connection pool.
+
+        Schema is assumed to already exist (see module docstring) -- this
+        constructor does not touch the database.
 
         Args:
             pool: ConnectionPool instance providing psycopg v3 connections.
         """
         self._pool = pool
-        self._ensure_schema()
 
-    def _ensure_schema(self) -> None:
-        """Create the logs table and indexes if they do not already exist."""
-        try:
-            with self._pool.connection() as conn:
-                conn.execute(
-                    """
-                    CREATE TABLE IF NOT EXISTS logs (
-                        id SERIAL PRIMARY KEY,
-                        timestamp TEXT NOT NULL,
-                        level TEXT NOT NULL,
-                        source TEXT,
-                        message TEXT,
-                        correlation_id TEXT,
-                        user_id TEXT,
-                        request_path TEXT,
-                        extra_data TEXT,
-                        node_id TEXT,
-                        alias TEXT,
-                        created_at TIMESTAMPTZ DEFAULT NOW()
-                    )
-                    """
-                )
-                # Story #876 Phase C: tag rows with repo alias so operators
-                # can filter lifecycle-runner failures by repo. ALTER is idempotent
-                # so legacy deployments migrate cleanly on next boot.
-                conn.execute("ALTER TABLE logs ADD COLUMN IF NOT EXISTS alias TEXT")
-                conn.execute(
-                    "CREATE INDEX IF NOT EXISTS idx_logs_pg_timestamp ON logs(timestamp)"
-                )
-                conn.execute(
-                    "CREATE INDEX IF NOT EXISTS idx_logs_pg_level ON logs(level)"
-                )
-                conn.execute(
-                    "CREATE INDEX IF NOT EXISTS idx_logs_pg_node_id ON logs(node_id)"
-                )
-                conn.execute(
-                    "CREATE INDEX IF NOT EXISTS idx_logs_pg_correlation_id ON logs(correlation_id)"
-                )
-                conn.execute(
-                    "CREATE INDEX IF NOT EXISTS idx_logs_pg_alias ON logs(alias)"
-                )
-                conn.commit()
-        except Exception as exc:
-            logger.warning("LogsPostgresBackend: schema setup failed: %s", exc)
+    # Story #1676 AC2: shared column list for the logs table's INSERT
+    # statements, so insert_log/insert_log_batch stay in sync with each
+    # other and with the migration-owned schema (single source of truth).
+    _INSERT_COLUMNS = (
+        "timestamp, level, source, message, correlation_id, "
+        "user_id, request_path, extra_data, node_id, alias, "
+        "trace_id, span_id"
+    )
+    _INSERT_PLACEHOLDERS = "%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s"
 
     def insert_log(
         self,
@@ -107,34 +81,18 @@ class LogsPostgresBackend:
         extra_data: Optional[str] = None,
         node_id: Optional[str] = None,
         alias: Optional[str] = None,
+        trace_id: Optional[str] = None,
+        span_id: Optional[str] = None,
     ) -> None:
-        """Insert a single log record.
-
-        Failures are caught and logged as warnings to prevent log writes from
-        crashing the application.
-
-        Args:
-            timestamp: ISO 8601 timestamp string.
-            level: Log level name (DEBUG, INFO, WARNING, ERROR, CRITICAL).
-            source: Logger name / source identifier.
-            message: Formatted log message text.
-            correlation_id: Optional request correlation ID.
-            user_id: Optional user identifier.
-            request_path: Optional HTTP request path.
-            extra_data: Optional JSON-serialised extra fields.
-            node_id: Optional cluster node identifier (NULL in standalone).
-            alias: Optional repo alias (Story #876 Phase C). Tags lifecycle-runner
-                ERROR rows so the admin UI can filter logs by repo.
-        """
+        """Insert a single log record (see class docstring for the
+        node_id/alias/trace_id/span_id column semantics). Failures are
+        caught and logged as warnings -- a failed log write must never crash
+        the application."""
         try:
             with self._pool.connection() as conn:
                 conn.execute(
-                    """
-                    INSERT INTO logs
-                        (timestamp, level, source, message, correlation_id,
-                         user_id, request_path, extra_data, node_id, alias)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                    """,
+                    f"INSERT INTO logs ({self._INSERT_COLUMNS}) "
+                    f"VALUES ({self._INSERT_PLACEHOLDERS})",
                     (
                         timestamp,
                         level,
@@ -146,6 +104,8 @@ class LogsPostgresBackend:
                         extra_data,
                         node_id,
                         alias,
+                        trace_id,
+                        span_id,
                     ),
                 )
                 conn.commit()
@@ -156,18 +116,15 @@ class LogsPostgresBackend:
         """Insert a batch of log records in ONE transaction via executemany.
 
         Issue #1241 P1.1: batched writer to eliminate per-record commit churn.
-        Uses SET LOCAL synchronous_commit = off for ephemeral log rows (safe:
-        rows are immediately visible; only crash-flush durability is relaxed).
+        Uses SET LOCAL synchronous_commit = off (safe: rows are immediately
+        visible; only crash-flush durability is relaxed).
 
-        Bug #1553: returns a real bool success signal (rather than implicit
-        None) so SQLiteLogHandler's writer loop can detect failure -- the
-        swallow-and-log-a-warning contract is unchanged, only the return
-        value is now observable by the caller.
+        Bug #1553: returns a real bool success signal so SQLiteLogHandler's
+        writer loop can detect failure without relying on an exception alone.
 
         Args:
-            items: List of 10-tuples in column order:
-                (timestamp, level, source, message, correlation_id,
-                 user_id, request_path, extra_data, node_id, alias)
+            items: List of 12-tuples matching _INSERT_COLUMNS' order (Story
+                #1676 AC2 appended trace_id/span_id).
 
         Returns:
             True on success (including the empty-input no-op case), False
@@ -177,21 +134,13 @@ class LogsPostgresBackend:
             return True
         try:
             with self._pool.connection() as conn:
-                # psycopg v3: executemany lives on the CURSOR, NOT the connection.
-                # Calling conn.executemany() raises AttributeError on real psycopg3
-                # (swallowed by the fail-open handler -> silently drops all rows).
-                # Mirror the pattern used by PayloadCachePostgresBackend and
-                # QueryEmbeddingCachePostgresBackend (payload_cache_backend.py:133,
-                # query_embedding_cache_backend.py:192).
+                # psycopg v3: executemany lives on the CURSOR, NOT the connection
+                # (mirrors PayloadCachePostgresBackend/QueryEmbeddingCachePostgresBackend).
                 with conn.cursor() as cur:
                     cur.execute("SET LOCAL synchronous_commit = off")
                     cur.executemany(
-                        """
-                        INSERT INTO logs
-                            (timestamp, level, source, message, correlation_id,
-                             user_id, request_path, extra_data, node_id, alias)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                        """,
+                        f"INSERT INTO logs ({self._INSERT_COLUMNS}) "
+                        f"VALUES ({self._INSERT_PLACEHOLDERS})",
                         items,
                     )
                 conn.commit()
@@ -257,10 +206,11 @@ class LogsPostgresBackend:
 
         Column order matches the SELECT list in query_logs(): id, timestamp,
         level, source, message, correlation_id, user_id, request_path,
-        extra_data, node_id, alias, created_at.
+        extra_data, node_id, alias, trace_id, span_id, created_at
+        (Story #1676 AC2 appended trace_id/span_id).
         """
         # created_at may come back as a datetime from PostgreSQL
-        created_at = row[11]
+        created_at = row[13]
         if isinstance(created_at, datetime):
             created_at = created_at.isoformat()
 
@@ -276,6 +226,8 @@ class LogsPostgresBackend:
             "extra_data": row[8],
             "node_id": row[9],
             "alias": row[10],
+            "trace_id": row[11],
+            "span_id": row[12],
             "created_at": created_at,
         }
 
@@ -325,7 +277,8 @@ class LogsPostgresBackend:
             rows = conn.execute(
                 f"""
                 SELECT id, timestamp, level, source, message, correlation_id,
-                       user_id, request_path, extra_data, node_id, alias, created_at
+                       user_id, request_path, extra_data, node_id, alias,
+                       trace_id, span_id, created_at
                 FROM logs {where_clause}
                 ORDER BY timestamp {order_direction}
                 LIMIT %s OFFSET %s

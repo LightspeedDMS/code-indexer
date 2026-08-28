@@ -19,8 +19,8 @@ from pathlib import Path
 
 import pytest
 
-from src.code_indexer.server.services.ci_token_manager import CITokenManager
-from src.code_indexer.server.services.git_credential_manager import GitCredentialManager
+from code_indexer.server.services.ci_token_manager import CITokenManager
+from code_indexer.server.services.git_credential_manager import GitCredentialManager
 
 # Fake test token — not a real credential
 TEST_GITHUB_TOKEN = "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghij"

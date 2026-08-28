@@ -740,9 +740,7 @@ class TestBothProvidersConfigured:
         ):
             with patch("code_indexer.config.ConfigManager") as mock_cm_cls:
                 mock_config = MagicMock()
-                mock_cm = MagicMock()
-                mock_cm.get_config.return_value = mock_config
-                mock_cm_cls.create_with_backtrack.return_value = mock_cm
+                mock_cm_cls.load_verified_config.return_value = mock_config
 
                 with patch(
                     "code_indexer.services.embedding_factory.EmbeddingProviderFactory.get_configured_providers",
@@ -758,9 +756,7 @@ class TestBothProvidersConfigured:
 
         with patch("code_indexer.config.ConfigManager") as mock_cm_cls:
             mock_config = MagicMock()
-            mock_cm = MagicMock()
-            mock_cm.get_config.return_value = mock_config
-            mock_cm_cls.create_with_backtrack.return_value = mock_cm
+            mock_cm_cls.load_verified_config.return_value = mock_config
 
             with patch(
                 "code_indexer.services.embedding_factory.EmbeddingProviderFactory.get_configured_providers",
@@ -776,9 +772,7 @@ class TestBothProvidersConfigured:
 
         with patch("code_indexer.config.ConfigManager") as mock_cm_cls:
             mock_config = MagicMock()
-            mock_cm = MagicMock()
-            mock_cm.get_config.return_value = mock_config
-            mock_cm_cls.create_with_backtrack.return_value = mock_cm
+            mock_cm_cls.load_verified_config.return_value = mock_config
 
             with patch(
                 "code_indexer.services.embedding_factory.EmbeddingProviderFactory.get_configured_providers",
@@ -793,7 +787,7 @@ class TestBothProvidersConfigured:
         manager = _make_manager()
 
         with patch("code_indexer.config.ConfigManager") as mock_cm_cls:
-            mock_cm_cls.create_with_backtrack.side_effect = RuntimeError(
+            mock_cm_cls.load_verified_config.side_effect = RuntimeError(
                 "no config found"
             )
             with patch(
@@ -810,7 +804,7 @@ class TestBothProvidersConfigured:
         manager = _make_manager()
 
         with patch("code_indexer.config.ConfigManager") as mock_cm_cls:
-            mock_cm_cls.create_with_backtrack.side_effect = RuntimeError(
+            mock_cm_cls.load_verified_config.side_effect = RuntimeError(
                 "no config found"
             )
             with patch(

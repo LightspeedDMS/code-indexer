@@ -113,8 +113,9 @@ class TestSqliteBackendInsertLogBatchReturnValue:
         from code_indexer.server.storage.sqlite_backends import LogsSqliteBackend
 
         backend = LogsSqliteBackend(db_path=str(tmp_path / "logs.db"))
-        # 10-tuple: (timestamp, level, source, message, correlation_id,
-        # user_id, request_path, extra_data, node_id, alias).
+        # 12-tuple: (timestamp, level, source, message, correlation_id,
+        # user_id, request_path, extra_data, node_id, alias, trace_id,
+        # span_id) -- Story #1676 AC2 appended trace_id/span_id.
         result = backend.insert_log_batch(
             [
                 (
@@ -122,6 +123,8 @@ class TestSqliteBackendInsertLogBatchReturnValue:
                     "INFO",
                     "mod.a",
                     "hello",
+                    None,
+                    None,
                     None,
                     None,
                     None,

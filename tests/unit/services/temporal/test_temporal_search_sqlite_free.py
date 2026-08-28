@@ -8,7 +8,7 @@ import unittest
 from unittest.mock import Mock
 from pathlib import Path
 
-from src.code_indexer.services.temporal.temporal_search_service import (
+from code_indexer.services.temporal.temporal_search_service import (
     TemporalSearchService,
 )
 
@@ -33,7 +33,7 @@ class TestTemporalSearchSQLiteFree(unittest.TestCase):
 
     def test_no_sqlite_imports(self):
         """Verify no SQLite imports in module."""
-        import src.code_indexer.services.temporal.temporal_search_service as module
+        import code_indexer.services.temporal.temporal_search_service as module
 
         # Check module source doesn't contain sqlite3 import
         import inspect
@@ -44,7 +44,7 @@ class TestTemporalSearchSQLiteFree(unittest.TestCase):
 
     def test_no_sqlite_usage_in_generate_chunk_diff(self):
         """Verify _generate_chunk_diff doesn't use SQLite."""
-        import src.code_indexer.services.temporal.temporal_search_service as module
+        import code_indexer.services.temporal.temporal_search_service as module
         import inspect
 
         # Check if method exists

@@ -4,6 +4,8 @@ Unit tests for logging_utils module.
 Tests the logging utility functions for formatting log messages with error codes.
 """
 
+import pytest
+
 
 def test_format_error_log():
     """Test formatting an error log message with error code."""
@@ -96,3 +98,242 @@ class TestMaskUrlCredentials:
         assert mask_url_credentials(once) == once  # masking twice is a no-op
         assert mask_url_credentials(None) is None
         assert mask_url_credentials(123) == 123
+
+
+def _make_log_record(msg: str = "test message"):
+    import logging
+
+    return logging.LogRecord(
+        name="test.logging_utils.inject",
+        level=logging.INFO,
+        pathname=__file__,
+        lineno=1,
+        msg=msg,
+        args=(),
+        exc_info=None,
+    )
+
+
+@pytest.fixture
+def _reset_correlation_contextvar_util():
+    from code_indexer.server.telemetry.correlation_bridge import _correlation_id_var
+
+    token = _correlation_id_var.set(None)
+    try:
+        yield
+    finally:
+        _correlation_id_var.reset(token)
+
+
+class TestInjectCorrelationId:
+    """Bug #1641: inject_correlation_id() is the shared helper both
+    async_logging.IdentityQueueHandler.prepare() and
+    SQLiteLogHandler.emit() call to heal the log store's correlation_id
+    column for plain logger.x() calls that pass no extra=... at all."""
+
+    def test_sets_correlation_id_from_active_context(
+        self, _reset_correlation_contextvar_util
+    ):
+        from code_indexer.server.logging_utils import inject_correlation_id
+        from code_indexer.server.telemetry.correlation_bridge import (
+            set_current_correlation_id,
+        )
+
+        set_current_correlation_id("ctx-id-1641")
+        record = _make_log_record()
+
+        inject_correlation_id(record)
+
+        assert record.correlation_id == "ctx-id-1641"
+
+    def test_does_not_override_existing_correlation_id(
+        self, _reset_correlation_contextvar_util
+    ):
+        from code_indexer.server.logging_utils import inject_correlation_id
+        from code_indexer.server.telemetry.correlation_bridge import (
+            set_current_correlation_id,
+        )
+
+        set_current_correlation_id("ambient-id")
+        record = _make_log_record()
+        record.correlation_id = "explicit-id"
+
+        inject_correlation_id(record)
+
+        assert record.correlation_id == "explicit-id"
+
+    def test_no_op_when_no_active_context(self, _reset_correlation_contextvar_util):
+        from code_indexer.server.logging_utils import inject_correlation_id
+
+        record = _make_log_record()
+
+        inject_correlation_id(record)
+
+        assert getattr(record, "correlation_id", None) is None
+
+
+class TestInjectTraceContext:
+    """Story #1676 AC2: inject_trace_context() is the shared helper that
+    async_logging.IdentityQueueHandler.prepare() and SQLiteLogHandler.emit()
+    call to populate the log store's trace_id/span_id columns from the
+    currently active OTEL span, mirroring inject_correlation_id()'s pattern
+    exactly."""
+
+    def test_sets_zero_values_when_no_active_span(self):
+        from code_indexer.server.logging_utils import inject_trace_context
+
+        record = _make_log_record()
+
+        inject_trace_context(record)
+
+        assert record.trace_id == "0" * 32
+        assert record.span_id == "0" * 16
+
+    def test_does_not_override_existing_trace_context(self):
+        from code_indexer.server.logging_utils import inject_trace_context
+
+        record = _make_log_record()
+        record.trace_id = "explicit-trace-id"
+        record.span_id = "explicit-span-id"
+
+        inject_trace_context(record)
+
+        assert record.trace_id == "explicit-trace-id"
+        assert record.span_id == "explicit-span-id"
+
+    def test_sets_real_ids_from_active_span(self):
+        from code_indexer.server.logging_utils import inject_trace_context
+        from code_indexer.server.telemetry import (
+            get_telemetry_manager,
+            reset_telemetry_manager,
+        )
+        from code_indexer.server.telemetry.spans import create_span, reset_spans_state
+        from code_indexer.server.utils.config_manager import TelemetryConfig
+
+        config = TelemetryConfig(enabled=True, export_traces=True)
+        get_telemetry_manager(config)
+        try:
+            with create_span("test.inject_trace_context"):
+                record = _make_log_record()
+                inject_trace_context(record)
+
+                assert len(record.trace_id) == 32
+                assert len(record.span_id) == 16
+                # Must be genuinely different from the zero-values (a real,
+                # recording span was active) and valid hex.
+                assert record.trace_id != "0" * 32
+                assert record.span_id != "0" * 16
+                int(record.trace_id, 16)
+                int(record.span_id, 16)
+        finally:
+            reset_spans_state()
+            reset_telemetry_manager()
+
+
+class TestInjectOtelContext:
+    """Story #1676 AC3: inject_otel_context() captures the full OTEL
+    ``Context`` object active on the calling thread and attaches it to the
+    LogRecord as a private attribute. This is the wiring point
+    (async_logging.IdentityQueueHandler.prepare()) that later lets the
+    context-aware log bridge handler reattach the ORIGINAL request thread's
+    context on the QueueListener thread before exporting -- producing the
+    correct trace_id/span_id on the exported OTLP LogRecord instead of
+    whatever (unrelated) context happens to be live on the listener thread.
+    """
+
+    def test_attaches_private_context_attribute(self):
+        from code_indexer.server.logging_utils import (
+            OTEL_CONTEXT_RECORD_ATTR,
+            inject_otel_context,
+        )
+
+        record = _make_log_record()
+        assert not hasattr(record, OTEL_CONTEXT_RECORD_ATTR)
+
+        inject_otel_context(record)
+
+        assert hasattr(record, OTEL_CONTEXT_RECORD_ATTR)
+
+    def test_captured_context_is_the_real_ambient_context_object(self):
+        from opentelemetry import context as otel_context
+
+        from code_indexer.server.logging_utils import (
+            OTEL_CONTEXT_RECORD_ATTR,
+            inject_otel_context,
+        )
+
+        record = _make_log_record()
+        inject_otel_context(record)
+
+        captured = getattr(record, OTEL_CONTEXT_RECORD_ATTR)
+        # Identity, not mere type equivalence: proves this is the SAME
+        # ambient Context object context.get_current() resolves to on this
+        # thread right now, not an equivalent copy/synthetic stand-in.
+        assert captured is otel_context.get_current()
+
+    def test_does_not_override_already_captured_context(self):
+        from code_indexer.server.logging_utils import (
+            OTEL_CONTEXT_RECORD_ATTR,
+            inject_otel_context,
+        )
+
+        record = _make_log_record()
+        sentinel = object()
+        setattr(record, OTEL_CONTEXT_RECORD_ATTR, sentinel)
+
+        inject_otel_context(record)
+
+        assert getattr(record, OTEL_CONTEXT_RECORD_ATTR) is sentinel
+
+
+class TestInjectOtelContextReflectsActiveSpan:
+    """Discriminating test: the captured Context when a span IS active must
+    be the real ambient Context carrying that span (identity-checked, not
+    just isinstance-checked) and must differ from the no-span case -- proving
+    this genuinely reads ambient state rather than always stashing a fixed/
+    empty Context object regardless of what is actually active on the
+    calling thread."""
+
+    def test_captured_context_carries_the_real_active_span_by_identity(self):
+        from opentelemetry import context as otel_context
+        from opentelemetry import trace as otel_trace
+
+        from code_indexer.server.logging_utils import (
+            OTEL_CONTEXT_RECORD_ATTR,
+            inject_otel_context,
+        )
+        from code_indexer.server.telemetry import (
+            get_telemetry_manager,
+            reset_telemetry_manager,
+        )
+        from code_indexer.server.telemetry.spans import create_span, reset_spans_state
+        from code_indexer.server.utils.config_manager import TelemetryConfig
+
+        config = TelemetryConfig(enabled=True, export_traces=True)
+        get_telemetry_manager(config)
+        try:
+            record_without_span = _make_log_record()
+            inject_otel_context(record_without_span)
+            context_without_span = getattr(
+                record_without_span, OTEL_CONTEXT_RECORD_ATTR
+            )
+
+            with create_span("test.inject_otel_context.active"):
+                record_with_span = _make_log_record()
+                inject_otel_context(record_with_span)
+                context_with_span = getattr(record_with_span, OTEL_CONTEXT_RECORD_ATTR)
+                # Identity check while still inside the span's `with` block,
+                # where context.get_current() is guaranteed to still equal
+                # the exact object just captured.
+                assert context_with_span is otel_context.get_current()
+
+            # Extract the span recorded in each captured Context -- proves
+            # the capture reflects the REAL ambient span, not a fixed value.
+            span_without = otel_trace.get_current_span(context_without_span)
+            span_with = otel_trace.get_current_span(context_with_span)
+
+            assert not span_without.get_span_context().is_valid
+            assert span_with.get_span_context().is_valid
+        finally:
+            reset_spans_state()
+            reset_telemetry_manager()

@@ -27,6 +27,8 @@ class TestExecuteSemanticSearchErrorPropagation:
     @pytest.fixture
     def mock_project_path(self, tmp_path):
         """Create mock project with index structure."""
+        from code_indexer.config import ConfigManager
+
         project_path = tmp_path / "test_project"
         project_path.mkdir()
 
@@ -35,6 +37,15 @@ class TestExecuteSemanticSearchErrorPropagation:
         config_dir.mkdir()
         index_dir = config_dir / "index"
         index_dir.mkdir()
+
+        # Bug #1718: _execute_semantic_search now verifies project_path has
+        # its OWN genuine config via ConfigManager.load_verified_config()
+        # before reaching BackendFactory.create (the mocked failure point
+        # under test here) -- a real config.json matching project_path
+        # exactly is required for that verification to pass.
+        ConfigManager(config_dir / "config.json").create_default_config(
+            codebase_dir=project_path
+        )
 
         return project_path
 

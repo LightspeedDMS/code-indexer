@@ -8,12 +8,12 @@ ARCHITECTURE:
 This eliminates 50-100ms RPyC proxy overhead per callback and prevents stale data issues.
 """
 
-from src.code_indexer.services.clean_slot_tracker import (
+from code_indexer.services.clean_slot_tracker import (
     CleanSlotTracker,
     FileStatus,
     FileData,
 )
-from src.code_indexer.progress.multi_threaded_display import (
+from code_indexer.progress.multi_threaded_display import (
     MultiThreadedProgressManager,
 )
 from rich.console import Console

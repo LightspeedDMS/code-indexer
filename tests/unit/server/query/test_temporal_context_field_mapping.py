@@ -14,10 +14,10 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from src.code_indexer.server.query.semantic_query_manager import (
+from code_indexer.server.query.semantic_query_manager import (
     SemanticQueryManager,
 )
-from src.code_indexer.services.temporal.temporal_search_service import (
+from code_indexer.services.temporal.temporal_search_service import (
     TemporalSearchResult,
     TemporalSearchResults,
 )
@@ -94,14 +94,12 @@ def _make_temporal_results_with_diff_context(repo_path: Path):
 def _execute_query_with_mock(semantic_query_manager, repo_path, temporal_results):
     """Execute _execute_temporal_query with mocked fusion dispatch."""
     with (
+        patch("code_indexer.proxy.config_manager.ConfigManager") as MockConfigManager,
         patch(
-            "src.code_indexer.proxy.config_manager.ConfigManager"
-        ) as MockConfigManager,
-        patch(
-            "src.code_indexer.backends.backend_factory.BackendFactory"
+            "code_indexer.backends.backend_factory.BackendFactory"
         ) as MockBackendFactory,
         patch(
-            "src.code_indexer.services.temporal.temporal_fusion_dispatch.execute_temporal_query_with_fusion",
+            "code_indexer.services.temporal.temporal_fusion_dispatch.execute_temporal_query_with_fusion",
             return_value=temporal_results,
         ),
     ):

@@ -322,10 +322,17 @@ class TestExecuteStep3DeployMode:
             ),
             _patch.object(executor, "_ensure_data_dir_env_var", return_value=True),
             _patch.object(executor, "_ensure_malloc_arena_max", return_value=True),
+            _patch.object(executor, "_ensure_codex_cli_installed", return_value=True),
             _patch.object(executor, "ensure_ripgrep", return_value=True),
             _patch.object(executor, "_ensure_sudoers_restart", return_value=True),
             _patch.object(executor, "_ensure_memory_overcommit", return_value=True),
             _patch.object(executor, "_ensure_swap_file", return_value=True),
+            # Bug #1640/#1545: _ensure_claude_cli_updated makes a real, unmocked
+            # `npm install -g @anthropic-ai/claude-code@latest` network call when
+            # left unpatched, causing multi-second timing variance under CI load
+            # and mutating the developer's/CI runner's global Claude CLI version
+            # as an unintended side effect of this unit test.
+            _patch.object(executor, "_ensure_claude_cli_updated", return_value=True),
             _patch.object(executor, "_ensure_pace_maker_installed", return_value=True),
             _patch.object(executor, "_ensure_rust_toolchain", return_value=True),
         ]

@@ -7,11 +7,11 @@ and other deletion failure scenarios.
 """
 
 import pytest
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 from fastapi.testclient import TestClient
 
-from src.code_indexer.server.app import create_app
-from src.code_indexer.server.repositories.golden_repo_manager import (
+from code_indexer.server.app import create_app
+from code_indexer.server.repositories.golden_repo_manager import (
     GoldenRepoError,
     GitOperationError,
 )
@@ -55,8 +55,13 @@ class TestRepositoryDeletionTDD:
             "success": True,
             "message": "Golden repository 'test-repo' removed successfully",
         }
+        # Patch the REAL golden_repo_manager instance captured as a closure
+        # parameter by Story #409's route extraction -- patching
+        # code_indexer.server.app.golden_repo_manager never reaches it.
         monkeypatch.setattr(
-            "src.code_indexer.server.app.golden_repo_manager", mock_manager
+            client.app.state.golden_repo_manager,
+            "remove_golden_repo",
+            mock_manager.remove_golden_repo,
         )
 
         response = client.delete(
@@ -85,8 +90,12 @@ class TestRepositoryDeletionTDD:
             f"Failed to cleanup repository files: {broken_pipe_error}"
         )
 
+        # Patch the REAL golden_repo_manager instance (closure-capture class
+        # -- see test_successful_repository_deletion_returns_204 above).
         monkeypatch.setattr(
-            "src.code_indexer.server.app.golden_repo_manager", mock_manager
+            client.app.state.golden_repo_manager,
+            "remove_golden_repo",
+            mock_manager.remove_golden_repo,
         )
 
         response = client.delete(
@@ -117,8 +126,12 @@ class TestRepositoryDeletionTDD:
             "message": "Golden repository 'concurrent-repo' removed successfully",
         }
 
+        # Patch the REAL golden_repo_manager instance (closure-capture class
+        # -- see test_successful_repository_deletion_returns_204 above).
         monkeypatch.setattr(
-            "src.code_indexer.server.app.golden_repo_manager", mock_manager
+            client.app.state.golden_repo_manager,
+            "remove_golden_repo",
+            mock_manager.remove_golden_repo,
         )
 
         # Simulate concurrent deletion attempts
@@ -140,9 +153,7 @@ class TestRepositoryDeletionTDD:
         assert response2.status_code == 404
         assert "not found" in response2.json()["detail"]
 
-    def test_active_job_cancellation_during_deletion(
-        self, client, auth_headers, monkeypatch
-    ):
+    def test_active_job_cancellation_during_deletion(self, client, auth_headers):
         """
         Test that active jobs are cancelled gracefully during deletion.
 
@@ -166,16 +177,30 @@ class TestRepositoryDeletionTDD:
             "message": "Repository removed after job cancellation",
         }
 
-        monkeypatch.setattr(
-            "src.code_indexer.server.app.golden_repo_manager", mock_manager
-        )
-        monkeypatch.setattr(
-            "src.code_indexer.server.app.background_job_manager", mock_job_manager
-        )
-
-        response = client.delete(
-            "/api/admin/golden-repos/active-job-repo", headers=auth_headers
-        )
+        # Patch the REAL manager instances captured as closure parameters by
+        # Story #409's route extraction (see
+        # test_successful_repository_deletion_returns_204 above for
+        # golden_repo_manager).
+        with (
+            patch.object(
+                client.app.state.golden_repo_manager,
+                "remove_golden_repo",
+                mock_manager.remove_golden_repo,
+            ),
+            patch.object(
+                client.app.state.background_job_manager,
+                "get_jobs_by_operation_and_params",
+                mock_job_manager.get_jobs_by_operation_and_params,
+            ),
+            patch.object(
+                client.app.state.background_job_manager,
+                "cancel_job",
+                mock_job_manager.cancel_job,
+            ),
+        ):
+            response = client.delete(
+                "/api/admin/golden-repos/active-job-repo", headers=auth_headers
+            )
 
         # FAILING TEST: Should cancel jobs and then delete successfully
         assert response.status_code == 204
@@ -196,8 +221,12 @@ class TestRepositoryDeletionTDD:
             "Failed to cleanup repository files: Filesystem service unavailable"
         )
 
+        # Patch the REAL golden_repo_manager instance (closure-capture class
+        # -- see test_successful_repository_deletion_returns_204 above).
         monkeypatch.setattr(
-            "src.code_indexer.server.app.golden_repo_manager", mock_manager
+            client.app.state.golden_repo_manager,
+            "remove_golden_repo",
+            mock_manager.remove_golden_repo,
         )
 
         response = client.delete(
@@ -209,15 +238,13 @@ class TestRepositoryDeletionTDD:
         response_data = response.json()
         assert "unavailability" in response_data["detail"].lower()
 
-    def test_resource_cleanup_in_finally_block(self, client, auth_headers, monkeypatch):
+    def test_resource_cleanup_in_finally_block(self, client, auth_headers):
         """
         Test that resources are cleaned up even when exceptions occur.
 
         This test will FAIL until proper finally block cleanup is implemented
         to prevent resource leaks during deletion failures.
         """
-        mock_manager = MagicMock()
-
         # Mock a cleanup method to track if it was called
         cleanup_tracker = {"cleanup_called": False}
 
@@ -231,27 +258,28 @@ class TestRepositoryDeletionTDD:
                 # This should always be called
                 cleanup_tracker["cleanup_called"] = True
 
-        mock_manager.remove_golden_repo.side_effect = mock_remove_with_cleanup_tracking
-        monkeypatch.setattr(
-            "src.code_indexer.server.app.golden_repo_manager", mock_manager
-        )
-
-        response = client.delete(
-            "/api/admin/golden-repos/exception-repo", headers=auth_headers
-        )
+        # Patch the REAL golden_repo_manager instance (closure-capture class
+        # -- see test_successful_repository_deletion_returns_204 above).
+        with patch.object(
+            client.app.state.golden_repo_manager,
+            "remove_golden_repo",
+            side_effect=mock_remove_with_cleanup_tracking,
+        ):
+            response = client.delete(
+                "/api/admin/golden-repos/exception-repo", headers=auth_headers
+            )
 
         # FAILING TEST: Cleanup should be called even when error occurs
         assert cleanup_tracker["cleanup_called"] is True
         assert response.status_code == 500  # Expected error response
 
-    def test_database_transaction_consistency(self, client, auth_headers, monkeypatch):
+    def test_database_transaction_consistency(self, client, auth_headers):
         """
         Test that database operations maintain ACID properties during deletion.
 
         This test will FAIL until proper database transaction management
         is implemented with proper commit/rollback behavior.
         """
-        mock_manager = MagicMock()
         mock_transaction = MagicMock()
 
         # Mock database transaction behavior
@@ -279,24 +307,23 @@ class TestRepositoryDeletionTDD:
                 mock_transaction.rollback()
                 raise
 
-        mock_manager.remove_golden_repo.side_effect = mock_remove_with_transaction
-
-        monkeypatch.setattr(
-            "src.code_indexer.server.app.golden_repo_manager", mock_manager
-        )
-
-        response = client.delete(
-            "/api/admin/golden-repos/transaction-fail-repo", headers=auth_headers
-        )
+        # Patch the REAL golden_repo_manager instance (closure-capture class
+        # -- see test_successful_repository_deletion_returns_204 above).
+        with patch.object(
+            client.app.state.golden_repo_manager,
+            "remove_golden_repo",
+            side_effect=mock_remove_with_transaction,
+        ):
+            response = client.delete(
+                "/api/admin/golden-repos/transaction-fail-repo", headers=auth_headers
+            )
 
         # FAILING TEST: Transaction should be properly rolled back on failure
         assert response.status_code == 500
         assert transaction_state["rolledback"] is True
         assert transaction_state["committed"] is False
 
-    def test_proper_http_status_codes_for_different_errors(
-        self, client, auth_headers, monkeypatch
-    ):
+    def test_proper_http_status_codes_for_different_errors(self, client, auth_headers):
         """
         Test that different error types return appropriate HTTP status codes.
 
@@ -312,7 +339,7 @@ class TestRepositoryDeletionTDD:
                 "permission denied",
             ),
             (
-                GitOperationError("Failed to cleanup: Filesystem connection refused"),
+                GitOperationError("Failed to cleanup: Filesystem service unavailable"),
                 503,  # Service unavailable for external service failures
                 "unavailability",
             ),
@@ -324,16 +351,17 @@ class TestRepositoryDeletionTDD:
         ]
 
         for error, expected_status, expected_text in test_scenarios:
-            mock_manager = MagicMock()
-            mock_manager.remove_golden_repo.side_effect = error
-
-            monkeypatch.setattr(
-                "src.code_indexer.server.app.golden_repo_manager", mock_manager
-            )
-
-            response = client.delete(
-                "/api/admin/golden-repos/test-repo", headers=auth_headers
-            )
+            # Patch the REAL golden_repo_manager instance (closure-capture
+            # class -- see test_successful_repository_deletion_returns_204
+            # above).
+            with patch.object(
+                client.app.state.golden_repo_manager,
+                "remove_golden_repo",
+                side_effect=error,
+            ):
+                response = client.delete(
+                    "/api/admin/golden-repos/test-repo", headers=auth_headers
+                )
 
             # FAILING TESTS: Should return correct status codes for different error types
             assert response.status_code == expected_status, (

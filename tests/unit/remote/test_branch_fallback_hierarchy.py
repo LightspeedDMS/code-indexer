@@ -7,14 +7,14 @@ branch ancestry prioritization, and fallback repository matching functionality.
 import pytest
 from unittest.mock import Mock, AsyncMock
 
-from src.code_indexer.remote.repository_linking import (
+from code_indexer.remote.repository_linking import (
     ExactBranchMatcher,
     RepositoryLink,
     RepositoryType,
     MatchQuality,
 )
-from src.code_indexer.services.git_topology_service import GitTopologyService
-from src.code_indexer.api_clients.repository_linking_client import (
+from code_indexer.services.git_topology_service import GitTopologyService
+from code_indexer.api_clients.repository_linking_client import (
     RepositoryLinkingClient,
     RepositoryMatch as ClientRepositoryMatch,
     RepositoryDiscoveryResponse as ClientDiscoveryResponse,
@@ -161,7 +161,7 @@ class TestBranchFallbackMatcher:
         """Test that BranchFallbackMatcher class now exists."""
         # This test should pass since we've implemented the BranchFallbackMatcher
         try:
-            from src.code_indexer.remote.repository_linking import BranchFallbackMatcher
+            from code_indexer.remote.repository_linking import BranchFallbackMatcher
 
             assert BranchFallbackMatcher is not None
         except ImportError:
@@ -309,7 +309,7 @@ class TestGitMergeBaseAnalysis:
 
     def test_git_merge_base_analysis_with_real_repo(self, real_complex_git_repo):
         """Test git merge-base analysis with real repository structure."""
-        from src.code_indexer.services.git_topology_service import GitTopologyService
+        from code_indexer.services.git_topology_service import GitTopologyService
 
         git_service = GitTopologyService(real_complex_git_repo)
 
@@ -328,7 +328,7 @@ class TestGitMergeBaseAnalysis:
 
     def test_branch_ancestry_analysis_not_implemented_yet(self, real_complex_git_repo):
         """Test branch ancestry analysis functionality that should be implemented."""
-        from src.code_indexer.services.git_topology_service import GitTopologyService
+        from code_indexer.services.git_topology_service import GitTopologyService
 
         git_service = GitTopologyService(real_complex_git_repo)
         current_branch = git_service.get_current_branch()
@@ -465,7 +465,7 @@ class TestFallbackErrorHandling:
 
     def test_fallback_with_git_command_failures(self, tmp_path):
         """Test fallback behavior when git commands fail."""
-        from src.code_indexer.services.git_topology_service import GitTopologyService
+        from code_indexer.services.git_topology_service import GitTopologyService
 
         # Create non-git directory
         git_service = GitTopologyService(tmp_path)

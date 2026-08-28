@@ -60,11 +60,18 @@ def _make_embedding_factory():
     return mock_provider
 
 
-def _make_config_manager():
-    """Return a mock ConfigManager.create_with_backtrack result with minimal config."""
+def _make_config_manager(codebase_dir: str):
+    """Return a mock ConfigManager.create_with_backtrack result with minimal config.
+
+    Bug #1690: codebase_dir must match the repo_path under test --
+    ConfigManager.load_verified_config() (which _load_repo_config now
+    routes through) verifies the resolved config.codebase_dir equals the
+    requested target directory.
+    """
     mock_cfg = MagicMock()
     mock_cfg.embedding_provider = "voyage-ai"
     mock_cfg.collection_name = "code"
+    mock_cfg.codebase_dir = codebase_dir
     mock_mgr = MagicMock()
     mock_mgr.get_config.return_value = mock_cfg
     return mock_mgr
@@ -100,7 +107,7 @@ def _shared_search_service_patches(captured: List, fake_dir: str):
             ),
             patch(
                 "code_indexer.server.services.search_service.ConfigManager.create_with_backtrack",
-                return_value=_make_config_manager(),
+                return_value=_make_config_manager(fake_dir),
             ),
             patch(
                 "code_indexer.server.services.search_service.EmbeddingProviderFactory.create",

@@ -195,33 +195,40 @@ def test_global_repo_sister_relocated_temporal_data_is_detected(tmp_path):
     assert result["format"] != "none"
 
 
-def test_get_activated_repo_manager_logs_warning_on_real_import_failure(caplog):
-    """Round 2 remediation, Finding C: `_get_activated_repo_manager`'s bare
-    `except Exception: return None` silently swallowed the real exception,
-    which is now load-bearing for the AC4 resolver-based fallback above --
-    a genuine resolution failure previously produced a false-negative "no
-    temporal index" status with zero diagnostic trace. This forces a REAL
-    ImportError at the exact `from ..app import activated_repo_manager`
-    statement (by deleting the real module attribute, not by mocking the
-    method under test -- Messi Rule #1) and asserts a WARNING-level record
-    naming activated_repo_manager AND carrying the real exception text was
-    logged, while the graceful None-return behavior is preserved
-    unchanged."""
+def test_get_activated_repo_manager_logs_warning_on_real_import_failure(
+    caplog, monkeypatch
+):
+    """`_get_activated_repo_manager`'s bare `except Exception: return None`
+    must log a WARNING naming activated_repo_manager and carrying the real
+    exception text on a genuine import failure, while still returning None.
+    """
     from code_indexer.server import app as app_module
 
     assert hasattr(app_module, "activated_repo_manager"), (
-        "Precondition: app_module must have the attribute for this test "
-        "to genuinely exercise its removal"
+        "Precondition: app_module must expose the attribute for this test "
+        "to genuinely exercise a real import failure"
     )
-    original = app_module.activated_repo_manager
-    delattr(app_module, "activated_repo_manager")
+    original_getattr = app_module.__getattr__
+
+    def _raise_for_activated_repo_manager(name):
+        if name == "activated_repo_manager":
+            raise AttributeError(name)
+        return original_getattr(name)
+
+    # Issue #1658: a bare delattr() here raises AttributeError instead of
+    # injecting a failure -- PEP 562 __getattr__'s _lazy_values snapshot
+    # (Bug #1638) keeps hasattr/getattr resolving the name even after the
+    # real __dict__ entry is gone, and delattr bypasses __getattr__
+    # entirely. monkeypatch removes the real entry AND makes __getattr__
+    # raise for this one name (guaranteed restoration on teardown), so the
+    # _lazy_values fallback cannot mask the failure -- forcing a genuine
+    # ImportError below.
+    monkeypatch.delitem(app_module.__dict__, "activated_repo_manager", raising=False)
+    monkeypatch.setattr(app_module, "__getattr__", _raise_for_activated_repo_manager)
 
     service = DashboardService()
-    try:
-        with caplog.at_level(logging.WARNING):
-            result = service._get_activated_repo_manager()
-    finally:
-        app_module.activated_repo_manager = original
+    with caplog.at_level(logging.WARNING):
+        result = service._get_activated_repo_manager()
 
     assert result is None
     matching = [

@@ -19,15 +19,15 @@ import pytest
 def reset_all_singletons():
     """Reset all singletons to ensure clean test state.
 
-    Uses src.code_indexer... import paths to match module resolution in tests.
+    Uses code_indexer... import paths to match module resolution in tests.
     """
     # Reset config service singleton
-    from src.code_indexer.server.services.config_service import reset_config_service
+    from code_indexer.server.services.config_service import reset_config_service
 
     reset_config_service()
 
     # Reset telemetry manager singleton
-    from src.code_indexer.server.telemetry import (
+    from code_indexer.server.telemetry import (
         reset_telemetry_manager,
         reset_machine_metrics_exporter,
     )
@@ -84,7 +84,7 @@ class TestTelemetryAppIntegration:
             # Reset singletons INSIDE patch context so env var is set first
             reset_all_singletons()
 
-            from src.code_indexer.server.app import create_app
+            from code_indexer.server.app import create_app
 
             app = create_app()
 
@@ -103,60 +103,68 @@ class TestTelemetryAppIntegration:
 
 
 @pytest.mark.slow
-class TestTelemetryEnvironmentOverrides:
-    """Tests for environment variable overrides in app context."""
+class TestTelemetryDbConfigEnablesTelemetry:
+    """Story #1676 AC1: telemetry is enabled/disabled exclusively via the
+    DB-backed config (Web UI Config Screen) -- environment variables no
+    longer play any role. Replaces the old TestTelemetryEnvironmentOverrides,
+    which asserted the removed CIDX_TELEMETRY_ENABLED/
+    CIDX_OTEL_COLLECTOR_ENDPOINT override behavior."""
 
-    def test_env_var_overrides_config_file_for_telemetry(self, tmp_path: Path):
+    @staticmethod
+    def _app_with_telemetry_enabled(tmp_path: Path):
+        """Build a FastAPI app with telemetry enabled via config.json (the
+        DB-backed value), with the 5 legacy telemetry env vars stripped so
+        this genuinely proves config-file-only startup behavior."""
+        from contextlib import contextmanager
+        from code_indexer.server.utils.config_manager import (
+            _IGNORED_TELEMETRY_ENV_VARS,
+        )
+
+        @contextmanager
+        def _ctx():
+            config_dir = tmp_path / ".cidx-server"
+            config_dir.mkdir(parents=True)
+            (config_dir / "data" / "golden-repos").mkdir(parents=True)
+            config_file = config_dir / "config.json"
+            config_file.write_text(json.dumps({"telemetry_config": {"enabled": True}}))
+
+            with patch.dict(os.environ, {"CIDX_SERVER_DATA_DIR": str(config_dir)}):
+                for legacy_var in _IGNORED_TELEMETRY_ENV_VARS:
+                    os.environ.pop(legacy_var, None)
+                reset_all_singletons()
+                from code_indexer.server.app import create_app
+
+                yield create_app()
+
+        return _ctx()
+
+    def test_db_config_file_enables_telemetry(self, tmp_path: Path):
         """
-        Environment variables override config file settings.
-
-        Given a config file with telemetry disabled
-        And CIDX_TELEMETRY_ENABLED=true environment variable
+        Given a config file with telemetry.enabled=true (the DB-backed value)
+        And no telemetry-related environment variables set
         When the app starts
         Then telemetry should be enabled
         """
         from asgi_lifespan import LifespanManager
         import asyncio
 
-        # Create config with telemetry disabled
-        config_dir = tmp_path / ".cidx-server"
-        config_dir.mkdir(parents=True)
-        # Create data directory structure needed by lifespan
-        (config_dir / "data" / "golden-repos").mkdir(parents=True)
-        config_file = config_dir / "config.json"
-        config_file.write_text(json.dumps({"telemetry_config": {"enabled": False}}))
+        with self._app_with_telemetry_enabled(tmp_path) as app:
 
-        # Override with environment variable
-        with patch.dict(
-            os.environ,
-            {
-                "CIDX_SERVER_DATA_DIR": str(config_dir),
-                "CIDX_TELEMETRY_ENABLED": "true",
-                "CIDX_OTEL_COLLECTOR_ENDPOINT": "http://localhost:4317",
-            },
-        ):
-            # Reset singletons INSIDE patch context so env var is set first
-            reset_all_singletons()
-
-            from src.code_indexer.server.app import create_app
-
-            app = create_app()
-
-            async def check_env_override():
-                # Use LifespanManager to properly trigger FastAPI lifespan events
+            async def check_db_config_enables_telemetry():
                 async with LifespanManager(app):
-                    # With env override, telemetry should be enabled
                     assert hasattr(app.state, "telemetry_manager"), (
                         "telemetry_manager not set on app.state"
                     )
                     assert app.state.telemetry_manager is not None, (
-                        "telemetry_manager should not be None when env var enables it"
+                        "telemetry_manager should not be None when the "
+                        "DB-backed config enables it"
                     )
                     assert app.state.telemetry_manager.is_initialized is True, (
-                        "telemetry_manager should be initialized when env var enables it"
+                        "telemetry_manager should be initialized when the "
+                        "DB-backed config enables it"
                     )
 
-            asyncio.run(check_env_override())
+            asyncio.run(check_db_config_enables_telemetry())
 
 
 @pytest.mark.slow
@@ -170,12 +178,11 @@ class TestApplicationMetricsStartupWiring:
     """
 
     @staticmethod
-    def _app_with_env(tmp_path: Path, extra_env: dict):
-        """Context manager: build a FastAPI app with a disabled-telemetry
-        base config, patched with extra_env, singletons reset. The
-        patch.dict scope stays open around the yielded app so lifespan
-        (triggered later by the caller's own LifespanManager) still sees
-        the env override."""
+    def _app_with_env(tmp_path: Path, telemetry_enabled: bool = False):
+        """Context manager: build a FastAPI app with telemetry.enabled set
+        directly in config.json (the DB-backed value -- Story #1676 AC1:
+        environment variables no longer control telemetry), singletons
+        reset."""
         from contextlib import contextmanager
 
         @contextmanager
@@ -184,12 +191,13 @@ class TestApplicationMetricsStartupWiring:
             config_dir.mkdir(parents=True)
             (config_dir / "data" / "golden-repos").mkdir(parents=True)
             config_file = config_dir / "config.json"
-            config_file.write_text(json.dumps({"telemetry_config": {"enabled": False}}))
+            config_file.write_text(
+                json.dumps({"telemetry_config": {"enabled": telemetry_enabled}})
+            )
 
-            env = {"CIDX_SERVER_DATA_DIR": str(config_dir), **extra_env}
-            with patch.dict(os.environ, env):
+            with patch.dict(os.environ, {"CIDX_SERVER_DATA_DIR": str(config_dir)}):
                 reset_all_singletons()
-                from src.code_indexer.server.app import create_app
+                from code_indexer.server.app import create_app
 
                 yield create_app()
 
@@ -199,7 +207,7 @@ class TestApplicationMetricsStartupWiring:
         from asgi_lifespan import LifespanManager
         import asyncio
 
-        with self._app_with_env(tmp_path, {}) as app:
+        with self._app_with_env(tmp_path, telemetry_enabled=False) as app:
 
             async def check_application_metrics_state():
                 async with LifespanManager(app):
@@ -216,11 +224,7 @@ class TestApplicationMetricsStartupWiring:
         from asgi_lifespan import LifespanManager
         import asyncio
 
-        extra_env = {
-            "CIDX_TELEMETRY_ENABLED": "true",
-            "CIDX_OTEL_COLLECTOR_ENDPOINT": "http://localhost:4317",
-        }
-        with self._app_with_env(tmp_path, extra_env) as app:
+        with self._app_with_env(tmp_path, telemetry_enabled=True) as app:
 
             async def check_application_metrics_active():
                 async with LifespanManager(app):
@@ -252,7 +256,9 @@ class TestJobMetricsStartupWiring:
         from asgi_lifespan import LifespanManager
         import asyncio
 
-        with TestApplicationMetricsStartupWiring._app_with_env(tmp_path, {}) as app:
+        with TestApplicationMetricsStartupWiring._app_with_env(
+            tmp_path, telemetry_enabled=False
+        ) as app:
 
             async def check_job_metrics_state():
                 async with LifespanManager(app):
@@ -275,12 +281,8 @@ class TestJobMetricsStartupWiring:
         # dual PYTHONPATH import identity (same gotcha noted in conftest.py).
         from code_indexer.server.telemetry.job_metrics import JobMetrics
 
-        extra_env = {
-            "CIDX_TELEMETRY_ENABLED": "true",
-            "CIDX_OTEL_COLLECTOR_ENDPOINT": "http://localhost:4317",
-        }
         with TestApplicationMetricsStartupWiring._app_with_env(
-            tmp_path, extra_env
+            tmp_path, telemetry_enabled=True
         ) as app:
 
             async def check_job_metrics_active():

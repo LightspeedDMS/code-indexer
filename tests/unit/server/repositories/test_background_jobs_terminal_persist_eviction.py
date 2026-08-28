@@ -28,13 +28,13 @@ from typing import Any, Dict, Optional
 
 import pytest
 
-from src.code_indexer.server.repositories.background_jobs import (
+from code_indexer.server.repositories.background_jobs import (
     BackgroundJobManager,
     BackgroundJob,
     JobStatus,
 )
-from src.code_indexer.server.storage.database_manager import DatabaseSchema
-from src.code_indexer.server.utils.config_manager import BackgroundJobsConfig
+from code_indexer.server.storage.database_manager import DatabaseSchema
+from code_indexer.server.utils.config_manager import BackgroundJobsConfig
 
 # All tests are integration-style (real SQLite, real worker threads) but fast
 pytestmark = pytest.mark.slow
@@ -60,10 +60,15 @@ def _wait_for_terminal(
     while time.monotonic() < deadline_at:
         status = manager.get_job_status(job_id, username=username, is_admin=True)
         if status and status.get("status") in terminal_statuses:
-            return status
+            # Issue #1696 Session 1: get_job_status() is really typed to
+            # return Optional[Dict[str, Any]]; mypy currently resolves the
+            # bare cross-module import to Any until Session 2's mypy_path
+            # fix lands.
+            return status  # type: ignore[no-any-return]
         time.sleep(_POLL_INTERVAL)
     # Return whatever get_job_status says at timeout (may still be "running")
-    return manager.get_job_status(job_id, username=username, is_admin=True)
+    # Issue #1696 Session 1: see comment above.
+    return manager.get_job_status(job_id, username=username, is_admin=True)  # type: ignore[no-any-return]
 
 
 def _wait_for_not_in_running_jobs(
@@ -179,7 +184,10 @@ class TestTerminalPersistEviction:
                 # Simulate a silently-swallowed SQLite failure (return False,
                 # do NOT raise — see docstring for why raising is wrong here)
                 return False
-            return original(job_id)
+            # Issue #1696 Session 1: original() is really typed to return
+            # bool; mypy currently resolves the bare cross-module import
+            # to Any until Session 2's mypy_path fix lands.
+            return original(job_id)  # type: ignore[no-any-return]
 
         self.manager._persist_single_job_sqlite = patched  # type: ignore[method-assign]
         return tracker

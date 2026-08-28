@@ -19,6 +19,13 @@ from code_indexer.server.middleware.correlation import (
     CorrelationContextMiddleware,
 )
 
+# Bug #1648 (code-review round 2, Finding 1): correlation-id ContextVar
+# isolation between tests (several tests here, e.g.
+# test_correlation_id_format_is_string, call set_correlation_id(...)
+# without a matching clear_correlation_id()) is now provided tree-wide by
+# tests/unit/server/conftest.py's _reset_correlation_id_contextvar autouse
+# fixture -- no per-file fixture needed here.
+
 
 class TestCorrelationIDContextHelpers:
     """Test correlation ID context variable helpers."""

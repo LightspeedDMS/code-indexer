@@ -5,6 +5,7 @@ Verifies that self_monitoring_issues table has all required columns
 for three-tier deduplication algorithm.
 """
 
+import shutil
 import sqlite3
 import tempfile
 from pathlib import Path
@@ -32,8 +33,13 @@ class TestSelfMonitoringSchema:
 
             yield str(db_path)
         finally:
-            db_path.unlink(missing_ok=True)
-            Path(temp_dir).rmdir()
+            # Bug #1706: SQLite leaves -wal/-shm sidecar files (WAL mode or
+            # unclean close) and other artifacts (e.g. .bootstrap.lock) in
+            # temp_dir. Removing only db_path and then rmdir()'ing the
+            # directory fails with "Directory not empty" whenever any such
+            # sidecar file is present. shutil.rmtree removes the whole
+            # directory tree regardless of what SQLite left behind.
+            shutil.rmtree(temp_dir, ignore_errors=True)
 
     def test_self_monitoring_issues_has_error_codes_column(self, temp_db):
         """Test that error_codes column exists for Tier 1 deduplication."""

@@ -30,6 +30,7 @@ from code_indexer.xray.search_engine import XRaySearchEngine
 
 from . import _utils
 from ._utils import _mcp_response, _parse_json_string_array
+from .xray import _lazy_singleton_app_or_none
 from code_indexer.server.services.query_admission_gate import (
     check_query_admission,
     memory_pressure_mcp_payload,
@@ -217,8 +218,15 @@ def _resolve_repo_path(alias: str) -> Optional[str]:
 
 
 def _get_xray_cell_limiter() -> Any:
-    """Return the xray cell concurrency limiter from app.state, or None if not wired."""
-    app = getattr(_utils.app_module, "app", None)
+    """Return the xray cell concurrency limiter from app.state, or None if not wired.
+
+    Bug #1693: probes via `_lazy_singleton_app_or_none()` (the same
+    side-effect-free helper #1678 introduced for the setters in xray.py)
+    instead of a bare `getattr(_utils.app_module, "app", None)`, which
+    would otherwise permanently construct the process-wide app singleton
+    as a side effect of merely reading it.
+    """
+    app = _lazy_singleton_app_or_none()
     if app is None:
         return None
     return getattr(getattr(app, "state", None), "xray_cell_limiter", None)

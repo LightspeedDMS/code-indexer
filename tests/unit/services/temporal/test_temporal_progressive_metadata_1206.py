@@ -23,7 +23,7 @@ import threading
 import time
 from pathlib import Path
 
-from src.code_indexer.services.temporal.temporal_progressive_metadata import (
+from code_indexer.services.temporal.temporal_progressive_metadata import (
     TemporalProgressiveMetadata,
 )
 

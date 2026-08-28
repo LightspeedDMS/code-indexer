@@ -54,6 +54,7 @@ class TestGitPushAutoDetectBranch:
         def mock_run_git(cmd, **kwargs):
             calls_made.append(list(cmd))
             result = MagicMock()
+            result.stderr = ""
             if "get-url" in cmd:
                 result.stdout = "git@github.com:owner/repo.git"
             elif "rev-parse" in cmd and "--abbrev-ref" in cmd:
@@ -81,6 +82,7 @@ class TestGitPushAutoDetectBranch:
 
         def mock_run_git(cmd, **kwargs):
             result = MagicMock()
+            result.stderr = ""
             if "get-url" in cmd:
                 result.stdout = "git@github.com:owner/repo.git"
             elif "rev-parse" in cmd and "--abbrev-ref" in cmd:
@@ -112,6 +114,7 @@ class TestGitPushAutoDetectBranch:
         def mock_run_git(cmd, **kwargs):
             calls_made.append(list(cmd))
             result = MagicMock()
+            result.stderr = ""
             if "get-url" in cmd:
                 result.stdout = "git@github.com:owner/repo.git"
             else:
@@ -144,6 +147,7 @@ class TestGitPushExplicitRefspecAndUpstream:
 
         def mock_run_git(cmd, **kwargs):
             result = MagicMock()
+            result.stderr = ""
             if "get-url" in cmd:
                 result.stdout = "git@github.com:owner/repo.git"
             elif "push" in cmd:
@@ -173,6 +177,7 @@ class TestGitPushExplicitRefspecAndUpstream:
         def mock_run_git(cmd, **kwargs):
             calls_made.append(list(cmd))
             result = MagicMock()
+            result.stderr = ""
             if "get-url" in cmd:
                 result.stdout = "git@github.com:owner/repo.git"
             elif "rev-parse" in cmd:
@@ -213,6 +218,7 @@ class TestGitPushExplicitRefspecAndUpstream:
         def mock_run_git(cmd, **kwargs):
             calls_made.append(list(cmd))
             result = MagicMock()
+            result.stderr = ""
             if "get-url" in cmd:
                 result.stdout = "git@github.com:owner/repo.git"
             elif "rev-parse" in cmd:

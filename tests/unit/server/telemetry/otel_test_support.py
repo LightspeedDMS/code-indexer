@@ -202,7 +202,7 @@ _span_tracer_install_lock = threading.Lock()
 
 
 @contextmanager
-def active_span_exporter() -> Iterator[InMemorySpanExporter]:
+def active_span_exporter(sampler=None) -> Iterator[InMemorySpanExporter]:
     """Yield a real InMemorySpanExporter wired to a locally-owned
     TracerProvider, installed directly into
     code_indexer.server.telemetry.spans's module-level tracer cache
@@ -218,6 +218,11 @@ def active_span_exporter() -> Iterator[InMemorySpanExporter]:
     every test file observe its own spans independent of whichever other
     test already claimed the process-wide trace provider.
 
+    Args:
+        sampler: Optional Sampler passed through to the locally-owned
+            TracerProvider (Story #1676 AC4). None preserves the SDK's own
+            default sampler resolution, unchanged for existing callers.
+
     _span_tracer_install_lock is held for the ENTIRE context lifetime
     (across the yield, not just the save/restore steps) so two overlapping
     uses of this helper serialize completely instead of interleaving their
@@ -227,7 +232,7 @@ def active_span_exporter() -> Iterator[InMemorySpanExporter]:
     import code_indexer.server.telemetry.spans as spans_module
 
     exporter = InMemorySpanExporter()
-    provider = TracerProvider()
+    provider = TracerProvider(sampler=sampler)
     provider.add_span_processor(SimpleSpanProcessor(exporter))
     tracer = provider.get_tracer("test.otel_test_support")
 

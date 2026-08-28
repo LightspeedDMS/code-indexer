@@ -4817,6 +4817,8 @@ class LogsSqliteBackend:
                     extra_data TEXT,
                     node_id TEXT,
                     alias TEXT,
+                    trace_id TEXT,
+                    span_id TEXT,
                     created_at TEXT DEFAULT CURRENT_TIMESTAMP
                 )
                 """
@@ -4828,8 +4830,11 @@ class LogsSqliteBackend:
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_logs_correlation_id ON logs(correlation_id)"
             )
-            # Migrate existing databases: add node_id / alias columns if missing
-            # (must run BEFORE creating the indexes that reference them).
+            # Migrate existing databases: add node_id / alias / trace_id /
+            # span_id columns if missing (must run BEFORE creating the
+            # indexes that reference them). Backward-compatible additive
+            # change per the project's "Database Migrations Must Be
+            # Backward Compatible" rule.
             cursor = conn.execute("PRAGMA table_info(logs)")
             columns = {row[1] for row in cursor.fetchall()}
             if "node_id" not in columns:
@@ -4838,6 +4843,11 @@ class LogsSqliteBackend:
             # admin UI can filter lifecycle-runner failures by repo.
             if "alias" not in columns:
                 conn.execute("ALTER TABLE logs ADD COLUMN alias TEXT")
+            # Story #1676 AC2: OTEL trace/span correlation columns.
+            if "trace_id" not in columns:
+                conn.execute("ALTER TABLE logs ADD COLUMN trace_id TEXT")
+            if "span_id" not in columns:
+                conn.execute("ALTER TABLE logs ADD COLUMN span_id TEXT")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_logs_node_id ON logs(node_id)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_logs_alias ON logs(alias)")
 
@@ -4855,6 +4865,8 @@ class LogsSqliteBackend:
         extra_data: Optional[str] = None,
         node_id: Optional[str] = None,
         alias: Optional[str] = None,
+        trace_id: Optional[str] = None,
+        span_id: Optional[str] = None,
     ) -> None:
         """Insert a single log record.
 
@@ -4870,6 +4882,10 @@ class LogsSqliteBackend:
             node_id: Optional cluster node identifier (NULL in standalone).
             alias: Optional repo alias (Story #876 Phase C). Tags rows written
                 by the lifecycle-runner so operators can filter logs by repo.
+            trace_id: Optional OTEL trace ID (Story #1676 AC2). 32-char hex,
+                or the documented zero-value when no span was active.
+            span_id: Optional OTEL span ID (Story #1676 AC2). 16-char hex,
+                or the documented zero-value when no span was active.
         """
 
         def operation(conn: Any) -> None:
@@ -4877,8 +4893,9 @@ class LogsSqliteBackend:
                 """
                 INSERT INTO logs
                     (timestamp, level, source, message, correlation_id,
-                     user_id, request_path, extra_data, node_id, alias)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     user_id, request_path, extra_data, node_id, alias,
+                     trace_id, span_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     timestamp,
@@ -4891,6 +4908,8 @@ class LogsSqliteBackend:
                     extra_data,
                     node_id,
                     alias,
+                    trace_id,
+                    span_id,
                 ),
             )
 
@@ -4908,9 +4927,11 @@ class LogsSqliteBackend:
         must report them the same way.
 
         Args:
-            items: List of 10-tuples in column order:
+            items: List of 12-tuples in column order (Story #1676 AC2 added
+                trace_id/span_id):
                 (timestamp, level, source, message, correlation_id,
-                 user_id, request_path, extra_data, node_id, alias)
+                 user_id, request_path, extra_data, node_id, alias,
+                 trace_id, span_id)
 
         Returns:
             True on success (including the empty-input no-op case).
@@ -4923,8 +4944,9 @@ class LogsSqliteBackend:
                 """
                 INSERT INTO logs
                     (timestamp, level, source, message, correlation_id,
-                     user_id, request_path, extra_data, node_id, alias)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     user_id, request_path, extra_data, node_id, alias,
+                     trace_id, span_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 items,
             )
@@ -4989,7 +5011,8 @@ class LogsSqliteBackend:
 
         Column order matches the SELECT list in query_logs(): id, timestamp,
         level, source, message, correlation_id, user_id, request_path,
-        extra_data, node_id, alias, created_at.
+        extra_data, node_id, alias, trace_id, span_id, created_at
+        (Story #1676 AC2 appended trace_id/span_id).
         """
         return {
             "id": row[0],
@@ -5003,7 +5026,9 @@ class LogsSqliteBackend:
             "extra_data": row[8],
             "node_id": row[9],
             "alias": row[10],
-            "created_at": row[11],
+            "trace_id": row[11],
+            "span_id": row[12],
+            "created_at": row[13],
         }
 
     def query_logs(
@@ -5048,7 +5073,8 @@ class LogsSqliteBackend:
         rows = conn.execute(
             f"""
             SELECT id, timestamp, level, source, message, correlation_id,
-                   user_id, request_path, extra_data, node_id, alias, created_at
+                   user_id, request_path, extra_data, node_id, alias,
+                   trace_id, span_id, created_at
             FROM logs {where_clause}
             ORDER BY timestamp {order_direction}
             LIMIT ? OFFSET ?

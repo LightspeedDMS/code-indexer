@@ -15,6 +15,7 @@ import logging
 import pathspec
 from contextlib import contextmanager
 from dataclasses import dataclass
+from datetime import date, datetime
 from typing import Dict, Any, Optional, List, Union, TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -108,7 +109,7 @@ def cap_breach_response(breach: CapBreach) -> "Dict[str, Any]":
         "cap": breach.configured_cap,
         "remediation": _cap_breach_message(breach),
     }
-    return {"content": [{"type": "text", "text": json.dumps(payload)}]}
+    return _mcp_response(payload)
 
 
 def cap_breach_http_exception(breach: CapBreach) -> None:
@@ -247,6 +248,34 @@ def _enrich_with_wiki_url(
     result_dict["wiki_url"] = f"/wiki/{wiki_alias}/{article_path}"
 
 
+def _json_default(obj: Any) -> str:
+    """Typed defensive fallback for json.dumps() at the MCP response boundary.
+
+    Bug #1645 (defense-in-depth hardening): Bug #1642 fixed the one live
+    instance of a non-JSON-native value leaking into an MCP response (a raw
+    ``datetime`` from AuditLogPostgresBackend), but that fix was applied at
+    the data-access layer (``sanitize_row()``), not at this shared
+    serialization boundary. A future handler that forwards any other
+    non-JSON-native value directly into a response would reproduce the same
+    class of 100%-failure bug. This function is that boundary's guard.
+
+    Deliberately NOT a blanket ``str(obj)`` fallback -- that was considered
+    and rejected: it would silently paper over a genuinely wrong object type
+    reaching a response instead of failing loudly (this project's
+    anti-silent-failure stance), and ``str(datetime)`` emits a space
+    separator while ``.isoformat()`` emits the "T" separator used everywhere
+    else in this codebase. Only ``datetime``/``date`` are converted; every
+    other type raises TypeError, matching json.dumps()'s own default error
+    shape so callers see a familiar message.
+
+    Raises:
+        TypeError: obj is not a datetime/date instance.
+    """
+    if isinstance(obj, (datetime, date)):
+        return obj.isoformat()
+    raise TypeError(f"Object of type {type(obj).__name__} is not JSON serializable")
+
+
 def _mcp_response(data: Dict[str, Any]) -> Dict[str, Any]:
     """Wrap response data in MCP-compliant content array format.
 
@@ -271,7 +300,14 @@ def _mcp_response(data: Dict[str, Any]) -> Dict[str, Any]:
     # encoder (c_make_encoder). Whitespace is not part of the MCP content
     # contract -- clients parse this as JSON -- so dropping indentation is
     # a pure performance fix with no semantic response change.
-    return {"content": [{"type": "text", "text": json.dumps(data)}]}
+    #
+    # Bug #1645: default=_json_default is a defense-in-depth typed fallback
+    # -- it converts a stray datetime/date to an ISO-8601 string and raises
+    # loudly (never silently stringifies) for anything else that isn't
+    # natively JSON-serializable.
+    return {
+        "content": [{"type": "text", "text": json.dumps(data, default=_json_default)}]
+    }
 
 
 def _get_golden_repos_dir() -> str:

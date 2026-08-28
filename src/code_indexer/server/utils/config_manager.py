@@ -36,6 +36,19 @@ _MCP_DISPATCH_POOL_MAX: int = 1024
 _QUERY_EXECUTOR_POOL_MIN: int = 1
 _QUERY_EXECUTOR_POOL_MAX: int = 2048
 
+# Story #1676 AC1: telemetry configuration is managed exclusively via the Web
+# UI Config Screen (DB-backed) -- these 5 legacy environment variables no
+# longer override it. Listed here (rather than re-derived) so the single
+# aggregated-warning check in apply_env_overrides() and its tests share one
+# source of truth.
+_IGNORED_TELEMETRY_ENV_VARS: tuple = (
+    "CIDX_TELEMETRY_ENABLED",
+    "CIDX_OTEL_COLLECTOR_ENDPOINT",
+    "CIDX_OTEL_COLLECTOR_PROTOCOL",
+    "CIDX_OTEL_SERVICE_NAME",
+    "CIDX_DEPLOYMENT_ENVIRONMENT",
+)
+
 
 @dataclass
 class PasswordSecurityConfig:
@@ -224,9 +237,26 @@ class TelemetryConfig:
     """
     OpenTelemetry configuration for CIDX Server (Story #695).
 
-    Controls telemetry export including traces, metrics, and logs to an
-    OpenTelemetry collector endpoint. Disabled by default to ensure
-    zero overhead on fresh installations.
+    Controls telemetry export of traces and metrics to an OpenTelemetry
+    collector endpoint (export_traces/export_metrics below). Disabled by
+    default to ensure zero overhead on fresh installations.
+
+    Story #1676 AC2/AC3 scope split for "logs" (do not overclaim either
+    half in isolation):
+      - AC2 (delivered, this config unaffected): every stored log row in
+        BOTH the SQLite and PostgreSQL log stores carries `trace_id`/
+        `span_id` columns, letting an operator jump from a log line to its
+        OTEL trace. This is columnar log/trace CORRELATION, not export --
+        it works regardless of this config's settings, is populated by the
+        logging pipeline itself (logging_utils.inject_trace_context via
+        async_logging.IdentityQueueHandler.prepare()), and requires no new
+        field here.
+      - AC3 (delivered): actual OTLP log EXPORT to the collector endpoint
+        via the `export_logs` field below, mirroring export_traces/
+        export_metrics. A prior `export_logs` field was removed as dead
+        code (Bug #938) and stripped from loaded config dicts pending AC3;
+        that stripping was removed once this field became live again --
+        see load_config()'s telemetry_config conversion block.
     """
 
     # Core settings
@@ -238,6 +268,11 @@ class TelemetryConfig:
     # Export settings
     export_traces: bool = True
     export_metrics: bool = True
+    # Story #1676 AC3: real OTLP log export (context-aware bridge handler +
+    # BatchLogRecordProcessor, see telemetry/manager.py's
+    # _setup_log_exporter()). Default False so a fresh install produces
+    # zero OTLP log traffic and constructs no LoggerProvider at all.
+    export_logs: bool = False
 
     # Machine metrics settings
     machine_metrics_enabled: bool = True
@@ -245,6 +280,14 @@ class TelemetryConfig:
 
     # Deployment environment (development, staging, production)
     deployment_environment: str = "development"
+
+    # Story #1676 AC4: fraction of requests traced, in [0.0, 1.0]. Default
+    # 1.0 preserves pre-AC4 always-on trace sampling for operators who never
+    # touch this setting. Applied via an explicit
+    # ParentBased(TraceIdRatioBased(trace_sample_rate)) sampler in
+    # telemetry/manager.py so an already-sampled parent context is always
+    # honored regardless of this rate.
+    trace_sample_rate: float = 1.0
 
 
 @dataclass
@@ -2291,11 +2334,7 @@ class ServerConfigManager:
         if "telemetry_config" in config_dict and isinstance(
             config_dict["telemetry_config"], dict
         ):
-            # Bug #938: strip dead fields removed from TelemetryConfig so old
-            # config.json files load cleanly without TypeError.
             _tel = config_dict["telemetry_config"]
-            _tel.pop("export_logs", None)
-            _tel.pop("trace_sample_rate", None)
             config_dict["telemetry_config"] = TelemetryConfig(**_tel)
 
         # Story #3 - Configuration Consolidation: Convert migrated config dicts
@@ -2947,27 +2986,25 @@ class ServerConfigManager:
                     f"Invalid CIDX_SCIP_WORKSPACE_RETENTION_DAYS environment variable value '{retention_env}'. Using default {config.scip_config.scip_workspace_retention_days} days"
                 )
 
-        # Telemetry environment variable overrides (Story #695)
-        # Assert telemetry_config is not None (guaranteed by __post_init__)
-        assert config.telemetry_config is not None
-        if telemetry_enabled_env := os.environ.get("CIDX_TELEMETRY_ENABLED"):
-            config.telemetry_config.enabled = telemetry_enabled_env.lower() in (
-                "true",
-                "1",
-                "yes",
+        # Story #1676 AC1: telemetry configuration is managed exclusively via
+        # the Web UI Config Screen (DB-backed) -- the env var overrides that
+        # used to live here (Story #695) were removed. Any of the 5 legacy
+        # variables still present in the process environment is IGNORED; a
+        # single aggregated WARNING names every one found (never one
+        # WARNING per variable) so an operator migrating off env-based
+        # config gets one clear, actionable message instead of silent
+        # divergence from the DB-backed value.
+        present_telemetry_env_vars = [
+            name for name in _IGNORED_TELEMETRY_ENV_VARS if name in os.environ
+        ]
+        if present_telemetry_env_vars:
+            logging.warning(
+                "%s environment variable(s) are set but ignored -- telemetry "
+                "configuration is managed exclusively via the Web UI Config "
+                "Screen. Remove these environment variables from your "
+                "deployment.",
+                ", ".join(sorted(present_telemetry_env_vars)),
             )
-
-        if collector_endpoint_env := os.environ.get("CIDX_OTEL_COLLECTOR_ENDPOINT"):
-            config.telemetry_config.collector_endpoint = collector_endpoint_env
-
-        if collector_protocol_env := os.environ.get("CIDX_OTEL_COLLECTOR_PROTOCOL"):
-            config.telemetry_config.collector_protocol = collector_protocol_env.lower()
-
-        if service_name_env := os.environ.get("CIDX_OTEL_SERVICE_NAME"):
-            config.telemetry_config.service_name = service_name_env
-
-        if deployment_env := os.environ.get("CIDX_DEPLOYMENT_ENVIRONMENT"):
-            config.telemetry_config.deployment_environment = deployment_env
 
         return config
 
@@ -3083,6 +3120,14 @@ class ServerConfigManager:
             if config.telemetry_config.machine_metrics_interval_seconds < 1:
                 raise ValueError(
                     f"machine_metrics_interval_seconds must be >= 1, got {config.telemetry_config.machine_metrics_interval_seconds}"
+                )
+
+            # Story #1676 AC4: validate trace_sample_rate is in [0.0, 1.0].
+            # Rejected, never clamped -- an out-of-range value is a
+            # configuration mistake the operator must fix explicitly.
+            if not (0.0 <= config.telemetry_config.trace_sample_rate <= 1.0):
+                raise ValueError(
+                    f"trace_sample_rate must be between 0.0 and 1.0, got {config.telemetry_config.trace_sample_rate}"
                 )
 
         # Validate search_limits_config (Story #3 - Phase 1, AC-M1, AC-M2)

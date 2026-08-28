@@ -5,19 +5,40 @@ Drop-in replacement for SelfMonitoringSqliteBackend using psycopg v3 sync
 connections via ConnectionPool.  Satisfies the SelfMonitoringBackend Protocol
 (protocols.py).
 
-Tables created on first use (CREATE TABLE IF NOT EXISTS) so no separate
-migration step is required.
+Schema (`self_monitoring_scans`, `self_monitoring_issues` tables and their
+indexes) is owned entirely by the SQL migrations
+(storage/postgres/migrations/sql/001_initial_schema.sql,
+049_backend_indexes_1697.sql) -- this backend does NOT create or alter any
+table. `service_init.py` always runs `MigrationRunner` before
+`StorageFactory.create_backends()` constructs this class, so schema is
+guaranteed present by the time any instance exists (Issue #1697, mirroring
+Bug #1655/#1662: a previous self-heal `CREATE TABLE IF NOT EXISTS` here was
+dead code in every real deployment, and had ALSO drifted from the
+migration's TIMESTAMPTZ columns (declared TEXT here) -- removed rather
+than re-synced so there is no second copy left to drift again; its two
+indexes not already mirrored by a migration, idx_sm_scans_started_at and
+idx_sm_issues_created_at, were moved to 049_backend_indexes_1697.sql first
+so no coverage gap was introduced).
+
+Bug #1701 fix: list_scans(), list_issues(), get_last_started_at(), and
+fetch_stored_fingerprints() now normalize TIMESTAMPTZ columns (psycopg
+deserializes these to native datetime objects, never str) to ISO-8601 str
+via pg_utils.sanitize_row()/to_iso() -- the SAME pattern
+research_sessions_backend.py already used. Without this, web/routes.py's
+datetime.fromisoformat() calls on these values raised TypeError, silently
+degrading scan-duration/next-scan-time display to "N/A" in cluster mode.
+cleanup_orphaned_scans() needed no change: it only ever compares a str
+cutoff parameter against the TIMESTAMPTZ column server-side (PostgreSQL
+implicitly casts), it never returns a timestamp value to normalize.
 """
 
 from __future__ import annotations
 
-import logging
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 
 from .connection_pool import ConnectionPool
-
-logger = logging.getLogger(__name__)
+from .pg_utils import sanitize_row, to_iso
 
 
 class SelfMonitoringPostgresBackend:
@@ -30,60 +51,15 @@ class SelfMonitoringPostgresBackend:
 
     def __init__(self, pool: ConnectionPool) -> None:
         """
-        Initialize with a shared connection pool and ensure tables exist.
+        Initialize with a shared connection pool.
+
+        Schema is assumed to already exist (see module docstring) -- this
+        constructor does not touch the database.
 
         Args:
             pool: ConnectionPool instance providing psycopg v3 connections.
         """
         self._pool = pool
-        self._ensure_schema()
-
-    def _ensure_schema(self) -> None:
-        """Create self_monitoring tables and indexes if they do not already exist."""
-        try:
-            with self._pool.connection() as conn:
-                conn.execute(
-                    """
-                    CREATE TABLE IF NOT EXISTS self_monitoring_scans (
-                        scan_id TEXT PRIMARY KEY,
-                        started_at TEXT NOT NULL,
-                        status TEXT NOT NULL,
-                        log_id_start INTEGER NOT NULL,
-                        log_id_end INTEGER,
-                        completed_at TEXT,
-                        issues_created INTEGER,
-                        error_message TEXT
-                    )
-                    """
-                )
-                conn.execute(
-                    """
-                    CREATE TABLE IF NOT EXISTS self_monitoring_issues (
-                        id SERIAL PRIMARY KEY,
-                        scan_id TEXT NOT NULL,
-                        github_issue_number INTEGER,
-                        github_issue_url TEXT,
-                        classification TEXT NOT NULL,
-                        title TEXT NOT NULL,
-                        error_codes TEXT,
-                        fingerprint TEXT NOT NULL,
-                        source_log_ids TEXT,
-                        source_files TEXT,
-                        created_at TEXT NOT NULL
-                    )
-                    """
-                )
-                conn.execute(
-                    "CREATE INDEX IF NOT EXISTS idx_sm_scans_started_at ON self_monitoring_scans(started_at)"
-                )
-                conn.execute(
-                    "CREATE INDEX IF NOT EXISTS idx_sm_issues_created_at ON self_monitoring_issues(created_at)"
-                )
-                conn.commit()
-        except Exception as exc:
-            logger.warning(
-                "SelfMonitoringPostgresBackend: schema setup failed: %s", exc
-            )
 
     def create_scan_record(
         self,
@@ -162,7 +138,7 @@ class SelfMonitoringPostgresBackend:
             row = conn.execute(
                 "SELECT started_at FROM self_monitoring_scans ORDER BY started_at DESC LIMIT 1"
             ).fetchone()
-        return row[0] if row else None  # type: ignore[no-any-return]
+        return to_iso(row[0]) if row else None  # type: ignore[no-any-return]
 
     def fetch_stored_fingerprints(
         self, retention_days: int
@@ -177,7 +153,7 @@ class SelfMonitoringPostgresBackend:
                 "ORDER BY created_at DESC",
                 (cutoff,),
             ).fetchall()
-        return [(row[0], row[1], row[2], row[3], row[4]) for row in rows]
+        return [(row[0], row[1], row[2], row[3], to_iso(row[4])) for row in rows]
 
     def store_issue_metadata(
         self,
@@ -244,7 +220,7 @@ class SelfMonitoringPostgresBackend:
             "issues_created",
             "error_message",
         ]
-        return [dict(zip(cols, row)) for row in rows]
+        return [sanitize_row(dict(zip(cols, row))) for row in rows]
 
     def list_issues(self, limit: int = 100) -> List[Dict[str, Any]]:
         """Return issue records, most recent first.
@@ -280,7 +256,7 @@ class SelfMonitoringPostgresBackend:
             "source_files",
             "created_at",
         ]
-        return [dict(zip(cols, row)) for row in rows]
+        return [sanitize_row(dict(zip(cols, row))) for row in rows]
 
     def get_running_scan_count(self) -> int:
         """Return count of scans where completed_at IS NULL (currently running)."""

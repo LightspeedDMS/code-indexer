@@ -11,12 +11,47 @@ TDD: These tests are written FIRST, before implementation.
 """
 
 import pytest
-import tempfile
-from pathlib import Path
 from unittest.mock import MagicMock, patch
+from fastapi.routing import APIRoute
 from fastapi.testclient import TestClient
 
-pytestmark = pytest.mark.slow
+# Issue #1677: this file was marked pytest.mark.slow with no file-specific
+# rationale, which silently excluded it from server-fast-automation.sh's
+# "-m not slow" gate. Measured standalone at ~4.9s for 26 tests (well under
+# CLAUDE.md's exclusion bar), so the marker is removed and the file rejoins
+# the regression gate.
+
+# Issue #1656: /restart carries `dependencies=[Depends(require_elevation())]`
+# (added by commit 21e8cc57, Story #956) at the ROUTER level. A router-level
+# dependency runs before the route body even though this file only ever
+# patched `_require_admin_session` (checked *inside* the route body). The
+# elevation dependency's own sub-dependency (`get_current_admin_user_hybrid`)
+# calls `get_session_manager()`, which raises `RuntimeError: Session manager
+# not initialized` in this file's minimal FastAPI app (no lifespan/session
+# manager wiring) -- reproduced identically for all 13 TestClient-based tests
+# below. This is NOT the session-manager-global-leak issue tracked separately
+# in #1673 (missing `init_session_manager()` call); the correct, established
+# fix -- already used for this exact route in
+# test_1195_ac3_ac4_restart_gates.py, and for other admin routes in
+# test_groups_toggle_ajax.py / test_admin_elevation_gating_956.py / etc. --
+# is to override the elevation dependency via FastAPI's
+# `app.dependency_overrides`, bypassing it entirely rather than trying to
+# satisfy its real session-manager requirement.
+_ELEVATION_QUALNAME = "require_elevation.<locals>._check"
+
+
+def _bypass_elevation(app, router):
+    """Override all require_elevation deps so tests can call routes without TOTP setup."""
+    for route in router.routes:
+        if not isinstance(route, APIRoute):
+            continue
+        for dep in route.dependencies or []:
+            dep_callable = getattr(dep, "dependency", None)
+            if (
+                dep_callable
+                and getattr(dep_callable, "__qualname__", "") == _ELEVATION_QUALNAME
+            ):
+                app.dependency_overrides[dep_callable] = lambda: None
 
 
 @pytest.fixture(autouse=True)
@@ -27,6 +62,29 @@ def reset_restart_state():
     routes_module._restart_in_progress = False
     yield
     routes_module._restart_in_progress = False
+
+
+@pytest.fixture(autouse=True)
+def isolate_restart_signal(tmp_path):
+    """
+    Sandbox RESTART_SIGNAL_PATH for every test in this file.
+
+    Issue #1677 remediation: RESTART_SIGNAL_PATH is bound at import time from
+    CIDX_DATA_DIR (not server-fast-automation.sh's CIDX_SERVER_DATA_DIR), so
+    without this patch any test that reaches the real systemd branch of
+    _delayed_restart writes a real restart.signal file to the real
+    ~/.cidx-server/ directory. If cidx-auto-update.timer is active on the
+    host, its poller (auto_update/service.py) picks up a signal file younger
+    than RESTART_SIGNAL_STALENESS_THRESHOLD and executes a REAL server
+    restart, which would kill any in-flight background job. Applying this
+    autouse fixture at module scope (rather than per-test) protects every
+    test here, including ones added in the future.
+    """
+    with patch(
+        "code_indexer.server.web.routes.RESTART_SIGNAL_PATH",
+        tmp_path / "restart.signal",
+    ):
+        yield
 
 
 @pytest.fixture
@@ -45,6 +103,7 @@ def test_client():
 
     with patch("code_indexer.server.web.routes._require_admin_session") as mock_auth:
         mock_auth.return_value = mock_admin_session
+        _bypass_elevation(app, web_router)
         yield TestClient(app)
 
 
@@ -60,6 +119,7 @@ def test_client_non_admin():
     # Mock non-admin session - return None (not authenticated)
     with patch("code_indexer.server.web.routes._require_admin_session") as mock_auth:
         mock_auth.return_value = None
+        _bypass_elevation(app, web_router)
         yield TestClient(app)
 
 
@@ -489,27 +549,26 @@ class TestDelayedRestartMechanism:
 
         When _delayed_restart is called in systemd environment
         Then it writes a JSON signal file to RESTART_SIGNAL_PATH
+
+        Note: RESTART_SIGNAL_PATH is already sandboxed to a tmp_path by the
+        module-level autouse `isolate_restart_signal` fixture (Issue #1677) --
+        no per-test patch is needed here.
         """
         from code_indexer.server.web.routes import _delayed_restart
+        import code_indexer.server.web.routes as routes_module
         import json
 
-        with tempfile.TemporaryDirectory() as tmpdir:
-            mock_signal_path = Path(tmpdir) / "restart.signal"
-            with patch("time.sleep"):
-                with patch("os.environ.get") as mock_env:
-                    mock_env.return_value = "some-invocation-id"  # Systemd
-                    with patch(
-                        "code_indexer.server.web.routes.RESTART_SIGNAL_PATH",
-                        mock_signal_path,
-                    ):
-                        _delayed_restart(delay=2)
+        with patch("time.sleep"):
+            with patch("os.environ.get") as mock_env:
+                mock_env.return_value = "some-invocation-id"  # Systemd
+                _delayed_restart(delay=2)
 
-            # Signal file should have been written (assert while tmpdir still exists)
-            assert mock_signal_path.exists()
-            signal_data = json.loads(mock_signal_path.read_text())
-            assert "timestamp" in signal_data
-            assert "reason" in signal_data
-            assert signal_data["reason"] == "diagnostics_restart"
+        signal_path = routes_module.RESTART_SIGNAL_PATH
+        assert signal_path.exists()
+        signal_data = json.loads(signal_path.read_text())
+        assert "timestamp" in signal_data
+        assert "reason" in signal_data
+        assert signal_data["reason"] == "diagnostics_restart"
 
     def test_dev_mode_calls_os_execv(self):
         """
@@ -606,30 +665,29 @@ class TestErrorHandling:
         Given _delayed_restart is called in systemd mode
         When the signal file is written
         Then its content is valid JSON with 'timestamp' and 'reason' fields
+
+        Note: RESTART_SIGNAL_PATH is already sandboxed to a tmp_path by the
+        module-level autouse `isolate_restart_signal` fixture (Issue #1677) --
+        no per-test patch is needed here.
         """
         from code_indexer.server.web.routes import _delayed_restart
+        import code_indexer.server.web.routes as routes_module
         import json
 
         with patch("time.sleep"):
             with patch("os.environ.get") as mock_env:
                 mock_env.return_value = "some-invocation-id"  # Systemd mode
+                _delayed_restart(delay=2)
 
-                with tempfile.TemporaryDirectory() as tmpdir:
-                    mock_signal_path = Path(tmpdir) / "restart.signal"
-                    with patch(
-                        "code_indexer.server.web.routes.RESTART_SIGNAL_PATH",
-                        mock_signal_path,
-                    ):
-                        _delayed_restart(delay=2)
+        # Signal file should contain valid JSON
+        signal_path = routes_module.RESTART_SIGNAL_PATH
+        assert signal_path.exists()
+        content = signal_path.read_text()
+        signal_data = json.loads(content)
 
-                    # Signal file should contain valid JSON
-                    assert mock_signal_path.exists()
-                    content = mock_signal_path.read_text()
-                    signal_data = json.loads(content)
-
-                    # Verify required fields are present
-                    assert "timestamp" in signal_data
-                    assert "reason" in signal_data
+        # Verify required fields are present
+        assert "timestamp" in signal_data
+        assert "reason" in signal_data
 
     def test_os_execv_failure_is_caught(self):
         """

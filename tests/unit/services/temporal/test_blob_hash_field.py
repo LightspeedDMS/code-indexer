@@ -6,7 +6,7 @@ import subprocess
 
 import pytest
 
-from src.code_indexer.services.temporal.temporal_diff_scanner import TemporalDiffScanner
+from code_indexer.services.temporal.temporal_diff_scanner import TemporalDiffScanner
 
 
 @pytest.fixture

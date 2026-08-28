@@ -11,7 +11,7 @@ import os
 import threading
 import time
 from pathlib import Path
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, Optional, Union
 
 from code_indexer.server.middleware.correlation import get_correlation_id
 from code_indexer.server.logging_utils import format_error_log
@@ -21,6 +21,30 @@ from code_indexer.server.storage.database_manager import DatabaseConnectionManag
 from code_indexer.server.utils.registry_factory import STORAGE_MODE_PENDING_SENTINEL
 
 logger = logging.getLogger(__name__)
+
+
+def _ensure_dep_map_output_dir(golden_repos_dir: Union[str, Path]) -> Path:
+    """Eagerly create the dependency-map output directory (Bug #1621).
+
+    Without this, {golden_repos_dir}/cidx-meta/dependency-map/ is only ever
+    created lazily, as a side effect of the first analysis run. That meant
+    `_get_dep_map_output_dir()` (dependency_map_routes.py) returned None for
+    every request on a never-before-visited node -- including the very
+    request that would otherwise trigger the directory's creation -- causing
+    a spurious "Dashboard analysis infrastructure unavailable" error on the
+    first dashboard load. The next poll a few seconds later would then
+    succeed once something else happened to create the directory.
+
+    This is a single, trivial O(1) directory creation, unconditionally safe
+    to run once at startup regardless of whether the dependency-map feature
+    is enabled -- it does not scale with fleet size (unlike golden-repo-count
+    work, which must never run unbacked on the startup path).
+
+    Returns the (created, or already-existing) directory path.
+    """
+    dep_map_dir = Path(golden_repos_dir) / "cidx-meta" / "dependency-map"
+    dep_map_dir.mkdir(parents=True, exist_ok=True)
+    return dep_map_dir
 
 
 def _make_dep_map_repair_invoker_fn(
@@ -699,9 +723,11 @@ def make_lifespan(
         if getattr(_cache_cfg, "query_path_cache_enabled", True):
 
             def _repo_config_loader(repo_path: str) -> Any:
-                return _ConfigManager.create_with_backtrack(
-                    Path(repo_path)
-                ).get_config()
+                # Bug #1690: load_verified_config() verifies the resolved
+                # config genuinely describes repo_path itself, rather than
+                # blind-trusting create_with_backtrack()'s own silent
+                # ancestor-backtrack / bare-Config() defaulting.
+                return _ConfigManager.load_verified_config(Path(repo_path))
 
             app.state.repo_config_cache = _RepoConfigCache(
                 config_ttl_seconds=float(_cache_cfg.repo_config_cache_ttl_seconds),
@@ -2602,6 +2628,15 @@ def make_lifespan(
             # Story #927: closures capture dep_map_dir, tracking_backend, job_tracker
             _dep_map_dir = Path(golden_repos_dir) / "cidx-meta" / "dependency-map"
 
+            # Bug #1621: eagerly create the dep-map output directory here, before
+            # anything below checks for its existence. Without this, a
+            # never-before-visited node has no cidx-meta/dependency-map/ on disk
+            # until the first analysis run happens to create it lazily -- so the
+            # very first dashboard HTMX poll sees `_get_dep_map_output_dir()`
+            # return None and renders a spurious "infrastructure unavailable"
+            # error, even though the directory would exist moments later.
+            _ensure_dep_map_output_dir(golden_repos_dir)
+
             # Bug #1040 follow-up: clean stale sentinel lock files on startup.
             # Server restart kills analysis threads but leaves sentinel files on
             # disk, blocking the dep-map UI with a stuck "Processing..." state.
@@ -3188,7 +3223,14 @@ def make_lifespan(
             config_service = get_config_service()
             server_config = config_service.get_config()
 
-            # Apply environment variable overrides (e.g., CIDX_TELEMETRY_ENABLED)
+            # Apply environment variable overrides (e.g., CIDX_SERVER_HOST,
+            # CIDX_LOG_LEVEL). Story #1676 AC1: telemetry configuration is
+            # managed exclusively via the Web UI Config Screen (DB-backed) --
+            # apply_env_overrides() no longer applies any of the 5 legacy
+            # CIDX_TELEMETRY_*/CIDX_OTEL_*/CIDX_DEPLOYMENT_ENVIRONMENT
+            # variables to server_config.telemetry_config below; it only logs
+            # one aggregated WARNING if any of them are still present in the
+            # process environment.
             config_manager = ServerConfigManager()
             server_config = config_manager.apply_env_overrides(server_config)
 
@@ -3199,8 +3241,35 @@ def make_lifespan(
                 # Lazy import telemetry module only when enabled
                 from code_indexer.server.telemetry import get_telemetry_manager
 
+                # Story #1676 AC6: resolve this process's cluster node
+                # identity via the SAME shared resolver service_init.py and
+                # the cluster-services block below use for JobTracker /
+                # NodeHeartbeatService (resolve_cluster_node_id) -- never a
+                # second/competing identity scheme. server_config.cluster is
+                # the already-parsed ClusterConfig from this same
+                # config.json (see ServerConfigManager's "cluster" ->
+                # ClusterConfig conversion), so we build the small raw-dict
+                # shape the resolver expects from it instead of re-reading
+                # config.json a third time in this startup routine. In solo
+                # (non-cluster) mode server_config.cluster is None and the
+                # resolver's existing f"{hostname}-cidx" fallback applies
+                # unchanged.
+                from code_indexer.server.utils.cluster_node_id import (
+                    resolve_cluster_node_id,
+                )
+
+                _telemetry_raw_cluster_cfg = (
+                    {"cluster": {"node_id": server_config.cluster.node_id}}
+                    if server_config.cluster is not None
+                    else None
+                )
+                _telemetry_cluster_node_id = resolve_cluster_node_id(
+                    _telemetry_raw_cluster_cfg
+                )
+
                 telemetry_manager = get_telemetry_manager(
-                    server_config.telemetry_config
+                    server_config.telemetry_config,
+                    cluster_node_id=_telemetry_cluster_node_id,
                 )
                 app.state.telemetry_manager = telemetry_manager
 
@@ -3280,23 +3349,42 @@ def make_lifespan(
                         extra={"correlation_id": get_correlation_id()},
                     )
 
-                # Initialize FastAPI instrumentation for OTEL (Story #697)
-                if server_config.telemetry_config.export_traces:
-                    from code_indexer.server.telemetry.instrumentation import (
-                        instrument_fastapi,
-                    )
+                # FastAPI OTEL instrumentation (Story #697) is no longer
+                # applied here. Bug #1679: by the time this lifespan body
+                # executes, Starlette has ALREADY built its ASGI
+                # middleware stack (it builds that stack lazily on the
+                # very first ASGI message the app receives, which is the
+                # "lifespan" startup message itself) -- calling
+                # instrument_fastapi() at this point was a structural
+                # no-op that silently produced zero HTTP request spans on
+                # every deployment. Instrumentation now happens
+                # immediately after `FastAPI(...)` is constructed, in
+                # startup/app_wiring.py's create_fastapi_app(), well
+                # before this lifespan body ever runs.
+                logger.debug(
+                    "FastAPI OTEL instrumentation already applied at "
+                    "app-construction time (see app_wiring.py)",
+                    extra={"correlation_id": get_correlation_id()},
+                )
 
-                    instrumented = instrument_fastapi(app, telemetry_manager)
-                    if instrumented:
-                        logger.info(
-                            "FastAPI instrumented with OTEL tracing",
-                            extra={"correlation_id": get_correlation_id()},
-                        )
-                    else:
-                        logger.debug(
-                            "FastAPI instrumentation skipped",
-                            extra={"correlation_id": get_correlation_id()},
-                        )
+                # Story #1676 AC5: outbound HTTP span instrumentation
+                # (httpx, process-global). Unlike FastAPI instrumentation
+                # above, HTTPXClientInstrumentor monkey-patches
+                # httpx.HTTPTransport/AsyncHTTPTransport directly -- no
+                # Bug #1679-style ordering constraint -- so it is safe to
+                # apply here in the lifespan body. Gated identically to
+                # instrument_fastapi()'s own gate (telemetry_config.enabled,
+                # this whole `if` block) rather than export_traces alone,
+                # matching instrument_fastapi()'s rationale: real
+                # per-request overhead is added even with a no-op tracer.
+                # Deliberately process-global (Story #1676 AC5 Non-Goal):
+                # also instruments non-embedding httpx traffic (e.g.
+                # ShardRouter calls below) -- intentional, not scoped.
+                from code_indexer.server.telemetry.instrumentation import (
+                    instrument_httpx,
+                )
+
+                instrument_httpx()
             else:
                 # Telemetry disabled - set to None
                 app.state.telemetry_manager = None
@@ -3568,14 +3656,27 @@ def make_lifespan(
         # constructed -- see that assignment for the full rationale.
 
         # Bug #532: Inject DiagnosticsBackend into the module-level diagnostics_service
-        # singleton. The singleton is created at import time with no backend; we inject
-        # it here after backend_registry is available.
+        # singleton. We inject it here after backend_registry is available.
+        #
+        # Bug #1686 follow-up: this used to do a bare-name
+        # `from ...routers.diagnostics import diagnostics_service as
+        # _diagnostics_service` import. Bug #1686 changed that module
+        # global's default from an eagerly-constructed instance to `None`
+        # (to stop a bare import of the router from touching the live DB),
+        # so the bare-name import here bound to None and
+        # `_diagnostics_service._backend = ...` raised
+        # `AttributeError: 'NoneType' object has no attribute '_backend'`,
+        # unconditionally crashing real server startup (this guard is
+        # always true on a real server). Calling _get_diagnostics_service()
+        # instead lazily constructs the singleton right now, at real
+        # STARTUP time -- exactly what Bug #1686 always intended to allow;
+        # only import-time construction was ever the problem.
         if backend_registry is not None and hasattr(backend_registry, "diagnostics"):
             from code_indexer.server.routers.diagnostics import (
-                diagnostics_service as _diagnostics_service,
+                _get_diagnostics_service,
             )
 
-            _diagnostics_service._backend = backend_registry.diagnostics
+            _get_diagnostics_service()._backend = backend_registry.diagnostics
             logger.info(
                 "Bug #532: DiagnosticsBackend injected into diagnostics_service singleton",
                 extra={"correlation_id": get_correlation_id()},

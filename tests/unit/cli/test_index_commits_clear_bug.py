@@ -22,22 +22,43 @@ from code_indexer.services.temporal.temporal_collection_naming import (
 
 
 def _count_temporal_vectors(index_dir: Path) -> int:
-    """Sum vector_*.json files across ALL temporal collection dirs.
+    """Count temporal collection dirs that hold real committed data.
 
     Story #1171 introduced quarterly-sharded, per-embedder temporal
     collection directories (e.g. "code-indexer-temporal-voyage_context_4-
     2026Q3"), so vectors are no longer guaranteed to live under the single
     legacy "code-indexer-temporal" directory -- that legacy dir may exist
     but only hold "temporal_metadata.db" bookkeeping, no vector files.
+
+    Bug #1528 made temporal indexing write the consolidated CHUNKS_DB
+    layout ("chunks.db") by default instead of the legacy SHARDED_JSON
+    layout ("vector_*.json" shard files) -- a bare "vector_*.json" glob
+    therefore always returns 0 regardless of whether indexing actually
+    produced data. This helper is layout-aware: it reuses
+    ``temporal_shard_has_committed_rows`` (the shared, side-effect-free
+    primitive documented in this project's CLAUDE.md under
+    "Observability/Inspection Call-Site Updates (Story #1459, Epic
+    #1454)"), which dispatches on ``resolve_chunk_layout()`` and, for
+    CHUNKS_DB collections, uses the read-only ``chunk_store_has_real_data``
+    primitive -- never a bare glob, which is wrong for both layouts.
+
+    Returns the number of temporal collection directories holding at least
+    one committed row -- a presence count, not an exact chunk tally. Every
+    call site only asserts this is greater than zero, so exact-count
+    fidelity is not required.
     """
     if not index_dir.is_dir():
         return 0
+
+    from code_indexer.services.temporal.temporal_row_existence import (
+        temporal_shard_has_committed_rows,
+    )
+
     count = 0
     for entry in index_dir.iterdir():
         if entry.is_dir() and is_temporal_collection(entry.name):
-            count += len(
-                [f for f in entry.glob("**/*.json") if f.name.startswith("vector_")]
-            )
+            if temporal_shard_has_committed_rows(entry, on_error="treat_absent"):
+                count += 1
     return count
 
 

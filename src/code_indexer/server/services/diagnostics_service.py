@@ -19,10 +19,10 @@ import re
 import sqlite3
 import threading
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from enum import Enum
 from pathlib import Path
-from typing import TYPE_CHECKING, Dict, List, Any, Optional, Tuple
+from typing import TYPE_CHECKING, Dict, List, Any, Optional, Sequence, Tuple
 
 import httpx
 
@@ -32,6 +32,7 @@ from code_indexer.server.services.ci_token_manager import (
     GITLAB_TOKEN_PATTERN,
 )
 from code_indexer.server.storage.database_manager import DatabaseConnectionManager
+from code_indexer.server.storage.json_column import parse_json_column
 from code_indexer.storage.hnsw_index_manager import HNSWIndexManager
 
 if TYPE_CHECKING:
@@ -809,7 +810,14 @@ class DiagnosticsService:
         try:
             # Serialize results to JSON
             results_json = json.dumps([r.to_dict() for r in results])
-            run_at = datetime.now().isoformat()
+            # Bug #1663: write a timezone-AWARE UTC value, never naive-local.
+            # run_at is TIMESTAMPTZ on PostgreSQL -- a naive-local value
+            # round-trips incorrectly if the PostgreSQL session's configured
+            # timezone ever differs from this process's local timezone,
+            # skewing get_status()'s freshness/TTL comparison. An aware UTC
+            # value is unambiguous regardless of session timezone. See
+            # _coerce_run_at() for the matching read-side normalization.
+            run_at = datetime.now(timezone.utc).isoformat()
 
             if self._backend is not None:
                 self._backend.save_results(category.value, results_json, run_at)
@@ -831,64 +839,194 @@ class DiagnosticsService:
             logger = logging.getLogger(__name__)
             logger.error(f"Failed to save diagnostic results to database: {e}")
 
+    def _reconstruct_diagnostic_results(
+        self, results_data: List[Dict[str, Any]]
+    ) -> List[DiagnosticResult]:
+        """Rebuild DiagnosticResult objects from persisted result dicts.
+
+        Shared by _load_results_from_db and _read_category_from_db (Bug
+        #1653) so the two call sites can't drift.
+        """
+        return [
+            DiagnosticResult(
+                name=result_dict["name"],
+                status=DiagnosticStatus(result_dict["status"]),
+                message=result_dict["message"],
+                details=result_dict.get("details", {}),
+                timestamp=datetime.fromisoformat(result_dict["timestamp"]),
+            )
+            for result_dict in results_data
+        ]
+
+    def _coerce_run_at(self, raw: object) -> Optional[datetime]:
+        """Normalize a persisted run_at value to a naive local datetime.
+
+        Bug #1653 round 2: run_at is PostgreSQL's TIMESTAMPTZ (psycopg
+        returns a real, often tz-aware, datetime) but SQLite's TEXT (an
+        ISO-format str). get_status() compares this value against a naive
+        datetime.now() (its TTL-staleness check) -- a tz-aware pass-through
+        would raise "can't subtract offset-naive and offset-aware
+        datetimes" the first time that comparison runs, so an aware value
+        is converted to local time and stripped of tzinfo before being
+        returned. A malformed value (neither datetime nor a parseable str)
+        fails soft: logs a WARNING and returns None, mirroring
+        parse_json_column()'s contract.
+
+        Bug #1663: _save_results_to_db() now writes run_at as a
+        timezone-AWARE UTC value (datetime.now(timezone.utc).isoformat()),
+        so on SQLite the persisted TEXT string itself carries a UTC offset
+        (e.g. "...+00:00"). datetime.fromisoformat() parses that into a
+        tz-AWARE datetime -- the str branch below must strip/convert it
+        exactly like the isinstance(raw, datetime) branch already does,
+        otherwise the very same "naive vs aware" TypeError this method
+        exists to prevent would resurface via the str path instead.
+        """
+        if isinstance(raw, datetime):
+            if raw.tzinfo is not None:
+                return raw.astimezone().replace(tzinfo=None)
+            return raw
+
+        if isinstance(raw, str):
+            try:
+                parsed = datetime.fromisoformat(raw)
+            except ValueError:
+                pass
+            else:
+                if parsed.tzinfo is not None:
+                    return parsed.astimezone().replace(tzinfo=None)
+                return parsed
+
+        import logging
+
+        logging.getLogger(__name__).warning(
+            "diagnostic_results.run_at: malformed value %s (type %s)",
+            repr(raw)[:200],
+            type(raw).__name__,
+        )
+        return None
+
+    def _fetch_all_diagnostic_rows(
+        self,
+    ) -> Optional[Sequence[Tuple[str, object, object]]]:
+        """Fetch all raw (category, results_json, run_at) rows.
+
+        Returns None if there is nothing to load yet (no backend and no
+        on-disk SQLite file). Raises on a genuine fetch failure -- the
+        caller decides how to handle that.
+        """
+        if self._backend is not None:
+            # Bug #1662: DiagnosticsBackend.load_all_results() now honestly
+            # declares Sequence[Tuple[str, object, object]] (previously the
+            # provably false List[Tuple[str, str, str]]) -- that widening
+            # itself needed no mypy suppression here. The suppression below
+            # remains for an UNRELATED, pre-existing reason, confirmed via
+            # reveal_type() probing under the project's real lint.sh mypy
+            # invocation (mypy --explicit-package-bases --check-untyped-defs
+            # src tests): mypy registers this module as
+            # src.code_indexer.server.services.diagnostics_service (it
+            # treats the repo root, not src/, as the package base), while
+            # the DiagnosticsBackend import above is written as bare
+            # code_indexer.server.storage.protocols (matching this
+            # project's runtime PYTHONPATH=./src convention). Those two
+            # spellings are different module identities to mypy, so the
+            # bare import can never resolve inside mypy's static analysis;
+            # combined with ignore_missing_imports=true it silently
+            # resolves to Any rather than erroring -- self._backend itself
+            # is Any, independent of how honestly DiagnosticsBackend types
+            # its own methods. This is a project-wide, pre-existing mypy
+            # limitation (see feedback_git_worktree_isolation_invalid_dual_import_path.md
+            # in .claude-memory/), not a str-vs-object typing gap -- e.g.
+            # wiki_cache.py's structurally identical
+            # self._backend.get_view_count(...) call site carries the
+            # identical suppression for the exact same cause. No narrowing
+            # on this line can fix a lost cross-module type identity.
+            return self._backend.load_all_results()  # type: ignore[no-any-return]
+
+        if not Path(self._db_path).exists():
+            return None
+
+        # Bug #1532 follow-up: route the raw connection through
+        # guarded_connection() so close_all() cannot close it mid-read.
+        with self._conn_manager.guarded_connection() as conn:
+            cursor = conn.execute(
+                "SELECT category, results_json, run_at FROM diagnostic_results"
+            )
+            return cursor.fetchall()  # type: ignore[no-any-return]
+
     def _load_results_from_db(self) -> None:
         """
         Load persisted diagnostic results from database on initialization.
 
         Populates the cache with previously saved results. If database
         is empty or has errors, cache remains empty (will use placeholders).
+
+        Bug #1653: fetching rows and processing each row are separate
+        exception boundaries. A fetch failure legitimately aborts the load
+        (nothing to iterate). Once rows exist, EACH row gets its own
+        try/except so one malformed/differently-shaped row (e.g. a
+        PostgreSQL JSONB column already deserialized to a native list, vs.
+        SQLite's TEXT str) cannot abort the rest of the population pass --
+        it is logged and skipped, and later rows are still cached.
         """
+        import logging
+
+        logger = logging.getLogger(__name__)
+
         try:
-            if self._backend is not None:
-                rows = self._backend.load_all_results()
-            else:
-                # Check if database file exists
-                if not Path(self._db_path).exists():
-                    return
+            rows = self._fetch_all_diagnostic_rows()
+        except Exception as e:
+            logger.error(f"Failed to load diagnostic results from database: {e}")
+            return
+        if rows is None:
+            return
 
-                # Bug #1532 follow-up: route the raw connection through
-                # guarded_connection() so close_all() cannot close it
-                # mid-read.
-                with self._conn_manager.guarded_connection() as conn:
-                    cursor = conn.execute(
-                        "SELECT category, results_json, run_at FROM diagnostic_results"
-                    )
-                    rows = cursor.fetchall()
-
-            for row in rows:
+        for row in rows:
+            try:
                 category_str, results_json, run_at = row
 
-                # Parse category
                 try:
                     category = DiagnosticCategory(category_str)
                 except ValueError:
                     continue  # Skip unknown categories
 
-                # Deserialize results
-                results_data = json.loads(results_json)
-                results = []
+                # Bug #1653: results_json is JSONB on PostgreSQL (psycopg
+                # already deserializes it to a native list) and TEXT on
+                # SQLite (a str needing json.loads()). parse_json_column()
+                # accepts either shape and fails soft (WARNING + None) on
+                # malformed input instead of raising.
+                results_data = parse_json_column(
+                    results_json, list, "diagnostic_results.results_json"
+                )
+                if results_data is None:
+                    continue  # Malformed row -- skip, keep the rest
 
-                for result_dict in results_data:
-                    # Reconstruct DiagnosticResult from dict
-                    result = DiagnosticResult(
-                        name=result_dict["name"],
-                        status=DiagnosticStatus(result_dict["status"]),
-                        message=result_dict["message"],
-                        details=result_dict.get("details", {}),
-                        timestamp=datetime.fromisoformat(result_dict["timestamp"]),
-                    )
-                    results.append(result)
+                # Bug #1653 round 2: run_at is TIMESTAMPTZ on PostgreSQL
+                # (psycopg returns a real datetime) and TEXT on SQLite (an
+                # ISO str) -- the exact same dual-shape hazard as
+                # results_json above. Compute this BEFORE touching either
+                # cache dict so a coercion failure never leaves an orphan
+                # entry in one dict without its pair in the other.
+                run_at_dt = self._coerce_run_at(run_at)
+                if run_at_dt is None:
+                    continue  # Malformed run_at -- skip, keep the rest
 
-                # Populate cache
+                results = self._reconstruct_diagnostic_results(results_data)
+
+                # Both values are known-good at this point -- publish them
+                # together, atomically. _cache/_cache_timestamps must never
+                # diverge (see get_status()'s and run_all_diagnostics'
+                # "published as a pair" comments elsewhere in this class).
                 self._cache[category] = results
-                self._cache_timestamps[category] = datetime.fromisoformat(run_at)
+                self._cache_timestamps[category] = run_at_dt
 
-        except Exception as e:
-            # Log error but don't fail service initialization
-            import logging
-
-            logger = logging.getLogger(__name__)
-            logger.error(f"Failed to load diagnostic results from database: {e}")
+            except Exception as e:
+                # Bug #1653: a single row's failure must never abort the
+                # rest of the population loop -- log and continue.
+                logger.warning(
+                    "Failed to load one diagnostic_results row from "
+                    f"database (skipping, continuing with remaining rows): {e}"
+                )
+                continue
 
     def _read_category_from_db(
         self, category: DiagnosticCategory
@@ -933,22 +1071,28 @@ class DiagnosticsService:
 
                 results_json, run_at = db_row
 
-            # Deserialize results
-            results_data = json.loads(results_json)
-            results = []
+            # Bug #1653: results_json is JSONB on PostgreSQL (psycopg
+            # already deserializes it to a native list) and TEXT on
+            # SQLite (a str needing json.loads()). parse_json_column()
+            # accepts either shape and fails soft (WARNING + None) on
+            # malformed input instead of raising -- never a bare
+            # json.loads().
+            results_data = parse_json_column(
+                results_json, list, "diagnostic_results.results_json"
+            )
+            if results_data is None:
+                return None
 
-            for result_dict in results_data:
-                # Reconstruct DiagnosticResult from dict
-                result = DiagnosticResult(
-                    name=result_dict["name"],
-                    status=DiagnosticStatus(result_dict["status"]),
-                    message=result_dict["message"],
-                    details=result_dict.get("details", {}),
-                    timestamp=datetime.fromisoformat(result_dict["timestamp"]),
-                )
-                results.append(result)
+            # Bug #1653 round 2: run_at is TIMESTAMPTZ on PostgreSQL (a real
+            # datetime) and TEXT on SQLite (an ISO str) -- same dual-shape
+            # hazard as results_json above.
+            run_at_dt = self._coerce_run_at(run_at)
+            if run_at_dt is None:
+                return None
 
-            return results, datetime.fromisoformat(run_at)
+            results = self._reconstruct_diagnostic_results(results_data)
+
+            return results, run_at_dt
 
         except Exception as e:
             # Log error but report "nothing persisted" so the caller falls back

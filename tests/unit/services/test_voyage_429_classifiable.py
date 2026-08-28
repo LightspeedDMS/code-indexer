@@ -21,12 +21,12 @@ from unittest.mock import MagicMock, patch
 import httpx
 import pytest
 
-from src.code_indexer.config import VoyageAIConfig
-from src.code_indexer.services.provider_backoff import (
+from code_indexer.config import VoyageAIConfig
+from code_indexer.services.provider_backoff import (
     get_http_status_error,
     is_rate_limited,
 )
-from src.code_indexer.services.voyage_ai import VoyageAIClient
+from code_indexer.services.voyage_ai import VoyageAIClient
 
 _FAKE_KEY = "test-voyage-key-1079A"
 

@@ -4,7 +4,7 @@ import pytest
 from unittest.mock import MagicMock
 from pathlib import Path
 
-from src.code_indexer.services.temporal.temporal_search_service import (
+from code_indexer.services.temporal.temporal_search_service import (
     TemporalSearchService,
 )
 

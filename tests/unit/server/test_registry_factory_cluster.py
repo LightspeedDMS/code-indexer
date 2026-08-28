@@ -13,6 +13,8 @@ Tests:
 """
 
 import contextlib
+import importlib
+import sys
 from pathlib import Path
 from unittest.mock import MagicMock
 from typing import Any, Dict, Generator, Optional
@@ -904,6 +906,62 @@ def test_resolve_backend_registry_state_never_imports_server_app() -> None:
     finally:
         if saved is not None:
             sys.modules["code_indexer.server.app"] = saved
+
+
+@contextlib.contextmanager
+def _fresh_server_app_module() -> Generator:
+    """Yield a pristine, never-yet-accessed `code_indexer.server.app` module.
+
+    Pops it from `sys.modules` (and clears the parent package's cached
+    attribute) before re-importing, restoring both on exit so this never
+    leaks import state into later tests.
+    """
+    import code_indexer.server as server_pkg
+
+    _unset = object()
+    saved_module = sys.modules.pop("code_indexer.server.app", None)
+    saved_pkg_attr = getattr(server_pkg, "app", _unset)
+    try:
+        yield importlib.import_module("code_indexer.server.app")
+    finally:
+        sys.modules.pop("code_indexer.server.app", None)
+        if saved_module is not None:
+            sys.modules["code_indexer.server.app"] = saved_module
+        if saved_pkg_attr is _unset:
+            if hasattr(server_pkg, "app"):
+                delattr(server_pkg, "app")
+        else:
+            server_pkg.app = saved_pkg_attr
+
+
+def test_running_server_app_state_probe_does_not_trigger_lazy_singleton_construction_1678() -> (
+    None
+):
+    """
+    Bug #1678: `getattr(app_module, "app", None)` is NOT side-effect-free --
+    `app` is a PEP 562 `__getattr__` lazy singleton (Bug #1638), so a bare
+    `getattr` with a default still constructs and permanently caches it.
+    That let an unrelated `create_app()` call (e.g. a test fixture's own
+    temp-dir-scoped app) leak its stale golden_repo_manager into the
+    process-wide singleton, breaking later tests with
+    `sqlite3.OperationalError: unable to open database file`.
+    """
+    from code_indexer.server.utils.registry_factory import (
+        _running_server_app_state,
+    )
+
+    with _fresh_server_app_module() as fresh_module:
+        assert fresh_module._initialized is False
+
+        result = _running_server_app_state()
+
+        assert result is None, "Bug #1678: must not trigger construction"
+        assert fresh_module._initialized is False, (
+            "Bug #1678: probe must not construct the singleton"
+        )
+        assert "app" not in fresh_module.__dict__, (
+            "Bug #1678: probe must not populate the lazy `app` singleton"
+        )
 
 
 def test_resolve_backend_registry_state_still_works_when_app_already_imported(

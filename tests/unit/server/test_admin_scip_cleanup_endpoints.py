@@ -30,14 +30,23 @@ class TestSCIPCleanupWorkspacesEndpointAC4:
 
     @patch("code_indexer.server.auth.dependencies.jwt_manager")
     @patch("code_indexer.server.auth.dependencies.user_manager")
-    @patch("code_indexer.server.app.workspace_cleanup_service")
     def test_cleanup_workspaces_success_returns_200(
-        self, mock_cleanup_service, mock_dep_user_manager, mock_jwt_manager, client
+        self, mock_dep_user_manager, mock_jwt_manager, client
     ):
         """
         Given admin authentication
         When POST /api/admin/scip-cleanup-workspaces is called
         Then it should return 200 with cleanup summary
+
+        Bug #1705: the route handler (inline_admin_ops.py) closes over the
+        real WorkspaceCleanupService INSTANCE captured at app-wiring time
+        (create_app() -> startup/app_wiring.py), not the bare
+        code_indexer.server.app.workspace_cleanup_service module global --
+        that global exists for backward compatibility only and is never
+        read by the route handler, so patching it is a no-op. The route's
+        closure and app.state.workspace_cleanup_service share the SAME
+        object identity (app_wiring.py assigns both from one local var),
+        so patch.object() against that shared instance reaches the route.
         """
         # Setup authentication for admin
         mock_jwt_manager.validate_token.return_value = {
@@ -65,10 +74,16 @@ class TestSCIPCleanupWorkspacesEndpointAC4:
             skipped=[],
             duration_seconds=1.5,
         )
-        mock_cleanup_service.cleanup_workspaces.return_value = cleanup_result
 
         headers = {"Authorization": "Bearer admin.jwt.token"}
-        response = client.post("/api/admin/scip-cleanup-workspaces", headers=headers)
+        with patch.object(
+            client.app.state.workspace_cleanup_service,
+            "cleanup_workspaces",
+            return_value=cleanup_result,
+        ) as mock_cleanup_workspaces:
+            response = client.post(
+                "/api/admin/scip-cleanup-workspaces", headers=headers
+            )
 
         assert response.status_code == 200
         response_data = response.json()
@@ -86,20 +101,19 @@ class TestSCIPCleanupWorkspacesEndpointAC4:
         assert response_data["errors"] == []
 
         # Verify cleanup_workspaces was called
-        mock_cleanup_service.cleanup_workspaces.assert_called_once()
+        mock_cleanup_workspaces.assert_called_once()
 
     @patch("code_indexer.server.auth.dependencies.jwt_manager")
     @patch("code_indexer.server.auth.dependencies.user_manager")
-    @patch("code_indexer.server.app.workspace_cleanup_service")
     def test_cleanup_workspaces_with_errors_returns_200_with_error_details(
-        self, mock_cleanup_service, mock_dep_user_manager, mock_jwt_manager, client
+        self, mock_dep_user_manager, mock_jwt_manager, client
     ):
         """
         Given cleanup encounters errors
         When POST /api/admin/scip-cleanup-workspaces is called
         Then it should return 200 with error details in response
         """
-        # Setup authentication for admin
+        # Bug #1705: patch the shared service instance, not the stale app.py global.
         mock_jwt_manager.validate_token.return_value = {
             "username": "admin",
             "role": "admin",
@@ -125,10 +139,13 @@ class TestSCIPCleanupWorkspacesEndpointAC4:
             skipped=[],
             duration_seconds=1.5,
         )
-        mock_cleanup_service.cleanup_workspaces.return_value = cleanup_result
 
+        svc = client.app.state.workspace_cleanup_service
         headers = {"Authorization": "Bearer admin.jwt.token"}
-        response = client.post("/api/admin/scip-cleanup-workspaces", headers=headers)
+        with patch.object(svc, "cleanup_workspaces", return_value=cleanup_result):
+            response = client.post(
+                "/api/admin/scip-cleanup-workspaces", headers=headers
+            )
 
         assert response.status_code == 200
         response_data = response.json()
@@ -193,16 +210,15 @@ class TestSCIPCleanupStatusEndpointAC5:
 
     @patch("code_indexer.server.auth.dependencies.jwt_manager")
     @patch("code_indexer.server.auth.dependencies.user_manager")
-    @patch("code_indexer.server.app.workspace_cleanup_service")
     def test_get_cleanup_status_success_returns_200(
-        self, mock_cleanup_service, mock_dep_user_manager, mock_jwt_manager, client
+        self, mock_dep_user_manager, mock_jwt_manager, client
     ):
         """
         Given admin authentication
         When GET /api/admin/scip-cleanup-status is called
         Then it should return 200 with cleanup status
         """
-        # Setup authentication for admin
+        # Bug #1705: patch the shared service instance, not the stale app.py global.
         mock_jwt_manager.validate_token.return_value = {
             "username": "admin",
             "role": "admin",
@@ -225,10 +241,13 @@ class TestSCIPCleanupStatusEndpointAC5:
             "oldest_workspace_age": 10.5,
             "total_size_mb": 150.25,
         }
-        mock_cleanup_service.get_cleanup_status.return_value = status_result
 
+        svc = client.app.state.workspace_cleanup_service
         headers = {"Authorization": "Bearer admin.jwt.token"}
-        response = client.get("/api/admin/scip-cleanup-status", headers=headers)
+        with patch.object(
+            svc, "get_cleanup_status", return_value=status_result
+        ) as mock_get_status:
+            response = client.get("/api/admin/scip-cleanup-status", headers=headers)
 
         assert response.status_code == 200
         response_data = response.json()
@@ -246,20 +265,19 @@ class TestSCIPCleanupStatusEndpointAC5:
         assert response_data["total_size_mb"] == 150.25
 
         # Verify get_cleanup_status was called
-        mock_cleanup_service.get_cleanup_status.assert_called_once()
+        mock_get_status.assert_called_once()
 
     @patch("code_indexer.server.auth.dependencies.jwt_manager")
     @patch("code_indexer.server.auth.dependencies.user_manager")
-    @patch("code_indexer.server.app.workspace_cleanup_service")
     def test_get_cleanup_status_before_first_cleanup_returns_null_time(
-        self, mock_cleanup_service, mock_dep_user_manager, mock_jwt_manager, client
+        self, mock_dep_user_manager, mock_jwt_manager, client
     ):
         """
         Given cleanup has never run
         When GET /api/admin/scip-cleanup-status is called
         Then last_cleanup_time should be null
         """
-        # Setup authentication for admin
+        # Bug #1705: patch the shared service instance, not the stale app.py global.
         mock_jwt_manager.validate_token.return_value = {
             "username": "admin",
             "role": "admin",
@@ -282,10 +300,10 @@ class TestSCIPCleanupStatusEndpointAC5:
             "oldest_workspace_age": 5.0,
             "total_size_mb": 50.0,
         }
-        mock_cleanup_service.get_cleanup_status.return_value = status_result
-
         headers = {"Authorization": "Bearer admin.jwt.token"}
-        response = client.get("/api/admin/scip-cleanup-status", headers=headers)
+        svc = client.app.state.workspace_cleanup_service
+        with patch.object(svc, "get_cleanup_status", return_value=status_result):
+            response = client.get("/api/admin/scip-cleanup-status", headers=headers)
 
         assert response.status_code == 200
         response_data = response.json()

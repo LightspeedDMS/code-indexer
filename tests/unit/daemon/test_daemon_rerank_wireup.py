@@ -124,15 +124,17 @@ def _sem_patches(results, timing=None):
     backend = MagicMock()
     backend.get_vector_store_client.return_value = vs
 
-    config_mgr = MagicMock()
-    config_mgr.get_config.return_value = MagicMock()
+    # Bug #1718: _execute_semantic_search now calls
+    # ConfigManager.load_verified_config() directly (returning the Config
+    # itself), not create_with_backtrack().get_config().
+    config = MagicMock()
 
     ep = MagicMock()
 
     return [
         patch(
-            "code_indexer.config.ConfigManager.create_with_backtrack",
-            return_value=config_mgr,
+            "code_indexer.config.ConfigManager.load_verified_config",
+            return_value=config,
         ),
         patch(
             "code_indexer.backends.backend_factory.BackendFactory.create",

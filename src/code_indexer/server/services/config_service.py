@@ -682,9 +682,11 @@ class ConfigService:
                 "service_name": config.telemetry_config.service_name,
                 "export_traces": config.telemetry_config.export_traces,
                 "export_metrics": config.telemetry_config.export_metrics,
+                "export_logs": config.telemetry_config.export_logs,
                 "machine_metrics_enabled": config.telemetry_config.machine_metrics_enabled,
                 "machine_metrics_interval_seconds": config.telemetry_config.machine_metrics_interval_seconds,
                 "deployment_environment": config.telemetry_config.deployment_environment,
+                "trace_sample_rate": config.telemetry_config.trace_sample_rate,
             },
             # Langfuse configuration (Story #136, Story #164)
             "langfuse": {
@@ -1998,12 +2000,16 @@ class ConfigService:
             telemetry.export_traces = value in ["true", True, "True", "1"]
         elif key == "export_metrics":
             telemetry.export_metrics = value in ["true", True, "True", "1"]
+        elif key == "export_logs":
+            telemetry.export_logs = value in ["true", True, "True", "1"]
         elif key == "machine_metrics_enabled":
             telemetry.machine_metrics_enabled = value in ["true", True, "True", "1"]
         elif key == "machine_metrics_interval_seconds":
             telemetry.machine_metrics_interval_seconds = int(value)
         elif key == "deployment_environment":
             telemetry.deployment_environment = str(value)
+        elif key == "trace_sample_rate":
+            telemetry.trace_sample_rate = float(value)
         else:
             raise ValueError(f"Unknown telemetry setting: {key}")
 

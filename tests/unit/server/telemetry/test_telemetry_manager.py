@@ -8,7 +8,7 @@ written FIRST before implementation.
 All tests use real components following MESSI Rule #1: No mocks.
 """
 
-from src.code_indexer.server.utils.config_manager import TelemetryConfig
+from code_indexer.server.utils.config_manager import TelemetryConfig
 
 
 # =============================================================================
@@ -27,7 +27,7 @@ class TestTelemetryManagerImport:
         When I import TelemetryManager
         Then the import succeeds without loading OTEL SDK
         """
-        from src.code_indexer.server.telemetry import TelemetryManager
+        from code_indexer.server.telemetry import TelemetryManager
 
         assert TelemetryManager is not None
 
@@ -39,7 +39,7 @@ class TestTelemetryManagerImport:
         When I import get_telemetry_manager
         Then the import succeeds
         """
-        from src.code_indexer.server.telemetry import get_telemetry_manager
+        from code_indexer.server.telemetry import get_telemetry_manager
 
         assert callable(get_telemetry_manager)
 
@@ -60,7 +60,7 @@ class TestTelemetryManagerDisabled:
         When TelemetryManager is initialized
         Then OTEL SDK should not be loaded
         """
-        from src.code_indexer.server.telemetry import TelemetryManager
+        from code_indexer.server.telemetry import TelemetryManager
 
         config = TelemetryConfig(enabled=False)
         manager = TelemetryManager(config)
@@ -77,7 +77,7 @@ class TestTelemetryManagerDisabled:
         When get_tracer() is called
         Then a no-op tracer is returned (not None)
         """
-        from src.code_indexer.server.telemetry import TelemetryManager
+        from code_indexer.server.telemetry import TelemetryManager
 
         config = TelemetryConfig(enabled=False)
         manager = TelemetryManager(config)
@@ -93,7 +93,7 @@ class TestTelemetryManagerDisabled:
         When get_meter() is called
         Then a no-op meter is returned (not None)
         """
-        from src.code_indexer.server.telemetry import TelemetryManager
+        from code_indexer.server.telemetry import TelemetryManager
 
         config = TelemetryConfig(enabled=False)
         manager = TelemetryManager(config)
@@ -109,7 +109,7 @@ class TestTelemetryManagerDisabled:
         When shutdown() is called
         Then it completes without error
         """
-        from src.code_indexer.server.telemetry import TelemetryManager
+        from code_indexer.server.telemetry import TelemetryManager
 
         config = TelemetryConfig(enabled=False)
         manager = TelemetryManager(config)
@@ -135,7 +135,7 @@ class TestTelemetryManagerEnabled:
         Then OTEL SDK should be loaded
         And is_initialized should be True
         """
-        from src.code_indexer.server.telemetry import TelemetryManager
+        from code_indexer.server.telemetry import TelemetryManager
 
         config = TelemetryConfig(
             enabled=True,
@@ -156,7 +156,7 @@ class TestTelemetryManagerEnabled:
         When TelemetryManager is initialized
         Then tracer_provider should be set
         """
-        from src.code_indexer.server.telemetry import TelemetryManager
+        from code_indexer.server.telemetry import TelemetryManager
 
         config = TelemetryConfig(
             enabled=True,
@@ -178,7 +178,7 @@ class TestTelemetryManagerEnabled:
         When TelemetryManager is initialized
         Then meter_provider should be set
         """
-        from src.code_indexer.server.telemetry import TelemetryManager
+        from code_indexer.server.telemetry import TelemetryManager
 
         config = TelemetryConfig(
             enabled=True,
@@ -200,7 +200,7 @@ class TestTelemetryManagerEnabled:
         When get_tracer() is called
         Then a real tracer is returned
         """
-        from src.code_indexer.server.telemetry import TelemetryManager
+        from code_indexer.server.telemetry import TelemetryManager
 
         config = TelemetryConfig(
             enabled=True,
@@ -225,7 +225,7 @@ class TestTelemetryManagerEnabled:
         When get_meter() is called
         Then a real meter is returned
         """
-        from src.code_indexer.server.telemetry import TelemetryManager
+        from code_indexer.server.telemetry import TelemetryManager
 
         config = TelemetryConfig(
             enabled=True,
@@ -259,7 +259,7 @@ class TestTelemetryManagerInvalidEndpoint:
         When TelemetryManager is initialized
         Then it should initialize successfully (exports will fail later)
         """
-        from src.code_indexer.server.telemetry import TelemetryManager
+        from code_indexer.server.telemetry import TelemetryManager
 
         config = TelemetryConfig(
             enabled=True,
@@ -290,7 +290,7 @@ class TestTelemetryManagerSingleton:
         When I compare the returned instances
         Then they should be the same object
         """
-        from src.code_indexer.server.telemetry import (
+        from code_indexer.server.telemetry import (
             get_telemetry_manager,
             reset_telemetry_manager,
         )
@@ -315,7 +315,7 @@ class TestTelemetryManagerSingleton:
         When reset_telemetry_manager() is called
         Then get_telemetry_manager() returns a new instance
         """
-        from src.code_indexer.server.telemetry import (
+        from code_indexer.server.telemetry import (
             get_telemetry_manager,
             reset_telemetry_manager,
         )
@@ -352,7 +352,7 @@ class TestTelemetryManagerConfiguration:
         When TelemetryManager is initialized
         Then the service name is used in resource attributes
         """
-        from src.code_indexer.server.telemetry import TelemetryManager
+        from code_indexer.server.telemetry import TelemetryManager
 
         config = TelemetryConfig(
             enabled=True,
@@ -374,7 +374,7 @@ class TestTelemetryManagerConfiguration:
         When TelemetryManager is initialized
         Then the deployment environment is used in resource attributes
         """
-        from src.code_indexer.server.telemetry import TelemetryManager
+        from code_indexer.server.telemetry import TelemetryManager
 
         config = TelemetryConfig(
             enabled=True,
@@ -396,7 +396,7 @@ class TestTelemetryManagerConfiguration:
         When TelemetryManager is initialized
         Then TracerProvider should not be fully configured
         """
-        from src.code_indexer.server.telemetry import TelemetryManager
+        from code_indexer.server.telemetry import TelemetryManager
 
         config = TelemetryConfig(
             enabled=True,
@@ -420,7 +420,7 @@ class TestTelemetryManagerConfiguration:
         When TelemetryManager is initialized
         Then MeterProvider should not be fully configured
         """
-        from src.code_indexer.server.telemetry import TelemetryManager
+        from code_indexer.server.telemetry import TelemetryManager
 
         config = TelemetryConfig(
             enabled=True,
@@ -453,7 +453,7 @@ class TestTelemetryManagerProtocol:
         When TelemetryManager is initialized
         Then it should use gRPC exporter
         """
-        from src.code_indexer.server.telemetry import TelemetryManager
+        from code_indexer.server.telemetry import TelemetryManager
 
         config = TelemetryConfig(
             enabled=True,
@@ -476,7 +476,7 @@ class TestTelemetryManagerProtocol:
         When TelemetryManager is initialized
         Then it should use HTTP exporter
         """
-        from src.code_indexer.server.telemetry import TelemetryManager
+        from code_indexer.server.telemetry import TelemetryManager
 
         config = TelemetryConfig(
             enabled=True,

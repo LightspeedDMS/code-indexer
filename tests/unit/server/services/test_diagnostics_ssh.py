@@ -22,9 +22,9 @@ class TestCheckSSHKeys:
     """Tests for check_ssh_keys() method (AC1, AC6, AC8)."""
 
     @pytest.mark.asyncio
-    async def test_ssh_keys_working_github(self):
+    async def test_ssh_keys_working_github(self, tmp_path):
         """Test SSH keys working with GitHub authentication."""
-        service = DiagnosticsService()
+        service = DiagnosticsService(db_path=str(tmp_path / "diagnostics.db"))
 
         # Mock subprocess that returns successful GitHub SSH auth
         mock_process = AsyncMock()
@@ -58,9 +58,9 @@ class TestCheckSSHKeys:
         assert "git@github.com" in call_args[0]
 
     @pytest.mark.asyncio
-    async def test_ssh_keys_working_gitlab(self):
+    async def test_ssh_keys_working_gitlab(self, tmp_path):
         """Test SSH keys working with GitLab authentication."""
-        service = DiagnosticsService()
+        service = DiagnosticsService(db_path=str(tmp_path / "diagnostics.db"))
 
         # Mock subprocess that returns successful GitLab SSH auth
         mock_process = AsyncMock()
@@ -82,9 +82,9 @@ class TestCheckSSHKeys:
         assert "authentication successful" in result.message.lower()
 
     @pytest.mark.asyncio
-    async def test_ssh_keys_permission_denied(self):
+    async def test_ssh_keys_permission_denied(self, tmp_path):
         """Test SSH keys returning permission denied (no key or wrong key)."""
-        service = DiagnosticsService()
+        service = DiagnosticsService(db_path=str(tmp_path / "diagnostics.db"))
 
         # Mock subprocess that returns permission denied
         mock_process = AsyncMock()
@@ -107,9 +107,9 @@ class TestCheckSSHKeys:
         assert result.details.get("exit_code") == 255
 
     @pytest.mark.asyncio
-    async def test_ssh_keys_timeout(self):
+    async def test_ssh_keys_timeout(self, tmp_path):
         """Test SSH check timing out after 60 seconds (AC6)."""
-        service = DiagnosticsService()
+        service = DiagnosticsService(db_path=str(tmp_path / "diagnostics.db"))
 
         # Mock timeout from wait_for
         with patch("asyncio.wait_for", side_effect=asyncio.TimeoutError):
@@ -120,9 +120,9 @@ class TestCheckSSHKeys:
         assert result.details.get("timeout_seconds") == SSH_TIMEOUT_SECONDS
 
     @pytest.mark.asyncio
-    async def test_ssh_keys_not_configured_ssh_not_installed(self):
+    async def test_ssh_keys_not_configured_ssh_not_installed(self, tmp_path):
         """Test SSH not installed (FileNotFoundError) returns NOT_CONFIGURED (AC8)."""
-        service = DiagnosticsService()
+        service = DiagnosticsService(db_path=str(tmp_path / "diagnostics.db"))
 
         # Mock FileNotFoundError when trying to run ssh command
         with patch("asyncio.create_subprocess_exec", side_effect=FileNotFoundError):
@@ -136,9 +136,9 @@ class TestCheckSSHKeys:
         )
 
     @pytest.mark.asyncio
-    async def test_ssh_keys_host_key_verification_failed(self):
+    async def test_ssh_keys_host_key_verification_failed(self, tmp_path):
         """Test SSH host key verification failure returns ERROR."""
-        service = DiagnosticsService()
+        service = DiagnosticsService(db_path=str(tmp_path / "diagnostics.db"))
 
         mock_process = AsyncMock()
         mock_process.communicate = AsyncMock(

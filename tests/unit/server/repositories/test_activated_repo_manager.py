@@ -20,14 +20,14 @@ from datetime import datetime, timezone
 
 import pytest
 
-from src.code_indexer.server.repositories.activated_repo_manager import (
+from code_indexer.server.repositories.activated_repo_manager import (
     ActivatedRepoManager,
     ActivatedRepo,
     ActivatedRepoError,
     GitOperationError,
 )
-from src.code_indexer.server.repositories.golden_repo_manager import GoldenRepo
-from src.code_indexer.server.utils.config_manager import ServerResourceConfig
+from code_indexer.server.repositories.golden_repo_manager import GoldenRepo
+from code_indexer.server.utils.config_manager import ServerResourceConfig
 
 
 @pytest.mark.e2e
@@ -114,10 +114,10 @@ class TestActivatedRepoManager:
 
             with patch("os.makedirs") as mock_makedirs:
                 with patch(
-                    "src.code_indexer.server.repositories.activated_repo_manager.GoldenRepoManager"
+                    "code_indexer.server.repositories.activated_repo_manager.GoldenRepoManager"
                 ):
                     with patch(
-                        "src.code_indexer.server.repositories.activated_repo_manager.BackgroundJobManager"
+                        "code_indexer.server.repositories.activated_repo_manager.BackgroundJobManager"
                     ):
                         ActivatedRepoManager()
 

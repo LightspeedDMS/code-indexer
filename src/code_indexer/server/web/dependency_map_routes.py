@@ -31,6 +31,7 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.templating import Jinja2Templates
 
 from code_indexer.server.auth import dependencies
+from code_indexer.server.storage.json_column import parse_json_column
 from .routes import (
     _require_admin_session,
     _create_login_redirect,
@@ -451,32 +452,12 @@ def _render_complete_response(request, session, cached_row: dict) -> HTMLRespons
 
     # Story D Bug #874: pre-parse phase_timings_json str -> dict for each run row
     # so the template iterates a real dict rather than needing a Jinja filter.
+    # Bug #1622: on PostgreSQL this value is already a dict (JSONB) rather
+    # than a JSON string — parse_json_column() handles both.
     for row in job_status.get("run_history", []):
-        raw = row.get("phase_timings_json")
-        if raw is None:
-            # Absent value — no warning; expected for legacy or NULL rows.
-            row["phase_timings_parsed"] = None
-        else:
-            try:
-                parsed = _json.loads(raw)
-            except (ValueError, TypeError) as exc:
-                logger.warning(
-                    "_render_complete_response: malformed phase_timings_json %r: %s",
-                    raw,
-                    exc,
-                )
-                row["phase_timings_parsed"] = None
-            else:
-                if not isinstance(parsed, dict):
-                    logger.warning(
-                        "_render_complete_response: phase_timings_json parsed to %s "
-                        "(expected dict), ignoring: %r",
-                        type(parsed).__name__,
-                        raw,
-                    )
-                    row["phase_timings_parsed"] = None
-                else:
-                    row["phase_timings_parsed"] = parsed
+        row["phase_timings_parsed"] = parse_json_column(
+            row.get("phase_timings_json"), dict, "phase_timings_json"
+        )
 
     return templates.TemplateResponse(
         request,

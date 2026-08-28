@@ -31,11 +31,11 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from src.code_indexer.server.repositories.activated_repo_manager import (
+from code_indexer.server.repositories.activated_repo_manager import (
     ActivatedRepoManager,
 )
-from src.code_indexer.server.repositories.golden_repo_manager import GoldenRepo
-from src.code_indexer.server.utils.config_manager import ServerResourceConfig
+from code_indexer.server.repositories.golden_repo_manager import GoldenRepo
+from code_indexer.server.utils.config_manager import ServerResourceConfig
 
 # Captured at module import time, BEFORE any per-test @patch("os.path.exists")
 # replaces the attribute -- a reference captured INSIDE a patched test would

@@ -58,19 +58,104 @@ class TestMultiplyFusion:
         assert len(fused) == 2
 
 
+class TestMultiplyFusionConsensus:
+    """Bug #1712: consensus (both-provider) and single-provider regressions."""
+
+    def test_both_providers_consensus_combines_independent_normalizations(self):
+        """Consensus score must be primary_norm * secondary_norm, not
+        global_norm[key] ** 2 (which happens when both providers' contributions
+        collapse into a single dict entry keyed by document).
+
+        Combined pool = [0.8, 0.2, 0.6, 0.0] -> global range [0.0, 0.8].
+        primary normalizes a.py: (0.8 - 0.0) / 0.8 = 1.0
+        secondary normalizes a.py: (0.6 - 0.0) / 0.8 = 0.75
+        Correct consensus product = 1.0 * 0.75 = 0.75.
+        The pre-fix collapse bug would instead square the LAST-written
+        (secondary) normalized value: 0.75 ** 2 = 0.5625.
+        """
+        primary = [_make_result("a.py", 0.8), _make_result("x.py", 0.2)]
+        secondary = [_make_result("a.py", 0.6), _make_result("y.py", 0.0)]
+        fused = fuse_multiply(primary, secondary, limit=10)
+        a_result = next(r for r in fused if r.file_path == "a.py")
+        assert abs(a_result.score - 0.75) < 1e-9
+
+    def test_single_provider_score_unaffected_by_fix(self):
+        """Regression guard: single-provider (neutral 0.5) branch math must be
+        byte-identical to before Bug #1712's fix.
+
+        primary=[a.py=0.9, b.py=0.3], no secondary.
+        Global range = [0.3, 0.9]. a.py normalizes to 1.0, b.py to 0.0.
+        a.py score = 1.0 * 0.5 (neutral) = 0.5
+        b.py score = 0.0 * 0.5 (neutral) = 0.0
+        """
+        primary = [_make_result("a.py", 0.9), _make_result("b.py", 0.3)]
+        fused = fuse_multiply(primary, [], limit=10)
+        a_result = next(r for r in fused if r.file_path == "a.py")
+        b_result = next(r for r in fused if r.file_path == "b.py")
+        assert abs(a_result.score - 0.5) < 1e-9
+        assert abs(b_result.score - 0.0) < 1e-9
+
+
 class TestAverageFusion:
     def test_average_both_providers(self):
+        """Consensus case: both providers see the same doc with DIFFERENT scores.
+
+        Bug #1712: _normalize_scores_global collapsed both providers' normalized
+        values into a single dict entry (keyed by doc), so the consensus branch
+        silently read only ONE provider's normalized score (whichever result was
+        processed second). The correct behavior is to average BOTH providers'
+        independently-normalized contributions.
+
+        Global range = [0.6, 0.8]. primary normalizes 0.8 -> 1.0.
+        secondary normalizes 0.6 -> 0.0. Average = (1.0 + 0.0) / 2 = 0.5.
+        """
         primary = [_make_result("a.py", 0.8)]
         secondary = [_make_result("a.py", 0.6)]
         fused = fuse_average(primary, secondary, limit=10)
         assert len(fused) == 1
-        # Both normalized to 1.0 (single result each), average = 1.0
-        assert fused[0].score == 1.0
+        assert fused[0].score == 0.5
 
     def test_average_single_provider(self):
         primary = [_make_result("a.py", 0.9)]
         fused = fuse_average(primary, [], limit=10)
         assert len(fused) == 1
+
+
+class TestAverageFusionConsensus:
+    """Bug #1712: consensus (both-provider) and single-provider regressions."""
+
+    def test_both_providers_consensus_combines_independent_normalizations(self):
+        """Consensus score must be the average of EACH provider's own
+        normalized value, not a collapsed single value (Bug #1712).
+
+        Combined pool = [0.8, 0.2, 0.6, 0.0] -> global range [0.0, 0.8].
+        primary normalizes a.py: (0.8 - 0.0) / 0.8 = 1.0
+        secondary normalizes a.py: (0.6 - 0.0) / 0.8 = 0.75
+        Correct consensus average = (1.0 + 0.75) / 2 = 0.875.
+        The pre-fix collapse bug would instead read the LAST-written
+        (secondary) normalized value directly as the consensus score: 0.75.
+        """
+        primary = [_make_result("a.py", 0.8), _make_result("x.py", 0.2)]
+        secondary = [_make_result("a.py", 0.6), _make_result("y.py", 0.0)]
+        fused = fuse_average(primary, secondary, limit=10)
+        a_result = next(r for r in fused if r.file_path == "a.py")
+        assert abs(a_result.score - 0.875) < 1e-9
+
+    def test_single_provider_score_unaffected_by_fix(self):
+        """Regression guard: single-provider (non-consensus) branch math must
+        be byte-identical to before Bug #1712's fix -- (global_norm + 0.5) / 2.
+
+        primary=[a.py=0.9, b.py=0.3], no secondary.
+        Global range = [0.3, 0.9]. a.py normalizes to 1.0, b.py to 0.0.
+        a.py score = (1.0 + 0.5) / 2 = 0.75
+        b.py score = (0.0 + 0.5) / 2 = 0.25
+        """
+        primary = [_make_result("a.py", 0.9), _make_result("b.py", 0.3)]
+        fused = fuse_average(primary, [], limit=10)
+        a_result = next(r for r in fused if r.file_path == "a.py")
+        b_result = next(r for r in fused if r.file_path == "b.py")
+        assert abs(a_result.score - 0.75) < 1e-9
+        assert abs(b_result.score - 0.25) < 1e-9
 
 
 class TestParallelQuery:
