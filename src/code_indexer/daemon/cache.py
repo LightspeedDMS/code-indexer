@@ -285,6 +285,52 @@ class CacheEntry:
         }
 
 
+class DaemonHNSWCacheAdapter:
+    """Bug #1730: duck-typed ``hnsw_index_cache`` adapter backed directly by
+    the daemon's already-loaded CacheEntry.
+
+    ``FilesystemVectorStore.search()`` expects its optional
+    ``hnsw_index_cache`` constructor argument to expose
+    ``get_or_load(cache_key, loader, index_file=None) -> (hnsw_index,
+    id_mapping)``. Passing the daemon's real HNSW cache handle through
+    ``BackendFactory.create(..., hnsw_cache=...)`` -- as the shipped
+    ``server.cache.hnsw_index_cache.HNSWIndexCache`` -- was considered and
+    rejected: any non-None ``hnsw_index_cache`` also flips several unrelated
+    "are we the server" branches in
+    ``FilesystemBackend.get_vector_store_client()`` (id_index_cache /
+    collection_meta_cache / chunk_store_cache global singletons, Postgres-
+    storage-mode probes), which transitively import the entire FastAPI/
+    Starlette server stack into the lightweight CLI daemon process on every
+    query (confirmed via direct import measurement: ~790 extra modules).
+
+    This adapter does no caching or eviction of its own -- the daemon's own
+    CacheEntry (with its TTL and rebuild-version invalidation; see
+    ``_ensure_cache_loaded``) is the single source of truth for the loaded
+    index. It is a pure pass-through: if the entry already has an index
+    loaded, hand it straight to the caller; otherwise (e.g. the initial
+    load genuinely failed) fall back to running the supplied loader,
+    matching the pre-existing uncached "load directly" behavior exactly.
+    """
+
+    def __init__(self, cache_entry: CacheEntry) -> None:
+        self._cache_entry = cache_entry
+
+    def get_or_load(
+        self,
+        cache_key: str,
+        loader: Any,
+        index_file: Optional[Path] = None,
+    ) -> Any:
+        """Return the cached (hnsw_index, id_mapping) pair, or run loader."""
+        if self._cache_entry.hnsw_index is not None:
+            return self._cache_entry.hnsw_index, self._cache_entry.id_mapping
+        return loader()
+
+    def invalidate(self, cache_key: str) -> None:
+        """No-op: the daemon's own CacheEntry lifecycle owns invalidation."""
+        return None
+
+
 class TTLEvictionThread(threading.Thread):
     """Background thread for TTL-based cache eviction.
 

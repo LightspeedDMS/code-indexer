@@ -1812,7 +1812,12 @@ class CIDXDaemonService(Service):
         try:
             from code_indexer.config import ConfigManager
             from code_indexer.backends.backend_factory import BackendFactory
+            from code_indexer.backends.filesystem_backend import FilesystemBackend
             from code_indexer.services.embedding_factory import EmbeddingProviderFactory
+            from code_indexer.storage.filesystem_vector_store import (
+                FilesystemVectorStore,
+            )
+            from .cache import DaemonHNSWCacheAdapter
 
             # Initialize configuration and services.
             # Bug #1718: verify project_path's OWN config -- same
@@ -1826,7 +1831,26 @@ class CIDXDaemonService(Service):
             # Create embedding provider and vector store
             embedding_provider = EmbeddingProviderFactory.create(config=config)
             backend = BackendFactory.create(config, Path(project_path))
-            vector_store = backend.get_vector_store_client()
+
+            # Bug #1730: when the daemon's own in-memory cache is warm,
+            # construct FilesystemVectorStore DIRECTLY with an adapter over
+            # cache_entry, instead of backend.get_vector_store_client().
+            # get_vector_store_client() gates a slew of unrelated
+            # "server mode" behavior on hnsw_index_cache being non-None
+            # (id_index_cache/collection_meta_cache/chunk_store_cache global
+            # singletons, Postgres-storage-mode probes), which transitively
+            # imports the entire FastAPI/Starlette server stack into this
+            # lightweight CLI daemon process -- so routing the daemon's
+            # cache through that factory would be worse than the bug it
+            # fixes. See DaemonHNSWCacheAdapter's docstring for detail.
+            if isinstance(backend, FilesystemBackend) and self.cache_entry is not None:
+                vector_store = FilesystemVectorStore(
+                    base_path=backend.vectors_dir,
+                    project_root=backend.project_root,
+                    hnsw_index_cache=DaemonHNSWCacheAdapter(self.cache_entry),
+                )
+            else:
+                vector_store = backend.get_vector_store_client()
 
             # Get collection name
             collection_name = vector_store.resolve_collection_name(
@@ -1990,7 +2014,23 @@ class CIDXDaemonService(Service):
                 return []
 
             tantivy_manager = TantivyIndexManager(fts_index_dir)
-            tantivy_manager.initialize_index(create_new=False)
+
+            # Bug #1730: use the daemon's own warm CacheEntry.tantivy_index
+            # (loaded once by _load_fts_indexes / _ensure_cache_loaded) when
+            # available -- adopting it directly does zero disk I/O and never
+            # touches the exclusive writer lock. Only fall back to opening
+            # from disk (via open_for_search(), the documented-correct
+            # read-path entry point -- NEVER initialize_index(), which
+            # always acquires the writer lock per Bug #1233) when the cache
+            # genuinely has nothing loaded (e.g. FTS index did not exist yet
+            # at cache-load time).
+            if (
+                self.cache_entry is not None
+                and self.cache_entry.tantivy_index is not None
+            ):
+                tantivy_manager.open_from_cached_index(self.cache_entry.tantivy_index)
+            else:
+                tantivy_manager.open_for_search()
 
             # Extract FTS search parameters
             limit = kwargs.get("limit", 10)
