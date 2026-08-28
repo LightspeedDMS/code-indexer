@@ -164,15 +164,19 @@ class ReposAPIClient(CIDXRemoteAPIClient):
                 repositories_data = response_data["repositories"]
 
                 # Map server ActivatedRepositoryInfo format to client ActivatedRepository
-                # format. The list endpoint itself carries no sync_status field, so each
-                # repo's real status is resolved via the per-repo sync-status endpoint.
+                # format. The list endpoint itself carries no sync_status field (#1740):
+                # resolving a genuine per-repo value would require an extra HTTP round
+                # trip per repo (N+1) to GET /api/repos/{alias}/sync-status, which the
+                # #1740 review found is not worth the cost for this low-traffic display
+                # column (and, as of the review, that endpoint itself still only returns
+                # a hardcoded default -- see #1740 for the follow-up server-side fix).
+                # Report "unknown" honestly rather than a false hardcoded "synced".
                 mapped_repositories = []
                 for repo_data in repositories_data:
-                    alias = repo_data["user_alias"]
                     mapped_repo = ActivatedRepository(
-                        alias=alias,
+                        alias=repo_data["user_alias"],
                         current_branch=repo_data["current_branch"],
-                        sync_status=self._resolve_sync_status(alias),
+                        sync_status="unknown",
                         last_sync=repo_data.get("last_accessed", ""),
                         activation_date=repo_data.get("activated_at", ""),
                         conflict_details=None,  # Server doesn't provide free-text details yet
@@ -187,26 +191,6 @@ class ReposAPIClient(CIDXRemoteAPIClient):
             raise APIClientError(
                 f"Failed to list repositories: {error_detail}", response.status_code
             )
-
-    def _resolve_sync_status(self, user_alias: str) -> str:
-        """Resolve one repo's real sync status via GET /api/repos/{alias}/sync-status.
-
-        Called once per activated repo from list_activated_repositories. A
-        per-repo lookup failure (e.g. the repo was deactivated in the race
-        between the list call and this lookup), or a 200 response missing
-        the sync_status field, degrades to "unknown" rather than silently
-        reporting "synced" for a repo whose real state could not be
-        confirmed.
-        """
-        try:
-            status_data = self.get_sync_status(user_alias)
-        except APIClientError:
-            return "unknown"
-
-        sync_status = status_data.get("sync_status")
-        if not sync_status:
-            return "unknown"
-        return str(sync_status)
 
     def list_available_repositories(
         self, search_term: Optional[str] = None
