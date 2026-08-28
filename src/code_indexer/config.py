@@ -718,12 +718,6 @@ class Config(BaseModel):
         description="Vector storage backend configuration (default: filesystem)",
     )
 
-    # Multi-provider settings
-    secondary_provider: Optional[str] = Field(
-        default=None,
-        description="Secondary embedding provider for dual-embed mode",
-    )
-
     # Provider-specific configurations
     voyage_ai: VoyageAIConfig = Field(default_factory=VoyageAIConfig)
     cohere: CohereConfig = Field(default_factory=CohereConfig)
