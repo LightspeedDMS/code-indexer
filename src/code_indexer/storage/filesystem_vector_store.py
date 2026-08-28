@@ -8297,6 +8297,29 @@ class FilesystemVectorStore:
 
         hnsw_manager = HNSWIndexManager(vector_dim=vector_size, space="cosine")
 
+        # Bug #1736 Finding 2 (Anti-Orphan-Code, Messi Rule 12): as of this
+        # writing, `self.cache_entry` on a FilesystemVectorStore instance has
+        # NO assignment site anywhere in src/ -- every real `.cache_entry =`
+        # write belongs to CIDXDaemonService (daemon/service.py,
+        # services/rpyc_daemon.py), a DIFFERENT class that keeps its own
+        # separate cache_entry and never wires it onto the
+        # FilesystemVectorStore instances it constructs. `watch_mode=True`
+        # is also never passed by any production caller today -- only by
+        # Story #435's dedicated tests
+        # (tests/unit/storage/test_watch_mode_daemon_hnsw.py), which
+        # exercise this branch directly by hand-setting `.cache_entry`. This
+        # branch is therefore genuinely unreachable in production, kept
+        # (not deleted) because those tests still assert its designed
+        # behavior. If it is ever wired up for real, it MUST first apply Bug
+        # #1730's collection-identity requirement: `cache_entry.hnsw_index`
+        # must never be read/written without verifying it actually belongs
+        # to THIS collection_path (see
+        # hnsw_cache_key_for_collection()/CacheEntry.set_semantic_indexes()'s
+        # hnsw_cache_key gating in daemon/cache.py) -- writing
+        # `cache_entry.hnsw_index` unconditionally, as this branch still
+        # does below, is the exact silent-wrong-results defect class #1730
+        # fixed for the reachable production path.
+
         # AC3: Detect daemon mode vs standalone mode
         daemon_mode = hasattr(self, "cache_entry") and self.cache_entry is not None
 
