@@ -130,9 +130,9 @@ def git_status(alias: str, user: User = Depends(get_current_user)) -> GitStatusR
             format_error_log(
                 "SVC-GENERAL-007",
                 f"Git status failed for {alias}: {e}",
-                exc_info=True,
                 extra={"correlation_id": get_correlation_id()},
-            )
+            ),
+            exc_info=True,
         )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -207,9 +207,9 @@ def git_diff(
             format_error_log(
                 "SVC-GENERAL-009",
                 f"Git diff failed for {alias}: {e}",
-                exc_info=True,
                 extra={"correlation_id": get_correlation_id()},
-            )
+            ),
+            exc_info=True,
         )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -294,9 +294,9 @@ def git_log(
             format_error_log(
                 "SVC-GENERAL-011",
                 f"Git log failed for {alias}: {e}",
-                exc_info=True,
                 extra={"correlation_id": get_correlation_id()},
-            )
+            ),
+            exc_info=True,
         )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -353,9 +353,9 @@ def git_stage(
             format_error_log(
                 "SVC-GENERAL-014",
                 f"Git stage failed for {alias}: {e}",
-                exc_info=True,
                 extra={"correlation_id": get_correlation_id()},
-            )
+            ),
+            exc_info=True,
         )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -399,9 +399,9 @@ def git_unstage(
             format_error_log(
                 "TELEM-GENERAL-002",
                 f"Git unstage failed for {alias}: {e}",
-                exc_info=True,
                 extra={"correlation_id": get_correlation_id()},
-            )
+            ),
+            exc_info=True,
         )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -459,9 +459,9 @@ def git_commit(
             format_error_log(
                 "TELEM-GENERAL-005",
                 f"Git commit failed for {alias}: {e}",
-                exc_info=True,
                 extra={"correlation_id": get_correlation_id()},
-            )
+            ),
+            exc_info=True,
         )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -513,9 +513,9 @@ def git_push(
             format_error_log(
                 "TELEM-GENERAL-007",
                 f"Git push failed for {alias}: {e}",
-                exc_info=True,
                 extra={"correlation_id": get_correlation_id()},
-            )
+            ),
+            exc_info=True,
         )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -564,9 +564,9 @@ def git_pull(
             format_error_log(
                 "VALID-GENERAL-001",
                 f"Git pull failed for {alias}: {e}",
-                exc_info=True,
                 extra={"correlation_id": get_correlation_id()},
-            )
+            ),
+            exc_info=True,
         )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -611,9 +611,9 @@ def git_fetch(
             format_error_log(
                 "VALID-GENERAL-003",
                 f"Git fetch failed for {alias}: {e}",
-                exc_info=True,
                 extra={"correlation_id": get_correlation_id()},
-            )
+            ),
+            exc_info=True,
         )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -684,9 +684,9 @@ def git_reset(
             format_error_log(
                 "VALID-GENERAL-007",
                 f"Git reset failed for {alias}: {e}",
-                exc_info=True,
                 extra={"correlation_id": get_correlation_id()},
-            )
+            ),
+            exc_info=True,
         )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -744,9 +744,9 @@ def git_clean(
             format_error_log(
                 "VALID-GENERAL-010",
                 f"Git clean failed for {alias}: {e}",
-                exc_info=True,
                 extra={"correlation_id": get_correlation_id()},
-            )
+            ),
+            exc_info=True,
         )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -788,9 +788,9 @@ def git_merge_abort(
             format_error_log(
                 "WEB-GENERAL-001",
                 f"Git merge abort failed for {alias}: {e}",
-                exc_info=True,
                 extra={"correlation_id": get_correlation_id()},
-            )
+            ),
+            exc_info=True,
         )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -834,9 +834,9 @@ def git_checkout_file(
             format_error_log(
                 "WEB-GENERAL-003",
                 f"Git checkout file failed for {alias}: {e}",
-                exc_info=True,
                 extra={"correlation_id": get_correlation_id()},
-            )
+            ),
+            exc_info=True,
         )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -881,9 +881,9 @@ def git_branch_list(
             format_error_log(
                 "WEB-GENERAL-005",
                 f"Git branch list failed for {alias}: {e}",
-                exc_info=True,
                 extra={"correlation_id": get_correlation_id()},
-            )
+            ),
+            exc_info=True,
         )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -947,9 +947,9 @@ def git_branch_create(
             format_error_log(
                 "WEB-GENERAL-009",
                 f"Git branch create failed for {alias}: {e}",
-                exc_info=True,
                 extra={"correlation_id": get_correlation_id()},
-            )
+            ),
+            exc_info=True,
         )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -993,9 +993,9 @@ def git_branch_switch(
             format_error_log(
                 "WEB-GENERAL-011",
                 f"Git branch switch failed for {alias}: {e}",
-                exc_info=True,
                 extra={"correlation_id": get_correlation_id()},
-            )
+            ),
+            exc_info=True,
         )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -1055,9 +1055,9 @@ def git_branch_delete(
             format_error_log(
                 "WEB-GENERAL-014",
                 f"Git branch delete failed for {alias}: {e}",
-                exc_info=True,
                 extra={"correlation_id": get_correlation_id()},
-            )
+            ),
+            exc_info=True,
         )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
