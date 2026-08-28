@@ -68,7 +68,7 @@ def _patch_npm_env(subprocess_side_effects):
 
 @contextmanager
 def _patch_execute_siblings(executor, *, claude_side_effect=None):
-    """Patch all execute() sibling step helpers except _ensure_codex_cli_installed.
+    """Patch the execute() sibling step helpers, except _ensure_codex_cli_installed.
 
     Follows the established project pattern from test_execute_calls_ensure_claude_cli_updated:
     sibling methods are patched so only the step under test runs for real.
@@ -120,6 +120,7 @@ def _patch_execute_siblings(executor, *, claude_side_effect=None):
         patch.object(executor, "_ensure_systemd_claude_path", return_value=True),
         patch.object(executor, "_ensure_rust_toolchain", return_value=True),
         patch.object(executor, "_calculate_auto_update_hash", return_value="abc123"),
+        patch.object(executor, "_ensure_cli_dependencies_synced", return_value=True),
     ]
     with ExitStack() as stack:
         for p in patches:
