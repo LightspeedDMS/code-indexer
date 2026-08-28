@@ -246,6 +246,16 @@ def test_execute_wires_ensure_scip_python(executor, caplog):
         patch.object(executor, "_ensure_claude_cli_updated", return_value=True),
         patch.object(executor, "_ensure_claude_cli_installed", return_value=True),
         patch.object(executor, "_ensure_pace_maker_installed", return_value=True),
+        # Bug #1726: _ensure_cli_dependencies_synced was only incidentally
+        # safe here because the blanket `shutil.which` patch below makes
+        # _get_cli_python_interpreter() return None (nothing to sync yet).
+        # That is the SAME fragility the Bug #1640 comment above already
+        # warns about for _ensure_claude_cli_updated -- narrowing the
+        # `shutil.which` patch to only cover scip-python/npm would resolve
+        # a real system-wide `cidx` and reach a real, unmocked
+        # `pip install -e .` subprocess call. Guard explicitly instead of
+        # relying on that incidental side effect.
+        patch.object(executor, "_ensure_cli_dependencies_synced", return_value=True),
         patch("shutil.which", return_value=None),
         caplog.at_level(logging.WARNING),
     ):
