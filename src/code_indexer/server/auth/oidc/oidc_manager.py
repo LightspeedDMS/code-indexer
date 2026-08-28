@@ -57,9 +57,9 @@ class OIDCManager:
                     format_error_log(
                         "AUTH-GENERAL-004",
                         f"Failed to initialize SSO provider: {e}",
-                        exc_info=True,
                         extra={"correlation_id": get_correlation_id()},
-                    )
+                    ),
+                    exc_info=True,
                 )
                 # Don't set self.provider - leave it None so we can retry
                 raise

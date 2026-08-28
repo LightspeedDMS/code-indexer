@@ -154,8 +154,8 @@ class ScheduledCatchupService:
                     format_error_log(
                         "GIT-GENERAL-072",
                         f"Scheduled catch-up processing failed: {e}",
-                        exc_info=True,
-                    )
+                    ),
+                    exc_info=True,
                 )
 
             # Wait for interval or until stopped
@@ -234,9 +234,9 @@ class ScheduledCatchupService:
                 format_error_log(
                     "MCP-GENERAL-137",
                     f"Scheduled catch-up failed: {e}",
-                    exc_info=True,
                     extra={"correlation_id": get_correlation_id()},
-                )
+                ),
+                exc_info=True,
             )
             if tracked_job_id and self._job_tracker is not None:
                 try:

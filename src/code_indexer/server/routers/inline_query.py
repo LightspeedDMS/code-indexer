@@ -1083,9 +1083,9 @@ def register_query_routes(
                 format_error_log(
                     "APP-GENERAL-037",
                     f"Unexpected error in unified search: {e}",
-                    exc_info=True,
                     extra={"correlation_id": get_correlation_id()},
-                )
+                ),
+                exc_info=True,
             )
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,

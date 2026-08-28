@@ -672,9 +672,9 @@ Status values:
                 format_error_log(
                     "MCP-GENERAL-159",
                     f"Job {job_id}: Exception during SCIP retry for {project_path}: {e}",
-                    exc_info=True,
                     extra={"correlation_id": get_correlation_id()},
-                )
+                ),
+                exc_info=True,
             )
             return False
 
@@ -735,9 +735,9 @@ Status values:
                 format_error_log(
                     "MCP-GENERAL-162",
                     f"Job {job_id}: Failed to re-queue {project_path}: {e}",
-                    exc_info=True,
                     extra={"correlation_id": get_correlation_id()},
-                )
+                ),
+                exc_info=True,
             )
 
     def _record_partial_success_details(
@@ -984,7 +984,7 @@ Status values:
                 format_error_log(
                     "MCP-GENERAL-168",
                     f"Job {job_id}: Failed to create PR (non-blocking): {e}",
-                    exc_info=True,
                     extra={"correlation_id": get_correlation_id()},
-                )
+                ),
+                exc_info=True,
             )

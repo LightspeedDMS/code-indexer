@@ -616,9 +616,9 @@ def initialize_services() -> Dict[str, Any]:
                 format_error_log(
                     "APP-GENERAL-011",
                     f"Failed to migrate/bootstrap cidx-meta on startup: {e}",
-                    exc_info=True,
                     extra={"correlation_id": get_correlation_id()},
-                )
+                ),
+                exc_info=True,
             )
 
     activated_repo_manager = ActivatedRepoManager(

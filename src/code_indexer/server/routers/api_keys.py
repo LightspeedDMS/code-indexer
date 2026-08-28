@@ -155,9 +155,9 @@ def trigger_catchup_on_api_key_save(api_key: Optional[str]) -> bool:
                 format_error_log(
                     "STORE-GENERAL-014",
                     f"Catch-up processing failed: {e}",
-                    exc_info=True,
                     extra={"correlation_id": _get_cid()},
-                )
+                ),
+                exc_info=True,
             )
             if tracked_job_id and tracker is not None:
                 try:

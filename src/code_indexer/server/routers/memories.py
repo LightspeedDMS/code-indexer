@@ -155,9 +155,9 @@ def create_memory(
             format_error_log(
                 "MEM-GENERAL-001",
                 f"create_memory failed: {exc}",
-                exc_info=True,
                 extra={"correlation_id": get_correlation_id()},
-            )
+            ),
+            exc_info=True,
         )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -241,9 +241,9 @@ def edit_memory(
             format_error_log(
                 "MEM-GENERAL-002",
                 f"edit_memory failed for {memory_id!r}: {exc}",
-                exc_info=True,
                 extra={"correlation_id": get_correlation_id()},
-            )
+            ),
+            exc_info=True,
         )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -316,9 +316,9 @@ def delete_memory(
             format_error_log(
                 "MEM-GENERAL-003",
                 f"delete_memory failed for {memory_id!r}: {exc}",
-                exc_info=True,
                 extra={"correlation_id": get_correlation_id()},
-            )
+            ),
+            exc_info=True,
         )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,

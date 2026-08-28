@@ -1488,9 +1488,9 @@ def langfuse_sync_trigger(request: Request):
             format_error_log(
                 "LANGFUSE-SYNC-001",
                 f"Failed to trigger Langfuse sync: {e}",
-                exc_info=True,
                 extra={"correlation_id": get_correlation_id()},
-            )
+            ),
+            exc_info=True,
         )
         # M5: Generic error message (keep detailed logging above)
         return JSONResponse(
@@ -9140,9 +9140,9 @@ async def fetch_discovery_branches(request: Request):
             format_error_log(
                 "STORE-GENERAL-044",
                 f"Error fetching discovery branches: {e}",
-                exc_info=True,
                 extra={"correlation_id": get_correlation_id()},
-            )
+            ),
+            exc_info=True,
         )
         return JSONResponse(
             status_code=500,
@@ -9628,9 +9628,9 @@ async def update_config_section(
                     format_error_log(
                         "STORE-GENERAL-047",
                         f"Failed to reload OIDC configuration: {e}",
-                        exc_info=True,
                         extra={"correlation_id": get_correlation_id()},
-                    )
+                    ),
+                    exc_info=True,
                 )
                 config_service.load_config()  # Reload from file to undo in-memory changes
                 return _create_config_page_response(

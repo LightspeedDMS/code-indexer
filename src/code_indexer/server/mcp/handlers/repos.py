@@ -236,9 +236,9 @@ def list_repo_categories(params: Dict[str, Any], user: User) -> Dict[str, Any]:
             format_error_log(
                 "MCP-GENERAL-035",
                 f"Failed to list repository categories: {e}",
-                exc_info=True,
                 extra={"correlation_id": get_correlation_id()},
-            )
+            ),
+            exc_info=True,
         )
         return _mcp_response(
             {"success": False, "error": str(e), "categories": [], "total": 0}
@@ -640,9 +640,9 @@ def _append_global_repos_to_status(status_summary: list, user: User) -> None:
             format_error_log(
                 "MCP-GENERAL-036",
                 f"Failed to load global repos status: {e}",
-                exc_info=True,
                 extra={"correlation_id": get_correlation_id()},
-            )
+            ),
+            exc_info=True,
         )
 
 
@@ -737,9 +737,9 @@ def _load_global_repos_normalized() -> list:
             format_error_log(
                 "MCP-GENERAL-033",
                 f"Failed to load global repos from storage backend: {e}",
-                exc_info=True,
                 extra={"correlation_id": get_correlation_id()},
-            )
+            ),
+            exc_info=True,
         )
     return result
 

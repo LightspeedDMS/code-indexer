@@ -285,9 +285,9 @@ class GoldenRepoBranchService:
                 format_error_log(
                     "DEPLOY-GENERAL-028",
                     error_msg,
-                    exc_info=True,
                     extra={"correlation_id": get_correlation_id()},
-                )
+                ),
+                exc_info=True,
             )
             raise GitOperationError(error_msg)
 
