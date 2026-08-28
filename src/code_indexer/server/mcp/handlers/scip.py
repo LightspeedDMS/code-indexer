@@ -152,7 +152,11 @@ def _parse_log_details(row: dict) -> dict:
 def _get_pr_logs_from_service(limit: int, repo_alias: Optional[str] = None) -> list:
     """Fetch PR logs from AuditLogService."""
 
-    svc = getattr(getattr(_utils.app_module, "app", None), "state", None)
+    # Bug #1709: probes via _utils._lazy_module_attr_or_none("app") instead
+    # of a bare getattr(_utils.app_module, "app", None), which would
+    # otherwise permanently construct the process-wide app singleton as a
+    # side effect of merely reading it.
+    svc = getattr(_utils._lazy_module_attr_or_none("app"), "state", None)
     audit_service = getattr(svc, "audit_service", None) if svc else None
     if audit_service is None:
         raise RuntimeError("AuditLogService not available on app.state")
@@ -163,7 +167,11 @@ def _get_pr_logs_from_service(limit: int, repo_alias: Optional[str] = None) -> l
 def _get_cleanup_logs_from_service(limit: int, repo_path: Optional[str] = None) -> list:
     """Fetch cleanup logs from AuditLogService."""
 
-    svc = getattr(getattr(_utils.app_module, "app", None), "state", None)
+    # Bug #1709: probes via _utils._lazy_module_attr_or_none("app") instead
+    # of a bare getattr(_utils.app_module, "app", None), which would
+    # otherwise permanently construct the process-wide app singleton as a
+    # side effect of merely reading it.
+    svc = getattr(_utils._lazy_module_attr_or_none("app"), "state", None)
     audit_service = getattr(svc, "audit_service", None) if svc else None
     if audit_service is None:
         raise RuntimeError("AuditLogService not available on app.state")
@@ -178,8 +186,14 @@ def _get_cleanup_logs_from_service(limit: int, repo_path: Optional[str] = None) 
 
 def _execute_workspace_cleanup() -> Dict[str, Any]:
     """Execute workspace cleanup and return result dict."""
+    # Bug #1709: probes via _utils._lazy_module_attr_or_none("app") instead
+    # of a bare _utils.app_module.app.state attribute chain, which would
+    # otherwise permanently construct the process-wide app singleton as a
+    # side effect of merely reading it.
     workspace_cleanup_service = getattr(
-        _utils.app_module.app.state, "workspace_cleanup_service", None
+        getattr(_utils._lazy_module_attr_or_none("app"), "state", None),
+        "workspace_cleanup_service",
+        None,
     )
     if workspace_cleanup_service:
         result = workspace_cleanup_service.cleanup_workspaces()
@@ -281,8 +295,12 @@ def scip_definition(params: Dict[str, Any], user: User) -> Dict[str, Any]:
         if isinstance(repository_alias, str) and not repository_alias.endswith(
             "-global"
         ):
-            _arm = getattr(_utils.app_module, "activated_repo_manager", None)
-            _grm = getattr(_utils.app_module, "golden_repo_manager", None)
+            # Bug #1709: probes via _utils._lazy_module_attr_or_none() instead
+            # of a bare getattr(_utils.app_module, name, None), which would
+            # otherwise permanently construct the process-wide app singleton
+            # as a side effect of merely reading it.
+            _arm = _utils._lazy_module_attr_or_none("activated_repo_manager")
+            _grm = _utils._lazy_module_attr_or_none("golden_repo_manager")
             if _arm is not None and _grm is not None:
                 if not _arm.user_has_activated_repo(user.username, repository_alias):
                     from ._global_fallback import try_global_fallback
@@ -377,8 +395,12 @@ def scip_references(params: Dict[str, Any], user: User) -> Dict[str, Any]:
         if isinstance(repository_alias, str) and not repository_alias.endswith(
             "-global"
         ):
-            _arm = getattr(_utils.app_module, "activated_repo_manager", None)
-            _grm = getattr(_utils.app_module, "golden_repo_manager", None)
+            # Bug #1709: probes via _utils._lazy_module_attr_or_none() instead
+            # of a bare getattr(_utils.app_module, name, None), which would
+            # otherwise permanently construct the process-wide app singleton
+            # as a side effect of merely reading it.
+            _arm = _utils._lazy_module_attr_or_none("activated_repo_manager")
+            _grm = _utils._lazy_module_attr_or_none("golden_repo_manager")
             if _arm is not None and _grm is not None:
                 if not _arm.user_has_activated_repo(user.username, repository_alias):
                     from ._global_fallback import try_global_fallback
@@ -517,8 +539,12 @@ def scip_dependencies(params: Dict[str, Any], user: User) -> Dict[str, Any]:
         if isinstance(repository_alias, str) and not repository_alias.endswith(
             "-global"
         ):
-            _arm = getattr(_utils.app_module, "activated_repo_manager", None)
-            _grm = getattr(_utils.app_module, "golden_repo_manager", None)
+            # Bug #1709: probes via _utils._lazy_module_attr_or_none() instead
+            # of a bare getattr(_utils.app_module, name, None), which would
+            # otherwise permanently construct the process-wide app singleton
+            # as a side effect of merely reading it.
+            _arm = _utils._lazy_module_attr_or_none("activated_repo_manager")
+            _grm = _utils._lazy_module_attr_or_none("golden_repo_manager")
             if _arm is not None and _grm is not None:
                 if not _arm.user_has_activated_repo(user.username, repository_alias):
                     from ._global_fallback import try_global_fallback
@@ -630,8 +656,12 @@ def scip_dependents(params: Dict[str, Any], user: User) -> Dict[str, Any]:
         if isinstance(repository_alias, str) and not repository_alias.endswith(
             "-global"
         ):
-            _arm = getattr(_utils.app_module, "activated_repo_manager", None)
-            _grm = getattr(_utils.app_module, "golden_repo_manager", None)
+            # Bug #1709: probes via _utils._lazy_module_attr_or_none() instead
+            # of a bare getattr(_utils.app_module, name, None), which would
+            # otherwise permanently construct the process-wide app singleton
+            # as a side effect of merely reading it.
+            _arm = _utils._lazy_module_attr_or_none("activated_repo_manager")
+            _grm = _utils._lazy_module_attr_or_none("golden_repo_manager")
             if _arm is not None and _grm is not None:
                 if not _arm.user_has_activated_repo(user.username, repository_alias):
                     from ._global_fallback import try_global_fallback
@@ -743,8 +773,12 @@ def scip_impact(params: Dict[str, Any], user: User) -> Dict[str, Any]:
         if isinstance(repository_alias, str) and not repository_alias.endswith(
             "-global"
         ):
-            _arm = getattr(_utils.app_module, "activated_repo_manager", None)
-            _grm = getattr(_utils.app_module, "golden_repo_manager", None)
+            # Bug #1709: probes via _utils._lazy_module_attr_or_none() instead
+            # of a bare getattr(_utils.app_module, name, None), which would
+            # otherwise permanently construct the process-wide app singleton
+            # as a side effect of merely reading it.
+            _arm = _utils._lazy_module_attr_or_none("activated_repo_manager")
+            _grm = _utils._lazy_module_attr_or_none("golden_repo_manager")
             if _arm is not None and _grm is not None:
                 if not _arm.user_has_activated_repo(user.username, repository_alias):
                     from ._global_fallback import try_global_fallback
@@ -859,8 +893,12 @@ def scip_callchain(params: Dict[str, Any], user: User) -> Dict[str, Any]:
         if isinstance(repository_alias, str) and not repository_alias.endswith(
             "-global"
         ):
-            _arm = getattr(_utils.app_module, "activated_repo_manager", None)
-            _grm = getattr(_utils.app_module, "golden_repo_manager", None)
+            # Bug #1709: probes via _utils._lazy_module_attr_or_none() instead
+            # of a bare getattr(_utils.app_module, name, None), which would
+            # otherwise permanently construct the process-wide app singleton
+            # as a side effect of merely reading it.
+            _arm = _utils._lazy_module_attr_or_none("activated_repo_manager")
+            _grm = _utils._lazy_module_attr_or_none("golden_repo_manager")
             if _arm is not None and _grm is not None:
                 if not _arm.user_has_activated_repo(user.username, repository_alias):
                     from ._global_fallback import try_global_fallback
@@ -981,8 +1019,12 @@ def scip_context(params: Dict[str, Any], user: User) -> Dict[str, Any]:
         if isinstance(repository_alias, str) and not repository_alias.endswith(
             "-global"
         ):
-            _arm = getattr(_utils.app_module, "activated_repo_manager", None)
-            _grm = getattr(_utils.app_module, "golden_repo_manager", None)
+            # Bug #1709: probes via _utils._lazy_module_attr_or_none() instead
+            # of a bare getattr(_utils.app_module, name, None), which would
+            # otherwise permanently construct the process-wide app singleton
+            # as a side effect of merely reading it.
+            _arm = _utils._lazy_module_attr_or_none("activated_repo_manager")
+            _grm = _utils._lazy_module_attr_or_none("golden_repo_manager")
             if _arm is not None and _grm is not None:
                 if not _arm.user_has_activated_repo(user.username, repository_alias):
                     from ._global_fallback import try_global_fallback
@@ -1298,8 +1340,14 @@ def handle_scip_cleanup_status(args: Dict[str, Any], user: User) -> Dict[str, An
                 }
             )
 
+        # Bug #1709: probes via _utils._lazy_module_attr_or_none("app")
+        # instead of a bare _utils.app_module.app.state attribute chain,
+        # which would otherwise permanently construct the process-wide app
+        # singleton as a side effect of merely reading it.
         workspace_cleanup_service = getattr(
-            _utils.app_module.app.state, "workspace_cleanup_service", None
+            getattr(_utils._lazy_module_attr_or_none("app"), "state", None),
+            "workspace_cleanup_service",
+            None,
         )
         service_status = (
             workspace_cleanup_service.get_cleanup_status()

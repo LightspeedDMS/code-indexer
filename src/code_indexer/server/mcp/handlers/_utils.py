@@ -13,6 +13,7 @@ import difflib
 import json
 import logging
 import pathspec
+import types
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import date, datetime
@@ -30,6 +31,62 @@ from code_indexer.server.services.constants import is_internal_meta_repo
 logger = logging.getLogger(__name__)
 
 HTTP_STATUS_BAD_REQUEST = 400
+
+
+def _lazy_module_attr_or_none(name: str) -> Any:
+    """Read a lazy PEP-562 attribute off ``app_module`` without constructing it.
+
+    Bug #1709: generalizes the technique Bug #1678/#1693 introduced as
+    ``_lazy_singleton_app_or_none()`` in xray.py (there scoped to the
+    ``"app"`` attribute name only) to ANY lazy-constructed module-level name
+    on ``code_indexer.server.app``. Names such as ``"activated_repo_manager"``,
+    ``"golden_repo_manager"``, and ``"background_job_manager"`` are ALL
+    members of that module's ``_LAZY_INIT_ATTRS`` and trigger the identical
+    ``__getattr__`` construction side effect that a bare
+    ``getattr(app_module, name, None)`` probe suffers for ``"app"`` --
+    Python invokes ``__getattr__`` whenever normal attribute lookup (which
+    checks ``__dict__`` first) fails, and ``getattr()`` only catches the
+    resulting ``AttributeError`` afterward; it does not prevent the call.
+
+    Reading ``__dict__.get(name)`` directly on a genuine ``ModuleType``
+    bypasses ``__getattr__`` entirely -- it returns ``None`` until the
+    singleton has genuinely already been constructed elsewhere, instead of
+    permanently constructing it as a side effect of merely probing it.
+
+    Test stand-ins that replace ``app_module`` with a ``MagicMock()`` (the
+    established pattern, e.g. test_xray_cell_limiter.py) are not
+    ``types.ModuleType`` instances, so they fall through to a plain
+    ``getattr()`` call -- preserving normal Mock attribute-interception
+    semantics for tests that rely on it.
+
+    Bug #1709 remediation: a raw ``__dict__`` read alone missed one more
+    scenario app.py's own ``__getattr__`` handles -- ``unittest.mock.patch
+    .object(app_module, name, ...)`` called WITHOUT ``create=True`` when
+    ``name`` is not yet a literal ``__dict__`` key. Mock's ``get_original()``
+    then captures the value via a ``getattr()`` fallback (``is_local=False``)
+    -- which itself constructs the singleton -- and its teardown calls
+    ``delattr(target, name)`` rather than restoring it, permanently removing
+    ``name`` from ``__dict__`` even though the singleton is fully
+    constructed and cached in ``_lazy_values``. Ordinary attribute access
+    (``getattr(app_module, name, ...)``/``hasattr()``) transparently
+    recovers via that same ``_lazy_values`` fallback inside
+    ``__getattr__``; this helper must match that exact recovery semantics
+    instead of permanently returning ``None``. Reading ``_initialized``/
+    ``_lazy_values`` is always safe: both are plain, unconditionally
+    module-level-assigned globals (never lazy themselves, always present in
+    ``__dict__`` from import time), so this can never itself trigger real
+    construction.
+    """
+    mod = app_module
+    if isinstance(mod, types.ModuleType):
+        if name in mod.__dict__:
+            return mod.__dict__[name]
+        if mod.__dict__.get("_initialized") and name in mod.__dict__.get(
+            "_lazy_values", {}
+        ):
+            return mod.__dict__["_lazy_values"][name]
+        return None
+    return getattr(mod, name, None)
 
 
 @dataclass
