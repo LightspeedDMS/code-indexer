@@ -7,6 +7,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [12.26.0] - 2026-08-27
+
+### Fixed
+
+- **Bug #1707**: 51 failed + 14 errors across 13 `tests/unit/server/` files, caused by
+  Story #409's route-extraction pattern making `@patch("code_indexer.server.app.<manager>")`
+  an inert mock (the closure never reads that module-level name) -- fixed by patching the
+  real DI-wired object (`client.app.state.<manager>`) instead. Remediation round also fixed
+  a machine-state-dependent test (`test_user_management_endpoints.py`, which only passed
+  because a row happened to persist in a developer's local DB) and added a missing
+  `_pool = None` reset to the rate-limiter test-isolation fixture.
+- **Bug #1717**: `watch_manager.py`'s `_watch_thread_worker` `finally` block unconditionally
+  wiped the `_WatchError` sentinel before any consumer could observe a construction failure,
+  so a failed `cidx watch` start silently reported success. `exposed_watch_status`/
+  `stop_watch` now surface the real error.
+- **Bug #1702**: `routers/git.py` constructed a node-local, unpooled `ActivatedRepoManager`
+  instance instead of resolving the DI-wired `app.state.activated_repo_manager` -- the same
+  cluster-outage defect class as Bug #1692, now fixed to resolve the shared instance.
+- **Bug #1718**: `daemon/service.py` had 6 unverified `ConfigManager.create_with_backtrack()`
+  call sites (4 on write/indexing paths) that could silently resolve to an ancestor's or
+  defaulted config -- all 6 now go through `ConfigManager.load_verified_config()`.
+- **Bug #1704**: REST write endpoints (`create_file`/`edit_file`/`delete_file` in
+  `routers/files.py`) constructed a fresh `FileCRUDService()` per request instead of reusing
+  the shared singleton, so REST requests couldn't see write-exception registrations MCP had
+  access to.
+- **Bug #1659**: audited every `hasattr`/`getattr`/`delattr` call site against the PEP-562
+  lazy-init modules (`app.py`, `git_operations_service.py`); found no live-impact call site,
+  documented the hazard directly in both `__getattr__` docstrings with a regression test
+  pinning the hazard text.
+- **Bug #1710**: removed the orphaned `dual_embed_enabled` config field and its 3
+  permanently-failing tests -- investigation found zero readers anywhere in the indexing
+  pipeline; the CLI surface these tests expected was never wired and never will be.
+- **Bug #1711**: investigated missing `--strategy`/`--score-fusion`/`--provider` query CLI
+  flags; wiring them up was rejected in review (the flags were inert in every mode -- no
+  REST payload field, no local multi-provider path -- and turned a loud
+  `Error: No such option` into a silent no-op), so the CLI surface and its 12-test file were
+  removed instead, restoring the original loud-failure behavior.
+- **Bug #1703**: deleted `FileCRUDService`'s orphaned `activated_repo_manager` property --
+  Bug #1704 left it with zero production consumers, and per Messi Rule 12 it was removed
+  rather than merely documented as unsafe.
+- **Bug #1708**: the fake test server (`tests/infrastructure/test_cidx_server.py`) registered
+  5 routes with no real production counterpart (including the `GET /api/admin/users/{username}`
+  endpoint from Bug #1695) -- a Messi Rule 1 (Anti-Mock) false-confidence risk. Removed 5,
+  renamed 1 to match the real path, and deliberately kept 1 (`/api/jobs/{job_id}/status`)
+  with a tracking comment since it backs a genuine, still-open production client bug (filed
+  as Bug #1720).
+
 ## [12.25.0] - 2026-08-24
 
 ### Fixed
