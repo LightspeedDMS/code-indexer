@@ -190,12 +190,20 @@ def _truncate_xray_batch_result(
 
 
 def _get_background_job_manager() -> Any:
-    return _utils.app_module.background_job_manager
+    # Bug #1709: probes via _utils._lazy_module_attr_or_none() instead of a
+    # direct unconditional _utils.app_module.background_job_manager
+    # attribute access, which would otherwise permanently construct the
+    # process-wide app singleton as a side effect of merely reading it
+    # (byte-identical fix to xray.py's _get_background_job_manager()).
+    return _utils._lazy_module_attr_or_none("background_job_manager")
 
 
 def _get_cidx_meta_path() -> Path:
-    """Return the mutable cidx-meta base path."""
-    grm = getattr(_utils.app_module, "golden_repo_manager", None)
+    """Return the mutable cidx-meta base path.
+
+    Bug #1709: safe lazy probe -- avoids PEP-562 construction side effect.
+    """
+    grm = _utils._lazy_module_attr_or_none("golden_repo_manager")
     if grm is None:
         raise RuntimeError(
             "cidx-meta path not available: golden_repo_manager not configured"
@@ -204,9 +212,12 @@ def _get_cidx_meta_path() -> Path:
 
 
 def _get_arm_and_grm() -> Tuple[Any, Any]:
-    """Return (activated_repo_manager, golden_repo_manager) or (None, None)."""
-    arm = getattr(_utils.app_module, "activated_repo_manager", None)
-    grm = getattr(_utils.app_module, "golden_repo_manager", None)
+    """Return (activated_repo_manager, golden_repo_manager) or (None, None).
+
+    Bug #1709: safe lazy probes -- avoid PEP-562 construction side effect.
+    """
+    arm = _utils._lazy_module_attr_or_none("activated_repo_manager")
+    grm = _utils._lazy_module_attr_or_none("golden_repo_manager")
     return arm, grm
 
 
@@ -717,7 +728,11 @@ def handle_xray_search_batch(
             bjm=bjm,
             progress_callback=progress_callback,
         )
-        payload_cache = getattr(getattr(_utils.app_module, "app", None), "state", None)
+        # Bug #1709: probes via _lazy_singleton_app_or_none() instead of a
+        # bare getattr(_utils.app_module, "app", None), which would
+        # otherwise permanently construct the process-wide app singleton
+        # as a side effect of merely reading it.
+        payload_cache = getattr(_lazy_singleton_app_or_none(), "state", None)
         payload_cache = (
             getattr(payload_cache, "payload_cache", None) if payload_cache else None
         )

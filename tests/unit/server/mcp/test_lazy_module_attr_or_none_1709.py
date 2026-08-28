@@ -205,3 +205,51 @@ class TestLazyModuleAttrOrNoneRecoversAfterMockPatchDelattrTeardown:
             "Bug #1709 regression: recovered value must be the SAME "
             f"already-constructed singleton, not a new one. Got: {stdout!r}"
         )
+
+
+class TestXrayLazySingletonAppOrNoneDelegatesAndRecovers:
+    """Code-review remediation (rejected commit 45e7fa4e, Blocker 1):
+    xray.py's OLD Bug #1693 `_lazy_singleton_app_or_none()` did a raw
+    `app_module.__dict__.get("app")` read with no `_lazy_values` fallback
+    -- the EXACT insufficiency this issue's fix addresses for the new
+    generalized helper. It must delegate to
+    `_utils._lazy_module_attr_or_none("app")` so it inherits the same
+    `_lazy_values` recovery after a real mock.patch delattr-teardown
+    sequence (see TestLazyModuleAttrOrNoneRecoversAfterMockPatchDelattrTeardown
+    above for the full scenario rationale)."""
+
+    def test_xray_lazy_singleton_app_or_none_recovers_via_lazy_values(
+        self, tmp_path
+    ) -> None:
+        code = (
+            "import sys; "
+            f"sys.path.insert(0, {SRC_ROOT!r}); "
+            "from unittest.mock import Mock, patch; "
+            "from code_indexer.server import app as m; "
+            "assert 'app' not in vars(m)\n"
+            "with patch.object(m, 'app', Mock()):\n"
+            "    pass\n"
+            "real_app = m._lazy_values.get('app')\n"
+            "from code_indexer.server.mcp.handlers import xray; "
+            "result = xray._lazy_singleton_app_or_none(); "
+            "print('app_in_dict_after_teardown:', 'app' in vars(m)); "
+            "print('real_app_is_none:', real_app is None); "
+            "print('recovered_same_object:', result is real_app); "
+            "print('result_is_none:', result is None)"
+        )
+        env = {**os.environ, "CIDX_SERVER_DATA_DIR": str(tmp_path)}
+        stdout = _run_and_assert_ok(code, env)
+        assert "app_in_dict_after_teardown: False" in stdout, (
+            "Test precondition failed: expected mock.patch's teardown to "
+            f"delete 'app' from __dict__ (is_local=False path). Got: {stdout!r}"
+        )
+        assert "result_is_none: False" in stdout, (
+            "Code review Blocker 1: xray._lazy_singleton_app_or_none() "
+            "must recover the real singleton via _lazy_values after a "
+            "mock.patch delattr-then-hasattr teardown sequence, not "
+            f"return None. Got: {stdout!r}"
+        )
+        assert "recovered_same_object: True" in stdout, (
+            "Code review Blocker 1: recovered value must be the SAME "
+            f"already-constructed singleton, not a new one. Got: {stdout!r}"
+        )
