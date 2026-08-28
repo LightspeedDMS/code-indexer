@@ -163,16 +163,19 @@ class ReposAPIClient(CIDXRemoteAPIClient):
                 response_data = response.json()
                 repositories_data = response_data["repositories"]
 
-                # Map server ActivatedRepositoryInfo format to client ActivatedRepository format
+                # Map server ActivatedRepositoryInfo format to client ActivatedRepository
+                # format. The list endpoint itself carries no sync_status field, so each
+                # repo's real status is resolved via the per-repo sync-status endpoint.
                 mapped_repositories = []
                 for repo_data in repositories_data:
+                    alias = repo_data["user_alias"]
                     mapped_repo = ActivatedRepository(
-                        alias=repo_data["user_alias"],
+                        alias=alias,
                         current_branch=repo_data["current_branch"],
-                        sync_status="synced",  # Default status - server doesn't provide this yet
+                        sync_status=self._resolve_sync_status(alias),
                         last_sync=repo_data.get("last_accessed", ""),
                         activation_date=repo_data.get("activated_at", ""),
-                        conflict_details=None,  # Server doesn't provide this yet
+                        conflict_details=None,  # Server doesn't provide free-text details yet
                     )
                     mapped_repositories.append(mapped_repo)
 
@@ -184,6 +187,26 @@ class ReposAPIClient(CIDXRemoteAPIClient):
             raise APIClientError(
                 f"Failed to list repositories: {error_detail}", response.status_code
             )
+
+    def _resolve_sync_status(self, user_alias: str) -> str:
+        """Resolve one repo's real sync status via GET /api/repos/{alias}/sync-status.
+
+        Called once per activated repo from list_activated_repositories. A
+        per-repo lookup failure (e.g. the repo was deactivated in the race
+        between the list call and this lookup), or a 200 response missing
+        the sync_status field, degrades to "unknown" rather than silently
+        reporting "synced" for a repo whose real state could not be
+        confirmed.
+        """
+        try:
+            status_data = self.get_sync_status(user_alias)
+        except APIClientError:
+            return "unknown"
+
+        sync_status = status_data.get("sync_status")
+        if not sync_status:
+            return "unknown"
+        return str(sync_status)
 
     def list_available_repositories(
         self, search_term: Optional[str] = None

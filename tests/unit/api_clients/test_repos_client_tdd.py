@@ -43,6 +43,51 @@ class TestReposAPIClientInitialization:
             assert client is not None
 
 
+def _build_activated_repos_list_response(aliases):
+    """Build a minimal /api/repos list response for the given aliases.
+
+    Test helper for #1740 sync-status enrichment tests: intentionally omits
+    a "sync_status" field per repo, matching the real server's
+    ActivatedRepositoryInfo payload shape (no sync_status on the list route).
+    """
+    return {
+        "repositories": [
+            {
+                "user_alias": alias,
+                "current_branch": "main",
+                "last_accessed": "2024-01-15T10:30:00Z",
+                "activated_at": "2024-01-10T14:20:00Z",
+            }
+            for alias in aliases
+        ],
+        "total_count": len(aliases),
+    }
+
+
+def _make_sync_status_aware_request_fake(list_response_data, sync_status_by_alias):
+    """Build an _authenticated_request side_effect keyed by URL.
+
+    Routes "/api/repos" to the list payload and
+    "/api/repos/{alias}/sync-status" to the per-alias sync status payload,
+    mirroring the two real, distinct server endpoints repos_client.py talks
+    to for #1740.
+    """
+
+    def fake_authenticated_request(method, url, **kwargs):
+        response = Mock()
+        response.status_code = 200
+        if url == "/api/repos":
+            response.json.return_value = list_response_data
+            return response
+        for alias, status_payload in sync_status_by_alias.items():
+            if url == f"/api/repos/{alias}/sync-status":
+                response.json.return_value = status_payload
+                return response
+        raise AssertionError(f"Unexpected URL requested: {method} {url}")
+
+    return fake_authenticated_request
+
+
 class TestActivatedRepositoryOperations:
     """Test operations for managing activated repositories."""
 
@@ -56,38 +101,58 @@ class TestActivatedRepositoryOperations:
             )
 
     @pytest.mark.asyncio
-    async def test_list_activated_repositories_success(self, mock_client):
-        """Test successful listing of activated repositories."""
-        # Mock HTTP response
-        mock_response_data = {
-            "repositories": [
-                {
-                    "user_alias": "web-app",
-                    "current_branch": "main",
-                    "sync_status": "synced",
-                    "last_sync": "2024-01-15T10:30:00Z",
-                    "activation_date": "2024-01-10T14:20:00Z",
-                    "conflict_details": None,
-                },
-                {
-                    "user_alias": "api-service",
-                    "current_branch": "feature/v2",
-                    "sync_status": "needs_sync",
-                    "last_sync": "2024-01-14T08:15:00Z",
-                    "activation_date": "2024-01-12T09:45:00Z",
-                    "conflict_details": None,
-                },
-            ],
-            "total_count": 2,
+    async def test_list_activated_repositories_resolves_real_sync_status(
+        self, mock_client
+    ):
+        """Test that sync_status reflects genuine per-repo server state.
+
+        Regression test for #1740: repos_client.py used to hardcode
+        sync_status="synced" for every activated repo, ignoring the real
+        GET /api/repos/{alias}/sync-status endpoint entirely. This proves
+        the client now enriches each repo with its real sync status, so
+        different repos can genuinely report synced/needs_sync/conflict.
+        """
+        list_response_data = _build_activated_repos_list_response(
+            ["web-app", "api-service", "billing-service"]
+        )
+        sync_status_by_alias = {
+            "web-app": {"sync_status": "synced", "has_conflicts": False},
+            "api-service": {"sync_status": "needs_sync", "has_conflicts": False},
+            "billing-service": {"sync_status": "conflict", "has_conflicts": True},
         }
 
-        # Mock HTTP response
-        mock_response = Mock()
-        mock_response.status_code = 200
-        mock_response.json.return_value = mock_response_data
+        with patch.object(
+            mock_client,
+            "_authenticated_request",
+            side_effect=_make_sync_status_aware_request_fake(
+                list_response_data, sync_status_by_alias
+            ),
+        ):
+            repositories = mock_client.list_activated_repositories()
+
+        by_alias = {repo.alias: repo for repo in repositories}
+        assert len(repositories) == 3
+        assert by_alias["web-app"].sync_status == "synced"
+        assert by_alias["api-service"].sync_status == "needs_sync"
+        assert by_alias["billing-service"].sync_status == "conflict"
+
+    @pytest.mark.asyncio
+    async def test_list_activated_repositories_success(self, mock_client):
+        """Test successful listing of activated repositories."""
+        list_response_data = _build_activated_repos_list_response(
+            ["web-app", "api-service"]
+        )
+        sync_status_by_alias = {
+            "web-app": {"sync_status": "synced", "has_conflicts": False},
+            "api-service": {"sync_status": "needs_sync", "has_conflicts": False},
+        }
 
         with patch.object(
-            mock_client, "_authenticated_request", return_value=mock_response
+            mock_client,
+            "_authenticated_request",
+            side_effect=_make_sync_status_aware_request_fake(
+                list_response_data, sync_status_by_alias
+            ),
         ):
             repositories = mock_client.list_activated_repositories()
 
@@ -95,40 +160,66 @@ class TestActivatedRepositoryOperations:
         assert repositories[0].alias == "web-app"
         assert repositories[0].sync_status == "synced"
         assert repositories[1].alias == "api-service"
-        # Server's ActivatedRepositoryInfo has no sync_status field; production
-        # code (repos_client.py) intentionally hardcodes "synced" for all repos.
-        assert repositories[1].sync_status == "synced"
+        # sync_status is resolved per-repo from the real
+        # GET /api/repos/{alias}/sync-status endpoint (#1740) -- it genuinely
+        # reflects each repo's own status rather than being hardcoded.
+        assert repositories[1].sync_status == "needs_sync"
+
+    @pytest.mark.asyncio
+    async def test_list_activated_repositories_sync_status_lookup_failure_degrades_to_unknown(
+        self, mock_client
+    ):
+        """Test a per-repo sync-status lookup failure never reports "synced".
+
+        Regression coverage for #1740's error path: if the sync-status
+        endpoint 404s for one repo (e.g. it was deactivated in the race
+        between the list call and this lookup), that repo must surface an
+        honest "unknown" status rather than silently claiming "synced".
+        """
+        list_response_data = _build_activated_repos_list_response(["ghost-repo"])
+
+        def fake_authenticated_request(method, url, **kwargs):
+            if url == "/api/repos":
+                response = Mock()
+                response.status_code = 200
+                response.json.return_value = list_response_data
+                return response
+            assert url == "/api/repos/ghost-repo/sync-status"
+            error_response = Mock()
+            error_response.status_code = 404
+            error_response.json.return_value = {"detail": "Repository not found"}
+            return error_response
+
+        with patch.object(
+            mock_client,
+            "_authenticated_request",
+            side_effect=fake_authenticated_request,
+        ):
+            repositories = mock_client.list_activated_repositories()
+
+        assert len(repositories) == 1
+        assert repositories[0].sync_status == "unknown"
 
     @pytest.mark.asyncio
     async def test_list_activated_repositories_with_filter(self, mock_client):
         """Test listing activated repositories with filter parameter."""
-        mock_response_data = {
-            "repositories": [
-                {
-                    "user_alias": "web-app",
-                    "current_branch": "main",
-                    "sync_status": "synced",
-                    "last_sync": "2024-01-15T10:30:00Z",
-                    "activation_date": "2024-01-10T14:20:00Z",
-                    "conflict_details": None,
-                }
-            ],
-            "total_count": 1,
+        list_response_data = _build_activated_repos_list_response(["web-app"])
+        sync_status_by_alias = {
+            "web-app": {"sync_status": "synced", "has_conflicts": False},
         }
 
-        mock_response = Mock()
-        mock_response.status_code = 200
-        mock_response.json.return_value = mock_response_data
-
         with patch.object(
-            mock_client, "_authenticated_request", return_value=mock_response
+            mock_client,
+            "_authenticated_request",
+            side_effect=_make_sync_status_aware_request_fake(
+                list_response_data, sync_status_by_alias
+            ),
         ) as mock_request:
             repositories = mock_client.list_activated_repositories(filter_pattern="web")
 
-        # Verify the request was made with correct parameters
-        mock_request.assert_called_once_with(
-            "GET", "/api/repos", params={"filter": "web"}
-        )
+        # Verify the list request was made with correct parameters (a second
+        # call to the per-repo sync-status endpoint is also expected, #1740)
+        mock_request.assert_any_call("GET", "/api/repos", params={"filter": "web"})
 
         assert len(repositories) == 1
         assert repositories[0].alias == "web-app"
