@@ -7,6 +7,7 @@ This server responds to actual HTTP requests with real JWT tokens and authentica
 import asyncio
 import logging
 import socket
+import threading
 import time
 from datetime import datetime, timedelta, timezone
 from typing import Dict, Any, Optional, List, cast
@@ -119,6 +120,19 @@ class UpdateUserRequest(BaseModel):
     role: str = Field(..., min_length=1)
 
 
+class AdminChangePasswordRequest(BaseModel):
+    """Admin change password request model.
+
+    Intentionally no ``min_length`` constraint: emptiness is validated
+    manually in the handler (mirroring UpdateUserRequest's role-validation
+    pattern in this file) so an empty password produces HTTP 400, not
+    FastAPI's automatic 422 -- matching the real production client's
+    handling of a 400 response (Bug #1720 Finding 2).
+    """
+
+    new_password: str = Field(...)
+
+
 class TestCIDXServer:
     """Real CIDX server for testing with authentic JWT and HTTP operations.
 
@@ -138,7 +152,15 @@ class TestCIDXServer:
         """
         self.port = port
         self.server_process: Optional[uvicorn.Server] = None
-        self._server_task: Optional[asyncio.Task] = None
+        # Bug #1720 investigation: uvicorn runs on its OWN thread (with its
+        # own event loop, via uvicorn.Server.run()) rather than as an
+        # asyncio.Task on the test's event loop. Running it on the same loop
+        # deterministically deadlocked every synchronous real-network client
+        # call (httpx.Client) made from the test coroutine: the blocking
+        # socket read holds the only thread able to service the server's
+        # request handling, so the client's request never gets answered
+        # until its own read-timeout fires.
+        self._server_thread: Optional[threading.Thread] = None
         self.actual_port: Optional[int] = None
         self.base_url: Optional[str] = None
 
@@ -196,19 +218,11 @@ class TestCIDXServer:
 
         # Job management endpoints
         app.get("/api/jobs")(self._list_jobs)
-        # KNOWN EXCEPTION (Bug #1708 audit, tracked follow-up #1720): the real
-        # production server has NO "/status"-suffixed route -- only
-        # "GET /api/jobs/{job_id}" (see inline_jobs.py). This fake route is a
-        # superset by the strict route-table definition, but it is left in
-        # place deliberately: real production client code
-        # (base_client.py's get_job_status(), used by cli.py and
-        # remote/polling.py) genuinely calls this exact "/status" URL, which
-        # 404s against the real server. ~15+ currently-passing tests across
-        # multiple files depend on this route to exercise that (buggy) real
-        # client method. Removing it here would silently delete that
-        # coverage without fixing the underlying client bug. See #1720 for
-        # the correct fix (align base_client.py's URL with the real route).
-        app.get("/api/jobs/{job_id}/status")(self._get_job_status)
+        # Matches the real production server's only job-status route (see
+        # inline_jobs.py: "GET /api/jobs/{job_id}", no "/status" suffix).
+        # base_client.py's get_job_status() was fixed to call this exact URL
+        # (Bug #1720 Finding 1); this fake route was renamed to match.
+        app.get("/api/jobs/{job_id}")(self._get_job_status)
         app.delete("/api/jobs/{job_id}")(self._cancel_job)
 
         # Query endpoints
@@ -219,6 +233,14 @@ class TestCIDXServer:
         app.get("/api/admin/users")(self._list_users)
         app.put("/api/admin/users/{username}")(self._update_user)
         app.delete("/api/admin/users/{username}")(self._delete_user)
+        # Matches the real production route registered in
+        # inline_admin_users.py: "PUT /api/admin/users/{username}/change-password"
+        # (Bug #1720 Finding 2 -- added to replace the pre-#1708 fictional
+        # "POST /api/admin/users/{username}/password" route that had no real
+        # production counterpart).
+        app.put("/api/admin/users/{username}/change-password")(
+            self._change_user_password
+        )
 
         # Health endpoint
         app.get("/health")(self._health_check)
@@ -259,8 +281,15 @@ class TestCIDXServer:
 
         self.server_process = uvicorn.Server(config)
 
-        # Start server in background task
-        self._server_task = asyncio.create_task(self.server_process.serve())
+        # Start server on its own thread with its own event loop (Bug #1720
+        # investigation fix -- see __init__'s comment on _server_thread for
+        # why this must NOT be asyncio.create_task() on the test's loop).
+        # uvicorn.Server.run() internally does asyncio.run(self.serve()),
+        # giving this thread a fresh event loop independent of the caller's.
+        self._server_thread = threading.Thread(
+            target=self.server_process.run, daemon=True
+        )
+        self._server_thread.start()
 
         # Wait for server to be ready with timeout
         max_wait_time = 5.0
@@ -295,6 +324,17 @@ class TestCIDXServer:
 
             while self.server_process.started and time.time() - start_time < max_wait:
                 await asyncio.sleep(0.1)
+
+            if self._server_thread is not None:
+                # Join off the event loop thread so a slow shutdown never
+                # blocks this coroutine's own loop.
+                await asyncio.to_thread(self._server_thread.join, 3.0)
+                if self._server_thread.is_alive():
+                    logging.getLogger(__name__).warning(
+                        "TestCIDXServer: server thread did not stop within "
+                        "3.0s shutdown timeout -- leaking thread"
+                    )
+                self._server_thread = None
 
             self.server_process = None
 
@@ -931,6 +971,35 @@ class TestCIDXServer:
         del self.users[username]
 
         return {"message": f"User '{username}' deleted successfully"}
+
+    async def _change_user_password(
+        self,
+        username: str,
+        password_request: AdminChangePasswordRequest,
+        credentials: HTTPAuthorizationCredentials = Depends(HTTPBearer()),
+    ):
+        """Change a user's password (admin only).
+
+        Args:
+            username: Username whose password to change
+            password_request: New password data
+            credentials: JWT token credentials
+        """
+        # Verify JWT token and get current user
+        self._verify_jwt_token(credentials.credentials)
+        current_user = self.active_tokens[credentials.credentials]["user_data"]
+        self._require_admin_user(current_user)
+
+        if username not in self.users:
+            raise HTTPException(status_code=404, detail=f"User '{username}' not found")
+
+        if not password_request.new_password:
+            raise HTTPException(status_code=400, detail="Password cannot be empty")
+
+        # Update the user's password
+        self.users[username]["password"] = password_request.new_password
+
+        return {"message": f"Password changed successfully for user '{username}'"}
 
     async def _health_check(self):
         """Health check endpoint.

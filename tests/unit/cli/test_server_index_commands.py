@@ -485,5 +485,5 @@ class TestAdminAPIClientJobStatus:
         assert result["status"] == "completed"
         assert result["progress"] == 100
         client._authenticated_request.assert_called_once_with(
-            "GET", "/api/jobs/test-job-123/status"
+            "GET", "/api/jobs/test-job-123"
         )

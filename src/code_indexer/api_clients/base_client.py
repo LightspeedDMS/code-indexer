@@ -787,7 +787,7 @@ class CIDXRemoteAPIClient:
             NetworkError: If network request fails
         """
         try:
-            response = self._authenticated_request("GET", f"/api/jobs/{job_id}/status")
+            response = self._authenticated_request("GET", f"/api/jobs/{job_id}")
 
             if response.status_code == 200:
                 return dict(response.json())
