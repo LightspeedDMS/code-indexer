@@ -39,10 +39,7 @@ def _make_bookkeeping_dir(index_path: Path) -> Path:
     coll_dir.mkdir(parents=True)
     (coll_dir / "temporal_metadata.db").write_bytes(b"sqlite-bytes-here")
     (coll_dir / "temporal_progress.json").write_text('{"done": true}')
-    # Issue #1696 Session 1: LEGACY_TEMPORAL_COLLECTION is a real `str`
-    # constant; mypy currently resolves the bare cross-module import to
-    # Any until Session 2's mypy_path fix lands.
-    return coll_dir  # type: ignore[no-any-return]
+    return coll_dir
 
 
 def _make_legacy_collection_with_hnsw(index_path: Path, name: str) -> Path:

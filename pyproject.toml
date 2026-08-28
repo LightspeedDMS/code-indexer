@@ -195,10 +195,44 @@ disallow_untyped_defs = false
 ignore_missing_imports = true
 no_site_packages = false
 explicit_package_bases = true
+mypy_path = "src"
 exclude = [
     "tests/fixtures/cidx-test-repo/.*",
-    "tests/manual/.*"
+    "tests/manual/.*",
+    # Issue #1696 Session 2: these 3 files are deliberate, self-contained
+    # dual-import-identity regression probes -- their entire test value
+    # depends on retaining a literal `src.code_indexer.*` import statement
+    # alongside the bare `code_indexer.*` spelling. This blocks mypy from
+    # picking them up as ROOTS during its recursive directory walk of
+    # `tests`. It is NOT sufficient by itself -- see the
+    # `follow_imports = "skip"` overrides below for the other half.
+    "^tests/conftest\\.py$",
+    "^tests/unit/cli/test_console_singleton_test_isolation_bug1370\\.py$",
+    "^tests/unit/server/models/test_query_result_item_import\\.py$",
 ]
+
+# Issue #1696 Session 2 (continued): `exclude` above only blocks
+# directory-walk ROOT discovery. Each of these 3 files is *also* reachable
+# via another (non-excluded) file's import statement (confirmed live for
+# tests/conftest.py, which mypy still parsed via import-following even
+# while excluded from root discovery), so mypy would still parse its body
+# and hit the same "Source file found twice under different module names"
+# crash mypy_path (above) exists to fix. `follow_imports = "skip"` stops
+# mypy from ever parsing these modules' bodies when reached via import --
+# it type-checks them as Any instead -- which structurally cannot collide,
+# regardless of how many places import them. Both mechanisms together are
+# required; either alone was proven insufficient during this session.
+[[tool.mypy.overrides]]
+module = "tests.conftest"
+follow_imports = "skip"
+
+[[tool.mypy.overrides]]
+module = "tests.unit.cli.test_console_singleton_test_isolation_bug1370"
+follow_imports = "skip"
+
+[[tool.mypy.overrides]]
+module = "tests.unit.server.models.test_query_result_item_import"
+follow_imports = "skip"
 
 [[tool.mypy.overrides]]
 module = "pydantic.*"

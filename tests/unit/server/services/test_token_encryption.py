@@ -138,10 +138,7 @@ class TestEncryptDecryptSingle:
     """Tests for encrypt_token() and decrypt_single() roundtrip."""
 
     def _get_test_key(self) -> bytes:
-        # Issue #1696 Session 1: derive_key_from_salt() is really typed to
-        # return bytes; mypy currently resolves the bare cross-module
-        # import to Any until Session 2's mypy_path fix lands.
-        return derive_key_from_salt("test-key-salt")  # type: ignore[no-any-return]
+        return derive_key_from_salt("test-key-salt")
 
     def test_encrypt_returns_non_empty_base64_string(self):
         import re
