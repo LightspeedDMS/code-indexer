@@ -181,12 +181,21 @@ def _reset_login_rate_limiters() -> Generator[None, None, None]:
 # atomically (app_wiring.py:220-227) with no save/restore. Absolute import
 # there means only this canonical module ever needs handling (no
 # `src.`-prefixed alias, unlike BackgroundJobManager above).
+#
+# Bug #1732 Finding 2: `server_config` added once app_wiring.py started
+# actually assigning `dependencies.server_config = server_config` (Story
+# #563's non-SSO API restriction wiring, previously missing since that
+# story's original commit). Without tracking it here too, the newly-wired
+# attribute would leak across tests exactly like the other 5 -- any test
+# building a real create_app()/create_fastapi_app() would permanently set
+# it with no restore.
 _AUTH_DEPENDENCIES_ATTRS = (
     "jwt_manager",
     "user_manager",
     "oauth_manager",
     "mcp_credential_manager",
     "api_key_manager",
+    "server_config",
 )
 
 
