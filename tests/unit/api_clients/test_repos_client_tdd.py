@@ -43,25 +43,28 @@ class TestReposAPIClientInitialization:
             assert client is not None
 
 
-def _build_activated_repos_list_response(aliases):
+def _build_activated_repos_list_response(aliases, sync_status="synced"):
     """Build a minimal /api/repos list response for the given aliases.
 
-    The list endpoint carries no sync_status field (#1740): the server does
-    not populate a real per-repo sync status on this route, matching the
-    real ActivatedRepositoryInfo payload shape.
+    Bug #1740: the list endpoint now inlines a REAL per-repo sync_status
+    field (computed server-side via ActivatedRepoManager.compute_sync_status),
+    matching the real ActivatedRepositoryInfo payload shape. Pass
+    sync_status=None to build a payload that omits the field entirely,
+    simulating an older server that predates this fix.
     """
-    return {
-        "repositories": [
-            {
-                "user_alias": alias,
-                "current_branch": "main",
-                "last_accessed": "2024-01-15T10:30:00Z",
-                "activated_at": "2024-01-10T14:20:00Z",
-            }
-            for alias in aliases
-        ],
-        "total_count": len(aliases),
-    }
+    repos = []
+    for alias in aliases:
+        entry = {
+            "user_alias": alias,
+            "current_branch": "main",
+            "last_accessed": "2024-01-15T10:30:00Z",
+            "activated_at": "2024-01-10T14:20:00Z",
+        }
+        if sync_status is not None:
+            entry["sync_status"] = sync_status
+        repos.append(entry)
+
+    return {"repositories": repos, "total_count": len(aliases)}
 
 
 def _mock_ok_response(payload):
@@ -85,22 +88,19 @@ class TestActivatedRepositoryOperations:
             )
 
     @pytest.mark.asyncio
-    async def test_list_activated_repositories_reports_unknown_sync_status_without_n_plus_one(
+    async def test_list_activated_repositories_reads_real_sync_status_without_n_plus_one(
         self, mock_client
     ):
-        """#1740 Option B: sync_status is an honest constant, no N+1 lookups.
-
-        Earlier commit 8377fdfb resolved a "real" per-repo sync_status by
-        calling GET /api/repos/{alias}/sync-status once per activated repo
-        inside list_activated_repositories -- an N+1 HTTP pattern for a
-        low-traffic display column, and the server route it called still
-        just returned a hardcoded default (#1740 review REJECT finding 1:
-        the fix was functionally inert). This proves the client makes
-        exactly ONE request for the whole listing and reports "unknown"
-        honestly rather than a per-repo value it cannot actually verify.
+        """#1740: sync_status is now a REAL server-computed value, inlined
+        onto the single /api/repos list response -- still exactly ONE HTTP
+        request for the whole listing (no N+1 per-repo lookup). This is the
+        fix for the earlier honest-but-fake "unknown" constant: the server
+        now runs ActivatedRepoManager.compute_sync_status() per repo inside
+        the SAME list request and inlines the result, so the client needs
+        no enrichment call at all.
         """
         list_response_data = _build_activated_repos_list_response(
-            ["web-app", "api-service", "billing-service"]
+            ["web-app", "api-service", "billing-service"], sync_status="needs_sync"
         )
 
         with patch.object(
@@ -111,15 +111,17 @@ class TestActivatedRepositoryOperations:
             repositories = mock_client.list_activated_repositories()
 
         assert len(repositories) == 3
-        assert all(repo.sync_status == "unknown" for repo in repositories)
+        assert all(repo.sync_status == "needs_sync" for repo in repositories)
         assert mock_request.call_count == 1
-        mock_request.assert_called_once_with("GET", "/api/repos", params={})
+        mock_request.assert_called_once_with(
+            "GET", "/api/repos", params={"include_sync_status": "true"}
+        )
 
     @pytest.mark.asyncio
     async def test_list_activated_repositories_success(self, mock_client):
         """Test successful listing of activated repositories."""
         list_response_data = _build_activated_repos_list_response(
-            ["web-app", "api-service"]
+            ["web-app", "api-service"], sync_status="synced"
         )
 
         with patch.object(
@@ -132,12 +134,33 @@ class TestActivatedRepositoryOperations:
         assert len(repositories) == 2
         assert repositories[0].alias == "web-app"
         assert repositories[1].alias == "api-service"
-        # sync_status is a constant "unknown" (#1740 Option B) -- the list
-        # endpoint provides no real per-repo status and resolving one via a
-        # per-repo HTTP call is not worth the N+1 cost for this low-traffic
-        # display column.
+        # sync_status is now real, server-inlined data (Bug #1740).
+        assert repositories[0].sync_status == "synced"
+        assert repositories[1].sync_status == "synced"
+
+    @pytest.mark.asyncio
+    async def test_list_activated_repositories_falls_back_to_unknown_when_sync_status_field_absent(
+        self, mock_client
+    ):
+        """Graceful backward compatibility: a server predating Bug #1740
+        (or a repo the server could not compute a status for, e.g. a
+        composite repo) omits the sync_status field entirely -- the client
+        must not crash, and must degrade to the honest "unknown" value
+        rather than fabricating a status.
+        """
+        list_response_data = _build_activated_repos_list_response(
+            ["legacy-repo"], sync_status=None
+        )
+
+        with patch.object(
+            mock_client,
+            "_authenticated_request",
+            return_value=_mock_ok_response(list_response_data),
+        ):
+            repositories = mock_client.list_activated_repositories()
+
+        assert len(repositories) == 1
         assert repositories[0].sync_status == "unknown"
-        assert repositories[1].sync_status == "unknown"
 
     @pytest.mark.asyncio
     async def test_list_activated_repositories_with_filter(self, mock_client):
@@ -153,7 +176,9 @@ class TestActivatedRepositoryOperations:
 
         # Exactly one request for the whole listing -- no per-repo lookup.
         mock_request.assert_called_once_with(
-            "GET", "/api/repos", params={"filter": "web"}
+            "GET",
+            "/api/repos",
+            params={"filter": "web", "include_sync_status": "true"},
         )
 
         assert len(repositories) == 1
