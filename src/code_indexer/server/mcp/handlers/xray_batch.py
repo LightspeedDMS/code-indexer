@@ -30,6 +30,11 @@ from code_indexer.xray.search_engine import XRaySearchEngine
 
 from . import _utils
 from ._utils import _mcp_response, _parse_json_string_array
+from .xray import _lazy_singleton_app_or_none
+from code_indexer.server.services.query_admission_gate import (
+    check_query_admission,
+    memory_pressure_mcp_payload,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -185,12 +190,20 @@ def _truncate_xray_batch_result(
 
 
 def _get_background_job_manager() -> Any:
-    return _utils.app_module.background_job_manager
+    # Bug #1709: probes via _utils._lazy_module_attr_or_none() instead of a
+    # direct unconditional _utils.app_module.background_job_manager
+    # attribute access, which would otherwise permanently construct the
+    # process-wide app singleton as a side effect of merely reading it
+    # (byte-identical fix to xray.py's _get_background_job_manager()).
+    return _utils._lazy_module_attr_or_none("background_job_manager")
 
 
 def _get_cidx_meta_path() -> Path:
-    """Return the mutable cidx-meta base path."""
-    grm = getattr(_utils.app_module, "golden_repo_manager", None)
+    """Return the mutable cidx-meta base path.
+
+    Bug #1709: safe lazy probe -- avoids PEP-562 construction side effect.
+    """
+    grm = _utils._lazy_module_attr_or_none("golden_repo_manager")
     if grm is None:
         raise RuntimeError(
             "cidx-meta path not available: golden_repo_manager not configured"
@@ -199,9 +212,12 @@ def _get_cidx_meta_path() -> Path:
 
 
 def _get_arm_and_grm() -> Tuple[Any, Any]:
-    """Return (activated_repo_manager, golden_repo_manager) or (None, None)."""
-    arm = getattr(_utils.app_module, "activated_repo_manager", None)
-    grm = getattr(_utils.app_module, "golden_repo_manager", None)
+    """Return (activated_repo_manager, golden_repo_manager) or (None, None).
+
+    Bug #1709: safe lazy probes -- avoid PEP-562 construction side effect.
+    """
+    arm = _utils._lazy_module_attr_or_none("activated_repo_manager")
+    grm = _utils._lazy_module_attr_or_none("golden_repo_manager")
     return arm, grm
 
 
@@ -213,8 +229,15 @@ def _resolve_repo_path(alias: str) -> Optional[str]:
 
 
 def _get_xray_cell_limiter() -> Any:
-    """Return the xray cell concurrency limiter from app.state, or None if not wired."""
-    app = getattr(_utils.app_module, "app", None)
+    """Return the xray cell concurrency limiter from app.state, or None if not wired.
+
+    Bug #1693: probes via `_lazy_singleton_app_or_none()` (the same
+    side-effect-free helper #1678 introduced for the setters in xray.py)
+    instead of a bare `getattr(_utils.app_module, "app", None)`, which
+    would otherwise permanently construct the process-wide app singleton
+    as a side effect of merely reading it.
+    """
+    app = _lazy_singleton_app_or_none()
     if app is None:
         return None
     return getattr(getattr(app, "state", None), "xray_cell_limiter", None)
@@ -461,6 +484,10 @@ def handle_xray_search_batch(
         xray_evaluator_validation_failed — evaluator code fails Rust whitelist.
         no_repositories_resolved       — all aliases unresolvable.
     """
+    _admission = check_query_admission()
+    if not _admission.allowed:
+        return _mcp_response(memory_pressure_mcp_payload(_admission))
+
     # ------------------------------------------------------------------
     # 1. Auth
     # ------------------------------------------------------------------
@@ -701,7 +728,11 @@ def handle_xray_search_batch(
             bjm=bjm,
             progress_callback=progress_callback,
         )
-        payload_cache = getattr(getattr(_utils.app_module, "app", None), "state", None)
+        # Bug #1709: probes via _lazy_singleton_app_or_none() instead of a
+        # bare getattr(_utils.app_module, "app", None), which would
+        # otherwise permanently construct the process-wide app singleton
+        # as a side effect of merely reading it.
+        payload_cache = getattr(_lazy_singleton_app_or_none(), "state", None)
         payload_cache = (
             getattr(payload_cache, "payload_cache", None) if payload_cache else None
         )

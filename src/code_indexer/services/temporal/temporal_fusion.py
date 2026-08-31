@@ -21,6 +21,68 @@ logger = logging.getLogger(__name__)
 # Over-fetch multiplier: each provider queried for limit * this value
 TEMPORAL_OVERFETCH_MULTIPLIER = 3
 
+# Story #1493 AC1 (report Finding C2, HIGH): TEMPORAL_OVERFETCH_MULTIPLIER
+# above (shard-level, up to 3x) and temporal_search_service.py's per-chunk-
+# type multiplier (up to 40x for chunk_type=commit_message) stack
+# MULTIPLICATIVELY -- up to 120x -- because the shard-level over-fetched
+# "limit" is itself passed down as the base "limit" that the chunk-type
+# multiplier then multiplies again. This is the ONE authoritative ceiling on
+# that COMBINED multiplier (not duplicated as separate per-site caps).
+#
+# Value rationale: 60x is not an arbitrary number -- it is the SAME worst
+# case the codebase already runs today for a different combination (a small
+# limit with a generic post-filter, e.g. diff_types/author/narrow time
+# range: TEMPORAL_OVERFETCH_MULTIPLIER(3) x
+# _calculate_over_fetch_multiplier(limit<=5)=20 == 60x), so capping the
+# chunk_type=commit_message worst case (120x) down to this already-accepted
+# ceiling reduces the worst-case decode/candidate volume by half without
+# introducing any NEW multiplier value the system hasn't already exercised
+# safely. AC3's real-data recall comparison is the blocking proof that this
+# specific value does not degrade result quality.
+TEMPORAL_COMBINED_OVERFETCH_CEILING = 60
+
+
+def cap_combined_overfetch_search_limit(
+    true_user_limit: int, natural_search_limit: int
+) -> int:
+    """Bound the COMBINED temporal overfetch multiplier at the ceiling.
+
+    ``natural_search_limit`` is the per-shard fetch limit AFTER both known
+    multiplier sites have already been applied (shard-level
+    TEMPORAL_OVERFETCH_MULTIPLIER in temporal_fusion_dispatch.py, then the
+    per-chunk-type multiplier in temporal_search_service.py). The ratio
+    ``natural_search_limit / true_user_limit`` is therefore exactly the
+    COMBINED multiplier actually in effect for this query -- no need to
+    track the two factors separately.
+
+    Args:
+        true_user_limit: The ORIGINAL user-requested result limit (never the
+            already-shard-multiplied intermediate value).
+        natural_search_limit: The per-shard fetch limit as computed today,
+            before any capping.
+
+    Returns:
+        ``natural_search_limit`` unchanged when the combined multiplier is
+        already at or below the ceiling (existing behavior for queries
+        below the ceiling is fully preserved). Otherwise
+        ``true_user_limit * TEMPORAL_COMBINED_OVERFETCH_CEILING``, floored at
+        ``true_user_limit`` so a user-requested limit is never truncated
+        below what was asked for. A non-positive ``true_user_limit`` is not
+        a real production input (callers always pass a positive limit) --
+        defensively returns ``natural_search_limit`` unchanged rather than
+        raising or dividing by zero.
+    """
+    if true_user_limit <= 0:
+        return natural_search_limit
+
+    combined_multiplier = natural_search_limit / true_user_limit
+    if combined_multiplier <= TEMPORAL_COMBINED_OVERFETCH_CEILING:
+        return natural_search_limit
+
+    capped = true_user_limit * TEMPORAL_COMBINED_OVERFETCH_CEILING
+    return max(capped, true_user_limit)
+
+
 # Default RRF constant (standard value = 60)
 DEFAULT_RRF_K = 60
 

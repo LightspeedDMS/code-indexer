@@ -235,6 +235,147 @@ class TestCompletedWithoutSnapshotIsExpiry:
         assert result["continue_polling"] is False
         assert "expired" in result["error"].lower()
 
+    def test_completed_with_explicit_none_result_is_still_expired_not_found(self):
+        """Bug #1499 regression guard: a genuine temporal job's job_status
+        dict always carries a "result" key (BackgroundJobManager.get_job_status
+        always includes it, defaulting to None for a temporal job -- only
+        the PayloadCache-backed snapshot is the real result store for
+        temporal jobs). This must NOT be misinterpreted as "has a real
+        persisted result" -- the original TTL-expiry contract must survive
+        the Bug #1499 fix unchanged."""
+        result = poll_temporal_job_status(
+            job_status={"status": "completed", "result": None},
+            read_snapshot_fn=lambda: None,
+            access_filtering_service=_FakeAccessFilteringService(),
+            username="alice",
+            is_admin=False,
+        )
+        assert result["status"] == "not_found"
+        assert result["continue_polling"] is False
+        assert "expired" in result["error"].lower()
+
+    def test_completed_temporal_job_with_result_ready_sentinel_and_expired_snapshot_is_expired_not_found(
+        self,
+    ):
+        """Regression guard (reviewer finding on the #1499 fix): a REAL
+        temporal search job's job_status["result"] is NOT None once the
+        worker completes -- run_temporal_worker (temporal_worker.py) returns
+        {"result_ready": True}, which background_jobs.py persists verbatim
+        as job.result, and get_job_status surfaces it as-is. That value IS
+        a dict, so a bare `isinstance(job_status["result"], dict)` check
+        (the original, buggy #1499 discriminator) would incorrectly treat
+        this as "a genuine non-temporal persisted result" and return a
+        bogus completed-with-no-actual-results response instead of the
+        honest AC10 expiry. operation_type="temporal_query" is the exact
+        string temporal_live_dispatch.py's TEMPORAL_OPERATION_TYPE submits
+        every live temporal search job under -- this must route through
+        the snapshot/AC10-expiry branch, never the persisted-result
+        passthrough meant only for non-temporal jobs like X-Ray."""
+        result = poll_temporal_job_status(
+            job_status={
+                "status": "completed",
+                "operation_type": "temporal_query",
+                "result": {"result_ready": True},
+            },
+            read_snapshot_fn=lambda: None,
+            access_filtering_service=_FakeAccessFilteringService(),
+            username="alice",
+            is_admin=False,
+        )
+        assert result["status"] == "not_found"
+        assert result["continue_polling"] is False
+        assert "expired" in result["error"].lower()
+
+
+class TestCompletedNonTemporalJobWithPersistedResult:
+    """Bug #1499: a non-temporal completed job (e.g. operation_type=
+    xray_search) polled through this SAME deferred-poll path (poll_search_job
+    MCP tool / GET /api/query/result/{job_id}) never had a temporal snapshot
+    written for it -- read_snapshot_fn() correctly returns None. The real
+    result lives in background_jobs.result (job_status["result"]), and must
+    be returned as-is instead of the misleading "result expired -- resubmit"
+    error."""
+
+    def test_non_temporal_completed_job_returns_persisted_result(self):
+        xray_result = {
+            "success": True,
+            "matches": [{"file": "a.py", "line": 10}],
+            "evaluation_errors": [],
+        }
+        result = poll_temporal_job_status(
+            job_status={
+                "status": "completed",
+                "operation_type": "xray_search",
+                "result": xray_result,
+            },
+            read_snapshot_fn=lambda: None,
+            access_filtering_service=_FakeAccessFilteringService(),
+            username="alice",
+            is_admin=False,
+        )
+        assert result["status"] == "completed"
+        assert result["continue_polling"] is False
+        assert "error" not in result
+
+    def test_non_temporal_completed_job_result_passes_through_unmodified(self):
+        """The result shape (including a cache_handle, which a temporal
+        snapshot response never carries) must reach the caller byte-for-byte
+        -- never routed through postprocess_temporal_snapshot, whose
+        result-shape assumptions (results/shards_completed/shards_total)
+        do not apply to an X-Ray result."""
+        xray_result = {
+            "success": True,
+            "matches": [{"file": "a.py", "line": 10}],
+            "evaluation_errors": ["timeout on shard 3"],
+            "cache_handle": "handle-abc123",
+        }
+        result = poll_temporal_job_status(
+            job_status={
+                "status": "completed",
+                "operation_type": "xray_search",
+                "result": xray_result,
+            },
+            read_snapshot_fn=lambda: None,
+            access_filtering_service=_FakeAccessFilteringService(),
+            username="alice",
+            is_admin=False,
+        )
+        assert result["matches"] == xray_result["matches"]
+        assert result["evaluation_errors"] == xray_result["evaluation_errors"]
+        assert result["cache_handle"] == "handle-abc123"
+        assert result["success"] is True
+        # Polling-contract fields layered on top, never reshaped by
+        # postprocess_temporal_snapshot's results/shards_* shape.
+        assert result["status"] == "completed"
+        assert result["continue_polling"] is False
+        assert "results" not in result
+        assert "shards_completed" not in result
+        assert "shards_total" not in result
+        assert "unranked" not in result
+
+    def test_non_temporal_completed_job_never_calls_postprocess(self):
+        """Discriminating assertion: postprocess_temporal_snapshot must not
+        even be invoked for this path -- proves the result is returned
+        as-is, not merely coincidentally shaped the same."""
+        from unittest.mock import patch
+
+        xray_result = {"success": True, "matches": []}
+        with patch(
+            "code_indexer.server.services.temporal_poll_job_status.postprocess_temporal_snapshot"
+        ) as mock_postprocess:
+            poll_temporal_job_status(
+                job_status={
+                    "status": "completed",
+                    "operation_type": "xray_search",
+                    "result": xray_result,
+                },
+                read_snapshot_fn=lambda: None,
+                access_filtering_service=_FakeAccessFilteringService(),
+                username="alice",
+                is_admin=False,
+            )
+        mock_postprocess.assert_not_called()
+
 
 class TestConfigServiceThreading:
     """Story #1400: config_service/deadline_monotonic must reach

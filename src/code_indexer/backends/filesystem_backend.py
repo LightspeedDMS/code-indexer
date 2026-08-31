@@ -7,7 +7,7 @@ Suitable for environments where Docker/Podman containers are not available.
 import logging
 import shutil
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 from .vector_store_backend import VectorStoreBackend
 
@@ -32,23 +32,57 @@ class FilesystemBackend(VectorStoreBackend):
         project_root: Path,
         hnsw_index_cache: Any = None,
         memory_governor: Any = None,
+        activation_id: Any = None,
+        use_chunks_db_for_new_collections: Optional[bool] = None,
+        index_dir: Optional[Path] = None,
     ):
         """Initialize FilesystemBackend.
 
         Args:
             project_root: Root directory of the project being indexed
+            index_dir: Bug #1529 -- optional EXPLICIT index root, overriding
+                the default `project_root/.code-indexer/index`. Used by the
+                temporal read path, whose data deliberately lives at a fixed
+                location OUTSIDE the queried repo's own tree (so an
+                activation's CoW clone never carries it, and every activation
+                reads the golden repo's CURRENT data). None (default -- every
+                other call site) is byte-identical to before.
             hnsw_index_cache: Optional HNSW index cache for server performance (Story #526)
                              Server mode passes this explicitly. None for CLI mode.
             memory_governor: Optional MemoryGovernor for Story #1213 Story 3.
                              Server mode passes get_memory_governor(); CLI leaves it None.
+            activation_id: Story #1458 AC11 -- optional per-clone generation/
+                identity token for an ACTIVATED repo, threaded into the
+                FilesystemVectorStore this backend constructs. None
+                (default) preserves today's pure path-derived cache key.
+            use_chunks_db_for_new_collections: Story #1488 -- optional
+                explicit new-collection chunk-storage layout choice
+                (True=CHUNKS_DB, False=SHARDED_JSON) forwarded verbatim to
+                the FilesystemVectorStore. None (default) leaves the store
+                to fall back to the CIDX_CHUNKS_DB_NEW_COLLECTIONS env var
+                (default SHARDED_JSON), so every existing call site is
+                unchanged. The CLI's `--new-collection-layout` flag and the
+                server's explicit `--new-collection-layout=chunks_db` child
+                arg both resolve to this param.
         """
         super().__init__(project_root)
-        self.vectors_dir = self.project_root / ".code-indexer" / "index"
+        # Bug #1529: an explicit index_dir wins (temporal's fixed
+        # outside-the-repo location); otherwise the ordinary in-repo default.
+        self.vectors_dir = (
+            Path(index_dir)
+            if index_dir is not None
+            else self.project_root / ".code-indexer" / "index"
+        )
 
         # Story #526: Server passes cache explicitly, CLI leaves it None
         self.hnsw_index_cache = hnsw_index_cache
         # Story #1213 Story 3: Server passes governor; CLI leaves it None
         self.memory_governor = memory_governor
+        # Story #1458 AC11: server passes this for an activated-repo query;
+        # None everywhere else (CLI, golden-repo/-global queries).
+        self.activation_id = activation_id
+        # Story #1488: explicit new-collection layout (None -> env fallback).
+        self.use_chunks_db_for_new_collections = use_chunks_db_for_new_collections
         # py-spy logging-lock fix (follow-up to Bug #1078): the per-construction
         # "HNSW index caching enabled" INFO log was removed. FilesystemBackend is
         # constructed once per server query, so this fired on every hot-path call.
@@ -136,20 +170,49 @@ class FilesystemBackend(VectorStoreBackend):
         Story #526: Passes hnsw_index_cache to enable server-side caching.
         Bug #1078: Passes id_index_cache (global singleton) when in server mode
                    (indicated by hnsw_index_cache being set), otherwise None.
+        Story #1492 post-manual-E2E-test fix: passes collection_meta_cache
+                   and chunk_store_cache (global singletons) the same way --
+                   a real running server was strace-verified to show ZERO
+                   cross-request benefit from either cache because this
+                   method previously left both as the FilesystemVectorStore
+                   default (None), so every per-query instance got its own
+                   private, single-use cache that died with it.
 
         Returns:
             FilesystemVectorStore instance configured for this project
         """
         from ..storage.filesystem_vector_store import FilesystemVectorStore
 
-        # Bug #1078: server mode (hnsw_index_cache present) -> inject id_index cache.
-        # Local import avoids pulling server modules into CLI startup path.
+        # Bug #1078 / Story #1492: server mode (hnsw_index_cache present) ->
+        # inject the process-wide singletons. Local imports avoid pulling
+        # server modules into the CLI startup path.
         id_index_cache = None
+        collection_meta_cache = None
+        chunk_store_cache = None
         skip_staleness = False
+        # Bug #1575 Part C AC46: default True (mechanism enabled) unless
+        # this is a server running in postgres/cluster storage mode, where
+        # it fails closed to always-full-rebuild -- resolved below.
+        hnsw_sync_epoch_enabled = True
         if self.hnsw_index_cache is not None:
             from ..server.cache.id_index_cache import get_global_id_index_cache
 
             id_index_cache = get_global_id_index_cache()
+
+            # Story #1492 follow-up: same server-mode gate as id_index_cache
+            # above -- these two caches' own module docstrings already
+            # describe being safe to share as a cross-request singleton;
+            # this closes the gap where nothing ever constructed them that
+            # way in production.
+            from ..storage.shared.collection_meta_cache import (
+                get_global_collection_meta_cache,
+            )
+            from ..storage.shared.chunk_store_cache import (
+                get_global_chunk_store_cache,
+            )
+
+            collection_meta_cache = get_global_collection_meta_cache()
+            chunk_store_cache = get_global_chunk_store_cache()
 
             # Bug #1181 Perf Fix #3: skip _compute_file_hash for immutable .versioned snapshots.
             # Import is server-mode-only (guarded by hnsw_index_cache) so CLI never pulls
@@ -160,6 +223,34 @@ class FilesystemBackend(VectorStoreBackend):
 
             skip_staleness = is_immutable_versioned_snapshot(str(self.project_root))
 
+            # Bug #1575 Part C AC46: .index_rebuild.lock provides NO
+            # cross-node exclusion on the documented vers=3,nolock,hard
+            # golden-repos NFS mount, and fleet-wide DB-backed job-level
+            # serialization coverage of EVERY mutation entry point (not
+            # just the flagship golden-repo refresh path) could not be
+            # exhaustively confirmed -- fail closed in postgres/cluster
+            # storage mode.
+            from ..server.utils.registry_factory import is_postgres_storage_mode
+
+            hnsw_sync_epoch_enabled = not is_postgres_storage_mode()
+        else:
+            # Bug #1575 Part C review fix (Defect 3a bypass 3): a spawned
+            # `cidx index` CLI child process (e.g. the server's own `cidx
+            # index --fts` subprocess) has no app.state to inspect via
+            # is_postgres_storage_mode() -- that probe always returns
+            # False here regardless of the PARENT server's actual storage
+            # mode. Fall back to an explicit env var the parent sets when
+            # it knows it is running in postgres/cluster mode. Absent
+            # (every standalone CLI invocation) keeps the enabled default.
+            import os
+
+            from ..storage.shared.hnsw_sync_state import (
+                CIDX_HNSW_SYNC_EPOCH_POSTGRES_MODE_ENV,
+            )
+
+            if os.environ.get(CIDX_HNSW_SYNC_EPOCH_POSTGRES_MODE_ENV) == "1":
+                hnsw_sync_epoch_enabled = False
+
         return FilesystemVectorStore(
             base_path=self.vectors_dir,
             project_root=self.project_root,
@@ -167,6 +258,11 @@ class FilesystemBackend(VectorStoreBackend):
             id_index_cache=id_index_cache,
             skip_staleness_check=skip_staleness,
             memory_governor=self.memory_governor,
+            activation_id=self.activation_id,
+            use_chunks_db_for_new_collections=self.use_chunks_db_for_new_collections,
+            collection_meta_cache=collection_meta_cache,
+            chunk_store_cache=chunk_store_cache,
+            hnsw_sync_epoch_enabled=hnsw_sync_epoch_enabled,
         )
 
     def health_check(self) -> bool:

@@ -106,13 +106,20 @@ import os
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 from code_indexer.server.repositories.golden_repo_manager import (
     GoldenRepoManager,
     GoldenRepoNotFoundError,
 )
 from code_indexer.server.services.job_tracker import DuplicateJobError
+
+if TYPE_CHECKING:
+    # Type-checking only: the Bug #1523 global-orphan pass annotates its
+    # activator parameter precisely, while the RUNTIME import stays deferred
+    # inside the function -- the same deferral the surrounding code already
+    # uses for this class (see _run_sweep's Pass 3 and remove_golden_repo).
+    from code_indexer.global_repos.global_activation import GlobalActivator
 
 logger = logging.getLogger(__name__)
 
@@ -159,6 +166,12 @@ class ReconcileResult:
     orphans_failed: List[str] = field(default_factory=list)
     pointers_repaired: List[str] = field(default_factory=list)
     pointers_repair_failed: List[str] = field(default_factory=list)
+    # Bug #1523: the REVERSE direction -- a live global-registry entry whose
+    # `golden_repos` row is already gone. Distinct from orphans_* above,
+    # which track rows whose on-disk clone is absent.
+    global_orphans_found: List[str] = field(default_factory=list)
+    global_orphans_removed: List[str] = field(default_factory=list)
+    global_orphans_failed: List[str] = field(default_factory=list)
     healthy_count: int = 0
     aborted: bool = False
     abort_reason: Optional[str] = None
@@ -628,3 +641,162 @@ def _run_sweep(
                 repair_error,
             )
             result.pointers_repair_failed.append(alias)
+
+    # Pass 4 (Bug #1523): the REVERSE orphan direction -- global-registry
+    # entries whose golden_repos row is already gone.
+    _reconcile_global_registry_orphans(golden_repo_manager, repo_rows, result)
+
+
+def _list_global_registry_entries(
+    activator: "GlobalActivator",
+) -> List[Dict[str, Any]]:
+    """
+    Read every global-registry row; [] on any read failure (Bug #1523).
+
+    `Dict[str, Any]` is not a type escape -- it is exactly the element type
+    `GlobalRegistry.list_global_repos()` / its PostgreSQL adapter declare, a
+    heterogeneous DB row (str alias/url, bool enable_temporal, dict
+    temporal_options).
+    """
+    try:
+        return list(activator.registry.list_global_repos())
+    except Exception as list_error:  # noqa: BLE001 -- sidecar discipline
+        logger.error(
+            "Bug #1523 reconcile: failed to list global-registry entries: %s "
+            "-- skipping the global-orphan pass.",
+            list_error,
+        )
+        return []
+
+
+def _global_entry_repo_name(entry: Dict[str, Any]) -> Optional[str]:
+    """
+    Bare golden-repo alias for one global-registry row (Bug #1523).
+
+    Prefers the row's own `repo_name` column (present in BOTH the SQLite and
+    PostgreSQL `global_repos` schemas), else strips exactly ONE trailing
+    `-global` suffix -- Bug #1373's normalization convention, never a blind
+    `replace()`, which would corrupt a repo named e.g. `my-global-repo`.
+    Returns None when neither yields a usable name, so an unparseable row is
+    skipped rather than guessed at.
+    """
+    repo_name = entry.get("repo_name")
+    if isinstance(repo_name, str) and repo_name:
+        return repo_name
+
+    alias_name = entry.get("alias_name")
+    suffix = "-global"
+    if isinstance(alias_name, str) and alias_name.endswith(suffix):
+        return alias_name[: -len(suffix)] or None
+    return None
+
+
+def _golden_repo_row_confirmed_absent(
+    golden_repo_manager: GoldenRepoManager, repo_name: str
+) -> bool:
+    """
+    Second, INDEPENDENT shared-backend read confirming the row is really gone
+    (Bug #1523).
+
+    `_resolve_golden_repo_authoritative` bypasses the per-worker cache, so a
+    partial or stale `list_golden_repos()` read cannot promote a live repo to
+    "orphan". Chosen over a fleet-wide ratio threshold deliberately: a ratio
+    guard would recreate the "can never heal" trap Bug #1382 had to dig this
+    reconciler out of. A read failure returns False -- never delete on doubt.
+    """
+    try:
+        return golden_repo_manager._resolve_golden_repo_authoritative(repo_name) is None
+    except Exception as confirm_error:  # noqa: BLE001 -- sidecar discipline
+        logger.error(
+            "Bug #1523 reconcile: could not re-confirm absence of the "
+            "golden_repos row for '%s' (%s) -- leaving its global entry "
+            "alone (safe default).",
+            repo_name,
+            confirm_error,
+        )
+        return False
+
+
+def _deactivate_global_orphan(
+    activator: "GlobalActivator", repo_name: str, result: ReconcileResult
+) -> None:
+    """
+    Deactivate one confirmed global-registry orphan (Bug #1523).
+
+    Reuses the SAME `GlobalActivator.deactivate_golden_repo()` primitive
+    remove_golden_repo() calls (Messi Rule #4) -- backend-agnostic via
+    GlobalActivator's Bug #1308 deferred registry resolution: PostgreSQL in
+    cluster mode, SQLite in solo mode.
+    """
+    result.global_orphans_found.append(repo_name)
+    logger.warning(
+        "Bug #1523 reconcile: global-registry entry '%s-global' has no "
+        "golden_repos row -- deactivating globally so it stops being "
+        "advertised/queryable and its alias can be re-registered.",
+        repo_name,
+    )
+    try:
+        activator.deactivate_golden_repo(repo_name)
+        result.global_orphans_removed.append(repo_name)
+    except Exception as deactivation_error:  # noqa: BLE001
+        logger.error(
+            "Bug #1523 reconcile: failed to deactivate global-registry orphan '%s': %s",
+            repo_name,
+            deactivation_error,
+        )
+        result.global_orphans_failed.append(repo_name)
+
+
+def _reconcile_global_registry_orphans(
+    golden_repo_manager: GoldenRepoManager,
+    repo_rows: List[Dict[str, str]],
+    result: ReconcileResult,
+) -> None:
+    """
+    Pass 4 -- sweep the REVERSE orphan direction (Bug #1523): a live
+    global-registry entry + `-global` alias pointer whose `golden_repos` row
+    is already gone.
+
+    Bug #1317's sweep iterates `list_golden_repos()`, so it can never observe
+    this shape. The state has no front-door recovery -- removal reports "not
+    found" (the row is gone) while the leftover clone directory blocks
+    re-registration -- and meanwhile the entry keeps the repo advertised and
+    queryable with broken content. remove_golden_repo()'s ordering fix stops
+    NEW wedges but cannot heal installations wedged before it shipped.
+
+    Safe to sweep because every global entry is, by construction, backed by a
+    golden repo: `register_global_repo` has exactly ONE production writer
+    (`GlobalActivator.activate_golden_repo`, only ever called for golden
+    repos) and `RESERVED_GLOBAL_NAMES` is empty.
+    """
+    from code_indexer.global_repos.global_activation import GlobalActivator
+
+    activator = GlobalActivator(golden_repo_manager.golden_repos_dir)
+    global_entries = _list_global_registry_entries(activator)
+    if not global_entries:
+        return
+
+    # Guard: zero rows alongside live global entries is indistinguishable
+    # from a total shared-backend read failure. Waiting for the next sweep
+    # costs nothing; tearing down the whole global registry does not.
+    if not repo_rows:
+        logger.warning(
+            "Bug #1523 reconcile: %d global-registry entries exist but the "
+            "golden_repos read returned ZERO rows -- refusing to treat every "
+            "global entry as orphaned. Skipping the global-orphan pass.",
+            len(global_entries),
+        )
+        return
+
+    # Row-orphans that Pass 2 just submitted for removal are INCLUDED here on
+    # purpose: their own remove_golden_repo() cascade already deactivates them
+    # globally, so skipping them avoids racing that in-flight job.
+    known_aliases = {row["alias"] for row in repo_rows}
+
+    for entry in global_entries:
+        repo_name = _global_entry_repo_name(entry)
+        if repo_name is None or repo_name in known_aliases:
+            continue
+        if not _golden_repo_row_confirmed_absent(golden_repo_manager, repo_name):
+            continue
+        _deactivate_global_orphan(activator, repo_name, result)

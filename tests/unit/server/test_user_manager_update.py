@@ -4,8 +4,8 @@ import tempfile
 import json
 import os
 from datetime import datetime, timezone
-from src.code_indexer.server.auth.user_manager import UserManager
-from src.code_indexer.server.utils.datetime_parser import DateTimeParser
+from code_indexer.server.auth.user_manager import UserManager
+from code_indexer.server.utils.datetime_parser import DateTimeParser
 
 
 def test_update_user_method_exists():

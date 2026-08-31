@@ -52,6 +52,46 @@ def _extract_display_name(full_symbol: str) -> str:
     return _extract_short_symbol_name(full_symbol)
 
 
+def _scip_incompleteness_warning(
+    status, project: Optional[str] = None
+) -> Optional[str]:
+    """Build a loud incompleteness warning for an empty SCIP query result.
+
+    Bug #1498: an empty query result (no definitions/references found) is
+    ambiguous -- it could mean the symbol genuinely has none, OR it could mean
+    the SCIP index is in a partial (LIMBO) state where the project the symbol
+    actually lives in failed to generate, so its symbols were never indexed.
+
+    Returns None when the index is complete (all projects succeeded), so a
+    genuine zero-result query is never polluted with a spurious warning.
+
+    Args:
+        status: GenerationStatus loaded from StatusTracker.
+        project: The specific project path the query was scoped to (--project
+            flag), if any. When known and that exact project failed to
+            generate, this yields a more precise signal than the coarse
+            overall LIMBO state.
+    """
+    from code_indexer.scip.status import OverallStatus
+
+    if project:
+        project_status = status.projects.get(project)
+        if project_status is not None and project_status.status == OverallStatus.FAILED:
+            return (
+                f"⚠️  SCIP generation FAILED for project '{project}'; "
+                "results may be missing. Run 'cidx scip generate' to complete."
+            )
+
+    if status.is_limbo():
+        return (
+            f"⚠️  SCIP index is partial: {status.failed_projects}/"
+            f"{status.total_projects} project(s) failed to generate; results "
+            "may be missing. Run 'cidx scip generate' to complete."
+        )
+
+    return None
+
+
 def _is_remote_mode() -> bool:
     """Check if we are in remote mode."""
     from .mode_detection.command_mode_detector import (
@@ -826,6 +866,9 @@ def scip_definition(
 
     if not all_results:
         console.print(f"No definitions found for '{symbol}'", style="yellow")
+        incompleteness_warning = _scip_incompleteness_warning(status, project)
+        if incompleteness_warning:
+            console.print(incompleteness_warning, style="red bold")
         sys.exit(0)
 
     console.print(
@@ -972,6 +1015,9 @@ def scip_references(
 
     if not all_results:
         console.print(f"No references found for '{symbol}'", style="yellow")
+        incompleteness_warning = _scip_incompleteness_warning(status, project)
+        if incompleteness_warning:
+            console.print(incompleteness_warning, style="red bold")
         sys.exit(0)
 
     console.print(
@@ -1072,6 +1118,27 @@ def scip_dependencies(
       Local mode: SCIP indexes must be generated first (run 'cidx scip generate')
       Remote mode: --repository flag required
     """
+    # Bug #1627: validate --depth BEFORE branching into local/remote mode,
+    # mirroring Bug #1603's --max-depth fix on `scip callchain`, so both
+    # paths reject an out-of-range value identically with a clean,
+    # immediate CLI-level message instead of letting it reach the deep
+    # engine layer. Bounds match the ones already enforced server-side by
+    # Bug #1625 (Web UI ceiling) and Bug #1626 (SCIPMultiService guard) --
+    # NOT callchain's own MAX_DEPTH_CAP, which is a deliberately different,
+    # narrower range for a different operation.
+    from code_indexer.server.services.constants import (
+        MIN_SCIP_DEPENDENCY_DEPTH,
+        MAX_SCIP_DEPENDENCY_DEPTH,
+    )
+
+    if depth < MIN_SCIP_DEPENDENCY_DEPTH or depth > MAX_SCIP_DEPENDENCY_DEPTH:
+        console.print(
+            f"Error: --depth must be between {MIN_SCIP_DEPENDENCY_DEPTH} and "
+            f"{MAX_SCIP_DEPENDENCY_DEPTH}, got {depth}",
+            style="red",
+        )
+        sys.exit(1)
+
     # Remote mode handling
     if _is_remote_mode():
         if not repository:
@@ -1231,6 +1298,28 @@ def scip_dependents(
       Local mode: SCIP indexes must be generated first (run 'cidx scip generate')
       Remote mode: --repository flag required
     """
+    # Bug #1627: validate --depth BEFORE branching into local/remote mode,
+    # mirroring Bug #1603's --max-depth fix on `scip callchain` and the
+    # same fix applied to `scip_dependencies` above, so all three paths
+    # reject an out-of-range value identically with a clean, immediate
+    # CLI-level message instead of letting it reach the deep engine layer.
+    # Bounds match the ones already enforced server-side by Bug #1625 (Web
+    # UI ceiling) and Bug #1626 (SCIPMultiService guard) -- NOT callchain's
+    # own MAX_DEPTH_CAP, which is a deliberately different, narrower range
+    # for a different operation.
+    from code_indexer.server.services.constants import (
+        MIN_SCIP_DEPENDENCY_DEPTH,
+        MAX_SCIP_DEPENDENCY_DEPTH,
+    )
+
+    if depth < MIN_SCIP_DEPENDENCY_DEPTH or depth > MAX_SCIP_DEPENDENCY_DEPTH:
+        console.print(
+            f"Error: --depth must be between {MIN_SCIP_DEPENDENCY_DEPTH} and "
+            f"{MAX_SCIP_DEPENDENCY_DEPTH}, got {depth}",
+            style="red",
+        )
+        sys.exit(1)
+
     # Remote mode handling
     if _is_remote_mode():
         if not repository:
@@ -1383,6 +1472,24 @@ def scip_impact(
       Local mode: SCIP indexes must be generated first (run 'cidx scip generate')
       Remote mode: --repository flag required
     """
+    # Bug #1639: validate --depth BEFORE branching into local/remote mode,
+    # mirroring Bug #1627's --depth fix on `scip dependencies`/`dependents`
+    # and Bug #1603's --max-depth fix on `scip callchain`, so both paths
+    # reject an out-of-range value identically with a clean, immediate
+    # CLI-level message instead of letting it reach the deep engine layer.
+    # The bound is MAX_TRAVERSAL_DEPTH from composites.py's analyze_impact
+    # -- a DIFFERENT constant from dependencies/dependents's
+    # MAX_SCIP_DEPENDENCY_DEPTH (both happen to be 10 today, but they are
+    # not the same source of truth and must not be conflated).
+    from code_indexer.scip.query.composites import MAX_TRAVERSAL_DEPTH
+
+    if depth < 1 or depth > MAX_TRAVERSAL_DEPTH:
+        console.print(
+            f"Error: --depth must be between 1 and {MAX_TRAVERSAL_DEPTH}, got {depth}",
+            style="red",
+        )
+        sys.exit(1)
+
     # Remote mode handling
     if _is_remote_mode():
         if not repository:
@@ -1478,9 +1585,7 @@ def _run_remote_impact(
 @scip_group.command("callchain")
 @click.argument("from_symbol")
 @click.argument("to_symbol")
-@click.option(
-    "--max-depth", default=10, help="Maximum chain length (default 10, max 20)"
-)
+@click.option("--max-depth", default=3, help="Maximum chain length (default 3, max 3)")
 @click.option("--limit", type=int, default=0, help="Maximum results (0 = unlimited)")
 @click.option("--project", help="Filter to specific project path")
 @click.option(
@@ -1506,13 +1611,31 @@ def scip_callchain(
     EXAMPLES:
       cidx scip callchain main Application.run     # Find paths from main to run
       cidx scip callchain Logger UserService       # Trace Logger to UserService
-      cidx scip callchain A B --max-depth 5        # Limit to 5 hops max
+      cidx scip callchain A B --max-depth 2        # Limit to 2 hops max
       cidx scip callchain main process -r backend  # Remote mode with repository
 
     REQUIRES:
       Local mode: SCIP indexes must be generated first (run 'cidx scip generate')
       Remote mode: --repository flag required
     """
+    # Bug #1603 code review round 5 remediation (F1): validate --max-depth
+    # BEFORE branching into local/remote mode, so both paths reject an
+    # out-of-range value identically. Without this, remote mode already
+    # raises loudly (SCIPAPIClient.callchain), but local mode fell through
+    # to trace_call_chain_v2_batched, which silently clamps depth back
+    # down to the cap with only a server-side-style logger.warning() the
+    # CLI user never sees -- the exact silent-fallback anti-pattern this
+    # bug eliminated at the MCP/REST/multi-repo/remote-CLI front doors.
+    from code_indexer.scip.database.queries import MAX_DEPTH_CAP as _MAX_CALLCHAIN_DEPTH
+
+    if max_depth < 1 or max_depth > _MAX_CALLCHAIN_DEPTH:
+        console.print(
+            f"Error: --max-depth must be between 1 and {_MAX_CALLCHAIN_DEPTH}, "
+            f"got {max_depth}",
+            style="red",
+        )
+        sys.exit(1)
+
     # Remote mode handling
     if _is_remote_mode():
         if not repository:
@@ -1579,13 +1702,44 @@ def scip_callchain(
         sys.exit(1)
 
     # Try all combinations of from/to symbols and merge results
+    from typing import List as TypingList
+
     all_chains = []
+    timeout_errors: TypingList[str] = []
     for from_def in from_defs:
         for to_def in to_defs:
             chains = engine.trace_call_chain(
-                from_def.symbol, to_def.symbol, max_depth=max_depth
+                from_def.symbol,
+                to_def.symbol,
+                max_depth=max_depth,
+                timeout_errors=timeout_errors,
             )
             all_chains.extend(chains)
+            if timeout_errors:
+                # Bug #1603 code review round 5 remediation (F2): stop
+                # scanning the moment ANY pair times out. Fuzzy matching
+                # (exact=False) can produce a large N x M cross-product
+                # (up to ~100 pairs observed in review), each eligible
+                # for the full default query timeout -- continuing to
+                # exhaust the cross-product after the first timeout could
+                # delay the round-4 timeout-surfacing fix by up to ~50
+                # minutes in the worst case, defeating its own purpose.
+                break
+        if timeout_errors:
+            break
+
+    if timeout_errors:
+        # Bug #1603 code review round 4 Priority 1: a query timeout must
+        # never be reported as the false-negative "No call chain found"
+        # success below -- mirrors the fix already applied to the MCP
+        # (handlers/scip.py), REST (routers/scip_queries.py), and web UI
+        # (server/web/routes.py) callchain front doors.
+        console.print(
+            f"Error: Callchain query timed out while tracing '{from_symbol}' "
+            f"to '{to_symbol}': {timeout_errors[0]}",
+            style="red",
+        )
+        sys.exit(1)
 
     # Deduplicate chains by path
     seen_paths = set()
@@ -1599,8 +1753,6 @@ def scip_callchain(
     chains = sorted(unique_chains, key=lambda c: c.length)
 
     # Enrich chains with location details for display
-    from typing import List as TypingList
-
     DEFAULT_CHAIN_LIMIT = 100
     enriched_chains: TypingList[CompositeCallChain] = []
     for chain in chains:
@@ -1737,6 +1889,13 @@ def _display_callchain_results(result: dict, from_symbol: str, to_symbol: str):
     for repo_id, items in result.get("results", {}).items():
         all_chains.extend(items)
 
+    # Bug #1603 code review round 4 Priority 1: a per-repo error (e.g. a
+    # server-side query timeout) must be detectable via exit code, not just
+    # by visually scanning the red error line(s) printed above -- otherwise
+    # scripted callers cannot distinguish a genuine empty result (or a
+    # partial success from other repos) from a failure.
+    exit_code = 1 if errors else 0
+
     if not all_chains:
         console.print(
             f"No call chain found from '{from_symbol}' to '{to_symbol}'", style="yellow"
@@ -1744,7 +1903,7 @@ def _display_callchain_results(result: dict, from_symbol: str, to_symbol: str):
         console.print(
             "   Symbols may not be connected or path exceeds max depth", style="dim"
         )
-        sys.exit(0)
+        sys.exit(exit_code)
 
     console.print(f"Found {len(all_chains)} call chain(s):\n", style="green bold")
 
@@ -1763,7 +1922,7 @@ def _display_callchain_results(result: dict, from_symbol: str, to_symbol: str):
             console.print(f"  {j}. {display_name} ({file_path}:{line})", style="dim")
         console.print()
 
-    sys.exit(0)
+    sys.exit(exit_code)
 
 
 @scip_group.command("context")

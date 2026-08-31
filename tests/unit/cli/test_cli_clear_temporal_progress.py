@@ -10,7 +10,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 from click.testing import CliRunner
 
-from src.code_indexer.cli import cli
+from code_indexer.cli import cli
 
 
 class TestCLIClearTemporalProgress(unittest.TestCase):
@@ -107,18 +107,37 @@ class TestCLIClearTemporalProgress(unittest.TestCase):
         runner = CliRunner()
 
         # Mock the necessary components
-        with patch("src.code_indexer.cli.ConfigManager") as MockConfig:
+        with patch("code_indexer.cli.ConfigManager") as MockConfig:
             with patch(
-                "src.code_indexer.storage.filesystem_vector_store.FilesystemVectorStore"
+                "code_indexer.storage.filesystem_vector_store.FilesystemVectorStore"
             ) as MockVectorStore:
                 with patch(
-                    "src.code_indexer.services.temporal.temporal_indexer.TemporalIndexer"
+                    "code_indexer.services.temporal.temporal_indexer.TemporalIndexer"
                 ) as MockTemporal:
                     # Setup mocks
                     mock_config = MagicMock()
                     mock_config.codebase_dir = self.project_dir
                     mock_config.embedding_provider = "voyage-ai"
+                    # cli.py's index command computes
+                    # `daemon_enabled = config.daemon and config.daemon.enabled`.
+                    # A bare MagicMock() auto-creates a truthy `.daemon` child
+                    # mock, which unintentionally routes this pure local-mode
+                    # test through the REAL (unmocked) daemon-delegation path
+                    # -- which spawns a genuine background daemon subprocess
+                    # via subprocess.Popen that races with this command's own
+                    # real index-mutation lock acquisition. This test is about
+                    # local --clear/temporal-cleanup behavior only.
+                    mock_config.daemon = None
                     MockConfig.create_with_backtrack.return_value.get_config.return_value = mock_config
+                    # cli.py's index command reads `config = config_manager.load()`
+                    # for the daemon_enabled check specifically -- a DIFFERENT
+                    # method than .get_config() above. Without wiring .load()
+                    # to the SAME mock_config, it returns an unrelated
+                    # auto-generated MagicMock whose .daemon is still truthy,
+                    # silently defeating the daemon=None assignment above.
+                    MockConfig.create_with_backtrack.return_value.load.return_value = (
+                        mock_config
+                    )
 
                     mock_vector_store = MagicMock()
                     MockVectorStore.return_value = mock_vector_store

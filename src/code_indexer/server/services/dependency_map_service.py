@@ -49,6 +49,11 @@ from .jittered_dispatcher import (
 from .metadata_reader import read_current_commit
 from .shared_job_sentinel import AnalysisAlreadyRunningError, SharedJobSentinel
 
+# Story #1586 AC5: custom span around delta dependency-map analysis.
+# create_span() no-ops (yields a _NoOpSpan) when OTEL tracing is
+# unavailable/uninitialized.
+from code_indexer.server.telemetry.spans import create_span
+
 logger = logging.getLogger(__name__)
 
 # Constants
@@ -498,6 +503,44 @@ class DependencyMapService:
                         f"JobTracker update_status (running) failed (non-fatal): {tracker_err}"
                     )
 
+        # Bug #1506 5th-pass review Item 1 (confirmed genuine defect): the
+        # write lock must be acquired and CHECKED as the very first
+        # meaningful action -- before the in-process lock, before sentinel
+        # claiming, and before the lifecycle fleet pre-flight below. The
+        # pre-flight itself performs real, side-effecting writes to the
+        # golden-repo fleet (a Claude CLI call per broken repo, repairing
+        # cidx-meta/<alias>.md files) and must never run unprotected while
+        # RefreshScheduler's own _held_write_lock_for_publish() holds the
+        # SAME per-repo lock across its index -> integrity-gate -> snapshot
+        # -> swap-alias publish sequence. The 4th-pass fix (see git history)
+        # checked this too late -- only just before the main analysis --
+        # so the lifecycle pre-flight still ran unprotected on every call.
+        # On failed acquisition, skip EVERYTHING immediately: no lifecycle
+        # pre-flight, no in-process lock, no sentinel claim, no main
+        # analysis. Mark the job complete (a graceful skip, not a failure).
+        _write_lock_acquired = False
+        if self._refresh_scheduler is not None:
+            _write_lock_acquired = self._refresh_scheduler.acquire_write_lock(
+                "cidx-meta", owner_name="dependency_map_service"
+            )
+            if not _write_lock_acquired:
+                logger.info(
+                    "Full dependency-map analysis skipped -- write lock "
+                    "for 'cidx-meta' held by another writer (e.g. an "
+                    "in-progress refresh publish)"
+                )
+                if _tracked_job_id is not None and self._job_tracker is not None:
+                    try:
+                        self._job_tracker.complete_job(_tracked_job_id)
+                    except Exception as tracker_err:
+                        logger.warning(
+                            f"JobTracker complete_job (write-lock skip) failed (non-fatal): {tracker_err}"
+                        )
+                return {
+                    "status": "skipped",
+                    "message": "Write lock held by another writer; skipping this cycle",
+                }
+
         # Story #876 Phase B-1 Deliverable 2: lifecycle fleet pre-flight.
         # Before acquiring the dep-map lock, scan the golden-repo fleet for
         # cidx-meta/<alias>.md files that are missing, malformed, outdated,
@@ -508,31 +551,54 @@ class DependencyMapService:
         # argument is mandatory; if non-duplicate tracker registration failed
         # above and _tracked_job_id is None, there is no job to parent the
         # lifecycle batch against and pre-flight is correctly skipped).
-        if (
-            self._job_tracker is not None
-            and self._lifecycle_invoker is not None
-            and self._lifecycle_debouncer is not None
-            and _tracked_job_id is not None
-        ):
-            repo_aliases = [
-                r.get("alias")
-                for r in self._golden_repos_manager.list_golden_repos()
-                if r.get("alias")
-            ]
-            scanner = LifecycleFleetScanner(
-                golden_repos_dir=self._golden_repos_manager.golden_repos_dir,
-                repo_aliases=repo_aliases,
-            )
-            broken = scanner.find_broken_or_missing()
-            if broken:
-                runner = LifecycleBatchRunner(
+        #
+        # Bug #1506 5th-pass code-review remediation: this block runs
+        # BEFORE the pre-existing inner try/finally further down (which
+        # only wraps the main analysis), so an exception here would leak
+        # the write lock acquired above unless explicitly caught. Release
+        # it here and re-raise unchanged on any failure.
+        try:
+            if (
+                self._job_tracker is not None
+                and self._lifecycle_invoker is not None
+                and self._lifecycle_debouncer is not None
+                and _tracked_job_id is not None
+            ):
+                repo_aliases = [
+                    r.get("alias")
+                    for r in self._golden_repos_manager.list_golden_repos()
+                    if r.get("alias")
+                ]
+                scanner = LifecycleFleetScanner(
                     golden_repos_dir=self._golden_repos_manager.golden_repos_dir,
-                    job_tracker=self._job_tracker,
-                    refresh_scheduler=self._refresh_scheduler,
-                    debouncer=self._lifecycle_debouncer,
-                    claude_cli_invoker=self._lifecycle_invoker,
+                    repo_aliases=repo_aliases,
                 )
-                runner.run(broken, parent_job_id=_tracked_job_id)
+                broken = scanner.find_broken_or_missing()
+                if broken:
+                    # Issue #1546 Fix 3 (Codex round review):
+                    # ownership-loss checkpoint immediately before
+                    # LifecycleBatchRunner's repair writes to
+                    # cidx-meta/<alias>.md files. The write lock was
+                    # acquired above but never re-verified before this
+                    # destructive pre-flight step.
+                    if _write_lock_acquired and self._refresh_scheduler is not None:
+                        self._refresh_scheduler.raise_if_write_lock_ownership_lost(
+                            "cidx-meta", owner_name="dependency_map_service"
+                        )
+                    runner = LifecycleBatchRunner(
+                        golden_repos_dir=self._golden_repos_manager.golden_repos_dir,
+                        job_tracker=self._job_tracker,
+                        refresh_scheduler=self._refresh_scheduler,
+                        debouncer=self._lifecycle_debouncer,
+                        claude_cli_invoker=self._lifecycle_invoker,
+                    )
+                    runner.run(broken, parent_job_id=_tracked_job_id)
+        except Exception:
+            if _write_lock_acquired and self._refresh_scheduler is not None:
+                self._refresh_scheduler.release_write_lock(
+                    "cidx-meta", owner_name="dependency_map_service"
+                )
+            raise
 
         # Non-blocking lock acquire (AC7: Concurrency Protection)
         if not self._lock.acquire(blocking=False):
@@ -547,6 +613,13 @@ class DependencyMapService:
                     logger.warning(
                         f"JobTracker fail_job (lock conflict) failed (non-fatal): {tracker_err}"
                     )
+            # Bug #1506 5th-pass: write lock was already acquired above
+            # (before this in-process lock check existed as a gate), so it
+            # must be released here on this early-raise path too.
+            if _write_lock_acquired and self._refresh_scheduler is not None:
+                self._refresh_scheduler.release_write_lock(
+                    "cidx-meta", owner_name="dependency_map_service"
+                )
             raise RuntimeError("Dependency map analysis already in progress")
 
         # Story #1035: Claim shared sentinel AFTER acquiring in-process lock.
@@ -578,18 +651,18 @@ class DependencyMapService:
                         logger.warning(
                             f"JobTracker fail_job (sentinel conflict) failed (non-fatal): {tracker_err}"
                         )
+                # Bug #1506 5th-pass: release the already-acquired write
+                # lock on this early-raise path too (see the in-process
+                # lock branch above for the identical rationale).
+                if _write_lock_acquired and self._refresh_scheduler is not None:
+                    self._refresh_scheduler.release_write_lock(
+                        "cidx-meta", owner_name="dependency_map_service"
+                    )
                 raise AnalysisAlreadyRunningError(
                     active_job_id=_claim.active.job_id
                     if _claim.active
                     else _sentinel_job_id
                 )
-
-        # Story #227: Acquire write lock so RefreshScheduler skips CoW clone during writes.
-        _write_lock_acquired = False
-        if self._refresh_scheduler is not None:
-            _write_lock_acquired = self._refresh_scheduler.acquire_write_lock(
-                "cidx-meta", owner_name="dependency_map_service"
-            )
 
         _analysis_succeeded = False
         try:
@@ -3075,6 +3148,22 @@ class DependencyMapService:
         """
         Run delta analysis to refresh only affected domains (Story #193, AC1-8).
 
+        Thin span-wrapping public entry point (Story #1586 AC5) -- the full
+        implementation lives in _run_delta_analysis_impl(), unchanged, so
+        wrapping it in a custom span never requires re-indenting that body.
+        """
+        with create_span(
+            "cidx.depmap.run_delta_analysis",
+            attributes={"job_id": job_id or "auto"},
+        ):
+            return self._run_delta_analysis_impl(job_id=job_id, pre_claimed=pre_claimed)
+
+    def _run_delta_analysis_impl(
+        self, job_id: Optional[str] = None, pre_claimed: bool = False
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Run delta analysis to refresh only affected domains (Story #193, AC1-8).
+
         Args:
             job_id: Optional caller-provided job ID for unified job tracking.
                     When None, a new UUID-based ID is generated internally.
@@ -3127,6 +3216,34 @@ class DependencyMapService:
                         f"JobTracker update_status (running) failed (non-fatal): {tracker_err}"
                     )
 
+        # Bug #1506 5th-pass review Item 1 (confirmed genuine defect): the
+        # write lock must be acquired and CHECKED as the very first
+        # meaningful action -- before the in-process lock, before sentinel
+        # claiming, and before the lifecycle fleet pre-flight below. See
+        # the identical fix (and its full rationale) in run_full_analysis()
+        # above. On failed acquisition, skip EVERYTHING immediately: no
+        # lifecycle pre-flight, no in-process lock, no sentinel claim, no
+        # main delta-analysis work.
+        _write_lock_acquired = False
+        if self._refresh_scheduler is not None:
+            _write_lock_acquired = self._refresh_scheduler.acquire_write_lock(
+                "cidx-meta", owner_name="dependency_map_service"
+            )
+            if not _write_lock_acquired:
+                logger.info(
+                    "Delta dependency-map analysis skipped -- write lock "
+                    "for 'cidx-meta' held by another writer (e.g. an "
+                    "in-progress refresh publish)"
+                )
+                if _tracked_job_id is not None and self._job_tracker is not None:
+                    try:
+                        self._job_tracker.complete_job(_tracked_job_id)
+                    except Exception as tracker_err:
+                        logger.warning(
+                            f"JobTracker complete_job (write-lock skip) failed (non-fatal): {tracker_err}"
+                        )
+                return None
+
         # Story #876 Phase B-1 Deliverable 3: lifecycle fleet pre-flight.
         # Mirror image of the run_full_analysis pre-flight: before acquiring
         # the dep-map lock, scan the golden-repo fleet for broken/missing
@@ -3135,31 +3252,53 @@ class DependencyMapService:
         # them.  Four conditions are required: job_tracker, lifecycle_invoker,
         # lifecycle_debouncer, AND _tracked_job_id (the latter because
         # LifecycleBatchRunner.run's parent_job_id argument is mandatory).
-        if (
-            self._job_tracker is not None
-            and self._lifecycle_invoker is not None
-            and self._lifecycle_debouncer is not None
-            and _tracked_job_id is not None
-        ):
-            repo_aliases = [
-                r.get("alias")
-                for r in self._golden_repos_manager.list_golden_repos()
-                if r.get("alias")
-            ]
-            scanner = LifecycleFleetScanner(
-                golden_repos_dir=self._golden_repos_manager.golden_repos_dir,
-                repo_aliases=repo_aliases,
-            )
-            broken = scanner.find_broken_or_missing()
-            if broken:
-                runner = LifecycleBatchRunner(
+        #
+        # Bug #1506 5th-pass code-review remediation: this block runs
+        # BEFORE the pre-existing inner try/finally further down (which
+        # only wraps the main delta-analysis work), so an exception here
+        # would leak the write lock acquired above unless explicitly
+        # caught. Release it here and re-raise unchanged on any failure.
+        try:
+            if (
+                self._job_tracker is not None
+                and self._lifecycle_invoker is not None
+                and self._lifecycle_debouncer is not None
+                and _tracked_job_id is not None
+            ):
+                repo_aliases = [
+                    r.get("alias")
+                    for r in self._golden_repos_manager.list_golden_repos()
+                    if r.get("alias")
+                ]
+                scanner = LifecycleFleetScanner(
                     golden_repos_dir=self._golden_repos_manager.golden_repos_dir,
-                    job_tracker=self._job_tracker,
-                    refresh_scheduler=self._refresh_scheduler,
-                    debouncer=self._lifecycle_debouncer,
-                    claude_cli_invoker=self._lifecycle_invoker,
+                    repo_aliases=repo_aliases,
                 )
-                runner.run(broken, parent_job_id=_tracked_job_id)
+                broken = scanner.find_broken_or_missing()
+                if broken:
+                    # Issue #1546 Fix 3 (Codex round review):
+                    # ownership-loss checkpoint immediately before
+                    # LifecycleBatchRunner's repair writes to
+                    # cidx-meta/<alias>.md files -- mirrors the identical
+                    # fix in run_full_analysis() above.
+                    if _write_lock_acquired and self._refresh_scheduler is not None:
+                        self._refresh_scheduler.raise_if_write_lock_ownership_lost(
+                            "cidx-meta", owner_name="dependency_map_service"
+                        )
+                    runner = LifecycleBatchRunner(
+                        golden_repos_dir=self._golden_repos_manager.golden_repos_dir,
+                        job_tracker=self._job_tracker,
+                        refresh_scheduler=self._refresh_scheduler,
+                        debouncer=self._lifecycle_debouncer,
+                        claude_cli_invoker=self._lifecycle_invoker,
+                    )
+                    runner.run(broken, parent_job_id=_tracked_job_id)
+        except Exception:
+            if _write_lock_acquired and self._refresh_scheduler is not None:
+                self._refresh_scheduler.release_write_lock(
+                    "cidx-meta", owner_name="dependency_map_service"
+                )
+            raise
 
         # Non-blocking lock acquire (AC7: Concurrency Protection)
         if not self._lock.acquire(blocking=False):
@@ -3172,6 +3311,12 @@ class DependencyMapService:
                     logger.warning(
                         f"JobTracker complete_job (lock skip) failed (non-fatal): {tracker_err}"
                     )
+            # Bug #1506 5th-pass: write lock was already acquired above, so
+            # it must be released here on this early-return path too.
+            if _write_lock_acquired and self._refresh_scheduler is not None:
+                self._refresh_scheduler.release_write_lock(
+                    "cidx-meta", owner_name="dependency_map_service"
+                )
             return None
 
         # Story #1035: Claim shared sentinel AFTER acquiring in-process lock.
@@ -3205,6 +3350,12 @@ class DependencyMapService:
                         logger.warning(
                             f"JobTracker fail_job (delta sentinel conflict) failed (non-fatal): {tracker_err}"
                         )
+                # Bug #1506 5th-pass: release the already-acquired write
+                # lock on this early-raise path too.
+                if _write_lock_acquired and self._refresh_scheduler is not None:
+                    self._refresh_scheduler.release_write_lock(
+                        "cidx-meta", owner_name="dependency_map_service"
+                    )
                 raise AnalysisAlreadyRunningError(
                     active_job_id=(
                         _delta_claim.active.job_id
@@ -3212,13 +3363,6 @@ class DependencyMapService:
                         else _delta_sentinel_job_id
                     )
                 )
-
-        # Story #227: Acquire write lock so RefreshScheduler skips CoW clone during writes.
-        _write_lock_acquired = False
-        if self._refresh_scheduler is not None:
-            _write_lock_acquired = self._refresh_scheduler.acquire_write_lock(
-                "cidx-meta", owner_name="dependency_map_service"
-            )
 
         _delta_succeeded = False
         try:
@@ -3803,42 +3947,77 @@ class DependencyMapService:
         # Story #1040: Clear stale cancel flag before each run.
         self._cancel_event.clear()
 
-        config = self._config_manager.get_claude_integration_config()
-        if not config or not config.refinement_enabled:
-            logger.debug("Refinement disabled, skipping refinement cycle")
-            # Bug #1041: Use shared NFS path so all cluster nodes can read it
-            try:
-                _shared_journal = self.get_activity_journal_dir()
-                if _shared_journal is not None:
-                    self._activity_journal.init(_shared_journal)
-                self._activity_journal.log(
-                    "Refinement: disabled in config, skipping cycle"
-                )
-            except Exception as e:
-                logger.debug(f"Non-fatal journal log error (disabled path): {e}")
-            return None
-
-        # AC7: Non-blocking lock to prevent concurrent writes with delta analysis
-        if not self._lock.acquire(blocking=False):
-            logger.info("Refinement cycle skipped - analysis already in progress")
-            # Bug #1041: Use shared NFS path so all cluster nodes can read it
-            try:
-                _shared_journal = self.get_activity_journal_dir()
-                if _shared_journal is not None:
-                    self._activity_journal.init(_shared_journal)
-                self._activity_journal.log(
-                    "Refinement: skipped - analysis already in progress"
-                )
-            except Exception as e:
-                logger.debug(f"Non-fatal journal log error (lock-skip path): {e}")
-            return None
-
-        # Acquire write lock so RefreshScheduler skips CoW clone during writes
+        # Bug #1506 5th-pass review Item 1 (confirmed genuine defect): the
+        # write lock must be acquired and CHECKED as the very first
+        # meaningful action -- before the config read, the disabled-check,
+        # the in-process lock, and any activity-journal writes. See the
+        # identical fix (and its full rationale) in run_full_analysis()
+        # above. On failed acquisition, skip EVERYTHING immediately.
         _write_lock_acquired = False
         if self._refresh_scheduler is not None:
             _write_lock_acquired = self._refresh_scheduler.acquire_write_lock(
                 "cidx-meta", owner_name="dependency_map_service"
             )
+            if not _write_lock_acquired:
+                logger.info(
+                    "Refinement cycle skipped -- write lock for "
+                    "'cidx-meta' held by another writer (e.g. an "
+                    "in-progress refresh publish)"
+                )
+                return None
+
+        # Bug #1506 5th-pass code-review remediation: the config read and
+        # in-process lock acquisition below run BEFORE the pre-existing
+        # try/finally further down (which only wraps the main refinement
+        # work), so an exception here would leak the write lock acquired
+        # above unless explicitly caught. Release it here and re-raise
+        # unchanged on any failure; the two explicit early-return branches
+        # below (disabled, lock busy) release the write lock themselves
+        # since they return normally rather than raising.
+        try:
+            config = self._config_manager.get_claude_integration_config()
+            if not config or not config.refinement_enabled:
+                logger.debug("Refinement disabled, skipping refinement cycle")
+                # Bug #1041: Use shared NFS path so all cluster nodes can read it
+                try:
+                    _shared_journal = self.get_activity_journal_dir()
+                    if _shared_journal is not None:
+                        self._activity_journal.init(_shared_journal)
+                    self._activity_journal.log(
+                        "Refinement: disabled in config, skipping cycle"
+                    )
+                except Exception as e:
+                    logger.debug(f"Non-fatal journal log error (disabled path): {e}")
+                if _write_lock_acquired and self._refresh_scheduler is not None:
+                    self._refresh_scheduler.release_write_lock(
+                        "cidx-meta", owner_name="dependency_map_service"
+                    )
+                return None
+
+            # AC7: Non-blocking lock to prevent concurrent writes with delta analysis
+            if not self._lock.acquire(blocking=False):
+                logger.info("Refinement cycle skipped - analysis already in progress")
+                # Bug #1041: Use shared NFS path so all cluster nodes can read it
+                try:
+                    _shared_journal = self.get_activity_journal_dir()
+                    if _shared_journal is not None:
+                        self._activity_journal.init(_shared_journal)
+                    self._activity_journal.log(
+                        "Refinement: skipped - analysis already in progress"
+                    )
+                except Exception as e:
+                    logger.debug(f"Non-fatal journal log error (lock-skip path): {e}")
+                if _write_lock_acquired and self._refresh_scheduler is not None:
+                    self._refresh_scheduler.release_write_lock(
+                        "cidx-meta", owner_name="dependency_map_service"
+                    )
+                return None
+        except Exception:
+            if _write_lock_acquired and self._refresh_scheduler is not None:
+                self._refresh_scheduler.release_write_lock(
+                    "cidx-meta", owner_name="dependency_map_service"
+                )
+            raise
 
         any_changed = False
         try:
@@ -3851,6 +4030,7 @@ class DependencyMapService:
                 self._activity_journal.log("Starting refinement cycle")
             except Exception as e:
                 logger.debug(f"Non-fatal journal init error: {e}")
+
             golden_repos_dir = Path(self._golden_repos_manager.golden_repos_dir)
             cidx_meta_read_path = self._get_cidx_meta_read_path()
             dependency_map_read_dir = cidx_meta_read_path / "dependency-map"

@@ -629,6 +629,13 @@ class FileChunkingManager:
                         )
                     raise
 
+            # Bug #1502 (Codex M6): multimodal points are QUEUED here and
+            # only actually persisted in Phase 4, AFTER all regular
+            # embeddings have been validated -- never upserted eagerly,
+            # which would violate file atomicity if a later regular
+            # embedding turned out falsy and failed the whole file.
+            pending_multimodal_points: List[Dict[str, Any]] = []
+
             # MULTIMODAL PROCESSING: Handle chunks with images
             if (
                 multimodal_chunks
@@ -755,19 +762,19 @@ class FileChunkingManager:
                             )
                             continue
 
-                        success = self.vector_store_client.upsert_points(
-                            points=[vector_point],
-                            collection_name=multimodal_collection_name,
+                        # Bug #1502 M6: QUEUE, don't write yet -- the
+                        # actual upsert happens in Phase 4, only after
+                        # every regular embedding has been validated.
+                        pending_multimodal_points.append(
+                            {
+                                "collection_name": multimodal_collection_name,
+                                "vector_point": vector_point,
+                            }
                         )
 
-                        if not success:
-                            raise RuntimeError(
-                                "Failed to store multimodal vector point"
-                            )
-
                         logger.debug(
-                            f"Stored multimodal embedding for chunk {chunk.get('chunk_index')} "
-                            f"in {multimodal_collection_name} collection"
+                            f"Queued multimodal embedding for chunk {chunk.get('chunk_index')} "
+                            f"for deferred atomic write to {multimodal_collection_name} collection"
                         )
 
                     except Exception as e:
@@ -777,7 +784,19 @@ class FileChunkingManager:
                         # Continue processing other chunks rather than failing entire file
                         continue
 
-            if not batch_futures and not multimodal_chunks and not cached_points:
+            # Bug #1502 (Codex finding 4): pending_multimodal_points is the
+            # POST-embedding-attempt result -- unlike multimodal_chunks
+            # (the pre-embedding list, always non-empty when multimodal
+            # chunks existed regardless of whether every one of their
+            # embedding attempts later failed), it correctly reflects
+            # whether anything was actually produced. A multimodal-only
+            # file whose every embedding attempt failed must be detected
+            # here, never silently reported as a successful no-op.
+            if (
+                not batch_futures
+                and not pending_multimodal_points
+                and not cached_points
+            ):
                 logger.warning(f"No batches created for {file_path}")
                 return FileProcessingResult(
                     success=False,
@@ -843,25 +862,50 @@ class FileChunkingManager:
                     )
 
                 # Create points with preserved order: regular_chunks[i] → embeddings[i] → points[i]
-                for i, (chunk, embedding) in enumerate(
-                    zip(regular_chunks, all_embeddings)
-                ):
-                    if embedding:  # Validate individual embedding
-                        file_points.append(
-                            {
-                                "text": chunk["text"],
-                                "vector": embedding,  # Direct embedding from batch result
-                                "metadata": {
-                                    **metadata,
-                                    "line_start": chunk["line_start"],
-                                    "line_end": chunk["line_end"],
-                                },
-                            }
+                #
+                # Bug #1502: chunk_index/total_chunks MUST be the chunker's
+                # own positional values (chunk["chunk_index"], set once by
+                # FixedSizeChunker before any embedding/caching happens),
+                # NEVER an enumerate() position among whichever chunks
+                # happened to survive to a fresh embedding this run. A
+                # falsy embedding fails the WHOLE file loudly instead of
+                # being silently dropped -- silently skipping a chunk used
+                # to also shift every LATER chunk's re-derived
+                # position-based label, forging colliding point_ids with
+                # different content across runs (the confirmed root cause
+                # of issue #1502).
+                for chunk, embedding in zip(regular_chunks, all_embeddings):
+                    if not embedding:  # Validate individual embedding
+                        logger.error(
+                            f"Invalid/empty embedding for chunk_index="
+                            f"{chunk['chunk_index']} in {file_path} -- "
+                            f"failing the file (Bug #1502: never silently "
+                            f"skip a chunk, it forges duplicate point_ids "
+                            f"by shifting every later chunk's label)"
                         )
-                    else:
-                        logger.warning(
-                            f"Skipping chunk {i} with invalid embedding in {file_path}"
+                        return FileProcessingResult(
+                            success=False,
+                            file_path=file_path,
+                            chunks_processed=0,
+                            processing_time=time.time() - start_time,
+                            error=(
+                                f"Invalid embedding for chunk_index="
+                                f"{chunk['chunk_index']}"
+                            ),
                         )
+                    file_points.append(
+                        {
+                            "text": chunk["text"],
+                            "vector": embedding,  # Direct embedding from batch result
+                            "chunk_index": chunk["chunk_index"],
+                            "total_chunks": chunk["total_chunks"],
+                            "metadata": {
+                                **metadata,
+                                "line_start": chunk["line_start"],
+                                "line_end": chunk["line_end"],
+                            },
+                        }
+                    )
 
             except Exception as e:
                 logger.error(f"Batch vector processing failed for {file_path}: {e}")
@@ -874,15 +918,20 @@ class FileChunkingManager:
                 )
 
             # Phase 4: Atomic write to vector storage if we have valid vectors
-            if file_points or cached_points:
+            if file_points or cached_points or pending_multimodal_points:
                 try:
                     points_data = []
-                    for i, point in enumerate(file_points):
-                        # Create proper Filesystem point using existing method
+                    for point in file_points:
+                        # Bug #1502: chunk_index/total_chunks come from the
+                        # chunker's own positional values carried through
+                        # file_points above -- NEVER re-derived from this
+                        # loop's own enumerate() position, which would
+                        # reintroduce the exact same identity-shifting bug
+                        # this fix closes.
                         chunk_data = {
                             "text": point["text"],
-                            "chunk_index": i,
-                            "total_chunks": len(file_points),
+                            "chunk_index": point["chunk_index"],
+                            "total_chunks": point["total_chunks"],
                             "line_start": point["metadata"].get("line_start"),
                             "line_end": point["metadata"].get("line_end"),
                             "file_extension": file_path.suffix.lstrip(".") or "txt",
@@ -898,14 +947,50 @@ class FileChunkingManager:
                     if cached_points:
                         points_data.extend(cached_points)
 
-                    # Atomic write to vector storage
-                    success = self.vector_store_client.upsert_points(
-                        points=points_data,
-                        collection_name=metadata.get("collection_name"),
-                    )
-                    if not success:
-                        raise RuntimeError(
-                            f"Failed to write {len(points_data)} points to vector storage"
+                    # Atomic write to vector storage (only if there ARE
+                    # regular/cached points -- a file consisting solely of
+                    # multimodal chunks legitimately has none).
+                    if points_data:
+                        success = self.vector_store_client.upsert_points(
+                            points=points_data,
+                            collection_name=metadata.get("collection_name"),
+                        )
+                        if not success:
+                            raise RuntimeError(
+                                f"Failed to write {len(points_data)} points to vector storage"
+                            )
+
+                    # Bug #1502 M6: multimodal points are written HERE --
+                    # only now that every regular embedding has been
+                    # validated (Phase 3) and, if any exist, successfully
+                    # written above. Never earlier: writing them before
+                    # regular-embedding validation would leave multimodal
+                    # points persisted even when a later falsy regular
+                    # embedding fails the whole file (file-atomicity
+                    # violation).
+                    if pending_multimodal_points:
+                        multimodal_by_collection: Dict[str, List[Dict[str, Any]]] = {}
+                        for entry in pending_multimodal_points:
+                            multimodal_by_collection.setdefault(
+                                entry["collection_name"], []
+                            ).append(entry["vector_point"])
+
+                        for (
+                            mm_collection_name,
+                            mm_points,
+                        ) in multimodal_by_collection.items():
+                            mm_success = self.vector_store_client.upsert_points(
+                                points=mm_points,
+                                collection_name=mm_collection_name,
+                            )
+                            if not mm_success:
+                                raise RuntimeError(
+                                    f"Failed to write {len(mm_points)} "
+                                    f"multimodal point(s) to vector storage"
+                                )
+                        logger.debug(
+                            f"Successfully wrote {len(pending_multimodal_points)} "
+                            f"multimodal point(s) for {file_path}"
                         )
 
                     logger.debug(

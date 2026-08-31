@@ -31,6 +31,12 @@ def test_display_file_chunk_match_uses_path_field():
     result.score = 0.95
     result.temporal_context = {}
     result.content = "def authenticate():\n    pass"
+    # Story #640 provider-attribution code path does
+    # `getattr(result, "contributing_providers", None)` then `len(...)`.
+    # A bare Mock() auto-vivifies unset attributes instead of raising
+    # AttributeError, so the getattr default is never used; set it
+    # explicitly to avoid `TypeError: object of type 'Mock' has no len()`.
+    result.contributing_providers = None
 
     temporal_service = MagicMock()
     temporal_service.get_file_diff.return_value = "mock diff content"

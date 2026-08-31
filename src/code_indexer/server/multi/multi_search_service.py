@@ -558,15 +558,46 @@ class MultiSearchService:
             # Get repository path
             repo_path = PathLib(self._get_repository_path(repo_id))
 
-            # Load repository configuration
-            config_manager = ConfigManager.create_with_backtrack(repo_path)
-            config = config_manager.get_config()
+            # Load repository configuration.
+            # Bug #1690: load_verified_config() verifies the resolved
+            # config genuinely describes repo_path itself, rather than
+            # blind-trusting create_with_backtrack()'s silent
+            # ancestor-backtrack / bare-Config() defaulting -- which would
+            # otherwise feed the temporal fusion dispatch below the WRONG
+            # embedder/config settings for this repo.
+            config = ConfigManager.load_verified_config(repo_path)
 
             # Initialize vector store for temporal search.
             # Story #1170: mirror filesystem_backend.py get_vector_store_client()
             # pattern so the temporal path benefits from the same HNSW/ID cache
             # injection that the regular semantic search path already uses.
-            index_dir = repo_path / ".code-indexer" / "index"
+            # Bug #1529: server-context temporal data lives at ONE fixed
+            # root outside the repo's own tree, derived from the golden
+            # alias. repo_id here is ALWAYS a global-repo alias (path
+            # resolution is exclusively via backend_registry.global_repos
+            # -- see _get_repository_path), and server_temporal_index_root
+            # normalizes the query-facing '-global' suffix, so this lands
+            # on exactly the directory the write path targets. Rooting the
+            # STORE here (not just the dispatch index_path) is required:
+            # the store is what actually performs the search.
+            from ...services.temporal.temporal_server_paths import (
+                resolve_golden_repo_coordinates,
+                server_temporal_index_root,
+            )
+
+            # Prefer deriving golden_repos_dir STRUCTURALLY from the repo path
+            # already resolved above -- it handles both on-disk golden-repo
+            # layouts (flat and .versioned/<alias>/v_*), and avoids taking a
+            # second hard dependency on app.state for a value the path itself
+            # already encodes. Falls back to app.state only when the path is
+            # not structurally recognizable.
+            _coordinates = resolve_golden_repo_coordinates(repo_path)
+            _golden_repos_dir = (
+                _coordinates[0]
+                if _coordinates is not None
+                else PathLib(_get_golden_repos_dir())
+            )
+            index_dir = server_temporal_index_root(_golden_repos_dir, repo_id)
             id_index_cache = None
             if self.hnsw_index_cache is not None:
                 from ...server.cache.id_index_cache import get_global_id_index_cache

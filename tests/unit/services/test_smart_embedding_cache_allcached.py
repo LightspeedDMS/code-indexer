@@ -12,8 +12,8 @@ but cached_points is not, which requires special handling in the lifecycle.
 
 # mypy: ignore-errors
 
-from src.code_indexer.services.file_chunking_manager import FileProcessingResult
-from src.code_indexer.services.clean_slot_tracker import CleanSlotTracker
+from code_indexer.services.file_chunking_manager import FileProcessingResult
+from code_indexer.services.clean_slot_tracker import CleanSlotTracker
 
 # Re-use helpers from the hash test module
 from tests.unit.services.test_smart_embedding_cache_hash import (

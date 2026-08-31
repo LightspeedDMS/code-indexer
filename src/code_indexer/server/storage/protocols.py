@@ -18,7 +18,7 @@ Usage:
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 from typing import Protocol, runtime_checkable
 
 
@@ -432,6 +432,14 @@ class SSHKeysBackend(Protocol):
 class GoldenRepoMetadataBackend(Protocol):
     """Protocol for golden repository metadata storage."""
 
+    # Bug #1533: every implementation must state which kind of store it is --
+    # True for the SHARED, cross-node store (PostgreSQL), False for a
+    # NODE-LOCAL one (SQLite). Callers whose correctness depends on the
+    # cluster-wide view check this and must refuse to read a node-local store;
+    # they compare with `is True`, so an implementation that omits the
+    # declaration is treated as node-local rather than silently trusted.
+    is_shared_backend: bool
+
     def ensure_table_exists(self) -> None: ...
 
     def add_repo(
@@ -491,6 +499,95 @@ class GoldenRepoMetadataBackend(Protocol):
     def record_reconcile_auto_heal_event(self, removed_aliases: List[str]) -> None: ...
 
     def get_reconcile_auto_heal_event(self) -> Optional[Dict[str, Any]]: ...
+
+    # Issue #1477: fleet-migration per-repo failure quarantine state (see
+    # server/services/fleet_migration/quarantine.py).
+    def record_fleet_migration_failure(
+        self,
+        golden_alias: str,
+        state_signature: str,
+        failure_cause: Optional[str] = None,
+    ) -> int: ...
+
+    def reset_fleet_migration_failure(self, golden_alias: str) -> None: ...
+
+    # Issue #1477 Finding N: fallback used when the full reset (DELETE)
+    # above fails but a plain UPDATE still works -- zeroes
+    # consecutive_failure_count while keeping the row, so a just-repaired
+    # repo gets a genuinely fresh failure budget instead of resuming from
+    # a stale, elevated count (see quarantine.py's
+    # _clear_quarantine_after_detected_repair()).
+    def soft_reset_fleet_migration_failure_count(self, golden_alias: str) -> None: ...
+
+    def touch_fleet_migration_failure_check(self, golden_alias: str) -> None: ...
+
+    def get_fleet_migration_failure_state(
+        self, golden_alias: str
+    ) -> Optional[Dict[str, Any]]: ...
+
+    def list_fleet_migration_failure_states(self) -> List[Dict[str, Any]]: ...
+
+    # Bug #1506: ordinary-refresh integrity-gate per-repo failure
+    # quarantine state (see global_repos/refresh_integrity_gate.py).
+    def record_refresh_integrity_failure(
+        self, golden_alias: str, detail: str
+    ) -> int: ...
+
+    def reset_refresh_integrity_failure(self, golden_alias: str) -> None: ...
+
+    def get_refresh_integrity_failure_state(
+        self, golden_alias: str
+    ) -> Optional[Dict[str, Any]]: ...
+
+    # Story #1560: per-golden-alias duplicate-point-id auto-resolution
+    # outcome state (see server/services/fleet_migration/dedup_state.py).
+    # A NEW table, distinct from fleet_migration_quarantine_state above --
+    # that one means "this repo keeps failing"; this one means "this
+    # repo migrated successfully but permanently lost N records".
+    def record_dedup_outcome(
+        self,
+        golden_alias: str,
+        *,
+        duplicate_groups: int,
+        records_before: int,
+        records_deleted: int,
+        winner_kept_groups: int,
+        whole_group_deleted_groups: int,
+        collection_total: int,
+    ) -> Dict[str, Any]: ...
+
+    def get_dedup_state(self, golden_alias: str) -> Optional[Dict[str, Any]]: ...
+
+    def list_dedup_states(self) -> List[Dict[str, Any]]: ...
+
+    def clear_dedup_state(self, golden_alias: str, reason: str) -> None: ...
+
+    # Story #1589: bulk-clear EVERY currently-active dedup-outcome row in
+    # one shot -- the Diagnostics tab's "Clear All Dedup Warnings" action.
+    # Returns the number of rows actually cleared.
+    def clear_all_dedup_states(self, reason: str) -> int: ...
+
+    # Bug #1539's cidx-meta backup conflict-resolution per-repo failure
+    # quarantine state (record_cidx_meta_conflict_failure /
+    # reset_cidx_meta_conflict_failure / get_cidx_meta_conflict_failure_state)
+    # is RETIRED as of Bug #1555's root-cause fix: CidxMetaBackupSync.sync()
+    # is now a plain mirror-push that can never raise
+    # ConflictResolutionFailedError, so nothing ever calls these again. See
+    # cidx_meta_backup/sync.py's module docstring for the design rationale.
+
+    # Bug #1567: durable pending-deletion queue for versioned-snapshot
+    # cleanup (see global_repos/cleanup_manager.py). Backs the in-process
+    # queue that a restart/worker-recycle previously discarded silently,
+    # using a WALL-CLOCK timestamp (never time.monotonic(), which has no
+    # cross-process meaning) so the minimum-retention-age floor survives a
+    # restart.
+    def schedule_cleanup_deletion(
+        self, index_path: str, scheduled_at: float
+    ) -> float: ...
+
+    def list_cleanup_pending_deletions(self) -> List[Dict[str, Any]]: ...
+
+    def remove_cleanup_pending_deletion(self, index_path: str) -> None: ...
 
     def close(self) -> None: ...
 
@@ -841,6 +938,8 @@ class LogsBackend(Protocol):
     with filtering and pagination.
     """
 
+    is_cross_node_backend: bool
+
     def insert_log(
         self,
         timestamp: str,
@@ -853,6 +952,8 @@ class LogsBackend(Protocol):
         extra_data: Optional[str] = None,
         node_id: Optional[str] = None,
         alias: Optional[str] = None,
+        trace_id: Optional[str] = None,
+        span_id: Optional[str] = None,
     ) -> None:
         """Insert a single log record.
 
@@ -868,6 +969,10 @@ class LogsBackend(Protocol):
             node_id: Optional cluster node identifier (NULL in standalone).
             alias: Optional repo alias (Story #876 Phase C). Tags lifecycle-runner
                 ERROR rows so the admin UI can filter logs by repo.
+            trace_id: Optional OTEL trace ID (Story #1676 AC2). 32-char hex,
+                or the documented zero-value when no span was active.
+            span_id: Optional OTEL span ID (Story #1676 AC2). 16-char hex,
+                or the documented zero-value when no span was active.
         """
         ...
 
@@ -881,8 +986,15 @@ class LogsBackend(Protocol):
         node_id: Optional[str] = None,
         limit: int = 100,
         offset: int = 0,
+        levels: Optional[List[str]] = None,
+        search: Optional[str] = None,
+        sort_order: str = "desc",
     ) -> "Tuple[List[Dict], int]":
         """Query log records with optional filtering and pagination.
+
+        Bug #1553: levels/search/sort_order are additive -- their defaults
+        preserve the exact pre-existing behaviour for every caller that
+        predates them.
 
         Args:
             level: Filter by log level (optional).
@@ -893,6 +1005,11 @@ class LogsBackend(Protocol):
             node_id: Filter by cluster node ID (optional).
             limit: Maximum number of records to return (default 100).
             offset: Number of records to skip for pagination (default 0).
+            levels: Filter by multiple log levels (optional, takes precedence
+                over level).
+            search: Case-insensitive substring match across message and
+                correlation_id (optional).
+            sort_order: "asc" or "desc" (default "desc" = newest first).
 
         Returns:
             Tuple of (list_of_log_dicts, total_count) where total_count reflects
@@ -1488,12 +1605,31 @@ class DiagnosticsBackend(Protocol):
         """Persist (upsert) diagnostic results for a category."""
         ...
 
-    def load_all_results(self) -> "List[Tuple[str, str, str]]":
-        """Return all rows as list of (category, results_json, run_at) tuples."""
+    def load_all_results(self) -> "Sequence[Tuple[str, object, object]]":
+        """Return all rows as list of (category, results_json, run_at) tuples.
+
+        Bug #1662: `results_json`/`run_at` are honestly typed `object`, not
+        `str`. The real PostgreSQL schema (`001_initial_schema.sql`)
+        declares `results_json JSONB` and `run_at TIMESTAMPTZ` -- psycopg
+        deserializes both to native Python objects (dict/list, and a
+        real, often tz-aware, datetime) before the row reaches
+        application code. SQLite's TEXT columns return genuine `str`
+        values instead. A caller MUST normalize either shape (e.g. via
+        `parse_json_column()` for the JSON field and a datetime-coercion
+        helper for the timestamp field) rather than assuming `str` --
+        that false assumption is exactly the bug class that slipped
+        through review for Bug #1653. The return type is `Sequence`
+        rather than `List` so a backend may return any list-like
+        container without narrowing.
+        """
         ...
 
-    def load_category_results(self, category: str) -> "Optional[Tuple[str, str]]":
-        """Return (results_json, run_at) for a category, or None if absent."""
+    def load_category_results(self, category: str) -> "Optional[Tuple[object, object]]":
+        """Return (results_json, run_at) for a category, or None if absent.
+
+        Same dual-shape (JSONB dict/list, TIMESTAMPTZ datetime vs. SQLite
+        TEXT str) contract as `load_all_results()` -- see its docstring.
+        """
         ...
 
     def close(self) -> None:
@@ -1745,11 +1881,17 @@ class QueryEmbeddingCacheBackend(Protocol):
         embedding: bytes,
         created_at: float,
         last_used: float,
-    ) -> None:
+    ) -> bool:
         """Insert or update the embedding row.
 
         On conflict (cache_key, provider, model, dimension) the existing row
         is updated (embedding + last_used).
+
+        Bug #1536: fails open (never raises) and reports success/failure via
+        the return value — True on success, False on failure — so callers
+        (QueryEmbeddingCache.record_miss_or_shadow) can count persistent
+        write failures instead of that condition being indistinguishable
+        from success.
 
         Args:
             cache_key: SHA-256 hex string of the (normalized) query text.
@@ -1759,6 +1901,9 @@ class QueryEmbeddingCacheBackend(Protocol):
             embedding: Float32 LE bytes blob.
             created_at: Epoch seconds (first write).
             last_used: Epoch seconds (most recent use).
+
+        Returns:
+            True on success, False on failure (never raises).
         """
         ...
 

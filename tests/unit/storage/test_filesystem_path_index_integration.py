@@ -7,7 +7,7 @@ Story #540: Fix duplicate chunks bug.
 import tempfile
 import numpy as np
 from pathlib import Path
-from src.code_indexer.storage.filesystem_vector_store import (
+from code_indexer.storage.filesystem_vector_store import (
     FilesystemVectorStore,
     PathIndex,
 )
@@ -20,7 +20,9 @@ class TestPathIndexLoadSave:
         """_load_path_index should load existing path_index.bin file."""
         with tempfile.TemporaryDirectory() as tmpdir:
             base_path = Path(tmpdir)
-            store = FilesystemVectorStore(base_path=base_path)
+            store = FilesystemVectorStore(
+                base_path=base_path, use_chunks_db_for_new_collections=False
+            )
 
             # Create collection
             store.create_collection("test_collection", vector_size=1024)
@@ -46,7 +48,9 @@ class TestPathIndexLoadSave:
         """_load_path_index should return empty PathIndex when file doesn't exist."""
         with tempfile.TemporaryDirectory() as tmpdir:
             base_path = Path(tmpdir)
-            store = FilesystemVectorStore(base_path=base_path)
+            store = FilesystemVectorStore(
+                base_path=base_path, use_chunks_db_for_new_collections=False
+            )
 
             # Create collection but no path_index.bin
             store.create_collection("test_collection", vector_size=1024)
@@ -61,7 +65,9 @@ class TestPathIndexLoadSave:
         """_save_path_index should save path index to collection directory."""
         with tempfile.TemporaryDirectory() as tmpdir:
             base_path = Path(tmpdir)
-            store = FilesystemVectorStore(base_path=base_path)
+            store = FilesystemVectorStore(
+                base_path=base_path, use_chunks_db_for_new_collections=False
+            )
 
             # Create collection
             store.create_collection("test_collection", vector_size=1024)
@@ -88,7 +94,9 @@ class TestPathIndexLoadSave:
         """begin_indexing should load PathIndex for the collection."""
         with tempfile.TemporaryDirectory() as tmpdir:
             base_path = Path(tmpdir)
-            store = FilesystemVectorStore(base_path=base_path)
+            store = FilesystemVectorStore(
+                base_path=base_path, use_chunks_db_for_new_collections=False
+            )
 
             # Create collection and save a path index
             store.create_collection("test_collection", vector_size=1024)
@@ -107,10 +115,31 @@ class TestPathIndexLoadSave:
             assert loaded_index.get_point_ids("src/auth.py") == {"point_a1"}
 
     def test_path_index_saved_in_end_indexing(self):
-        """end_indexing should save PathIndex to disk."""
+        """end_indexing should save PathIndex to disk.
+
+        Bug #1575 round 6 factual-record correction: a round-5 agent
+        claimed this test had a "pre-existing bug predating this session."
+        That claim is FALSE, proven via git history -- at development tip
+        ``fa1e104a`` this test directly poked
+        ``store._path_indexes["test_collection"].add_point(...)`` (no real
+        backing ``vector_*.json`` file) and PASSED, because Gap A's
+        authoritative-repair-on-fallback logic did not yet exist to
+        override that unproven in-memory picture. Round 5's own reorder
+        (moving ``_save_path_index`` after
+        ``_calculate_and_save_unique_file_count``) plus Gap A's repair
+        logic together changed this test's real behavior -- a genuine,
+        undocumented behavior change, not a pre-existing defect. The fix
+        below (driving the test through the real ``upsert_points()``
+        write path instead of poking the cache directly) is INTENTIONAL
+        and correct: it exercises the documented, by-design Gap A
+        repair-on-fallback behavior (see ``_rebuild_and_repair_path_index``'s
+        own docstring in ``filesystem_vector_store.py``).
+        """
         with tempfile.TemporaryDirectory() as tmpdir:
             base_path = Path(tmpdir)
-            store = FilesystemVectorStore(base_path=base_path)
+            store = FilesystemVectorStore(
+                base_path=base_path, use_chunks_db_for_new_collections=False
+            )
 
             # Create collection
             store.create_collection("test_collection", vector_size=1024)
@@ -118,8 +147,28 @@ class TestPathIndexLoadSave:
             # Begin indexing (loads empty path index)
             store.begin_indexing("test_collection")
 
-            # Modify the path index
-            store._path_indexes["test_collection"].add_point("src/auth.py", "point_a1")
+            # Add a point via the real production write path (upsert_points)
+            # rather than poking store._path_indexes directly -- poking the
+            # in-memory cache alone leaves no REAL vector_*.json file
+            # backing it, and Bug #1575's authoritative-repair fallback
+            # (triggered here because no path_index.bin existed on disk
+            # when begin_indexing() ran) intentionally replaces an
+            # unproven in-memory PathIndex with the true, disk-scanned
+            # picture -- which would correctly be empty in that scenario.
+            store.upsert_points(
+                "test_collection",
+                [
+                    {
+                        "id": "point_a1",
+                        "vector": np.zeros(1024, dtype=np.float32).tolist(),
+                        "payload": {
+                            "path": "src/auth.py",
+                            "type": "content",
+                            "hidden_branches": [],
+                        },
+                    }
+                ],
+            )
 
             # End indexing (should save)
             store.end_indexing("test_collection")
@@ -141,7 +190,9 @@ class TestPreUpsertCleanup:
         """Upserting points for a new file should add to path index."""
         with tempfile.TemporaryDirectory() as tmpdir:
             base_path = Path(tmpdir)
-            store = FilesystemVectorStore(base_path=base_path)
+            store = FilesystemVectorStore(
+                base_path=base_path, use_chunks_db_for_new_collections=False
+            )
 
             # Create collection
             store.create_collection("test_collection", vector_size=1024)
@@ -174,7 +225,9 @@ class TestPreUpsertCleanup:
         """Upserting points for a modified file should remove old vectors."""
         with tempfile.TemporaryDirectory() as tmpdir:
             base_path = Path(tmpdir)
-            store = FilesystemVectorStore(base_path=base_path)
+            store = FilesystemVectorStore(
+                base_path=base_path, use_chunks_db_for_new_collections=False
+            )
 
             # Create collection
             store.create_collection("test_collection", vector_size=1024)
@@ -226,7 +279,9 @@ class TestPreUpsertCleanup:
         """Upserting fewer chunks should remove extra old chunks."""
         with tempfile.TemporaryDirectory() as tmpdir:
             base_path = Path(tmpdir)
-            store = FilesystemVectorStore(base_path=base_path)
+            store = FilesystemVectorStore(
+                base_path=base_path, use_chunks_db_for_new_collections=False
+            )
 
             store.create_collection("test_collection", vector_size=1024)
             store.begin_indexing("test_collection")
@@ -271,7 +326,9 @@ class TestPreUpsertCleanup:
         """Upserting more chunks should add new chunks and remove old ones."""
         with tempfile.TemporaryDirectory() as tmpdir:
             base_path = Path(tmpdir)
-            store = FilesystemVectorStore(base_path=base_path)
+            store = FilesystemVectorStore(
+                base_path=base_path, use_chunks_db_for_new_collections=False
+            )
 
             store.create_collection("test_collection", vector_size=1024)
             store.begin_indexing("test_collection")
@@ -321,7 +378,9 @@ class TestPreUpsertCleanup:
         """Cleanup should remove old point_ids from id_index."""
         with tempfile.TemporaryDirectory() as tmpdir:
             base_path = Path(tmpdir)
-            store = FilesystemVectorStore(base_path=base_path)
+            store = FilesystemVectorStore(
+                base_path=base_path, use_chunks_db_for_new_collections=False
+            )
 
             store.create_collection("test_collection", vector_size=1024)
             store.begin_indexing("test_collection")
@@ -357,7 +416,9 @@ class TestPreUpsertCleanup:
         """Cleanup should track deletions in _indexing_session_changes."""
         with tempfile.TemporaryDirectory() as tmpdir:
             base_path = Path(tmpdir)
-            store = FilesystemVectorStore(base_path=base_path)
+            store = FilesystemVectorStore(
+                base_path=base_path, use_chunks_db_for_new_collections=False
+            )
 
             store.create_collection("test_collection", vector_size=1024)
             store.begin_indexing("test_collection")
@@ -397,7 +458,9 @@ class TestDeletePointsPathIndexIntegration:
         """delete_points should remove point_ids from path index."""
         with tempfile.TemporaryDirectory() as tmpdir:
             base_path = Path(tmpdir)
-            store = FilesystemVectorStore(base_path=base_path)
+            store = FilesystemVectorStore(
+                base_path=base_path, use_chunks_db_for_new_collections=False
+            )
 
             store.create_collection("test_collection", vector_size=1024)
             store.begin_indexing("test_collection")
@@ -431,7 +494,9 @@ class TestDeletePointsPathIndexIntegration:
         """Deleting all points for a file should remove file from path index."""
         with tempfile.TemporaryDirectory() as tmpdir:
             base_path = Path(tmpdir)
-            store = FilesystemVectorStore(base_path=base_path)
+            store = FilesystemVectorStore(
+                base_path=base_path, use_chunks_db_for_new_collections=False
+            )
 
             store.create_collection("test_collection", vector_size=1024)
             store.begin_indexing("test_collection")
@@ -474,7 +539,9 @@ class TestWatchModePathIndexIntegration:
         """
         with tempfile.TemporaryDirectory() as tmpdir:
             base_path = Path(tmpdir)
-            store = FilesystemVectorStore(base_path=base_path)
+            store = FilesystemVectorStore(
+                base_path=base_path, use_chunks_db_for_new_collections=False
+            )
 
             # Create collection
             store.create_collection("test_collection", vector_size=1024)
@@ -537,7 +604,9 @@ class TestWatchModePathIndexIntegration:
         """Watch mode should handle file shrinking (fewer chunks) with lazy-loaded path index."""
         with tempfile.TemporaryDirectory() as tmpdir:
             base_path = Path(tmpdir)
-            store = FilesystemVectorStore(base_path=base_path)
+            store = FilesystemVectorStore(
+                base_path=base_path, use_chunks_db_for_new_collections=False
+            )
 
             store.create_collection("test_collection", vector_size=1024)
 
@@ -586,7 +655,9 @@ class TestWatchModePathIndexIntegration:
         """Watch mode should handle multiple file updates with lazy-loaded path index."""
         with tempfile.TemporaryDirectory() as tmpdir:
             base_path = Path(tmpdir)
-            store = FilesystemVectorStore(base_path=base_path)
+            store = FilesystemVectorStore(
+                base_path=base_path, use_chunks_db_for_new_collections=False
+            )
 
             store.create_collection("test_collection", vector_size=1024)
 

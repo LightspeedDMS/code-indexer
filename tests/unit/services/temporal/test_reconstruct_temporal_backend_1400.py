@@ -28,16 +28,14 @@ from code_indexer.server.query.semantic_query_manager import (
 class TestReconstructTemporalBackend:
     def test_returns_config_index_path_and_vector_store(self, tmp_path: Path):
         mock_config = MagicMock()
-        mock_config_manager = MagicMock()
-        mock_config_manager.get_config.return_value = mock_config
         mock_vector_store = MagicMock()
         mock_backend = MagicMock()
         mock_backend.get_vector_store_client.return_value = mock_vector_store
 
         with (
             patch(
-                "code_indexer.proxy.config_manager.ConfigManager.create_with_backtrack",
-                return_value=mock_config_manager,
+                "code_indexer.config.ConfigManager.load_verified_config",
+                return_value=mock_config,
             ),
             patch(
                 "code_indexer.backends.backend_factory.BackendFactory.create",
@@ -57,15 +55,13 @@ class TestReconstructTemporalBackend:
         """shard_ownership=None (default) -> always use the shared hnsw_cache
         (mirrors _owns_for_cache's None-safe fail-open semantics: sharding
         off or no ownership info -> use the cache)."""
-        mock_config_manager = MagicMock()
-        mock_config_manager.get_config.return_value = MagicMock()
         mock_backend = MagicMock()
         mock_backend.get_vector_store_client.return_value = MagicMock()
 
         with (
             patch(
-                "code_indexer.proxy.config_manager.ConfigManager.create_with_backtrack",
-                return_value=mock_config_manager,
+                "code_indexer.config.ConfigManager.load_verified_config",
+                return_value=MagicMock(),
             ),
             patch(
                 "code_indexer.backends.backend_factory.BackendFactory.create",
@@ -82,8 +78,6 @@ class TestReconstructTemporalBackend:
         assert kwargs["hnsw_cache"] is not None
 
     def test_shard_ownership_denies_bypasses_cache(self, tmp_path: Path):
-        mock_config_manager = MagicMock()
-        mock_config_manager.get_config.return_value = MagicMock()
         mock_backend = MagicMock()
         mock_backend.get_vector_store_client.return_value = MagicMock()
 
@@ -92,8 +86,8 @@ class TestReconstructTemporalBackend:
 
         with (
             patch(
-                "code_indexer.proxy.config_manager.ConfigManager.create_with_backtrack",
-                return_value=mock_config_manager,
+                "code_indexer.config.ConfigManager.load_verified_config",
+                return_value=MagicMock(),
             ),
             patch(
                 "code_indexer.backends.backend_factory.BackendFactory.create",

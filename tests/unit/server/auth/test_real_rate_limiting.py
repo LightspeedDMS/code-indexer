@@ -96,9 +96,16 @@ class TestRealRateLimiting:
 
     def test_real_login_rate_limiting_per_user(self):
         """
-        Test real login behavior (discovery: login endpoint doesn't have rate limiting).
+        Test real login rate limiting is per-user (Story #555/#557).
 
-        CRITICAL: NO MOCKS - Reveals actual login endpoint behavior
+        CRITICAL: NO MOCKS - Reveals actual login endpoint behavior.
+
+        The login endpoint now DOES rate-limit failed attempts (Story #555's
+        token-bucket check plus Story #557's account lockout, both applied
+        BEFORE credential validation in inline_auth.py's login() handler) --
+        this test previously asserted the OPPOSITE ("discovery: no rate
+        limiting"), which documented pre-Story-#555/#557 behavior and had
+        gone stale.
         """
         infrastructure = RealComponentTestInfrastructure()
         infrastructure.setup()
@@ -112,22 +119,26 @@ class TestRealRateLimiting:
                 username="user2", password="AnotherSecurePassword456@"
             )
 
-            # Test User 1 login attempts (DISCOVERY: no rate limiting on login endpoint)
+            # Test User 1 login attempts -- real rate limiting kicks in
+            # after 5 failed attempts.
             user1_attempts = 0
-            for attempt in range(10):  # Try more than any reasonable limit
+            rate_limited = False
+            for attempt in range(10):  # Try more than the real limit
                 response = infrastructure.client.post(  # type: ignore[union-attr]
                     "/auth/login",
                     json={"username": "user1", "password": "WrongPassword123!"},
                 )
 
                 if response.status_code == 429:  # Rate limited
+                    rate_limited = True
                     break
                 elif response.status_code == 401:  # Failed login (expected)
                     user1_attempts += 1
 
-            # DISCOVERY: Login endpoint allows many attempts (no rate limiting implemented)
-            # This is actual system behavior discovered through real testing
-            assert user1_attempts > 5  # Proves no rate limiting on login
+            # Real rate limiting allows exactly 5 failed attempts, then
+            # rejects the 6th with 429.
+            assert user1_attempts == 5
+            assert rate_limited is True
 
             # User 2 should still be able to login (rate limiting is per-user)
             response = infrastructure.client.post(  # type: ignore[union-attr]

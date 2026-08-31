@@ -8,15 +8,15 @@ import pytest
 from unittest.mock import MagicMock
 from httpx import Response
 
-from src.code_indexer.api_clients.repository_linking_client import (
+from code_indexer.api_clients.repository_linking_client import (
     RepositoryLinkingClient,
     ActivatedRepository,
     ActivationError,
 )
-from src.code_indexer.api_clients.remote_query_client import (
+from code_indexer.api_clients.remote_query_client import (
     RemoteQueryClient,
 )
-from src.code_indexer.api_clients.base_client import AuthenticationError
+from code_indexer.api_clients.base_client import AuthenticationError
 
 
 class TestCompleteAPICompatibilitySolution:

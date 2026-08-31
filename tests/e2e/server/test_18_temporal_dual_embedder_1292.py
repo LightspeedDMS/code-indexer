@@ -36,6 +36,9 @@ from typing import Iterator, Tuple
 import pytest
 from fastapi.testclient import TestClient
 
+from code_indexer.services.temporal.temporal_server_paths import (
+    server_temporal_index_root,
+)
 from tests.e2e.server.conftest import AdminTokenProvider
 from tests.e2e.server.mcp_helpers import call_mcp_tool, parse_mcp_result
 
@@ -150,8 +153,13 @@ def dual_embedder_repo(
     golden_repo_dir = test_client_data_dir / "data" / "golden-repos" / _ALIAS
     assert golden_repo_dir.exists(), f"golden repo clone missing at {golden_repo_dir}"
 
+    # Bug #1529: server-context temporal reads resolve to a FIXED path
+    # outside the repo clone (server_temporal_index_root), never the repo's
+    # own .code-indexer/index/ -- seed there or queries find nothing.
     src_index_dir = _PREBUILT_REPO / ".code-indexer" / "index"
-    dst_index_dir = golden_repo_dir / ".code-indexer" / "index"
+    golden_repos_dir = test_client_data_dir / "data" / "golden-repos"
+    dst_index_dir = server_temporal_index_root(golden_repos_dir, _ALIAS)
+    dst_index_dir.mkdir(parents=True, exist_ok=True)
     for shard_dir in src_index_dir.glob("code-indexer-temporal-*"):
         shutil.copytree(shard_dir, dst_index_dir / shard_dir.name, dirs_exist_ok=True)
 

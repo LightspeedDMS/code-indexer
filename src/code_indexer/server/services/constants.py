@@ -91,7 +91,13 @@ MAX_GITLAB_API_TIMEOUT_SECONDS = 120
 MIN_SCIP_REFERENCE_LIMIT = 10
 MAX_SCIP_REFERENCE_LIMIT = 10000
 MIN_SCIP_DEPENDENCY_DEPTH = 1
-MAX_SCIP_DEPENDENCY_DEPTH = 20
+# Bug #1625: this MUST NOT exceed the SCIP engine's real ceiling for
+# get_dependencies()/get_dependents() -- hardcoded as 10 in
+# scip/database/queries.py ("Depth must be between 1 and 10"). Raising this
+# above 10 lets an operator save a value that only fails, opaquely, at
+# QUERY time (not at config-save time). Keep server/utils/config_manager.py's
+# own scip_dependency_depth validation in sync with this value.
+MAX_SCIP_DEPENDENCY_DEPTH = 10
 MIN_SCIP_CALLCHAIN_MAX_DEPTH = 1
 MAX_SCIP_CALLCHAIN_MAX_DEPTH = 50
 MIN_SCIP_CALLCHAIN_LIMIT = 1

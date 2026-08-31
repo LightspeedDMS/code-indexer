@@ -5,7 +5,7 @@ in the shared model-spec YAML for token-preflight / request-seal calculations
 (AC23), and must be constrained to 1024 output dimensions (AC9).
 """
 
-from src.code_indexer.services.voyage_ai import (
+from code_indexer.services.voyage_ai import (
     _get_voyage_model_specs,
     _reset_model_specs_cache_for_tests,
 )

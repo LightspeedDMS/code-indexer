@@ -6,17 +6,17 @@ hierarchy matching, git merge-base analysis, and parent branch detection.
 
 import subprocess
 import pytest
-from unittest.mock import Mock, AsyncMock
+from unittest.mock import Mock, MagicMock
 from pathlib import Path
 
-from src.code_indexer.remote.repository_linking import (
+from code_indexer.remote.repository_linking import (
     ExactBranchMatcher,
     BranchFallbackMatcher,
     RepositoryLink,
     RepositoryType,
 )
-from src.code_indexer.services.git_topology_service import GitTopologyService
-from src.code_indexer.api_clients.repository_linking_client import (
+from code_indexer.services.git_topology_service import GitTopologyService
+from code_indexer.api_clients.repository_linking_client import (
     RepositoryLinkingClient,
     RepositoryMatch as ClientRepositoryMatch,
     RepositoryDiscoveryResponse as ClientDiscoveryResponse,
@@ -313,7 +313,7 @@ class TestExactBranchMatcherFallbackIntegration:
     def mock_repository_linking_client(self):
         """Create mock repository linking client."""
         client = Mock(spec=RepositoryLinkingClient)
-        client.discover_repositories = AsyncMock()
+        client.discover_repositories = MagicMock()
         client.server_url = "https://cidx.example.com"
         return client
 
@@ -342,8 +342,7 @@ class TestExactBranchMatcherFallbackIntegration:
             )
         ]
 
-    @pytest.mark.asyncio
-    async def test_exact_branch_matcher_with_fallback_success(
+    def test_exact_branch_matcher_with_fallback_success(
         self,
         exact_branch_matcher,
         mock_git_topology_service,
@@ -374,7 +373,7 @@ class TestExactBranchMatcherFallbackIntegration:
         )
 
         # Execute the method
-        result = await exact_branch_matcher.find_exact_branch_match(
+        result = exact_branch_matcher.find_exact_branch_match(
             tmp_path, "https://github.com/company/auth-service.git"
         )
 
@@ -387,8 +386,7 @@ class TestExactBranchMatcherFallbackIntegration:
         assert "main" in result.match_reason
         assert result.parent_branch == "main"
 
-    @pytest.mark.asyncio
-    async def test_exact_branch_matcher_fallback_priority_activated_over_golden(
+    def test_exact_branch_matcher_fallback_priority_activated_over_golden(
         self,
         exact_branch_matcher,
         mock_git_topology_service,
@@ -437,7 +435,7 @@ class TestExactBranchMatcherFallbackIntegration:
         )
 
         # Execute the method
-        result = await exact_branch_matcher.find_exact_branch_match(
+        result = exact_branch_matcher.find_exact_branch_match(
             tmp_path, "https://github.com/company/payments.git"
         )
 
@@ -447,8 +445,7 @@ class TestExactBranchMatcherFallbackIntegration:
         assert result.alias == "payments-user1"  # Activated repository
         assert result.repository_type == RepositoryType.ACTIVATED
 
-    @pytest.mark.asyncio
-    async def test_exact_branch_matcher_no_fallback_match(
+    def test_exact_branch_matcher_no_fallback_match(
         self,
         exact_branch_matcher,
         mock_git_topology_service,
@@ -487,7 +484,7 @@ class TestExactBranchMatcherFallbackIntegration:
         )
 
         # Execute the method
-        result = await exact_branch_matcher.find_exact_branch_match(
+        result = exact_branch_matcher.find_exact_branch_match(
             tmp_path, "https://github.com/company/different.git"
         )
 

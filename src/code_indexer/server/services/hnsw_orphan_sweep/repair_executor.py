@@ -23,14 +23,23 @@ interlock the issue's "Concurrency interlock" section requires:
   - A repair that runs but fails to converge to zero orphans is loud
     (ERROR, logged) but is NEVER raised -- fail-soft per item, matching the
     story's "a failure on one index does not abort the pass" requirement.
-  - A successful repair invalidates the server-side ``HNSWIndexCache`` entry
-    for the collection (the same cache the query path serves from), so a
-    running server sees the fix without a restart -- confirmed during
-    implementation: ``FilesystemVectorStore`` already invalidates this same
-    cache after every in-process rebuild via
-    ``self.hnsw_index_cache.invalidate(str(collection_path))``; the sweep
-    reaches the SAME global singleton via
+  - A successful repair attempts to invalidate the server-side
+    ``HNSWIndexCache`` entry for the collection (the same cache the query path
+    serves from), reaching the SAME global singleton via
     ``code_indexer.server.cache.get_global_cache()``.
+
+    Bug #1542: this eviction used to hand-build a bare resolved-path key,
+    which never matched the key ``FilesystemVectorStore.search()`` actually
+    stores under (Story #1458 AC11's chunk-layout token, and, for an
+    activated repo, its ``activation_id``). Fixed by routing through
+    ``hnsw_cache_key_for_collection_path()`` (the module-level sibling of
+    FSV's ``hnsw_cache_key_for_collection()``, usable here because the sweep
+    has no live FSV instance for the collection it just repaired) -- see
+    ``_make_default_cache_invalidator``/``_resolve_activation_id``. A
+    running server would still have picked the repair up on its next read
+    regardless, via Bug #1538's on-disk identity fingerprint; this fix
+    restores the IMMEDIATE eviction the
+    function was always meant to provide.
 """
 
 from __future__ import annotations
@@ -48,7 +57,9 @@ from code_indexer.storage.hnsw_index_manager import (
     HNSWIndexManager,
     count_orphan_errors,
 )
-from code_indexer.server.services.hnsw_orphan_sweep.discovery import SweepCandidate
+from code_indexer.server.services.hnsw_orphan_sweep.discovery import (
+    SweepCandidate,
+)
 from code_indexer.server.services.hnswlib_capability_check import (
     check_hnswlib_capability,
 )
@@ -76,25 +87,117 @@ class SweepOutcome(str, Enum):
     # from TRANSIENT_SKIP -- this condition will NOT resolve on its own on
     # a later tick (unlike a genuinely transient filesystem race).
     CAPABILITY_UNAVAILABLE = "capability_unavailable"
+    # Bug #1529: the SISTER_TEMPORAL_REPAIRED/_REPAIR_FAILED outcomes are
+    # GONE. Server-context temporal shards now live at a FIXED, mutable path
+    # ({golden_repos_dir}/.temporal/{alias}/), so they are discovered and
+    # repaired IN PLACE by process_candidate() like every other collection --
+    # there is no immutable version to rebuild and no alias pointer to swap.
 
 
-def _default_cache_invalidator(collection_path: str) -> None:
-    """Best-effort invalidation of the server-side HNSWIndexCache singleton.
+def _resolve_activation_id(
+    candidate: SweepCandidate,
+    # Any: this module deliberately avoids a hard import of
+    # ActivatedRepoManager (matching this file's existing `manager: Any` /
+    # `locked_index: Any` duck-typed style throughout) -- callers only need
+    # to satisfy `.get_activation_id(username, user_alias) -> Optional[str]`,
+    # and tests inject a minimal fake exposing just that one method.
+    activated_repo_manager: Optional[Any],
+) -> Optional[str]:
+    """Resolve the ``activation_id`` for an ACTIVATED-repo candidate so the
+    default cache invalidator can compose the SAME activation-scoped key
+    ``FilesystemVectorStore`` uses for that repo's query-serving cache entries
+    (Story #1458 AC11 Finding 7). Golden and ``golden_temporal`` candidates
+    never have one -- returns None immediately for those, matching
+    ``FilesystemVectorStore``'s own ``activation_id=None`` default for the
+    non-activated case.
 
-    Lazily imported so this module has no hard dependency on the cache
-    singleton being initialized (e.g. under CLI/solo or unit tests that
-    inject their own ``cache_invalidator``).
+    Best-effort, matching ``_make_default_cache_invalidator``'s own
+    best-effort contract: no ``activated_repo_manager`` injected, a
+    malformed ``candidate.alias`` (not a non-empty ``"username/user_alias"``
+    string with EXACTLY two non-whitespace-only components -- a
+    whitespace-only component, e.g. ``" / "`` splitting into two literally
+    non-empty ``" "`` strings, is rejected the same as a truly empty one,
+    Codex-review Q1), or any resolution failure all return None rather than
+    raise -- an activated repo's eviction then still falls back to Bug
+    #1538's on-disk identity fingerprint on the next read (the pre-existing
+    degraded behavior for every collection before this fix), never blocking
+    the repair itself.
     """
+    if candidate.kind != "activated" or activated_repo_manager is None:
+        return None
+    alias = candidate.alias
+    parts = alias.split("/") if isinstance(alias, str) else []
+    if len(parts) != 2 or not parts[0].strip() or not parts[1].strip():
+        logger.warning(
+            "hnsw_orphan_sweep: activated candidate alias %r is not "
+            "'username/user_alias'; cache invalidation will use a "
+            "path-only key",
+            alias,
+        )
+        return None
+    username, user_alias = parts
     try:
-        from code_indexer.server.cache import get_global_cache
-
-        get_global_cache().invalidate(collection_path)
+        activation_id: Optional[str] = activated_repo_manager.get_activation_id(
+            username, user_alias
+        )
     except Exception as exc:  # noqa: BLE001 -- best-effort, never block a repair
         logger.warning(
-            "hnsw_orphan_sweep: could not invalidate HNSWIndexCache for %s: %s",
-            collection_path,
+            "hnsw_orphan_sweep: could not resolve activation_id for %s: %s",
+            alias,
             exc,
         )
+        return None
+    # Codex-review Q1: an empty/whitespace-only return is equivalent to "no
+    # valid activation_id" -- normalize it to None rather than embedding a
+    # blank string literally into the cache key (`not activation_id` short-
+    # circuits before `.strip()` when the manager returns None itself).
+    if not activation_id or not activation_id.strip():
+        return None
+    return activation_id
+
+
+def _make_default_cache_invalidator(
+    activation_id: Optional[str],
+) -> Callable[[str], None]:
+    """Build the default best-effort HNSWIndexCache invalidator, bound to
+    *activation_id* (None for golden/``golden_temporal`` candidates, resolved
+    via ``_resolve_activation_id`` for activated-repo candidates).
+
+    Lazily imported so this module has no hard dependency on the cache
+    singleton (or on ``FilesystemVectorStore``'s heavier import chain) being
+    initialized (e.g. under CLI/solo or unit tests that inject their own
+    ``cache_invalidator``).
+
+    Bug #1542 (+ Codex-review follow-up): a bare ``collection_path`` does NOT
+    match the key ``FilesystemVectorStore.search()`` stores the entry under
+    -- that key also embeds Story #1458 AC11's chunk-layout token and, for an
+    activated repo, its ``activation_id``. This composes the SAME key via
+    ``hnsw_cache_key_for_collection_path()``, the module-level sibling of
+    ``FilesystemVectorStore.hnsw_cache_key_for_collection()`` usable here
+    because the sweep has no live FSV instance for the collection it just
+    repaired -- only its resolved path (and, now, the activation_id resolved
+    separately by the caller).
+    """
+
+    def _invalidate(collection_path: str) -> None:
+        try:
+            from code_indexer.server.cache import get_global_cache
+            from code_indexer.storage.filesystem_vector_store import (
+                hnsw_cache_key_for_collection_path,
+            )
+
+            canonical_key = hnsw_cache_key_for_collection_path(
+                collection_path, activation_id=activation_id
+            )
+            get_global_cache().invalidate(canonical_key)
+        except Exception as exc:  # noqa: BLE001 -- best-effort, never block a repair
+            logger.warning(
+                "hnsw_orphan_sweep: could not invalidate HNSWIndexCache for %s: %s",
+                collection_path,
+                exc,
+            )
+
+    return _invalidate
 
 
 def _resolve_collection_context(collection_path: Path) -> Optional[Any]:
@@ -224,6 +327,7 @@ def process_candidate(
     candidate: SweepCandidate,
     *,
     cache_invalidator: Optional[Callable[[str], None]] = None,
+    activated_repo_manager: Optional[Any] = None,
 ) -> SweepOutcome:
     """Check (and repair, if needed) one HNSW collection.
 
@@ -233,11 +337,19 @@ def process_candidate(
             after a successful repair. Defaults to invalidating the real
             server-side HNSWIndexCache singleton; tests may inject a
             recording callable instead.
+        activated_repo_manager: Optional object exposing
+            ``get_activation_id(username, user_alias) -> Optional[str]``
+            (``ActivatedRepoManager``'s real signature). Used ONLY when
+            ``cache_invalidator`` is not supplied, to resolve the
+            activation-scoped cache key for a ``kind == "activated"``
+            candidate (Story #1458 AC11 Finding 7, Bug #1542 follow-up).
+            Ignored for golden/``golden_temporal`` candidates.
 
     Returns:
         SweepOutcome describing what happened.
     """
-    invalidate = cache_invalidator or _default_cache_invalidator
+    activation_id = _resolve_activation_id(candidate, activated_repo_manager)
+    invalidate = cache_invalidator or _make_default_cache_invalidator(activation_id)
     collection_path = candidate.repo_root / candidate.index_relpath.parent
 
     if is_versioned_snapshot(str(collection_path)):
@@ -295,7 +407,37 @@ def process_candidate(
         return SweepOutcome.TRANSIENT_SKIP
 
     if outcome == SweepOutcome.REPAIRED:
+        # Bug #1542: the DEFAULT invalidator (built by
+        # _make_default_cache_invalidator, bound to the activation_id
+        # _resolve_activation_id resolved above) re-derives the canonical,
+        # chunk-layout-token-and-activation-id-bearing cache key from this
+        # bare path before evicting -- passing the bare path itself here
+        # keeps injected test callables (which record "which candidate was
+        # flagged") receiving the plain collection path, unchanged.
         invalidate(str(collection_path))
         logger.info("hnsw_orphan_sweep: repaired orphans for %s", collection_path)
 
     return outcome
+
+
+# Codex-review Q2 (Bug #1542 follow-up): a structural capability marker,
+# NOT an identity check. scheduler.py's HNSWOrphanRepairSweepScheduler used
+# to decide whether to pass `activated_repo_manager` via `fn is
+# process_candidate` -- a silent-failure trap, since ANY legitimate wrapper,
+# `functools.partial`, decorator, or instrumentation layer around this
+# function would fail that identity check and silently degrade to the
+# "no activation_id" branch with zero diagnostic, even in real production
+# code. A plain function attribute survives `functools.wraps`-based
+# wrapping (`functools.WRAPPER_UPDATES` copies `__dict__`, where this
+# attribute lives), so a wrapper decorated with
+# `@functools.wraps(process_candidate)` inherits it automatically. Callers
+# MUST check `getattr(fn, "supports_activated_repo_manager", False)`
+# instead of identity; see scheduler.py's `_process_one()`. Note:
+# `functools.partial` does NOT propagate this marker (a `partial` object
+# has no `__dict__` copy from the wrapped callable at all) -- any future
+# `functools.partial`-based wrapper around `process_candidate` must set
+# `supports_activated_repo_manager = True` explicitly to preserve
+# `activation_id` wiring. (`functools.wraps`/`functools.lru_cache` applied
+# directly to this function DO propagate it, via `update_wrapper`'s
+# `__dict__` copy -- verified empirically, not merely assumed.)
+process_candidate.supports_activated_repo_manager = True  # type: ignore[attr-defined]

@@ -16,7 +16,11 @@ from code_indexer.storage.filesystem_vector_store import FilesystemVectorStore
 @pytest.fixture
 def temp_store(tmp_path: Path) -> FilesystemVectorStore:
     """Create temporary filesystem vector store."""
-    store = FilesystemVectorStore(base_path=tmp_path / "index", project_root=tmp_path)
+    store = FilesystemVectorStore(
+        base_path=tmp_path / "index",
+        project_root=tmp_path,
+        use_chunks_db_for_new_collections=False,
+    )
     return store
 
 
@@ -329,7 +333,7 @@ class TestValidateEmbeddingDimensions:
         # Manually corrupt the stored vectors to have wrong dimensions
         collection_path = temp_store.base_path / collection_name
         for json_file in collection_path.rglob("*.json"):
-            if "collection_meta" not in json_file.name:
+            if json_file.name.startswith("vector_"):
                 with open(json_file) as f:
                     data = json.load(f)
                 # Truncate vector to wrong size
@@ -367,7 +371,7 @@ class TestValidateEmbeddingDimensions:
         collection_path = temp_store.base_path / collection_name
         file_idx = 0
         for json_file in collection_path.rglob("*.json"):
-            if "collection_meta" not in json_file.name:
+            if json_file.name.startswith("vector_"):
                 with open(json_file) as f:
                     data = json.load(f)
                 # Corrupt every other file

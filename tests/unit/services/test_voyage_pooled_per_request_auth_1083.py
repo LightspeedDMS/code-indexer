@@ -16,8 +16,8 @@ from unittest.mock import patch
 
 import httpx
 
-from src.code_indexer.config import VoyageAIConfig
-from src.code_indexer.services.voyage_ai import VoyageAIClient
+from code_indexer.config import VoyageAIConfig
+from code_indexer.services.voyage_ai import VoyageAIClient
 
 
 _FAKE_KEY = "test-voyage-key-1083"

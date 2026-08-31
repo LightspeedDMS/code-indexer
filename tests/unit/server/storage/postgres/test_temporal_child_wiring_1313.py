@@ -114,10 +114,19 @@ class TestBuildTemporalChildEnv:
         assert result["PATH"] == "/usr/bin"
         assert result["OTHER_VAR"] == "keep-me"
 
-    def test_sqlite_mode_returns_none(self):
+    def test_sqlite_mode_returns_dict_without_pg_bootstrap_dir(self):
+        """Story #1457 AC6 Finding-1 (round-23): build_temporal_child_env
+        now ALWAYS returns a dict -- sqlite mode still gets no
+        CIDX_TEMPORAL_PG_BOOTSTRAP_DIR (unchanged), but no longer returns
+        None (see test_temporal_child_wiring_server_context_1457.py for
+        the CIDX_SERVER_REFRESH_CONTEXT coverage this restructuring adds).
+        """
         from code_indexer.server.utils.config_manager import ServerConfig
         from code_indexer.server.storage.postgres.temporal_child_wiring import (
             build_temporal_child_env,
+        )
+        from code_indexer.storage.temporal_metadata_backend_registry import (
+            TEMPORAL_PG_BOOTSTRAP_DIR_ENV,
         )
 
         server_config = ServerConfig(
@@ -126,16 +135,24 @@ class TestBuildTemporalChildEnv:
 
         result = build_temporal_child_env(server_config, base_env={})
 
-        assert result is None
+        assert isinstance(result, dict)
+        assert TEMPORAL_PG_BOOTSTRAP_DIR_ENV not in result
 
-    def test_none_config_returns_none(self):
+    def test_none_config_returns_dict_without_pg_bootstrap_dir(self):
+        """Story #1457 AC6 Finding-1 (round-23): a None server_config (e.g.
+        a failed bootstrap read) still yields a dict, not None -- only the
+        postgres-specific bootstrap-dir var is skipped."""
         from code_indexer.server.storage.postgres.temporal_child_wiring import (
             build_temporal_child_env,
+        )
+        from code_indexer.storage.temporal_metadata_backend_registry import (
+            TEMPORAL_PG_BOOTSTRAP_DIR_ENV,
         )
 
         result = build_temporal_child_env(None, base_env={})
 
-        assert result is None
+        assert isinstance(result, dict)
+        assert TEMPORAL_PG_BOOTSTRAP_DIR_ENV not in result
 
     def test_no_base_env_defaults_to_os_environ_copy(self):
         """When base_env is omitted, the returned dict must still contain

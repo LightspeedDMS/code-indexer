@@ -13,6 +13,8 @@ from starlette import status
 from ...global_repos.alias_manager import AliasManager
 from ..auth.dependencies import get_current_user_hybrid
 from ..auth.user_manager import User
+from ..services.deactivation_query_drain import track_activated_repo_query
+from ..utils.registry_factory import resolve_backend_registry_attr
 from .wiki_cache import WikiCache
 from .wiki_service import WikiService
 
@@ -83,11 +85,22 @@ _wiki_cache: Optional[WikiCache] = None
 
 
 def _get_wiki_cache(request: Request) -> WikiCache:
-    """Lazily initialise the module-level WikiCache singleton."""
+    """Lazily initialise the module-level WikiCache singleton.
+
+    Bug #1665: resolves the shared PostgreSQL wiki_cache backend in
+    cluster mode via resolve_backend_registry_attr() so a page cached by
+    one node is visible to a request routed to a different node. Safe to
+    resolve at first-use time: app.state.backend_registry is guaranteed
+    populated before the server can serve its first HTTP request (Bug
+    #1515).
+    """
     global _wiki_cache
     if _wiki_cache is None:
         manager = request.app.state.golden_repo_manager
-        _wiki_cache = WikiCache(manager.db_path)
+        wiki_backend, _ = resolve_backend_registry_attr(
+            "wiki_cache", caller_name="wiki/routes._get_wiki_cache"
+        )
+        _wiki_cache = WikiCache(manager.db_path, storage_backend=wiki_backend)
         _wiki_cache.ensure_tables()
     return _wiki_cache
 
@@ -221,14 +234,23 @@ def user_wiki_search(
 
     semantic_query_manager = request.app.state.semantic_query_manager
     try:
-        result = semantic_query_manager.query_user_repositories(
-            username=username,
-            query_text=q.strip(),
-            repository_alias=alias,
-            search_mode=mode,
-            file_extensions=[".md"],
-            limit=50,
-        )
+        # Codex Finding #7: wire the SAME activated-repo QueryTracker
+        # refcount protection MCP search.py already has -- this route
+        # always targets an activated (non-global) repo.
+        with track_activated_repo_query(
+            getattr(request.app.state, "query_tracker", None),
+            getattr(request.app.state, "activated_repo_manager", None),
+            username,
+            alias,
+        ):
+            result = semantic_query_manager.query_user_repositories(
+                username=username,
+                query_text=q.strip(),
+                repository_alias=alias,
+                search_mode=mode,
+                file_extensions=[".md"],
+                limit=50,
+            )
     except Exception:
         logger.warning(
             "User wiki search failed for %s/%s query %r",

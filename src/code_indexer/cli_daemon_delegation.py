@@ -692,6 +692,21 @@ def _index_standalone(force_reindex: bool = False, **kwargs) -> int:
         if "enable_fts" in cli_kwargs:
             cli_kwargs["fts"] = cli_kwargs.pop("enable_fts")
 
+        # Bug discovered validating #1528: use_chunks_db_for_new_collections is
+        # Story #1488's RESOLVED bool, forwarded through _index_via_daemon's
+        # daemon RPC kwargs -- but the real index() Click command has no such
+        # parameter, only new_collection_layout (the raw string choice).
+        # ctx.invoke(cli_index, **cli_kwargs) below raises TypeError on this
+        # key otherwise. Translate back to the string enum the CLI expects.
+        if "use_chunks_db_for_new_collections" in cli_kwargs:
+            _resolved_layout = cli_kwargs.pop("use_chunks_db_for_new_collections")
+            cli_kwargs.setdefault(
+                "new_collection_layout",
+                None
+                if _resolved_layout is None
+                else ("chunks_db" if _resolved_layout else "sharded_json"),
+            )
+
         # Setup context object with mode detection
         project_root = find_project_root(Path.cwd())
         mode_detector = CommandModeDetector(project_root)
@@ -910,6 +925,14 @@ def _index_via_daemon(
                 "all_branches": kwargs.get("all_branches", False),
                 "max_commits": kwargs.get("max_commits"),
                 "since_date": kwargs.get("since_date"),
+                # Story #1488 (Codex Finding): carry the resolved
+                # `--new-collection-layout` choice across the RPC boundary so the
+                # daemon builds NEW collections in the requested layout. A bool
+                # (explicit) or None (flag absent -> daemon-side env/default) --
+                # both trivially serializable over rpyc.
+                "use_chunks_db_for_new_collections": kwargs.get(
+                    "use_chunks_db_for_new_collections"
+                ),
                 # rebuild_* flags not supported in daemon mode yet (early-exit paths in local mode)
             }
 

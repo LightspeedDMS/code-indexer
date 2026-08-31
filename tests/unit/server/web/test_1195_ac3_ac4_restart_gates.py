@@ -396,7 +396,7 @@ class TestAC4ElevationGateBehavioral:
             "/admin/config/server",
             data={
                 "csrf_token": config_csrf,
-                "host": "0.0.0.0",
+                "host": "127.0.0.1",
                 "port": "8000",
                 "workers": "1",
                 "log_level": "INFO",

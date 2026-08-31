@@ -13,6 +13,8 @@ Tests:
 """
 
 import contextlib
+import importlib
+import sys
 from pathlib import Path
 from unittest.mock import MagicMock
 from typing import Any, Dict, Generator, Optional
@@ -129,6 +131,25 @@ class FakeGlobalReposBackend:
         pass
 
 
+class FakeGoldenRepoMetadataBackend:
+    """
+    Minimal stand-in for GoldenRepoMetadataBackend's refresh-integrity
+    quarantine methods (Bug #1506) -- reports "never quarantined" and
+    no-ops on record/reset, sufficient for tests that don't exercise
+    quarantine behavior directly but whose refresh path now reads this
+    state on every cycle.
+    """
+
+    def get_refresh_integrity_failure_state(self, golden_alias: str):
+        return None
+
+    def record_refresh_integrity_failure(self, golden_alias: str, detail: str) -> int:
+        return 1
+
+    def reset_refresh_integrity_failure(self, golden_alias: str) -> None:
+        return None
+
+
 class FakeBackendRegistry:
     """
     Minimal BackendRegistry-like object with a global_repos attribute.
@@ -136,6 +157,7 @@ class FakeBackendRegistry:
 
     def __init__(self, global_repos: FakeGlobalReposBackend) -> None:
         self.global_repos = global_repos
+        self.golden_repo_metadata = FakeGoldenRepoMetadataBackend()
 
 
 # ---------------------------------------------------------------------------
@@ -886,6 +908,62 @@ def test_resolve_backend_registry_state_never_imports_server_app() -> None:
             sys.modules["code_indexer.server.app"] = saved
 
 
+@contextlib.contextmanager
+def _fresh_server_app_module() -> Generator:
+    """Yield a pristine, never-yet-accessed `code_indexer.server.app` module.
+
+    Pops it from `sys.modules` (and clears the parent package's cached
+    attribute) before re-importing, restoring both on exit so this never
+    leaks import state into later tests.
+    """
+    import code_indexer.server as server_pkg
+
+    _unset = object()
+    saved_module = sys.modules.pop("code_indexer.server.app", None)
+    saved_pkg_attr = getattr(server_pkg, "app", _unset)
+    try:
+        yield importlib.import_module("code_indexer.server.app")
+    finally:
+        sys.modules.pop("code_indexer.server.app", None)
+        if saved_module is not None:
+            sys.modules["code_indexer.server.app"] = saved_module
+        if saved_pkg_attr is _unset:
+            if hasattr(server_pkg, "app"):
+                delattr(server_pkg, "app")
+        else:
+            server_pkg.app = saved_pkg_attr
+
+
+def test_running_server_app_state_probe_does_not_trigger_lazy_singleton_construction_1678() -> (
+    None
+):
+    """
+    Bug #1678: `getattr(app_module, "app", None)` is NOT side-effect-free --
+    `app` is a PEP 562 `__getattr__` lazy singleton (Bug #1638), so a bare
+    `getattr` with a default still constructs and permanently caches it.
+    That let an unrelated `create_app()` call (e.g. a test fixture's own
+    temp-dir-scoped app) leak its stale golden_repo_manager into the
+    process-wide singleton, breaking later tests with
+    `sqlite3.OperationalError: unable to open database file`.
+    """
+    from code_indexer.server.utils.registry_factory import (
+        _running_server_app_state,
+    )
+
+    with _fresh_server_app_module() as fresh_module:
+        assert fresh_module._initialized is False
+
+        result = _running_server_app_state()
+
+        assert result is None, "Bug #1678: must not trigger construction"
+        assert fresh_module._initialized is False, (
+            "Bug #1678: probe must not construct the singleton"
+        )
+        assert "app" not in fresh_module.__dict__, (
+            "Bug #1678: probe must not populate the lazy `app` singleton"
+        )
+
+
 def test_resolve_backend_registry_state_still_works_when_app_already_imported(
     tmp_path: Path,
 ) -> None:
@@ -961,3 +1039,81 @@ def test_bare_scheduler_registry_getter_raises_clear_error_in_solo_without_init(
 
     with pytest.raises(RuntimeError, match="golden_repos_dir"):
         _ = scheduler.registry
+
+
+# ---------------------------------------------------------------------------
+# Issue #1546 Fix 1 (Codex review): is_storage_mode_undetermined() -- an
+# explicit, in-band "still resolving" signal that lifespan.py will stamp
+# onto app.state.storage_mode BEFORE its real value is known. Deliberately
+# narrower than "attribute is absent": a plain unit test that imports
+# code_indexer.server.app but never runs its lifespan (the overwhelming
+# majority of this test suite) must NOT be treated as "undetermined" --
+# only the real startup window, marked by the dedicated sentinel, counts.
+# (The "no app.state at all / pure CLI" case is already covered by this
+# file's existing test_resolve_backend_registry_state_never_imports_server_app
+# -- not duplicated here.)
+# ---------------------------------------------------------------------------
+
+
+_DELETE_ATTR = object()
+
+
+@contextlib.contextmanager
+def _app_state_storage_mode(value: Any) -> Generator[None, None, None]:
+    """Temporarily set app.state.storage_mode to `value` (or delete the
+    attribute entirely when `value` is `_DELETE_ATTR`), restoring the
+    exact prior state (including "attribute never existed") on exit."""
+    from code_indexer.server import app as app_module
+
+    _unset = object()
+    saved = getattr(app_module.app.state, "storage_mode", _unset)
+    try:
+        if value is _DELETE_ATTR:
+            if hasattr(app_module.app.state, "storage_mode"):
+                delattr(app_module.app.state, "storage_mode")
+        else:
+            app_module.app.state.storage_mode = value
+        yield
+    finally:
+        if saved is _unset:
+            if hasattr(app_module.app.state, "storage_mode"):
+                delattr(app_module.app.state, "storage_mode")
+        else:
+            app_module.app.state.storage_mode = saved
+
+
+class TestIsStorageModeUndeterminedFalseCases:
+    def test_false_when_storage_mode_attribute_is_simply_absent(self) -> None:
+        """The common unit-test shape: code_indexer.server.app is imported
+        (so app.state exists) but its lifespan never ran, so
+        storage_mode was never assigned at all. This must NOT be treated
+        as the pending window -- only the explicit sentinel does that."""
+        from code_indexer.server.utils.registry_factory import (
+            is_storage_mode_undetermined,
+        )
+
+        with _app_state_storage_mode(_DELETE_ATTR):
+            assert is_storage_mode_undetermined() is False
+
+    def test_false_when_storage_mode_already_resolved(self) -> None:
+        from code_indexer.server.utils.registry_factory import (
+            is_storage_mode_undetermined,
+        )
+
+        with _app_state_storage_mode("sqlite"):
+            assert is_storage_mode_undetermined() is False
+        with _app_state_storage_mode("postgres"):
+            assert is_storage_mode_undetermined() is False
+
+
+class TestIsStorageModeUndeterminedPendingSentinel:
+    def test_true_when_pending_sentinel_is_stamped(self) -> None:
+        """The genuine startup window: lifespan.py has stamped the pending
+        sentinel but not yet overwritten it with the real value."""
+        from code_indexer.server.utils.registry_factory import (
+            STORAGE_MODE_PENDING_SENTINEL,
+            is_storage_mode_undetermined,
+        )
+
+        with _app_state_storage_mode(STORAGE_MODE_PENDING_SENTINEL):
+            assert is_storage_mode_undetermined() is True

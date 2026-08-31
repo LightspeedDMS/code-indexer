@@ -250,7 +250,37 @@ class CohereMultimodalClient:
             _response.raise_for_status()
             return _response
 
+        def _count_multimodal_tokens() -> int:
+            """Text-block token count for this request (Story #1586 AC2).
+
+            Images consume a different, provider-defined token budget the
+            embedded text tokenizer cannot compute; only the text block
+            _build_content_blocks() always places first is counted.
+            """
+            total = 0
+            for inp in inputs:
+                content = inp.get("content") or []
+                if content and content[0].get("type") == "text":
+                    total += self._count_tokens(content[0].get("text", ""))
+            return total
+
+        # Story #1586 AC2: cidx.embedding.* OTEL metrics -- one event per
+        # real outbound HTTP attempt, the same boundary instrument_call()
+        # already wraps.
+        from code_indexer.services.embedding_metrics_telemetry import (
+            record_embedding_provider_call,
+        )
+
+        def _record_error_metric() -> None:
+            record_embedding_provider_call(
+                model=self.config.model,
+                duration_seconds=time.monotonic() - _embed_metric_start,
+                status="error",
+                count_tokens=lambda: 0,
+            )
+
         for attempt in range(max_attempts):
+            _embed_metric_start = time.monotonic()
             try:
                 _start = time.time()
                 response = instrument_call(
@@ -263,9 +293,16 @@ class CohereMultimodalClient:
                     purpose="index",
                     fn=_do_post_and_validate,
                 )
+                record_embedding_provider_call(
+                    model=self.config.model,
+                    duration_seconds=time.monotonic() - _embed_metric_start,
+                    status="success",
+                    count_tokens=_count_multimodal_tokens,
+                )
                 return dict(response.json())
 
             except httpx.HTTPStatusError as http_exc:
+                _record_error_metric()
                 last_error = http_exc
                 status_code = http_exc.response.status_code
 
@@ -319,6 +356,7 @@ class CohereMultimodalClient:
                 break
 
             except Exception as exc:
+                _record_error_metric()
                 last_error = exc
                 if attempt < max_retries:
                     delay = retry_delay * (2**attempt if exponential_backoff else 1)
@@ -472,6 +510,74 @@ class CohereMultimodalClient:
             all_embeddings.extend(embeddings)
 
         return all_embeddings
+
+    def get_embeddings_batch(
+        self,
+        texts: List[str],
+        model: Optional[str] = None,
+        *,
+        embedding_purpose: str = "document",
+        retry: bool = True,
+    ) -> List[List[float]]:
+        """Standard EmbeddingProvider batch contract (Bug #1480 follow-up).
+
+        The server-side embedding path (EmbeddingCoalescer) calls this method;
+        without it a server-side multimodal query raised AttributeError and
+        zeroed the whole result set. Embeds TEXT-ONLY queries (no images) in
+        the multimodal vector space by delegating to
+        get_multimodal_embeddings_batch, so the returned vectors match this
+        client's multimodal collection dimension (embed-v4.0-multimodal = 1536).
+
+        ``model`` and ``retry`` are accepted for signature-compatibility with
+        the base contract; the multimodal batch path manages its own model and
+        retries.
+        """
+        if not texts:
+            return []
+        input_type = "query" if embedding_purpose == "query" else "document"
+        items: List[Dict[str, Any]] = [{"text": t, "image_paths": []} for t in texts]
+        return self.get_multimodal_embeddings_batch(items, input_type=input_type)
+
+    def get_provider_name(self) -> str:
+        """Get the name of this embedding provider.
+
+        Bug #1480 remediation: required by the server-side
+        ``QueryEmbeddingCache.qualifier()`` contract (see
+        ``server/services/query_embedding_cache.py``) and by
+        ``governed_call.coalesced_query_embedding``'s cache-gating branch,
+        both of which call this before consulting the cache. Mirrors
+        ``CohereEmbeddingProvider.get_provider_name()`` exactly.
+        """
+        return "cohere"
+
+    def get_current_model(self) -> str:
+        """Get the current active model name.
+
+        Bug #1480 remediation: part of the ``QueryEmbeddingCache.qualifier()``
+        contract. Mirrors ``CohereEmbeddingProvider.get_current_model()``.
+        """
+        return str(self.config.model)
+
+    def get_model_info(self) -> Dict[str, Any]:
+        """Get information about the current model.
+
+        Bug #1480 remediation: required by ``QueryEmbeddingCache.qualifier()``,
+        which reads the ``"dimensions"`` key. Derives ``dimensions`` from
+        ``self.config.default_dimension`` -- the SAME value this client
+        actually sends as the ``output_dimension`` parameter in
+        ``_make_request()`` -- never a fabricated number, so the reported
+        dimension always matches the real embedding vectors this client
+        returns.
+        """
+        return {
+            "name": self.config.model,
+            "provider": "cohere",
+            "dimensions": int(self.config.default_dimension),
+            "max_tokens": COHERE_MULTIMODAL_TOKEN_LIMIT,
+            "max_images_per_request": MAX_IMAGES_PER_REQUEST,
+            "supports_batch": True,
+            "api_endpoint": self.config.api_endpoint,
+        }
 
     def get_embedding(self, text: str, **kwargs) -> List[float]:
         """Generate text-only embedding for query purposes.

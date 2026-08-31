@@ -17,7 +17,9 @@ from typing import Dict, Any, Optional
 from code_indexer.server.auth.user_manager import User, UserRole
 from code_indexer.server.auth import dependencies as dependencies
 from code_indexer.server.logging_utils import format_error_log
-from code_indexer.server.middleware.correlation import get_correlation_id
+from code_indexer.server.telemetry.correlation_bridge import (
+    get_current_correlation_id as get_correlation_id,
+)
 
 from code_indexer.server.mcp.handlers import _utils
 from code_indexer.server.mcp.handlers._utils import (
@@ -39,32 +41,22 @@ logger = logging.getLogger(__name__)
 DEFAULT_AUDIT_LOG_LIMIT = 100
 JOB_ID_LENGTH = 8
 
+# Issue #1646: handle_query_audit_logs pushes `page` straight into
+# AuditLogService.query()'s `offset` parameter. This clamps `page` to a sane
+# maximum so a pathological caller-supplied value can't produce an
+# unbounded OFFSET.
+_AUDIT_LOG_MAX_PAGE = 10_000
+
+# Matches the tool's own documented `limit` maximum (query_audit_logs.md)
+# so a caller-supplied `limit` can't force an unbounded SQL fetch.
+_AUDIT_LOG_MAX_LIMIT = 1000
+
 
 def _get_legacy():
     """Lazy import of _legacy for shared helpers."""
     from code_indexer.server.mcp.handlers import _legacy
 
     return _legacy
-
-
-# ---------------------------------------------------------------------------
-# Helpers re-imported from scip module (used by handle_query_audit_logs)
-# ---------------------------------------------------------------------------
-
-
-def _get_scip_helpers():
-    """Lazy import of scip helpers used by audit log handler."""
-    from code_indexer.server.mcp.handlers.scip import (
-        _filter_audit_entries,
-        _get_pr_logs_from_service,
-        _get_cleanup_logs_from_service,
-    )
-
-    return (
-        _filter_audit_entries,
-        _get_pr_logs_from_service,
-        _get_cleanup_logs_from_service,
-    )
 
 
 # =============================================================================
@@ -565,10 +557,14 @@ def handle_admin_logs_query(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     if not log_db_path:
         return _mcp_response({"success": False, "error": "Log database not configured"})  # type: ignore[no-any-return]
 
-    # Initialize service
+    # Initialize service. Bug #1553: pass the (possibly None) logs_backend so
+    # cluster-mode reads follow the same store the writer thread uses --
+    # without this, cluster mode always reads the frozen, empty node-local
+    # logs.db once the writer's backend is wired at startup.
     from code_indexer.server.services.log_aggregator_service import LogAggregatorService
 
-    service = LogAggregatorService(log_db_path)
+    logs_backend = getattr(_utils.app_module.app.state, "logs_backend", None)
+    service = LogAggregatorService(log_db_path, logs_backend=logs_backend)
 
     # Extract parameters
     page = args.get("page", 1)
@@ -705,11 +701,13 @@ def admin_logs_export(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     if not log_db_path:
         return _mcp_response({"success": False, "error": "Log database not configured"})  # type: ignore[no-any-return]
 
-    # Initialize services
+    # Initialize services. Bug #1553: pass logs_backend so cluster-mode
+    # exports follow the same store the writer thread uses.
     from code_indexer.server.services.log_aggregator_service import LogAggregatorService
     from code_indexer.server.services.log_export_formatter import LogExportFormatter
 
-    service = LogAggregatorService(log_db_path)
+    logs_backend = getattr(_utils.app_module.app.state, "logs_backend", None)
+    service = LogAggregatorService(log_db_path, logs_backend=logs_backend)
     formatter = LogExportFormatter()
 
     # Extract parameters
@@ -1445,9 +1443,111 @@ def handle_delete_api_key(args: Dict[str, Any], user: User) -> Dict[str, Any]:
 # =============================================================================
 
 
+def _resolve_audit_log_pagination(args: Dict[str, Any]) -> tuple:
+    """Resolve (limit, offset) from the `limit`/`page` MCP arguments.
+
+    Issue #1646: `page` was previously never read, so every call returned
+    the same first-`limit` slice regardless of `page`. Both `limit` and
+    `page` are clamped against named maxima to protect against a
+    pathological caller-supplied value producing an unbounded SQL fetch or
+    OFFSET.
+    """
+    limit = _coerce_int(args.get("limit"), DEFAULT_AUDIT_LOG_LIMIT)
+    if limit <= 0:
+        limit = DEFAULT_AUDIT_LOG_LIMIT
+    elif limit > _AUDIT_LOG_MAX_LIMIT:
+        limit = _AUDIT_LOG_MAX_LIMIT
+    page = _coerce_int(args.get("page"), 1)
+    if page < 1:
+        page = 1
+    elif page > _AUDIT_LOG_MAX_PAGE:
+        page = _AUDIT_LOG_MAX_PAGE
+    return limit, (page - 1) * limit
+
+
+def _get_audit_service() -> Any:
+    """Resolve app.state.audit_service, raising if the server isn't configured."""
+    import code_indexer.server.app as _app_module
+
+    _svc = getattr(getattr(_app_module, "app", None), "state", None)
+    audit_svc = getattr(_svc, "audit_service", None) if _svc else None
+    if audit_svc is None:
+        raise RuntimeError("AuditLogService not available on app.state")
+    return audit_svc
+
+
+def _decode_audit_log_details(row: Dict[str, Any]) -> Dict[str, Any]:
+    """Decode an audit_logs row's `details` JSON column, logging on failure."""
+    details_str = row.get("details") or "{}"
+    try:
+        details_obj = (
+            json.loads(details_str) if isinstance(details_str, str) else details_str
+        )
+    except (ValueError, TypeError) as e:
+        logger.warning(
+            "handle_query_audit_logs: malformed details JSON on audit_logs "
+            "row id=%s action_type=%s: %s",
+            row.get("id"),
+            row.get("action_type"),
+            e,
+        )
+        return {}
+    return details_obj if isinstance(details_obj, dict) else {}
+
+
+def _build_audit_log_entry(row: Dict[str, Any]) -> Dict[str, Any]:
+    """Build one query_audit_logs response entry from an audit_logs row.
+
+    PR creation (pr_creation_success/failure/disabled) and git cleanup
+    events carry a repo_alias/pr_url/repo_path inside their JSON `details`
+    blob (see PasswordChangeAuditLogger._log_to_service) -- when present,
+    `resource` surfaces that context. `user`/`action` always mirror the
+    row's own `admin_id`/`action_type` columns, the SAME columns
+    AuditLogService.query() filters on, so an entry can never disagree with
+    the SQL-level filter that selected it.
+
+    Issue #1647: this replaces a second, overlapping fetch via
+    get_pr_logs()/get_cleanup_logs() that used to re-select these SAME rows
+    (they live in the one audit_logs table, target_type="auth" like every
+    other event) and merge them on top of the general query, duplicating
+    every pr_creation_*/git_cleanup entry. There is now only one query.
+    """
+    from code_indexer.server.services.audit_log_service import (
+        PR_ACTION_TYPES,
+        CLEANUP_ACTION_TYPE,
+    )
+
+    details_obj = _decode_audit_log_details(row)
+    action = row.get("action_type", "")
+    admin_id = row.get("admin_id", "")
+    target_id = row.get("target_id", "")
+    resource = target_id
+    if action in PR_ACTION_TYPES and details_obj.get("pr_url") is not None:
+        resource = details_obj["pr_url"]
+    elif action == CLEANUP_ACTION_TYPE and details_obj.get("repo_path") is not None:
+        resource = details_obj["repo_path"]
+
+    return {
+        "timestamp": row.get("timestamp", ""),
+        "user": admin_id,
+        "action": action,
+        "action_type": action,
+        "target_type": row.get("target_type", ""),
+        "target_id": target_id,
+        "admin_id": admin_id,
+        "resource": resource,
+        "details": details_obj,
+    }
+
+
 @require_mcp_elevation()
 def handle_query_audit_logs(args: Dict[str, Any], user: User) -> Dict[str, Any]:
-    """Query security audit logs with optional filtering (admin only)."""
+    """Query security audit logs with optional filtering (admin only).
+
+    Issues #1646/#1647: one AuditLogService.query() call is the sole source
+    for both `entries` and `total` -- see _resolve_audit_log_pagination and
+    _build_audit_log_entry for the fix details.
+    """
     try:
         if user.role != UserRole.ADMIN:
             return _mcp_response(  # type: ignore[no-any-return]
@@ -1459,87 +1559,21 @@ def handle_query_audit_logs(args: Dict[str, Any], user: User) -> Dict[str, Any]:
 
         # Support both "action" and "action_type" as filter parameter names
         action_filter = args.get("action") or args.get("action_type")
+        limit, offset = _resolve_audit_log_pagination(args)
+        audit_svc = _get_audit_service()
 
-        (
-            _filter_audit_entries,
-            _get_pr_logs_from_service,
-            _get_cleanup_logs_from_service,
-        ) = _get_scip_helpers()
-
-        limit = _coerce_int(args.get("limit"), DEFAULT_AUDIT_LOG_LIMIT)
-        pr_logs = _get_pr_logs_from_service(limit=limit)
-        cleanup_logs = _get_cleanup_logs_from_service(limit=limit)
-
-        all_entries = [
-            {
-                "timestamp": log.get("timestamp", ""),
-                "user": log.get("repo_alias", ""),
-                "action": log.get("event_type") or log.get("action_type", ""),
-                "action_type": log.get("event_type") or log.get("action_type", ""),
-                "resource": log.get("pr_url", ""),
-                "details": log,
-            }
-            for log in pr_logs
-        ] + [
-            {
-                "timestamp": log.get("timestamp", ""),
-                "user": "system",
-                "action": log.get("event_type") or log.get("action_type", ""),
-                "action_type": log.get("event_type") or log.get("action_type", ""),
-                "resource": log.get("repo_path", ""),
-                "details": log,
-            }
-            for log in cleanup_logs
-        ]
-
-        # Story #458: Also query the main audit_logs table for general admin actions
-        # (e.g., open_delegation_executed, group/user management events)
-        import code_indexer.server.app as _app_module
-
-        _svc = getattr(getattr(_app_module, "app", None), "state", None)
-        _audit_svc = getattr(_svc, "audit_service", None) if _svc else None
-        if _audit_svc is not None:
-            audit_rows, _ = _audit_svc.query(
-                action_type=action_filter if action_filter else None,
-                admin_id=args.get("user"),
-                date_from=args.get("from_date"),
-                date_to=args.get("to_date"),
-                limit=limit,
-            )
-            for row in audit_rows:
-                details_str = row.get("details") or "{}"
-                try:
-                    details_obj = (
-                        json.loads(details_str)
-                        if isinstance(details_str, str)
-                        else details_str
-                    )
-                except (ValueError, TypeError):
-                    details_obj = {}
-                all_entries.append(
-                    {
-                        "timestamp": row.get("timestamp", ""),
-                        "user": row.get("admin_id", ""),
-                        "action": row.get("action_type", ""),
-                        "action_type": row.get("action_type", ""),
-                        "target_type": row.get("target_type", ""),
-                        "target_id": row.get("target_id", ""),
-                        "admin_id": row.get("admin_id", ""),
-                        "resource": row.get("target_id", ""),
-                        "details": details_obj,
-                    }
-                )
-
-        filtered = _filter_audit_entries(
-            all_entries,
-            args.get("user"),
-            action_filter,
-            args.get("from_date"),
-            args.get("to_date"),
-            limit,
+        audit_rows, total = audit_svc.query(
+            action_type=action_filter if action_filter else None,
+            admin_id=args.get("user"),
+            date_from=args.get("from_date"),
+            date_to=args.get("to_date"),
+            limit=limit,
+            offset=offset,
         )
+        entries = [_build_audit_log_entry(row) for row in audit_rows]
+
         return _mcp_response(  # type: ignore[no-any-return]
-            {"success": True, "entries": filtered, "total": len(filtered)}
+            {"success": True, "entries": entries, "total": total}
         )
     except RuntimeError as e:
         logger.critical("AuditLogService configuration error: %s", e)

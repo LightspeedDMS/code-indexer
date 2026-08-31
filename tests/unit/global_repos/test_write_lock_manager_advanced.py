@@ -200,17 +200,30 @@ class TestRefreshSchedulerDelegation:
 
     def test_scheduler_exposes_write_lock_manager_attribute(self, scheduler):
         """
-        RefreshScheduler must expose a write_lock_manager attribute
-        so external code can use WriteLockManager directly.
+        RefreshScheduler must expose a write_lock_manager attribute.
+
+        Issue #1546 Phase 2: this is now an AliasLockCoordinator (not a
+        bare WriteLockManager) -- it preserves WriteLockManager's exact
+        bool-based API while dispatching per-alias between the legacy
+        file lock and a DB-backed AliasLockStore. Default construction
+        (no rollout-flag getter passed, as this fixture's scheduler does)
+        keeps it wrapping a real WriteLockManager for byte-identical
+        file-based behavior.
         """
+        from code_indexer.global_repos.alias_lock_coordinator import (
+            AliasLockCoordinator,
+        )
         from code_indexer.global_repos.write_lock_manager import WriteLockManager
 
         assert hasattr(scheduler, "write_lock_manager"), (
             "RefreshScheduler must have a write_lock_manager attribute"
         )
-        assert isinstance(scheduler.write_lock_manager, WriteLockManager), (
-            "write_lock_manager must be a WriteLockManager instance"
+        assert isinstance(scheduler.write_lock_manager, AliasLockCoordinator), (
+            "write_lock_manager must be an AliasLockCoordinator instance"
         )
+        assert isinstance(
+            scheduler.write_lock_manager._file_manager, WriteLockManager
+        ), "AliasLockCoordinator must wrap a real WriteLockManager"
 
     def test_scheduler_acquire_uses_owner_name(self, scheduler, lock_dir):
         """

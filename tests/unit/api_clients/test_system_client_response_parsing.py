@@ -9,7 +9,7 @@ from unittest.mock import Mock, patch
 from pathlib import Path
 import httpx
 
-from src.code_indexer.api_clients.system_client import SystemAPIClient
+from code_indexer.api_clients.system_client import SystemAPIClient
 
 
 class TestSystemClientResponseParsing:
@@ -151,7 +151,7 @@ class TestSystemClientResponseParsing:
     @pytest.mark.asyncio
     async def test_json_parsing_error_handling(self, system_client):
         """Test that JSON parsing errors are handled gracefully."""
-        from src.code_indexer.api_clients.base_client import APIClientError
+        from code_indexer.api_clients.base_client import APIClientError
 
         # Mock the _authenticated_request to return an httpx.Response with invalid JSON
         mock_response = Mock(spec=httpx.Response)

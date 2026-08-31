@@ -36,6 +36,19 @@ _MCP_DISPATCH_POOL_MAX: int = 1024
 _QUERY_EXECUTOR_POOL_MIN: int = 1
 _QUERY_EXECUTOR_POOL_MAX: int = 2048
 
+# Story #1676 AC1: telemetry configuration is managed exclusively via the Web
+# UI Config Screen (DB-backed) -- these 5 legacy environment variables no
+# longer override it. Listed here (rather than re-derived) so the single
+# aggregated-warning check in apply_env_overrides() and its tests share one
+# source of truth.
+_IGNORED_TELEMETRY_ENV_VARS: tuple = (
+    "CIDX_TELEMETRY_ENABLED",
+    "CIDX_OTEL_COLLECTOR_ENDPOINT",
+    "CIDX_OTEL_COLLECTOR_PROTOCOL",
+    "CIDX_OTEL_SERVICE_NAME",
+    "CIDX_DEPLOYMENT_ENVIRONMENT",
+)
+
 
 @dataclass
 class PasswordSecurityConfig:
@@ -224,9 +237,26 @@ class TelemetryConfig:
     """
     OpenTelemetry configuration for CIDX Server (Story #695).
 
-    Controls telemetry export including traces, metrics, and logs to an
-    OpenTelemetry collector endpoint. Disabled by default to ensure
-    zero overhead on fresh installations.
+    Controls telemetry export of traces and metrics to an OpenTelemetry
+    collector endpoint (export_traces/export_metrics below). Disabled by
+    default to ensure zero overhead on fresh installations.
+
+    Story #1676 AC2/AC3 scope split for "logs" (do not overclaim either
+    half in isolation):
+      - AC2 (delivered, this config unaffected): every stored log row in
+        BOTH the SQLite and PostgreSQL log stores carries `trace_id`/
+        `span_id` columns, letting an operator jump from a log line to its
+        OTEL trace. This is columnar log/trace CORRELATION, not export --
+        it works regardless of this config's settings, is populated by the
+        logging pipeline itself (logging_utils.inject_trace_context via
+        async_logging.IdentityQueueHandler.prepare()), and requires no new
+        field here.
+      - AC3 (delivered): actual OTLP log EXPORT to the collector endpoint
+        via the `export_logs` field below, mirroring export_traces/
+        export_metrics. A prior `export_logs` field was removed as dead
+        code (Bug #938) and stripped from loaded config dicts pending AC3;
+        that stripping was removed once this field became live again --
+        see load_config()'s telemetry_config conversion block.
     """
 
     # Core settings
@@ -238,6 +268,11 @@ class TelemetryConfig:
     # Export settings
     export_traces: bool = True
     export_metrics: bool = True
+    # Story #1676 AC3: real OTLP log export (context-aware bridge handler +
+    # BatchLogRecordProcessor, see telemetry/manager.py's
+    # _setup_log_exporter()). Default False so a fresh install produces
+    # zero OTLP log traffic and constructs no LoggerProvider at all.
+    export_logs: bool = False
 
     # Machine metrics settings
     machine_metrics_enabled: bool = True
@@ -245,6 +280,14 @@ class TelemetryConfig:
 
     # Deployment environment (development, staging, production)
     deployment_environment: str = "development"
+
+    # Story #1676 AC4: fraction of requests traced, in [0.0, 1.0]. Default
+    # 1.0 preserves pre-AC4 always-on trace sampling for operators who never
+    # touch this setting. Applied via an explicit
+    # ParentBased(TraceIdRatioBased(trace_sample_rate)) sampler in
+    # telemetry/manager.py so an already-sampled parent context is always
+    # honored regardless of this rate.
+    trace_sample_rate: float = 1.0
 
 
 @dataclass
@@ -492,10 +535,24 @@ class ScipConfig:
     temporal_stale_threshold_days: int = 7
     # AC31: SCIP reference limit (default 100, range 10-10000)
     scip_reference_limit: int = 100
-    # AC32: SCIP dependency depth (default 3, range 1-20)
+    # AC32: SCIP dependency depth (default 3, range 1-10)
+    # Bug #1625: ceiling lowered from 20 to 10 to match the SCIP engine's
+    # real get_dependencies()/get_dependents() ceiling (hardcoded 10 in
+    # scip/database/queries.py) -- kept in sync with
+    # server/services/constants.py's MAX_SCIP_DEPENDENCY_DEPTH and with
+    # the validate_config() check below.
     scip_dependency_depth: int = 3
-    # AC33: SCIP callchain max depth (default 10, range 1-50)
-    scip_callchain_max_depth: int = 10
+    # AC33: SCIP callchain max depth (validated range 1-50, kept for
+    # backward compatibility with already-persisted config.json values).
+    # Default changed from 10 to 3 (Bug #1603): the underlying
+    # combinatorial-path query (scip/database/queries.py MAX_DEPTH_CAP,
+    # SCIPMultiService._trace_callchain_in_repo) is unsafe above depth 3
+    # and clamps to 3 regardless of what this setting allows -- 3 is the
+    # honest default for NEW deployments. The 1-50 validation ceiling is
+    # deliberately NOT tightened to avoid breaking startup on any
+    # already-deployed node whose on-disk config.json still has a value
+    # above 3 from before this fix.
+    scip_callchain_max_depth: int = 3
     # AC34: SCIP callchain limit (default 100, range 1-1000)
     scip_callchain_limit: int = 100
     # Story #15 AC2: SCIP workspace retention (moved from ServerConfig, default 7 days)
@@ -1044,6 +1101,152 @@ class HNSWOrphanRepairSweepConfig:
     operating_hours_end_utc: int = 0
 
 
+#: Issue #1530 validate_config() range bounds (Bug #1218: MAX keeps this a
+#: detection threshold, never a job-duration timeout).
+INDEXING_WATCHDOG_MIN_STALE_ACTIVITY_TIMEOUT_SECONDS = 1.0
+INDEXING_WATCHDOG_MAX_STALE_ACTIVITY_TIMEOUT_SECONDS = 3600.0
+
+
+@dataclass
+class IndexingWatchdogConfig:
+    """
+    Configuration for the indexing-subprocess activity watchdog (Issue
+    #1530).
+
+    Detect-and-mitigate for a `cidx index --progress-json` child that hangs
+    indefinitely showing zero forward progress (per its own
+    ActivityBeacon/ActivityHeartbeatWriter instrumentation) -- never for
+    being merely slow (Bug #1218: no wall-clock bound on legitimate
+    multi-hour indexing work).
+    """
+
+    # Staleness threshold in seconds: a generous multiple of the "a few
+    # seconds" normal ceiling for every instrumented tick operation, to
+    # absorb GC pauses/network jitter/a slow batch, while still catching a
+    # real stall in under 2 minutes instead of 40 hours (default: 120.0).
+    stale_activity_timeout_seconds: float = 120.0
+
+
+@dataclass
+class FleetMigrationConfig:
+    """
+    Configuration for the fleet migration scheduler (Story #1458, Epic
+    #1454).
+
+    Controls the paced, resumable background job that consolidates each
+    golden repo's MUTABLE BASE CLONE in place (sharded vector_*.json ->
+    chunks.db) and bootstraps its in-repo temporal shards to the sister
+    location, one repo at a time (AC1: "Serialized, one-repo-at-a-time,
+    bounded resource use").
+
+    Unlike the HNSW orphan repair sweep (read-only integrity repair),
+    fleet migration DELETES real on-disk sharded files after a verified
+    consolidation -- so this MUST default to `enabled=False`, requiring an
+    explicit operator opt-in before it ever touches a fleet repo.
+
+    This opt-in is exposed as a Web UI Config Screen section ("Fleet
+    Migration", `fleet_migration` entry in `web/routes.py`'s
+    `_VALID_CONFIG_SECTIONS` and `config_service.py`'s
+    `_fleet_migration_settings`/`_update_fleet_migration_setting`),
+    mirroring Story #1397's `HNSWOrphanRepairSweepConfig` pattern
+    exactly -- an operator toggles `enabled` and `tick_interval_minutes`
+    through the admin UI, no direct database/config edit required.
+    """
+
+    # Whether the scheduler is active (default: False -- explicit opt-in
+    # required; this touches/deletes real on-disk chunk data).
+    enabled: bool = False
+
+    # Minutes between scheduler ticks (default: 30). Each tick submits at
+    # most ONE per-repo migration job -- a single repo's migration can
+    # legitimately run for a long time (no per-job timeout, per this
+    # project's "Indexing Path Has No Job/Subprocess/Per-File Timeouts"
+    # invariant), so this interval only governs how promptly the NEXT
+    # unmigrated repo is picked up once the current one finishes (or when
+    # no migration is currently in flight).
+    tick_interval_minutes: int = 30
+
+    # Proactive cross-repo canary gate (Story #1461 salvage item #8,
+    # default: False -- an ADDITIONAL safety gate on top of `enabled`,
+    # defaulting off preserves today's exact fleet-wide sweep behavior).
+    # When True, the scheduler holds the fleet-wide sweep after the FIRST
+    # repo of a fresh sweep migrates, pending an explicit admin
+    # confirmation (`FleetMigrationScheduler.confirm_canary()` /
+    # `trigger_now(confirm_canary=True)`), before touching a second repo.
+    # This is DISTINCT from the existing reactive consecutive-failure
+    # quarantine breaker (`quarantine.py`) -- that breaker only reacts
+    # AFTER the SAME repo fails repeatedly; this gate proactively pauses
+    # the whole fleet after the very first successful migration of a
+    # sweep, so a systemic converter defect cannot silently touch multiple
+    # repos before anything notices.
+    canary_gate_enabled: bool = False
+
+
+@dataclass
+class TemporalLegacyMigrationConfig:
+    """
+    Configuration for relocating legacy in-repo temporal shards into the
+    fixed server-owned storage root (Bug #1529) (Issue #1548).
+
+    Deliberately a SEPARATE config section from FleetMigrationConfig
+    (chunks.db sharded-JSON consolidation) -- the two are independent
+    destructive operations with unrelated semantics, and folding this
+    into that unrelated section made both harder to reason about and
+    easy to confuse in the Web UI. Both flags default to False (explicit
+    operator opt-in required, mirroring FleetMigrationConfig.enabled):
+    ``relocation_enabled`` gates the non-destructive copy/publish step;
+    ``cleanup_authorized`` independently gates the destructive legacy
+    deletion step.
+    """
+
+    relocation_enabled: bool = False
+    cleanup_authorized: bool = False
+
+
+@dataclass
+class AliasLockConfig:
+    """
+    Configuration for the DB-backed golden-repo alias lock rollout gate
+    (Issue #1546 Phase 2).
+
+    `WriteLockManager` (global_repos/write_lock_manager.py) coordinates
+    golden-repo registration/removal/reconcile via a file-based lock on
+    the golden-repos NFS mount (`vers=3,nolock,hard` -- file locking does
+    not actually work across nodes there). Issue #1546 replaces it with a
+    DB-backed, session-held-transaction lock (SQLite solo / PostgreSQL
+    cluster), but the independent per-node auto-updater means nodes
+    upgrade on their own schedule -- an implicit cutover where some nodes
+    use file locks and others use DB locks is unsafe (they would not see
+    each other's locks at all).
+
+    Issue #1546 Phase 3 promoted `db_backed_enabled` to default True: the
+    DB-backed mechanism has been proven correct on a live 3-node staging
+    cluster (deterministic A-B-A toggle -- exactly one of three
+    simultaneous same-alias operations acquired with the flag on; a
+    split-brain reproduced with it off), so the DB-backed lock is now the
+    default cross-node-correct behavior. The flag remains as an emergency
+    rollback path to the OLD file-based mechanism for one release (e.g. a
+    fleet with nodes still mid-rollout to the new code); it is not yet
+    removed.
+
+    `db_backed_enabled_promoted` is an internal one-time migration marker
+    -- NOT a Web UI setting (never surfaced in
+    ConfigService._alias_lock_settings / _update_alias_lock_setting).
+    Runtime config is persisted as a full JSON blob and merged OVER this
+    dataclass's default on load, so changing the default above alone never
+    reaches a deployment that already has an explicit stored
+    `alias_lock_config` section from before Phase 3 shipped -- a stored
+    value always beats a dataclass default. Confirmed inert on a live
+    3-node staging cluster. See
+    ConfigService._apply_alias_lock_db_backed_promotion for the full
+    promotion mechanism. Once True, an operator's own choice (including an
+    explicit rollback to False) is never overwritten again.
+    """
+
+    db_backed_enabled: bool = True
+    db_backed_enabled_promoted: bool = False
+
+
 @dataclass
 class XRayConfig:
     """
@@ -1239,6 +1442,15 @@ class OntapConfig:
 
 _COW_DAEMON_DEFAULT_POLL_INTERVAL_SECONDS = 2
 _COW_DAEMON_DEFAULT_TIMEOUT_SECONDS = 600
+# Bug #1513: per-HTTP-call timeout, distinct from timeout_seconds above (which
+# bounds the overall async job-completion poll LOOP). Every individual
+# requests.post/get/delete call to the CoW daemon (create job, poll job,
+# delete, list, exists) is a fast metadata operation that should return almost
+# instantly -- it must never be allowed to hang forever when the daemon's
+# response is lost/dropped (observed in production as a stuck CLOSE-WAIT
+# connection and repo activation frozen at 40% indefinitely). 30s is generous
+# headroom for a daemon under load while still failing loud and fast.
+_COW_DAEMON_DEFAULT_REQUEST_TIMEOUT_SECONDS = 30
 
 
 @dataclass
@@ -1253,6 +1465,12 @@ class CowDaemonConfig:
     daemon_storage_path: Optional[str] = (
         None  # Story #1034: daemon-side absolute path (where daemon's local XFS lives); used by CowDaemonBackend to translate CIDX paths (mount_point view) to daemon paths (storage_path view) so reflink works on the daemon's local filesystem. Defaults to None for backward compat (no translation when None).
     )
+    # Bug #1513: per-HTTP-call timeout (connect+read), applied to EVERY
+    # requests.* call CowDaemonBackend makes. NOT the same as timeout_seconds
+    # (the overall job-completion poll deadline) -- this bounds each
+    # individual round-trip so a lost/dropped daemon response fails loudly
+    # instead of hanging the caller forever.
+    request_timeout_seconds: int = _COW_DAEMON_DEFAULT_REQUEST_TIMEOUT_SECONDS
 
 
 @dataclass
@@ -1510,6 +1728,17 @@ class ServerConfig:
 
     # Story #1360 (Epic #1333 S3) - HNSW orphan repair fleet sweep configuration
     hnsw_orphan_repair_sweep_config: Optional[HNSWOrphanRepairSweepConfig] = None
+    # Issue #1530 - Indexing-subprocess activity watchdog configuration
+    indexing_watchdog_config: Optional[IndexingWatchdogConfig] = None
+
+    # Story #1458 (Epic #1454) - Fleet migration scheduler configuration
+    fleet_migration_config: Optional[FleetMigrationConfig] = None
+
+    # Issue #1548 - Legacy in-repo temporal shard relocation configuration
+    temporal_legacy_migration_config: Optional[TemporalLegacyMigrationConfig] = None
+
+    # Issue #1546 Phase 2 - DB-backed golden-repo alias lock rollout gate
+    alias_lock_config: Optional[AliasLockConfig] = None
 
     # Story #977 - X-Ray precision AST-aware code search configuration (runtime, not bootstrap)
     xray_config: Optional[XRayConfig] = None
@@ -1684,6 +1913,26 @@ class ServerConfig:
     # there until alias-scoped naming lands.
     snapshot_retention_keep_last: int = 3
 
+    # Story #1457 AC13 — minimum seconds a superseded versioned snapshot
+    # must remain undeleted after being scheduled for cleanup, even once its
+    # process-local refcount reaches zero. Closes the cross-process/cross-node
+    # residual a process-local QueryTracker cannot see. Read LIVE by
+    # CleanupManager's min_retention_age_getter (GlobalReposLifecycleManager
+    # wiring) on every retention check — Runtime / Web UI configurable, no
+    # server restart required. Mirrors the existing PayloadCache default TTL
+    # (also 900s / 15 min).
+    snapshot_min_retention_age_seconds: float = 900.0
+
+    # Story #1458 AC13 — bounded wait (seconds) for an in-flight, same-
+    # worker-process activated-repo query to release its QueryTracker
+    # refcount before deactivation's Phase-2 purge deletes the trashed
+    # clone's consolidated chunks.db. Reuses the SAME bounded-wait-then-
+    # proceed shape Story #1457 AC11 establishes: on expiry, deactivation
+    # LOGS a WARNING and proceeds with the purge anyway -- never an
+    # unbounded/blocking wait that could wedge deactivation. Runtime / Web
+    # UI configurable, no server restart required.
+    deactivation_query_drain_max_wait_seconds: float = 30.0
+
     # Bug #1084 (staging follow-up) — NFS read-after-create visibility deadline
     # (seconds) for the versioned-snapshot barrier. Staging PROVED that under
     # concurrent reflink load a freshly-created versioned dir can take >15s to
@@ -1783,6 +2032,20 @@ class ServerConfig:
         # Story #1360 (Epic #1333 S3) - Initialize HNSW orphan repair sweep config
         if self.hnsw_orphan_repair_sweep_config is None:
             self.hnsw_orphan_repair_sweep_config = HNSWOrphanRepairSweepConfig()
+        # Issue #1530 - Initialize indexing watchdog config
+        if self.indexing_watchdog_config is None:
+            self.indexing_watchdog_config = IndexingWatchdogConfig()
+        # Story #1458 (Epic #1454) - Initialize fleet migration scheduler config
+        if self.fleet_migration_config is None:
+            self.fleet_migration_config = FleetMigrationConfig()
+        # Issue #1548 - Initialize legacy temporal migration config (the
+        # dict-to-dataclass conversion for a DB-persisted raw dict already
+        # exists further below, mirroring fleet_migration_config's pattern)
+        if self.temporal_legacy_migration_config is None:
+            self.temporal_legacy_migration_config = TemporalLegacyMigrationConfig()
+        # Issue #1546 Phase 2 - Initialize alias lock rollout-gate config
+        if self.alias_lock_config is None:
+            self.alias_lock_config = AliasLockConfig()
         # Story #977 - Initialize X-Ray config
         if self.xray_config is None:
             self.xray_config = XRayConfig()
@@ -2071,11 +2334,7 @@ class ServerConfigManager:
         if "telemetry_config" in config_dict and isinstance(
             config_dict["telemetry_config"], dict
         ):
-            # Bug #938: strip dead fields removed from TelemetryConfig so old
-            # config.json files load cleanly without TypeError.
             _tel = config_dict["telemetry_config"]
-            _tel.pop("export_logs", None)
-            _tel.pop("trace_sample_rate", None)
             config_dict["telemetry_config"] = TelemetryConfig(**_tel)
 
         # Story #3 - Configuration Consolidation: Convert migrated config dicts
@@ -2514,6 +2773,61 @@ class ServerConfigManager:
                 )
             )
 
+        # Issue #1530: Convert indexing_watchdog_config dict to
+        # IndexingWatchdogConfig. Same rationale/pattern as
+        # hnsw_orphan_repair_sweep_config above.
+        if "indexing_watchdog_config" in config_dict and isinstance(
+            config_dict["indexing_watchdog_config"], dict
+        ):
+            _watchdog_dict = config_dict["indexing_watchdog_config"]
+            _watchdog_allowed = {f.name for f in fields(IndexingWatchdogConfig)}
+            config_dict["indexing_watchdog_config"] = IndexingWatchdogConfig(
+                **{k: v for k, v in _watchdog_dict.items() if k in _watchdog_allowed}
+            )
+
+        # Story #1458 (Epic #1454): Convert fleet_migration_config dict to
+        # FleetMigrationConfig. Same rationale as
+        # hnsw_orphan_repair_sweep_config above -- without this block, the
+        # raw dict round-tripped through the runtime DB's JSON column
+        # survives unconverted and `cfg.enabled` access raises
+        # AttributeError (Bug #1368-class regression). Unknown keys
+        # filtered for rolling-upgrade safety.
+        if "fleet_migration_config" in config_dict and isinstance(
+            config_dict["fleet_migration_config"], dict
+        ):
+            _fm_dict = config_dict["fleet_migration_config"]
+            _fm_allowed = {f.name for f in fields(FleetMigrationConfig)}
+            config_dict["fleet_migration_config"] = FleetMigrationConfig(
+                **{k: v for k, v in _fm_dict.items() if k in _fm_allowed}
+            )
+
+        # Issue #1548: Convert temporal_legacy_migration_config dict to
+        # TemporalLegacyMigrationConfig. Same rationale as
+        # fleet_migration_config above -- unknown keys filtered for
+        # rolling-upgrade safety.
+        if "temporal_legacy_migration_config" in config_dict and isinstance(
+            config_dict["temporal_legacy_migration_config"], dict
+        ):
+            _tlm_dict = config_dict["temporal_legacy_migration_config"]
+            _tlm_allowed = {f.name for f in fields(TemporalLegacyMigrationConfig)}
+            config_dict["temporal_legacy_migration_config"] = (
+                TemporalLegacyMigrationConfig(
+                    **{k: v for k, v in _tlm_dict.items() if k in _tlm_allowed}
+                )
+            )
+
+        # Issue #1546 Phase 2: Convert alias_lock_config dict to
+        # AliasLockConfig. Same rationale as temporal_legacy_migration_config
+        # above -- unknown keys filtered for rolling-upgrade safety.
+        if "alias_lock_config" in config_dict and isinstance(
+            config_dict["alias_lock_config"], dict
+        ):
+            _alc_dict = config_dict["alias_lock_config"]
+            _alc_allowed = {f.name for f in fields(AliasLockConfig)}
+            config_dict["alias_lock_config"] = AliasLockConfig(
+                **{k: v for k, v in _alc_dict.items() if k in _alc_allowed}
+            )
+
         # Story #977: Convert xray_config dict to XRayConfig
         if "xray_config" in config_dict and isinstance(
             config_dict["xray_config"], dict
@@ -2672,27 +2986,25 @@ class ServerConfigManager:
                     f"Invalid CIDX_SCIP_WORKSPACE_RETENTION_DAYS environment variable value '{retention_env}'. Using default {config.scip_config.scip_workspace_retention_days} days"
                 )
 
-        # Telemetry environment variable overrides (Story #695)
-        # Assert telemetry_config is not None (guaranteed by __post_init__)
-        assert config.telemetry_config is not None
-        if telemetry_enabled_env := os.environ.get("CIDX_TELEMETRY_ENABLED"):
-            config.telemetry_config.enabled = telemetry_enabled_env.lower() in (
-                "true",
-                "1",
-                "yes",
+        # Story #1676 AC1: telemetry configuration is managed exclusively via
+        # the Web UI Config Screen (DB-backed) -- the env var overrides that
+        # used to live here (Story #695) were removed. Any of the 5 legacy
+        # variables still present in the process environment is IGNORED; a
+        # single aggregated WARNING names every one found (never one
+        # WARNING per variable) so an operator migrating off env-based
+        # config gets one clear, actionable message instead of silent
+        # divergence from the DB-backed value.
+        present_telemetry_env_vars = [
+            name for name in _IGNORED_TELEMETRY_ENV_VARS if name in os.environ
+        ]
+        if present_telemetry_env_vars:
+            logging.warning(
+                "%s environment variable(s) are set but ignored -- telemetry "
+                "configuration is managed exclusively via the Web UI Config "
+                "Screen. Remove these environment variables from your "
+                "deployment.",
+                ", ".join(sorted(present_telemetry_env_vars)),
             )
-
-        if collector_endpoint_env := os.environ.get("CIDX_OTEL_COLLECTOR_ENDPOINT"):
-            config.telemetry_config.collector_endpoint = collector_endpoint_env
-
-        if collector_protocol_env := os.environ.get("CIDX_OTEL_COLLECTOR_PROTOCOL"):
-            config.telemetry_config.collector_protocol = collector_protocol_env.lower()
-
-        if service_name_env := os.environ.get("CIDX_OTEL_SERVICE_NAME"):
-            config.telemetry_config.service_name = service_name_env
-
-        if deployment_env := os.environ.get("CIDX_DEPLOYMENT_ENVIRONMENT"):
-            config.telemetry_config.deployment_environment = deployment_env
 
         return config
 
@@ -2810,6 +3122,14 @@ class ServerConfigManager:
                     f"machine_metrics_interval_seconds must be >= 1, got {config.telemetry_config.machine_metrics_interval_seconds}"
                 )
 
+            # Story #1676 AC4: validate trace_sample_rate is in [0.0, 1.0].
+            # Rejected, never clamped -- an out-of-range value is a
+            # configuration mistake the operator must fix explicitly.
+            if not (0.0 <= config.telemetry_config.trace_sample_rate <= 1.0):
+                raise ValueError(
+                    f"trace_sample_rate must be between 0.0 and 1.0, got {config.telemetry_config.trace_sample_rate}"
+                )
+
         # Validate search_limits_config (Story #3 - Phase 1, AC-M1, AC-M2)
         if config.search_limits_config:
             # Validate max_result_size_mb (1-100 MB range)
@@ -2862,6 +3182,7 @@ class ServerConfigManager:
                     "temporal_inline_wait_seconds must be >= 0.0, "
                     f"got {st.temporal_inline_wait_seconds}"
                 )
+
             _temporal_grace_ceiling = (
                 st.search_code_handler_timeout_seconds
                 - TEMPORAL_RESPONSE_RESERVE_SECONDS
@@ -2874,6 +3195,25 @@ class ServerConfigManager:
                     f"got {st.temporal_inline_wait_seconds} with "
                     "search_code_handler_timeout_seconds="
                     f"{st.search_code_handler_timeout_seconds}"
+                )
+
+        # Validate indexing_watchdog_config (Issue #1530). A SIBLING of the
+        # search_timeouts_config block above -- never nested inside it (an
+        # earlier revision spliced this into the middle of that block and
+        # silently re-parented the Story #1400 grace-budget cross-field
+        # check onto this unrelated config object).
+        if config.indexing_watchdog_config:
+            iw = config.indexing_watchdog_config
+            if not (
+                INDEXING_WATCHDOG_MIN_STALE_ACTIVITY_TIMEOUT_SECONDS
+                <= iw.stale_activity_timeout_seconds
+                <= INDEXING_WATCHDOG_MAX_STALE_ACTIVITY_TIMEOUT_SECONDS
+            ):
+                raise ValueError(
+                    f"stale_activity_timeout_seconds must be between "
+                    f"{INDEXING_WATCHDOG_MIN_STALE_ACTIVITY_TIMEOUT_SECONDS} and "
+                    f"{INDEXING_WATCHDOG_MAX_STALE_ACTIVITY_TIMEOUT_SECONDS}, got "
+                    f"{iw.stale_activity_timeout_seconds}"
                 )
 
         # Validate embedding_stats_config (Story #1418 Phase 3)
@@ -2906,10 +3246,23 @@ class ServerConfigManager:
                 raise ValueError(
                     f"scip_reference_limit must be between 10 and 10000, got {config.scip_config.scip_reference_limit}"
                 )
-            # AC32: scip_dependency_depth range 1-20
-            if not (1 <= config.scip_config.scip_dependency_depth <= 20):
+            # AC32: scip_dependency_depth range (Bug #1625: sourced from
+            # server/services/constants.py, kept in sync with the SCIP
+            # engine's real get_dependencies()/get_dependents() ceiling in
+            # scip/database/queries.py)
+            from ..services.constants import (
+                MIN_SCIP_DEPENDENCY_DEPTH,
+                MAX_SCIP_DEPENDENCY_DEPTH,
+            )
+
+            if not (
+                MIN_SCIP_DEPENDENCY_DEPTH
+                <= config.scip_config.scip_dependency_depth
+                <= MAX_SCIP_DEPENDENCY_DEPTH
+            ):
                 raise ValueError(
-                    f"scip_dependency_depth must be between 1 and 20, got {config.scip_config.scip_dependency_depth}"
+                    f"scip_dependency_depth must be between {MIN_SCIP_DEPENDENCY_DEPTH} "
+                    f"and {MAX_SCIP_DEPENDENCY_DEPTH}, got {config.scip_config.scip_dependency_depth}"
                 )
             # AC33: scip_callchain_max_depth range 1-50
             if not (1 <= config.scip_config.scip_callchain_max_depth <= 50):

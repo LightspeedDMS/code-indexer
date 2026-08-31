@@ -16,7 +16,7 @@ Metrics exported:
 - cidx.embedding.duration (Histogram) - Embedding latency in seconds
 
 Usage:
-    from src.code_indexer.server.telemetry.metrics_instrumentation import (
+    from code_indexer.server.telemetry.metrics_instrumentation import (
         get_application_metrics,
     )
 
@@ -36,7 +36,7 @@ import logging
 from typing import TYPE_CHECKING, Any, Optional
 
 if TYPE_CHECKING:
-    from src.code_indexer.server.telemetry.manager import TelemetryManager
+    from code_indexer.server.telemetry.manager import TelemetryManager
 from code_indexer.server.logging_utils import format_error_log
 
 logger = logging.getLogger(__name__)

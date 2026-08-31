@@ -17,6 +17,18 @@ Mirrors the SCIP ``WorkspaceCleanupService`` pattern:
 - Anti-unbounded-loop (Messi #14): the scan is capped at ``max_dirs_per_run``.
 
 NEVER deletes a directory it cannot prove is an orphan (no live row).
+
+Bug #1485 follow-up: liveness is proven by SESSION ID (the on-disk
+directory's ``.name``, which IS the session id by construction -- every
+session folder is created at ``research_base_dir / session_id``), matched
+against the set of live session ids from the DB -- NEVER by the stored
+``folder_path`` string. The stored ``folder_path`` column may be a stale
+absolute path written by a prior deployment with a different
+service-account home (the exact Bug #1485 root cause); matching against it
+would either miss live sessions (mass-deleting them) or require self-healing
+that stored absolute path into shared cluster state, which would
+re-introduce the very anti-pattern Bug #1485 fixed. Session-id matching
+sidesteps both.
 """
 
 import logging
@@ -58,10 +70,11 @@ def _is_session_dir_name(name: str) -> bool:
         return False
 
 
-def make_backend_live_folder_provider(
+def make_backend_live_session_id_provider(
     backend_supplier: Callable[[], Any],
 ) -> Callable[[], Set[str]]:
-    """Build a live-folder provider backed by the ACTIVE research_sessions store.
+    """Build a live-session-id provider backed by the ACTIVE research_sessions
+    store.
 
     Bug #1085 BLOCKING-1: the live set MUST come from the same backend the
     writers use -- ``ResearchSessionsBackend`` from ``backend_registry`` -- which
@@ -69,6 +82,13 @@ def make_backend_live_folder_provider(
     previous SQLite-only provider read a table that is EMPTY in postgres mode and
     silently returned ``set()`` (no exception), so EVERY aged research dir was
     treated as an orphan and DELETED -- including live users' sessions.
+
+    Bug #1485 follow-up: the returned set contains SESSION IDS, never
+    ``folder_path`` strings -- the stored ``folder_path`` may be a stale
+    absolute path from a prior deployment with a different service-account
+    home, so it must never be trusted as the liveness key. The on-disk
+    session directory's ``.name`` IS the session id by construction, so
+    matching on id is immune to any stored-path staleness.
 
     ``backend_supplier()`` resolves the active backend lazily on each sweep
     (the registry is only available after startup wiring). Two FAIL-SAFE rules:
@@ -90,21 +110,26 @@ def make_backend_live_folder_provider(
                 "live set (fail-safe: no deletions)"
             )
         sessions = backend.list_sessions()
-        return {
-            str(s["folder_path"]) for s in sessions if s.get("folder_path") is not None
-        }
+        return {str(s["id"]) for s in sessions if s.get("id") is not None}
 
     return _provider
 
 
-def make_db_live_folder_provider(db_path: str) -> Callable[[], Set[str]]:
+def make_db_live_session_id_provider(db_path: str) -> Callable[[], Set[str]]:
     """
     Build a provider that returns the set of live ``research_sessions``
-    folder_path strings from the main server DB.
+    session ids from the main server DB.
 
     Opens a short-lived **read-only** connection per call (``mode=ro`` URI) so
     it always observes committed rows (even those written by other
     processes/nodes) and never creates or mutates the DB.
+
+    Bug #1485 follow-up: returns SESSION IDS, never ``folder_path`` strings --
+    the stored ``folder_path`` may be a stale absolute path from a prior
+    deployment with a different service-account home, so it must never be
+    trusted as the liveness key. The on-disk session directory's ``.name`` IS
+    the session id by construction, so matching on id is immune to any
+    stored-path staleness.
 
     Read errors PROPAGATE intentionally: ``ResearchCleanupService.cleanup()``
     catches a provider exception and aborts the sweep with ZERO deletions. This
@@ -113,12 +138,18 @@ def make_db_live_folder_provider(db_path: str) -> Callable[[], Set[str]]:
     """
 
     def _provider() -> Set[str]:
-        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+        # Issue #1459 code-review sweep: a naive f"file:{db_path}?mode=ro"
+        # string mis-parses any db_path containing a URI-special character
+        # ('?', '#', '%', spaces) -- SQLite's URI parser reads a literal
+        # '?'/'#' in the path as the start of the query string, truncating
+        # the path before "mode=ro" is even seen. Path.resolve().as_uri()
+        # produces a correctly percent-encoded file:// URI (same fix as
+        # storage/sqlite_chunk_store.py's ChunkStore._open_connection /
+        # chunk_store_has_real_data).
+        uri = f"{Path(db_path).resolve().as_uri()}?mode=ro"
+        conn = sqlite3.connect(uri, uri=True)
         try:
-            cursor = conn.execute(
-                "SELECT folder_path FROM research_sessions "
-                "WHERE folder_path IS NOT NULL"
-            )
+            cursor = conn.execute("SELECT id FROM research_sessions")
             return {str(row[0]) for row in cursor.fetchall()}
         finally:
             conn.close()
@@ -155,7 +186,7 @@ class ResearchCleanupService:
         self,
         research_base_dir: Path,
         retention_days: float,
-        live_folder_provider: Callable[[], Set[str]],
+        live_session_id_provider: Callable[[], Set[str]],
         max_dirs_per_run: int = 50_000,
         recent_modification_hours: float = 24.0,
     ) -> None:
@@ -163,15 +194,20 @@ class ResearchCleanupService:
         Args:
             research_base_dir: Root dir containing ``<uuid>`` session folders.
             retention_days: Age threshold in days. ``<= 0`` disables the sweep.
-            live_folder_provider: Callable returning the set of folder_path
-                strings for live ``research_sessions`` rows.
+            live_session_id_provider: Callable returning the set of live
+                ``research_sessions`` session id strings. Bug #1485
+                follow-up: NEVER folder_path strings -- the stored
+                folder_path may be a stale absolute path from a prior
+                deployment with a different service-account home, so
+                liveness is proven by session id (the on-disk directory's
+                ``.name``), not by the stored path.
             max_dirs_per_run: Upper bound on directories scanned per sweep
                 (Messi #14 — provable termination).
             recent_modification_hours: Skip dirs modified within this window.
         """
         self.research_base_dir = Path(research_base_dir)
         self.retention_days = retention_days
-        self._live_folder_provider = live_folder_provider
+        self._live_session_id_provider = live_session_id_provider
         self.max_dirs_per_run = max_dirs_per_run
         self.recent_modification_hours = recent_modification_hours
         self.last_cleanup_time: Optional[datetime] = None
@@ -307,9 +343,12 @@ class ResearchCleanupService:
             result.duration_seconds = time.time() - start
             return result
 
-        # Resolve live session folders once per sweep.
+        # Resolve live session ids once per sweep. Bug #1485 follow-up:
+        # session ids, never folder_path strings -- the stored folder_path
+        # may be a stale absolute path from a prior deployment with a
+        # different service-account home.
         try:
-            live_folders = {str(Path(p)) for p in self._live_folder_provider()}
+            live_session_ids = {str(s) for s in self._live_session_id_provider()}
         except Exception as e:  # noqa: BLE001 — never let a registry read crash GC
             logger.error(
                 "Research cleanup: failed to read live sessions; aborting sweep "
@@ -349,7 +388,11 @@ class ResearchCleanupService:
                 continue
 
             # Safety 1: never delete a dir mapping to a live registry row.
-            if str(path) in live_folders:
+            # Bug #1485 follow-up: matched by SESSION ID (path.name, which
+            # IS the session id by construction), never by the stored
+            # folder_path -- a stale foreign folder_path must never cause a
+            # live session's on-disk workspace to be mistaken for an orphan.
+            if path.name in live_session_ids:
                 result.dirs_preserved += 1
                 continue
 
@@ -412,12 +455,12 @@ class ResearchCleanupScheduler:
         self,
         research_base_dir: Path,
         retention_days_provider: Callable[[], float],
-        live_folder_provider: Callable[[], Set[str]],
+        live_session_id_provider: Callable[[], Set[str]],
         interval_seconds: int = DEFAULT_RESEARCH_CLEANUP_INTERVAL_SECONDS,
     ) -> None:
         self.research_base_dir = Path(research_base_dir)
         self._retention_days_provider = retention_days_provider
-        self._live_folder_provider = live_folder_provider
+        self._live_session_id_provider = live_session_id_provider
         self.interval_seconds = interval_seconds
 
         self._stop_event = threading.Event()
@@ -464,7 +507,7 @@ class ResearchCleanupScheduler:
         service = ResearchCleanupService(
             research_base_dir=self.research_base_dir,
             retention_days=retention_days,
-            live_folder_provider=self._live_folder_provider,
+            live_session_id_provider=self._live_session_id_provider,
         )
         return service.cleanup()
 

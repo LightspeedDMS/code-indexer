@@ -9,7 +9,7 @@ from ...conftest import local_temporary_directory
 
 from pathlib import Path
 
-from src.code_indexer.services.claude_integration import ClaudeIntegrationService
+from code_indexer.services.claude_integration import ClaudeIntegrationService
 
 
 def test_claude_response_should_preserve_formatting():

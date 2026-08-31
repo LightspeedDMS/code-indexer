@@ -36,6 +36,14 @@ from .meta_directory_updater import MetaDirectoryUpdater
 from .update_strategy import UpdateStrategy
 from .query_tracker import QueryTracker
 from .cleanup_manager import CleanupManager
+from .snapshot_retention import (
+    discover_and_enforce_temporal_retention,
+    enforce_snapshot_retention,
+)
+from .refresh_integrity_gate import (
+    RefreshIntegrityGateResult,
+    run_refresh_integrity_gate,
+)
 from .shared_operations import DEFAULT_REFRESH_INTERVAL, GlobalRepoOperations
 from code_indexer.server.repositories.background_jobs import DuplicateJobError
 from code_indexer.server.repositories.golden_repo_manager import (
@@ -43,12 +51,15 @@ from code_indexer.server.repositories.golden_repo_manager import (
 )
 from code_indexer.server.services.cidx_meta_backup import (
     CidxMetaBackupBootstrap,
-    ClaudeConflictResolver,
     CidxMetaBackupSync,
     detect_default_branch,
 )
 from code_indexer.server.services.config_service import get_config_service
 from code_indexer.server.services.db_outage_throttle import DbOutageThrottle
+from code_indexer.server.services.metadata_reader import (
+    read_current_commit,
+    read_status,
+)
 from code_indexer.server.storage.sqlite_backends import GoldenRepoMetadataSqliteBackend
 from code_indexer.server.storage.shared.nfs_visibility import (
     _configured_visibility_timeout,
@@ -56,6 +67,15 @@ from code_indexer.server.storage.shared.nfs_visibility import (
 )
 from code_indexer.server.utils.config_manager import ServerResourceConfig
 from code_indexer.utils.subprocess_env import build_cidx_subprocess_env
+
+# Story #1586 AC4: cidx.repos.refresh.duration OTEL metric -- peek_telemetry_
+# manager() (never get_telemetry_manager()) for the same reason job_tracker.py
+# uses it: _execute_refresh runs on a background pool worker thread that can
+# race the main lifespan coroutine's own telemetry-init block, and
+# get_telemetry_manager()'s "first call wins, disabled fallback if no config"
+# contract would let that early caller permanently disable telemetry.
+from code_indexer.server.telemetry.manager import peek_telemetry_manager
+from code_indexer.server.telemetry.job_metrics import get_job_metrics
 
 if TYPE_CHECKING:
     from code_indexer.server.repositories.background_jobs import BackgroundJobManager
@@ -66,10 +86,66 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+
+def _record_refresh_duration_metric(
+    repository: str, duration_seconds: float, status: str
+) -> None:
+    """Record a cidx.repos.refresh.duration OTEL metric for one
+    RefreshScheduler._execute_refresh() completion (Story #1586 AC4).
+
+    No-op when telemetry is disabled or not yet initialized this process
+    (peek_telemetry_manager() returns None); never raises into the refresh
+    completion path.
+    """
+    try:
+        telemetry_manager = peek_telemetry_manager()
+        if telemetry_manager is None:
+            return
+        job_metrics = get_job_metrics(telemetry_manager)
+        if not job_metrics.is_active:
+            return
+        job_metrics.record_repository_refresh(
+            repository=repository,
+            duration_seconds=duration_seconds,
+            status=status,
+        )
+    except Exception as exc:  # noqa: BLE001 -- must never break a refresh
+        logger.debug("Failed to record repository refresh metrics: %s", exc)
+
+
 # Git URL prefixes — any repo_url NOT starting with one of these is treated as
 # a local repo and is completely excluded from the scheduled auto-refresh cycle.
 # Local repos are only refreshed via explicit trigger_refresh_for_repo() calls.
 _GIT_URL_PREFIXES = ("https://", "http://", "git@", "ssh://", "git://")
+
+# Bug #1506: N consecutive ordinary-refresh integrity-gate failures for the
+# same golden_alias are QUARANTINED (loudly logged for operator attention)
+# -- mirrors description_refresh_scheduler.py's
+# PROMPT_FAILURE_QUARANTINE_THRESHOLD and Issue #1477's
+# FLEET_MIGRATION_FAILURE_QUARANTINE_THRESHOLD (both 3).
+_REFRESH_INTEGRITY_QUARANTINE_THRESHOLD = 3
+
+# Bug #1539's cidx-meta-conflict quarantine mechanism (a per-repo
+# consecutive-failure counter keyed on the upstream target SHA) is
+# RETIRED as of Bug #1555's root-cause fix: CidxMetaBackupSync.sync() no
+# longer rebases onto the remote, so it can never raise
+# ConflictResolutionFailedError, so there is no failure left to
+# quarantine. See sync.py's module docstring for the design rationale
+# (the remote is a passive backup mirror, never a peer).
+
+# Bug #1506 4th-pass review Item 1: WriteLockManager.acquire()'s default TTL
+# is 3600s (1 hour). _held_write_lock_for_publish() holds this lock for the
+# ENTIRE index -> integrity-gate -> snapshot -> swap-alias publish sequence,
+# which -- per CLAUDE.md's "Indexing Path Has No Job/Subprocess/Per-File
+# Timeouts" invariant (Bug #1218) -- can legitimately run for hours on a
+# large golden repo (e.g. evolution-scale). A short TTL would let another
+# writer (DependencyMapService, LangfuseTraceSyncService, etc) evict the
+# lock as "stale" and acquire it while indexing is still genuinely
+# in-progress, defeating the exclusivity guarantee the lock exists to
+# provide. Mirrors the fleet migration orchestrator's own
+# MIGRATION_LOCK_TTL_SECONDS precedent (server/services/fleet_migration/
+# orchestrator.py) for the identical class of problem.
+_REFRESH_PUBLISH_LOCK_TTL_SECONDS = 24 * 60 * 60
 
 
 def has_files_with_extensions(
@@ -155,6 +231,65 @@ def _read_max_commits_from_temporal_meta(source_path: Path) -> Optional[int]:
     return None
 
 
+def _read_max_commits_from_fixed_temporal_root(
+    golden_repos_dir: Path, repo_alias: str, legacy_index_path: Path
+) -> Optional[int]:
+    """Bug #1461 salvage item #6: sister-location fallback for the Bug #642
+    NULL-temporal_options max_commits safety net above.
+
+    `_read_max_commits_from_temporal_meta()` above only scans the golden
+    repo's OWN in-repo `.code-indexer/index/` tree for the legacy
+    `temporal_meta.json` artifact. Story #1457 can relocate a quarter
+    shard's data to the golden-owned sister location, and Story #1458's
+    fleet-migration bootstrap can reclaim (delete) the in-repo tree
+    entirely once migrated -- at which point the in-repo scan above finds
+    nothing. Worse, the NEW consolidated per-version build never writes
+    `temporal_meta.json` at all: it writes `temporal_progress.json`
+    (`TemporalProgressiveMetadata`, a `completed_commits` list) instead.
+
+    #1461-6 review correction: the legacy `temporal_meta.json.total_commits`
+    field this fallback replaces was a REPO-WIDE total, but the original
+    fix here read `len(completed_commits)` from only the single "best"
+    shard `get_temporal_repo_status()` resolves -- undercounting any repo
+    with more than one quarter and setting `--max-commits` LOWER than the
+    true repo-wide total (worse than omitting the bound). This now
+    delegates to `get_temporal_repo_max_commits()`
+    (services/temporal/temporal_status.py), which unions completed-commit
+    hashes across EVERY resolved quarter shard of the repo and fails open
+    to None (never an under-cap) whenever any shard's total cannot be
+    reliably determined.
+
+    Fails open (returns None -- no --max-commits appended, identical to a
+    miss in the in-repo scan above) on any error, missing data, or
+    unreliable progress data: this is a best-effort safety net for an
+    already degraded case (temporal_options is NULL), and a failure here
+    must never crash indexing.
+    """
+    try:
+        from code_indexer.services.temporal.temporal_status import (
+            get_temporal_repo_max_commits,
+        )
+
+        # Explicit annotation works around a mypy limitation where the
+        # return type of a function-scoped (local) import is not always
+        # fully resolved when forwarded directly in a return statement.
+        result: Optional[int] = get_temporal_repo_max_commits(
+            golden_repos_dir=golden_repos_dir,
+            repo_alias=repo_alias,
+            legacy_index_path=legacy_index_path,
+        )
+        return result
+    except Exception as exc:
+        logger.debug(
+            "Bug #1461: sister-location temporal max_commits lookup failed "
+            "for %s: %s: %s",
+            repo_alias,
+            type(exc).__name__,
+            exc,
+        )
+        return None
+
+
 def _is_git_repo_url(repo_url: str) -> bool:
     """
     Return True if repo_url represents a remote git repository.
@@ -194,6 +329,8 @@ class RefreshScheduler:
         job_tracker: Optional["JobTracker"] = None,
         snapshot_manager: Optional["VersionedSnapshotManager"] = None,
         golden_repo_metadata_backend: Optional[Any] = None,
+        alias_lock_db_backed_enabled_getter: Optional[Callable[[], bool]] = None,
+        alias_lock_store_resolver: Optional[Callable[[], Any]] = None,
     ):
         """
         Initialize the refresh scheduler.
@@ -219,6 +356,20 @@ class RefreshScheduler:
                 golden_repos_metadata table alongside the -global-alias-keyed
                 global_repos table (self.registry) -- the two are structurally separate
                 stores for the same logical repo and can otherwise drift independently.
+            alias_lock_db_backed_enabled_getter: Issue #1546 Phase 2 -- optional
+                callable returning the CURRENT value of the operator-controlled
+                rollout flag (AliasLockConfig.db_backed_enabled), forwarded
+                unchanged into the AliasLockCoordinator installed as
+                `self.write_lock_manager`. `None` (the default -- every
+                existing caller that predates this story, including CLI/solo
+                construction) preserves byte-identical pure file-based
+                behavior, matching AC7's mixed-fleet rollout default.
+            alias_lock_store_resolver: Issue #1546 Phase 2 -- optional callable
+                returning the AliasLockStore to use for a DB-backed acquire
+                (production wiring: server/services/alias_lock_store/factory.py,
+                dispatching PostgreSQL/SQLite via is_postgres_storage_mode()).
+                Only ever consulted when alias_lock_db_backed_enabled_getter()
+                returns True.
         """
         self.golden_repos_dir = Path(golden_repos_dir)
         self.config_source = config_source
@@ -228,6 +379,8 @@ class RefreshScheduler:
         self.background_job_manager = background_job_manager
         self._job_tracker = job_tracker
         self._snapshot_manager = snapshot_manager
+        self._alias_lock_db_backed_enabled_getter = alias_lock_db_backed_enabled_getter
+        self._alias_lock_store_resolver = alias_lock_store_resolver
 
         # Initialize managers
         self.alias_manager = AliasManager(str(self.golden_repos_dir / "aliases"))
@@ -265,13 +418,24 @@ class RefreshScheduler:
         self._repo_locks: dict[str, threading.Lock] = {}
         self._repo_locks_lock = threading.Lock()  # Protects _repo_locks dict
 
-        # File-based write-lock manager for external writers (Story #230).
-        # Replaces the in-memory threading.Lock registry from Story #227.
-        # Keyed by repo alias without -global suffix (e.g., "cidx-meta").
-        from .write_lock_manager import WriteLockManager
+        # Write-lock coordinator for external writers (Story #230, replaced
+        # by Issue #1546 Phase 2). Preserves WriteLockManager's exact
+        # bool-based public API while dispatching per-alias between the
+        # legacy file-based lock (golden_repos_dir/.locks/{alias}.lock) and
+        # a DB-backed AliasLockStore, gated behind
+        # alias_lock_db_backed_enabled_getter (default: always-False, i.e.
+        # pure file-based, byte-identical to the pre-#1546 WriteLockManager).
+        # Every real call site in this codebase reaches the lock exclusively
+        # through self.write_lock_manager (directly) or the
+        # acquire_write_lock/release_write_lock/is_write_locked facade
+        # methods below (which delegate to it 1:1), so installing this ONE
+        # coordinator here rewires all of them without any call-site changes.
+        from .alias_lock_coordinator import AliasLockCoordinator
 
-        self.write_lock_manager = WriteLockManager(
-            golden_repos_dir=self.golden_repos_dir
+        self.write_lock_manager = AliasLockCoordinator(
+            golden_repos_dir=self.golden_repos_dir,
+            db_backed_enabled_getter=self._alias_lock_db_backed_enabled_getter,
+            store_resolver=self._alias_lock_store_resolver,
         )
 
         # Story #295: Per-alias consecutive fetch failure counters and re-clone
@@ -537,38 +701,24 @@ class RefreshScheduler:
         ``previous_path``. Enabled on local + cow-daemon; on ONTAP the discovery
         API returns ``[]`` so this is naturally inert. Non-fatal: any failure is
         logged and swallowed so a refresh never fails on retention.
+
+        Story #1457 MEDIUM #14 (2026-07-23 code review): delegates to the
+        shared ``enforce_snapshot_retention`` primitive (extracted so
+        temporal sister-location aliases can reuse the exact same
+        keep-last-N logic via ``discover_and_enforce_temporal_retention``,
+        called separately below in ``_execute_refresh``). ``_retention_keep_last``
+        stays a method here (not delegated) so this class's own existing
+        test suite's ``get_config_service`` patch target is preserved
+        byte-identical.
         """
-        if self._snapshot_manager is None:
-            return
-        try:
-            keep_last = self._retention_keep_last()
-            snapshots = self._snapshot_manager.list_snapshots(alias_name)
-            if len(snapshots) <= keep_last:
-                return
-
-            # Force-keep set: current target + previous_path (rollback) + N newest.
-            protected: set = set()
-            if current_target:
-                protected.add(current_target)
-            previous_path = self.alias_manager.get_previous_path(alias_name)
-            if previous_path:
-                protected.add(previous_path)
-            # snapshots are sorted ascending by ts; the last keep_last are newest.
-            for path, _ts in snapshots[-keep_last:]:
-                protected.add(path)
-
-            for path, _ts in snapshots:
-                if path not in protected:
-                    logger.info(
-                        f"[retention] Scheduling cleanup of superseded snapshot "
-                        f"{path} (keep_last={keep_last}) for {alias_name}"
-                    )
-                    self.cleanup_manager.schedule_cleanup(path)
-        except Exception as exc:
-            logger.warning(
-                f"[retention] keep-last-N enforcement failed for {alias_name} "
-                f"(non-fatal): {type(exc).__name__}: {exc}"
-            )
+        enforce_snapshot_retention(
+            alias_name,
+            current_target,
+            snapshot_manager=self._snapshot_manager,
+            alias_manager=self.alias_manager,
+            cleanup_manager=self.cleanup_manager,
+            retention_keep_last=self._retention_keep_last(),
+        )
 
     def _get_repo_lock(self, alias_name: str) -> threading.Lock:
         """
@@ -1024,7 +1174,10 @@ class RefreshScheduler:
     # ------------------------------------------------------------------
 
     def acquire_write_lock(
-        self, alias: str, owner_name: str = "refresh_scheduler"
+        self,
+        alias: str,
+        owner_name: str = "refresh_scheduler",
+        ttl_seconds: Optional[int] = None,
     ) -> bool:
         """
         Non-blocking acquire of the write lock for a repo alias.
@@ -1038,15 +1191,33 @@ class RefreshScheduler:
                         Defaults to "refresh_scheduler" for internal scheduler use.
                         Pass the actual service name when calling from other services
                         (e.g., "dependency_map_service", "langfuse_trace_sync").
+            ttl_seconds: Bug #1580 follow-up (adversarial review) -- optional
+                explicit lock TTL forwarded to WriteLockManager.acquire().
+                `None` (the default) preserves byte-identical behavior for
+                every existing caller: WriteLockManager.acquire()'s own
+                1-hour default applies. Callers guarding a genuinely
+                long-running operation (e.g. golden_repo_write_lock_guard
+                around a `cidx index --index-commits` subprocess, which
+                this project's indexing-path invariant documents as having
+                NO job/subprocess timeout) MUST pass an explicit,
+                sufficiently long TTL -- otherwise the lock silently
+                expires mid-run and stops protecting anything.
 
         Returns:
             True if lock was acquired, False if already held
         """
+        if ttl_seconds is not None:
+            return self.write_lock_manager.acquire(
+                alias, owner_name=owner_name, ttl_seconds=ttl_seconds
+            )
         return self.write_lock_manager.acquire(alias, owner_name=owner_name)
 
     def release_write_lock(
-        self, alias: str, owner_name: str = "refresh_scheduler"
-    ) -> None:
+        self,
+        alias: str,
+        owner_name: str = "refresh_scheduler",
+        owner_token: Optional[str] = None,
+    ) -> bool:
         """
         Release the write lock for a repo alias.
 
@@ -1056,12 +1227,29 @@ class RefreshScheduler:
             alias: Repo alias without -global suffix (e.g., "cidx-meta")
             owner_name: Must match the owner name used when acquiring the lock.
                         Defaults to "refresh_scheduler".
+            owner_token: Issue #1548 round-8 fix -- forwarded to
+                ``WriteLockManager.release()`` unchanged. `None` (the
+                default) preserves byte-identical behavior for every
+                existing caller that does not pass this argument.
+
+        Returns:
+            True if the lock was released (or was not held at all), False
+            on an owner/owner_token mismatch (also logged as a WARNING
+            here). Bug #1580 follow-up (adversarial review): returning
+            this result -- instead of discarding it -- lets a caller like
+            golden_repo_write_lock_guard detect and surface a failed
+            release rather than silently continuing. Every pre-existing
+            caller that ignores the return value (the vast majority) is
+            unaffected -- Python callers routinely discard return values.
         """
-        result = self.write_lock_manager.release(alias, owner_name=owner_name)
+        result = self.write_lock_manager.release(
+            alias, owner_name=owner_name, owner_token=owner_token
+        )
         if not result:
             logger.warning(
                 f"Attempted to release write lock for '{alias}' but owner mismatch"
             )
+        return result
 
     def is_write_locked(self, alias: str) -> bool:
         """
@@ -1077,6 +1265,57 @@ class RefreshScheduler:
             True if write lock is held, False otherwise
         """
         return self.write_lock_manager.is_locked(alias)
+
+    def raise_if_write_lock_ownership_lost(
+        self,
+        alias: str,
+        owner_name: str,
+        owner_token: Optional[str] = None,
+    ) -> None:
+        """
+        Issue #1546 AC5 ownership-loss checkpoint: call this at each
+        lease-holding phase of a long-running operation that holds the
+        write lock for `alias` (e.g. after a clone step, immediately
+        before an alias swap, before a post-loop snapshot) to detect
+        that ownership was lost partway through and abort BEFORE any
+        further destructive work, rather than continuing to act on data
+        the caller may no longer have exclusive ownership of.
+
+        Backend-agnostic: raises the SAME exception type regardless of
+        which mechanism is active. DB-backed mode's
+        AliasLockCoordinator.renew() already raises
+        AliasLockOwnershipLostError natively on loss (a zero-rows
+        -affected exact-token UPDATE) -- this propagates unwrapped.
+        File mode's WriteLockManager.renew() instead returns False on
+        the same condition (no lock file present, or an owner/
+        owner_token mismatch) -- translated here into the SAME exception
+        type so every call site gets ONE uniform contract, never needing
+        to branch on which backend is active.
+
+        Args:
+            alias: Repo alias without -global suffix.
+            owner_name: Must match the owner name used when acquiring
+                the lock.
+            owner_token: Must match the owner_token used when acquiring
+                the lock, if one was supplied.
+
+        Raises:
+            AliasLockOwnershipLostError: ownership was lost (or the lock
+                was never held by this caller in the first place).
+        """
+        from code_indexer.server.services.alias_lock_store.base import (
+            AliasLockOwnershipLostError,
+        )
+
+        renewed = self.write_lock_manager.renew(
+            alias, owner_name=owner_name, owner_token=owner_token
+        )
+        if not renewed:
+            raise AliasLockOwnershipLostError(
+                f"write lock ownership check failed for alias={alias!r} "
+                f"owner={owner_name!r} (renew reported failure) -- "
+                f"ownership lost, or the lock was never held"
+            )
 
     def check_refresh_not_in_progress(self, alias: str) -> None:
         """
@@ -1680,6 +1919,49 @@ class RefreshScheduler:
         progress_callback=None,
         tracked_by_caller: bool = False,
     ) -> Dict[str, Any]:
+        """Thin wrapper around _execute_refresh_impl(): times the call and
+        records cidx.repos.refresh.duration via _record_refresh_duration_metric()
+        in `finally`, exactly once regardless of outcome (Story #1586 AC4).
+
+        Story #1586 Finding 2 fix: status is derived from the IMPL'S
+        RETURNED DICT's "success" key, never from whether an exception was
+        raised. A real failure path can return {"success": False, ...}
+        WITHOUT raising (e.g. Bug #1253's local-repo repair failure, or an
+        integrity-gate failure) -- deriving status purely from "did an
+        exception propagate" silently mislabeled those as status="success".
+
+        Deliberate scope decision (documented per Story #1586 remediation):
+        skip/no-op early returns (alias not found, write-lock held, no
+        changes detected, etc.) already set "success": True by original
+        design -- they are genuinely non-failure outcomes, not errors, so
+        this wrapper keeps recording them as status="success" rather than
+        introducing a third "skipped" status value.
+        """
+        _refresh_start_monotonic = time.monotonic()
+        _status = "error"
+        try:
+            result = self._execute_refresh_impl(
+                alias_name,
+                force_reset=force_reset,
+                progress_callback=progress_callback,
+                tracked_by_caller=tracked_by_caller,
+            )
+            _status = "success" if result.get("success") else "error"
+            return result
+        finally:
+            _record_refresh_duration_metric(
+                alias_name,
+                time.monotonic() - _refresh_start_monotonic,
+                _status,
+            )
+
+    def _execute_refresh_impl(
+        self,
+        alias_name: str,
+        force_reset: bool = False,
+        progress_callback=None,
+        tracked_by_caller: bool = False,
+    ) -> Dict[str, Any]:
         """
         Execute refresh for a repository (called by BackgroundJobManager).
 
@@ -1747,6 +2029,27 @@ class RefreshScheduler:
                 try:
                     logger.info(f"Starting refresh for {alias_name}")
 
+                    # Bug #1506 third-pass review Item 1 (Codex Finding 2,
+                    # confirmed by independent code reading): this check
+                    # MUST run before ANYTHING else in this function --
+                    # before current_target/repo_info are read, before
+                    # GitPullUpdater is ever constructed, before the
+                    # branch-verification subprocess calls (including a
+                    # real `git checkout` branch reset), and before
+                    # updater.has_changes()/update(). It previously ran
+                    # much later (right before the write-lock/publish
+                    # sequence), so a quarantined repo -- one that should
+                    # be fully skipped -- still performed real git-pull
+                    # mutation work on the actual golden repo clone before
+                    # being skipped. See
+                    # _refresh_integrity_quarantine_skip_result()
+                    # docstring.
+                    _quarantine_skip = self._refresh_integrity_quarantine_skip_result(
+                        alias_name
+                    )
+                    if _quarantine_skip is not None:
+                        return _quarantine_skip
+
                     # Get current alias target
                     current_target = self.alias_manager.read_alias(alias_name)
                     if not current_target:
@@ -1790,7 +2093,7 @@ class RefreshScheduler:
                     # AC6: Reconcile registry with filesystem at START of refresh
                     # This ensures registry flags reflect actual index state before refresh begins
                     detected_indexes = self._detect_existing_indexes(
-                        Path(current_target)
+                        Path(current_target), repo_alias=repo_name
                     )
                     self._reconcile_registry_with_filesystem(
                         alias_name, detected_indexes
@@ -1939,10 +2242,15 @@ class RefreshScheduler:
                                         )
 
                                 _branch = detect_default_branch(master_path) or "master"
+
+                                # Bug #1555: the remote is a passive backup
+                                # mirror, never a peer -- sync() publishes
+                                # local HEAD directly (force-with-lease)
+                                # rather than rebasing, so it can never get
+                                # stuck on a content conflict and there is
+                                # no quarantine state left to check.
                                 _sync_result = CidxMetaBackupSync(
-                                    master_path,
-                                    _branch,
-                                    ClaudeConflictResolver(),
+                                    master_path, _branch
                                 ).sync()
 
                                 if _sync_result.skipped and not force_reset:
@@ -2052,11 +2360,15 @@ class RefreshScheduler:
                                         bootstrap_err,
                                     )
                             branch = detect_default_branch(master_path) or "master"
-                            sync_result = CidxMetaBackupSync(
-                                master_path,
-                                branch,
-                                ClaudeConflictResolver(),
-                            ).sync()
+
+                            # Bug #1555: the remote is a passive backup
+                            # mirror, never a peer -- sync() publishes local
+                            # HEAD directly (force-with-lease) rather than
+                            # rebasing, so it can never get stuck on a
+                            # content conflict and there is no quarantine
+                            # state left to check. Mirrors the post-migration
+                            # block's identical call above.
+                            sync_result = CidxMetaBackupSync(master_path, branch).sync()
                             if sync_result.skipped and not force_reset:
                                 logger.info(
                                     "No cidx-meta backup changes detected for %s, skipping refresh",
@@ -2218,6 +2530,24 @@ class RefreshScheduler:
                                             source_path, alias_name
                                         )
                                         if not force_reconcile:
+                                            # Bug #1508: has_changes() is a pure git-ref
+                                            # comparison and has zero awareness of whether
+                                            # the LAST indexing pass for the current HEAD
+                                            # actually completed. If a prior refresh's git
+                                            # pull succeeded but indexing was interrupted
+                                            # (server restart, crash, OOM) before
+                                            # metadata.json was updated, local HEAD already
+                                            # equals origin HEAD forever afterward, so
+                                            # has_changes() reports False on every
+                                            # subsequent cycle and the stale index is never
+                                            # repaired. Cross-check metadata.json before
+                                            # honoring the short-circuit.
+                                            force_reconcile = (
+                                                self._check_stale_index_metadata(
+                                                    source_path, alias_name
+                                                )
+                                            )
+                                        if not force_reconcile:
                                             logger.info(
                                                 f"No changes detected for {alias_name}, skipping refresh"
                                             )
@@ -2250,37 +2580,108 @@ class RefreshScheduler:
                             source_path, alias_name
                         )
 
-                    # Index source first, then create versioned snapshot (Story #229)
-                    # Story #482 PATH C: Forward progress_callback into _index_source
-                    # Bug #1388: pass an alias-bound orphan_event_callback
-                    # (see _make_hnsw_orphan_event_logger docstring in
-                    # golden_repo_manager.py) so a marker line scraped from
-                    # the child's stderr is re-logged tagged with this
-                    # repo's alias -- a channel entirely separate from
-                    # progress_callback, which is forwarded unwrapped.
-                    # Reuses the SAME factory the golden-repo
-                    # add/registration path already applies -- never a
-                    # second, duplicated copy.
-                    self._index_source(
-                        alias_name=alias_name,
-                        source_path=source_path,
-                        progress_callback=progress_callback,
-                        orphan_event_callback=_make_hnsw_orphan_event_logger(
-                            alias_name
-                        ),
-                        force_reconcile=force_reconcile,
-                    )
-                    new_index_path = self._create_snapshot(
-                        alias_name=alias_name, source_path=source_path
-                    )
+                    # Bug #1506 third-pass review Item 1: the quarantine
+                    # check used to run HERE, but has been moved to the
+                    # very top of this function (right after "Starting
+                    # refresh") so a quarantined repo is skipped before
+                    # any git-pull/branch-verification work runs -- see
+                    # the comment there and
+                    # _refresh_integrity_quarantine_skip_result()'s
+                    # docstring. Do not re-add a second check here.
 
-                    # Swap alias to new index
-                    logger.info(f"Swapping alias {alias_name} to new index")
-                    self.alias_manager.swap_alias(
-                        alias_name=alias_name,
-                        new_target=new_index_path,
-                        old_target=current_target,
-                    )
+                    # Bug #1506 Codex review Finding 1: hold the SAME
+                    # per-repo write lock external writers use for the
+                    # ENTIRE sequence below (index -> gate -> snapshot ->
+                    # swap), not just the earlier non-blocking
+                    # is_write_locked() pre-check -- see
+                    # _held_write_lock_for_publish() docstring.
+                    with self._held_write_lock_for_publish(
+                        repo_name
+                    ) as _write_lock_acquired:
+                        if not _write_lock_acquired:
+                            logger.info(
+                                f"Skipping refresh for {alias_name}, could "
+                                f"not acquire write lock (race with "
+                                f"external writer)"
+                            )
+                            return {
+                                "success": True,
+                                "alias": alias_name,
+                                "message": "Skipped, write lock held",
+                            }
+
+                        # Index source first, then create versioned snapshot (Story #229)
+                        # Story #482 PATH C: Forward progress_callback into _index_source
+                        # Bug #1388: pass an alias-bound orphan_event_callback
+                        # (see _make_hnsw_orphan_event_logger docstring in
+                        # golden_repo_manager.py) so a marker line scraped from
+                        # the child's stderr is re-logged tagged with this
+                        # repo's alias -- a channel entirely separate from
+                        # progress_callback, which is forwarded unwrapped.
+                        # Reuses the SAME factory the golden-repo
+                        # add/registration path already applies -- never a
+                        # second, duplicated copy.
+                        self._index_source(
+                            alias_name=alias_name,
+                            source_path=source_path,
+                            progress_callback=progress_callback,
+                            orphan_event_callback=_make_hnsw_orphan_event_logger(
+                                alias_name
+                            ),
+                            force_reconcile=force_reconcile,
+                        )
+
+                        # Bug #1506: run-boundary durability-flush +
+                        # integrity gate (still under the write lock
+                        # acquired above). _run_and_publish_integrity_gate
+                        # ALSO calls reset_refresh_integrity_failure() on
+                        # a pass and record_refresh_integrity_failure() on
+                        # a failure internally -- see its docstring; no
+                        # separate reset/record call is needed here.
+                        gate_result = self._run_and_publish_integrity_gate(
+                            alias_name=alias_name,
+                            source_path=source_path,
+                            current_target=current_target,
+                        )
+                        if not gate_result.passed:
+                            detail_summary = "; ".join(
+                                f"{f.collection_dir}: {f.detail}"
+                                for f in gate_result.failures
+                            )
+                            return {
+                                "success": False,
+                                "alias": alias_name,
+                                "message": "Refresh integrity gate failed; publish skipped",
+                                "integrity_gate_detail": detail_summary,
+                            }
+
+                        # Issue #1546 Fix 3 (Codex round review):
+                        # ownership-loss checkpoint immediately before the
+                        # destructive/publishing work below. The write
+                        # lock was acquired at the top of this `with`
+                        # block and held across indexing + the integrity
+                        # gate, but neither of those phases re-verified
+                        # ownership. A DB connection death (DB-backed
+                        # mode) or an external lock-file eviction (file
+                        # mode) mid-indexing rolls back/frees the lock
+                        # silently -- without this check, the code would
+                        # still create and publish a snapshot as if it
+                        # still held exclusive ownership.
+                        self.raise_if_write_lock_ownership_lost(
+                            repo_name, owner_name="refresh_scheduler"
+                        )
+
+                        new_index_path = self._create_snapshot(
+                            alias_name=alias_name, source_path=source_path
+                        )
+
+                        # Swap alias to new index
+                        logger.info(f"Swapping alias {alias_name} to new index")
+                        self.alias_manager.swap_alias(
+                            alias_name=alias_name,
+                            new_target=new_index_path,
+                            old_target=current_target,
+                        )
 
                     # Bug #881 Phase 2: Evict stale HNSW cache entries for the old snapshot
                     # immediately after swap, rather than waiting for 10-minute TTL.
@@ -2339,13 +2740,27 @@ class RefreshScheduler:
                     # current target or previous_path. Inert on ONTAP (discovery []).
                     self._enforce_retention(alias_name, new_index_path)
 
+                    # Story #1457 MEDIUM #14: temporal sister-location aliases
+                    # ({bare_alias}-temporal-{embedder_slug}[-{quarter}]) are
+                    # published directly via AliasManager, NOT as golden_repos
+                    # registry rows, so they are invisible to the enumeration
+                    # loop feeding _enforce_retention above -- sweep them
+                    # separately here, reusing the SAME keep-last-N primitive.
+                    discover_and_enforce_temporal_retention(
+                        alias_name.removesuffix("-global"),
+                        snapshot_manager=self._snapshot_manager,
+                        alias_manager=self.alias_manager,
+                        cleanup_manager=self.cleanup_manager,
+                    )
+
                     # Update registry timestamp
                     self.registry.update_refresh_timestamp(alias_name)
 
                     # AC6: Reconcile registry with filesystem at END of refresh
                     # This captures any new indexes created during refresh (semantic, FTS, temporal, SCIP)
                     detected_indexes = self._detect_existing_indexes(
-                        Path(new_index_path)
+                        Path(new_index_path),
+                        repo_alias=alias_name.removesuffix("-global"),
                     )
                     self._reconcile_registry_with_filesystem(
                         alias_name, detected_indexes
@@ -2380,6 +2795,10 @@ class RefreshScheduler:
                     )
 
         finally:
+            # Story #1586 AC4/Finding 2: cidx.repos.refresh.duration is now
+            # recorded exactly once by the _execute_refresh() thin wrapper
+            # above (which derives status from this method's returned dict,
+            # not from _tracker_raised) -- never duplicate that call here.
             # Bug #935: always unregister from JobTracker (finally runs on return AND raise).
             # EVO-64385: only for the job WE registered. When tracked_by_caller,
             # `refresh-{alias}` was never inserted by us and the outer
@@ -2393,6 +2812,279 @@ class RefreshScheduler:
                     )
                 else:
                     _tracker.complete_job(_tracker_job_id)
+
+    def _held_write_lock_for_publish(self, repo_name: str):
+        """
+        Context manager (Bug #1506 Codex review Finding 1) that acquires
+        the SAME per-repo write lock external writers
+        (DependencyMapService, LangfuseTraceSyncService, etc) use, for
+        the ENTIRE index -> integrity-gate -> snapshot -> swap-alias
+        publish sequence in _execute_refresh() -- not just the earlier
+        non-blocking is_write_locked() pre-check.
+
+        Without this, a writer could start mutating chunks.db
+        concurrently with the gate's fresh-connection
+        ``PRAGMA integrity_check``, producing a false integrity failure
+        (reading a DB mid-write) or, worse, triggering a self-heal
+        reflink-restore over a database that was merely caught mid-write.
+
+        Yields ``True`` if the lock was acquired (caller should proceed)
+        or ``False`` if another owner already holds it (caller should
+        skip this cycle gracefully, exactly like the existing
+        ``is_write_locked()`` pre-check) -- never raises on a failed
+        acquire. Releases the lock in a ``finally`` on every exit path
+        (success, an early return, or an exception propagating through)
+        when it was actually acquired.
+
+        Bug #1506 4th-pass review Item 2: this lock's exclusivity
+        guarantee is only real if EVERY writer that acquires it also
+        skips its own real work on a failed acquisition -- a writer that
+        records the acquired-flag but proceeds regardless (as
+        ``DependencyMapService``'s three call sites did before that
+        review round) would mutate the SAME cidx-meta source files this
+        method's publish sequence is indexing/gating, defeating mutual
+        exclusion from the other direction. That defect is now fixed
+        (``run_full_analysis``/``run_delta_analysis``/
+        ``run_refinement_cycle`` in ``dependency_map_service.py`` all
+        check their own acquisition result before proceeding); any FUTURE
+        writer added to this coordination protocol must do the same.
+
+        Usage::
+
+            with self._held_write_lock_for_publish(repo_name) as acquired:
+                if not acquired:
+                    return {...skip...}
+                ...index -> gate -> snapshot -> swap...
+        """
+        from contextlib import contextmanager
+
+        @contextmanager
+        def _ctx():
+            # Bug #1506 4th-pass review Item 1: bypass acquire_write_lock()'s
+            # wrapper (which hardcodes WriteLockManager's short 3600s
+            # default) and pass an explicit, long TTL directly to
+            # write_lock_manager.acquire() -- mirrors the fleet migration
+            # orchestrator's MIGRATION_LOCK_TTL_SECONDS bypass of the same
+            # wrapper, for the identical reason: this lock must survive a
+            # genuinely multi-hour indexing run. Release goes through the
+            # SAME write_lock_manager API directly (not release_write_lock's
+            # wrapper) for symmetry with the acquire call.
+            acquired = self.write_lock_manager.acquire(
+                repo_name,
+                owner_name="refresh_scheduler",
+                ttl_seconds=_REFRESH_PUBLISH_LOCK_TTL_SECONDS,
+            )
+            try:
+                yield acquired
+            finally:
+                if acquired:
+                    released = self.write_lock_manager.release(
+                        repo_name, owner_name="refresh_scheduler"
+                    )
+                    if not released:
+                        logger.warning(
+                            f"_held_write_lock_for_publish: release for "
+                            f"'{repo_name}' returned False (owner mismatch) "
+                            f"-- lock file may be left behind for staleness "
+                            f"eviction to reclaim"
+                        )
+
+        return _ctx()
+
+    def _get_refresh_integrity_quarantine_state_if_active(
+        self, alias_name: str
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Bug #1506 Codex review Finding 2: read persisted refresh-integrity
+        quarantine state for *alias_name* and return it ONLY when the
+        consecutive-failure count has reached
+        ``_REFRESH_INTEGRITY_QUARANTINE_THRESHOLD`` -- ``None`` otherwise.
+
+        Previously, ``record_refresh_integrity_failure``/
+        ``reset_refresh_integrity_failure`` were called correctly on
+        every cycle, but nothing ever READ this state to make a skip
+        decision -- a repeatedly-corrupting repo just kept retrying
+        indexing (and corrupting) forever. This is the first real caller
+        of ``get_refresh_integrity_failure_state``.
+
+        Bug #1506 third-pass review Item 2 (Codex NEW HIGH): a metadata-
+        backend read failure is deliberately NOT swallowed here -- it
+        propagates to the caller. This method used to catch every
+        exception and return ``None`` ("not quarantined, proceed"),
+        which meant a genuinely-quarantined alias (3+ consecutive
+        corruption failures) whose read merely failed transiently would
+        be silently treated as healthy and re-indexed anyway -- exactly
+        backwards for a mechanism whose entire purpose is to stop
+        retrying a repeatedly-corrupting repo. See
+        ``_refresh_integrity_quarantine_skip_result`` for the fail-closed
+        handling of this exception.
+        """
+        state: Optional[Dict[str, Any]] = (
+            self.golden_repo_metadata.get_refresh_integrity_failure_state(alias_name)
+        )
+        if (
+            state is not None
+            and state.get("consecutive_failure_count", 0)
+            >= _REFRESH_INTEGRITY_QUARANTINE_THRESHOLD
+        ):
+            return state
+        return None
+
+    def _refresh_integrity_quarantine_skip_result(
+        self, alias_name: str
+    ) -> Optional[Dict[str, Any]]:
+        """Returns a skip-result dict if *alias_name* must NOT be indexed
+        this cycle, else ``None`` (proceed). Extracted so
+        ``_execute_refresh`` only needs a short call.
+
+        Two distinct skip reasons, both fail-closed (Bug #1506 third-pass
+        review Item 2):
+        - ``"integrity_quarantined"``: the read succeeded and confirmed
+          *alias_name* is at/above the consecutive-failure threshold.
+        - ``"quarantine_check_failed"``: the metadata-backend read itself
+          raised. This is deliberately a DIFFERENT skip reason from
+          ``"integrity_quarantined"`` -- an operator/log reader must be
+          able to tell "we are UNCERTAIN whether this repo is
+          quarantined" apart from "we CONFIRMED this repo is
+          quarantined". Either way, indexing is skipped this cycle: a
+          transient read failure must never make a possibly-quarantined
+          repo look clean and get re-indexed.
+        """
+        try:
+            quarantine_state = self._get_refresh_integrity_quarantine_state_if_active(
+                alias_name
+            )
+        except Exception as read_exc:
+            logger.error(
+                f"Bug #1506: failed to read refresh-integrity quarantine "
+                f"state for {alias_name} -- failing this refresh cycle "
+                f"CLOSED (skipping indexing) rather than silently treating "
+                f"a possibly-quarantined repo as healthy: "
+                f"{type(read_exc).__name__}: {read_exc}"
+            )
+            return {
+                "success": False,
+                "alias": alias_name,
+                "message": (
+                    "Refresh integrity quarantine state could not be read; "
+                    "skipping indexing this cycle to fail closed"
+                ),
+                "skipped": "quarantine_check_failed",
+            }
+        if quarantine_state is None:
+            return None
+        logger.error(
+            f"Bug #1506: {alias_name} is QUARANTINED after "
+            f"{quarantine_state['consecutive_failure_count']} consecutive "
+            f"refresh-integrity gate failures -- skipping indexing this "
+            f"cycle. Manual operator intervention is required to resume "
+            f"scheduled refresh for this repo."
+        )
+        return {
+            "success": False,
+            "alias": alias_name,
+            "message": "Refresh integrity quarantine active; indexing skipped",
+            "skipped": "integrity_quarantined",
+            "consecutive_failure_count": quarantine_state["consecutive_failure_count"],
+        }
+
+    def _record_integrity_gate_failure(
+        self, alias_name: str, gate_result: RefreshIntegrityGateResult
+    ) -> None:
+        """Log + persist a Bug #1506 integrity-gate failure (quarantine
+        bookkeeping), extracted from ``_run_and_publish_integrity_gate``
+        purely to keep that method short."""
+        detail_summary = "; ".join(
+            f"{f.collection_dir}: {f.detail}" for f in gate_result.failures
+        )
+        logger.error(
+            f"Bug #1506: refusing to publish refresh for "
+            f"{alias_name} -- integrity gate failed for "
+            f"{len(gate_result.failures)} collection(s): "
+            f"{detail_summary}. The already-published alias "
+            f"continues serving the last verified-good snapshot."
+        )
+        try:
+            failure_count = self.golden_repo_metadata.record_refresh_integrity_failure(
+                alias_name, detail_summary
+            )
+            if failure_count >= _REFRESH_INTEGRITY_QUARANTINE_THRESHOLD:
+                logger.error(
+                    f"Bug #1506: {alias_name} has failed the refresh "
+                    f"integrity gate {failure_count} consecutive times -- "
+                    f"QUARANTINED. Operator attention is required to "
+                    f"investigate the underlying corruption source."
+                )
+        except Exception as quarantine_exc:
+            logger.error(
+                f"Bug #1506: failed to record refresh-integrity "
+                f"quarantine state for {alias_name} (non-fatal): "
+                f"{type(quarantine_exc).__name__}: {quarantine_exc}"
+            )
+
+    def _reset_integrity_gate_quarantine(self, alias_name: str) -> None:
+        """Clear any prior Bug #1506 quarantine state on a gate pass,
+        extracted from ``_run_and_publish_integrity_gate`` purely to keep
+        that method short."""
+        try:
+            self.golden_repo_metadata.reset_refresh_integrity_failure(alias_name)
+        except Exception as reset_exc:
+            # Bug #1506 4th-pass review Item 3: bumped from WARNING to
+            # ERROR -- if this bookkeeping write repeatedly fails, the
+            # consecutive-failure-count circuit breaker never gets reset
+            # either, silently confusing future quarantine decisions. This
+            # does not fail the current cycle (already correct: the gate
+            # itself already decided to publish), it only ensures the
+            # swallowed failure is loudly visible for operator diagnosis.
+            logger.error(
+                f"Bug #1506: failed to reset refresh-integrity quarantine "
+                f"state for {alias_name} (non-fatal): "
+                f"{type(reset_exc).__name__}: {reset_exc}"
+            )
+
+    def _run_and_publish_integrity_gate(
+        self,
+        alias_name: str,
+        source_path: str,
+        current_target: Optional[str],
+    ) -> RefreshIntegrityGateResult:
+        """
+        Shared Bug #1506 run-boundary durability-flush + integrity gate
+        invocation, plus quarantine bookkeeping (record-on-failure /
+        reset-on-pass). Reused by BOTH the live ``_execute_refresh``
+        publish sequence AND the legacy ``_create_new_index()``
+        delegator (Codex review Finding 5) so a repeatedly-corrupting
+        repo is quarantined identically regardless of which entry point
+        indexed it, and so the underlying gate primitives can never be
+        bypassed by a second caller.
+
+        Never raises for a data-integrity failure -- returns the
+        ``RefreshIntegrityGateResult`` (whose ``.passed`` the caller must
+        check) so each caller can apply its own failure-reporting
+        convention (an early-return dict for ``_execute_refresh``, a
+        raised ``RuntimeError`` for ``_create_new_index``).
+        """
+        healthy_index_dir = (
+            Path(current_target) / ".code-indexer" / "index"
+            if current_target and current_target != source_path
+            else None
+        )
+        clone_backend = (
+            getattr(self._snapshot_manager, "_clone_backend", None)
+            if self._snapshot_manager is not None
+            else None
+        )
+        gate_result = run_refresh_integrity_gate(
+            source_index_dir=Path(source_path) / ".code-indexer" / "index",
+            healthy_index_dir=healthy_index_dir,
+            clone_backend=clone_backend,
+        )
+        if not gate_result.passed:
+            self._record_integrity_gate_failure(alias_name, gate_result)
+            return gate_result
+
+        self._reset_integrity_gate_quarantine(alias_name)
+        return gate_result
 
     def _index_source(
         self,
@@ -2436,27 +3128,24 @@ class RefreshScheduler:
         # --reconcile compares content IDs against existing vectors, skips unchanged
         # files. Only used when needed (interrupted state or extension drift), otherwise
         # normal incremental.
+        # Bug #1623-A: provider-aware read (voyage-ai first, legacy bare
+        # metadata.json fallback) via metadata_reader.read_status() -- this
+        # call site is a second, verbatim copy of the exact gap Bug #1623
+        # fixed in _check_stale_index_metadata(): reading only the bare
+        # legacy metadata.json left an in_progress/failed status recorded
+        # ONLY in a provider-suffixed file (e.g. metadata-voyage-ai.json,
+        # the real production filename) invisible here. read_status()
+        # never raises; it returns None on any read/parse error, missing
+        # file, or missing/empty key, which safely disables --reconcile
+        # (fail-open, matching the original bare try/except's behavior).
         needs_reconcile = False
-        metadata_path = Path(source_path) / ".code-indexer" / "metadata.json"
-        if metadata_path.exists():
-            try:
-                import json as _json
-
-                with open(metadata_path) as _f:
-                    _meta = _json.load(_f)
-                meta_status = _meta.get("status", "")
-                if meta_status in ("in_progress", "failed"):
-                    needs_reconcile = True
-                    logger.info(
-                        f"Previous indexing interrupted (status={meta_status}), "
-                        f"using --reconcile for crash recovery on {alias_name}"
-                    )
-            except Exception as _meta_err:
-                logger.warning(
-                    "Could not read metadata.json for %s, proceeding without --reconcile: %s",
-                    alias_name,
-                    _meta_err,
-                )
+        meta_status = read_status(source_path)
+        if meta_status in ("in_progress", "failed"):
+            needs_reconcile = True
+            logger.info(
+                f"Previous indexing interrupted (status={meta_status}), "
+                f"using --reconcile for crash recovery on {alias_name}"
+            )
 
         # Story #1001: OR with force_reconcile from extension-drift detection.
         needs_reconcile = needs_reconcile or force_reconcile
@@ -2465,6 +3154,14 @@ class RefreshScheduler:
             index_command = ["cidx", "index", "--fts", "--reconcile", "--progress-json"]
         else:
             index_command = ["cidx", "index", "--fts", "--progress-json"]
+
+        from code_indexer.server.utils.index_command_layout import (
+            append_server_layout_args,
+        )
+
+        # Story #1488: server states the new-collection layout explicitly
+        # (CHUNKS_DB) rather than inheriting the CLI SHARDED_JSON default.
+        index_command = append_server_layout_args(index_command)
 
         # Step 2: Temporal indexing on source (if enabled and not local://)
         repo_info = self.registry.get_global_repo(alias_name)
@@ -2518,7 +3215,12 @@ class RefreshScheduler:
 
         temporal_command = None
         if enable_temporal:
-            temporal_command = ["cidx", "index", "--index-commits", "--progress-json"]
+            # Story #1488: server states the new-collection layout explicitly
+            # (CHUNKS_DB); append_server_layout_args imported above in this
+            # method for the semantic command.
+            temporal_command = append_server_layout_args(
+                ["cidx", "index", "--index-commits", "--progress-json"]
+            )
             logger.info(f"Temporal indexing enabled for {alias_name}")
 
             # Story #1404: global temporal indexing floor date, composed
@@ -2586,6 +3288,29 @@ class RefreshScheduler:
                         alias_name,
                         _fallback_max,
                     )
+                else:
+                    # Bug #1461 salvage item #6 (see
+                    # _read_max_commits_from_fixed_temporal_root above): the
+                    # in-repo scan found nothing (relocated and/or
+                    # reclaimed by Story #1457/#1458) -- consult the
+                    # golden-owned sister location before giving up.
+                    _golden_repos_dir = getattr(self, "golden_repos_dir", None)
+                    if _golden_repos_dir is not None:
+                        _fallback_max = _read_max_commits_from_fixed_temporal_root(
+                            Path(_golden_repos_dir),
+                            bare_alias,
+                            Path(source_path) / ".code-indexer" / "index",
+                        )
+                        if _fallback_max is not None:
+                            logger.info(
+                                "Bug #1461: temporal_options NULL for %s, "
+                                "in-repo temporal_meta.json absent, using "
+                                "max_commits=%s from sister-location "
+                                "temporal_progress.json",
+                                alias_name,
+                                _fallback_max,
+                            )
+                if _fallback_max is not None:
                     temporal_command.extend(["--max-commits", str(_fallback_max)])
 
         # Step 3: SCIP indexing on source (if enabled)
@@ -2735,11 +3460,21 @@ class RefreshScheduler:
         logger.info(
             f"Running cidx index on source for {alias_name}: {' '.join(index_command)}"
         )
+        # Bug #1575 Part C independent re-review: this is THE dominant,
+        # steady-state production `cidx index` spawn (runs on every golden
+        # repo, every refresh cycle) and previously never signaled
+        # postgres/cluster mode to the child at all.
+        from code_indexer.storage.shared.hnsw_sync_state import (
+            resolve_hnsw_sync_epoch_env_var,
+        )
+
+        _semantic_env = build_cidx_subprocess_env()
+        _semantic_env.update(resolve_hnsw_sync_epoch_env_var())
         _run_popen_c_with_telemetry(
             index_command,
             phase_name="semantic",
             error_label=f"indexing on source for {alias_name}",
-            env=build_cidx_subprocess_env(),
+            env=_semantic_env,
         )
         logger.info(f"cidx index on source completed successfully for {alias_name}")
 
@@ -2788,6 +3523,18 @@ class RefreshScheduler:
                 if _temporal_env is not None
                 else None
             )
+            # Bug #1575 Part C independent re-review: temporal collections
+            # build/rebuild an HNSW graph via the SAME machinery as
+            # semantic collections, so this child needs the same
+            # postgres-mode signal -- merged AFTER the above so it can
+            # never be clobbered by build_temporal_child_env()/
+            # build_cidx_subprocess_env().
+            if _temporal_env is not None:
+                from code_indexer.storage.shared.hnsw_sync_state import (
+                    resolve_hnsw_sync_epoch_env_var,
+                )
+
+                _temporal_env.update(resolve_hnsw_sync_epoch_env_var())
 
             logger.info(
                 f"Running cidx index (temporal) on source for {alias_name}: {' '.join(temporal_command)}"
@@ -3062,10 +3809,53 @@ class RefreshScheduler:
             Path to new index directory (only if validation passes)
 
         Raises:
-            RuntimeError: If any step fails (with cleanup of partial artifacts)
+            RuntimeError: If any step fails (with cleanup of partial
+                artifacts), including a Bug #1506 integrity-gate failure
+                (Codex review Finding 5): this delegator previously
+                published chunks.db unchecked. It now runs the SAME
+                gate _execute_refresh() uses, via
+                _run_and_publish_integrity_gate(), before ever calling
+                _create_snapshot(). Also raised if the Bug #1506
+                third-pass review Item 3 write lock (see below) cannot
+                be acquired.
+
+        Bug #1506 third-pass review Item 3 (Codex NEW MEDIUM,
+        defense-in-depth): the index -> gate -> snapshot sequence below
+        is wrapped in the SAME _held_write_lock_for_publish() context
+        manager _execute_refresh()'s publish sequence uses. This method
+        has no production callers today (test/docstring-only backward-
+        compat delegator), but wrapping it now closes the exact race
+        Finding 1 fixed for _execute_refresh -- a concurrent external
+        writer mutating chunks.db mid-gate -- so a future caller cannot
+        silently reintroduce it.
         """
-        self._index_source(alias_name=alias_name, source_path=source_path)
-        return self._create_snapshot(alias_name=alias_name, source_path=source_path)
+        repo_name = alias_name.removesuffix("-global")
+        with self._held_write_lock_for_publish(repo_name) as _write_lock_acquired:
+            if not _write_lock_acquired:
+                raise RuntimeError(
+                    f"Bug #1506: could not acquire write lock for "
+                    f"{alias_name} (held by another owner) -- refusing "
+                    f"to index/publish via _create_new_index()"
+                )
+
+            self._index_source(alias_name=alias_name, source_path=source_path)
+
+            current_target = self.alias_manager.read_alias(alias_name)
+            gate_result = self._run_and_publish_integrity_gate(
+                alias_name=alias_name,
+                source_path=source_path,
+                current_target=current_target,
+            )
+            if not gate_result.passed:
+                detail_summary = "; ".join(
+                    f"{f.collection_dir}: {f.detail}" for f in gate_result.failures
+                )
+                raise RuntimeError(
+                    f"Bug #1506: refresh integrity gate failed for "
+                    f"{alias_name} via _create_new_index(): {detail_summary}"
+                )
+
+            return self._create_snapshot(alias_name=alias_name, source_path=source_path)
 
     def _is_local_config_valid(self, config_json_path: Path) -> bool:
         """
@@ -3263,19 +4053,202 @@ class RefreshScheduler:
             )
         return False
 
-    def _detect_existing_indexes(self, repo_path: Path) -> Dict[str, bool]:
+    def _check_stale_index_metadata(self, source_path: str, alias_name: str) -> bool:
+        """Detect an interrupted/stale index that has_changes() cannot see.
+
+        Bug #1508: GitPullUpdater.has_changes() is a pure git-ref comparison
+        (local HEAD vs @{upstream}). It has zero awareness of whether the
+        LAST indexing pass for the current local HEAD actually completed.
+        If a refresh's git-pull step succeeds but the subsequent indexing
+        step is interrupted (server restart landing mid-refresh, `cidx
+        index` crash, OOM kill) before metadata is updated, every
+        SUBSEQUENT refresh will see local HEAD == origin HEAD and
+        has_changes() will report False forever -- permanently masking
+        that the on-disk index is stale relative to the git tree it is
+        supposedly built from.
+
+        This cross-checks metadata against two independent signals:
+        - status "in_progress"/"failed": the last indexing attempt for
+          whatever commit it recorded never completed.
+        - current_commit != actual working-tree HEAD: the git tree has
+          advanced (via a pull) past the last commit that was ever
+          recorded as indexed, regardless of that run's reported status.
+
+        Bug #1591 (provider-aware current_commit read): current_commit is
+        read via metadata_reader.read_current_commit(), which resolves
+        the REAL filename SmartIndexer writes in production --
+        `.code-indexer/metadata-{provider}.json` (e.g.
+        metadata-voyage-ai.json) -- falling back to the legacy bare
+        metadata.json only when no provider file exists. A live census of
+        the dev golden-repos fleet found 15 metadata-voyage-ai.json + 13
+        metadata-cohere.json vs only 2 bare metadata.json; reading only
+        the legacy file (the original Bug #1508 implementation) left the
+        current_commit signal permanently inert on ~93% of the fleet,
+        which in turn meant the "unknown"/stale-SHA self-heal below could
+        never actually run for those repos. This fix makes the signal
+        effective fleet-wide for the provider filenames read_current_commit
+        knows about (voyage-ai and legacy bare); a repo whose ONLY
+        metadata file uses a different provider suffix (e.g.
+        metadata-cohere.json) is not covered by this fix -- that is a
+        pre-existing gap in read_current_commit() itself, out of scope
+        here.
+
+        Bug #1623 (provider-aware status read): the status signal above
+        was, until this fix, the ONLY remaining part of this check still
+        blind to provider-suffixed metadata files -- it read the legacy
+        bare metadata.json exclusively even after #1591 made
+        current_commit provider-aware. It is now read via
+        metadata_reader.read_status(), the status-field sibling of
+        read_current_commit() with the IDENTICAL provider-first
+        (metadata-voyage-ai.json), legacy-fallback (metadata.json)
+        precedence. Live evidence: colorama/metadata-voyage-ai.json and
+        markupsafe/metadata-voyage-ai.json both recorded
+        status=in_progress while their sibling metadata-cohere.json files
+        said completed -- exactly the interrupted-index condition this
+        check exists to catch, sitting in a file the status check never
+        opened before this fix. Same scope limitation as
+        read_current_commit(): a repo whose ONLY metadata file uses a
+        different provider suffix (e.g. metadata-cohere.json) is not
+        covered.
+
+        Bug #1591 (prefix tolerance): the current_commit comparison is
+        prefix-tolerant, not a plain string equality, and requires at
+        least 7 hex characters (git's own default abbreviation length) to
+        accept a value as a genuine prefix -- anything shorter is too
+        collision-prone to trust as a real commit identifier. Three
+        independent producers write this field: git_detection.py's
+        GitDetectionService._get_detailed_git_state() (the real indexing
+        path, reached via SmartIndexer.get_git_status() ->
+        GitAwareDocumentProcessor.get_git_status() ->
+        self.git_detection._get_current_git_state()) and
+        file_identifier.py's _get_cached_commit_hash() both write the
+        FULL 40-char SHA via `git rev-parse HEAD` and both write the
+        literal "unknown" if that command fails; config_fixer.py's
+        GitStateDetector previously wrote an abbreviated 7-char SHA via
+        `git rev-parse --short HEAD` (changed to the full SHA in the same
+        fix that added this prefix tolerance) and also writes "unknown"
+        on failure. A recorded value that is a genuine, valid-hex prefix
+        (>=7 chars, case-insensitive) of the actual HEAD is the SAME
+        commit and must NOT be treated as drift. The literal "unknown"
+        (matched case/whitespace-insensitively) carries no usable
+        information and always forces one reconcile so a real commit gets
+        recorded going forward -- the subsequent real indexing run writes
+        a full SHA via one of the producers above, which self-heals the
+        field for future cycles for any repo whose metadata file is one
+        read_current_commit() actually consults.
+
+        Args:
+            source_path: Absolute path to the live repo directory.
+            alias_name: Global alias name used only for logging.
+
+        Returns:
+            True if a reconcile pass is needed to catch up a stale index,
+            False if metadata is absent, unreadable, or fully consistent.
+        """
+        # Bug #1623: provider-aware read (voyage-ai first, legacy bare
+        # metadata.json fallback) -- see docstring above. read_status()
+        # never raises; it returns None on any read/parse error, missing
+        # file, or missing/empty key, which safely falls through to the
+        # current_commit check below (fail-open, matching the
+        # current_commit signal's own error handling).
+        status = read_status(source_path)
+        if status in ("in_progress", "failed"):
+            logger.warning(
+                "Stale/interrupted index detected for %s (metadata "
+                "status=%s) despite no new git changes -- forcing "
+                "reconcile to catch up (Bug #1508)",
+                alias_name,
+                status,
+            )
+            return True
+
+        # Bug #1591: provider-aware read (voyage-ai first, legacy bare
+        # metadata.json fallback) -- see docstring above.
+        recorded_commit = read_current_commit(source_path)
+        if not recorded_commit:
+            return False
+
+        try:
+            head_result = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=source_path,
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+        except Exception as e:
+            logger.debug(
+                "Could not determine git HEAD for %s while checking for a "
+                "stale index: %s",
+                alias_name,
+                e,
+            )
+            return False
+
+        if head_result.returncode != 0:
+            return False
+
+        actual_commit = head_result.stdout.strip()
+        if not actual_commit:
+            return False
+
+        recorded_lower = recorded_commit.strip().lower()
+
+        if recorded_lower == "unknown":
+            logger.warning(
+                "Index metadata for %s has no usable recorded commit "
+                '("unknown", written on a git-state detection failure by '
+                "config_fixer.py, git_detection.py, or file_identifier.py) "
+                "-- forcing reconcile once so a real commit gets recorded "
+                "going forward (Bug #1591)",
+                alias_name,
+            )
+            return True
+
+        # A shorter, valid-hex recorded value that is a genuine PREFIX of
+        # the actual HEAD is the SAME commit, not drift -- but only when
+        # it meets git's own minimum abbreviation length of 7 characters;
+        # anything shorter (e.g. a single character) is too collision-
+        # prone to trust as a real commit identifier.
+        is_hex_fragment = len(recorded_lower) >= 7 and all(
+            c in "0123456789abcdef" for c in recorded_lower
+        )
+        if is_hex_fragment and actual_commit.lower().startswith(recorded_lower):
+            return False
+
+        logger.warning(
+            "Index metadata for %s reflects commit %s but working tree "
+            "HEAD is %s -- forcing reconcile to catch up on drifted "
+            "index (Bug #1508)",
+            alias_name,
+            recorded_commit,
+            actual_commit,
+        )
+        return True
+
+    def _detect_existing_indexes(
+        self, repo_path: Path, repo_alias: Optional[str] = None
+    ) -> Dict[str, bool]:
         """
         Detect which index types exist in the repository's .code-indexer directory.
 
         Args:
             repo_path: Path to the repository root
+            repo_alias: Bare (no "-global" suffix) golden repo alias, used to
+                additionally consult the golden-owned sister location for
+                relocated temporal data (Bug #1461). Optional and defaults to
+                None for backward compatibility with existing positional-only
+                callers -- when None, temporal detection is EXACTLY the
+                in-repo-only scan below, unchanged.
 
         Returns:
             Dictionary with index types as keys and existence as boolean values:
             - semantic: True if semantic vector index exists
             - fts: True if FTS (Tantivy) index exists
             - temporal: True if a temporal collection exists WITH real shard data
-              (Bug #1390: name-match alone is not enough -- see below)
+              (Bug #1390: name-match alone is not enough -- see below), OR if
+              real temporal data exists at the golden-owned sister location
+              (Bug #1461, only checked when repo_alias is provided)
             - scip: True if SCIP code intelligence indexes exist
         """
         from code_indexer.services.temporal.temporal_collection_naming import (
@@ -3322,6 +4295,18 @@ class RefreshScheduler:
                     temporal_exists = True
                     break
 
+        # Bug #1461: the in-repo scan above cannot see temporal data that
+        # Story #1457 relocated to the golden-owned sister location. If the
+        # in-repo scan alone found nothing, additionally consult the sister
+        # location (fail-open, never raises) before concluding "no temporal
+        # data" -- otherwise a relocated-but-alive repo would trigger Bug
+        # #1406's one-way auto-DISABLE downgrade against operator/system
+        # intent.
+        if not temporal_exists and repo_alias is not None:
+            temporal_exists = self._fixed_root_temporal_data_exists(
+                repo_alias, semantic_index_dir
+            )
+
         # Check SCIP indexes: delegate to _has_scip_indexes()
         scip_exists = self._has_scip_indexes(repo_path)
 
@@ -3331,6 +4316,46 @@ class RefreshScheduler:
             "temporal": temporal_exists,
             "scip": scip_exists,
         }
+
+    def _fixed_root_temporal_data_exists(
+        self, repo_alias: str, legacy_index_path: Path
+    ) -> bool:
+        """Bug #1461 (Epic #1454 Story #1461 salvage item #1): the in-repo-only
+        scan above cannot see temporal data that Story #1457 relocated to the
+        golden-owned sister location. Consult get_temporal_repo_status()'s
+        resolver-based union (sister pointer OR in-repo, real-data-presence
+        only) so a relocated-but-alive repo is not misreported as "no temporal
+        data", which would otherwise trigger Bug #1406's one-way auto-DISABLE
+        downgrade against operator/system intent.
+
+        Fails open (returns False, in-repo-only result stands unchanged) on
+        ANY error -- reconciliation must never crash because this best-effort
+        secondary check could not run (e.g. golden_repos_dir unavailable on a
+        bare/test instance, a malformed alias pointer, an OSError).
+        """
+        golden_repos_dir: Optional[Path] = getattr(self, "golden_repos_dir", None)
+        if golden_repos_dir is None:
+            return False
+        try:
+            from code_indexer.services.temporal.temporal_status import (
+                get_temporal_repo_status,
+            )
+
+            status = get_temporal_repo_status(
+                golden_repos_dir=golden_repos_dir,
+                repo_alias=repo_alias,
+                legacy_index_path=legacy_index_path,
+            )
+            return bool(status.has_data)
+        except Exception as exc:
+            logger.warning(
+                "Reconciliation: sister-location temporal status check failed "
+                "for %s: %s: %s -- falling back to in-repo-only detection",
+                repo_alias,
+                type(exc).__name__,
+                exc,
+            )
+            return False
 
     def _has_scip_indexes(self, repo_path: Path) -> bool:
         """

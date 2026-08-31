@@ -185,9 +185,9 @@ class BranchService:
                 format_error_log(
                     "APP-GENERAL-053",
                     "Git operation failed listing branches",
-                    exc_info=True,
                     extra={"correlation_id": get_correlation_id()},
-                )
+                ),
+                exc_info=True,
             )
             raise  # Preserve original exception
         except Exception as e:
@@ -195,9 +195,9 @@ class BranchService:
                 format_error_log(
                     "APP-GENERAL-054",
                     "Unexpected error listing branches",
-                    exc_info=True,
                     extra={"correlation_id": get_correlation_id()},
-                )
+                ),
+                exc_info=True,
             )
             raise RuntimeError("Failed to retrieve branch information") from e
 
@@ -229,9 +229,9 @@ class BranchService:
                 format_error_log(
                     "APP-GENERAL-055",
                     f"Git operation failed getting branch '{branch_name}'",
-                    exc_info=True,
                     extra={"correlation_id": get_correlation_id()},
-                )
+                ),
+                exc_info=True,
             )
             return None
         except Exception:
@@ -239,9 +239,9 @@ class BranchService:
                 format_error_log(
                     "APP-GENERAL-056",
                     f"Unexpected error getting branch '{branch_name}'",
-                    exc_info=True,
                     extra={"correlation_id": get_correlation_id()},
-                )
+                ),
+                exc_info=True,
             )
             return None
 

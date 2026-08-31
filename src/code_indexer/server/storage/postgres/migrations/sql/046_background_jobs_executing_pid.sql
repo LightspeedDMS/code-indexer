@@ -1,0 +1,38 @@
+-- Migration 046: Add executing_pid to background_jobs (Bug #1563).
+--
+-- Under `uvicorn --workers N`, every worker runs its own app lifespan,
+-- and each lifespan calls cleanup_orphaned_jobs_on_startup(node_id=...).
+-- The pre-fix predicate scoped cleanup to a NODE but not to a WORKER, so
+-- when a single worker process recycled, its own startup sweep marked
+-- ALL running/pending jobs on the whole node as "failed", including
+-- jobs genuinely still executing inside a healthy sibling worker
+-- process that merely shared the same node.
+--
+-- This column records the OS process id of the specific worker that
+-- claimed a job (stamped internally via os.getpid() in
+-- save_job/atomic_claim_insert whenever executing_node is set -- no
+-- caller change required, since that call always executes inside the
+-- very process taking ownership). cleanup_orphaned_jobs_on_startup then
+-- checks this pid's liveness (psutil.pid_exists) against THIS host's
+-- process table before failing a node-scoped candidate: a live pid means
+-- a sibling worker still genuinely owns the job, and it is left alone; a
+-- dead pid means the owner is provably gone and the row is a genuine
+-- orphan. A real full-node restart is unaffected -- every pid recorded
+-- for that node becomes dead at once, so every row is still correctly
+-- reclaimed.
+--
+-- Deliberately NEVER applied to the Bug #1512 `executing_node IS NULL`
+-- reclaim branch: that branch's pid (if any) can be a STALE value from a
+-- DIFFERENT host (job_reconciliation_service resets executing_node to
+-- NULL, without touching executing_pid, when the owning node leaves the
+-- cluster) -- checking it locally would risk a false "still alive" from
+-- an unrelated local process reusing that foreign pid number.
+--
+-- Backward compatible: additive nullable column only, no default value
+-- required, no backfill. Rows inserted before this migration (or by a
+-- code path this fix does not touch, e.g. DistributedJobClaimer's
+-- cross-node work-stealing queue) simply read executing_pid as NULL and
+-- degrade to the pre-fix unconditional-fail behavior for that row only
+-- -- never blocks a rolling upgrade.
+
+ALTER TABLE background_jobs ADD COLUMN IF NOT EXISTS executing_pid INTEGER;

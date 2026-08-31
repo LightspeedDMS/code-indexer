@@ -30,12 +30,11 @@ become a permanent duplicate HNSW entry.
 """
 
 import logging
-import os
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Set
 
-from code_indexer.utils.file_locking import nfs_safe_fsync
+from code_indexer.utils.file_locking import fsync_directory
 
 from .models import CommitInfo
 from .temporal_collection_naming import get_shard_collection_name
@@ -54,15 +53,6 @@ class StrayDeleteFailedError(RuntimeError):
     """
 
 
-def _fsync_directory(path: Path) -> None:
-    """Fsync a directory so entries removed within it survive a crash."""
-    dir_fd = os.open(str(path), os.O_RDONLY)
-    try:
-        nfs_safe_fsync(dir_fd)
-    finally:
-        os.close(dir_fd)
-
-
 def reconcile_shard(
     vector_store,
     shard_name: str,
@@ -70,6 +60,14 @@ def reconcile_shard(
     model_name: str,
 ) -> List[CommitInfo]:
     """Reconcile ONE shard against disk (Bug #1407 per-shard primitive).
+
+    Story #1457 AC7: dispatches on the shard directory's chunk layout
+    (`resolve_chunk_layout`) -- CHUNKS_DB shards are reconciled against the
+    consolidated SQLite chunk store's point_id primary key
+    (`_reconcile_shard_chunks_db`); SHARDED_JSON shards keep the EXACT
+    existing `IDIndexManager().rebuild_from_vectors` behavior unchanged
+    (`_reconcile_shard_legacy`) -- a layout-DISPATCHED rewrite, never a
+    blanket replacement (Story #1456's established dual-mode pattern).
 
     Args:
         vector_store: FilesystemVectorStore instance.
@@ -84,7 +82,7 @@ def reconcile_shard(
         original order.
 
     Raises:
-        StrayDeleteFailedError: a PARTIAL commit's stray point file could
+        StrayDeleteFailedError: a PARTIAL commit's stray point(s) could
             not be deleted (Amendment 4, fail-closed).
     """
     if not shard_commits:
@@ -93,13 +91,28 @@ def reconcile_shard(
     if not vector_store.collection_exists(shard_name):
         return list(shard_commits)
 
+    shard_dir = vector_store.base_path / shard_name
+
+    from ...storage.shared.chunk_layout import ChunkLayout, resolve_chunk_layout
+
+    if resolve_chunk_layout(shard_dir) == ChunkLayout.CHUNKS_DB:
+        return _reconcile_shard_chunks_db(shard_dir, shard_name, shard_commits)
+    return _reconcile_shard_legacy(shard_dir, shard_name, shard_commits)
+
+
+def _reconcile_shard_legacy(
+    shard_dir: Path,
+    shard_name: str,
+    shard_commits: List[CommitInfo],
+) -> List[CommitInfo]:
+    """SHARDED_JSON layout: EXACT existing behavior, unchanged (extracted
+    verbatim from the pre-AC7 reconcile_shard body)."""
     # Story #1290 AC16: scan the ACTUAL vector files on disk rather than
     # trusting id_index.bin, which is only rewritten at end_indexing() --
     # a crash mid-shard leaves new points on disk that the cached binary
     # index does not yet know about.
     from ...storage.id_index_manager import IDIndexManager
 
-    shard_dir = vector_store.base_path / shard_name
     point_id_to_path = IDIndexManager().rebuild_from_vectors(shard_dir)
 
     hashes_with_points: Dict[str, List] = {}
@@ -108,7 +121,12 @@ def reconcile_shard(
         if len(parts) == 4 and parts[1] == "commit":
             hashes_with_points.setdefault(parts[2], []).append(json_path)
 
-    completed = TemporalProgressiveMetadata(shard_dir).load_completed()
+    # Bug #1461 sub-part 7b: strict=True -- a corrupt temporal_progress.json
+    # must abort reconciliation loudly. The lenient default would return an
+    # empty completed set, misclassifying every already-indexed commit in
+    # this shard as PARTIAL and deleting its points for a destructive
+    # full re-embed triggered by plain file corruption.
+    completed = TemporalProgressiveMetadata(shard_dir).load_completed(strict=True)
 
     missing: List[CommitInfo] = []
     partial_paths: List = []
@@ -134,7 +152,7 @@ def reconcile_shard(
                     f"{json_path} in shard {shard_name}: {exc}"
                 ) from exc
         for touched_dir in touched_dirs:
-            _fsync_directory(touched_dir)
+            fsync_directory(touched_dir)
         logger.info(
             "Reconciliation: shard %s -- deleted %d stray point(s)",
             shard_name,
@@ -142,6 +160,66 @@ def reconcile_shard(
         )
 
     return missing
+
+
+def _reconcile_shard_chunks_db(
+    shard_dir: Path,
+    shard_name: str,
+    shard_commits: List[CommitInfo],
+) -> List[CommitInfo]:
+    """CHUNKS_DB layout (Story #1457 AC7): point-id existence read from the
+    consolidated SQLite chunk store's primary key
+    (`ChunkStore.all_point_ids()`) instead of the retired
+    `id_index.bin`/`vector_*.json` scan. Stray deletion uses
+    `ChunkStore.delete_stray_points_fail_closed` -- a SINGLE transaction,
+    durable synchronous commit, rollback-on-any-failure -- preserving the
+    SAME transactional-delete + fail-closed + durable-fsync safety
+    contract `_reconcile_shard_legacy` established, translated into the
+    SAME `StrayDeleteFailedError`.
+    """
+    from ...storage.sqlite_chunk_store import ChunkStore
+
+    store = ChunkStore(shard_dir / "chunks.db")
+    try:
+        all_point_ids = store.all_point_ids()
+
+        hashes_with_points: Dict[str, List[str]] = {}
+        for point_id in all_point_ids:
+            parts = point_id.split(":")
+            if len(parts) == 4 and parts[1] == "commit":
+                hashes_with_points.setdefault(parts[2], []).append(point_id)
+
+        # Bug #1461 sub-part 7b: strict=True -- see the identical comment
+        # in _reconcile_shard_legacy for the full rationale.
+        completed = TemporalProgressiveMetadata(shard_dir).load_completed(strict=True)
+
+        missing: List[CommitInfo] = []
+        partial_point_ids: List[str] = []
+        for commit in shard_commits:
+            if commit.hash not in hashes_with_points:
+                missing.append(commit)
+            elif commit.hash not in completed:
+                partial_point_ids.extend(hashes_with_points[commit.hash])
+                missing.append(commit)
+            # else: points present AND marked complete -- already indexed.
+
+        if partial_point_ids:
+            try:
+                store.delete_stray_points_fail_closed(partial_point_ids)
+            except Exception as exc:
+                raise StrayDeleteFailedError(
+                    f"Reconciliation: failed to delete {len(partial_point_ids)} "
+                    f"stray point(s) in shard {shard_name} (chunks.db): {exc}"
+                ) from exc
+            logger.info(
+                "Reconciliation: shard %s (chunks.db) -- deleted %d stray point(s)",
+                shard_name,
+                len(partial_point_ids),
+            )
+
+        return missing
+    finally:
+        store.close()
 
 
 def reconcile_temporal_index(

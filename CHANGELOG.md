@@ -7,6 +7,1125 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [12.27.0] - 2026-08-28
+
+### Fixed
+
+- **Bug #1730 (CRITICAL)**: daemon mode completely bypassed HNSW/FTS caches on every query
+  and could silently serve one collection's results for a query against a different
+  collection -- fixed with a 3-layer defense (query-time collection-name gating, cache-key
+  validation, root-cause fix to warm the configured collection instead of an arbitrary one).
+- **Bug #1732**: Story #563's non-SSO API restriction was fully inert since its original
+  commit (`dependencies.server_config` declared but never assigned) -- wired correctly;
+  confirmed dormant/disabled by default with zero operator-reachable surface today.
+- **Bug #1728**: 103 `exc_info=` call sites across 23 files were silently absorbed by
+  `format_error_log()`'s `**context`, losing real tracebacks in server logs -- relocated to
+  the enclosing `logger.X()` call, mechanically proven via AST-equivalence.
+- **Bug #1739**: `tests/unit/remote/` had 80 failing tests (entirely excluded from the
+  enforced test gate) -- traced to one root cause (stale async tests against fully
+  synchronous production code) and fixed; the directory is re-enrolled in the enforced gate.
+- **Bug #1740**: `cidx repos list` always reported every repo as `Synced`; now reports an
+  honest `unknown` instead of a false claim (the underlying server-side sync-status write
+  path remains a tracked follow-up, confirmed non-hot-path).
+- **Bug #1741**: a hardcoded 0.08s test-timing floor flaked on fast hosts -- replaced with
+  bounded adaptive calibration.
+- **Bug #1736**: pinned HNSW warm/query cache-key equivalence with a regression test;
+  documented two dead code paths carrying the same collection-identity hazard as #1730.
+- **Bug #1737**: added a TOTP elevation-simulation toggle to the test infrastructure,
+  giving the CLI's elevation-retry logic its first real-HTTP round-trip coverage.
+- Fixed a real, load-triggered test-isolation leak in `tests/unit/server/`'s shared
+  auth-dependencies fixture, surfaced by a PEP-562 lazy-singleton first-construction race
+  during a genuine `server-fast-automation.sh` run.
+- Additional fixes: #1696 (mypy cross-module type resolution), #1700, #1709, #1716 (partial),
+  #1719-#1727, #1729, #1731, #1733-#1735, #1738 -- stale test fixtures, flaky tests, and
+  dead-code removal across the server and CLI test suites.
+
+## [12.26.0] - 2026-08-27
+
+### Fixed
+
+- **Bug #1707**: 51 failed + 14 errors across 13 `tests/unit/server/` files, caused by
+  Story #409's route-extraction pattern making `@patch("code_indexer.server.app.<manager>")`
+  an inert mock (the closure never reads that module-level name) -- fixed by patching the
+  real DI-wired object (`client.app.state.<manager>`) instead. Remediation round also fixed
+  a machine-state-dependent test (`test_user_management_endpoints.py`, which only passed
+  because a row happened to persist in a developer's local DB) and added a missing
+  `_pool = None` reset to the rate-limiter test-isolation fixture.
+- **Bug #1717**: `watch_manager.py`'s `_watch_thread_worker` `finally` block unconditionally
+  wiped the `_WatchError` sentinel before any consumer could observe a construction failure,
+  so a failed `cidx watch` start silently reported success. `exposed_watch_status`/
+  `stop_watch` now surface the real error.
+- **Bug #1702**: `routers/git.py` constructed a node-local, unpooled `ActivatedRepoManager`
+  instance instead of resolving the DI-wired `app.state.activated_repo_manager` -- the same
+  cluster-outage defect class as Bug #1692, now fixed to resolve the shared instance.
+- **Bug #1718**: `daemon/service.py` had 6 unverified `ConfigManager.create_with_backtrack()`
+  call sites (4 on write/indexing paths) that could silently resolve to an ancestor's or
+  defaulted config -- all 6 now go through `ConfigManager.load_verified_config()`.
+- **Bug #1704**: REST write endpoints (`create_file`/`edit_file`/`delete_file` in
+  `routers/files.py`) constructed a fresh `FileCRUDService()` per request instead of reusing
+  the shared singleton, so REST requests couldn't see write-exception registrations MCP had
+  access to.
+- **Bug #1659**: audited every `hasattr`/`getattr`/`delattr` call site against the PEP-562
+  lazy-init modules (`app.py`, `git_operations_service.py`); found no live-impact call site,
+  documented the hazard directly in both `__getattr__` docstrings with a regression test
+  pinning the hazard text.
+- **Bug #1710**: removed the orphaned `dual_embed_enabled` config field and its 3
+  permanently-failing tests -- investigation found zero readers anywhere in the indexing
+  pipeline; the CLI surface these tests expected was never wired and never will be.
+- **Bug #1711**: investigated missing `--strategy`/`--score-fusion`/`--provider` query CLI
+  flags; wiring them up was rejected in review (the flags were inert in every mode -- no
+  REST payload field, no local multi-provider path -- and turned a loud
+  `Error: No such option` into a silent no-op), so the CLI surface and its 12-test file were
+  removed instead, restoring the original loud-failure behavior.
+- **Bug #1703**: deleted `FileCRUDService`'s orphaned `activated_repo_manager` property --
+  Bug #1704 left it with zero production consumers, and per Messi Rule 12 it was removed
+  rather than merely documented as unsafe.
+- **Bug #1708**: the fake test server (`tests/infrastructure/test_cidx_server.py`) registered
+  5 routes with no real production counterpart (including the `GET /api/admin/users/{username}`
+  endpoint from Bug #1695) -- a Messi Rule 1 (Anti-Mock) false-confidence risk. Removed 5,
+  renamed 1 to match the real path, and deliberately kept 1 (`/api/jobs/{job_id}/status`)
+  with a tracking comment since it backs a genuine, still-open production client bug (filed
+  as Bug #1720).
+
+## [12.25.0] - 2026-08-24
+
+### Fixed
+
+- **Bug #1635**: `BackgroundJobManager` starts 7 long-lived worker threads per instance;
+  many test files never called `.shutdown()` on it, and three further vectors (an
+  internal construction inside `create_app()`, an implicit default fallback in
+  `ActivatedRepoManager`/`SemanticQueryManager`/`ActivatedRepoIndexManager`, and 10
+  unguarded `.shutdown()` call sites) went undetected by a simple literal-construction
+  grep. This compounded to 5,768 live threads during this session's own verification of
+  an unrelated fix, driving the host's load average to 1449 and requiring an emergency
+  process kill. `tests/unit/server/conftest.py` now monkeypatches
+  `BackgroundJobManager.__init__` at the class level (covering both the canonical class
+  and a `src.`-prefixed import alias, confirmed to resolve to a genuinely distinct class
+  object), tracking and independently tearing down every instance constructed during a
+  test regardless of caller -- one mechanism covering all four vectors. Verified via a
+  full local regression run: 19,606 passed, 1 pre-existing unrelated flake (a deployment
+  test with an unmocked real network call).
+- **Bug #1623/#1624**: `RefreshScheduler`'s stale-index status check (interrupted-index
+  detection) only read the legacy bare `metadata.json` file, missing the signal entirely
+  when it existed only in a provider-suffixed file (`metadata-voyage-ai.json`,
+  `metadata-cohere.json`) -- confirmed live on real fleet repos. Made the check
+  provider-aware via a new `read_status()` reader sharing precedence logic with the
+  existing `read_current_commit()`. A companion fix attempt (normalizing a stale status
+  during legacy-to-provider migration) was reverted after code review proved it silently
+  disabled interrupted-index resume capability, producing a worse defect (a silent
+  partial index) than the one it targeted.
+- **Bug #1630**: `SCIPQueryEngine` derived `project_root` via a fixed two-directory-level
+  walk, correct only for a top-level SCIP database -- a sub-project's database at any
+  deeper nesting nesting undershot the real root, causing silently-empty source context
+  in query results and, on the mutable indexing path, creating a bogus nested
+  `.code-indexer/` directory inside the sub-project's own output folder (reproduced live
+  in this repo's own test fixtures). Fixed with a name-chain-anchored root resolver.
+- **Bug #1625/#1626/#1627**: a three-layer SCIP dependency-depth validation inconsistency
+  -- the Web UI Config screen allowed values up to 20 while the query engine hard-capped
+  at 10 (config-save-time now rejects out-of-range values instead of failing opaquely at
+  query time); `SCIPMultiService`'s dependencies/dependents endpoints had no explicit
+  depth guard (only accidental, and in one path non-existent, error propagation); the CLI
+  `dependencies`/`dependents` commands had no client-side validation, unlike their
+  `callchain` sibling.
+- **Bug #1629**: importing `code_indexer.server.mcp.handlers.search` in one test file
+  triggered a process-wide `MCPSelfRegistrationService` singleton registration as an
+  import-time side effect, silently corrupting an unrelated test file's own subprocess
+  mock when both ran in the same pytest session.
+- **Bug #1631/#1632**: the `correlation_id` reader was wired to a ContextVar that no
+  middleware ever populates, silently returning `None` everywhere it was used --
+  including the shared `logging_utils.get_log_extra()` helper and the primary audit
+  logger (~70 files total). Fixed by delegating to the actually-wired
+  `telemetry.correlation_bridge` reader.
+- **Bug #1590/#1608/#1609/#1611/#1634**: `regex_search`'s ripgrep-fallback and
+  pure-Python-multiline code paths, plus `RegexSearchService` construction and
+  `regex_routes.py`'s alias resolution, performed unbounded synchronous filesystem I/O
+  and had no timeout enforcement on several sub-paths -- all now offloaded off the event
+  loop and/or timeout-bounded, closing several distinct risks of hanging the server event
+  loop or the `xray_search` job status.
+- **Bug #1610**: a package-level `__setattr__` forwarding shim corrupted unrelated,
+  independently-defined submodule attributes that happened to share a name, causing
+  cross-test pollution in `tests/unit/server/mcp/`.
+- **Bug #1612**: `xray_search` filename mode failed with "Argument list too long" on large
+  candidate sets by spreading candidates into subprocess argv; now passed via a temp
+  file.
+- **Bug #1613/#1614**: `scip_callchain` reported a hardcoded `scip_files_searched: 0`
+  instead of a real count; `scip_dependents`/`scip_dependencies` silently clamped
+  out-of-range depth instead of rejecting it loudly, unlike every other SCIP depth front
+  door.
+- **Bug #1616**: `SCIPQueryEngine` opened versioned-snapshot sub-databases read-write,
+  causing readonly-database warning spam and silent data exclusion under immutable
+  snapshots.
+- **Bug #1618**: activation clone-phase orphan cleanup ran (and logged a false
+  "late-materializing async clone" warning plus unnecessary sleep delay) even when the
+  clone was never attempted because write-lock acquisition failed.
+- **Bug #1628**: the generic MCP route smoke test hung indefinitely against the
+  `/mcp-public` SSE stream endpoint, which was never excluded from the test's generic
+  route-probing logic.
+- **Bug #1633**: a test's monkeypatch stub predated an earlier bug fix's new function
+  parameter, causing the test to fail unconditionally on every run.
+
+### Investigated
+
+- **Bug #1591**: abbreviated-SHA-prefix commit values were incorrectly flagged as drift
+  in the stale-index check; now recognized as non-drifted when they match a full SHA's
+  prefix.
+- **Bug #1615**: freshly-generated SCIP index returning `total_results: 0` for ~20 minutes
+  on clustered staging was investigated and found not locally reproducible; re-scoped
+  toward cluster/NFS-level investigation.
+
+## [12.24.0] - 2026-08-21
+
+### Fixed
+
+- **Bug #1619**: `write_hnsw_sync_state()` did a full read-merge-write of the entire
+  `collection_meta.json` (holding the potentially multi-MB HNSW `id_mapping`) on every
+  single `upsert_points()`/`delete_points()` call, serialized behind one global exclusive
+  lock -- diagnosed live with `py-spy` against a real stuck indexing run: worker threads
+  blocked on the lock, embedding threads sitting idle, zero files completed after 2h43m on
+  a ~66K-file repo. The `hnsw_sync` payload now lives in its own dedicated sidecar file,
+  still guarded by the same lock (preserving the Bug #1575 Part C mutual-exclusion
+  guarantee), making the write O(sync-payload size) instead of O(collection size). Also
+  fixes 6 collection-root scanners that only excluded `collection_meta.json` by name and
+  would otherwise misclassify the new sidecar file.
+- **Bug #1620**: the Dependency Map dashboard panel was 100% broken on every page load with
+  `TypeError: run() got multiple values for argument 'job_id'` -- a job id was passed both
+  positionally and via keyword injection into the same background-job worker parameter.
+  Also fixes a secondary defect where the dashboard's cache slot could be left holding a
+  job id the job tracker never knew about; `set_job_slot()` is now a proper
+  compare-and-swap operation instead of an unconditional overwrite.
+- Fixed a pre-existing typo (`ci.voyage_api_key` instead of `ci.voyageai_api_key`) that
+  silently broke VoyageAI API-key sync-on-config-change in cluster/PostgreSQL mode, and
+  added the equivalent missing sync call for Cohere.
+
+## [12.23.0] - 2026-08-21
+
+### Fixed
+
+- **Bug #1601**: `regex_search` could read unbounded ripgrep/grep subprocess output into
+  memory and was immune to `max_results`, risking server OOM at production repo counts.
+  Bounded subprocess output read (64 MiB), per-match content (256 KiB), and aggregate
+  response content across all matches in one search (8 MiB). Fixed a stderr-pipe deadlock,
+  file descriptor leaks, and event-loop blocking. Also fixed an access-control leak where
+  cidx-meta-filtered responses reported the raw pre-filter match count.
+- **Bug #1603**: `scip_callchain` was non-functional server-side -- `signal.alarm()` only
+  works on a process's main thread, but the MCP/REST handler stack always invokes it from a
+  worker thread. Replaced with a real cross-thread-cancellable watchdog. Tightened the
+  advertised max depth to a safe combinatorial bound, and closed a "timeout reported as
+  silent success" gap across all five call sites (MCP, single-repo REST, multi-repo REST,
+  local CLI, Web UI).
+- **Bug #1598**: `xray_search`'s `timeout_seconds` was enforced during AST evaluation but
+  never reached candidate-file selection, so a short requested timeout could not bound a
+  slow directory walk or regex scan. Phase 1 now honors the caller's timeout end-to-end,
+  including the zero-match-pattern diagnostic probe, and reports a clean partial/timeout
+  result instead of an unbounded run or a raw traceback failure.
+
+### Added
+
+- **Story #1600**: query-path memory-pressure admission gate -- the 15 identified
+  memory/CPU-unbounded MCP query handlers, plus the REST `/api/query` route, now check the
+  server's existing memory-pressure monitor before executing and cleanly reject with a
+  retry hint under sustained memory pressure, instead of the server driving itself into an
+  OOM/swap death spiral that previously required a manual restart to recover from.
+
+## [12.22.0] - 2026-08-19
+
+### Added
+
+- **Story #1589**: "Clear All Dedup Warnings" action in the Diagnostics tab -- a bulk-clear
+  endpoint (`POST /api/admin/diagnostics/dedup-warnings/clear-all`) and UI button that
+  acknowledges fleet-migration dedup-state warnings across every golden repo in one action,
+  without requiring a full re-index of each affected repo. Both SQLite (solo) and PostgreSQL
+  (cluster) storage backends implemented and tested.
+- **Story #1586**: `ApplicationMetrics` and `JobMetrics` (built in prior stories with zero real
+  call sites) are now wired end-to-end into real OTEL call sites: search/FTS request metrics,
+  embedding-provider metrics (all 4 clients, instrumented at the real HTTP boundary, no
+  double-counting on query-embedding-cache hits), job lifecycle metrics, repository-refresh
+  duration, and 7 custom spans across SCIP/temporal/HNSW/CoW-snapshot/dep-map operations.
+  Verified via real manual E2E testing against a genuine external OTLP receiver (not just unit
+  test doubles), which surfaced and fixed two real gaps unit tests couldn't see: a span that sat
+  on a code path production never reaches, and REST search traffic that bypassed the metrics
+  the story's own documentation claimed covered it.
+
+### Fixed
+
+- **Bug #1599**: `scip_impact` MCP handler applied no clamp on its documented `depth` bound.
+- **Bug #1602**: `scip_dependents` had the same missing clamp -- but with no safety net at any
+  layer, an out-of-range `depth` silently returned a wrong, empty `success: true` result instead
+  of an error.
+- **Bug #1604**: `scip_dependencies` had the identical unclamped-depth defect as #1602.
+- Extended REST front-door audit found and closed two more live gaps in the same family:
+  `/scip/callchain`'s `max_depth` upper bound didn't match what the backend actually honors, and
+  `/scip/references`' `limit` parameter was completely unbounded (`limit=0` meant "unlimited").
+- A pre-existing bug in `MachineMetricsExporter`'s observable-gauge callbacks (yielding plain
+  tuples instead of OTEL `Observation` objects) was fixed opportunistically while validating
+  #1586's telemetry pipeline -- it had been failing on every export cycle.
+
+## [12.21.0] - 2026-08-18
+
+### Fixed
+
+Twelve bugs closed (#1574, #1576-#1585, #1587), plus four additional defects found while
+driving the fixes through the full local regression-gate hierarchy (`fast-automation.sh`,
+`server-fast-automation.sh`, `e2e-automation.sh` -- all 6 phases). Each was reproduced with
+real evidence before being fixed; none were dismissed as "pre-existing" without proof.
+
+- **Bug #1574**: incremental indexing's change-detection merge de-duplicated by comparing
+  raw relative-vs-absolute path strings, so any file discovered by both the git-delta and
+  filesystem-scan tracks was indexed twice in the same run.
+- **Bug #1575** (three parts): incremental refresh rebuilt the ENTIRE HNSW index and
+  materialized ALL payloads regardless of change size, for both storage layouts. Part A
+  (authoritative content enumeration + targeted fetches), Part B (quadratic `scroll_points`
+  pagination), Part C (Visibility Epoch + complete affected-ID tracking) -- plus the
+  SHARDED_JSON PathIndex "fast path" for `unique_file_count` was ultimately abandoned after
+  a multi-round investigation surfaced a recurring class of correctness bugs; SHARDED_JSON now
+  always does the authoritative disk scan, matching CHUNKS_DB's pre-existing behavior.
+- **Bug #1576**: deleted three stale `cidx-meta-backup` integration test files exercising a
+  retired API shape, invisible to all CI gates.
+- **Bug #1577**: `store_xray_pattern` MCP tool crashed with a `TypeError` when cidx-meta backup
+  was enabled (a stale 3-argument `CidxMetaBackupSync` call).
+- **Bug #1578**: `build_non_interactive_git_env()` never set `GIT_EDITOR`, leaving `git merge`
+  exposed to the same EDITOR-unset failure class Bug #1573 fixed for other git subcommands.
+- **Bug #1579**: duplicate "shifted" point_id vector files permanently broke semantic refresh
+  for golden repos and deadlocked fleet migration in a quarantine loop.
+- **Bug #1580**: temporal legacy migration shard collisions never converged -- a promised
+  "later, separate cleanup pass" that never existed.
+- **Bug #1581**: temporal legacy migration permanently misclassified CHUNKS_DB shards as
+  collisions (a `numpy.ndarray` vector rejected by an `isinstance(vector, list)` check).
+- **Bug #1582**: `GenericQueryService._is_result_current_branch` compared a raw absolute
+  `payload.path` against a relative `git ls-files` set at a third un-normalized call site.
+- **Bug #1583**: SHARDED_JSON's `_load_id_index()` never rescanned disk once `id_index.bin`
+  existed, found during Bug #1575 Part C crash-recovery testing.
+- **Bug #1584**: fleet migration falsely reported UNRECOVERABLE data corruption on healthy
+  migrated collections -- the `chunks.db` content manifest was a frozen migration-time
+  snapshot that ordinary re-indexing invalidated.
+- **Bug #1585**: temporal indexing raced on `chunks.db`'s schema migration under concurrent
+  `ChunkStore` opens (`temporal_indexer.py`'s `ThreadPoolExecutor`), producing a real
+  `sqlite3.OperationalError: duplicate column name: type` that aborted a whole
+  `cidx index --index-commits` run. Discovered live via `e2e-automation.sh` Phase 1.
+- **Bug #1587**: server-triggered temporal indexing (dual-embedder) silently produced zero
+  indexed collections -- a stale E2E test fixture, from before an earlier session's Bug #1529
+  relocated server-context temporal reads to a fixed path outside the repo clone, never
+  updated to seed data at the new location. Discovered live via `e2e-automation.sh` Phase 3.
+- **cidx-meta global registration under postgres/cluster mode**: on every fresh
+  postgres/cluster install, cidx-meta's `-global` registry entry was written to a per-node
+  SQLite fallback instead of the shared PostgreSQL registry, because the write happens before
+  `app.state` exists to resolve the correct backend. Every later reader (description-refresh,
+  dep-map background analysis) then found nothing there, forever. Fixed with an idempotent
+  self-heal wired into server startup, immediately after the backend registry is populated.
+  Discovered live via `e2e-automation.sh` Phase 6.
+- **Cluster node-identity divergence**: two independent startup call sites derived "this
+  node's cluster identity" with different fallback defaults (`"local"` vs
+  `f"{hostname}-cidx"`) when no explicit `cluster.node_id` was configured -- a legitimate,
+  supported single-node `storage_mode=postgres` deployment. The mismatch caused
+  `JobReconciliationService` to misclassify genuinely live, still-running `lifecycle_registration`
+  jobs as abandoned-by-a-dead-node on the very next sweep, wrongly failing them. Unified behind
+  one shared resolver. Discovered live via `e2e-automation.sh` Phase 6.
+- Cross-module locking gap between the temporal legacy migration mover and a
+  provider-triggered admin temporal-index job, closed via a new write-lock guard.
+- A genuine, pre-existing bash integer-arithmetic bug in `e2e-automation.sh`'s readiness-probe
+  helpers (`wait_for_server`/`wait_for_fault_server`/`wait_for_pg_server`): fractional poll
+  intervals crashed the accumulator under `set -euo pipefail`. Predates this release; found
+  while triaging `fast-automation.sh` failures.
+- A test-topology defect in the Phase 6 E2E harness: a throwaway server sharing the main
+  session server's PostgreSQL database was given a disjoint filesystem `golden_repos_dir` -- a
+  topology no real cluster has -- tripping the Bug #1317 security-violation guard as a false
+  positive. Fixed by symlinking the throwaway server's golden-repos subtree onto the main
+  server's own.
+
+### Changed
+
+- `RefreshScheduler.acquire_write_lock()` gained an optional `ttl_seconds` parameter;
+  `release_write_lock()` now returns `bool` instead of `None`.
+- `cidx-meta` backup's rebase + Claude-CLI conflict-resolution mechanism (Story #926 AC8) was
+  confirmed retired (superseded by an earlier session's Bug #1555 mirror-semantics fix); the
+  one E2E test still asserting the removed behavior was rewritten to assert the current,
+  intentional contract instead.
+
+## [12.20.0] - 2026-08-13
+
+### Fixed
+
+- **Bug #1572**: the unit suite no longer makes live public-internet calls. Seven tests in
+  `test_remote_branch_service.py` / `test_remote_branch_service_credentials.py` shelled out to
+  `git ls-remote` against `github.com/octocat/Hello-World.git` -- and one asserted on a FAILURE path
+  against a deliberately nonexistent repo, so its result depended on how DNS and GitHub answered.
+  All seven failed `server-fast-automation.sh` with `Failed: Timeout (>15.0s) from pytest-timeout`
+  under the gate's six-way parallelism, taking down a release gate. Individually they ran in
+  0.32-1.09s, which is why nothing ever flagged them: the project's threshold measures DURATION, and
+  these were never slow -- they were NON-DETERMINISTIC, with runtime governed by something outside
+  the machine.
+  Fixed with a real bare git repository built in a session-scoped tmpdir fixture, not with mocks:
+  `git ls-remote` treats a local path exactly as it treats an HTTPS URL, so every test still spawns a
+  real `git` process against a real repository and asserts on real `ls-remote` output and real exit
+  codes (Messi Rule #1, anti-mock, is preserved -- zero mocks were added and no production code was
+  touched). The failure-path test now targets a real directory that is definitively not a git repo,
+  giving a deterministic exit 128.
+  `@pytest.mark.slow` was explicitly rejected: it would gate these by a property they do not have
+  while leaving them network-dependent whenever they did run -- hiding the flake rather than removing
+  it.
+  The fixture seeds branches `SCM-1234` and `feature/SCM-1234-hotfix` so the issue-tracker filtering
+  assertion has something real to filter, and `feature/login` to exercise slash-containing names --
+  otherwise those tests would pass vacuously against a repo with only clean branch names.
+  Verified by running the suite inside a network namespace (`unshare --net`) with GitHub confirmed
+  unreachable: 43 passed in 2.39s. That is stronger than grepping for URLs, since it proves no code
+  path reaches the network by ANY route. Timing for the seven: 6.55s -> 1.93s. The 17 pure
+  parsing/filtering/dataclass tests in those files are byte-identical.
+
+## [12.19.0] - 2026-08-13
+
+### Fixed
+
+- **Bug #1571**: the versioned-snapshot sweep now removes an empty `.versioned/{namespace}/`
+  directory instead of leaving it behind forever. When a golden repo is fully deregistered, Bug
+  #1570's reclaim deletes all of its snapshots, but nothing owned the enclosing namespace directory --
+  `cleanup_manager` only ever receives snapshot paths. Measured on a live server: 15 of 30 namespaces
+  were empty directories that had survived the sweep which emptied them, a service restart, and the
+  cleanup thread. This only occurs when a namespace reaches ZERO snapshots (a removed repo); normal
+  retention always leaves the current snapshot, so a live repo never leaks.
+  Deliberately implemented sweep-side rather than coupled to cleanup completion. Two independent
+  900s gates run in series -- the reconciler's age floor uses the snapshot's own timestamp, while
+  `CleanupManager.min_retention_age_seconds` starts at `scheduled_at` -- so at scheduling time the
+  snapshots are still physically on disk. Removing the directory there would either fail or race the
+  cleanup thread. A LATER sweep observing an already-empty namespace is naturally idempotent and
+  race-free.
+  Safety is enforced by construction rather than by a pre-check: `os.rmdir` only (never
+  `shutil.rmtree`, which would force emptiness), so the "fails if non-empty" test is atomic and
+  cannot be defeated by anything racing in; a single non-recursive join to a direct child of
+  `.versioned/`; any `OSError` is non-fatal, logged, and the sweep continues to the next namespace;
+  and removal is declined outright whenever `resolve_governing_pointer` resolves ANY alias pointer,
+  including a dangling one -- the pointer's presence is what protects live data in #1570's
+  conjunction and that trust is not weakened here.
+  Severity is low and recorded as such: roughly 4 KB per directory, a few syscalls per empty
+  namespace, and growth bounded by the number of repos ever removed rather than by uptime. An earlier
+  revision of the issue overstated this as approaching the event-loop cost fixed in v12.18.0; it does
+  not. The 842 MB stale-pointer orphan originally filed alongside it was dropped as a one-off
+  artifact rather than a recurring class.
+
+## [12.18.0] - 2026-08-12
+
+### Fixed
+
+- **Production-scale hazard: two O(repos) startup sweeps blocked the event loop.**
+  `reconcile_versioned_snapshots` and `reconcile_golden_repo_registry` are both synchronous functions
+  that were called directly inside `async def lifespan`. A sync call inside an async function blocks
+  the ENTIRE event loop for its duration -- the server answers nothing until it returns.
+  Both walk the fleet: the versioned-snapshot sweep performs roughly 18 filesystem operations per
+  namespace, and the golden-repo reconcile resolves one filesystem path per registered repo. At
+  production scale (~900 repositories) that is on the order of 16,000 NFS metadata operations on the
+  event loop -- roughly 80 seconds of a fully unresponsive server on every boot.
+  The worse case is not slowness. The cow-storage mount is `hard` NFSv3, where `os.stat` blocks in
+  UNINTERRUPTIBLE kernel retry if the server is unresponsive -- it never times out. On the event loop
+  that is a permanently hung node at startup, so a single unreachable storage host could take a node
+  down at boot.
+  Both now run inside backgrounded closures via `anyio.to_thread.run_sync(lambda: ...)`, matching the
+  `_run_orphan_sweep` convention that already existed in the same function. Each dependent
+  result-consuming block moved inside its closure; behaviour, ordering and every safety guard (the
+  900s age floor, keep-last-N, pointer protection, the reclaim conjunction, and the golden-repo
+  circuit-breaker/confirmation-counter/health-gate) are unchanged -- only WHERE the work executes.
+  Guarded by AST tests that verify the call is the deferred body of a `lambda:` passed to a
+  recognized thread-offload. This deliberately rejects the plausible-looking wrong fix
+  `await run_sync(reconcile(...))`, which evaluates the call EAGERLY on the loop before `run_sync`
+  ever sees it and would pass any behavioural test while blocking exactly as before.
+  Found only because the fleet size was questioned: on the 30-repo development server -- 3% of
+  production -- both sweeps completed instantly and looked correct. Recorded as a binding invariant
+  in CLAUDE.md ("Production Scale -- DESIGN EVERYTHING FOR IT").
+  Audited the rest of `lifespan.py` for the same anti-pattern: `fail_orphaned_jobs` and
+  `reconcile_orphaned_exports` are single bounded UPDATE queries (not O(repos), left as-is);
+  `ShardPrewarmService.start()` already spawns a real thread; `SSHKeySyncService.sync()` has the same
+  shape but is bounded by SSH key count and needs result-consumption restructuring, so it is reported
+  rather than changed here.
+
+## [12.17.0] - 2026-08-12
+
+### Fixed
+
+- **Bug #1570** (priority-1): removing a golden repo no longer orphans its entire `.versioned/`
+  snapshot tree forever. `remove_golden_repo`'s cascade deleted the base clone and the `-global` alias
+  pointer but never touched `.versioned/{alias}/` -- and because the pointer was gone, the Bug #1567
+  reconciler then had no live-target reference and correctly refused to guess which snapshot was safe
+  to keep, so the space became permanently unreachable. Measured on one small dev node: 3.0 GB across
+  15 orphaned namespaces, reported as "skipped" on every single boot.
+  Fixed in both halves, because a write-path fix alone cannot heal what already leaked (the Bug #1567
+  lesson). Removal now deletes the snapshot tree as part of its cascade -- resolved BEFORE the alias
+  pointer is removed, since the pointer may be what identifies it, and non-fatal per the Bug #1523
+  teardown discipline. Existing orphans are reclaimed by the reconciler through the SAME
+  `cleanup_manager.schedule_cleanup` gates (refcount-zero plus minimum retention age), never a
+  separate deletion path.
+  The reclaim discriminator is a strict conjunction: no readable pointer AND no base clone AND absent
+  from the golden-repo registry. A repo that still exists with a temporarily unreadable pointer stays
+  skipped -- that skip protects live data and must not be weakened. Absence is proven with an explicit
+  `os.stat()`, and any other `OSError` (permission denied, stale NFS handle) blocks the reclaim rather
+  than being read as "gone".
+
+- **Bug #1567 (follow-up, supersedes the 12.16.0 entry)**: the `versioned_snapshot_reconcile_config.mode`
+  setting is REMOVED and snapshot deletion is now unconditional. Shipping the leak fix behind a
+  `report`/`delete` toggle that defaulted to `report` meant no deployment actually reclaimed anything
+  -- the defect was still present by default, just better logged. A bug fix must not be
+  operator-gated. Removed the dataclass, the `ServerConfig` field, the config-service accessors, the
+  Web UI section, and the startup mode resolution.
+  The guards that decide WHICH snapshots are safe to delete are unchanged and load-bearing: the 900s
+  minimum-absolute-age floor (so an in-flight publish is never deleted mid-copy), keep-last-N
+  retention, never deleting a path any pointer references, and `ts_live` anchoring.
+
+- **Bug #1555 (follow-up, supersedes the 12.16.0 entry)**: fixed the actual cause instead of the
+  symptom. `sync()` rebased local commits onto `origin/{branch}`, which treats the remote as a peer
+  whose history must be preserved. The remote is a backup mirror and local is the sole source of
+  truth, so there was never anything to preserve -- and since cidx-meta content is machine-generated,
+  a remote commit touching the same regenerated file produced a conflict that could never resolve
+  differently on retry. That is why it sat quarantined for 59+ hours against one unchanged SHA.
+  `sync()` now publishes local HEAD directly with `git push --force-with-lease` -- no rebase, no
+  merge, no conflict-resolution step, self-healing on the next cycle. `--force-with-lease` rather than
+  `--force` because the immediately preceding fetch refreshes the tracking ref, making the push
+  race-safe without reintroducing a merge; a lease mismatch simply defers to the next cycle.
+  This deletes the entire machinery that existed only to cope with those conflicts: the Claude
+  conflict resolver and its prompt, six quarantine-bookkeeping methods on the refresh scheduler, three
+  CRUD methods across the storage protocol and both backends, and the `/health` quarantine surface
+  added earlier in 12.16.0 -- which can never fire again, since the table can no longer gain a row.
+  The quarantine tables themselves are left in place per the never-drop-tables migration rule; they
+  simply stay empty.
+
+## [12.16.0] - 2026-08-12
+
+### Added
+
+- **Bug #1530 (partial -- issue remains OPEN, mechanism is NOT yet active)**: the primitives for
+  detecting a stalled indexing subprocess. `ActivityBeacon` tracks in-flight operations per thread
+  and reports the age of the OLDEST in-flight one -- deliberately not a single global
+  `last_activity` scalar, which cannot distinguish "one slow operation" from "everything stopped".
+  A child-side heartbeat writer and a parent-side watchdog evaluator accompany it, wired into the one
+  shared `run_with_popen_progress()` every `cidx index --progress-json` child goes through.
+  **This ships INERT and must be read that way**: the watchdog parameters default to `None`, so
+  behaviour is byte-identical unless explicitly enabled, and no CLI child writes a heartbeat file
+  yet. Nothing detects or kills anything in a real run today.
+  Two design constraints were found during implementation and must gate the remaining work, because
+  either would cause production damage if the sequence were completed naively. First, the
+  "heartbeat never appeared" signal is elapsed-time-since-spawn gated on file absence, so wiring the
+  server-side threshold BEFORE the CLI child that writes the file would kill every real indexing job
+  at the threshold. Second, the provider-delay exemption is per-thread, but the thread legitimately
+  sleeping on a rate-limit `Retry-After` is not the thread that ticks -- so instrumenting the
+  embedding providers as designed would false-kill healthy, rate-limited jobs. Both need resolving
+  before the remaining priorities land. Consistent with the standing invariant, no wall-clock job,
+  subprocess, or per-file timeout was added: the signal is absence of forward progress only.
+
+### Fixed
+
+- **Bug #1568**: the middleware file-size compliance test is green again after being permanently RED.
+  `retry_handler.py` (198) and `error_formatters.py` (315) both exceeded the limits that test
+  enforces, so a release gate carried a failure that never changed -- indistinguishable at a glance
+  from a new regression, which cost real time during this session's sweeps. Split along the seams the
+  files already had rather than cutting at the line count: the retry classification/backoff policy
+  and the shared per-attempt retry decision moved to a new `retry_policy.py`, and the response
+  primitives (correlation id, timestamps, serialization) moved to a new
+  `error_response_primitives.py`. `DatabaseRetryHandler`'s public API is byte-identical and every
+  existing import site still resolves via re-export.
+  Two deliberate calls. First, an unreachable `if attempt <= max_attempts` guard inside each retry
+  loop was removed rather than carried across: `should_retry_error` already returns False (forcing a
+  raise) once that condition fails, so the delay/log/sleep step was only ever reached when it was
+  true. Second, the initial split landed `retry_handler.py` at exactly 150/150 -- rejected, because a
+  file pinned against its cap re-breaks on the next edit and relocates the problem instead of fixing
+  it. It now sits at 122/150 and `error_formatters.py` at 274/300, both with genuine margin.
+  The Bug #1468 import-budget guard was verified before and after: the module that now owns
+  `generate_correlation_id` imports only uuid/datetime/pathlib/typing, so the split moved in the
+  safe direction.
+
+- **Bug #1569**: `HealthCheckService` no longer reports a different server instance's health. It
+  hardcoded `Path.home() / ".cidx-server" / "data"` and ignored `CIDX_SERVER_DATA_DIR`, which
+  `ServerConfigManager` honors -- so on any host that relocates its data directory (the documented
+  Bug #879 IPC-path-alignment case) every DB-sourced health signal was read from whatever happened to
+  sit at the default path. That is either silently empty, in which case the fail-open collectors
+  report nothing and real problems stay invisible, or actively wrong. `self.database_url` feeds seven
+  call sites, so this was never confined to one check. Reproduced live before fixing: a second server
+  started with `CIDX_SERVER_DATA_DIR` set, with deliberately different values seeded in each
+  database, reported the OTHER instance's row; relocating `HOME` so `Path.home()` matched made it
+  report its own, with no other change. Now resolved via the same env var with the same semantics as
+  `ServerConfigManager` (the variable names the SERVER directory; `data` is its subdirectory) --
+  reusing that convention rather than inventing a second one. Found while proving Story #1560's
+  final acceptance criterion on an isolated instance.
+
+- **Bug #1555**: the cidx-meta backup-sync quarantine no longer promises a resolution it cannot
+  deliver. The ERROR line said the condition "resolves automatically once new commits land upstream,
+  or requires manual operator intervention" -- but the quarantine is only ever reached by raising
+  `ConflictResolutionFailedError`, which happens exclusively AFTER the automatic resolver has already
+  tried and failed against that exact upstream target. New upstream commits do not resolve a
+  conflicting rebase, they only move the target. On clustered staging an operator could reasonably
+  have read that line and waited; the condition held for roughly 14 hours against one unchanged SHA.
+  The message now states plainly that the condition will not clear by waiting and that manual
+  intervention is required. The quarantine threshold, the log level, and the circuit-breaker itself
+  are all unchanged -- the breaker was working correctly; only its description was wrong.
+  A persistent quarantine also now surfaces on `/health` as DEGRADED once it has held for longer than
+  twice the refresh interval (2h), naming the affected alias, so it is visible where operators
+  actually look instead of only in a repeating log line. This reuses the existing Bug #1539
+  quarantine table and mirrors the golden-repo reconcile breaker's established health-surface
+  pattern; no schema change, and the existing failure-reason truncation applies unmodified.
+
+- **Bug #1566**: server-side HTTP errors are logged again. `GlobalErrorHandler.dispatch`'s
+  `except HTTPException` branch could not fire: Starlette nests `ExceptionMiddleware` INSIDE user
+  `BaseHTTPMiddleware`, so an `HTTPException` is already converted to a `Response` before it reaches
+  this middleware -- the exception never propagates, and the handler waited for something that
+  structurally cannot arrive. Replaced with a response-side check after `call_next`, which observes
+  the converted result instead. Only status `>= 500` is logged: 401/403/404/422 are ordinary,
+  by-design outcomes, and logging them would recreate exactly the operational noise Bug #1565 was
+  filed to remove. The dedup guard is set inside `_log_error` itself rather than at each of its four
+  call sites, so it holds by construction for any path added later. The RED test drives a real ASGI
+  stack -- a direct `dispatch()` unit test passes against the broken code and proves nothing.
+
+### Changed
+
+- **Bug #1567 (observability follow-up)**: the versioned-snapshot reconcile sweep now reports what it
+  did on every run -- one unconditional INFO line carrying mode, namespaces scanned, candidates,
+  skipped, and deletions scheduled -- plus a WARNING naming the specific dependency when the startup
+  guard skips the sweep entirely. Previously a sweep that never ran and a sweep that ran and found
+  nothing were indistinguishable, which left "is this mechanism inert?" unanswerable from logs alone.
+  Deliberately NOT raised to WARNING to force `logs.db` visibility: that store persists WARNING and
+  above, and promoting a routine success line to reach it is what Bug #1565 had to undo.
+
+## [12.15.0] - 2026-08-12
+
+### Fixed
+
+- **Bug #1567** (priority-1, production-critical): versioned snapshots no longer leak forever.
+  `CleanupManager` held its pending-deletion queue in in-process dictionaries stamped with
+  `time.monotonic()`, while deletion is gated behind refcount-zero plus a 900-second retention floor.
+  Any process restart or uvicorn worker recycle inside that window silently discarded the queue, and
+  nothing ever re-derived deletions from disk -- so a superseded snapshot became permanently
+  unreachable by the deleter. Losses were cumulative and irreversible. Measured on staging: 229
+  snapshots for one repo against a keep-last-3 policy (~120 GB), with 5 of 10 repos over the limit;
+  the compliant-looking ones had simply never been refreshed twice. Production is more exposed than
+  staging, because the auto-updater restarts the server on every deploy cycle.
+  Fixed in two halves, since either alone is inert: the queue is now persisted in the shared backend
+  (additive migration 047) with wall-clock timestamps so it survives a restart, and a new reconciler
+  re-derives deletions from disk, which is what heals installations that have already leaked.
+  The supersession predicate is anchored strictly below the live target's own version id, which
+  closes a real live-data hazard: a snapshot is materialized at its final path well before
+  `swap_alias` runs, so an in-flight publish is newer than the target and referenced by nothing, and
+  a naive keep-set could delete it mid-copy. Anchoring also makes NFS staleness safe-directional --
+  a stale read returns an older pointer, so it can only ever under-delete.
+  The live retention path now shares that single predicate instead of carrying its own. It previously
+  used `AliasManager.read_alias()`, which returns the write-mode source path for a `-global` alias
+  with an active write session, and read the target and previous paths from two separate opens that
+  could straddle two generations mid-swap. Both are now one atomic read of the raw pointer JSON,
+  unioned over every alias file. A new operator setting (`report` | `delete`, defaulting to `report`)
+  exposes the full candidate list without deleting.
+- **Bug #1541**: `DependencyLatencyTracker` no longer kills its writer thread on transient SQLite
+  contention. "database is locked" is self-healing but counted toward the same five-failure cap as
+  unrecoverable errors, permanently terminating the writer with no auto-restart, after which latency
+  samples were silently dropped until a process restart. Transient lock errors are now retried with
+  capped backoff and never count toward termination, and the terminal state is queryable rather than
+  silent. A separate data-loss bug in the same path was also fixed: the buffer was cleared before the
+  insert succeeded, so a failed attempt dropped those samples permanently even when the retry
+  afterwards succeeded.
+- **Bug #1565**: by-design scheduler conditions no longer dominate WARNING output. Measured over 24
+  hours on staging, roughly 1,900 of 2,223 WARNING entries were mechanisms working exactly as
+  intended -- 1,543 from a single message. "Duplicate active job rejected by database" is the
+  single-flight guard succeeding, and "repo X is quarantined -- skipping" restates an unchanged fact
+  every tick. Because that log line lives in a shared backend method reached both by callers that
+  treat a duplicate as the expected no-op and by callers for which it is a real error, severity is now
+  decided by the caller rather than blanket-demoted, so genuine failures keep their signal. The
+  per-tick quarantine and skip lines gained a bounded per-alias cadence.
+
+## [12.14.0] - 2026-08-11
+
+### Fixed
+
+- **Bug #1563** (priority-1): a recycled uvicorn worker no longer fails every running job on its node.
+  `cleanup_orphaned_jobs_on_startup` runs on app lifespan startup, and under `uvicorn --workers N`
+  every worker runs its own lifespan, so its `UPDATE` -- scoped by `executing_node` but not by worker
+  -- marked as `failed` every running job on the node, including hours-long jobs owned by healthy
+  sibling workers that kept running regardless. Proven live: `NRestarts=0`, node up 5 weeks, yet a
+  fleet-migration job was failed 11 seconds after a replacement worker spawned, with the misleading
+  error "Job interrupted by server restart". Because spurious failures drive
+  `consecutive_failure_count` toward the quarantine threshold, this could permanently strand a repo.
+  Fixed with an `executing_pid` column (additive migration 046) plus a PID-liveness check, chosen
+  over a designated-sweeper approach because if the lock-holding worker recycles its replacement
+  reproduces the identical bug. A genuine full-node restart still reclaims everything. PID reuse is a
+  documented, bounded residual that can only defer reclaiming a real orphan, never kill a live job.
+- **Bug #1564**: stale quarantine rows no longer produce a permanent false DEGRADED on `/health`.
+  All three rows on the staging cluster were stale -- one repo flagged "permanently UNRECOVERABLE,
+  requires manual data recovery" was fully consolidated and answering queries normally, one was fully
+  migrated yet still quarantined, and one named an alias that is not a registered golden repo at all.
+  Quarantine state is now re-validated against positive evidence using the existing read-only
+  `chunk_store_has_real_data` primitive (never creates files, never raises), and rows for vanished
+  aliases are reaped. Genuinely broken repos stay reported.
+- **Bug #1562**: fleet-migration jobs now report real progress instead of a constant `25` for their
+  entire multi-hour run. The worker declared no `progress_callback`, so `BackgroundJobManager` never
+  injected one and the consolidation engine had no instrumentation at all. Measured on staging: 2h29m
+  at a constant 25 while working correctly -- indistinguishable from the Bug #1558 hang, which
+  produced the identical signature. Progress now ticks WITHIN the dominant phase, not only at phase
+  boundaries, because the phases are wildly uneven (scan+write 2h11m versus ~4 minutes to delete
+  343,561 files). Observability only; no timeouts added.
+- **Bug #1561**: an over-broad test assertion no longer makes a release gate flaky. The test counted
+  every subprocess and asserted exactly one, using total count as a proxy for "cidx init ran once",
+  so unrelated activity in the same code path broke it. Found in 4 of the file's 5 tests.
+- **Bug #1551**: `SSHKeySyncService`'s by-design pytest-guard refusal is logged at DEBUG rather than
+  CRITICAL, where it had been producing 8 of 14 high-severity entries in a 24-hour window. The guard
+  itself is unchanged.
+- **Bug #1545**: fixed the three worst offenders behind parallel-load test flakes. The underlying
+  causes were worse than slowness -- one test performed a live `git clone`/`pull` into the real
+  `$HOME` and a real `npm install -g` of the Claude CLI on every run; another spawned the real
+  `claude` CLI and blocked a full 10 seconds on a genuine timeout. Both are now mocked, removing
+  network dependence and side effects on the developer's environment. Runtimes: 9.23s to 0.54s,
+  20.1s to 1.17s, 9.06s to 0.17s, with no assertion weakened.
+
+### Closed without code
+
+- **Bug #1559**: already resolved by Story #1560 (v12.13.0); verified against a measured oracle.
+- **Bug #1556**: disproved. The solo/SQLite store does persist records -- a single front-door request
+  hitting a real `logger.warning` grew `logs.db` within ~2 seconds. All three "no growth"
+  observations had innocent explanations: the handler sits at WARNING while the probes emitted INFO,
+  failed logins route to a separate audit table behind a `NullHandler` with `propagate = False`, and
+  one admin path logs nothing at all.
+
+## [12.13.0] - 2026-08-11
+
+### Changed
+
+- **Story #1560**: Fleet migration now auto-resolves duplicate `point_id`s instead of failing closed.
+  Previously a duplicate that `id_index.bin` could not arbitrate raised `DuplicateSourceIdError`, left
+  the collection untouched, and quarantined the repo after 3 consecutive failures -- turning a 2-chunk
+  ambiguity in a 343,604-chunk collection (0.0096%) into a permanently unconsolidated repo with no
+  visibility for the cause. At ~900 production repos that is unworkable. Migration now always
+  proceeds: when `id_index.bin` names a winner that copy is kept and the others deleted; when it has
+  no entry at all, every copy is deleted -- no arbitrary winner, no invented identity. The index is a
+  derived artifact (git is the source of truth and a re-index rebuilds it), so deletion removes an
+  identity rather than manufacturing one. The `.dedup-quarantine` sidecar is removed entirely; nothing
+  is left behind. A genuinely corrupt `id_index.bin` still raises `DedupRepairAmbiguousError` with the
+  collection byte-identical -- only the missing-entry case changed.
+
+### Added
+
+- **Story #1560**: Durable per-repo dedup-outcome state (`fleet_migration_dedup_state`, additive
+  migration 045) on BOTH the PostgreSQL and SQLite backends behind a shared protocol, so clustered and
+  solo deployments agree. Counts are cumulative per repo on a documented file-scan basis, with aliases
+  normalized to bare form at every backend boundary.
+- **Story #1560**: `/health` (`GET /api/system/health`) carries a bounded (K=50) dedup summary with
+  per-repo `records_deleted`, `collection_total`, `loss_ratio` and an explicit `incomplete` flag. The
+  condition sets DEGRADED and names the alias, count and ratio, and dedup reasons are prioritized
+  ahead of `MAX_FAILURE_REASONS` truncation so they cannot be swallowed into "+N more". `/healthz`
+  still returns HTTP 200 for degraded, so this can never drain a node over an index-completeness
+  issue. The affected repo remains fully queryable throughout -- degraded describes index
+  completeness, never availability.
+- **Story #1560**: A repo already quarantined by this cause is released by an explicit pre-attempt
+  reset. The existing state-signature auto-clear could never fire for it, because repair is the only
+  thing that would change the signature and a quarantined repo is skipped before repair runs.
+  Unrecoverable-corruption and disk-headroom quarantines are untouched.
+- **Story #1560**: The dedup record is cleared only by a successful FULL re-index, so operator
+  remediation actually clears the health signal; a failed or partial re-index retains it.
+
+### Fixed
+
+- **Story #1560**: The dedup outcome journal carries an explicit pending/completed phase, so a crash
+  between the journal write and the first unlink can no longer replay as a completed deletion and
+  double-count `records_deleted`. Un-swept journals now count as scheduler work, so the sweep stays
+  reachable even once every repo appears migrated.
+- **Story #1560**: With the Story #1460 rollout gate closed, consolidation returns a distinct,
+  retryable `dedup_deletion_gated` status that propagates to the scheduler and is quarantine-exempt --
+  never a false "migrated", never a generic failure.
+- **Story #1560**: Duplicate deletion now runs behind the existing QueryTracker bounded drain, which
+  was previously declared through the call chain but never supplied by the production orchestrator.
+
+## [12.12.0] - 2026-08-11
+
+### Fixed
+
+- **Bug #1558**: Fleet migration no longer exhausts memory on large legacy collections. Step 0's
+  dedup repair (`collection_dedup_repair._scan_raw_records`) retained the entire parsed JSON --
+  embedding vector and all payload -- for every record across the whole scan/plan/apply lifecycle,
+  even when nothing was renumbered. Measured on staging: 6.6 GB RSS in one worker on a 7.5 GB node
+  for a 343,604-file collection, swap thrash, worker recycled repeatedly, repo never migrated, and
+  no OOM-kill to surface it as a failure. The scan now retains only the identity fields the gate and
+  renumber planner use, re-reading the full record from disk at apply time
+  (tracemalloc: 288.8 MB -> 11.8 MB at N=8000; 577.0 MB -> 23.0 MB at N=16000). The consolidation
+  engine itself is untouched, so pure-addition -> verify -> durable flip -> delete, field-for-field
+  verification, the content-digest manifest and the `deletion_authorized` gate all keep their
+  existing guarantees.
+- **Bug #1558 (also)**: `temporal_legacy_migration/locking.py` caught
+  `background_jobs.DuplicateJobError` while the call it wraps raises the same-named
+  `job_tracker.DuplicateJobError`, so a benign refresh collision escaped uncaught and surfaced as a
+  FAILED job instead of a graceful skip. Both test fakes raised the wrong class as well, which is
+  why no test caught it.
+
+### Added
+
+- `docs/migration-playbook.md` -- operator procedure for the two data migrations, written from a
+  verified staging run: runtime config pickup without restart, cross-node/cross-worker job
+  serialization, web-session elevation, and the pre-flight checks.
+
+## [12.11.0] - 2026-08-10
+
+### Fixed
+
+- **Bug #1553**: Cluster-mode log reads now follow log writes. `SQLiteLogHandler`'s
+  writer routes every record to the PostgreSQL backend once it is injected at startup
+  (~8-10s in), but seven read call sites -- including `handle_admin_logs_query`, the
+  handler the mandated post-E2E audit gate uses -- read the node-local `logs.db`, which
+  therefore appeared frozen forever at startup+9s and made that gate vacuously pass.
+  `LogAggregatorService` is now backend-aware at a single decision point, keyed on a
+  declared `LogsBackend.is_cross_node_backend` capability rather than a fragile type-name
+  string match, and the duplicated inline branch in the logs page was removed. `query_logs`
+  on both backends gained additive `levels`/`search`/`sort_order` so cluster reads keep
+  parity with the standalone aggregator. Backend write failures are now observable
+  (counter + throttled stderr) instead of silently swallowed. Solo/SQLite is unchanged.
+- **Bug #1554**: Rejected admin config writes no longer return HTTP 200. All 28
+  `_create_config_page_response` call sites are classified: CSRF failure 403, invalid
+  input 400, server failure 500, success unchanged at 200. Previously a rejection was
+  distinguishable from a success only by reading the HTML body.
+- **Bug #1552**: CI now runs the lint gate its documentation always claimed. A new `lint`
+  job runs the full `./lint.sh`, and `create-tag`/`create-release` are gated on it, so a
+  tag -- which triggers the staging deploy -- cannot be cut from a red tree. The job runs
+  on Python 3.9 to match `[tool.mypy] python_version`, and `types-cachetools` is now
+  declared in the dev extra (it was installed ad hoc on developer machines only, which is
+  why local lint passed while no fresh environment could reproduce it).
+
+## [12.10.0] - 2026-08-10
+
+### Fixed
+
+- Story #1546 Phase 3 follow-up: the v12.9.0 default flip was INERT on every existing deployment, and this release is what actually makes DB-backed alias locking take effect. Runtime config persists as a full JSON blob and is merged OVER the dataclass defaults on load, so a stored value always beats a default -- changing `AliasLockConfig.db_backed_enabled`'s default therefore only reached deployments that had never saved runtime config, which in practice is none. Confirmed live on the 3-node staging cluster: all three nodes ran 12.9.0 and were still using file-based locking, with a no-config-change three-node race producing the file-lock split-brain signature (all three admitted, none refused, two reporting lost ownership mid-operation) identical to the control run with the setting explicitly disabled. The fix is a one-time promotion in `_merge_runtime_config` -- the load path every server executes at startup -- which sets the value and persists it to whichever backend is live. Its discriminator is the PRESENCE of a new internal `db_backed_enabled_promoted` marker in the raw stored blob, not its value: every save path serialises the full dataclass, so any blob written after this migration carries the key, and one missing it can only predate the migration. That distinguishes "false because it predates Phase 3" (promote once) from "false because an operator deliberately rolled back" (never touch) -- a value-based check cannot, since both are simply false, and silently overriding an operator's rollback would be the same class of defect inverted. Also fixes a latent hazard found while wiring it: the `lifecycle_analysis_config` save path re-persisted a stale pre-merge dict that would have clobbered the promotion write moments after it happened. The marker is internal and never surfaced as a Web UI setting.
+
+## [12.9.0] - 2026-08-10
+
+### Changed
+
+- Story #1546 Phase 3: DB-backed golden-repo alias locking is now the DEFAULT (`alias_lock.db_backed_enabled` flips from false to true). Phase 2 shipped the mechanism behind an opt-in flag, which meant every deployment still ran the legacy file-based `WriteLockManager` on a `vers=3,nolock,hard` NFS mount -- where `nolock` makes byte-range locking client-side-only, so file locks do not coordinate across cluster nodes at all and the defect this story addresses remained live regardless of how well the new mechanism worked. The flip is justified by direct evidence on the live 3-node staging cluster: with DB-backed locking enabled, three simultaneous same-alias index operations started within 15ms and exactly one acquired while two were cleanly refused with a lock-conflict error; with it disabled, all three entered and one detected lost ownership mid-operation (the split-brain symptom). An A-B-A toggle reproduced both directions deterministically, establishing the setting as the causal variable rather than a correlate. The flag, `WriteLockManager`, and the coordinator's file-mode branch are all deliberately RETAINED as the emergency rollback path for the lock guarding every golden-repo operation; removing them in the same release that changes the default would delete the escape hatch at the moment of highest risk. Test coverage of the file-mode path is likewise retained -- only assertions about which mode is the default were updated. During a rolling update the mixed-fleet window narrows but does not vanish (un-upgraded nodes still default to file locks); this is survivable because every node on 12.8.0 or later carries both mechanisms, and Phase 2's cross-mechanism conflict detection covers the overlap with its residual documented in the coordinator's module docstring.
+
+## [12.8.0] - 2026-08-10
+
+### Changed
+
+- Story #1546 Phase 2: golden-repo alias locking is now wired onto the DB-backed store built in Phase 1. That store shipped on 2026-08-07 complete and fully tested, and was imported by ZERO production files -- `WriteLockManager` remained the live mechanism, coordinating every golden-repo operation with JSON lock files on an NFS mount configured `vers=3,nolock,hard`, where `nolock` makes byte-range locking client-side-only so file locks do not coordinate across cluster nodes at all. A new `AliasLockCoordinator` is installed as `RefreshScheduler.write_lock_manager`; because all eight real call sites reach the lock through that facade, one wiring point rewires every one of them with no call-site signature changes (Bug #1548's `owner_token` already supplied the per-acquisition identity the store needs as a handle). Gated behind a new operator-controlled flag `alias_lock.db_backed_enabled` (default disabled, Web UI configurable) because nodes auto-update independently and an implicit cutover would leave part of the fleet on file locks and part on DB locks, unable to see each other's locks; release and renew therefore dispatch on how a lock was ACQUIRED rather than on the live flag value, so flipping mid-hold cannot leak a lock. Backend selection is treated as correctness rather than configuration: cluster mode resolves to PostgreSQL, solo to node-local SQLite, resolution fails loud when storage mode is not yet determined (an explicit pending sentinel now distinguishes "not postgres" from "not yet known"), and the SQLite lock database can never be placed under the golden-repos mount. Independent review additionally found and fixed a factory that could cache a node-local SQLite store during the storage-mode lazy-init window, cross-mechanism checks that could not see across processes, two destructive phases (refresh publish, dependency-map lifecycle repair) running with no ownership checkpoint, and a lifecycle wiring gap where the factory was never given `golden_repos_dir` so its containment check had nothing to validate against. `WriteLockManager` is deliberately retained as the default until an operator flips the flag; its deletion is post-rollout work.
+
+## [12.7.0] - 2026-08-09
+
+### Fixed
+
+- Bug #1549: scheduler jobs were failed as "interrupted by server restart" on a server with continuous uptime. The solo/SQLite orphan-cleanup sweeps carry no time filter and no process-identity filter -- the predicate is purely `status IN ('running','pending')`, resting on an assumption that solo mode is single-process. A `Restart=always` systemd unit whose port bind always failed had accumulated 5,982 restarts, and every doomed process ran the entire FastAPI lifespan, including both unscoped sweeps, against the live instance's databases before dying. A staleness window cannot fix this (jobs died ~13s after creation while the respawn interval was sub-10s), so the sweeps are now gated on an OS file lock proving sole ownership of the data directory, released by the kernel on process exit. Codex review additionally closed a restart race that could strand a predecessor's pending rows permanently behind the unique active-job index, an unguarded in-memory half of the sweep, and new WARNINGs that would have failed the post-E2E log-audit gate on a normal multi-worker startup.
+
+- Bug #1547: `TemporalDedupCache` re-served a completed prior job's frozen result snapshot for up to an hour after a temporal refresh, per node, because its signature carried no index-freshness component and no refresh path evicted entries. The dedup signature now folds in an on-disk identity fingerprint of every temporal shard's `hnsw_index.bin`, reusing Bug #1538's existing primitive rather than adding a second mechanism, and the terminal TTL derives from `payload_cache_ttl_seconds` instead of a hardcoded constant. Two Codex rounds closed seven further defects, including a per-dispatch blocking stat against a hard-mounted NFS root, a fingerprint collapse that could re-serve the exact stale snapshot the fix targets, a terminal TTL anchored on first observation rather than real completion time, a generation counter that restarted per cache instance, and a cache key that collided across different repositories.
+
+- Bug #1536: query-embedding cache write failures were silent. The PostgreSQL backend caught every exception internally and returned `None`, indistinguishable from success at the call site; the SQLite backend had no handling at all; and the cached-entry memo incremented either way, so the cache reported itself healthy while storing nothing and every later lookup re-embedded live. The backend contract now returns a boolean, failures increment a counter exposed as the `cidx.cache.embedding.write_failures` gauge, and the failure path returns early so the entry-count memo cannot drift. Two competing explanations were investigated and refuted by evidence rather than argument.
+
+- Bug #1542: the HNSW orphan-sweep's post-repair cache invalidation was a silent no-op. It hand-built a bare resolved-path key while the actual search-path key embeds a chunk-layout token (and an activation id for activated repositories), so no repaired collection was ever evicted. Invalidation now composes the key through the same helper the search path uses.
+
+- Bug #1539: `cidx-meta-global` refresh failed every tick with an unresolvable rebase conflict and retried forever, accumulating failed jobs. Quarantine now keys on the upstream commit SHA being rebased onto, persisted cross-worker, so three consecutive failures against the same target skip the sync while any advance of upstream automatically resumes it -- no manual intervention and no permanent quarantine.
+
+- Bug #1534: a golden repository registered from a `file://` source could never be refreshed. The clone was produced by `copytree` rather than `git clone`, so it inherited whatever remote configuration the source working tree happened to have, usually none; the resulting permanent failure was then misclassified as transient and retried forever. Registration now configures an origin remote with upstream tracking, and the git error classifier recognises the stale-path form of the failure.
+
+- Bug #1535: every successful temporal query logged a WARNING about a missing `repo_alias`, and golden-repo registration logged WARNINGs on its happy path. Operation types that intentionally omit `repo_alias` by design are demoted to DEBUG; genuinely unexpected omissions still warn.
+
+- Bug #1532: `server-fast-automation.sh` chunk 4 intermittently segfaulted. `DatabaseConnectionManager.close_all()` closed tracked SQLite connections while holding its lock, but direct-read call sites across the codebase read from those connections without holding it, so a connection could be closed mid-read on another thread. A `guarded_connection()` context manager now acquires the lock before fetching the connection and holds it for the whole operation.
+
+- Bug #1531: two embedding-coalescer concurrency tests failed intermittently under full parallel load. The tests asserted that K concurrent warm lookups always produce K independent hits, but the single-flight design legitimately allows a concurrent same-key request to become a joiner. The tests now force full overlap and assert the real invariant, including the returned vector values.
+
+- Bug #1543: `test_multi_search_service_handles_concurrent_requests` patched the system under test from inside ten worker threads. `unittest.mock.patch` mutates shared state on enter and exit and is not thread-safe for that pattern. The test now patches an external dependency once before any thread starts, with real on-disk repositories, and proves genuine thread overlap rather than assuming it.
+
+- Bug #1544: Story #1491's performance tests wrote real wall-clock measurements into tracked files under `reports/perf/` on every run, dirtying the working tree after every gate. Those writes now default to a gitignored scratch path, with an explicit opt-in for deliberately regenerating committed evidence.
+
+## [12.6.0] - 2026-08-08
+
+### Fixed
+
+- Bug #1548: server-context temporal (git-history) index data indexed before Bug #1529's fixed-root path (`{golden_repos_dir}/.temporal/{alias}/`) existed was stuck at its legacy in-repo location with no migration path. Added `temporal_legacy_migration` (discovery, verification, mover, scheduler) to relocate it. Ten rounds of TDD-implement plus independent Codex adversarial review closed real, reproduced data-loss exploits along the way: a completeness check that followed symlinks and could be tricked into deleting a legacy shard whose target was a dangling symlink; an HNSW completeness check that trusted `collection_meta.json`'s attacker-writable `id_mapping` instead of the actual binary's own stored IDs; a TOCTOU window between the final pre-deletion verification and the actual delete; a forgeable provenance marker that authorized deletion without ever actually verifying the same data was relocated; a write-lock with no renewal/heartbeat that could be lost during a legitimately long-running migration while destructive work continued; lock ownership keyed on a shared name rather than a unique per-acquisition token, allowing one instance to "renew" a different instance's lock; incomplete lock-loss guarding across some mutation sites (orphaned-staging/trash cleanup, metadata-scope copy, relocation-record writes); and lock-loss occurring mid-operation during a slow database commit or multi-syscall record write, not just before the operation started. An independent Opus materiality review confirmed the final round closes the core safety property (this migration cannot destroy or corrupt real production data under any realistic normal-operation condition) and that the one remaining Codex finding from that round (a hypothetical stale-metadata overwrite on crash-resume) is not reachable in practice.
+
+## [12.5.0] - 2026-08-07
+
+### Fixed
+
+- Epic #1489 / Story #1490: `pyproject.toml`'s hnswlib dependency pin still referenced the pre-Story-#1490 fork commit (the Bug #1437 `save_index`/`load_index` GIL-release fix only) instead of the post-Story-#1490 commit that also releases the GIL in `init_index`, `resize_index`, `check_integrity`, `repair_orphans`, `get_ids_list`, `get_items`, `mark_deleted`, and `BFIndex`'s `save_index`/`load_index` -- meaning a fresh install, CI run, or new deployment would have silently built the pre-fix binary and gotten none of Story #1490's GIL releases, despite the story itself being merged and `EXPECTED_HNSWLIB_FORK_COMMIT`/the `third_party/hnswlib` submodule both already pointing at the correct commit. Found during a completeness audit of Epic #1489 (Finding A1, rated SEVERE in the source report) before closing it. The pin now matches the submodule and the runtime capability-check constant.
+
+## [12.4.0] - 2026-08-07
+
+### Added
+
+- Story #1546 (Phase 1): `AliasLockStore` -- a DB-backed alias-lock abstraction for both SQLite (solo) and PostgreSQL (cluster), replacing the file-based `WriteLockManager` that went through 9 rounds of recurring TOCTOU races (see closed Bugs #1537/#1540). The lock is a session-held database transaction rather than an expiring TTL-based lease -- a crash or connection death causes automatic rollback, so the design has no heartbeat, no TTL, and no stale-lock reaper anywhere. Six rounds of dual adversarial review (Codex + Opus) found and closed, in order: an indefinite-blocking bug in PostgreSQL's acquire path (the original `INSERT ... ON CONFLICT DO NOTHING` waited on an uncommitted conflicting row instead of returning promptly); a SQLite whole-file writer-lock false-negative on unrelated aliases (fixed via one dedicated lock file per alias); a bug where broad exception handling in `renew()` incorrectly closed the connection and released a live lock; a missing context-manager protocol; a PostgreSQL vacuum-pinning concern from the long-held write transaction (mitigated via `idle_in_transaction_session_timeout`); a test-selection gate bypass via `-k` keyword filtering; and a critical cross-thread SQLite wedge (a missing `check_same_thread=False`) that would have made a lock permanently unrecoverable in the exact threading pattern real call sites use.
+
+This is a standalone abstraction only -- no production call site is rewired yet; that is Phase 2, tracked separately along with several acceptance criteria recorded during this review (a bounded PostgreSQL lock-connection pool, `renew()`'s lock scope across a potentially-unbounded network call, unreadable observability columns, and a couple of smaller hardening items).
+
+### Testing
+
+- Story #1546 (Phase 1): real SQLite and PostgreSQL concurrency tests (real threads, real processes, real fault injection -- severed connections, killed processes, SQLite authorizer-callback and interrupt-based faults, server-side disconnects) proving no two acquisitions of the same lock key ever overlap, crash recovery requires no TTL wait, and a definitive ownership-loss signal is distinguishable from a transient failure on both backends.
+
+## [12.3.0] - 2026-08-07
+
+### Fixed
+
+- Bug #1533: on a cluster, activated-repo temporal queries returned zero results because `temporal_worker`'s lineage lookup constructed its own node-local `ActivatedRepoManager` instead of using the DI-injected manager backed by shared PostgreSQL metadata (the same read-side half-wiring pattern as Bug #1529, discovered while E2E-verifying it). In postgres/cluster mode with no injected manager, now raises `TemporalLineageStoreUnavailableError` loudly instead of silently reading stale or absent node-local state; both MCP and REST front doors now pass the DI-wired manager (AST-guarded per call site). Also closes a real gap where `uses_shared_metadata_stores()` accepted any injected backend regardless of actual type -- a locally-constructed SQLite backend could pass as "shared" in postgres mode -- by requiring an explicit `is_shared_backend` capability marker, now declared on the `GoldenRepoMetadataBackend` Protocol itself rather than left to each concrete backend's discretion.
+
+### Testing
+
+- Bug #1533: real live-PostgreSQL test isolation hardened across three findings -- a strict `re.fullmatch` disposable-database-name guard (a substring check let names like `production_cidx_test` slip through), validation of the database libpq actually resolves via `conninfo_to_dict()` cross-checked against a live `SELECT current_database()` (a hand-parsed DSN string could be bypassed by a `?dbname=` override), and a read-only public-schema table-identity comparison replacing an earlier sentinel-table approach that risked leaking state on failure.
+
+## [12.2.0] - 2026-08-06
+
+### Fixed
+
+- Bug #1538: on a cluster, temporal queries served stale results indefinitely after a successful golden-repo refresh -- the server's per-worker `HNSWIndexCache` never invalidated once Bug #1529 made temporal data live at a stable, fixed path (the old versioned-snapshot design's path churn had accidentally been providing "free" cache invalidation as a side effect). Fixed by capturing a `(mtime_ns, size, inode, device)` file-identity fingerprint before loading the index rather than after (closing a "load-then-stamp poisoning" race where a refresh landing mid-load could permanently defeat later staleness checks), and by moving the potentially-blocking freshness `stat()` call off the shared cache lock with a per-key in-flight guard (this project's NFS golden-repos mount is `hard` NFSv3, so a blocked `stat()` during an outage must never serialize every other cache consumer behind it). A `stat()` failure now drops the cache entry with a rate-limited warning instead of silently trusting stale data forever.
+
+### Testing
+
+- Bug #1538: real hnswlib/filesystem concurrency tests proving no cache hang under a blocked freshness check, a same-size/same-mtime rebuild is still detected via the inode component, and an unverifiable entry does not thrash (reload+warn) on every subsequent hit.
+
+## [12.1.0] - 2026-08-06
+
+### Fixed
+
+- Bug #1529: a previous fix (#1528) retired the write side of Story #1457's temporal sister-location relocation mechanism but left the read side live, producing a real duplication/staleness hazard -- an activation's CoW clone could physically duplicate a golden repo's temporal quarter-shard tree, and a repo with pre-existing sister-location data could silently diverge from newly-written in-repo data. This recovery retires Story #1457's entire versioned-snapshot/alias-pointer/resolver architecture and replaces it with temporal data living at a stable, fixed path outside the golden repo's own directory tree, derived deterministically from `(golden_repo_alias, embedder_slug, quarter)` -- no versioning, since temporal data is append-only and monotonic by design. All read/write seams (REST, MCP, multi-repo search) resolve through one shared path-derivation function and fail loud rather than silently falling back to the wrong location when the golden lineage is known but resolution fails. Also fixes: an admin temporal reindex operation that was silently deleting real relocated data and forcing a full git-history re-embed (its existence check looked at the wrong root); a symlink-escape gap in alias path sanitization; a legacy-JSON write escape hatch for temporal collections; and a bare-name legacy monolith directory that was invisible to status/reindex-decision logic due to a prefix-matching quirk.
+- HNSW/metadata index publication now uses durable temp-write+fsync+atomic-rename+directory-fsync for the actual production publishers (`BackgroundIndexRebuilder.atomic_swap`, `HNSWIndexManager.save_incremental_update`) -- an earlier pass in this same recovery had hardened this pattern only on a dead code path with zero production callers.
+
+### Testing
+
+- Bug #1529: real filesystem/SQLite concurrent-reader-during-refresh test proving no torn or corrupt read at the fixed temporal path, with a self-consistency oracle that can detect a mis-resolved HNSW label pointing at the wrong point_id (not just membership in the set of ever-written ids).
+
+## [12.0.0] - 2026-08-06
+
+### Fixed
+
+- Story #1491: server-side synchronous work (bcrypt/JWT verification, regex-search subprocess dispatch, discovery-branch git subprocess calls, diagnostics DB reads, background-diagnostics execution) no longer blocks the shared asyncio event loop -- all now dispatch through worker threads or a dedicated bounded executor. Fixes a `diagnostics_service.get_status()` lost-update race (a stale DB read could clobber a concurrently-published newer result) via a monotonic generation-counter compare-and-set, replacing an earlier `datetime.now()`-based token that could collide. Adds a `BoundedSubmissionGate` bounding concurrent discovery-branch fetches, with graceful per-repo degradation on overload rather than failing the whole request. Fixes a diagnostics lock lazy-initialization race where two concurrent first callers could each construct a separate `threading.Lock`, silently defeating all synchronization.
+
+### Testing
+
+- Story #1491: real concurrent-request test evidence (FastAPI `httpx.AsyncClient` + `asyncio.gather`, not mocks) for every affected code path, including a 7,500-file real trigram-indexed corpus for the regex-search promptness proof and a real never-answering loopback socket for the blocked-remote discovery test.
+
+## [11.109.0] - 2026-08-04
+
+### Fixed
+
+- **CRITICAL** #1528: temporal indexing was unconditionally excluded from the consolidated `chunks.db` storage layout regardless of caller intent, reproducing the exact legacy-file-explosion pathology Epic #1454 was built to eliminate (measured live: 487,076 `vector_*.json` files for one real repo). Two compounding root causes fixed: `FilesystemVectorStore.create_collection()`'s unconditional temporal exclusion (now tri-state, honoring an explicit `--new-collection-layout=sharded_json` request), and the CLI temporal branch never threading a layout argument into `FilesystemVectorStore` at all. Pre-existing legacy shards are now migrated in place before any new temporal write (CLI, daemon-refusal, and fleet migration all route through the same `consolidate_collection_in_place` engine); Story #1457's separate "sister location" relocation write path is retired (its read path is untouched, so already-relocated data stays queryable). Also fixes two pre-existing bugs found while validating this change: a natively-built `chunks.db` collection was misjudged as unmigrated by the fleet-migration verifier, and the metadata-less temporal bookkeeping directory was wrongly enumerated as a migration target (breaking `--migrate-chunks-to-sqlite` for every real temporal repo).
+- **MEDIUM**: `cli_daemon_delegation.py`'s standalone-fallback path (`_index_standalone`, taken when daemon connection fails) crashed with `TypeError: index() got an unexpected keyword argument 'use_chunks_db_for_new_collections'` -- a pre-existing Story #1488 gap where the daemon-RPC kwarg name never matched the real `index()` Click command's `new_collection_layout` parameter. Found while validating #1528. Fixed by translating the resolved bool back to the string enum before `ctx.invoke`.
+
+### Testing
+
+- Fixed a test-only bug in `tests/unit/cli/test_cli_clear_temporal_progress.py`: a loosely-mocked `MagicMock()` config object made `daemon_enabled` (`config.daemon and config.daemon.enabled`) unintentionally truthy, routing a pure local-mode test through the real, unmocked daemon-delegation path -- which spawned a genuine background daemon subprocess that raced with the test's own real index-mutation lock acquisition. Found while validating #1528.
+
+## [11.108.0] - 2026-08-04
+
+### Fixed
+
+- **MEDIUM** #1527: `SSHKeyManager.delete_key()` -- the third sibling gap in this class after #1524 (list path) and #1526 (get_public_key/assign_key_to_host) -- never consulted the shared PostgreSQL backend before concluding a key was untracked, so Bug #1519's provenance guard falsely refused to delete a genuinely cluster-managed key on any node that hadn't itself created it (reproduced live: only 2 of 6 HAProxy-round-robinned delete attempts succeeded). Fixed by consulting the shared backend before falling through to the (unchanged) provenance guard, so a real foreign-file collision is still correctly refused.
+
+### Removed
+
+- GitLab SSH keys and deploy keys removed from the local dev machine, solo staging, and clustered staging per operator directive to stop using GitLab on this equipment. No stored PAT-based git credentials existed on any of the three servers.
+
+### Fixed
+
+- **HIGH** #1523: `remove_golden_repo`'s background worker called `GlobalActivator.deactivate_golden_repo()` (plus three sibling detach hooks -- cidx-meta description, group-access revocation, wiki view records) INSIDE an `if cleanup_successful:` branch, so a filesystem-cleanup failure skipped all four even though the `golden_repos` row was already deleted -- a permanently wedged global-registry orphan with no front-door recovery, confirmed live on clustered staging. Fixed by treating row removal, global deactivation, and on-disk cleanup as three separable steps: all four detach steps now run unconditionally and before filesystem cleanup. Also adds a reconcile Pass 4 (`_reconcile_global_registry_orphans`) to heal installations wedged before this fix shipped.
+- **HIGH** #1524: `SSHKeyManager._list_keys_internal()` classified keys as managed/unmanaged from node-local state only, so the same cluster-managed key was reported `managed` on the node that created it and `unmanaged` on every other node at the same instant -- reproduced 4/4 across a 3-node cluster. Now unions the shared PostgreSQL backend's keys into the node-local view, matching the convention `create_key`/`assign_host`/`delete_key` already use. Confirmed not to weaken the #1519/#1521 safety guards, which read through a different path entirely.
+- #1526 (sibling of #1524): `get_public_key()` and `assign_key_to_host()` still resolved keys from node-local state only, so a key correctly listed as `managed` by #1524's fix could still 404 on those two operations if not yet materialized on the current node. Extended the same cluster-lookup convention to both.
+- #1525: MCP `get_job_details` failed with "Object of type datetime is not JSON serializable" for any cluster-claimed job, because `claimed_at` was the only timestamp column in `BackgroundJobsPostgresBackend._row_to_dict` not wrapped in the existing `_dt()` normalization helper.
+- Fixed a pre-existing gap surfaced by #1526: the `ssh_keys` REST router's `get_public_key` endpoint only caught `KeyNotFoundError`, so `PublicKeyNotFoundError` escaped as a bare 500 instead of a 404.
+
+## [11.106.0] - 2026-08-03
+
+### Fixed
+
+- Fixed SSH config manager blank-line growth: `~/.ssh/config`'s CIDX-managed section grew by one blank line on every sync round-trip because the leading blank line the writer added was re-captured into the user section on the next parse, then compounded by another writer-added blank line each cycle. Fixed by stripping leading blank lines from the parsed user section before rejoining.
+- Fixed #1516: query dispatch built a fresh `ThreadPoolExecutor(max_workers=2)` per request instead of a shared, process-wide pool, defeating Story #1492's thread-local `ChunkStoreThreadCache`. Now uses a shared, generously-sized (64-worker) singleton executor, matching this codebase's other server-mode executor conventions, with a guard against a shutdown-race `RuntimeError` during concurrent executor resets.
+- Fixed #1517 and its sibling #1522: two independent call sites (`temporal_worker.py`'s `run_temporal_worker` and `semantic_query_manager.py`'s `SemanticQueryManager.__init__`/`load_golden_temporal_config`) constructed a `GoldenRepoManager`/`ActivatedRepoManager` without honoring `CIDX_SERVER_DATA_DIR`, causing temporal queries to silently fall back to stale embedder configuration -- or, in #1522's case, to return zero results for genuinely-present sister-relocated temporal data -- on any deployment where the server's data directory differs from the OS default (i.e. any normal production/staging/cluster configuration).
+- Investigated #1518 (HNSW cache governor RED-band evictions under concurrent temporal load) and confirmed it is NOT a bug -- the governor is correctly reverting to the pre-Epic-#1213 safe baseline under genuine memory pressure, exactly as designed. Closed with real balloon-test reproduction evidence.
+
+## [11.105.0] - 2026-08-03
+
+### Fixed
+
+- **CRITICAL** #1521: `SSHKeySyncService`'s stale-key manifest (`~/.ssh/.cidx-ssh-keys.json`) is now scoped by a SHA-256 hash of the owning backend's identity (resolved SQLite path, or PostgreSQL connection identity in cluster mode) instead of being a single flat list shared by every process on the host. Previously, a second server instance pointed at the same real `~/.ssh` with a different (e.g. empty, freshly-created) backend would see every name in the shared manifest as unconditionally stale relative to its own backend and delete those key files -- even though a different, legitimate instance's backend still owned them. This closed a real, already-exploited data-loss vector (confirmed via a real two-backend reproduction test) while preserving the legitimate cluster same-backend multi-node cleanup behavior (proven via a dedicated control test). A legacy (pre-fix) manifest's entries are never adopted as managed after upgrade -- their provenance is unknowable, so they are safely dropped from auto-cleanup eligibility rather than risk a wrongful deletion.
+- Fixed #1521 (secondary): all three SSH-key delete front doors (REST, MCP, Web) previously reported success unconditionally regardless of `SSHKeyManager.delete_key()`'s actual return value, silently hiding the #1519 provenance guard's legitimate refusal to delete an untracked same-named file. All three now report an honest failure when the guard refuses.
+
+## [11.104.0] - 2026-08-03
+
+### Fixed
+
+- Fixed #1519: `SSHKeySyncService.sync()` could delete a real, unrelated SSH key file it never wrote, if that file's name happened to collide with a backend-tracked key name that was later renamed/retired. The manifest of "keys managed by this service" now tracks actual write provenance (`(previously-verified-managed names still reported by backend) | (names written just now)`) instead of unconditionally recording every backend-reported name. `SSHKeyManager.delete_key()` had the same class of defect -- deleting an untracked same-named file when no backend metadata existed for the requested key name -- and now refuses that fallback instead of silently unlinking an unrelated file.
+- Fixed #1520: an E2E test (`test_19_temporal_live_wiring_1400.py`) could intermittently fail because its `TemporalDedupCache` signature (derived from query text) collided with another test's already-completed job elsewhere in the same large test-process run, causing a query expected to defer to a background job to instead return an already-cached synchronous result. Test query texts now include a per-process-unique token so this collision is structurally impossible.
+
+## [11.103.0] - 2026-08-03
+
+### Performance
+
+- Story #1493: temporal search overfetch is now bounded by `TEMPORAL_COMBINED_OVERFETCH_CEILING = 60`, capping a combined multiplier that could previously reach 120x on `commit_message` queries. CHUNKS_DB collections skip decoding discarded non-head chunk-type candidates entirely (zero-I/O), improving head-chunk recall. Recall-comparison evidence (7 real natural-language queries against a realistic multi-chunk corpus) confirms byte-identical results before/after; a deterministic engineered-vector test documents a real, adversarial-only SHARDED_JSON recall risk that natural-language queries do not appear to produce in practice.
+
+### Fixed
+
+- Fixed intermittent test failures in the new Story #1493 boundary-risk test caused by HNSW's multi-threaded index-construction non-determinism (concurrent insertion occasionally orphaning graph nodes, degrading approximate search on a razor-thin engineered rank margin). `HNSWIndexManager`/`FilesystemVectorStore` gained an additive, optional `num_threads`/`hnsw_num_threads` constructor parameter (defaults preserve existing multi-threaded production behavior for every existing caller) so tests needing deterministic construction can force single-threaded index builds.
+
+## [11.102.0] - 2026-08-03
+
+### Performance
+
+- Story #1492: `FilesystemVectorStore.search()` no longer re-parses `collection_meta.json` 4-5 times per query on the server query hot path -- a mtime-keyed `CollectionMetaCache` and a per-thread `ChunkStoreThreadCache` are now genuinely shared, process-wide singletons (wired through `FilesystemBackend.get_vector_store_client()`, mirroring the existing `id_index_cache` server-mode pattern), so a repeat query against an unchanged collection is a structural cache hit instead of a fresh parse. MCP `search_code`/`multi_query_routes` payload truncation now batches its `payload_cache` writes into a single transaction instead of one commit per truncated result (mirroring Bug #1181's existing REST-path fix).
+
+## [11.101.0] - 2026-08-03
+
+### Performance
+
+- Story #1491: MCP authentication work (bcrypt credential verification, elevated-session creation, JWT validation) is now offloaded onto worker threads instead of running directly on the shared asyncio event loop, so concurrent request handling is no longer serialized behind auth checks. Eleven research-assistant routes that were `async def` with no actual `await` inside are now plain `def`, letting FastAPI threadpool them correctly instead of running them on the event loop. Restored the C-accelerated JSON encoder path for MCP responses.
+
+### Fixed
+
+- Story #1491: Async-dispatched MCP tools now have a genuine timeout deadline (previously unbounded, so a hung tool could block forever). `regex_search`, `xray_search`, `xray_explore`, and the three CI/CD `*_search_logs` handlers are explicitly exempted, since they manage their own internal per-unit time budget across a multi-repo/multi-job fan-out that can legitimately exceed a single-call deadline.
+
+## [11.100.0] - 2026-08-02
+
+### Performance
+
+- Story #1494: Bounded the X-Ray in-process AST dump to files under 256KB (larger files return an explicit `file_too_large` error rather than freezing the event loop with an unbounded tree-sitter parse); bounded the Tantivy FTS regex position-extraction post-filter at 2000 candidates per search (results beyond the cap are marked `regex_extraction_capped` rather than dropped -- the full match set is always returned); converted the HNSW orphan-sweep sister-repair chunk reader to a streaming generator instead of materializing a full list.
+
+### Fixed
+
+- Story #1494: The dummy-password timing-attack mitigation in the login path now performs a real `bcrypt.checkpw` call (which releases the GIL) against a static precomputed hash, replacing a 5000-iteration pure-Python `hashlib.sha256` loop that held the GIL for its full duration and did not scale under concurrent failed-login attempts.
+
+### Removed
+
+- Story #1494: Deleted the dead `DiagnosticsService._get_storage_statistics` method (zero call sites).
+
+## [11.99.0] - 2026-08-02
+
+### Removed
+
+- Story #1487: Removed the Claude Server delegation feature entirely -- `ClaudeServerClient`, `DelegationJobTracker`, `DelegationFunctionLoader`, `PromptTemplateProcessor`, the delegation MCP tools (`cs_check_health`, `cs_list_repositories`, `cs_register_repository`, `execute_delegation_function`, `execute_open_delegation`, `list_delegation_functions`, `poll_delegation_job`), the `delegation_callbacks` router, the delegation Web Config UI section, and the `delegation_job_results` table (migration 042, dropped with explicit approval). The `delegate_open` permission is removed from the `power_user` role.
+
+### Performance
+
+- Story #1490: Released the GIL in the remaining `hnswlib` fork bindings (`check_integrity`, `repair_orphans`, `init_index`, `get_ids_list`, `mark_deleted`, `resize_index`, and `BFIndex` save/load) so long-running native HNSW operations no longer block concurrent request handling on the shared event loop. Verified live: 3100 concurrent `/health` requests served at idle latency while 53 real production orphan-integrity-check-and-repair passes ran in a background thread.
+
+## [11.98.0] - 2026-08-02
+
+### Fixed
+
+- Bug #1515: `app.state.backend_registry` is now assigned in `make_lifespan()` immediately after `app.state.storage_mode` is set, BEFORE `GlobalReposLifecycleManager` (which immediately spawns a background reconciliation thread calling into `RefreshScheduler`/`GlobalActivator`) is constructed and started. Previously the assignment happened later in the same function, so in cluster (postgres) mode the first reconciliation pass -- and any repository activation racing server startup -- silently resolved against an empty per-node SQLite registry instead of the shared PostgreSQL-backed one, logging "storage_mode=postgres but backend_registry not set; falling back to SQLite" and producing genuine registry drift. Reproduced live on staging: a refresh job correctly marked failed via the postgres-backed startup-orphan cleanup was still reported as an active conflict by `RefreshScheduler`'s own stale SQLite-backed check, permanently blocking activation for that golden repo until a manual server restart.
+
+## [11.97.0] - 2026-08-02
+
+### Fixed
+
+- Bug #1511 (performance): `_ensure_source_tree_readable_for_clone`'s original per-file Python `os.walk`+`os.stat`+`os.chmod` loop was proven live via py-spy to hang repository activation for 30+ minutes on staging for a golden repo with hundreds of thousands of small index/shard files over NFS (evolution's temporal quarter-shard directories) -- one or two network round trips per file. Replaced with two batched `find ... -exec chmod ... {} +` calls (directories: `g+rx,o+rx`; files: `g+r,o+r`, kept separate so a combined pass could never set execute on an already-executable plain file), preserving the same additive-only, never-strip, log-and-continue-on-failure contract with drastically fewer round trips.
+
+## [11.96.0] - 2026-08-02
+
+### Fixed
+
+- Bug #1511 (second call site): the CoW-daemon permission-widening preflight was only wired into `VersionedSnapshotManager._create_clone_backend_snapshot` (refresh/snapshot creation). Repository activation calls `clone_backend.create_clone_at_path()` directly and never went through that path, so activating any golden repo with restrictive-mode index files still failed with `Permission denied` -- reproduced live on staging immediately after deploying the original #1511 fix. The same preflight now also runs in `ActivatedRepoManager._clone_with_copy_on_write` before the activation clone.
+- Bug #1514 (second call site): `ActivatedRepoManager` never called `GitHookManager.ensure_hook_installed()`. A CoW-cloned activated repo carries its golden repo's `.git/hooks/post-checkout` over byte-for-byte, and the subsequent branch checkout fires that stale hook before any indexing (the only place self-heal previously ran) has a chance to repair it -- reproduced live on staging as the exact same `PermissionError` on a stale install-time path #1514 was meant to fix. A new `_ensure_branch_hook_self_heal` helper now self-heals the activated repo's own hook (never the golden repo, never requiring a reindex) immediately before every checkout in both the initial-activation and branch-switch code paths.
+
+## [11.95.0] - 2026-08-02
+
+### Fixed
+
+- Bug #1508: `RefreshScheduler` no longer trusts `has_changes()==False` alone to skip a refresh cycle. A new `_check_stale_index_metadata()` check cross-references `.code-indexer/metadata.json`'s recorded `status`/`current_commit` against the actual working-tree HEAD -- an interrupted indexing run (`status` still `in_progress`/`failed`) or a drifted `current_commit` now forces a reconcile pass even when git itself reports no new commits, closing the class of bug where git-pull success permanently masked a stale index.
+- Bug #1511: CoW-daemon-backed snapshot creation preflight-widens source-tree read permissions (`_ensure_source_tree_readable_for_clone`) immediately before dispatching to `CowDaemonBackend`, fixing a fleet-wide failure where the daemon process (running as a different OS user than the golden-repo file owner) could not open golden-repo files for reading, permanently blocking snapshot/clone creation with `Permission denied`. Confirmed live on staging: activating `evolution` failed with exactly this error before the fix.
+- Bug #1512: PostgreSQL's `cleanup_orphaned_jobs_on_startup()` now also reclaims `running` jobs with `executing_node IS NULL` (SQL `NULL = <node>` never matches, so such a row was permanently unreachable by every node's node-scoped cleanup, forever blocking that repo's per-alias unique-active-job constraint). SQLite backend needed no change -- solo mode is single-node by definition.
+
+## [11.94.0] - 2026-08-02
+
+### Fixed
+
+- Bug #1507 (follow-up): `SSHKeySyncService.sync()` now refuses to run (loud CRITICAL log + no-op) when invoked under pytest with `ssh_dir` still defaulted to the real, unoverridden `~/.ssh`. A pre-existing test exercising the real solo-mode lifespan sequence with an empty/fake backend silently reconciled against the developer's actual `~/.ssh`, treating every previously-real, manifest-tracked key as stale and deleting it -- a real incident that destroyed three personal SSH private keys with no recoverable backup. Every legitimate test in this suite already passes an explicit `tmp_path`-based `ssh_dir`, so this guard can never affect real coverage.
+
+## [11.93.0] - 2026-08-01
+
+### Fixed
+
+- Bug #1513: repository activation on cow-daemon (cluster) deployments could hang forever -- none of `CowDaemonBackend`'s HTTP calls to the CoW storage daemon passed a timeout, so a lost/dropped daemon response left the client blocked indefinitely (observed in production as a permanent CLOSE-WAIT connection). Adds a `request_timeout_seconds` config field (default 30s) applied to all daemon HTTP calls.
+- Bug #1514: activating a golden repo onto a non-default branch could fail with a `PermissionError` on a stale, install-time absolute path baked into the repo's `.git/hooks/post-checkout` script -- this project creates repo copies via `cp --reflink=auto -a` (not `git clone`), so a hardcoded path from wherever the hook was first installed traveled byte-for-byte into every subsequent copy. The hook now resolves the repo root dynamically at run time via `git rev-parse --show-toplevel`, with automatic self-heal for already-installed old-style hooks. Also fixes a related orphan: a branch-activation failure occurring after the on-disk clone was created but before repository registration previously left a permanently unreachable directory with no front-door cleanup path -- `deactivate_repository()` now detects and cleans up this case.
+
+## [11.92.0] - 2026-08-01
+
+### Fixed
+
+- Bug #1507: solo/SQLite-mode servers now materialize DB-registered SSH keys to `~/.ssh/` + `~/.ssh/config` at startup, reusing `SSHKeySyncService` unmodified (previously wired only in postgres/cluster mode). A key correctly registered via any admin front door on a solo server would persist to the `ssh_keys` table but never actually reach disk, making it unusable for git operations -- this affects production, which runs solo/SQLite.
+
+## [11.91.0] - 2026-08-01
+
+### Fixed
+
+- Bug #1510: the cluster's shared cow-storage NFS mount is downgraded from NFSv4.1 to NFSv3 with `nolock`, fixing the chronic server-side lock-manager state loss (`dmesg`: `NFS: <server>: lost N locks`) that directly caused SQLite `disk I/O error`s during golden-repo refresh. An initial attempt added `nolock` to the NFSv4.1 mount alone and was empirically proven ineffective -- NFSv4 integrates locking into its own OPEN/LOCK state machine, bypassing the separate NLM protocol `nolock` controls. NFSv3 is where `nolock` genuinely disables server-side lock negotiation, matching this project's existing golden-repos mount precedent. Live-validated against a real evolution golden-repo refresh on the 3-node staging cluster: zero lock-loss messages and zero disk I/O errors during indexing (previously a near-continuous failure pattern).
+
+## [11.90.0] - 2026-08-01
+
+### Fixed
+
+- Bug #1509: the Bug #1506 refresh-integrity gate's reflink self-heal now also restores the sibling `metadata-{provider}.json` file(s) on `master_path` from the last-known-good snapshot, alongside the already-existing `chunks.db` self-heal. Previously, a self-healed `chunks.db` (reflecting the OLDER, restored commit) was left paired with a `metadata-{provider}.json` still claiming the NEWER commit was fully indexed -- a self-contradictory state that permanently masked staleness on every subsequent refresh cycle (the same failure class as Bug #1508, triggered via the integrity gate's own self-heal path instead of an interrupted refresh).
+
+## [11.89.0] - 2026-07-31
+
+### Fixed
+
+- Bug #1499: `poll_temporal_job_status` now discriminates non-temporal job results (xray_search/xray_search_batch) from temporal search jobs via `operation_type` rather than the shape of the persisted result, fixing a regression where a genuine temporal job's `{"result_ready": True}` completion sentinel was misclassified as a persisted result, making the AC10 TTL-expiry path unreachable.
+- Bug #1500: cidx-meta-backup's git helpers now default `GIT_EDITOR=true` (preserving any operator-configured value) before rebase operations, fixing a production incident where a mid-rebase conflict hung/failed due to no interactive editor being available in the service-user's environment.
+- Bug #1503: a stale-but-valid-subset content-integrity manifest (legacy flat format, or an envelope whose records are a proper subset of live chunks.db rows because an ordinary refresh added rows after the manifest was last written) is now safely accepted and upgraded instead of permanently branding a healthy collection UNRECOVERABLE. Every covered digest is re-verified fresh before acceptance; a phantom manifest key is still a hard refusal. Hardened against a contradictory read-only/write-permission caller combination and against a transient write failure during the upgrade being silently converted into a permanent quarantine.
+- Bug #1504: `SSHKeyManager.assign_key_to_host` now mirrors the host mapping to the PostgreSQL backend in cluster mode (matching `create_key`/`delete_key`'s existing behavior), fixing a bug where a key registered via the MCP front door in cluster mode was present on disk but never offered for authentication, and a subsequent sync could silently remove a previously-working Host block.
+- Bug #1505: `cidx --reconcile` no longer spawns one `git log` subprocess per file (a multi-hour stall on large repos); a single `git ls-tree -r -z HEAD` call now produces the full repo's blob-hash map in one subprocess call. Also fixes a pre-existing correctness bug where the clean-file comparison used a memoized per-run HEAD commit hash instead of the stored per-file blob hash, causing reconcile to re-embed nearly everything.
+- Bug #1506: ordinary golden-repo refresh now runs a durability-flush + integrity-check gate against `chunks.db` before publishing (snapshot + alias swap), with reflink self-heal on failure and a persisted per-repo quarantine for repeated failures -- closing the gap that allowed a real, confirmed SQLite corruption on staging to go undetected and require a manual backup restore. The per-repo write lock coordinating this gate now uses an explicit 24h TTL (was silently inheriting a 1h default) and is now correctly respected by all four writers of the shared "cidx-meta" lock (`DependencyMapService`'s three analysis methods and `atomic_write_description`), each of which previously performed real work before or without checking lock acquisition.
+
+## [11.88.0] - 2026-07-30
+
+### Fixed
+
+- Bug #1502 amendment (live-staging finding): the dedup/renumber repair's per-file-group safety checks (genuine line gap between consecutive chunks; identical line-range ambiguity) no longer refuse the ENTIRE collection -- the offending group is excluded from renumbering (its records stay byte-identical, with stable post-dedup point_ids) and migration proceeds, with a summary WARNING reporting the skipped-group count and sample. Evidence from the real staging fleet: 5.5% of one large repo's file groups (586 of 10,579) carry genuine historical content gaps from chunks silently dropped by the pre-#1502 indexing bug, so whole-collection refusal made migration permanently impossible for long-lived repos. Whole-collection fail-loud is unchanged for genuine ambiguity: malformed or invalid-UTF-8 records, foreign identity formats, duplicate point_ids with no id_index winner, missing HNSW dimension/space metadata, and an empty tree under a stale repair marker.
+
+## [11.87.0] - 2026-07-30
+
+### Fixed
+
+- Bug #1502 (CRITICAL indexing-identity defect): a chunk's identity label (`chunk_index`, which feeds `point_id`) was assigned by position among the chunks that received a fresh embedding in that particular run, instead of the chunk's fixed position in the file. Cache-hit and skip patterns differ between runs, so re-processing an UNCHANGED file forged the same point_id onto different chunk content, accumulating duplicate point_ids in the legacy sharded layout (a real staging repo carried 969) and blocking the JSON-to-SQLite fleet migration (the consolidation scan correctly refuses duplicates and quarantines the repo). The chunker's positional index is now carried through to point creation on both the fresh and cached paths, and a failed embedding fails the whole file loudly instead of silently skipping and renumbering.
+- Fleet migration now runs a metadata-only dedup/renumber repair as step 0 of per-collection consolidation: duplicate point_ids are resolved by keeping the copy the live id_index already serves (losers are quarantined to a sidecar, never deleted); every file's surviving records are canonically renumbered by line order (identity transform for healthy collections); derived artifacts (`id_index.bin`, HNSW index + id_mapping) are rebuilt from the repaired records under a durable crash-recovery marker; hidden-branch filtering is preserved across the rebuild. All ambiguity (foreign identity formats, malformed or invalid-UTF-8 records, line-range gaps, missing HNSW metadata) fails loud pre-mutation, leaving the collection untouched -- foreign-format collections pass through with pre-existing behavior.
+- Multimodal file processing is now atomic with regular-chunk validation: multimodal points are no longer persisted before regular embeddings validate, and a multimodal-only file whose embeddings all fail reports failure instead of silent success.
+- Repaired 12 long-broken tests in `test_file_chunking_manager.py` (unfaithful mock chunker signature and broken test setup) and re-enabled the file in `fast-automation.sh`, where it had been excluded since September 2025.
+
+## [11.86.0] - 2026-07-29
+
+### Fixed
+
+- **#1486 (CRITICAL):** Fleet migration NFS data-loss hardening — `consolidate_collection_in_place` now forces durable persistence of `chunks.db` (`PRAGMA synchronous=FULL` + `nfs_safe_fsync` of file and directory) and verifies integrity on a fresh, cache-bypassing connection BEFORE committing the discriminator and BEFORE deleting legacy sharded files. Legacy data is never deleted until the replacement is provably durable. `FleetMigrationScheduler` now auto-stops once all repos are migrated and surfaces unrecoverable corruption as a DEGRADED health signal instead of retrying forever. Server write path defaults to CHUNKS_DB.
+- **#1488:** `cidx index --migrate-chunks-to-sqlite` performs a full in-place JSON→SQLite chunk-store migration; CLI otherwise preserves the existing on-disk layout (new collections default SHARDED_JSON in CLI; server enforces CHUNKS_DB).
+- **#1495:** `cancel_job` no longer crashes with `AttributeError` when a tracked child is a `subprocess.Popen` (X-Ray Rust dynlib path); child-process termination is now polymorphic over `multiprocessing.Process` and `subprocess.Popen`.
+- **#1496:** Multi-index CLI query now fails loud when a present collection's index fails to load, instead of silently returning partial results from other collections (genuinely-absent collections are still skipped).
+- **#1497:** `cidx query --fts --regex` now matches identifiers containing underscores (raw-tokenizer field queried via Tantivy's DFA-safe regex engine); match-snippet extraction is ReDoS-safe (literal fast-path + bounded fallback) and wrapped patterns that exceed Tantivy's regex state limit fall back gracefully.
+- **#1498:** `cidx scip references`/`definition` now surface a clear "index incomplete" warning when SCIP generation is partial (LIMBO), instead of a silent false-negative.
+
+## [11.85.0] - 2026-07-28
+
+### Fixed
+
+- **#1482 (temporal `-global` read path on solo/cluster)**: the REST `/api/query` temporal path did not thread `query_tracker` into the live dispatch worker, so the `TemporalShardResolver` was never constructed and shard discovery fell back to the (now-empty) in-repo scan -- temporal queries against a golden repo whose shards had been relocated to the sister location (Story #1457) returned 0 results. Fixed by passing `query_tracker` from `app.state` in `_execute_temporal_via_live_dispatch_rest`, mirroring the MCP door.
+- **#1485 (Research Assistant broken on cluster)**: RA session `folder_path` was persisted as an absolute local path in shared PostgreSQL; paths written by a prior deployment (different service-account home) could not be created by the current service user, so `_ensure_session_folder_setup` raised `PermissionError` and RA failed on every chat. All filesystem operations now recompute the session folder from this node's own `research_base_dir + session_id` and never trust the stored path. The cleanup GC now proves session liveness by session id (the on-disk directory name), not by the stored `folder_path`, so it can no longer delete a live session whose stored path diverged.
+
+## [11.84.0] - 2026-07-27
+
+### Fixed
+
+- **#1479 (Research Assistant cluster-aware poll)**: RA job state lived only in a per-process class-level `_jobs` dict, so a poll HAProxy-routed to a non-owning cluster node missed it and returned a spurious "not found in memory" error for an in-progress job. `poll_job` now consults the cluster-shared `JobTracker` on a local miss (running→running, failed/cancelled→error, completed→response from DB messages), keeping the in-memory dict as the same-node fast path.
+- **#1484 (e2e admin-auth resilience)**: the e2e `AdminTokenProvider` renewed the admin JWT via a full username/password re-login, which intermittently 401'd late in the long auth-heavy Phase 3 (erroring test_19's forced-deferral tests at fixture setup). It now prefers the refresh-token grant (`POST /api/auth/refresh`) and only falls back to full re-login when the grant is unavailable. Test-infrastructure only.
+
+## [11.83.0] - 2026-07-27
+
+### Fixed
+
+- **#1480 (multimodal query completeness)**: two follow-ups found via live front-door E2E on a dual-provider repo. (1) The multimodal fan-out only fired on the `primary_only` query strategy; a default query on a repo with both providers configured resolves to `parallel`, which bypassed it -- multimodal now folds into the parallel/failover strategies too (gated to semantic), so dual-provider `/api/query` returns multimodal hits. (2) The multimodal clients (`VoyageMultimodalClient`/`CohereMultimodalClient`) lacked the standard `EmbeddingProvider.get_embeddings_batch` the server coalescer calls, so a server-side multimodal query raised `AttributeError` and -- because the supplement error propagated -- ZEROED the whole result set; added `get_embeddings_batch` (text-only query embedding in the multimodal space, correct 1024/1536 dims) and wrapped the supplement call so a multimodal failure degrades to code-only results instead of killing the query. Proven live: dual-provider "database schema" query returns 6 results including the image-referencing doc (was 0).
+
+## [11.82.0] - 2026-07-27
+
+### Fixed
+
+- **#1482 (temporal read-path resolver wiring)**: temporal shards relocated to the golden-owned sister location (Story #1457) were unqueryable on any local-disk server (production is solo/local-disk) because the live temporal read paths only resolved the in-repo legacy location. Wired `TemporalShardResolver` into every live temporal read/status path -- single-repo (`temporal_worker`/`temporal_live_dispatch`/`search_code`, threading `query_tracker` through), multi-repo (`multi_search_service` -- REST multi-search + MCP omni-search), status (`golden_repo_manager._index_exists` -> `get_temporal_repo_status`, `repository_health_aggregator`, `diagnostics_service`), and standalone (`cli`/`daemon`/`watch` via a new structural `detect_golden_repo_sister_root` primitive that honors the Story #1460 standalone boundary). Found the full set via a Codex audit; chunk-layout (CHUNKS_DB) migration confirmed clean.
+- **#1483 (multimodal query dimension mismatch)**: on a repo with both multimodal collections (voyage-multimodal-3 1024-dim + embed-v4.0-multimodal 1536-dim), `MultiIndexQueryService` embedded the query with one provider but searched the other's collection, so the multimodal branch failed a dimension check and silently returned zero results. Provider selection is now the sole authority keyed by each collection's own model, and every present multimodal collection is queried with its matching provider and merged -- restoring multimodal image-content search on dual-provider repos.
+- **#1480 (server-side multimodal query)**: the REST/MCP front door indexed multimodal collections but never queried them; wired an `enable_multimodal` fan-out into the query path (reusing `MultiIndexQueryService`) and made the multimodal clients first-class embedding providers so they satisfy the query-embedding cache's qualifier contract.
+- **#1481 (cluster-aware golden-repo lookup)**: refresh/force-resync/enable-temporal routes validated repo existence against a per-worker in-memory dict, causing false 404/500 in a cluster (a repo registered on another node was invisible); rerouted all five sites through the authoritative shared-backend `get_golden_repo()` read.
+
+## [11.81.0] - 2026-07-27
+
+### Fixed
+
+- **Story #1461 (Epic #1454 salvage items)**: closed 10 gaps a dual-review found in Epic #1454. Highlights: temporal `enable_temporal` fleet reconciliation is now sister-location-aware (CRITICAL -- previously a repo whose temporal data relocated to the sister location was seen as "gone" and got `enable_temporal` flipped off fleet-wide); strict parse+schema validation of `temporal_progress.json` before any publish/`mark_completed` (HIGH -- a corrupt progress file previously cascaded into stray-point deletion + full re-embed); the HNSW orphan-repair sweep now covers the relocated temporal sister-location with an immutable-safe rebuild-and-swap; activated-repo temporal queries select the embedder from the golden worktree's current config (not the stale activated clone); composite-repo temporal queries are explicitly rejected instead of silently dropping the time filter; sister-location publication is gated on fleet reader-capability; an opt-in first-repo migration canary gate; repo-wide `max_commits` fallback after relocation; and HNSW rebuild no longer eagerly decompresses text columns it does not use.
+- **#1478**: fixed non-monotonic (40<->10) job-progress reporting on the cluster -- coarse progress milestones now bypass the persist debounce so cross-node polls stay consistent (the activation stall itself was a since-fixed NFS-mount wedge, not a code defect).
+- **#1475**: closed as an accepted, documented design residual (in-process `QueryTracker` refcount is deliberately not cross-node, per Story #1457 AC14's reviewed tradeoff).
+
+## [11.80.0] - 2026-07-26
+
+### Added
+
+- **Epic #1454 (Chunk Storage Consolidation)**: consolidates legacy per-chunk `vector_*.json` sharded storage into a single SQLite `chunks.db` per collection (dramatically reducing activation-time file-copy cost from file-count-proportional to collection-count-proportional), relocates temporal quarter data to a golden-owned sister location (out of the mutable repo tree), and introduces a fleet-wide migration mechanism to consolidate already-indexed golden repos. Migration is gated behind a default-OFF, Web-UI-configurable `fleet_migration_config.enabled` operator flag -- ships inert until explicitly enabled, after confirming the reader-capable release has baked fleet-wide (Story #1460).
+- **#1477**: hardened the fleet migration scheduler with a per-repo consecutive-failure quarantine circuit breaker (mirroring the existing description-refresh quarantine pattern), closing a starvation bug where a single permanently-failing repo (corrupt legacy data, persistent backend read/write outages) could block every alphabetically-later repo in the fleet forever. Includes a bounded-recursion on-disk state signature for genuine-repair auto-clear, an unconditional cheap backend health probe before any destructive migration attempt (cluster-safe by construction, no per-node memory), and an atomic PostgreSQL upsert for the failure counter (closing a lost-update race under concurrent cluster writers).
+
 ## [11.79.0] - 2026-07-22
 
 ### Fixed

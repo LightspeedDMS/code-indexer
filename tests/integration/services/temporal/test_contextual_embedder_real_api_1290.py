@@ -16,18 +16,18 @@ from pathlib import Path
 
 import pytest
 
-from src.code_indexer.config import Config
-from src.code_indexer.services.temporal.commit_aggregator import (
+from code_indexer.config import Config
+from code_indexer.services.temporal.commit_aggregator import (
     build_aggregated_document,
     get_file_changes,
 )
-from src.code_indexer.services.temporal.contextual_chunker import (
+from code_indexer.services.temporal.contextual_chunker import (
     chunk_aggregated_document,
 )
-from src.code_indexer.services.temporal.embedders.contextual import (
+from code_indexer.services.temporal.embedders.contextual import (
     ContextualTemporalEmbedder,
 )
-from src.code_indexer.services.temporal.models import CommitInfo
+from code_indexer.services.temporal.models import CommitInfo
 
 pytestmark = pytest.mark.skipif(
     not os.environ.get("VOYAGE_API_KEY"),

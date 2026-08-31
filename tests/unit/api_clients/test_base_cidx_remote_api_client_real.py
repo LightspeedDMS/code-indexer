@@ -140,8 +140,12 @@ class TestCIDXRemoteAPIClientRealAuthentication:
         # Clear any existing token
         real_api_client._current_token = None
 
-        # Make multiple concurrent token requests
-        tasks = [real_api_client._get_valid_token() for _ in range(5)]
+        # Make multiple concurrent token requests. _get_valid_token() is a
+        # synchronous, thread-lock-guarded method (not a coroutine) -- run
+        # it concurrently via asyncio.to_thread so asyncio.gather receives
+        # real awaitables and the test genuinely exercises the thread-lock
+        # concurrency guard rather than 5 pre-computed plain values.
+        tasks = [asyncio.to_thread(real_api_client._get_valid_token) for _ in range(5)]
         tokens = await asyncio.gather(*tasks)
 
         # Should all return the same token (only one auth request made)
@@ -197,9 +201,7 @@ class TestCIDXRemoteAPIClientRealRequests:
     @pytest.mark.asyncio
     async def test_real_authenticated_get_request(self, authenticated_api_client):
         """Test real authenticated GET request."""
-        response = authenticated_api_client._authenticated_request(
-            "GET", "/api/repositories"
-        )
+        response = authenticated_api_client._authenticated_request("GET", "/api/repos")
 
         assert response.status_code == 200
         data = response.json()
@@ -236,11 +238,14 @@ class TestCIDXRemoteAPIClientRealRequests:
         self, authenticated_api_client, real_server_with_data
     ):
         """Test real job cancellation workflow."""
-        # Cancel running job
-        result = authenticated_api_client.cancel_job("job-456", "Test cancellation")
+        # Cancel running job. cancel_job() takes only job_id -- the real
+        # production contract has no "reason" parameter or response field
+        # (see CIDXRemoteAPIClient.cancel_job, the DELETE /api/jobs/{job_id}
+        # REST route, and this fixture's fake server, none of which support
+        # a cancellation reason).
+        result = authenticated_api_client.cancel_job("job-456")
 
         assert "cancelled successfully" in result["message"]
-        assert result["reason"] == "Test cancellation"
 
         # Verify job status was updated on server
         updated_job = authenticated_api_client.get_job_status("job-456")
@@ -550,9 +555,13 @@ class TestRealPersistentTokenStorage:
                     project_root=project_root,
                 )
 
+                # CIDXRemoteAPIClient is synchronous by design (thread-lock
+                # guarded auth, httpx.Client HTTP session) -- none of these
+                # methods are coroutines, so they must be called without
+                # await, matching every other call site across the codebase.
                 try:
-                    await client1._authenticate()
-                    await client1.close()
+                    client1._authenticate()
+                    client1.close()
 
                     # Second client - should load stored token
                     client2 = CIDXRemoteAPIClient(
@@ -563,20 +572,18 @@ class TestRealPersistentTokenStorage:
 
                     try:
                         # Should load persistent token without server call
-                        await client2._get_valid_token()
+                        client2._get_valid_token()
 
                         # Verify we can use the loaded token
-                        response = await client2._authenticated_request(
-                            "GET", "/health"
-                        )
+                        response = client2._authenticated_request("GET", "/health")
                         assert response.status_code == 200
 
                     finally:
-                        await client2.close()
+                        client2.close()
 
                 finally:
                     if not client1.session.is_closed:
-                        await client1.close()
+                        client1.close()
 
 
 # Integration tests combining real server, real JWT, and real HTTP operations
@@ -608,9 +615,7 @@ class TestRealEndToEndIntegration:
                 assert token is not None
 
                 # 2. Real repository listing
-                repos_response = client._authenticated_request(
-                    "GET", "/api/repositories"
-                )
+                repos_response = client._authenticated_request("GET", "/api/repos")
                 assert repos_response.status_code == 200
                 repos_data = repos_response.json()
                 assert len(repos_data["repositories"]) == 1
@@ -620,9 +625,7 @@ class TestRealEndToEndIntegration:
                 assert job_data["status"] == "pending"
 
                 # 4. Real job cancellation
-                cancel_result = client.cancel_job(
-                    "integration-job", "Integration test cleanup"
-                )
+                cancel_result = client.cancel_job("integration-job")
                 assert "cancelled successfully" in cancel_result["message"]
 
                 # 5. Verify real state change

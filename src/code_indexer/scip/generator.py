@@ -153,6 +153,35 @@ class SCIPGenerator:
         """
         Generate SCIP indexes for all discoverable projects.
 
+        Thin span-wrapping public entry point (Story #1586 AC5) -- the full
+        implementation lives in _generate_impl(), unchanged, so wrapping it
+        in a custom span never requires re-indenting that large body.
+
+        Story #1586 code-review Finding 6: create_span() is imported HERE,
+        function-local, rather than at module scope -- this module is on
+        the CLI's `cidx scip generate` import path, and a module-scope
+        import of the server telemetry package transitively pulls in ~11
+        server-layer modules into every CLI invocation (measured ~+0.1s),
+        violating this project's CLI/server layering boundary (Bug #1468
+        precedent). create_span() no-ops (yields a _NoOpSpan) when OTEL
+        tracing is unavailable/uninitialized (always true on the CLI-only
+        path).
+        """
+        from code_indexer.server.telemetry.spans import create_span
+
+        with create_span(
+            "cidx.scip.generate",
+            attributes={"repo_root": str(self.repo_root)},
+        ):
+            return self._generate_impl(progress_callback)
+
+    def _generate_impl(
+        self,
+        progress_callback: Optional[Callable[[DiscoveredProject, str], None]] = None,
+    ) -> GenerationResult:
+        """
+        Generate SCIP indexes for all discoverable projects.
+
         Args:
             progress_callback: Optional callback for progress reporting
                 Called with (project, status_message)

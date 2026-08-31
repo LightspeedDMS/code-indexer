@@ -23,6 +23,31 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def legacy_temporal_refusal_response(pending_shards: List[Path]) -> Dict[str, Any]:
+    """Bug #1528: the daemon's refusal to extend legacy temporal shards.
+
+    Uses the ``cli_daemon_delegation`` client contract -- ``status ==
+    "error"`` plus a ``message`` -- because that is the ONLY shape the client
+    renders as a real failure with its reason. A real daemon-mode run proved
+    a ``{"status": "failed", "error": ...}`` dict prints as "Unexpected
+    status: failed / Message:" with the reason silently dropped.
+
+    Migrating here is deliberately not offered: the in-place consolidation
+    needs the repo's exclusive index-mutation lock and can legitimately run
+    for hours on a large repo, neither of which belongs inside an RPC.
+    """
+    names = ", ".join(sorted(shard.name for shard in pending_shards))
+    message = (
+        f"Refusing temporal indexing: {len(pending_shards)} temporal shard(s) "
+        f"are still in the legacy vector_*.json layout ({names}). Indexing "
+        f"them would add more legacy files. Run `cidx index "
+        f"--migrate-chunks-to-sqlite` to consolidate them first (it holds the "
+        f"exclusive index-mutation lock a daemon RPC cannot)."
+    )
+    logger.error(message)
+    return {"status": "error", "message": message}
+
+
 class CIDXDaemonService(Service):
     """RPyC daemon service for in-memory index caching.
 
@@ -74,6 +99,29 @@ class CIDXDaemonService(Service):
         self.indexing_thread: Optional[threading.Thread] = None
         self.indexing_project_path: Optional[str] = None
         self.indexing_lock_internal: threading.Lock = threading.Lock()
+
+        # Codex Finding (Story #1488): daemon-wide chunk-MUTATION serializer.
+        #
+        # The ThreadedServer shares ONE service instance across connection
+        # threads, and the process-level `.index-mutation.lock` (daemon/server.py)
+        # is held by the DAEMON PROCESS itself -- so neither serializes two RPC
+        # calls WITHIN this process. Without this mutex, two simultaneous
+        # daemon-delegated `cidx index` calls (or a blocking index concurrent
+        # with a background index / a watch mutation) could mutate the SAME
+        # collection concurrently, racing writes and corrupting the index.
+        #
+        # A daemon is bound to a SINGLE project (project-local `daemon.sock`),
+        # so one daemon-wide lock == per-collection here; a per-collection map
+        # would add no concurrency and would over-engineer (KISS).
+        #
+        # This is DELIBERATELY separate from `indexing_lock_internal`, which
+        # only guards short progress-state critical sections and is re-acquired
+        # inside the background progress callback -- wrapping the whole mutation
+        # in that non-reentrant Lock would self-deadlock. `mutation_lock` is an
+        # RLock (reentrant, deadlock-safe) and is always acquired OUTERMOST,
+        # never while `cache_lock`/`indexing_lock_internal` is held, so there is
+        # no lock-ordering cycle.
+        self.mutation_lock: threading.RLock = threading.RLock()
 
         # Indexing progress state (for polling)
         self.current_files_processed: int = 0
@@ -437,11 +485,28 @@ class CIDXDaemonService(Service):
             from code_indexer.config import ConfigManager
 
             # Bug #1300: lazy-init config_manager BEFORE first use below.
+            # Bug #1718: verify project_root's OWN config via
+            # load_verified_config() instead of blind-trusting
+            # create_with_backtrack() -- same root-cause class as #1690/
+            # #1713. create_with_backtrack() can silently backtrack onto an
+            # unrelated ANCESTOR's config, or default to a bare Config()
+            # (codebase_dir=".") when nothing is found anywhere. This is a
+            # READ path (temporal query, no mutation), so
+            # ConfigVerificationError (a ValueError subclass) is allowed to
+            # propagate naturally to the RPC caller -- there is no existing
+            # per-repo skip-gracefully wrapper at this single-repo daemon
+            # call site to route through, matching #1690's established
+            # read-path treatment.
+            #
+            # self.config_manager now caches the verified Config itself
+            # (not a ConfigManager instance) -- a daemon instance serves
+            # exactly one project for its whole lifetime, so caching the
+            # one-time verification result is safe.
             if not hasattr(self, "config_manager") or self.config_manager is None:
-                self.config_manager = ConfigManager.create_with_backtrack(project_root)
+                self.config_manager = ConfigManager.load_verified_config(project_root)
 
             assert self.config_manager is not None
-            config = self.config_manager.get_config()
+            config = self.config_manager
 
             # Convert time_range string to tuple (same logic as cli.py:4819-4840)
             if time_range == "all":
@@ -589,6 +654,14 @@ class CIDXDaemonService(Service):
         logger.info(f"exposed_index_blocking: project={project_path} [BLOCKING MODE]")
         logger.info(f"exposed_index_blocking: kwargs={kwargs}")
 
+        # Codex Finding (#1488): hold the daemon-wide chunk-mutation lock for the
+        # ENTIRE mutation (both the temporal-only and semantic paths, including
+        # their cache invalidations and returns). Acquired here as the outermost
+        # lock and released in `finally` on every exit path, this serializes
+        # concurrent blocking indexes AND a blocking index against the background
+        # index / a watch mutation. Explicit acquire/finally (rather than a
+        # `with` block) avoids re-indenting the whole method body.
+        self.mutation_lock.acquire()
         try:
             # Invalidate cache BEFORE indexing
             with self.cache_lock:
@@ -612,9 +685,44 @@ class CIDXDaemonService(Service):
                     FilesystemVectorStore,
                 )
 
-                # Only setup what's needed for temporal
-                config_manager = ConfigManager.create_with_backtrack(Path(project_path))
+                # Only setup what's needed for temporal.
+                # Bug #1718: verify project_path's OWN config before ANY
+                # indexing proceeds -- same #1683-severity WRITE-path class
+                # already fixed for other call sites in #1690/#1713.
+                # create_with_backtrack() can silently backtrack onto an
+                # unrelated ANCESTOR's config, or default to a bare
+                # Config() (codebase_dir=".") when nothing is found
+                # anywhere -- either would silently index into/against the
+                # wrong directory. load_verified_config() raises
+                # ConfigVerificationError (caught by this method's outer
+                # except below, surfaced as {"status": "error", ...}) when
+                # project_path has no genuine .code-indexer/config.json of
+                # its own. TemporalIndexer needs a real ConfigManager (not
+                # a bare Config), so once verification succeeds a fresh
+                # ConfigManager is constructed pointed exactly at
+                # project_path's OWN verified config file.
+                resolved_project_root = Path(project_path).resolve()
+                ConfigManager.load_verified_config(resolved_project_root)
+                config_manager = ConfigManager(
+                    resolved_project_root / ".code-indexer" / "config.json"
+                )
                 index_dir = Path(project_path) / ".code-indexer" / "index"
+                # Bug #1528: temporal must never write another legacy
+                # vector_*.json file. An existing collection's committed
+                # layout always wins, so a repo indexed before that fix would
+                # keep growing its legacy tree here. Unlike `cidx index`'s own
+                # temporal branch, this daemon RPC cannot safely run the
+                # in-place migration itself -- that needs the repo's exclusive
+                # index-mutation lock and can legitimately run for hours on a
+                # large repo -- so REFUSE and point at the explicit command.
+                from code_indexer.services.chunk_migration_cli import (
+                    find_pending_legacy_temporal_shards,
+                )
+
+                _pending_legacy = find_pending_legacy_temporal_shards(index_dir)
+                if _pending_legacy:
+                    return legacy_temporal_refusal_response(_pending_legacy)
+
                 vector_store = FilesystemVectorStore(
                     base_path=index_dir, project_root=Path(project_path)
                 )
@@ -703,17 +811,43 @@ class CIDXDaemonService(Service):
             from code_indexer.backends.backend_factory import BackendFactory
             from code_indexer.services.embedding_factory import EmbeddingProviderFactory
 
-            # Initialize configuration and backend
-            config_manager = ConfigManager.create_with_backtrack(Path(project_path))
-            config = config_manager.get_config()
+            # Initialize configuration and backend.
+            # Bug #1718: verify project_path's OWN config before ANY
+            # indexing proceeds -- same #1683-severity WRITE-path class
+            # already fixed for other call sites in #1690/#1713.
+            # load_verified_config() raises ConfigVerificationError
+            # (caught by this method's outer except below, surfaced as
+            # {"status": "error", ...}) instead of silently indexing an
+            # unrelated ANCESTOR's directory or a defaulted fallback.
+            # NOTE: metadata_path below is derived directly from
+            # project_path (not config_manager.config_path.parent) --
+            # see that line's own comment.
+            config = ConfigManager.load_verified_config(Path(project_path))
 
             # Create embedding provider and vector store
             embedding_provider = EmbeddingProviderFactory.create(config=config)
-            backend = BackendFactory.create(config, Path(project_path))
+            # Story #1488 (Codex Finding): honor the caller's explicit
+            # `--new-collection-layout` on the daemon-delegation path, exactly
+            # like the foreground `cidx index` path. An explicit True/False wins;
+            # None (flag absent) passes through so the daemon-side
+            # CIDX_CHUNKS_DB_NEW_COLLECTIONS env/default applies unchanged.
+            backend = BackendFactory.create(
+                config,
+                Path(project_path),
+                use_chunks_db_for_new_collections=kwargs.get(
+                    "use_chunks_db_for_new_collections"
+                ),
+            )
             vector_store_client = backend.get_vector_store_client()
 
-            # Initialize SmartIndexer
-            metadata_path = config_manager.config_path.parent / "metadata.json"
+            # Initialize SmartIndexer.
+            # Bug #1718: derive metadata_path directly from project_path's
+            # OWN (already-verified) .code-indexer directory, never from a
+            # config_manager.config_path that no longer exists here --
+            # mirrors #1713's established derivation pattern.
+            metadata_path = (
+                Path(project_path).resolve() / ".code-indexer" / "metadata.json"
+            )
             indexer = SmartIndexer(
                 config, embedding_provider, vector_store_client, metadata_path
             )
@@ -800,6 +934,9 @@ class CIDXDaemonService(Service):
                 "status": "error",
                 "message": str(e),
             }
+        finally:
+            # Release the daemon-wide chunk-mutation lock on every exit path.
+            self.mutation_lock.release()
 
     def exposed_index(
         self, project_path: str, callback: Optional[Any] = None, **kwargs
@@ -907,6 +1044,15 @@ class CIDXDaemonService(Service):
             project_path: Path to project root
             kwargs: Additional indexing parameters
         """
+        # Codex Finding (#1488): the background index participates in the SAME
+        # daemon-wide chunk-mutation serialization as the blocking index and the
+        # watch mutation. Acquired OUTERMOST (before cache_lock /
+        # indexing_lock_internal are ever taken inside) and released in the
+        # `finally` below, so a blocking index and a background index can never
+        # mutate the same collection concurrently. `exposed_index` already
+        # returned "started" without holding this lock, so the caller is not
+        # blocked -- only the actual mutation work queues behind an in-flight one.
+        self.mutation_lock.acquire()
         try:
             logger.info("=== BACKGROUND INDEXING THREAD STARTED ===")
             logger.info(f"Project path: {project_path}")
@@ -925,10 +1071,18 @@ class CIDXDaemonService(Service):
 
             logger.info("Step 1: Importing modules complete")
 
-            # Initialize configuration and backend
+            # Initialize configuration and backend.
+            # Bug #1718: verify project_path's OWN config before ANY
+            # indexing proceeds -- same #1683-severity WRITE-path class
+            # already fixed for other call sites in #1690/#1713.
+            # load_verified_config() raises ConfigVerificationError
+            # (caught by this method's outer except below, recorded as
+            # self.indexing_error) instead of silently indexing an
+            # unrelated ANCESTOR's directory or a defaulted fallback.
+            # NOTE: this removes config_manager -- the metadata_path line
+            # below still references it and is fixed in the very next edit.
             logger.info("Step 2: Creating ConfigManager...")
-            config_manager = ConfigManager.create_with_backtrack(Path(project_path))
-            config = config_manager.get_config()
+            config = ConfigManager.load_verified_config(Path(project_path))
             logger.info(
                 f"Step 2 Complete: Config loaded (codebase_dir={config.codebase_dir})"
             )
@@ -941,14 +1095,32 @@ class CIDXDaemonService(Service):
             )
 
             logger.info("Step 4: Creating backend and vector store...")
-            backend = BackendFactory.create(config, Path(project_path))
+            # Codex Finding (#1488): honor the caller's explicit
+            # `--new-collection-layout` on the BACKGROUND daemon-delegation
+            # path too, exactly like `exposed_index_blocking` above. An
+            # explicit True/False wins; None (flag absent) passes through so
+            # the daemon-side CIDX_CHUNKS_DB_NEW_COLLECTIONS env/default
+            # applies unchanged.
+            backend = BackendFactory.create(
+                config,
+                Path(project_path),
+                use_chunks_db_for_new_collections=kwargs.get(
+                    "use_chunks_db_for_new_collections"
+                ),
+            )
             vector_store_client = backend.get_vector_store_client()
             logger.info(
                 f"Step 4 Complete: Backend created ({type(vector_store_client).__name__})"
             )
 
-            # Initialize SmartIndexer with correct signature
-            metadata_path = config_manager.config_path.parent / "metadata.json"
+            # Initialize SmartIndexer with correct signature.
+            # Bug #1718: derive metadata_path directly from project_path's
+            # OWN (already-verified) .code-indexer directory, never from a
+            # config_manager.config_path that no longer exists here --
+            # mirrors #1713's established derivation pattern.
+            metadata_path = (
+                Path(project_path).resolve() / ".code-indexer" / "metadata.json"
+            )
             logger.info(
                 f"Step 5: Creating SmartIndexer (metadata_path={metadata_path})..."
             )
@@ -1019,6 +1191,8 @@ class CIDXDaemonService(Service):
                 self.indexing_thread = None
                 self.indexing_project_path = None
             logger.info("=== BACKGROUND INDEXING THREAD EXITING ===")
+            # Release the daemon-wide chunk-mutation lock LAST (outermost).
+            self.mutation_lock.release()
 
     # =============================================================================
     # Watch Mode (3 methods)
@@ -1044,10 +1218,31 @@ class CIDXDaemonService(Service):
         logger.info(f"exposed_watch_start: project={project_path}")
 
         # Delegate to DaemonWatchManager for non-blocking operation
-        # Config will be loaded by the manager
-        result = cast(
-            dict[str, Any], self.watch_manager.start_watch(project_path, None, **kwargs)
-        )
+        # Config will be loaded by the manager.
+        #
+        # Codex Finding (#1488): the watch lifecycle participates in the
+        # daemon-wide chunk-mutation serialization at its daemon-controlled
+        # entry point. Holding `mutation_lock` across start_watch() ensures the
+        # watch handler's construction (which opens the collection's vector
+        # store / reads its metadata) cannot race an in-flight blocking or
+        # background index mutation. The lock is held only for the short,
+        # non-blocking start (start_watch spawns a background thread and returns
+        # immediately -- it never runs the watch loop under the lock).
+        #
+        # 16th Codex review, Finding 2: the previously-documented residual --
+        # the watch's ONGOING per-event index cycles running inside
+        # GitAwareWatchHandler in its own thread, unserialized against a
+        # manual index/clean_data -- is now closed by threading this SAME
+        # `mutation_lock` through DaemonWatchManager.start_watch() into the
+        # constructed GitAwareWatchHandler, which acquires it per mutation
+        # cycle in `_process_pending_changes` (see that module for details).
+        with self.mutation_lock:
+            result = cast(
+                dict[str, Any],
+                self.watch_manager.start_watch(
+                    project_path, None, mutation_lock=self.mutation_lock, **kwargs
+                ),
+            )
 
         # Update legacy fields for compatibility
         if result["status"] == "success":
@@ -1102,6 +1297,18 @@ class CIDXDaemonService(Service):
                 "project_path": stats["project_path"],
                 "stats": stats,
             }
+        elif stats["status"] == "error":
+            # Bug #1717: a construction failure in the watch's background
+            # thread must be surfaced here too, not collapsed into the
+            # same payload as genuine idle -- otherwise an RPC client /
+            # CLI user is told the watch is simply "not running" and never
+            # learns why it failed.
+            return {
+                "running": False,
+                "project_path": stats.get("project_path"),
+                "error": stats.get("error"),
+                "stats": stats,
+            }
         else:
             return {
                 "running": False,
@@ -1124,57 +1331,73 @@ class CIDXDaemonService(Service):
         """
         logger.info(f"exposed_clean: project={project_path}")
 
-        # Invalidate cache FIRST
-        with self.cache_lock:
-            if self.cache_entry:
-                logger.info("Invalidating cache before clean")
-                self.cache_entry = None
-
+        # Codex Finding (16th review, Story #1488): exposed_clean is a
+        # daemon-delegated MUTATOR (clears a collection's chunk storage) and
+        # must be serialized against exposed_index_blocking / the background
+        # index / a watch mutation cycle via the SAME daemon-wide mutation_lock,
+        # exactly mirroring exposed_index_blocking's outermost-lock pattern.
+        # Acquired here as the outermost lock and released in `finally` on
+        # every exit path. (exposed_clean_data gets the identical treatment in
+        # a separate, dedicated edit.)
+        self.mutation_lock.acquire()
         try:
-            from code_indexer.storage.filesystem_vector_store import (
-                FilesystemVectorStore,
-            )
+            # Invalidate cache FIRST
+            with self.cache_lock:
+                if self.cache_entry:
+                    logger.info("Invalidating cache before clean")
+                    self.cache_entry = None
 
-            # Clear vectors using clear_collection method
-            index_dir = Path(project_path) / ".code-indexer" / "index"
-            vector_store = FilesystemVectorStore(
-                base_path=index_dir, project_root=Path(project_path)
-            )
+            try:
+                from code_indexer.storage.filesystem_vector_store import (
+                    FilesystemVectorStore,
+                )
 
-            # Get collection name from kwargs or auto-resolve
-            collection_name = kwargs.get("collection")
-            if collection_name is None:
-                collections = vector_store.list_collections()
-                if len(collections) == 1:
-                    collection_name = collections[0]
-                elif len(collections) == 0:
-                    return {"status": "success", "message": "No collections to clear"}
+                # Clear vectors using clear_collection method
+                index_dir = Path(project_path) / ".code-indexer" / "index"
+                vector_store = FilesystemVectorStore(
+                    base_path=index_dir, project_root=Path(project_path)
+                )
+
+                # Get collection name from kwargs or auto-resolve
+                collection_name = kwargs.get("collection")
+                if collection_name is None:
+                    collections = vector_store.list_collections()
+                    if len(collections) == 1:
+                        collection_name = collections[0]
+                    elif len(collections) == 0:
+                        return {
+                            "status": "success",
+                            "message": "No collections to clear",
+                        }
+                    else:
+                        return {
+                            "status": "error",
+                            "message": "Multiple collections exist, specify collection parameter",
+                        }
+
+                # Clear collection
+                remove_projection_matrix = kwargs.get("remove_projection_matrix", False)
+                success = vector_store.clear_collection(
+                    collection_name, remove_projection_matrix
+                )
+
+                if success:
+                    return {
+                        "status": "success",
+                        "message": f"Collection '{collection_name}' cleared",
+                    }
                 else:
                     return {
                         "status": "error",
-                        "message": "Multiple collections exist, specify collection parameter",
+                        "message": f"Failed to clear collection '{collection_name}'",
                     }
 
-            # Clear collection
-            remove_projection_matrix = kwargs.get("remove_projection_matrix", False)
-            success = vector_store.clear_collection(
-                collection_name, remove_projection_matrix
-            )
-
-            if success:
-                return {
-                    "status": "success",
-                    "message": f"Collection '{collection_name}' cleared",
-                }
-            else:
-                return {
-                    "status": "error",
-                    "message": f"Failed to clear collection '{collection_name}'",
-                }
-
-        except Exception as e:
-            logger.error(f"Clean failed: {e}")
-            return {"status": "error", "message": str(e)}
+            except Exception as e:
+                logger.error(f"Clean failed: {e}")
+                return {"status": "error", "message": str(e)}
+        finally:
+            # Release the daemon-wide chunk-mutation lock on every exit path.
+            self.mutation_lock.release()
 
     def exposed_clean_data(self, project_path: str, **kwargs) -> Dict[str, Any]:
         """Clear all data with cache invalidation (deletes collections).
@@ -1188,54 +1411,66 @@ class CIDXDaemonService(Service):
         """
         logger.info(f"exposed_clean_data: project={project_path}")
 
-        # Invalidate cache FIRST
-        with self.cache_lock:
-            if self.cache_entry:
-                logger.info("Invalidating cache before clean_data")
-                self.cache_entry = None
-
+        # Codex Finding (16th review, Story #1488): exposed_clean_data is a
+        # daemon-delegated MUTATOR (deletes a collection's chunk storage) and
+        # must be serialized against exposed_index_blocking / the background
+        # index / a watch mutation cycle via the SAME daemon-wide mutation_lock,
+        # exactly mirroring exposed_index_blocking's outermost-lock pattern.
+        # Acquired here as the outermost lock and released in `finally` on
+        # every exit path.
+        self.mutation_lock.acquire()
         try:
-            from code_indexer.storage.filesystem_vector_store import (
-                FilesystemVectorStore,
-            )
+            # Invalidate cache FIRST
+            with self.cache_lock:
+                if self.cache_entry:
+                    logger.info("Invalidating cache before clean_data")
+                    self.cache_entry = None
 
-            # Clear data by deleting collections
-            index_dir = Path(project_path) / ".code-indexer" / "index"
-            vector_store = FilesystemVectorStore(
-                base_path=index_dir, project_root=Path(project_path)
-            )
+            try:
+                from code_indexer.storage.filesystem_vector_store import (
+                    FilesystemVectorStore,
+                )
 
-            # Get collection name from kwargs or delete all collections
-            collection_name = kwargs.get("collection")
-            if collection_name:
-                # Delete specific collection
-                success = vector_store.delete_collection(collection_name)
-                if success:
+                # Clear data by deleting collections
+                index_dir = Path(project_path) / ".code-indexer" / "index"
+                vector_store = FilesystemVectorStore(
+                    base_path=index_dir, project_root=Path(project_path)
+                )
+
+                # Get collection name from kwargs or delete all collections
+                collection_name = kwargs.get("collection")
+                if collection_name:
+                    # Delete specific collection
+                    success = vector_store.delete_collection(collection_name)
+                    if success:
+                        return {
+                            "status": "success",
+                            "message": f"Collection '{collection_name}' deleted",
+                        }
+                    else:
+                        return {
+                            "status": "error",
+                            "message": f"Failed to delete collection '{collection_name}'",
+                        }
+                else:
+                    # Delete all collections
+                    collections = vector_store.list_collections()
+                    deleted_count = 0
+                    for coll in collections:
+                        if vector_store.delete_collection(coll):
+                            deleted_count += 1
+
                     return {
                         "status": "success",
-                        "message": f"Collection '{collection_name}' deleted",
+                        "message": f"Deleted {deleted_count} collection(s)",
                     }
-                else:
-                    return {
-                        "status": "error",
-                        "message": f"Failed to delete collection '{collection_name}'",
-                    }
-            else:
-                # Delete all collections
-                collections = vector_store.list_collections()
-                deleted_count = 0
-                for coll in collections:
-                    if vector_store.delete_collection(coll):
-                        deleted_count += 1
 
-                return {
-                    "status": "success",
-                    "message": f"Deleted {deleted_count} collection(s)",
-                }
-
-        except Exception as e:
-            logger.error(f"Clean data failed: {e}")
-            return {"status": "error", "message": str(e)}
+            except Exception as e:
+                logger.error(f"Clean data failed: {e}")
+                return {"status": "error", "message": str(e)}
+        finally:
+            # Release the daemon-wide chunk-mutation lock on every exit path.
+            self.mutation_lock.release()
 
     def exposed_status(self, project_path: str) -> Dict[str, Any]:
         """Combined daemon + storage status.
@@ -1404,19 +1639,25 @@ class CIDXDaemonService(Service):
                 self.cache_entry is not None
                 and self.cache_entry.project_path == project_path_obj
             ):
-                # Same project - check if rebuild occurred
+                # Same project - check if rebuild occurred.
+                # Bug #1730 FINDING 2: resolve collection_path from the
+                # collection ACTUALLY cached (cache_entry.collection_name),
+                # never an arbitrary iterdir()-order pick -- a project can
+                # have multiple collections on disk, and comparing an
+                # unrelated collection's index_rebuild_uuid can silently
+                # miss a genuine out-of-band rebuild of the collection
+                # actually cached (or incorrectly invalidate a fresh one).
                 index_dir = project_path_obj / ".code-indexer" / "index"
-                if index_dir.exists():
-                    # Find collection directory (assume single collection)
-                    collections = [d for d in index_dir.iterdir() if d.is_dir()]
-                    if collections:
-                        collection_path = collections[0]
-                        if self.cache_entry.is_stale_after_rebuild(collection_path):
-                            logger.info(
-                                "Background rebuild detected, invalidating cache"
-                            )
-                            self.cache_entry.invalidate()
-                            self.cache_entry = None
+                cached_collection_name = self.cache_entry.collection_name
+                if index_dir.exists() and cached_collection_name:
+                    collection_path = index_dir / cached_collection_name
+                    if (
+                        collection_path.is_dir()
+                        and self.cache_entry.is_stale_after_rebuild(collection_path)
+                    ):
+                        logger.info("Background rebuild detected, invalidating cache")
+                        self.cache_entry.invalidate()
+                        self.cache_entry = None
 
             # Check if we need to load or replace cache
             if (
@@ -1463,8 +1704,42 @@ class CIDXDaemonService(Service):
                 logger.warning("No collections found in index")
                 return
 
-            # Load first collection (single collection per project)
-            collection_name = collections[0]
+            # Bug #1730 (code-review remediation, root cause): warm the
+            # CONFIGURED collection -- the one _execute_semantic_search
+            # will actually resolve to via resolve_collection_name() --
+            # never an arbitrary list_collections()/iterdir() order pick.
+            # A single project can have MULTIPLE collections on disk (a
+            # switched embedding model, temporal shards, ...); caching the
+            # wrong one used to be merely wasteful (the query path re-read
+            # the correct index from disk anyway) but became actively
+            # unsafe once the query path started trusting the cache.
+            from code_indexer.config import ConfigManager
+            from code_indexer.services.embedding_factory import (
+                EmbeddingProviderFactory,
+            )
+
+            try:
+                config = ConfigManager.load_verified_config(entry.project_path)
+                embedding_provider = EmbeddingProviderFactory.create(config=config)
+                configured_collection_name = vector_store.resolve_collection_name(
+                    config, embedding_provider
+                )
+            except Exception as e:
+                logger.warning(
+                    f"Could not resolve configured collection for semantic "
+                    f"cache warm-up, leaving semantic cache cold: {e}"
+                )
+                return
+
+            if configured_collection_name not in collections:
+                logger.warning(
+                    f"Configured collection '{configured_collection_name}' not "
+                    f"found on disk (available: {collections}); semantic cache "
+                    f"stays cold until it exists"
+                )
+                return
+
+            collection_name = configured_collection_name
             collection_path = index_dir / collection_name
 
             # Read collection metadata to get vector dimension
@@ -1488,9 +1763,36 @@ class CIDXDaemonService(Service):
             id_manager = IDIndexManager()
             id_index = id_manager.load_index(collection_path)
 
+            # Story #1456: CHUNKS_DB collections never have id_index.bin
+            # (retired for this layout) -- an empty id_index here is
+            # EXPECTED, not a failure, and must not block installing an
+            # otherwise-working hnsw_index. Full daemon-mode CHUNKS_DB
+            # query-serving (whatever downstream consumes entry.id_index)
+            # is a separate concern, out of scope for this gate fix.
+            from code_indexer.storage.shared.chunk_layout import (
+                ChunkLayout,
+                resolve_chunk_layout,
+            )
+
+            is_chunks_db = (
+                resolve_chunk_layout(collection_path) == ChunkLayout.CHUNKS_DB
+            )
+
             # Set semantic indexes
-            if hnsw_index and id_index:
-                entry.set_semantic_indexes(hnsw_index, id_index)
+            if hnsw_index and (id_index or is_chunks_db):
+                # Bug #1730: the EXACT cache key search() would key this
+                # collection's HNSW entry under -- see
+                # hnsw_cache_key_for_collection()'s own docstring (Bug
+                # #1538) for why callers must never hand-reconstruct this
+                # format. Stored so DaemonHNSWCacheAdapter can defensively
+                # verify a query's cache_key actually matches the cached
+                # collection before ever trusting it.
+                hnsw_cache_key = vector_store.hnsw_cache_key_for_collection(
+                    collection_path
+                )
+                entry.set_semantic_indexes(
+                    hnsw_index, id_index, hnsw_cache_key=hnsw_cache_key
+                )
                 # Store collection metadata for search execution
                 entry.collection_name = collection_name
                 entry.vector_dim = vector_dim
@@ -1562,16 +1864,64 @@ class CIDXDaemonService(Service):
         try:
             from code_indexer.config import ConfigManager
             from code_indexer.backends.backend_factory import BackendFactory
+            from code_indexer.backends.filesystem_backend import FilesystemBackend
             from code_indexer.services.embedding_factory import EmbeddingProviderFactory
+            from code_indexer.storage.filesystem_vector_store import (
+                FilesystemVectorStore,
+            )
+            from .cache import DaemonHNSWCacheAdapter
 
-            # Initialize configuration and services
-            config_manager = ConfigManager.create_with_backtrack(Path(project_path))
-            config = config_manager.get_config()
+            # Initialize configuration and services.
+            # Bug #1718: verify project_path's OWN config -- same
+            # root-cause class already fixed in #1690's read-path sites.
+            # load_verified_config() raises ConfigVerificationError
+            # (caught by this method's outer except below, surfaced as
+            # {"error": str(e)}) instead of silently searching an
+            # unrelated ANCESTOR's directory or a defaulted fallback.
+            config = ConfigManager.load_verified_config(Path(project_path))
 
             # Create embedding provider and vector store
             embedding_provider = EmbeddingProviderFactory.create(config=config)
             backend = BackendFactory.create(config, Path(project_path))
-            vector_store = backend.get_vector_store_client()
+
+            # Bug #1730 (code-review remediation): the daemon's cache holds
+            # AT MOST one collection's HNSW index, but a project can have
+            # MULTIPLE collections on disk (a switched embedding model,
+            # temporal shards, ...). Taking the fast direct-construction
+            # path is only safe when THIS QUERY's own resolved collection
+            # is the exact one currently cached -- never merely on
+            # cache_entry.hnsw_index being non-None. Resolve the collection
+            # name via a throwaway direct-construction instance (cheap:
+            # in-memory state + one idempotent mkdir, no HNSW/FTS disk I/O)
+            # BEFORE deciding which path to take; on a match, reuse that
+            # same instance with the cache adapter attached.
+            #
+            # get_vector_store_client() gates a slew of unrelated "server
+            # mode" behavior on hnsw_index_cache being non-None (global
+            # id_index_cache/collection_meta_cache/chunk_store_cache
+            # singletons, Postgres-storage-mode probes) that only make
+            # sense for a real multi-worker server process sharing caches
+            # across many concurrent requests -- semantics this
+            # single-project CLI daemon was never designed to run under.
+            # See DaemonHNSWCacheAdapter's docstring for detail.
+            vector_store = None
+            if isinstance(backend, FilesystemBackend):
+                candidate_store = FilesystemVectorStore(
+                    base_path=backend.vectors_dir, project_root=backend.project_root
+                )
+                resolved_collection_name = candidate_store.resolve_collection_name(
+                    config, embedding_provider
+                )
+                if (
+                    self.cache_entry is not None
+                    and self.cache_entry.collection_name == resolved_collection_name
+                ):
+                    candidate_store.hnsw_index_cache = DaemonHNSWCacheAdapter(
+                        self.cache_entry
+                    )
+                    vector_store = candidate_store
+            if vector_store is None:
+                vector_store = backend.get_vector_store_client()
 
             # Get collection name
             collection_name = vector_store.resolve_collection_name(
@@ -1735,7 +2085,23 @@ class CIDXDaemonService(Service):
                 return []
 
             tantivy_manager = TantivyIndexManager(fts_index_dir)
-            tantivy_manager.initialize_index(create_new=False)
+
+            # Bug #1730: use the daemon's own warm CacheEntry.tantivy_index
+            # (loaded once by _load_fts_indexes / _ensure_cache_loaded) when
+            # available -- adopting it directly does zero disk I/O and never
+            # touches the exclusive writer lock. Only fall back to opening
+            # from disk (via open_for_search(), the documented-correct
+            # read-path entry point -- NEVER initialize_index(), which
+            # always acquires the writer lock per Bug #1233) when the cache
+            # genuinely has nothing loaded (e.g. FTS index did not exist yet
+            # at cache-load time).
+            if (
+                self.cache_entry is not None
+                and self.cache_entry.tantivy_index is not None
+            ):
+                tantivy_manager.open_from_cached_index(self.cache_entry.tantivy_index)
+            else:
+                tantivy_manager.open_for_search()
 
             # Extract FTS search parameters
             limit = kwargs.get("limit", 10)
@@ -1803,9 +2169,16 @@ class CIDXDaemonService(Service):
             }
 
         try:
-            # Load configuration
-            config_manager = ConfigManager.create_with_backtrack(Path(project_path))
-            config = config_manager.get_config()
+            # Load configuration.
+            # Bug #1718: verify project_path's OWN config before ANY
+            # rebuild proceeds -- same #1683-severity WRITE-path class
+            # already fixed for other call sites in #1690/#1713.
+            # load_verified_config() raises ConfigVerificationError
+            # (caught by this method's outer except below, surfaced as
+            # {"status": "error", "error": str(e)}) instead of silently
+            # rebuilding an unrelated ANCESTOR's FTS index or a defaulted
+            # fallback.
+            config = ConfigManager.load_verified_config(Path(project_path))
 
             # Send progress callback: discovering files
             if callback:

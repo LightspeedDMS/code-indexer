@@ -475,3 +475,200 @@ class TestAssignKeyToHostReturnKeyMetadata:
             )
         names = [k.name for k in result.managed]
         assert "list_test_key" in names
+
+
+# ---------------------------------------------------------------------------
+# Test 6: Bug #1504 — assign_key_to_host must mirror the host assignment to
+#         the PG backend in cluster mode, exactly as create_key/delete_key
+#         already mirror key create/delete.  Without this, SSHKeySyncService
+#         (which reads exclusively from PG) never emits a Host block for the
+#         newly-assigned key -> ssh never offers the identity fleet-wide.
+# ---------------------------------------------------------------------------
+
+
+class FakeSSHKeysBackend:
+    """
+    Faithful in-memory stand-in for SSHKeysPostgresBackend.
+
+    Implements the full SSHKeysBackend protocol (protocols.py) with real
+    stateful behavior (a dict + a hosts-set-per-key), so that a write via
+    one method (assign_host) is genuinely observable via another
+    (get_key/list_keys) -- unlike a MagicMock, which only records calls.
+    This lets the sync-service end-to-end test prove the real downstream
+    artifact (the regenerated ~/.ssh/config) reflects the manager-level
+    assign_key_to_host() call, not merely "a mock was called".
+    """
+
+    def __init__(self) -> None:
+        self._keys: dict = {}
+        self._hosts: dict = {}
+
+    def create_key(
+        self,
+        name,
+        fingerprint,
+        key_type,
+        private_path,
+        public_path,
+        public_key=None,
+        email=None,
+        description=None,
+        is_imported=False,
+        private_key=None,
+    ) -> None:
+        self._keys[name] = {
+            "name": name,
+            "fingerprint": fingerprint,
+            "key_type": key_type,
+            "private_path": private_path,
+            "public_path": public_path,
+            "public_key": public_key,
+            "email": email,
+            "description": description,
+            "is_imported": is_imported,
+            "private_key": private_key,
+            "created_at": None,
+            "imported_at": None,
+        }
+        self._hosts.setdefault(name, set())
+
+    def get_key(self, name):
+        if name not in self._keys:
+            return None
+        data = dict(self._keys[name])
+        data["hosts"] = sorted(self._hosts.get(name, set()))
+        return data
+
+    def assign_host(self, key_name, hostname) -> None:
+        self._hosts.setdefault(key_name, set()).add(hostname)
+
+    def remove_host(self, key_name, hostname) -> None:
+        self._hosts.get(key_name, set()).discard(hostname)
+
+    def delete_key(self, name) -> bool:
+        existed = name in self._keys
+        self._keys.pop(name, None)
+        self._hosts.pop(name, None)
+        return existed
+
+    def list_keys(self) -> list:
+        return [self.get_key(name) for name in self._keys]
+
+    def close(self) -> None:
+        pass
+
+
+class TestClusterAssignKeyToHostWritesToPG:
+    """
+    Bug #1504, Test 1: cluster-mode assign_key_to_host must write the host
+    mapping through to the PG backend's ssh_key_hosts table (here: the
+    FakeSSHKeysBackend's internal host-set), not just the node-local
+    SQLite store.
+
+    This test FAILS on pre-fix code: assign_key_to_host never calls
+    pg_backend.assign_host, so the fake PG backend's host set for the key
+    stays empty.
+    """
+
+    def test_pg_backend_has_host_row_after_assign(self, tmp_path: Path) -> None:
+        fernet = Fernet(Fernet.generate_key())
+        pg_backend = FakeSSHKeysBackend()
+
+        manager = _make_manager(tmp_path, pg_backend=pg_backend, fernet=fernet)
+        manager.create_key(name="GitLab", key_type="ed25519")
+        manager.assign_key_to_host("GitLab", "gitlab.com")
+
+        pg_key = pg_backend.get_key("GitLab")
+        assert pg_key is not None
+        assert "gitlab.com" in pg_key["hosts"]
+
+
+class TestClusterAssignKeyToHostSyncEndToEnd:
+    """
+    Bug #1504, Test 2: the true end-to-end proof -- after a cluster-mode
+    assign_key_to_host() call, running SSHKeySyncService.sync() against the
+    SAME PG backend instance must regenerate ~/.ssh/config with a real
+    `Host <hostname>` block for the key.
+
+    This test FAILS on pre-fix code: since the PG backend never receives
+    the host mapping, sync()'s regenerated config has zero Host entries for
+    the key.
+    """
+
+    def test_sync_emits_host_block_for_assigned_host(self, tmp_path: Path) -> None:
+        from code_indexer.server.services.ssh_key_sync_service import (
+            SSHKeySyncService,
+        )
+
+        fernet = Fernet(Fernet.generate_key())
+        pg_backend = FakeSSHKeysBackend()
+
+        manager = _make_manager(tmp_path, pg_backend=pg_backend, fernet=fernet)
+        manager.create_key(name="GitLab", key_type="ed25519")
+        manager.assign_key_to_host("GitLab", "gitlab.com")
+
+        sync_ssh_dir = tmp_path / "sync_ssh"
+        sync_service = SSHKeySyncService(
+            ssh_keys_backend=pg_backend,
+            ssh_dir=str(sync_ssh_dir),
+            fernet=fernet,
+        )
+        result = sync_service.sync()
+
+        assert result["errors"] == []
+        config_text = (sync_ssh_dir / "config").read_text()
+        assert "Host gitlab.com" in config_text
+
+
+class TestSoloAssignKeyToHostUnaffected:
+    """
+    Bug #1504, Test 3: regression guard -- in solo/non-cluster mode (no
+    cluster deps set), assign_key_to_host must behave exactly as before:
+    local-only write, no attempt to touch any PG backend, no crash from
+    missing PG deps.
+    """
+
+    def test_solo_mode_assign_does_not_touch_pg(self, tmp_path: Path) -> None:
+        manager = _make_manager(tmp_path)
+        assert manager._pg_backend is None
+
+        manager.create_key(name="solo_assign_key", key_type="ed25519")
+        result = manager.assign_key_to_host("solo_assign_key", "example.com")
+
+        assert result.name == "solo_assign_key"
+        assert "example.com" in result.hosts
+        # No PG backend present at all -- nothing to assert calls on; the
+        # absence of a crash IS the regression proof.
+        assert manager._pg_backend is None
+
+
+class TestClusterAssignKeyToHostPGFailure:
+    """
+    Bug #1504, Test 5: PG-write-failure policy.
+
+    Mirrors create_key's/delete_key's existing anti-silent-failure policy
+    (Messi Rule #13): a PG backend failure during assign_key_to_host is
+    logged and RE-RAISED, never swallowed.  Matching delete_key's ordering
+    (local write happens first, then the PG mirror), the local SQLite
+    assignment has already committed by the time the PG call raises --
+    this is an accepted, non-silent degraded state (surfaced to the caller
+    via the exception) that a later successful call/sync will reconcile,
+    not a rollback of the local write.
+    """
+
+    def test_pg_failure_is_raised_not_swallowed(self, tmp_path: Path) -> None:
+        fernet = Fernet(Fernet.generate_key())
+        pg_backend = MagicMock()
+        pg_backend.assign_host.side_effect = RuntimeError("PG assign_host failed")
+
+        manager = _make_manager(tmp_path, pg_backend=pg_backend, fernet=fernet)
+        manager.create_key(name="pg_fail_key", key_type="ed25519")
+
+        with pytest.raises(RuntimeError, match="PG assign_host failed"):
+            manager.assign_key_to_host("pg_fail_key", "failhost.example.com")
+
+        # Local SQLite write already happened before the PG call raised.
+        assert manager._sqlite_backend is not None
+        local_key = manager._sqlite_backend.get_key("pg_fail_key")
+        assert local_key is not None
+        assert "failhost.example.com" in local_key["hosts"]

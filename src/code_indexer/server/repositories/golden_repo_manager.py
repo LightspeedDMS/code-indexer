@@ -21,7 +21,16 @@ import threading
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Any, TYPE_CHECKING, cast
+from typing import (
+    Callable,
+    Dict,
+    List,
+    Literal,
+    Optional,
+    Any,
+    TYPE_CHECKING,
+    cast,
+)
 
 if TYPE_CHECKING:
     from code_indexer.server.models.golden_repo_branch_models import (
@@ -45,8 +54,178 @@ from code_indexer.utils.subprocess_env import build_cidx_subprocess_env
 # from the D4 unit tests, matching the D2/D3 pattern in DependencyMapService.
 from code_indexer.global_repos.lifecycle_batch_runner import LifecycleBatchRunner
 from code_indexer.server.services.job_tracker import DuplicateJobError
+from code_indexer.services.temporal.temporal_row_existence import (
+    temporal_shard_has_committed_rows,
+)
+from code_indexer.storage.shared.chunk_layout import ChunkLayout, resolve_chunk_layout
+from code_indexer.storage.sqlite_chunk_store import chunk_store_has_real_data
+
+# Story #1586 AC5: custom span around golden-repo CoW snapshot creation.
+# create_span() no-ops (yields a _NoOpSpan) when OTEL tracing is
+# unavailable/uninitialized.
+from code_indexer.server.telemetry.spans import create_span
 
 logger = logging.getLogger(__name__)
+
+
+def _log_config_json_present_diagnostic(
+    context: str, path: Path, cwd: Optional[str] = None
+) -> None:
+    """Bug #1535: config.json BEING PRESENT at a post-init/pre-index probe
+    point is the EXPECTED, happy-path outcome on every successful
+    golden-repo registration -- log it at DEBUG, not WARNING, so it stops
+    flooding the WARNING channel the mandatory post-E2E log-audit gate
+    relies on to spot real problems. (These probes were originally raised
+    from DEBUG to WARNING to diagnose a specific config-init race; the
+    ABSENT case remains a genuine anomaly and stays at WARNING at its own
+    call sites, untouched by this helper.)
+    """
+    if cwd is not None:
+        logger.debug(
+            "[config-init-diag] %s config.json present: path=%s mtime=%.6f cwd=%s",
+            context,
+            path,
+            path.stat().st_mtime,
+            cwd,
+        )
+    else:
+        logger.debug(
+            "[config-init-diag] %s config.json present: path=%s mtime=%.6f",
+            context,
+            path,
+            path.stat().st_mtime,
+        )
+
+
+def _collection_has_real_chunk_data(coll_dir: Path) -> bool:
+    """Layout-aware existence check for a single collection directory
+    (Issue #1459 AC1/AC5).
+
+    Never trusts a bare ``*.json`` glob: ``collection_meta.json`` always
+    exists in every collection directory (consolidated or not) and would
+    otherwise produce a false positive by itself, even for a collection
+    that is genuinely empty of real chunk data.
+
+    Routes EXCLUSIVELY through the single canonical ``resolve_chunk_layout``
+    resolver (AC5 -- never an independent flag/file check): CHUNKS_DB
+    collections are checked via ``chunk_store_has_real_data`` (Issue #1459
+    remediation Findings 2/3/4 -- a read-only, side-effect-free row-count
+    query that never creates a missing chunks.db and degrades gracefully
+    on a corrupt one, the ONE shared primitive this reporting surface
+    routes through instead of reimplementing "open ChunkStore -> count ->
+    close"); SHARDED_JSON collections are checked via the existing
+    ``temporal_shard_has_committed_rows`` primitive -- a generic,
+    side-effect-free ``vector_*.json`` row-existence scan (its name predates
+    this reuse; it makes no temporal-specific assumption), never a bare
+    ``*.json`` glob.
+    """
+    if resolve_chunk_layout(coll_dir) == ChunkLayout.CHUNKS_DB:
+        # bool(...) wrap: this project's known mypy quirk where this
+        # cross-module call resolves under a src.-prefixed module identity
+        # when checked from the repo root, otherwise inferring Any (see
+        # collection_migration.py's analogous documented workaround).
+        return bool(chunk_store_has_real_data(coll_dir / "chunks.db"))
+    return bool(temporal_shard_has_committed_rows(coll_dir))
+
+
+#: Story #1457 AC9: bounded retry count for the standalone-CLI-fallback
+#: collision-checked version-id generation in _cb_cow_snapshot, mirroring
+#: snapshot_manager.py's VersionedSnapshotManager hardening. Gives a
+#: provable termination guarantee for the collision-retry loop.
+_MAX_VERSION_ID_COLLISION_RETRIES = 100
+
+
+def _temporal_vectors_exist_for_repo(
+    index_dir: Path,
+    *,
+    on_error: Literal["treat_absent", "raise"] = "treat_absent",
+) -> bool:
+    """Layout-agnostic replacement for the confirmed Bug/AC5 non-recursive
+    glob (Story #1457 AC5).
+
+    The original inline check (`_coll_dir.glob("vector_*.json")`) is a
+    NON-RECURSIVE glob against each `code-indexer-temporal*` collection
+    directory -- but vector_*.json files are actually 4-level hash-sharded,
+    so it can NEVER match, always forcing `--clear` (a full unwanted
+    re-embed) on every explicit add_indexes/reindex admin action.
+
+    Reuses the shared `temporal_shard_has_committed_rows` primitive (the
+    SAME side-effect-free, existence-only, short-circuiting scan AC6/AC8/
+    AC11 use) across every `code-indexer-temporal*` directory found under
+    index_dir, returning True on the FIRST embedder/quarter with any
+    committed row.
+
+    NOTE: this checks the IN-REPO root only. It is deliberately name-glob
+    based rather than parser based, which is exactly why it is still needed
+    alongside ``get_temporal_repo_status``: the glob also matches the BARE
+    pre-Story-#1457 monolith name (``code-indexer-temporal``, no
+    embedder/quarter suffix), which ``parse_physical_temporal_name`` returns
+    None for -- so the status helper cannot see that shape at all. See
+    ``temporal_reindex_needs_clear``, which composes the two for that reason.
+
+    ``on_error`` is forwarded to the shared row-existence predicate; a
+    DESTRUCTIVE caller must pass ``"raise"`` so an unreadable store is never
+    silently reported as "no data".
+    """
+    if not index_dir.is_dir():
+        return False
+    for coll_dir in index_dir.glob("code-indexer-temporal*"):
+        if not coll_dir.is_dir():
+            continue
+        if temporal_shard_has_committed_rows(coll_dir, on_error=on_error):
+            return True
+    return False
+
+
+def temporal_reindex_needs_clear(
+    golden_repos_dir: Path,
+    alias: str,
+    in_repo_index_dir: Path,
+) -> bool:
+    """Does an explicit temporal add-index/reindex have to pass ``--clear``?
+
+    ``--clear`` DELETES the existing temporal shards, forcing a full re-embed
+    of the entire git history (real, unbounded embedding spend). It is
+    legitimate ONLY when there is genuinely no temporal data anywhere. Bug
+    #945 established that intent; Bug #1529 broke it, because the decision
+    still consulted the IN-REPO index directory alone after server-context
+    temporal data moved to the fixed ``{golden_repos_dir}/.temporal/{alias}/``
+    root -- making the answer permanently "no data" and so permanently
+    destructive on the first admin reindex of any relocated repo.
+
+    Both physical roots are therefore consulted, via two DELIBERATELY
+    different mechanisms because neither alone is sufficient:
+
+      1. ``_temporal_vectors_exist_for_repo`` (in-repo, name-glob) -- the only
+         one that can see the bare legacy monolith name.
+      2. ``get_temporal_repo_status`` (both roots, parser-based) -- the only
+         one that can see the fixed server root.
+
+    Both run with ``on_error="raise"``: for THIS decision "no data" authorizes
+    destruction, so a corrupt/locked/unreadable store must fail loud rather
+    than be silently read as "nothing here, safe to wipe" (finding #5).
+
+    Returns:
+        True only when no temporal data was found in either root.
+
+    Raises:
+        Propagates the underlying store-read error when a shard exists but
+        cannot be read -- the caller must abort rather than wipe.
+    """
+    from code_indexer.services.temporal.temporal_status import (
+        get_temporal_repo_status,
+    )
+
+    if _temporal_vectors_exist_for_repo(Path(in_repo_index_dir), on_error="raise"):
+        return False
+
+    status = get_temporal_repo_status(
+        Path(golden_repos_dir),
+        alias,
+        Path(in_repo_index_dir),
+        on_error="raise",
+    )
+    return not status.has_data
 
 
 def _make_hnsw_orphan_event_logger(alias: str):
@@ -307,6 +486,30 @@ class GoldenRepoManager:
             except (json.JSONDecodeError, TypeError, KeyError) as e:
                 logging.warning(f"Could not migrate metadata.json: {e}")
 
+    def has_shared_metadata_backend(self) -> bool:
+        """Whether golden-repo metadata reads reach the SHARED, cross-node
+        store (Bug #1533).
+
+        Asks the CURRENT backend what it IS (`is_shared_backend`), not whether
+        something was injected at construction. Those are different questions:
+        an accidentally-injected node-local SQLite backend is still node-local,
+        and treating it as shared is precisely the bug class this guard
+        exists to close.
+
+        False means golden-repo lookups cannot see repos registered by another
+        cluster node -- `get_actual_repo_path()` then raises
+        GoldenRepoNotFoundError for a repo that genuinely exists. Callers whose
+        correctness depends on the cluster-wide view must treat False as "I
+        cannot answer".
+
+        Compared with ``is True``, never ``bool(...)``: truthiness coercion is
+        satisfied by ANY truthy value, so a MagicMock (which fabricates every
+        attribute on demand) or a duck-typed substitute would pass as shared
+        without ever declaring the marker deliberately. Only an explicit
+        ``is_shared_backend = True`` counts.
+        """
+        return getattr(self._sqlite_backend, "is_shared_backend", False) is True
+
     def set_mcp_registration_service(self, service) -> None:
         """Set the MCPSelfRegistrationService for Phase 2 lifecycle detection."""
         self._mcp_registration_service = service
@@ -387,10 +590,10 @@ class GoldenRepoManager:
         # Anti-duplication: get_golden_repo() already performs the identical
         # unconditional self._sqlite_backend.get_repo(alias) -> GoldenRepo(...)
         # read (it is the long-standing public "source of truth" accessor
-        # used throughout the codebase, e.g. activated_repo_manager.py,
-        # mcp/handlers/delegation.py). Delegate to it rather than duplicating
-        # the fetch-and-construct logic; this method's only added value is
-        # the cache-refresh/eviction side effect below.
+        # used throughout the codebase, e.g. activated_repo_manager.py).
+        # Delegate to it rather than duplicating the fetch-and-construct
+        # logic; this method's only added value is the cache-refresh/
+        # eviction side effect below.
         repo = self.get_golden_repo(alias)
         if repo is None:
             self.golden_repos.pop(alias, None)
@@ -1292,8 +1495,111 @@ class GoldenRepoManager:
 
             del self.golden_repos[alias]
 
-            # Filesystem cleanup happens only now, after the registry row is
-            # confirmed removed.
+            # Bug #1523: every satellite-state detach step below runs
+            # UNCONDITIONALLY, and BEFORE filesystem cleanup. These four
+            # steps used to sit inside an `if cleanup_successful:` branch, so
+            # a _cleanup_repository_files() failure skipped them entirely --
+            # even though the golden_repos row was ALREADY gone by then. For
+            # the global registry that produced a permanently wedged
+            # "registry-orphan" in the OPPOSITE direction from Bug #1317: no
+            # row, but a live global registry entry + `-global` alias pointer
+            # still advertising a repo whose clone was gone or half-deleted,
+            # un-removable (metadata already gone) and un-re-addable (clone
+            # directory still blocking the alias). Row removal, global
+            # deactivation, and on-disk cleanup are three SEPARABLE steps: a
+            # failure in the last one must never skip the second.
+            #
+            # Ordering is deliberate -- deactivate BEFORE deleting files, so
+            # the repo stops resolving through its `-global` alias before its
+            # clone starts disappearing, never the reverse. `actual_path` was
+            # already resolved above, so removing the alias pointer here
+            # cannot invalidate the cleanup target. None of these steps can
+            # be "undone" once the row is gone, which is exactly why gating
+            # them on a later step's success bought nothing and cost
+            # consistency. Each remains individually non-fatal.
+
+            # Bug #1570: delete the repo's entire `.versioned/{alias}/`
+            # snapshot tree BEFORE the `-global` alias pointer is deleted
+            # below -- a non-local clone backend may need that pointer to
+            # identify the on-disk namespace, and the Bug #1567 orphan
+            # sweep fail-closed-skips any namespace whose pointer is gone,
+            # so nothing else would ever reclaim it once removal deletes
+            # the pointer.
+            self._cleanup_versioned_snapshots(alias)
+
+            # Deactivate global activation (Story #532)
+            # Remove GlobalRegistry entry and alias pointer file
+            try:
+                from code_indexer.global_repos.global_activation import (
+                    GlobalActivator,
+                )
+
+                global_activator = GlobalActivator(self.golden_repos_dir)
+                global_activator.deactivate_golden_repo(alias)
+                logging.info(f"Golden repository '{alias}' deactivated globally")
+                cascade_results["global_alias_deleted"] = True
+            except Exception as deactivation_error:
+                # Log error but don't fail removal - the registry row is already gone
+                # This is consistent with add_golden_repo() behavior (AC4)
+                logging.error(
+                    f"Global deactivation failed for '{alias}': {deactivation_error}. "
+                    f"Golden repository removed but some global resources may remain."
+                )
+
+            # Lifecycle hook: Delete .md file from cidx-meta (Story #538)
+            try:
+                from code_indexer.global_repos.meta_description_hook import (
+                    on_repo_removed,
+                )
+
+                on_repo_removed(repo_name=alias, golden_repos_dir=self.golden_repos_dir)
+            except Exception as hook_error:
+                # Log error but don't fail removal - the repo is already removed
+                logging.error(
+                    f"Meta description hook failed for '{alias}': {hook_error}. "
+                    f"Golden repository removed but meta description not deleted."
+                )
+
+            # Lifecycle hook: Revoke group access (Story #706)
+            try:
+                if self.group_access_manager is not None:
+                    from code_indexer.server.services.group_access_hooks import (
+                        on_repo_removed as group_access_on_repo_removed,
+                    )
+
+                    group_access_on_repo_removed(alias, self.group_access_manager)
+            except Exception as hook_error:
+                # Log error but don't fail removal - the repo is already removed
+                logging.error(
+                    f"Group access hook failed for '{alias}': {hook_error}. "
+                    f"Golden repository removed but access records may remain."
+                )
+
+            # Lifecycle hook: Delete wiki article view records (Story #287, AC4)
+            try:
+                from code_indexer.server.wiki.wiki_cache import WikiCache
+                from code_indexer.server.utils.registry_factory import (
+                    resolve_backend_registry_attr,
+                )
+
+                # Bug #1665: resolve the shared PostgreSQL wiki_cache backend
+                # in cluster mode so this hook (and every other reader/writer)
+                # sees the same store regardless of which node handles it.
+                wiki_backend, _ = resolve_backend_registry_attr(
+                    "wiki_cache",
+                    caller_name="golden_repo_manager.remove_golden_repo",
+                )
+                wiki_cache = WikiCache(self.db_path, storage_backend=wiki_backend)
+                wiki_cache.delete_views_for_repo(alias)
+            except Exception as hook_error:
+                logging.error(
+                    f"Wiki view cleanup hook failed for '{alias}': {hook_error}. "
+                    f"Golden repository removed but view records may remain."
+                )
+
+            # Filesystem cleanup happens LAST -- after the registry row is
+            # confirmed removed (Bug #1317) and after every satellite-state
+            # detach above (Bug #1523).
             if repo_exists_on_disk:
                 assert actual_path is not None
                 cleanup_successful = self._cleanup_repository_files(actual_path)
@@ -1302,97 +1608,37 @@ class GoldenRepoManager:
 
             # ANTI-FALLBACK RULE: Fail operation when cleanup is incomplete
             # Per MESSI Rule 2: "Graceful failure over forced success"
-            # Don't report "success with warnings" - either succeed or fail clearly
-            if cleanup_successful:
-                # Deactivate global activation (Story #532)
-                # Remove GlobalRegistry entry, alias pointer file, meta-directory .md file
-                try:
-                    from code_indexer.global_repos.global_activation import (
-                        GlobalActivator,
-                    )
-
-                    global_activator = GlobalActivator(self.golden_repos_dir)
-                    global_activator.deactivate_golden_repo(alias)
-                    logging.info(f"Golden repository '{alias}' deactivated globally")
-                    cascade_results["global_alias_deleted"] = True
-                except Exception as deactivation_error:
-                    # Log error but don't fail removal - the repo files are already deleted
-                    # This is consistent with add_golden_repo() behavior (AC4)
-                    logging.error(
-                        f"Global deactivation failed for '{alias}': {deactivation_error}. "
-                        f"Golden repository removed but some global resources may remain."
-                    )
-
-                # Lifecycle hook: Delete .md file from cidx-meta (Story #538)
-                try:
-                    from code_indexer.global_repos.meta_description_hook import (
-                        on_repo_removed,
-                    )
-
-                    on_repo_removed(
-                        repo_name=alias, golden_repos_dir=self.golden_repos_dir
-                    )
-                except Exception as hook_error:
-                    # Log error but don't fail removal - the repo is already removed
-                    logging.error(
-                        f"Meta description hook failed for '{alias}': {hook_error}. "
-                        f"Golden repository removed but meta description not deleted."
-                    )
-
-                # Lifecycle hook: Revoke group access (Story #706)
-                try:
-                    if self.group_access_manager is not None:
-                        from code_indexer.server.services.group_access_hooks import (
-                            on_repo_removed as group_access_on_repo_removed,
-                        )
-
-                        group_access_on_repo_removed(alias, self.group_access_manager)
-                except Exception as hook_error:
-                    # Log error but don't fail removal - the repo is already removed
-                    logging.error(
-                        f"Group access hook failed for '{alias}': {hook_error}. "
-                        f"Golden repository removed but access records may remain."
-                    )
-
-                # Lifecycle hook: Delete wiki article view records (Story #287, AC4)
-                try:
-                    from code_indexer.server.wiki.wiki_cache import WikiCache
-
-                    wiki_cache = WikiCache(self.db_path)
-                    wiki_cache.delete_views_for_repo(alias)
-                except Exception as hook_error:
-                    logging.error(
-                        f"Wiki view cleanup hook failed for '{alias}': {hook_error}. "
-                        f"Golden repository removed but view records may remain."
-                    )
-
-                # Mark golden repo as deleted
-                cascade_results["golden_repo_deleted"] = True
-
-                # Build enhanced message with cascade deletion counts
-                activated_count = len(cascade_results["activated_repos_deleted"])
-                failed_count = len(cascade_results["activated_repos_failed"])
-
-                message = f"Golden repository '{alias}' removed successfully"
-                if activated_count > 0:
-                    message += f" (cascade deleted {activated_count} activated repos)"
-                if failed_count > 0:
-                    message += (
-                        f" (WARNING: {failed_count} activated repos failed to delete)"
-                    )
-
-                return {
-                    "success": True,
-                    "alias": alias,
-                    "message": message,
-                    "cascade_results": cascade_results,
-                }
-            else:
-                # FAIL the operation - don't mask cleanup failures
+            # Don't report "success with warnings" - either succeed or fail clearly.
+            # Bug #1523: this signal is unchanged -- an incomplete cleanup is
+            # still reported as a resource leak; it just no longer suppresses
+            # the detach steps above.
+            if not cleanup_successful:
                 raise GitOperationError(
                     "Repository metadata removed but cleanup incomplete. "
                     "Resource leak detected: some cleanup operations did not complete fully."
                 )
+
+            # Mark golden repo as deleted
+            cascade_results["golden_repo_deleted"] = True
+
+            # Build enhanced message with cascade deletion counts
+            activated_count = len(cascade_results["activated_repos_deleted"])
+            failed_count = len(cascade_results["activated_repos_failed"])
+
+            message = f"Golden repository '{alias}' removed successfully"
+            if activated_count > 0:
+                message += f" (cascade deleted {activated_count} activated repos)"
+            if failed_count > 0:
+                message += (
+                    f" (WARNING: {failed_count} activated repos failed to delete)"
+                )
+
+            return {
+                "success": True,
+                "alias": alias,
+                "message": message,
+                "cascade_results": cascade_results,
+            }
 
         # Submit to BackgroundJobManager
         job_id = self.background_job_manager.submit_job(
@@ -1557,6 +1803,9 @@ class GoldenRepoManager:
             # Always use regular copy for golden repository registration
             # This avoids cross-device link issues that occur with CoW cloning
             shutil.copytree(source_path, clone_path, symlinks=True)
+            self._establish_local_git_remote_and_upstream(
+                clone_path, os.path.realpath(source_path)
+            )
             logging.info(
                 f"Golden repository registered using regular copy: {source_path} -> {clone_path}"
             )
@@ -1576,6 +1825,196 @@ class GoldenRepoManager:
         except shutil.Error as e:
             raise GitOperationError(
                 f"Failed to copy local repository: Copy operation failed: {str(e)}"
+            )
+
+    _GIT_LOCAL_REMOTE_TIMEOUT_SECONDS = 30
+    _GIT_LOCAL_FETCH_TIMEOUT_SECONDS = 60
+
+    def _establish_local_git_remote_and_upstream(
+        self, clone_path: str, resolved_source_path: str
+    ) -> None:
+        """
+        Deterministically configure the golden clone's own git remote/upstream
+        after a plain filesystem copy (Bug #1534).
+
+        A `shutil.copytree` of a local repo inherits whatever origin/upstream
+        config the SOURCE working tree happened to have (often none). Refresh
+        (GitPullUpdater) needs `git fetch origin` + `@{upstream}` to work on
+        THIS clone regardless of the source's own git state, so this method
+        sets an `origin` remote pointing at the resolved source path, fetches
+        it, and configures upstream tracking for the checked-out branch.
+
+        Entirely best-effort: any failure (git missing, timeout, no `.git` in
+        clone_path, detached HEAD, etc.) is logged as a WARNING and swallowed
+        -- registration succeeding must never depend on this step.
+        """
+        try:
+            git_dot_path = os.path.join(clone_path, ".git")
+
+            if os.path.isfile(git_dot_path):
+                # A `.git` FILE (not a directory) means the SOURCE was a git
+                # WORKTREE (created via `git worktree add`), and shutil.copytree
+                # copied only that small pointer file verbatim. The pointer
+                # still targets the SOURCE main repo's shared
+                # `.git/worktrees/<name>` admin dir, which in turn shares its
+                # `config` + object database with the source main repo via
+                # `commondir`. Empirically confirmed (Bug #1534 investigation):
+                # running `git remote add`/`git fetch`/etc. directly against
+                # such a copy mutates the SOURCE repository's own shared
+                # `.git/config` -- real cross-repository corruption, not a
+                # hypothetical. Converting the copy into a fully independent,
+                # self-contained repository is out of scope here, so this step
+                # is skipped entirely for a worktree-sourced clone: never
+                # attempt any git command against it. Registration still
+                # succeeds; refresh will not work for this specific clone
+                # (unchanged from pre-fix behavior for this case).
+                logging.warning(
+                    "Bug #1534: golden clone %s was copied from a git "
+                    "WORKTREE (.git is a file, not a directory) -- skipping "
+                    "origin/upstream setup to avoid mutating the source "
+                    "repository's shared git config/object database. "
+                    "Refresh will not work for this repo.",
+                    clone_path,
+                )
+                return
+
+            if not os.path.isdir(git_dot_path):
+                # Plain non-git directory copy (e.g. test_file_url_still_works) --
+                # nothing to configure.
+                return
+
+            git_env = build_non_interactive_git_env()
+
+            if not self._configure_origin_remote(
+                clone_path, resolved_source_path, git_env
+            ):
+                return
+            if not self._fetch_origin_for_golden_clone(clone_path, git_env):
+                return
+            branch = self._detect_checked_out_branch(clone_path, git_env)
+            if not branch:
+                return
+            self._configure_upstream_tracking(clone_path, branch, git_env)
+        except Exception as e:
+            # Best-effort only -- never fail registration over this step.
+            # Codex review Finding 3: `str(e)` and `logging.warning(...)`
+            # itself could theoretically raise (e.g. a pathological __str__
+            # override, or a misconfigured logging handler), which would let
+            # the exception escape this "best-effort" handler and break the
+            # very contract it exists to uphold. Nothing inside this handler
+            # may ever propagate.
+            try:
+                logging.warning(
+                    "Bug #1534: unexpected error establishing git remote/upstream "
+                    "for golden clone %s: %s",
+                    clone_path,
+                    str(e),
+                )
+            except Exception:
+                pass
+
+    def _configure_origin_remote(
+        self, clone_path: str, resolved_source_path: str, git_env: dict
+    ) -> bool:
+        """Add (or replace) an `origin` remote pointing at resolved_source_path."""
+        add_result = subprocess.run(
+            ["git", "remote", "add", "origin", resolved_source_path],
+            cwd=clone_path,
+            capture_output=True,
+            text=True,
+            timeout=self._GIT_LOCAL_REMOTE_TIMEOUT_SECONDS,
+            env=git_env,
+        )
+        if add_result.returncode == 0:
+            return True
+
+        # origin already existed from the copied source config -- replace it.
+        set_url_result = subprocess.run(
+            ["git", "remote", "set-url", "origin", resolved_source_path],
+            cwd=clone_path,
+            capture_output=True,
+            text=True,
+            timeout=self._GIT_LOCAL_REMOTE_TIMEOUT_SECONDS,
+            env=git_env,
+        )
+        if set_url_result.returncode != 0:
+            logging.warning(
+                "Bug #1534: failed to configure origin remote for golden clone %s: %s",
+                clone_path,
+                set_url_result.stderr,
+            )
+            return False
+        return True
+
+    def _fetch_origin_for_golden_clone(self, clone_path: str, git_env: dict) -> bool:
+        """Fetch origin so the remote-tracking ref exists locally."""
+        fetch_result = subprocess.run(
+            ["git", "fetch", "origin"],
+            cwd=clone_path,
+            capture_output=True,
+            text=True,
+            timeout=self._GIT_LOCAL_FETCH_TIMEOUT_SECONDS,
+            env=git_env,
+        )
+        if fetch_result.returncode != 0:
+            logging.warning(
+                "Bug #1534: failed to fetch origin for golden clone %s: %s",
+                clone_path,
+                fetch_result.stderr,
+            )
+            return False
+        return True
+
+    def _detect_checked_out_branch(
+        self, clone_path: str, git_env: dict
+    ) -> Optional[str]:
+        """Return the checked-out branch name, or None if detached/unavailable."""
+        branch_result = subprocess.run(
+            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+            cwd=clone_path,
+            capture_output=True,
+            text=True,
+            timeout=self._GIT_LOCAL_REMOTE_TIMEOUT_SECONDS,
+            env=git_env,
+        )
+        if branch_result.returncode != 0:
+            logging.warning(
+                "Bug #1534: failed to detect current branch for golden clone %s: %s",
+                clone_path,
+                branch_result.stderr,
+            )
+            return None
+
+        branch = branch_result.stdout.strip()
+        if not branch or branch == "HEAD":
+            # Detached HEAD -- nothing to track.
+            logging.warning(
+                "Bug #1534: golden clone %s has detached HEAD; skipping "
+                "upstream configuration",
+                clone_path,
+            )
+            return None
+        return branch
+
+    def _configure_upstream_tracking(
+        self, clone_path: str, branch: str, git_env: dict
+    ) -> None:
+        """Configure `branch` to track `origin/branch` (requires a prior fetch)."""
+        upstream_result = subprocess.run(
+            ["git", "branch", f"--set-upstream-to=origin/{branch}", branch],
+            cwd=clone_path,
+            capture_output=True,
+            text=True,
+            timeout=self._GIT_LOCAL_REMOTE_TIMEOUT_SECONDS,
+            env=git_env,
+        )
+        if upstream_result.returncode != 0:
+            logging.warning(
+                "Bug #1534: failed to set upstream tracking for golden clone "
+                "%s branch %s: %s",
+                clone_path,
+                branch,
+                upstream_result.stderr,
             )
 
     def _clone_remote_repository(
@@ -1662,6 +2101,69 @@ class GoldenRepoManager:
                 e,
             )
             return "main"
+
+    def _delete_versioned_snapshots_for_alias(self, alias: str) -> None:
+        """Delete every versioned snapshot for *alias* via the wired
+        VersionedSnapshotManager (Bug #1570). A no-op if no snapshot
+        manager is wired. Per-snapshot / list failures are logged and
+        skipped -- never fatal, called from a removal-cascade teardown
+        step where the golden_repos row is already gone."""
+        snapshot_manager = self._snapshot_manager
+        if snapshot_manager is None:
+            return
+        try:
+            snapshots = snapshot_manager.list_snapshots(alias)
+        except Exception as list_error:
+            logging.error(
+                f"Bug #1570: failed to list versioned snapshots for "
+                f"'{alias}': {list_error}"
+            )
+            return
+        for snapshot_path, _ts in snapshots:
+            try:
+                snapshot_manager.delete_snapshot(alias, snapshot_path)
+            except Exception as snap_error:
+                logging.error(
+                    f"Bug #1570: failed to delete versioned snapshot "
+                    f"'{snapshot_path}' for '{alias}': {snap_error}"
+                )
+
+    def _cleanup_versioned_snapshots(self, alias: str) -> None:
+        """
+        Delete *alias*'s entire `.versioned/{alias}/` snapshot tree
+        (Bug #1570) so it never survives golden repo removal.
+
+        MUST be called BEFORE the `-global` alias pointer is deleted (a
+        non-local clone backend may need it to identify the on-disk
+        namespace). Individually non-fatal (Bug #1523 discipline): a
+        failure here is logged and swallowed, never raised.
+        """
+        # Defensive invariant (Messi Rule #15): alias is already validated
+        # for traversal characters at registration time and only reaches
+        # here via an alias resolved from the registry -- re-checked
+        # anyway before it feeds a path passed to shutil.rmtree.
+        if ".." in alias or "/" in alias or "\\" in alias:
+            logging.error(
+                f"Bug #1570: refusing to clean up versioned snapshots for "
+                f"alias '{alias}': contains path traversal characters."
+            )
+            return
+
+        self._delete_versioned_snapshots_for_alias(alias)
+
+        # Local/CoW filesystem convention (snapshot_paths.py canonical
+        # shape): remove the namespace directory itself so it never lingers
+        # as an untracked, unreachable entry -- also the sole cleanup
+        # mechanism when no snapshot_manager is wired.
+        versioned_ns_dir = Path(self.golden_repos_dir) / ".versioned" / alias
+        try:
+            if versioned_ns_dir.exists():
+                shutil.rmtree(versioned_ns_dir)
+        except Exception as dir_error:
+            logging.error(
+                f"Bug #1570: failed to remove versioned namespace directory "
+                f"'{versioned_ns_dir}' for '{alias}': {dir_error}"
+            )
 
     def _cleanup_repository_files(self, clone_path: str) -> bool:
         """
@@ -1903,7 +2405,15 @@ class GoldenRepoManager:
         # If temporal indexing is enabled, build temporal command
         temporal_command: Optional[List[str]] = None
         if enable_temporal:
-            temporal_command = ["cidx", "index", "--index-commits", "--progress-json"]
+            from code_indexer.server.utils.index_command_layout import (
+                append_server_layout_args,
+            )
+
+            # Story #1488: server states the new-collection layout explicitly
+            # (CHUNKS_DB) rather than inheriting the CLI SHARDED_JSON default.
+            temporal_command = append_server_layout_args(
+                ["cidx", "index", "--index-commits", "--progress-json"]
+            )
 
             # Story #1404: global temporal indexing floor date, composed
             # with the per-repo temporal_options["since_date"] override as
@@ -2074,10 +2584,8 @@ class GoldenRepoManager:
                     Path(clone_path) / ".code-indexer" / "config.json"
                 )
                 if _config_json_post_init.exists():
-                    logger.warning(
-                        "[config-init-diag] post-init config.json present: path=%s mtime=%.6f",
-                        _config_json_post_init,
-                        _config_json_post_init.stat().st_mtime,
+                    _log_config_json_present_diagnostic(
+                        "post-init", _config_json_post_init
                     )
                 else:
                     logger.warning(
@@ -2149,11 +2657,8 @@ class GoldenRepoManager:
             # Step 2: cidx index --fts --progress-json (semantic + FTS, Popen for real progress)
             _config_json_pre_index = Path(clone_path) / ".code-indexer" / "config.json"
             if _config_json_pre_index.exists():
-                logger.warning(
-                    "[config-init-diag] pre-index config.json present: path=%s mtime=%.6f cwd=%s",
-                    _config_json_pre_index,
-                    _config_json_pre_index.stat().st_mtime,
-                    clone_path,
+                _log_config_json_present_diagnostic(
+                    "pre-index", _config_json_pre_index, cwd=clone_path
                 )
             else:
                 logger.warning(
@@ -2162,11 +2667,41 @@ class GoldenRepoManager:
                     clone_path,
                 )
             logging.info(f"Executing cidx index --fts for {clone_path}")
+            from code_indexer.server.utils.index_command_layout import (
+                append_server_layout_args,
+            )
+            from code_indexer.storage.shared.hnsw_sync_state import (
+                CIDX_HNSW_SYNC_EPOCH_POSTGRES_MODE_ENV,
+                resolve_hnsw_sync_epoch_env_var,
+            )
+
+            # Bug #1575 Part C review fix (Defect 3a bypass 3): this
+            # spawned child has no app.state to inspect via
+            # is_postgres_storage_mode() -- signal postgres/cluster mode
+            # explicitly via env var so it can resolve
+            # hnsw_sync_epoch_enabled=False (FilesystemBackend's
+            # CLI-mode fallback check). Bug #1575 Part C independent
+            # re-review: resolution now goes through the ONE shared
+            # resolve_hnsw_sync_epoch_env_var() helper (identical
+            # mechanism/fail-safe semantics as before) so every other
+            # server-side `cidx index` spawn site can reuse it instead of
+            # reimplementing this check. The var is popped from the
+            # inherited environment FIRST so this process's own ambient
+            # environment can never leak a stale value through -- only
+            # THIS call's own fresh resolution ever sets it.
+            _semantic_env_base = dict(os.environ)
+            _semantic_env_base.pop(CIDX_HNSW_SYNC_EPOCH_POSTGRES_MODE_ENV, None)
+            _semantic_env_base.update(resolve_hnsw_sync_epoch_env_var())
+
+            # Story #1488: server states the new-collection layout explicitly
+            # (CHUNKS_DB) rather than inheriting the CLI SHARDED_JSON default.
             _run_popen_with_telemetry(
-                ["cidx", "index", "--fts", "--progress-json"],
+                append_server_layout_args(
+                    ["cidx", "index", "--fts", "--progress-json"]
+                ),
                 phase_name="semantic",
                 error_label="semantic+FTS indexing",
-                env=build_cidx_subprocess_env(),
+                env=build_cidx_subprocess_env(_semantic_env_base),
             )
             logging.info(f"cidx index --fts completed for {clone_path}")
 
@@ -2188,6 +2723,18 @@ class GoldenRepoManager:
                 _temporal_env = build_temporal_child_env(
                     get_config_service().get_config()
                 )
+                # Bug #1575 Part C review fix (Defect 3a bypass 3,
+                # temporal half): temporal collections build/rebuild an
+                # HNSW graph via the SAME FilesystemVectorStore/
+                # HNSWIndexManager machinery as semantic collections (Bug
+                # #1529), so this child needs the SAME postgres-mode
+                # signal the semantic `--fts` Popen call above already
+                # sets. build_temporal_child_env() never sets this var
+                # itself (it is temporal-metadata-specific), so it is
+                # merged in here via the shared resolve_hnsw_sync_epoch_env_var()
+                # helper (Bug #1575 Part C independent re-review).
+                if _temporal_env is not None:
+                    _temporal_env.update(resolve_hnsw_sync_epoch_env_var())
                 _temporal_env = (
                     build_cidx_subprocess_env(_temporal_env)
                     if _temporal_env is not None
@@ -2913,13 +3460,29 @@ class GoldenRepoManager:
         the HNSW index with only visible-branch files.
         """
         try:
+            from code_indexer.server.utils.index_command_layout import (
+                append_server_layout_args,
+            )
+            from code_indexer.storage.shared.hnsw_sync_state import (
+                resolve_hnsw_sync_epoch_env_var,
+            )
+
+            # Story #1488: server states the new-collection layout explicitly
+            # (CHUNKS_DB) rather than inheriting the CLI SHARDED_JSON default.
+            # Bug #1575 Part C independent re-review: this spawn previously
+            # never set CIDX_HNSW_SYNC_EPOCH_POSTGRES_MODE_ENV at all, so it
+            # silently inherited the unsafe enabled default in postgres/
+            # cluster mode. Merged via the shared resolver used by every
+            # other server-side `cidx index` spawn site.
+            _cb_env = build_cidx_subprocess_env()
+            _cb_env.update(resolve_hnsw_sync_epoch_env_var())
             result = subprocess.run(
-                ["cidx", "index", "--fts"],
+                append_server_layout_args(["cidx", "index", "--fts"]),
                 cwd=base_clone_path,
                 capture_output=True,
                 text=True,
                 check=True,
-                env=build_cidx_subprocess_env(),
+                env=_cb_env,
             )
             if result.stdout:
                 logger.debug(
@@ -2945,6 +3508,26 @@ class GoldenRepoManager:
         cow_timeout: int,
         cidx_fix_timeout: int,
     ) -> str:
+        """Create CoW snapshot and return its path.
+
+        Thin span-wrapping entry point (Story #1586 AC5) -- the full
+        implementation lives in _cb_cow_snapshot_impl(), unchanged, kept
+        as a separate method so wrapping it in a custom span never
+        requires re-indenting that body. Name preserved so this still
+        works as a callback wherever it was previously wired.
+        """
+        with create_span("cidx.golden_repo.cow_snapshot", attributes={"alias": alias}):
+            return self._cb_cow_snapshot_impl(
+                alias, base_clone_path, cow_timeout, cidx_fix_timeout
+            )
+
+    def _cb_cow_snapshot_impl(
+        self,
+        alias: str,
+        base_clone_path: str,
+        cow_timeout: int,
+        cidx_fix_timeout: int,
+    ) -> str:
         """Create CoW snapshot and return its path."""
         if self._snapshot_manager is not None:
             # Story #1034: route through VersionedSnapshotManager (single source of truth)
@@ -2955,7 +3538,33 @@ class GoldenRepoManager:
             # Standalone CLI fallback: no manager wired (e.g., test contexts or CLI usage)
             versioned_base = os.path.join(self.golden_repos_dir, ".versioned", alias)
             os.makedirs(versioned_base, exist_ok=True)
-            snapshot_path = os.path.join(versioned_base, f"v_{int(time.time())}")
+
+            # Story #1457 AC9: collision-checked version-id generation.
+            # Two snapshot creations for the SAME alias within the SAME
+            # wall-clock second must not collide on v_{timestamp} -- a
+            # naive `cp -a source <existing-dir>` copies INSIDE the
+            # existing directory (nesting) instead of erroring, producing
+            # a structurally corrupt snapshot.
+            candidate_ts = int(time.time())
+            snapshot_path = os.path.join(versioned_base, f"v_{candidate_ts}")
+            for _attempt in range(_MAX_VERSION_ID_COLLISION_RETRIES):
+                if not os.path.exists(snapshot_path):
+                    break
+                logger.warning(
+                    "CoW snapshot collision for alias '%s' at '%s'; "
+                    "retrying with incremented version id",
+                    alias,
+                    snapshot_path,
+                )
+                candidate_ts += 1
+                snapshot_path = os.path.join(versioned_base, f"v_{candidate_ts}")
+            else:
+                raise RuntimeError(
+                    f"Failed to generate a collision-free version id for "
+                    f"alias '{alias}' after "
+                    f"{_MAX_VERSION_ID_COLLISION_RETRIES} attempts"
+                )
+
             subprocess.run(
                 ["cp", "--reflink=auto", "-a", base_clone_path, snapshot_path],
                 capture_output=True,
@@ -3080,6 +3689,9 @@ class GoldenRepoManager:
             from code_indexer.storage.filesystem_vector_store import (
                 FilesystemVectorStore,
             )
+            from code_indexer.server.utils.registry_factory import (
+                is_postgres_storage_mode,
+            )
 
             # Get list of files in target branch via git ls-files on the snapshot
             result = subprocess.run(
@@ -3098,7 +3710,15 @@ class GoldenRepoManager:
 
             branch_files = set(result.stdout.splitlines())
 
-            store = FilesystemVectorStore(index_dir)
+            # Bug #1575 Part C review fix (Defect 3a bypass 1): thread the
+            # postgres/cluster-mode signal, matching
+            # FilesystemBackend.get_vector_store_client()'s existing
+            # pattern -- otherwise this belt-and-suspenders rebuild path
+            # silently defaults the epoch-sync mechanism to enabled
+            # regardless of storage mode.
+            store = FilesystemVectorStore(
+                index_dir, hnsw_sync_epoch_enabled=not is_postgres_storage_mode()
+            )
             collections = store.list_collections()
 
             for collection_name in collections:
@@ -3321,6 +3941,14 @@ class GoldenRepoManager:
                         95,
                         phase="swap",
                         detail="branch change: activating new snapshot...",
+                    )
+                # Issue #1546 AC5: ownership-loss checkpoint immediately
+                # before the swap -- the last chance to detect that this
+                # write lock is no longer legitimately held before
+                # publishing the new snapshot.
+                if scheduler is not None:
+                    scheduler.raise_if_write_lock_ownership_lost(
+                        alias, owner_name="branch_change"
                     )
                 self._cb_swap_alias(alias, snapshot)
                 if progress_callback is not None:
@@ -3599,6 +4227,9 @@ class GoldenRepoManager:
                     from code_indexer.server.services.config_service import (
                         get_config_service as _get_config_service_for_stats,
                     )
+                    from code_indexer.storage.shared.hnsw_sync_state import (
+                        resolve_hnsw_sync_epoch_env_var,
+                    )
 
                     _shared_kwargs: dict = dict(
                         command=command,
@@ -3613,6 +4244,11 @@ class GoldenRepoManager:
                     _shared_kwargs["env"] = build_embedding_stats_child_env(
                         _get_config_service_for_stats().get_config(), base_env=env
                     )
+                    # Bug #1575 Part C independent re-review: this closure
+                    # is the SHARED convergence point for the semantic and
+                    # temporal spawns in this workflow, so the postgres-
+                    # mode signal is merged in here ONCE.
+                    _shared_kwargs["env"].update(resolve_hnsw_sync_epoch_env_var())
                     try:
                         _run_with_popen_progress_shared(**_shared_kwargs)
                     except IndexingSubprocessError as e:
@@ -3654,7 +4290,15 @@ class GoldenRepoManager:
                     if index_type == "semantic":
                         # Bug #468: --clear forces full rebuild for already-indexed repos
                         # Story #480: Add --progress-json for real-time progress streaming
-                        command = ["cidx", "index", "--clear", "--progress-json"]
+                        # Story #1488: server states the new-collection layout
+                        # explicitly (CHUNKS_DB), not the CLI SHARDED_JSON default.
+                        from code_indexer.server.utils.index_command_layout import (
+                            append_server_layout_args,
+                        )
+
+                        command = append_server_layout_args(
+                            ["cidx", "index", "--clear", "--progress-json"]
+                        )
                         _run_with_popen_progress(
                             command,
                             phase_name="semantic",
@@ -3670,13 +4314,30 @@ class GoldenRepoManager:
                                 phase="fts",
                                 detail="FTS: building index...",
                             )
-                        command = ["cidx", "index", "--rebuild-fts-index"]
+                        # Story #1488: uniform explicit server layout stamp
+                        # (harmless on this rebuild-only command).
+                        from code_indexer.server.utils.index_command_layout import (
+                            append_server_layout_args,
+                        )
+
+                        command = append_server_layout_args(
+                            ["cidx", "index", "--rebuild-fts-index"]
+                        )
+                        from code_indexer.storage.shared.hnsw_sync_state import (
+                            resolve_hnsw_sync_epoch_env_var as _resolve_fts_hnsw_epoch,
+                        )
+
+                        # Bug #1575 Part C independent re-review: this
+                        # spawn previously never set
+                        # CIDX_HNSW_SYNC_EPOCH_POSTGRES_MODE_ENV at all.
+                        _fts_env = build_cidx_subprocess_env()
+                        _fts_env.update(_resolve_fts_hnsw_epoch())
                         result = subprocess.run(
                             command,
                             cwd=repo_path,
                             capture_output=True,
                             text=True,
-                            env=build_cidx_subprocess_env(),
+                            env=_fts_env,
                         )
                         all_stdout += result.stdout or ""
                         all_stderr += result.stderr or ""
@@ -3698,24 +4359,43 @@ class GoldenRepoManager:
 
                     elif index_type == "temporal":
                         # Story #480: Use Popen + line reader for real-time progress
-                        # Bug #945: Only use --clear when no vector_*.json files exist.
-                        # Vectors are expensive (embedding API). HNSW is cheap to rebuild.
-                        # If vectors exist, omit --clear so rebuild_from_vectors is used.
+                        # Bug #945: only use --clear when there is genuinely no
+                        # temporal data. Vectors are expensive (embedding API);
+                        # HNSW is cheap to rebuild. If data exists, omit --clear
+                        # so rebuild_from_vectors is used instead of a full
+                        # re-embed of the entire git history.
+                        # Bug #1529: this decision MUST consult both physical
+                        # roots. It previously checked only the in-repo index
+                        # directory, which is permanently empty once temporal
+                        # data lives at {golden_repos_dir}/.temporal/{alias}/ --
+                        # so --clear was always appended and the real shards were
+                        # destroyed on the first admin reindex.
                         _index_dir = Path(repo_path) / ".code-indexer" / "index"
-                        _temporal_vectors_exist = any(
-                            True
-                            for _coll_dir in _index_dir.glob("code-indexer-temporal*")
-                            if _coll_dir.is_dir()
-                            for _ in _coll_dir.glob("vector_*.json")
+                        _clear_flags = (
+                            ["--clear"]
+                            if temporal_reindex_needs_clear(
+                                Path(self.golden_repos_dir), alias, _index_dir
+                            )
+                            else []
                         )
-                        _clear_flags = [] if _temporal_vectors_exist else ["--clear"]
-                        command = [
-                            "cidx",
-                            "index",
-                            "--index-commits",
-                            *_clear_flags,
-                            "--progress-json",
-                        ]
+                        # Story #1488: server states the new-collection layout
+                        # explicitly (CHUNKS_DB), not the CLI SHARDED_JSON
+                        # default. This temporal reindex/add-index path can
+                        # create brand-new temporal shards, so it MUST route
+                        # through the shared stamp like the other spawn sites.
+                        from code_indexer.server.utils.index_command_layout import (
+                            append_server_layout_args,
+                        )
+
+                        command = append_server_layout_args(
+                            [
+                                "cidx",
+                                "index",
+                                "--index-commits",
+                                *_clear_flags,
+                                "--progress-json",
+                            ]
+                        )
 
                         max_commits = temporal_options.get("max_commits")
                         if max_commits is not None:
@@ -3906,6 +4586,15 @@ class GoldenRepoManager:
                     )
                     current_target = scheduler.alias_manager.read_alias(global_alias)
 
+                    # Issue #1546 AC5: ownership-loss checkpoint immediately
+                    # before the post-loop snapshot+swap publish sequence --
+                    # the last chance to detect the write lock is no longer
+                    # legitimately held before creating/publishing the new
+                    # snapshot.
+                    scheduler.raise_if_write_lock_ownership_lost(
+                        alias, owner_name="add_index"
+                    )
+
                     new_snapshot = scheduler._create_snapshot(
                         alias_name=global_alias,
                         source_path=source_path,
@@ -3950,6 +4639,37 @@ class GoldenRepoManager:
                         phase="cow",
                         detail="Snapshot complete",
                     )
+
+                # Codex review Finding F6 (Story #1560 AC8): the "semantic"
+                # branch above ALWAYS passes --clear (Bug #468), so a
+                # successful call with "semantic" in index_types IS, by
+                # construction, a genuine full re-index -- exactly the
+                # "successful full re-index's completion marker" AC8
+                # requires to clear any duplicate-point-id auto-
+                # resolution outcome previously recorded for this repo.
+                # Non-fatal: a clear failure must never fail the
+                # reindex job itself (mirrors the retention-enforcement
+                # non-fatal pattern immediately above).
+                if "semantic" in index_types:
+                    try:
+                        from code_indexer.server.services.fleet_migration.dedup_state import (
+                            clear_dedup_state,
+                        )
+
+                        clear_dedup_state(
+                            self,
+                            alias,
+                            reason=(
+                                "successful full re-index via "
+                                "add_indexes_to_golden_repo (--clear)"
+                            ),
+                        )
+                    except Exception as _dedup_clear_exc:
+                        logging.warning(
+                            f"[add_index] Clearing dedup-outcome state for "
+                            f"'{alias}' failed (non-fatal, reindex itself "
+                            f"succeeded): {_dedup_clear_exc}"
+                        )
 
                 return {
                     "success": True,
@@ -4002,11 +4722,18 @@ class GoldenRepoManager:
         repo_dir = Path(actual_path)
 
         if index_type == "semantic":
-            # semantic index: check for vector index files
+            # semantic index: check every collection subdirectory for real
+            # chunk data (Issue #1459 AC1) -- NOT a bare rglob("*.json"),
+            # which collection_meta.json alone always satisfies regardless
+            # of whether any real chunk data exists.
             vector_index = repo_dir / ".code-indexer" / "index"
-            if vector_index.exists():
-                # Check for any .json files in index subdirectories (collection folders)
-                return any(vector_index.rglob("*.json"))
+            if not vector_index.exists():
+                return False
+            for coll_dir in vector_index.iterdir():
+                if not coll_dir.is_dir():
+                    continue
+                if _collection_has_real_chunk_data(coll_dir):
+                    return True
             return False
 
         elif index_type == "fts":
@@ -4023,12 +4750,40 @@ class GoldenRepoManager:
             from code_indexer.services.temporal.temporal_collection_naming import (
                 get_temporal_collections,
             )
+            from code_indexer.services.temporal.temporal_status import (
+                get_temporal_repo_status,
+            )
 
+            # Issue #1459 AC1: fixes the false-positive glob (collection_meta.json
+            # alone no longer satisfies existence) for the LOCAL clone's
+            # collection directories that get_temporal_collections() already
+            # returns. Kept as the FIRST check (rather than folded into
+            # get_temporal_repo_status() below) because it also covers the
+            # bare pre-Story-#1457 legacy monolith name
+            # ("code-indexer-temporal", no provider/quarter suffix), which
+            # predates the embedder-slug-based naming scheme the resolver's
+            # parser understands.
             index_dir = repo_dir / ".code-indexer" / "index"
             collections = get_temporal_collections(None, index_dir)
-            if not collections:
-                return False
-            return any(any(coll_path.rglob("*.json")) for _, coll_path in collections)
+            if any(
+                _collection_has_real_chunk_data(coll_path)
+                for _, coll_path in collections
+            ):
+                return True
+
+            # Bug #1482: the local-clone-only check above can never see
+            # temporal shard data Story #1457's AC1 relocation trigger has
+            # moved to the golden-owned sister location (true on every
+            # local-disk/solo server, i.e. production, once relocation
+            # succeeds). Reroute through the resolver-aware
+            # get_temporal_repo_status(), which resolves BOTH the sister
+            # alias pointers AND the (provider-aware) in-repo legacy
+            # directories -- so GET /api/admin/golden-repos/{alias}/indexes
+            # correctly reports temporal.present=true for relocated data.
+            status = get_temporal_repo_status(
+                Path(self.golden_repos_dir), golden_repo.alias, index_dir
+            )
+            return bool(status.has_data)
 
         elif index_type == "scip":
             # AC3: scip requires .code-indexer/scip/ directory with valid .scip.db files containing data

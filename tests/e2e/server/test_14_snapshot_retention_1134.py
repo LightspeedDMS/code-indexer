@@ -62,6 +62,7 @@ from fastapi.testclient import TestClient
 
 from tests.e2e.helpers import require_voyage_key
 from tests.e2e.server.conftest import AdminTokenProvider
+from code_indexer.server.services.config_service import get_config_service
 
 # ---------------------------------------------------------------------------
 # Configuration resolved from environment variables
@@ -212,6 +213,27 @@ def retention_repo(
             f"Story #1134 is LOCAL-backend only; wired backend is {backend_name!r}."
         )
 
+    # Story #1457 AC13 added a 900s (15 min) minimum-retention-age floor to
+    # CleanupManager: a scheduled snapshot is only deleted once BOTH refcount==0
+    # AND >= snapshot_min_retention_age_seconds has elapsed since it was scheduled
+    # (see global_repos/cleanup_manager.py's MIN_RETENTION_AGE_SECONDS check, wired
+    # via the min_retention_age_getter lambda in
+    # server/lifecycle/global_repos_lifecycle.py). This test performs
+    # _REFRESH_COUNT rapid refreshes (~seconds apart), far faster than the
+    # production floor, so nothing would ever prune within the test's lifetime.
+    # AC13's own docstring documents this exact mechanism: "tests that need
+    # immediate deletion must pass min_retention_age_seconds=0.0 explicitly".
+    # The in-process TestClient server here runs solo/SQLite (no --pool), so
+    # ConfigService.start_config_reload() no-ops and nothing will overwrite this
+    # in-process mutation for the fixture's lifetime. Restore the original value
+    # in `finally` below so later tests in this session-scoped server are
+    # unaffected by a leaked 0.0 floor.
+    config_service = get_config_service()
+    original_min_retention_age_seconds = (
+        config_service.get_config().snapshot_min_retention_age_seconds
+    )
+    config_service.get_config().snapshot_min_retention_age_seconds = 0.0
+
     workdir = Path(tempfile.mkdtemp(prefix="cidx-1134-"))
     src = _make_source_repo(workdir)
 
@@ -274,6 +296,11 @@ def retention_repo(
         except Exception:  # noqa: BLE001 -- teardown is best-effort
             pass
         shutil.rmtree(workdir, ignore_errors=True)
+        # Restore the original min-retention-age floor so later tests sharing
+        # this session-scoped server's ConfigService are unaffected.
+        config_service.get_config().snapshot_min_retention_age_seconds = (
+            original_min_retention_age_seconds
+        )
 
 
 def _refresh_once(

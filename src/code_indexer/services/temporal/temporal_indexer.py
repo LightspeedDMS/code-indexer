@@ -20,7 +20,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from queue import Queue, Empty
-from typing import List, Optional, Callable
+from typing import Any, List, Optional, Callable
 
 from ...config import ConfigManager
 from ...services.vector_calculation_manager import VectorCalculationManager
@@ -37,11 +37,17 @@ from .temporal_blank_out import blank_out_legacy_temporal_collections
 from .temporal_collection_naming import (
     LEGACY_TEMPORAL_COLLECTION,
     sanitize_model_name,
+    validate_embedder_slug_uniqueness,
 )
 from .temporal_point_builder import build_chunk_payload, build_point_id
 from .temporal_projection_matrix import _ensure_shard_has_projection_matrix
 from .temporal_progressive_metadata import TemporalProgressiveMetadata
 from .temporal_structure_marker import is_v2_structure, write_structure_marker
+
+# Story #1586 AC5: custom span around the whole temporal per-commit indexing
+# run. create_span() no-ops (yields a _NoOpSpan) when OTEL tracing is
+# unavailable/uninitialized (always true on the CLI-only path).
+from code_indexer.server.telemetry.spans import create_span
 
 logger = logging.getLogger(__name__)
 
@@ -362,6 +368,36 @@ class TemporalIndexer:
     ) -> IndexingResult:
         """Index git commit history as per-commit aggregated contextual documents.
 
+        Thin span-wrapping public entry point (Story #1586 AC5) -- spans the
+        WHOLE run (never per-commit inside the internal loop, which would be
+        unbounded cardinality). The full implementation lives in
+        _index_commits_impl(), unchanged, so wrapping it in a custom span
+        never requires re-indenting that large body.
+        """
+        with create_span(
+            "cidx.temporal.index_commits",
+            attributes={"codebase_dir": str(self.codebase_dir)},
+        ):
+            return self._index_commits_impl(
+                all_branches=all_branches,
+                max_commits=max_commits,
+                since_date=since_date,
+                progress_callback=progress_callback,
+                reconcile=reconcile,
+                embedder_scope=embedder_scope,
+            )
+
+    def _index_commits_impl(
+        self,
+        all_branches: bool = False,
+        max_commits: Optional[int] = None,
+        since_date: Optional[str] = None,
+        progress_callback: Optional[Callable] = None,
+        reconcile: bool = False,
+        embedder_scope: Optional[List[str]] = None,
+    ) -> IndexingResult:
+        """Index git commit history as per-commit aggregated contextual documents.
+
         Story #1291: builds a shard set for EVERY embedder configured in
         `config.temporal.embedders`, not only the active one. Missing-commit
         discovery for EACH embedder always runs through the disk-scan-based
@@ -422,6 +458,12 @@ class TemporalIndexer:
             configured_embedders = [active_embedder_name]
         if active_embedder_name not in configured_embedders:
             configured_embedders = [active_embedder_name] + configured_embedders
+
+        # Story #1457 AC6 (round-13 Codex N13-1): fail loud, at the
+        # consumption boundary, if two configured embedders sanitize to the
+        # same collection slug -- they would silently share one on-disk
+        # shard namespace and overwrite each other.
+        validate_embedder_slug_uniqueness(configured_embedders)
 
         # AC10: an explicit embedder_scope only narrows WHICH configured
         # embedders are processed this run when reconcile=True. A normal
@@ -826,54 +868,122 @@ class TemporalIndexer:
                             embedder_name,
                         )
 
-                # Initialize incremental HNSW tracking for this shard
-                self.vector_store.begin_indexing(_shard_name)
-
-                _shard_commits = shard_commit_map[_shard_name]
-                # Bug #1378: wrap the callback so current/total reflect the
-                # WHOLE embedder run (commits_processed is the running
-                # cumulative offset from prior shards; grand_total is
-                # constant) instead of resetting every shard.
-                _shard_progress_callback = _wrap_shard_progress_callback(
-                    progress_callback,
-                    offset=commits_processed,
-                    grand_total=grand_total,
-                )
-                # reconcile=True: `commits` was already computed by the
-                # caller -- skip the (per-shard base-tracker) redundant
-                # re-filter inside _index_shard_commits.
-                _c, _b, _v = self._index_shard_commits(
-                    _shard_commits,
+                _c, _b, _v = self._run_shard_indexing_pass(
+                    _shard_name,
+                    shard_commit_map,
                     vector_manager,
-                    _shard_progress_callback,
-                    True,
+                    progress_callback,
+                    commits_processed,
+                    grand_total,
+                    _use_stale_barrier,
+                    was_stale,
+                    hnsw_manager,
+                    collection_path,
                 )
                 commits_processed += _c
                 blobs_processed += _b
                 vectors_created += _v
-
-                if _use_stale_barrier:
-                    # Finalize: was_stale -> forced full rebuild (never
-                    # append onto a possibly-inconsistent index); else ->
-                    # normal incremental-or-full end_indexing.
-                    # clear_stale=False on BOTH -- staleness is preserved
-                    # until the explicit clear_stale() call below succeeds
-                    # (Amendment 2).
-                    self.vector_store.end_indexing(
-                        collection_name=_shard_name,
-                        force_full_rebuild=was_stale,
-                        clear_stale=False,
-                    )
-                    hnsw_manager.clear_stale(collection_path)
-                else:
-                    # Legacy path (no durable barrier available -- see
-                    # _use_stale_barrier guard above).
-                    self.vector_store.end_indexing(collection_name=_shard_name)
-                self._processed_shards.append(_shard_name)
         finally:
             self.collection_name = _original_collection_name
 
         return commits_processed, blobs_processed, vectors_created
+
+    def _finalize_shard_end_indexing(
+        self,
+        _shard_name: str,
+        _use_stale_barrier: bool,
+        was_stale: bool,
+        hnsw_manager: Any,  # HNSWIndexManager (imported by caller, locally-scoped)
+        collection_path,
+    ) -> None:
+        """Bug #1407: was_stale -> forced full rebuild (never append onto a
+        possibly-inconsistent index); else normal incremental-or-full
+        end_indexing. clear_stale=False on BOTH -- staleness is preserved
+        until the explicit clear_stale() call below succeeds (Amendment 2).
+
+        Bug #1528: Story #1457's sister-location relocation trigger used to
+        fire after this call. It is RETIRED and must NOT be re-wired -- see
+        temporal_indexer.py's module history for why (it sourced rows only
+        from legacy vector_*.json files and would publish an empty sister
+        version over a chunks.db shard).
+        """
+        if _use_stale_barrier:
+            self.vector_store.end_indexing(
+                collection_name=_shard_name,
+                force_full_rebuild=was_stale,
+                clear_stale=False,
+            )
+            hnsw_manager.clear_stale(collection_path)
+        else:
+            # Legacy path (no durable barrier available -- see
+            # _use_stale_barrier guard above).
+            self.vector_store.end_indexing(collection_name=_shard_name)
+
+    def _run_shard_indexing_pass(
+        self,
+        _shard_name: str,
+        shard_commit_map: dict,
+        vector_manager: VectorCalculationManager,
+        progress_callback: Optional[Callable],
+        commits_processed: int,
+        grand_total: int,
+        _use_stale_barrier: bool,
+        was_stale: bool,
+        hnsw_manager: Any,  # HNSWIndexManager (imported by caller, locally-scoped)
+        collection_path,
+    ) -> tuple:
+        """Run ONE shard's begin_indexing() -> embed -> end_indexing().
+
+        Bug #1575 Part C: any exception here discards THIS process's
+        in-memory HNSWSyncSession via ``abort_indexing()`` before
+        re-raising. ``self.vector_store`` is not always a throwaway
+        per-call object -- ``cli_temporal_watch_handler.py`` reuses ONE
+        ``TemporalIndexer`` across repeated watch-loop ``index_commits()``
+        calls, catching and logging exceptions per tick rather than
+        crashing the process. Without this, a failed shard's abandoned
+        session would silently carry into the NEXT tick's
+        ``begin_indexing()`` call for the SAME shard, corrupting the next
+        incremental decision.
+
+        Returns:
+            (commits_delta, blobs_delta, vectors_delta) for this ONE shard.
+        """
+        try:
+            # Initialize incremental HNSW tracking for this shard
+            self.vector_store.begin_indexing(_shard_name)
+
+            _shard_commits = shard_commit_map[_shard_name]
+            # Bug #1378: wrap the callback so current/total reflect the
+            # WHOLE embedder run (commits_processed is the running
+            # cumulative offset from prior shards; grand_total is
+            # constant) instead of resetting every shard.
+            _shard_progress_callback = _wrap_shard_progress_callback(
+                progress_callback,
+                offset=commits_processed,
+                grand_total=grand_total,
+            )
+            # reconcile=True: `commits` was already computed by the
+            # caller -- skip the (per-shard base-tracker) redundant
+            # re-filter inside _index_shard_commits.
+            _c, _b, _v = self._index_shard_commits(
+                _shard_commits,
+                vector_manager,
+                _shard_progress_callback,
+                True,
+            )
+
+            self._finalize_shard_end_indexing(
+                _shard_name,
+                _use_stale_barrier,
+                was_stale,
+                hnsw_manager,
+                collection_path,
+            )
+            self._processed_shards.append(_shard_name)
+            return _c, _b, _v
+        except Exception:
+            self.vector_store.abort_indexing(_shard_name)
+            raise
 
     def _get_commit_history(
         self, all_branches: bool, max_commits: Optional[int], since_date: Optional[str]

@@ -881,6 +881,13 @@ class TestTemporalEntryPointValueFlow:
             def get_config(self):
                 return _FakeConfig()
 
+            # Bug #1690: reconstruct_temporal_backend now calls
+            # ConfigManager.load_verified_config(repo_path) instead of
+            # create_with_backtrack(...).get_config().
+            @classmethod
+            def load_verified_config(cls, p):
+                return _FakeConfig()
+
         monkeypatch.setattr(config_mod, "ConfigManager", _FakeCM)
 
         class _FakeVS:
@@ -892,7 +899,20 @@ class TestTemporalEntryPointValueFlow:
 
         class _FakeFactory:
             @staticmethod
-            def create(config, project_root, hnsw_cache=None, memory_governor=None):
+            def create(
+                config,
+                project_root,
+                hnsw_cache=None,
+                memory_governor=None,
+                # Bug #1529: reconstruct_temporal_backend now also forwards
+                # index_dir (temporal's fixed outside-the-repo location).
+                # **kwargs keeps this stub from breaking on the real
+                # factory's other optional params (activation_id,
+                # use_chunks_db_for_new_collections) as well -- an unfaithful
+                # stub signature is what made this a test-only failure.
+                index_dir=None,
+                **kwargs,
+            ):
                 return _FakeBackend()
 
         monkeypatch.setattr(backend_mod, "BackendFactory", _FakeFactory)
@@ -964,6 +984,13 @@ class TestTemporalEntryPointValueFlow:
             def get_config(self):
                 return _FakeConfig()
 
+            # Bug #1690: _search_temporal_sync now calls
+            # ConfigManager.load_verified_config(repo_path) instead of
+            # create_with_backtrack(...).get_config().
+            @classmethod
+            def load_verified_config(cls, p):
+                return _FakeConfig()
+
         monkeypatch.setattr(config_mod2, "ConfigManager", _FakeCM)
 
         class _FakeVS:
@@ -980,8 +1007,17 @@ class TestTemporalEntryPointValueFlow:
         service.config = _FakeMSSConfig()
         service.hnsw_index_cache = None  # attribute read at multi_search_service.py:538
 
+        # Bug #1529: the temporal read path resolves its (fixed, outside-the-
+        # repo-tree) data location from the golden repo's own coordinates. This
+        # stub previously returned a bare tmp_path, which is not structurally a
+        # golden-repo clone, so no location could be derived. Return a real
+        # golden-repo-shaped path -- <...>/golden-repos/<alias> -- exactly as
+        # the production _get_repository_path does.
+        _golden_clone = tmp_path / "golden-repos" / "myrepo"
+        _golden_clone.mkdir(parents=True, exist_ok=True)
+
         def _fake_get_repo_path(repo_id):
-            return str(tmp_path)
+            return str(_golden_clone)
 
         service._get_repository_path = _fake_get_repo_path
 
@@ -1152,6 +1188,7 @@ class TestValueFlowTemporalDispatch:
 
         class _FakeVectorStore:
             project_root = "/fake/root"
+            base_path = "/fake/root"
 
         dispatch_mod.execute_temporal_query_with_fusion(
             config=object(),

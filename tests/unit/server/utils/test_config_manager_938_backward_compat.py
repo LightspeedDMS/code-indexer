@@ -2,11 +2,17 @@
 Backward-compatibility tests for Bug #938 dead-field removal.
 
 Verifies that config.json / DB rows written by older server versions that
-still contain the 5 removed fields load cleanly without raising TypeError.
+still contain the removed fields load cleanly without raising TypeError.
 
 Fields removed in Bug #938:
-- TelemetryConfig.export_logs
-- TelemetryConfig.trace_sample_rate
+- TelemetryConfig.export_logs (RESURRECTED by Story #1676 AC3 as a real,
+  live field -- no longer dead, so it is excluded from the dead-field cases
+  below. See test_export_logs_config_1676_ac3.py for its current live-field
+  coverage.)
+- TelemetryConfig.trace_sample_rate (RESURRECTED by Story #1676 AC4 as a
+  real, live field -- no longer dead, so it is excluded from the dead-field
+  cases below. See test_trace_sample_rate_config_1676_ac4.py for its
+  current live-field coverage.)
 - HealthConfig.system_metrics_cache_ttl_seconds
 - MultiSearchLimitsConfig.omni_max_total_results_before_aggregation
 - ContentLimitsConfig.cache_max_entries
@@ -17,7 +23,7 @@ import tempfile
 
 import pytest
 
-from src.code_indexer.server.utils.config_manager import ServerConfigManager
+from code_indexer.server.utils.config_manager import ServerConfigManager
 
 
 def _write_and_load(tmpdir: str, config_dict: dict):
@@ -31,18 +37,6 @@ def _write_and_load(tmpdir: str, config_dict: dict):
 # Each tuple: (section_key, dead_field, dead_value, config_attr_path)
 # config_attr_path is a tuple of attribute names to traverse from the loaded config.
 _DEAD_FIELD_CASES = [
-    (
-        "telemetry_config",
-        "export_logs",
-        True,
-        ("telemetry_config", "export_logs"),
-    ),
-    (
-        "telemetry_config",
-        "trace_sample_rate",
-        0.5,
-        ("telemetry_config", "trace_sample_rate"),
-    ),
     (
         "health_config",
         "system_metrics_cache_ttl_seconds",
@@ -95,11 +89,14 @@ class TestBug938BackwardCompat:
                 obj = getattr(obj, attr)
             assert not hasattr(obj, attr_path[-1])
 
-    def test_all_five_dead_keys_together_load_cleanly(self):
+    def test_all_three_dead_keys_together_load_cleanly(self):
         """
-        Old config with all 5 dead keys present simultaneously must not raise.
+        Old config with all 3 remaining dead keys present simultaneously
+        must not raise. (trace_sample_rate was resurrected as a live field
+        by Story #1676 AC4, and export_logs by Story #1676 AC3 -- neither
+        is part of this dead-field set any longer.)
 
-        Given a config.json containing all 5 removed fields across their sections
+        Given a config.json containing all 3 removed fields across their sections
         When loaded via ServerConfigManager
         Then it loads without TypeError
         """
@@ -108,8 +105,6 @@ class TestBug938BackwardCompat:
                 "server_dir": tmpdir,
                 "telemetry_config": {
                     "enabled": False,
-                    "export_logs": False,
-                    "trace_sample_rate": 1.0,
                 },
                 "health_config": {
                     "memory_warning_threshold_percent": 80.0,

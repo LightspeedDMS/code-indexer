@@ -25,7 +25,6 @@ from typing import (
     runtime_checkable,
 )
 
-from ..config.delegation_config import ClaudeDelegationManager, ClaudeDelegationConfig
 from ..utils.config_manager import (
     CidxMetaBackupConfig,
     LifecycleAnalysisConfig,
@@ -82,6 +81,67 @@ def _hnsw_orphan_sweep_settings(config: ServerConfig) -> Dict[str, Any]:
         "tick_interval_minutes": sweep.tick_interval_minutes,
         "operating_hours_start_utc": sweep.operating_hours_start_utc,
         "operating_hours_end_utc": sweep.operating_hours_end_utc,
+    }
+
+
+def _indexing_watchdog_settings(config: ServerConfig) -> Dict[str, Any]:
+    """Return indexing_watchdog settings dict from ServerConfig (Issue #1530)."""
+    watchdog = config.indexing_watchdog_config
+    assert watchdog is not None  # Guaranteed by ServerConfig.__post_init__
+    return {
+        "stale_activity_timeout_seconds": watchdog.stale_activity_timeout_seconds,
+    }
+
+
+def _fleet_migration_settings(config: ServerConfig) -> Dict[str, Any]:
+    """Return fleet_migration settings dict from ServerConfig (Story
+    #1458, Epic #1454, round-6 item #10).
+
+    Surfaces both fields of FleetMigrationConfig for the Web UI Config
+    screen, mirroring Story #1397's HNSWOrphanRepairSweepConfig pattern
+    exactly. `enabled` defaults to False -- this scheduler deletes real
+    on-disk chunk data, so an explicit operator opt-in is required.
+    """
+    fm = config.fleet_migration_config
+    assert fm is not None  # Guaranteed by ServerConfig.__post_init__
+    return {
+        "enabled": fm.enabled,
+        "tick_interval_minutes": fm.tick_interval_minutes,
+        "canary_gate_enabled": fm.canary_gate_enabled,
+    }
+
+
+def _temporal_legacy_migration_settings(config: ServerConfig) -> Dict[str, Any]:
+    """Return temporal_legacy_migration settings dict from ServerConfig
+    (Issue #1548).
+
+    Deliberately its own config section -- see
+    TemporalLegacyMigrationConfig's docstring for why it must never be
+    folded back into the unrelated fleet_migration section.
+    """
+    tlm = config.temporal_legacy_migration_config
+    assert tlm is not None  # Guaranteed by ServerConfig.__post_init__
+    return {
+        "relocation_enabled": tlm.relocation_enabled,
+        "cleanup_authorized": tlm.cleanup_authorized,
+    }
+
+
+def _alias_lock_settings(config: ServerConfig) -> Dict[str, Any]:
+    """Return alias_lock settings dict from ServerConfig (Issue #1546
+    Phase 2).
+
+    Surfaces AliasLockConfig's single field for the Web UI Config screen,
+    mirroring `_fleet_migration_settings`'s pattern. `db_backed_enabled`
+    defaults to True (Issue #1546 Phase 3 -- proven correct on a live
+    3-node staging cluster). The flag remains available as an emergency
+    rollback to the old file-based WriteLockManager mechanism, e.g. for a
+    fleet with nodes still mid-rollout to the new code.
+    """
+    alc = config.alias_lock_config
+    assert alc is not None  # Guaranteed by ServerConfig.__post_init__
+    return {
+        "db_backed_enabled": alc.db_backed_enabled,
     }
 
 
@@ -240,7 +300,7 @@ class ConfigService:
                            Defaults to ~/.cidx-server
             config_manager: Optional pre-built ServerConfigManager instance.
                           When provided, server_dir_path is ignored for config
-                          loading (but still used for ClaudeDelegationManager).
+                          loading.
                           Primarily useful for unit tests.
         """
         if config_manager is not None:
@@ -248,7 +308,6 @@ class ConfigService:
         else:
             self.config_manager = ServerConfigManager(server_dir_path)
         self._config: Optional[ServerConfig] = None
-        self._delegation_manager = ClaudeDelegationManager(server_dir_path)
         # Story #578: Unified DB for runtime config (SQLite or PG)
         self._pool: Any = None  # PG pool (set via set_connection_pool for cluster)
         self._sqlite_db_path: Optional[str] = None  # SQLite path (solo mode)
@@ -297,9 +356,21 @@ class ConfigService:
             self._strip_config_file_to_bootstrap()
             # A7d (Story #885 AC-V4-17): persist lifecycle_analysis_config defaults
             # to SQLite on first boot after upgrade (key absent from legacy row).
+            #
+            # Issue #1546 Phase 3 promotion follow-up: this MUST save the
+            # CURRENT merged config (self.get_config(), which already
+            # reflects any in-place fix _merge_runtime_config just made and
+            # persisted -- e.g. the alias-lock promotion below), never the
+            # STALE pre-merge `runtime` dict captured above. Re-saving that
+            # stale dict here would silently clobber a write
+            # _merge_runtime_config already made to the DB row moments
+            # earlier.
             if "lifecycle_analysis_config" not in runtime:
-                runtime["lifecycle_analysis_config"] = asdict(LifecycleAnalysisConfig())
-                self._save_runtime_to_sqlite(runtime)
+                current_runtime_dict = self._extract_runtime_dict(self.get_config())
+                current_runtime_dict["lifecycle_analysis_config"] = asdict(
+                    LifecycleAnalysisConfig()
+                )
+                self._save_runtime_to_sqlite(current_runtime_dict)
         else:
             # First boot or pre-migration: seed DB from config.json
             config = self.get_config()
@@ -379,10 +450,6 @@ class ConfigService:
         if self._reload_thread is not None:
             self._reload_thread.join(timeout=5)
             logger.info("ConfigService: config reload thread stopped")
-
-    def get_delegation_manager(self) -> ClaudeDelegationManager:
-        """Get the Claude Delegation manager for config operations."""
-        return self._delegation_manager
 
     def load_config(self) -> ServerConfig:
         """
@@ -615,9 +682,11 @@ class ConfigService:
                 "service_name": config.telemetry_config.service_name,
                 "export_traces": config.telemetry_config.export_traces,
                 "export_metrics": config.telemetry_config.export_metrics,
+                "export_logs": config.telemetry_config.export_logs,
                 "machine_metrics_enabled": config.telemetry_config.machine_metrics_enabled,
                 "machine_metrics_interval_seconds": config.telemetry_config.machine_metrics_interval_seconds,
                 "deployment_environment": config.telemetry_config.deployment_environment,
+                "trace_sample_rate": config.telemetry_config.trace_sample_rate,
             },
             # Langfuse configuration (Story #136, Story #164)
             "langfuse": {
@@ -672,8 +741,6 @@ class ConfigService:
                     else 5
                 ),
             },
-            # Claude Delegation configuration (Story #721)
-            "claude_delegation": self._get_delegation_settings(),
             # Story #3 - Configuration Consolidation: Migrated settings
             "search_limits": {
                 "max_result_size_mb": config.search_limits_config.max_result_size_mb,
@@ -773,6 +840,10 @@ class ConfigService:
             "activated_reaper": _activated_reaper_settings(config),
             # Story #1397 - HNSW orphan-repair sweep Web UI configuration
             "hnsw_orphan_sweep": _hnsw_orphan_sweep_settings(config),
+            # Issue #1530 - Indexing-subprocess activity watchdog configuration
+            "indexing_watchdog": _indexing_watchdog_settings(config),
+            "fleet_migration": _fleet_migration_settings(config),
+            "alias_lock": _alias_lock_settings(config),
             # Issue #1398 - Query & search timeouts Web UI configuration
             "search_timeouts": _search_timeouts_settings(config),
             # Story #1418 Phase 3 - Embedding & reranker call tracking config
@@ -931,26 +1002,6 @@ class ConfigService:
 
         return settings
 
-    def _get_delegation_settings(self) -> Dict[str, Any]:
-        """Get Claude Delegation settings for display (credential masked)."""
-        delegation_config = self._delegation_manager.load_config()
-        if delegation_config is None:
-            delegation_config = ClaudeDelegationConfig()
-
-        return {
-            "function_repo_alias": delegation_config.function_repo_alias,
-            "claude_server_url": delegation_config.claude_server_url,
-            "claude_server_username": delegation_config.claude_server_username,
-            "claude_server_credential_type": delegation_config.claude_server_credential_type,
-            "is_configured": delegation_config.is_configured,
-            "cidx_callback_url": delegation_config.cidx_callback_url,  # Story #720
-            "skip_ssl_verify": delegation_config.skip_ssl_verify,  # Allow self-signed certs for E2E
-            "guardrails_enabled": delegation_config.guardrails_enabled,  # Story #457
-            "delegation_guardrails_repo": delegation_config.delegation_guardrails_repo,  # Story #457
-            "delegation_default_engine": delegation_config.delegation_default_engine,  # Story #459
-            "delegation_default_mode": delegation_config.delegation_default_mode,  # Story #459
-        }
-
     def _apply_setting(
         self, config: ServerConfig, category: str, key: str, value: Any
     ) -> bool:
@@ -1033,6 +1084,18 @@ class ConfigService:
         # Story #1397 - HNSW orphan-repair sweep Web UI configuration
         elif category == "hnsw_orphan_sweep":
             self._update_hnsw_orphan_sweep_setting(config, key, value)
+        # Issue #1530 - Indexing-subprocess activity watchdog configuration
+        elif category == "indexing_watchdog":
+            self._update_indexing_watchdog_setting(config, key, value)
+        # Story #1458 (Epic #1454) - Fleet migration Web UI configuration
+        elif category == "fleet_migration":
+            self._update_fleet_migration_setting(config, key, value)
+        # Issue #1548 - Legacy temporal shard relocation Web UI configuration
+        elif category == "temporal_legacy_migration":
+            self._update_temporal_legacy_migration_setting(config, key, value)
+        # Issue #1546 Phase 2 - DB-backed alias lock rollout gate
+        elif category == "alias_lock":
+            self._update_alias_lock_setting(config, key, value)
         # Issue #1398 - Query & search timeouts Web UI configuration
         elif category == "search_timeouts":
             self._update_search_timeouts_setting(config, key, value)
@@ -1937,12 +2000,16 @@ class ConfigService:
             telemetry.export_traces = value in ["true", True, "True", "1"]
         elif key == "export_metrics":
             telemetry.export_metrics = value in ["true", True, "True", "1"]
+        elif key == "export_logs":
+            telemetry.export_logs = value in ["true", True, "True", "1"]
         elif key == "machine_metrics_enabled":
             telemetry.machine_metrics_enabled = value in ["true", True, "True", "1"]
         elif key == "machine_metrics_interval_seconds":
             telemetry.machine_metrics_interval_seconds = int(value)
         elif key == "deployment_environment":
             telemetry.deployment_environment = str(value)
+        elif key == "trace_sample_rate":
+            telemetry.trace_sample_rate = float(value)
         else:
             raise ValueError(f"Unknown telemetry setting: {key}")
 
@@ -2477,6 +2544,66 @@ class ConfigService:
         else:
             raise ValueError(f"Unknown activated_reaper setting: {key}")
 
+    def _update_fleet_migration_setting(
+        self, config: ServerConfig, key: str, value: Any
+    ) -> None:
+        """Update a fleet_migration setting (Story #1458, Epic #1454,
+        round-6 item #10).
+
+        `enabled` is coerced via the shared `_parse_bool` helper -- the
+        Web UI submits an explicit "true"/"false" string (boolean
+        <select>, not a checkbox), so `_parse_bool("false")` must persist
+        False rather than silently no-op, mirroring Story #1397's own
+        "enabled-checkbox trap" fix exactly. `tick_interval_minutes` is a
+        plain integer.
+        """
+        fm = config.fleet_migration_config
+        assert fm is not None  # Guaranteed by ServerConfig.__post_init__
+        if key == "enabled":
+            fm.enabled = _parse_bool(value)
+        elif key == "tick_interval_minutes":
+            fm.tick_interval_minutes = int(value)
+        elif key == "canary_gate_enabled":
+            fm.canary_gate_enabled = _parse_bool(value)
+        else:
+            raise ValueError(f"Unknown fleet_migration setting: {key}")
+
+    def _update_temporal_legacy_migration_setting(
+        self, config: ServerConfig, key: str, value: Any
+    ) -> None:
+        """Update a temporal_legacy_migration setting (Issue #1548).
+
+        Both fields are booleans coerced via the shared `_parse_bool`
+        helper, mirroring `_update_fleet_migration_setting`'s `enabled`
+        coercion -- the Web UI submits an explicit "true"/"false" string
+        (boolean <select>, not a checkbox).
+        """
+        tlm = config.temporal_legacy_migration_config
+        assert tlm is not None  # Guaranteed by ServerConfig.__post_init__
+        if key == "relocation_enabled":
+            tlm.relocation_enabled = _parse_bool(value)
+        elif key == "cleanup_authorized":
+            tlm.cleanup_authorized = _parse_bool(value)
+        else:
+            raise ValueError(f"Unknown temporal_legacy_migration setting: {key}")
+
+    def _update_alias_lock_setting(
+        self, config: ServerConfig, key: str, value: Any
+    ) -> None:
+        """Update an alias_lock setting (Issue #1546 Phase 2).
+
+        `db_backed_enabled` is coerced via the shared `_parse_bool`
+        helper, mirroring `_update_temporal_legacy_migration_setting`'s
+        coercion -- the Web UI submits an explicit "true"/"false" string
+        (boolean <select>, not a checkbox).
+        """
+        alc = config.alias_lock_config
+        assert alc is not None  # Guaranteed by ServerConfig.__post_init__
+        if key == "db_backed_enabled":
+            alc.db_backed_enabled = _parse_bool(value)
+        else:
+            raise ValueError(f"Unknown alias_lock setting: {key}")
+
     def _update_hnsw_orphan_sweep_setting(
         self, config: ServerConfig, key: str, value: Any
     ) -> None:
@@ -2502,6 +2629,17 @@ class ConfigService:
             sweep.operating_hours_end_utc = int(value)
         else:
             raise ValueError(f"Unknown hnsw_orphan_sweep setting: {key}")
+
+    def _update_indexing_watchdog_setting(
+        self, config: ServerConfig, key: str, value: Any
+    ) -> None:
+        """Update an indexing_watchdog setting (Issue #1530)."""
+        watchdog = config.indexing_watchdog_config
+        assert watchdog is not None  # Guaranteed by ServerConfig.__post_init__
+        if key == "stale_activity_timeout_seconds":
+            watchdog.stale_activity_timeout_seconds = float(value)
+        else:
+            raise ValueError(f"Unknown indexing_watchdog setting: {key}")
 
     def _update_search_timeouts_setting(
         self, config: ServerConfig, key: str, value: Any
@@ -2711,6 +2849,15 @@ class ConfigService:
                 embedders = [v.strip() for v in str(value).split(",") if v.strip()]
             if not embedders:
                 raise ValueError("temporal_embedders must not be empty")
+            # Story #1457 AC6 (round-13 Codex N13-1) defense-in-depth: reject
+            # a colliding embedder set HERE, at the Web UI Config Screen
+            # submission boundary, rather than silently persisting it and
+            # only failing later inside a background index run.
+            from code_indexer.services.temporal.temporal_collection_naming import (
+                validate_embedder_slug_uniqueness,
+            )
+
+            validate_embedder_slug_uniqueness(embedders)
             indexing.temporal_embedders = embedders
             self.save_config(config)
             logger.info(
@@ -3595,6 +3742,80 @@ class ConfigService:
         # which correctly converts nested dicts to dataclass instances
         new_config = self.config_manager._dict_to_server_config(full_dict)
         self._config = new_config  # Atomic reference swap
+
+        # Issue #1546 Phase 3 promotion follow-up: must run AFTER self._config
+        # is published above, since persisting the promotion (if needed) may
+        # call materialize_launch_config() / self.get_config(), which must
+        # observe the freshly merged config, not a stale prior one.
+        self._apply_alias_lock_db_backed_promotion(new_config, runtime_dict)
+
+    def _apply_alias_lock_db_backed_promotion(
+        self, config: "ServerConfig", raw_runtime_dict: dict
+    ) -> None:
+        """One-time promotion of alias_lock_config.db_backed_enabled to True.
+
+        Issue #1546 Phase 3 changed AliasLockConfig.db_backed_enabled's
+        dataclass DEFAULT from False to True, but runtime config is
+        persisted as a full JSON blob and merged OVER that default on load
+        (this method's caller, _merge_runtime_config). A deployment with a
+        pre-Phase-3 stored `alias_lock_config` section therefore silently
+        keeps the old False value forever -- confirmed inert on a live
+        3-node staging cluster (all three nodes still used file-based
+        locking after upgrading to the release that flipped the default).
+
+        Promotes exactly ONCE per deployment. The discriminator is the RAW
+        stored dict (`raw_runtime_dict`), never the reconstructed
+        dataclass:
+
+        - A stored "alias_lock_config" section that is missing the
+          "db_backed_enabled_promoted" key can only have been written by
+          code that predates this migration -- every save since (
+          update_setting, save_config, or this method's own write below)
+          always serializes the full AliasLockConfig dataclass via
+          asdict(), which always includes that field. This is the ONLY
+          case that triggers a promotion + write.
+        - A stored section that already carries the key -- even with
+          db_backed_enabled=False -- is left untouched forever, whether
+          that False is this method's own past promotion having since been
+          rolled back by an operator, or an operator's very first explicit
+          choice on a fresh (already-default-True) deployment.
+        - No "alias_lock_config" section at all (never touched, not even
+          by Phase 2's toggle) needs no action: ServerConfig.__post_init__
+          already constructs a fresh AliasLockConfig() with the modern
+          default (True) in that case.
+        """
+        alc = config.alias_lock_config
+        if alc is None or alc.db_backed_enabled_promoted:
+            return
+        raw_alc = raw_runtime_dict.get("alias_lock_config")
+        if not (
+            isinstance(raw_alc, dict) and "db_backed_enabled_promoted" not in raw_alc
+        ):
+            return
+
+        alc.db_backed_enabled = True
+        alc.db_backed_enabled_promoted = True
+
+        if self._pool is not None:
+            self._save_runtime_to_pg(config)
+        elif self._sqlite_db_path is not None:
+            self._save_runtime_to_sqlite(self._extract_runtime_dict(config))
+        else:
+            # No runtime DB attached yet (bootstrap/file-only mode). The
+            # in-memory promotion still applies for this process; a later
+            # initialize_runtime_db()/set_connection_pool() call re-enters
+            # this exact merge path once a DB is attached, and persists it
+            # then.
+            return
+
+        logger.warning(
+            "ConfigService: promoted alias_lock.db_backed_enabled to True "
+            "(Issue #1546 Phase 3 one-time migration). The stored runtime "
+            "config predated the promoted default. This will not run "
+            "again for this deployment -- any future operator choice, "
+            "including an explicit rollback to False, is preserved from "
+            "here on."
+        )
 
     def save_config(self, config: ServerConfig) -> None:
         """Save config: runtime to DB (PG or SQLite), bootstrap to file.

@@ -20,10 +20,25 @@ from code_indexer.server.telemetry.correlation_bridge import (
     get_current_correlation_id as get_correlation_id,
 )
 
+# Story #1586 AC1: cidx.search.*/cidx.fts.* OTEL metrics -- no-op when
+# telemetry is disabled (ApplicationMetrics.is_active gates every record_*
+# call internally).
+from code_indexer.server.telemetry.manager import peek_telemetry_manager
+from code_indexer.server.telemetry.metrics_instrumentation import (
+    get_application_metrics,
+)
+
 import asyncio
+import functools
 import logging
 import socket
 import time
+
+import anyio.to_thread
+
+from code_indexer.server.services.deactivation_query_drain import (
+    track_activated_repo_query,
+)
 from typing import TYPE_CHECKING, Dict, Any, List, Optional, Tuple, cast
 
 if TYPE_CHECKING:
@@ -44,6 +59,10 @@ from code_indexer.server.services.temporal_live_dispatch import (
     execute_live_temporal_search,
 )
 from code_indexer.server.services.config_service import get_config_service
+from code_indexer.server.services.query_admission_gate import (
+    check_query_admission,
+    memory_pressure_mcp_payload,
+)
 from code_indexer.server.services.api_metrics_service import api_metrics_service
 from code_indexer.server.logging_utils import format_error_log
 from code_indexer.server.services.search_event_context import (
@@ -98,6 +117,25 @@ _DEFAULT_EDIT_DISTANCE = 0
 _DEFAULT_SNIPPET_LINES = 5
 _DEFAULT_REGEX_MAX_RESULTS = 100
 _DEFAULT_REGEX_CONTEXT_LINES = 0
+# Issue #1601 remediation round 5 (Priority 1): matches the documented
+# inputSchema.max_results.maximum in
+# server/mcp/tool_docs/search/regex_search.md. Previously only the LOWER
+# bound was clamped (max(1, ...)); an absurdly large caller-supplied
+# max_results was passed straight through to RegexSearchService.search()
+# unclamped, defeating any per-request memory budget the documented
+# ceiling implies (including the aggregate result-content budget added
+# in this same remediation round).
+_MAX_REGEX_MAX_RESULTS = 1000
+# Issue #1601 remediation round 5 (Codex finding, other half of the
+# multiplicand): matches the documented inputSchema.context_lines.maximum
+# in server/mcp/tool_docs/search/regex_search.md, and mirrors the REST
+# route's Field(default=0, ge=0, le=10) in regex_routes.py. Previously
+# only the LOWER bound was clamped (max(0, ...)); an absurdly large
+# caller-supplied context_lines was passed straight through to
+# RegexSearchService.search(), wasting subprocess I/O/CPU on `rg -C
+# <huge>` even though the aggregate result-content budget (this same
+# remediation round) still bounds the resulting memory.
+_MAX_REGEX_CONTEXT_LINES = 10
 # Filesystem subdirectory name for the memory HNSW index (Story #883).
 _CIDX_META_DIR_NAME = "cidx-meta"
 
@@ -985,6 +1023,37 @@ def _build_search_kwargs(
     )
 
 
+def _record_search_metric(
+    params: Dict[str, Any],
+    user_repos: list,
+    duration_ms: int,
+    results: list,
+    status: str,
+) -> None:
+    """Record a cidx.search.* OTEL metric for one _execute_tracked_search call
+    (Story #1586 AC1). No-op when telemetry is disabled (ApplicationMetrics
+    early-returns internally); never raises into the search call path.
+    """
+    try:
+        telemetry_manager = peek_telemetry_manager()
+        if telemetry_manager is None:
+            return
+        app_metrics = get_application_metrics(telemetry_manager)
+        if not app_metrics.is_active:
+            return
+        search_type = params.get("search_mode", "semantic")
+        repository = user_repos[0]["user_alias"] if user_repos else "unknown"
+        app_metrics.record_search_request(
+            search_type=search_type,
+            repository=repository,
+            duration_seconds=duration_ms / 1000,
+            results_count=len(results),
+            status=status,
+        )
+    except Exception as e:
+        logger.debug(f"Failed to record search metrics: {e}")
+
+
 def _execute_tracked_search(
     params: Dict[str, Any],
     user: User,
@@ -1015,6 +1084,10 @@ def _execute_tracked_search(
     timeout_occurred = False
     ref_incremented = False
     effective_strategy: str = params.get("query_strategy") or "primary_only"
+    # Story #1586 AC1: defaults cover the exception-before-assignment path so
+    # the metric recorded in `finally` always has a results list to measure.
+    results: list = []
+    search_status = "error"
     try:
         if query_tracker is not None and index_path:
             query_tracker.increment_ref(index_path)
@@ -1026,6 +1099,7 @@ def _execute_tracked_search(
             results, effective_strategy = _raw
         else:
             results = _raw
+        search_status = "success"
     except TimeoutError as e:
         timeout_occurred = True
         raise Exception(f"Query timed out: {e}") from e
@@ -1037,6 +1111,9 @@ def _execute_tracked_search(
         execution_time_ms = int((time.time() - start_time) * 1000)
         if ref_incremented and query_tracker is not None and index_path:
             query_tracker.decrement_ref(index_path)
+        _record_search_metric(
+            params, user_repos, execution_time_ms, results, search_status
+        )
 
     return results, execution_time_ms, timeout_occurred, effective_strategy
 
@@ -1169,7 +1246,24 @@ def _search_activated_repo(params: Dict[str, Any], user: User) -> Dict[str, Any]
     del kwargs["user_repos"]
     kwargs["repository_alias"] = params.get("repository_alias")
     kwargs["precomputed_query_vector"] = shared_query_vector
-    result = _utils.app_module.semantic_query_manager.query_user_repositories(**kwargs)
+
+    # Story #1458 AC13 gap (b): wire QueryTracker ref-counting around this
+    # read, using the SAME shared track_activated_repo_query() helper the
+    # REST/wiki front doors use (Codex HIGH finding, round 2 -- this call
+    # site previously duplicated the key-construction + increment/
+    # decrement logic instead of reusing the shared helper). Fail-open (no
+    # tracker, no repository_alias e.g. omni queries, or a -global alias --
+    # golden-repo queries are a separate, already-covered concern) preserves
+    # today's behavior exactly.
+    with track_activated_repo_query(
+        _get_query_tracker(),
+        getattr(_utils.app_module, "activated_repo_manager", None),
+        user.username,
+        params.get("repository_alias"),
+    ):
+        result = _utils.app_module.semantic_query_manager.query_user_repositories(
+            **kwargs
+        )
 
     # Touch last_accessed for the activated repo (throttled, non-fatal).
     # Fixes Bug #1098 defect 2: search path never stamped last_accessed,
@@ -1355,6 +1449,19 @@ def _execute_temporal_via_live_dispatch(
         handler_deadline_monotonic=handler_deadline_monotonic,
         response_reserve_seconds=TEMPORAL_RESPONSE_RESERVE_SECONDS,
         config_service=config_service,
+        # Bug #1482: thread the real QueryTracker into the live worker so
+        # it can construct a resolution-scope-safe TemporalShardResolver
+        # and consult the golden-owned sister location Story #1457's
+        # relocation trigger may have moved shard data to.
+        query_tracker=_get_query_tracker(),
+        # Bug #1533: thread the server's DI-wired ActivatedRepoManager so the
+        # worker resolves golden lineage from the SHARED (PostgreSQL in
+        # cluster mode) metadata store. Omitting this sends the worker back to
+        # a node-local read, which on a cluster node cannot see an activation
+        # made on another node -- HTTP 200 with zero temporal results.
+        # Reached through the already-imported `_utils` module (the same
+        # access pattern as `_utils.app_module` above).
+        activated_repo_manager=_utils._get_activated_repo_manager(),
     )
 
     status = dispatch_result.get("status")
@@ -1420,6 +1527,10 @@ def search_code(
     embedding call sites can write cache metadata into it.  Enqueues a
     SearchEventRecord on success only (spec H11).  Resets ContextVar in finally.
     """
+    _admission = check_query_admission()
+    if not _admission.allowed:
+        return _mcp_response(memory_pressure_mcp_payload(_admission))
+
     import json as _json_mod
 
     _search_start = time.monotonic()
@@ -1635,6 +1746,7 @@ async def _omni_regex_search(args: Dict[str, Any], user: User) -> Dict[str, Any]
                 "matches": [],
                 "total_matches": 0,
                 "truncated": False,
+                "read_capped": False,
                 "search_engine": "ripgrep",
                 "search_time_ms": 0,
                 "repos_searched": 0,
@@ -1647,6 +1759,7 @@ async def _omni_regex_search(args: Dict[str, Any], user: User) -> Dict[str, Any]
     errors: dict = {}
     repos_searched = 0
     truncated = False
+    read_capped = False
 
     for repo_alias in repo_aliases:
         try:
@@ -1665,6 +1778,8 @@ async def _omni_regex_search(args: Dict[str, Any], user: User) -> Dict[str, Any]
                     all_matches.extend(matches)
                     if result_data.get("truncated"):
                         truncated = True
+                    if result_data.get("read_capped"):
+                        read_capped = True
                 else:
                     errors[repo_alias] = result_data.get("error", "Unknown error")
         except Exception as e:
@@ -1688,10 +1803,25 @@ async def _omni_regex_search(args: Dict[str, Any], user: User) -> Dict[str, Any]
         errors=errors,
     )
     formatted["truncated"] = truncated
+    formatted["read_capped"] = read_capped
     formatted["search_engine"] = "ripgrep"
     formatted["search_time_ms"] = elapsed_ms
     if response_format == "flat":
         formatted["matches"] = formatted.pop("results")
+        # Issue #1601 Priority 7 (documented deliberate deferral, not an
+        # oversight): this omni-level total_matches stays len(all_matches)
+        # (the sum of returned per-repo PAGES) rather than a sum of
+        # per-repo lower-bound SENTINELS (Priority 7's single-repo fix
+        # above). _format_omni_response is a shared helper also used by
+        # non-regex omni handlers (files.py, git_read.py, semantic
+        # search) with no equivalent sentinel concept, and naively
+        # summing per-repo sentinels here would produce a number that
+        # mixes exact counts with lower bounds inconsistently unless
+        # every constituent additionally reported whether ITS OWN total
+        # was itself a sentinel -- a larger protocol change out of scope
+        # for this remediation. The per-repo read_capped/truncated flags
+        # above are already OR-aggregated and remain the authoritative
+        # "results may be incomplete" signal for the omni response.
         formatted["total_matches"] = formatted.pop("total_results")
         formatted["repos_searched"] = formatted.pop("total_repos_searched")
     return _mcp_response(formatted)
@@ -1737,46 +1867,12 @@ def _validate_regex_args(args: Dict[str, Any]) -> tuple:
     return repository_alias, None
 
 
-async def _execute_regex_search(
-    args: Dict[str, Any],
-    repo_path: Path,
-    repository_alias: str,
-    user: User,
-) -> tuple:
-    """Execute regex search, enrich, rerank, truncate, and filter results.
+def _build_and_enrich_matches(search_result, repository_alias: str) -> list:
+    """Build match dicts from a RegexSearchResult and enrich with wiki URLs.
 
-    Returns:
-        (matches, rerank_meta, search_result) where search_result is the
-        raw RegexSearchResult dataclass.
+    Extracted from the former body of _execute_regex_search (Story #1586
+    AC1 split) so no single function there exceeds the method-length limit.
     """
-    from code_indexer.global_repos.regex_search import RegexSearchService
-
-    config = get_config_service().get_config()
-    search_limits = config.search_limits_config
-    subprocess_max_workers = config.background_jobs_config.subprocess_max_workers
-    max_results = max(
-        1, _coerce_int(args.get("max_results"), _DEFAULT_REGEX_MAX_RESULTS)
-    )
-    context_lines = max(
-        0, _coerce_int(args.get("context_lines"), _DEFAULT_REGEX_CONTEXT_LINES)
-    )
-
-    service = RegexSearchService(
-        repo_path, subprocess_max_workers=subprocess_max_workers
-    )
-    search_result = await service.search(
-        pattern=args["pattern"],
-        path=args.get("path"),
-        include_patterns=args.get("include_patterns"),
-        exclude_patterns=args.get("exclude_patterns"),
-        case_sensitive=args.get("case_sensitive", True),
-        context_lines=context_lines,
-        max_results=max_results,
-        timeout_seconds=search_limits.timeout_seconds,
-        multiline=args.get("multiline", False),
-        pcre2=args.get("pcre2", False),
-    )
-
     matches = [
         {
             "file_path": m.file_path,
@@ -1798,6 +1894,31 @@ async def _execute_regex_search(
             wiki_enabled_repos,
         )
 
+    return matches
+
+
+async def _rerank_truncate_and_filter_regex_matches(
+    matches: list,
+    args: Dict[str, Any],
+    repository_alias: str,
+    user: User,
+) -> tuple:
+    """Rerank, truncate, and (for cidx-meta repos) access-filter matches.
+
+    Extracted from the former body of _execute_regex_search (Story #1586
+    AC1 split).
+
+    Returns:
+        (matches, rerank_meta). rerank_meta carries an additional
+        "cidx_meta_access_filtered" bool (Bug #337 regression fix) set True
+        only when the cidx-meta access-filtering branch below actually ran
+        with a real access_svc -- the caller (handle_regex_search) uses this
+        to decide whether the raw engine's sr.total_matches (Issue #1601
+        Priority 7's lower-bound sentinel) is still safe to report, or
+        whether it must fall back to the post-filter len(matches) instead
+        because the raw count would otherwise leak the existence of files
+        the requesting user is not authorized to see.
+    """
     regex_limit = _coerce_int(args.get("max_results"), len(matches))
     rerank_kwargs = dict(
         results=matches,
@@ -1813,14 +1934,147 @@ async def _execute_regex_search(
 
     matches = _apply_regex_payload_truncation(matches)
 
+    cidx_meta_access_filtered = False
     if repository_alias and "cidx-meta" in repository_alias:
         access_svc = _get_access_filtering_service()
         if access_svc:
             filenames = [Path(m["file_path"]).name for m in matches]
             allowed = set(access_svc.filter_cidx_meta_files(filenames, user.username))
             matches = [m for m in matches if Path(m["file_path"]).name in allowed]
+            cidx_meta_access_filtered = True
+    rerank_meta["cidx_meta_access_filtered"] = cidx_meta_access_filtered
+
+    return matches, rerank_meta
+
+
+async def _execute_regex_search_impl(
+    args: Dict[str, Any],
+    repo_path: Path,
+    repository_alias: str,
+    user: User,
+) -> tuple:
+    """Execute regex search, enrich, rerank, truncate, and filter results.
+
+    Returns:
+        (matches, rerank_meta, search_result) where search_result is the
+        raw RegexSearchResult dataclass.
+    """
+    from code_indexer.global_repos.regex_search import RegexSearchService
+
+    config = get_config_service().get_config()
+    search_limits = config.search_limits_config
+    subprocess_max_workers = config.background_jobs_config.subprocess_max_workers
+    max_results = max(
+        1,
+        min(
+            _MAX_REGEX_MAX_RESULTS,
+            _coerce_int(args.get("max_results"), _DEFAULT_REGEX_MAX_RESULTS),
+        ),
+    )
+    context_lines = max(
+        0,
+        min(
+            _MAX_REGEX_CONTEXT_LINES,
+            _coerce_int(args.get("context_lines"), _DEFAULT_REGEX_CONTEXT_LINES),
+        ),
+    )
+
+    # Issue #1609: RegexSearchService.__init__ performs synchronous
+    # filesystem calls (Path.resolve(), shutil.which()) that must never
+    # run directly on the event-loop thread inside an `async def` (this
+    # project's own Production Scale invariant). Offload the constructor
+    # call itself via anyio.to_thread.run_sync, mirroring the granular
+    # per-call offload pattern already established elsewhere in this
+    # search path (see regex_search.py's search() method).
+    service = await anyio.to_thread.run_sync(
+        functools.partial(
+            RegexSearchService,
+            repo_path,
+            subprocess_max_workers=subprocess_max_workers,
+            # Issue #1601 Priority 9: thread the already-in-scope alias
+            # through so the service's read-capped WARNING log surfaces the
+            # real user-facing alias, not just the (possibly
+            # versioned-snapshot) repo_path.
+            alias=repository_alias,
+        )
+    )
+    search_result = await service.search(
+        pattern=args["pattern"],
+        path=args.get("path"),
+        include_patterns=args.get("include_patterns"),
+        exclude_patterns=args.get("exclude_patterns"),
+        case_sensitive=args.get("case_sensitive", True),
+        context_lines=context_lines,
+        max_results=max_results,
+        timeout_seconds=search_limits.timeout_seconds,
+        multiline=args.get("multiline", False),
+        pcre2=args.get("pcre2", False),
+    )
+
+    matches = _build_and_enrich_matches(search_result, repository_alias)
+    matches, rerank_meta = await _rerank_truncate_and_filter_regex_matches(
+        matches, args, repository_alias, user
+    )
 
     return matches, rerank_meta, search_result
+
+
+def _record_fts_metric(
+    repository_alias: str,
+    duration_seconds: float,
+    matches_count: int,
+    status: str,
+) -> None:
+    """Record a cidx.fts.* OTEL metric for one _execute_regex_search call
+    (Story #1586 AC1). No-op when telemetry is disabled (ApplicationMetrics
+    early-returns internally); never raises into the regex search call path.
+    """
+    try:
+        telemetry_manager = peek_telemetry_manager()
+        if telemetry_manager is None:
+            return
+        app_metrics = get_application_metrics(telemetry_manager)
+        if not app_metrics.is_active:
+            return
+        app_metrics.record_fts_request(
+            repository=repository_alias,
+            duration_seconds=duration_seconds,
+            matches_count=matches_count,
+            status=status,
+        )
+    except Exception as e:
+        logger.debug(f"Failed to record FTS metrics: {e}")
+
+
+async def _execute_regex_search(
+    args: Dict[str, Any],
+    repo_path: Path,
+    repository_alias: str,
+    user: User,
+) -> tuple:
+    """Execute regex search and record its cidx.fts.* OTEL metric (AC1).
+
+    Thin wrapper around _execute_regex_search_impl(): times the call and
+    records success/error via _record_fts_metric() in `finally`, so the
+    metric is recorded exactly once regardless of outcome.
+    """
+    _fts_metric_start = time.monotonic()
+    matches_count = 0
+    fts_status = "error"
+    try:
+        matches, rerank_meta, search_result = await _execute_regex_search_impl(
+            args, repo_path, repository_alias, user
+        )
+        matches_count = len(matches)
+        fts_status = "success"
+        return matches, rerank_meta, search_result
+    finally:
+        _record_fts_metric(
+            repository_alias,
+            time.monotonic() - _fts_metric_start,
+            matches_count,
+            fts_status,
+        )
 
 
 async def handle_regex_search(args: Dict[str, Any], user: User) -> Dict[str, Any]:
@@ -1828,6 +2082,10 @@ async def handle_regex_search(args: Dict[str, Any], user: User) -> Dict[str, Any
 
     Extracted from _legacy.py lines 2044-2220.
     """
+    _admission = check_query_admission()
+    if not _admission.allowed:
+        return _mcp_response(memory_pressure_mcp_payload(_admission))
+
     from code_indexer.server.services.search_error_formatter import SearchErrorFormatter
 
     repository_alias, err = _validate_regex_args(args)
@@ -1888,12 +2146,31 @@ async def handle_regex_search(args: Dict[str, Any], user: User) -> Dict[str, Any
         matches, rerank_meta, sr = await _execute_regex_search(
             args, Path(resolved), repository_alias, user
         )
+        # Bug #337 regression fix: when cidx-meta access filtering actually
+        # ran (rerank_meta["cidx_meta_access_filtered"], set in
+        # _rerank_truncate_and_filter_regex_matches), sr.total_matches is
+        # the PRE-filter raw engine count -- reporting it would both be
+        # factually wrong for the user and leak the existence-count of
+        # files they are not authorized to see. Fall back to the
+        # post-filter len(matches) in that case. Otherwise (non-cidx-meta
+        # repos, or no filtering applied), Issue #1601 Priority 7's
+        # original behavior is preserved: propagate the service's own
+        # total_matches (a deliberate lower-bound SENTINEL, e.g.
+        # max_results + 1, once truncated/read_capped stopped the scan
+        # early) -- never recompute via len(matches), which would silently
+        # discard that signal.
+        total_matches = (
+            len(matches)
+            if rerank_meta.get("cidx_meta_access_filtered")
+            else sr.total_matches
+        )
         return _mcp_response(
             {
                 "success": True,
                 "matches": matches,
-                "total_matches": len(matches),
+                "total_matches": total_matches,
                 "truncated": sr.truncated,
+                "read_capped": sr.read_capped,
                 "search_engine": sr.search_engine,
                 "search_time_ms": sr.search_time_ms,
                 "query_metadata": {
@@ -1924,6 +2201,36 @@ async def handle_regex_search(args: Dict[str, Any], user: User) -> Dict[str, Any
             extra={"correlation_id": get_correlation_id()},
         )
         return _mcp_response({"success": False, "error": str(e)})
+
+
+def handle_regex_search_sync(args: Dict[str, Any], user: User) -> Dict[str, Any]:
+    """Sync-dispatched entry point for the regex_search MCP tool (AC2).
+
+    Story #1491 AC2 (report Finding B2): ``handle_regex_search`` is async, so
+    ``protocol.py``'s dispatcher took the ``await handler(...)`` branch and ran
+    the handler's SYNCHRONOUS sections directly on the event loop -- the SQLite
+    trigram prefilter, up to ``_MAX_PREFILTER_CANDIDATES`` (8000)
+    ``Path.resolve()`` calls, the whole multi-MB ripgrep JSON output read, and
+    the per-line ``json.loads`` plus per-match resolve. An omni (``*``) search
+    multiplies all of it by the repo count.
+
+    Registering this plain ``def`` instead sends the tool down the dispatcher's
+    sync branch (``run_in_executor``), so the entire handler -- awaitable and
+    synchronous parts alike -- runs on a worker thread and the loop stays free.
+
+    Deliberate, documented consequence for the Issue #1398 sync/async dispatch
+    distinction: ``regex_search`` is now SYNC-dispatched. Its MCP-layer timeout
+    semantics are unchanged nonetheless -- ``regex_search`` is a member of
+    ``_ASYNC_DISPATCH_TIMEOUT_EXEMPT_TOOLS``, which the dispatcher honours on
+    BOTH branches, so the tool remains governed solely by its own configured
+    ``search_limits_config.timeout_seconds`` plus its ripgrep subprocess
+    timeout (Issue #1398 Group A), never by a handler-level deadline.
+
+    The coroutine runs on a private loop owned by this worker thread. Nothing
+    it awaits is shared across loops: ``RegexSearchService`` is constructed per
+    request and its ``SubprocessExecutor`` owns a per-call thread pool.
+    """
+    return asyncio.run(handle_regex_search(args, user))
 
 
 def handle_get_cached_content(args: Dict[str, Any], user: User) -> Dict[str, Any]:
@@ -2039,6 +2346,10 @@ def handle_poll_search_job(args: Dict[str, Any], user: User) -> Dict[str, Any]:
 def _register(registry: dict) -> None:
     """Register search handlers in the HANDLER_REGISTRY."""
     registry["search_code"] = search_code
-    registry["regex_search"] = handle_regex_search
+    # Story #1491 AC2: sync-dispatched (handle_regex_search_sync, defined above)
+    # so protocol.py offloads the handler's synchronous work -- trigram
+    # prefilter, Path.resolve fan-out, ripgrep output read + json.loads -- to
+    # the executor instead of running it on the event loop.
+    registry["regex_search"] = handle_regex_search_sync
     registry["poll_search_job"] = handle_poll_search_job
     registry["get_cached_content"] = handle_get_cached_content

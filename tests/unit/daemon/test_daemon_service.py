@@ -11,6 +11,10 @@ from code_indexer.daemon.cache import CacheEntry
 
 pytestmark = pytest.mark.slow
 
+# Bounded wait for a fully-mocked background indexing thread to complete --
+# generous relative to the mocked (near-instant) work it performs.
+_BACKGROUND_INDEXING_JOIN_TIMEOUT_SECONDS = 5
+
 
 class TestCIDXDaemonServiceInitialization:
     """Test daemon service initialization."""
@@ -202,15 +206,14 @@ class TestExposedIndexingMethods:
                     with patch(
                         "code_indexer.services.smart_indexer.SmartIndexer"
                     ) as MockSmartIndexer:
-                        # Configure mocks
-                        mock_config_manager = Mock()
+                        # Configure mocks.
+                        # Bug #1718: _run_indexing_background now calls
+                        # ConfigManager.load_verified_config() directly
+                        # (returning the Config itself), not
+                        # create_with_backtrack().get_config().
                         mock_config = Mock()
-                        mock_config_manager.get_config.return_value = mock_config
-                        mock_config_path = Mock()
-                        mock_config_path.parent = tmp_path
-                        mock_config_manager.config_path = mock_config_path
-                        MockConfigManager.create_with_backtrack.return_value = (
-                            mock_config_manager
+                        MockConfigManager.load_verified_config.return_value = (
+                            mock_config
                         )
 
                         mock_backend = Mock()
@@ -230,6 +233,24 @@ class TestExposedIndexingMethods:
 
                         # Execute
                         service.exposed_index(str(project_path))
+
+                        # exposed_index() starts a background thread and
+                        # returns immediately -- join it deterministically
+                        # instead of relying on thread-scheduling luck for
+                        # the background work to complete before asserting.
+                        # The thread reference is captured BEFORE joining
+                        # because _run_indexing_background's own `finally`
+                        # clears service.indexing_thread back to None once
+                        # it completes.
+                        background_thread = service.indexing_thread
+                        assert background_thread is not None
+                        background_thread.join(
+                            timeout=_BACKGROUND_INDEXING_JOIN_TIMEOUT_SECONDS
+                        )
+                        assert not background_thread.is_alive(), (
+                            "Background indexing thread did not complete "
+                            f"within {_BACKGROUND_INDEXING_JOIN_TIMEOUT_SECONDS}s"
+                        )
 
                         # Verify
                         MockSmartIndexer.assert_called_once()

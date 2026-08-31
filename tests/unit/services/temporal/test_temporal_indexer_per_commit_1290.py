@@ -118,7 +118,15 @@ def _make_config_manager(tmp_path: Path, aggregation_chunk_chars: int = 4096):
 
 def _make_indexer(repo: Path, index_dir: Path, aggregation_chunk_chars: int = 4096):
     index_dir.mkdir(parents=True, exist_ok=True)
-    vector_store = FilesystemVectorStore(base_path=index_dir, project_root=repo)
+    vector_store = FilesystemVectorStore(
+        base_path=index_dir,
+        project_root=repo,
+        # Bug #1528: temporal collections are CHUNKS_DB by default now. These
+        # tests inspect vector_*.json files directly, so they pin the legacy
+        # layout explicitly (still fully supported on request); the CHUNKS_DB
+        # temporal path is covered by test_temporal_chunks_db_layout_1528.py.
+        use_chunks_db_for_new_collections=False,
+    )
     config_manager = _make_config_manager(repo, aggregation_chunk_chars)
     indexer = TemporalIndexer(
         config_manager,
@@ -580,7 +588,15 @@ class TestDeterministicFixtureCounts:
 
         index_dir = tmp_path / "index"
         index_dir.mkdir(parents=True, exist_ok=True)
-        vector_store = FilesystemVectorStore(base_path=index_dir, project_root=repo)
+        vector_store = FilesystemVectorStore(
+            base_path=index_dir,
+            project_root=repo,
+            # Bug #1528: temporal collections are CHUNKS_DB by default now. These
+            # tests inspect vector_*.json files directly, so they pin the legacy
+            # layout explicitly (still fully supported on request); the CHUNKS_DB
+            # temporal path is covered by test_temporal_chunks_db_layout_1528.py.
+            use_chunks_db_for_new_collections=False,
+        )
 
         config = Config(codebase_dir=repo)
         config.embedding_provider = "voyage-ai"
@@ -764,6 +780,29 @@ class TestReconcileNothingMissingRerun:
         assert first_result.total_commits == 1
         indexer.close()
 
+        # Bug #1461 sub-part 7a: snapshot the embedder's call log AND the
+        # shard's on-disk data file bytes BEFORE the no-op reconcile pass,
+        # to prove it performs ZERO new embedding-provider calls and
+        # leaves persisted data byte-identical.
+        from code_indexer.storage.shared.chunk_layout import (
+            ChunkLayout,
+            resolve_chunk_layout,
+        )
+
+        shard_dir = _find_shard_dir(vector_store.base_path)
+
+        def _snapshot_data_files():
+            layout = resolve_chunk_layout(shard_dir)
+            if layout == ChunkLayout.CHUNKS_DB:
+                files = [shard_dir / "chunks.db"]
+            else:
+                files = _vector_files(shard_dir)
+            return {f: f.read_bytes() for f in files}
+
+        data_before = _snapshot_data_files()
+        assert data_before, "expected at least one on-disk data file after first index"
+        embed_calls_before = list(fake_embedder.embed_calls)
+
         # Second TemporalIndexer instance (fresh __init__, exactly mirroring a
         # real second `cidx index --index-commits --reconcile` CLI process).
         indexer2 = TemporalIndexer(
@@ -775,6 +814,17 @@ class TestReconcileNothingMissingRerun:
         second_result = indexer2.index_commits(reconcile=True)
         assert second_result.total_commits == 0
         assert second_result.skip_ratio == 1.0
+
+        # Zero new embedding provider calls on a genuine no-op reconcile pass.
+        assert fake_embedder.embed_calls == embed_calls_before, (
+            "reconcile with nothing missing must not invoke the embedder"
+        )
+        # On-disk data files are byte-identical before/after (same file
+        # set, same content -- no phantom rewrite of already-good data).
+        data_after = _snapshot_data_files()
+        assert data_after == data_before, (
+            "no-op reconcile must not mutate on-disk data files"
+        )
 
         # close()'s fallback path (_processed_shards never set when the
         # reconcile early-return fires before Step 2) must ALSO not crash.

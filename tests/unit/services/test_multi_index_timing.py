@@ -7,7 +7,7 @@ aggregates, and returns timing information for parallel multi-index queries.
 
 import pytest
 from unittest.mock import Mock, patch
-from src.code_indexer.services.multi_index_query_service import MultiIndexQueryService
+from code_indexer.services.multi_index_query_service import MultiIndexQueryService
 
 
 class TestMultiIndexTiming:

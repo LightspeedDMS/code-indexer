@@ -15,8 +15,8 @@ from pydantic import BaseModel, Field
 from code_indexer.server.auth.dependencies import get_current_user
 from code_indexer.server.auth.user_manager import User
 from code_indexer.server.services.file_crud_service import (
-    FileCRUDService,
     HashMismatchError,
+    file_crud_service,
 )
 from code_indexer.server.logging_utils import format_error_log
 
@@ -117,7 +117,7 @@ def create_file(
         HTTPException: On various error conditions
     """
     try:
-        service = FileCRUDService()
+        service = file_crud_service
         result = service.create_file(
             repo_alias=alias,
             file_path=request.file_path,
@@ -167,9 +167,9 @@ def create_file(
             format_error_log(
                 "STORE-GENERAL-022",
                 f"Create file failed for {alias}/{request.file_path}: {e}",
-                exc_info=True,
                 extra={"correlation_id": get_correlation_id()},
-            )
+            ),
+            exc_info=True,
         )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -214,7 +214,7 @@ def edit_file(
         HTTPException: On various error conditions
     """
     try:
-        service = FileCRUDService()
+        service = file_crud_service
         result = service.edit_file(
             repo_alias=alias,
             file_path=file_path,
@@ -267,9 +267,9 @@ def edit_file(
             format_error_log(
                 "SVC-GENERAL-002",
                 f"Edit file failed for {alias}/{file_path}: {e}",
-                exc_info=True,
                 extra={"correlation_id": get_correlation_id()},
-            )
+            ),
+            exc_info=True,
         )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -314,7 +314,7 @@ def delete_file(
         HTTPException: On various error conditions
     """
     try:
-        service = FileCRUDService()
+        service = file_crud_service
         result = service.delete_file(
             repo_alias=alias,
             file_path=file_path,
@@ -346,9 +346,9 @@ def delete_file(
             format_error_log(
                 "SVC-GENERAL-005",
                 f"Delete file failed for {alias}/{file_path}: {e}",
-                exc_info=True,
                 extra={"correlation_id": get_correlation_id()},
-            )
+            ),
+            exc_info=True,
         )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,

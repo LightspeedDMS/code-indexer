@@ -12,7 +12,7 @@ import threading
 import time
 from typing import Any
 
-from src.code_indexer.services.clean_slot_tracker import (
+from code_indexer.services.clean_slot_tracker import (
     CleanSlotTracker,
     FileData,
     FileStatus,

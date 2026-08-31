@@ -9,7 +9,7 @@ from code_indexer.server.middleware.correlation import get_correlation_id
 
 import os
 from pathlib import Path
-from typing import Any, List, Optional
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, cast
 import logging
 
 from ..models.api_models import (
@@ -25,6 +25,16 @@ from code_indexer.server.services.search_embed_event_emit import (
     emit_embed_error_event,
     emit_embed_event,
 )
+
+if TYPE_CHECKING:
+    # Bug #1638 remediation (mypy Blocker #4): server/app.py's `app` global is
+    # now resolved via a PEP 562 module __getattr__() that returns `Any`
+    # (needed for lazy initialization), which erased the concrete FastAPI
+    # type mypy previously inferred from the old `app = create_app()` direct
+    # assignment. This TYPE_CHECKING-only import + cast("FastAPI", ...) below
+    # restores static typing at each call site without a blanket
+    # `# type: ignore` (which would silence unrelated real errors too).
+    from fastapi import FastAPI
 
 logger = logging.getLogger(__name__)
 
@@ -48,7 +58,7 @@ def _get_http_client_factory() -> Any:
     """
     from ..app import app as _app
 
-    return getattr(_app.state, "http_client_factory", None)
+    return getattr(cast("FastAPI", _app).state, "http_client_factory", None)
 
 
 def _get_query_executor() -> Any:
@@ -70,7 +80,7 @@ def _get_query_executor() -> Any:
     """
     from ..app import app as _app
 
-    return getattr(_app.state, "query_executor", None)
+    return getattr(cast("FastAPI", _app).state, "query_executor", None)
 
 
 def _get_repo_config_cache() -> Any:
@@ -88,7 +98,7 @@ def _get_repo_config_cache() -> Any:
     """
     from ..app import app as _app
 
-    return getattr(_app.state, "repo_config_cache", None)
+    return getattr(cast("FastAPI", _app).state, "repo_config_cache", None)
 
 
 def _load_repo_config(repo_path: str) -> Any:
@@ -98,11 +108,20 @@ def _load_repo_config(repo_path: str) -> Any:
     from it (NO-TTL for predicate-proven immutable .versioned/ snapshot paths;
     SHORT-TTL for mutable / not-provably-immutable paths). When absent, the
     config is loaded directly (identical to the pre-#1082 behavior).
+
+    Bug #1690: the direct-load branch used to blind-trust
+    ConfigManager.create_with_backtrack(repo_path).get_config() without
+    verifying the resolved config genuinely describes repo_path itself.
+    ConfigManager.load_verified_config() closes that gap (raises
+    ConfigVerificationError -- a ValueError subclass, so it is caught by
+    search_similar's existing "orphaned repo -> skip gracefully"
+    `except ValueError` handling) instead of silently using an unrelated
+    ancestor's or a defaulted config.
     """
     registry = _get_repo_config_cache()
     if registry is not None:
         return registry.get_config(repo_path)
-    return ConfigManager.create_with_backtrack(Path(repo_path)).get_config()
+    return ConfigManager.load_verified_config(Path(repo_path))
 
 
 def _get_golden_repos_dir() -> str:
@@ -111,7 +130,8 @@ def _get_golden_repos_dir() -> str:
     from ..app import app as app_module
 
     golden_repos_dir: Optional[str] = cast(
-        Optional[str], getattr(app_module.state, "golden_repos_dir", None)
+        Optional[str],
+        getattr(cast("FastAPI", app_module).state, "golden_repos_dir", None),
     )
     if golden_repos_dir:
         return golden_repos_dir
@@ -193,6 +213,7 @@ class SemanticSearchService:
         search_request: SemanticSearchRequest,
         hnsw_cache: object = _HNSW_CACHE_USE_SERVER_DEFAULT,
         precomputed_query_vector: Optional[List[float]] = None,
+        activation_id: Optional[str] = None,
     ) -> SemanticSearchResponse:
         """
         Perform semantic search in repository using direct path.
@@ -241,6 +262,8 @@ class SemanticSearchService:
             hnsw_cache=hnsw_cache,
             precomputed_query_vector=precomputed_query_vector,
             no_embedding_cache_shortcut=search_request.no_embedding_cache_shortcut,
+            activation_id=activation_id,
+            enable_multimodal=True,
         )
 
         return SemanticSearchResponse(
@@ -254,6 +277,7 @@ class SemanticSearchService:
         repo_path: str,
         search_request: SemanticSearchRequest,
         provider_name: Optional[str] = None,
+        activation_id: Optional[str] = None,
     ) -> SemanticSearchResponse:
         """
         Perform semantic search using an explicitly named embedding provider.
@@ -284,6 +308,7 @@ class SemanticSearchService:
             accuracy=search_request.accuracy,
             provider_name_override=provider_name,
             no_embedding_cache_shortcut=search_request.no_embedding_cache_shortcut,
+            activation_id=activation_id,
         )
 
         return SemanticSearchResponse(
@@ -367,6 +392,8 @@ class SemanticSearchService:
         hnsw_cache: object = _HNSW_CACHE_USE_SERVER_DEFAULT,
         precomputed_query_vector: Optional[List[float]] = None,
         no_embedding_cache_shortcut: bool = False,
+        activation_id: Optional[str] = None,
+        enable_multimodal: bool = False,
     ) -> List[SearchResultItem]:
         """
         Perform real semantic search using repository-specific configuration.
@@ -384,6 +411,15 @@ class SemanticSearchService:
             exclude_language: Optional language to exclude (e.g. 'javascript')
             exclude_path: Optional path pattern to exclude (e.g. '*/tests/*')
             accuracy: Optional accuracy profile ('fast', 'balanced', 'high') - reserved
+            enable_multimodal: When True (Bug #1480) and a multimodal
+                collection (e.g. voyage-multimodal-3) exists on disk for this
+                repo, and no precomputed_query_vector was supplied, the
+                FilesystemVectorStore branch fans out to both the code and
+                multimodal collections via MultiIndexQueryService and merges
+                results — closing the gap where the server front door
+                (REST/MCP) never queried multimodal collections the CLI
+                already indexes. Default False so every existing caller is
+                unaffected.
 
         Returns:
             List of search results ranked by semantic similarity
@@ -424,6 +460,7 @@ class SemanticSearchService:
                 project_root=Path(repo_path),
                 hnsw_cache=resolved_hnsw_cache,
                 memory_governor=get_memory_governor(),
+                activation_id=activation_id,
             )
             vector_store_client = backend.get_vector_store_client()
 
@@ -498,7 +535,67 @@ class SemanticSearchService:
                     search_kwargs["precomputed_query_vector"] = precomputed_query_vector
                 if filter_conditions:
                     search_kwargs["filter_conditions"] = filter_conditions
-                search_results, _ = vector_store_client.search(**search_kwargs)
+
+                search_results: List[Dict[str, Any]]
+
+                # Bug #1480: the server front door never queried multimodal
+                # collections (e.g. voyage-multimodal-3) the CLI already
+                # indexes — only CLI's MultiIndexQueryService did. Reuse that
+                # SAME service (never reimplement multimodal detection/merge)
+                # when a multimodal collection genuinely exists on disk for
+                # this repo. Skipped entirely for the precomputed-vector reuse
+                # path (Story #883 Phase C / omni) — that vector lives in
+                # CODE embedding space and must never be handed to a
+                # multimodal provider expecting a different embedding space.
+                multimodal_service = None
+                if enable_multimodal and precomputed_query_vector is None:
+                    from ...services.multi_index_query_service import (
+                        MultiIndexQueryService,
+                    )
+
+                    _mm_candidate = MultiIndexQueryService(
+                        project_root=Path(repo_path),
+                        vector_store=vector_store_client,
+                        embedding_provider=embedding_service,
+                    )
+                    if _mm_candidate.has_multimodal_index():
+                        multimodal_service = _mm_candidate
+
+                if multimodal_service is not None:
+                    # Two INDEPENDENT kwargs dicts: the code-collection call
+                    # keeps the caller-supplied no_embedding_cache_shortcut
+                    # value unchanged (Story #1108 S4 behavior preserved);
+                    # the multimodal-collection call ALWAYS forces
+                    # no_embedding_cache_shortcut=True, isolating its cache
+                    # interaction from the code path regardless of the
+                    # caller's own flag (Bug #1480).
+                    code_kwargs = dict(
+                        ef=ef_value,
+                        parallel_executor=_get_query_executor(),
+                        no_embedding_cache_shortcut=no_embedding_cache_shortcut,
+                    )
+                    multimodal_kwargs = dict(
+                        ef=ef_value,
+                        parallel_executor=_get_query_executor(),
+                        no_embedding_cache_shortcut=True,
+                    )
+                    search_results, _ = multimodal_service.query_with_separate_kwargs(
+                        query_text=query,
+                        limit=limit,
+                        collection_name=collection_name,
+                        filter_conditions=filter_conditions or None,
+                        code_kwargs=code_kwargs,
+                        multimodal_kwargs=multimodal_kwargs,
+                    )
+                else:
+                    # return_timing=True in search_kwargs guarantees a tuple
+                    # return at runtime; cast() resolves the static Union
+                    # ambiguity mypy cannot otherwise narrow (no behavior
+                    # change).
+                    search_results, _ = cast(
+                        Tuple[List[Dict[str, Any]], Dict[str, Any]],
+                        vector_store_client.search(**search_kwargs),
+                    )
             else:
                 # Backend: sequential execution with pre-computed embedding.
                 # Bug #1078: gate through concurrency governor to cap concurrent
@@ -551,33 +648,7 @@ class SemanticSearchService:
 
             # py-spy logging-lock fix: per-query "Found N results" INFO removed.
 
-            # Format results for response
-            formatted_results = []
-            for result in search_results:
-                if not isinstance(result, dict):
-                    continue  # Skip malformed results
-                payload = result.get("payload", {})
-                score = result.get("score", 0.0)
-
-                # Extract source code if requested
-                source_content = None
-                if include_source:
-                    if "content" in payload:
-                        source_content = payload["content"]
-
-                search_item = SearchResultItem(
-                    file_path=payload.get("path", ""),
-                    line_start=payload.get("line_start", 0),
-                    line_end=payload.get("line_end", 0),
-                    score=score,
-                    content=source_content or payload.get("snippet", ""),
-                    language=self._detect_language_from_path(payload.get("path", "")),
-                    file_last_modified=payload.get("file_last_modified"),
-                    indexed_timestamp=payload.get("indexed_timestamp"),
-                )
-                formatted_results.append(search_item)
-
-            return formatted_results
+            return self._format_search_results(search_results, include_source)
 
         except ValueError as e:
             # Graceful handling for repos with missing/incomplete index configuration
@@ -599,6 +670,162 @@ class SemanticSearchService:
                 )
             )
             raise RuntimeError(f"Semantic search failed: {e}")
+
+    def _format_search_results(
+        self, search_results: List[Dict[str, Any]], include_source: bool
+    ) -> List[SearchResultItem]:
+        """Format raw vector-store search result dicts into SearchResultItem list.
+
+        Extracted from _perform_semantic_search's inline "Format results for
+        response" block (Bug #1480 follow-up) so query_multimodal_only can
+        reuse identical formatting logic without duplicating it.
+        """
+        formatted_results = []
+        for result in search_results:
+            if not isinstance(result, dict):
+                continue  # Skip malformed results
+            payload = result.get("payload", {})
+            score = result.get("score", 0.0)
+
+            # Extract source code if requested
+            source_content = None
+            if include_source:
+                if "content" in payload:
+                    source_content = payload["content"]
+
+            search_item = SearchResultItem(
+                file_path=payload.get("path", ""),
+                line_start=payload.get("line_start", 0),
+                line_end=payload.get("line_end", 0),
+                score=score,
+                content=source_content or payload.get("snippet", ""),
+                language=self._detect_language_from_path(payload.get("path", "")),
+                file_last_modified=payload.get("file_last_modified"),
+                indexed_timestamp=payload.get("indexed_timestamp"),
+            )
+            formatted_results.append(search_item)
+
+        return formatted_results
+
+    def query_multimodal_only(
+        self,
+        repo_path: str,
+        query: str,
+        limit: int,
+        path_filter: Optional[str] = None,
+        language: Optional[str] = None,
+        exclude_language: Optional[str] = None,
+        exclude_path: Optional[str] = None,
+        accuracy: Optional[str] = None,
+        activation_id: Optional[str] = None,
+    ) -> List[SearchResultItem]:
+        """Query ONLY the multimodal collection(s) for a repo (Bug #1480 follow-up).
+
+        The parallel/failover query strategies dispatch per-provider via
+        SemanticSearchService.search_repository_path_with_provider(), which
+        never fans out to multimodal collections (only search_repository_path's
+        enable_multimodal=True primary_only path does). This method lets
+        SemanticQueryManager fold in a SINGLE multimodal fan-out for those two
+        strategies without re-querying the code collection.
+
+        Multimodal provider selection is entirely internal to
+        MultiIndexQueryService/_get_multimodal_provider, keyed off which
+        multimodal collection exists on disk -- no provider_name_override is
+        needed or accepted here.
+
+        Returns an empty list when the vector store is not a
+        FilesystemVectorStore, or when no multimodal collection exists for
+        this repo.
+        """
+        try:
+            config = _load_repo_config(repo_path)
+
+            from ..app import _server_hnsw_cache
+
+            resolved_hnsw_cache: Any = _server_hnsw_cache
+
+            from ..services.memory_governor import get_memory_governor
+
+            backend = BackendFactory.create(
+                config=config,
+                project_root=Path(repo_path),
+                hnsw_cache=resolved_hnsw_cache,
+                memory_governor=get_memory_governor(),
+                activation_id=activation_id,
+            )
+            vector_store_client = backend.get_vector_store_client()
+
+            from ...storage.filesystem_vector_store import FilesystemVectorStore
+
+            if not isinstance(vector_store_client, FilesystemVectorStore):
+                return []
+
+            embedding_service = EmbeddingProviderFactory.create(
+                config=config,
+                http_client_factory=_get_http_client_factory(),
+            )
+
+            from ...services.multi_index_query_service import (
+                MultiIndexQueryService,
+            )
+
+            mm = MultiIndexQueryService(
+                project_root=Path(repo_path),
+                vector_store=vector_store_client,
+                embedding_provider=embedding_service,
+            )
+            if not mm.has_multimodal_index():
+                return []
+
+            filter_conditions = self._build_filter_conditions(
+                path_filter=path_filter,
+                language=language,
+                exclude_language=exclude_language,
+                exclude_path=exclude_path,
+            )
+
+            accuracy_to_ef = {"fast": 20, "balanced": 50, "high": 200}
+            ef_value = accuracy_to_ef.get(accuracy, 50) if accuracy else 50
+
+            # collection_name is only used by MultiIndexQueryService's legacy
+            # multimodal_index/ subdirectory fallback path -- the real
+            # collection(s) queried here are resolved internally, keyed off
+            # MULTIMODAL_MODELS, independent of this value.
+            collection_name = vector_store_client.resolve_collection_name(
+                config, embedding_service
+            )
+
+            search_results, _ = mm.query_multimodal_index_only(
+                query_text=query,
+                limit=limit,
+                collection_name=collection_name,
+                filter_conditions=filter_conditions or None,
+                ef=ef_value,
+                parallel_executor=_get_query_executor(),
+                no_embedding_cache_shortcut=True,
+            )
+
+            return self._format_search_results(search_results, include_source=True)
+
+        except ValueError as e:
+            logger.warning(
+                format_error_log(
+                    "MCP-GENERAL-171",
+                    f"Skipping multimodal-only query for repo {repo_path}: "
+                    "no valid index configured",
+                    error=str(e),
+                )
+            )
+            return []
+        except Exception as e:
+            logger.error(
+                format_error_log(
+                    "MCP-GENERAL-170",
+                    f"Multimodal-only search failed for repo {repo_path}: {e}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
+            raise RuntimeError(f"Multimodal-only search failed: {e}")
 
     def _detect_language_from_path(self, file_path: str) -> Optional[str]:
         """
@@ -644,7 +871,9 @@ class SemanticSearchService:
         golden_repos_dir = _get_golden_repos_dir()
 
         # Look up global repo via BackendRegistry
-        backend_registry = getattr(app_module.app.state, "backend_registry", None)
+        backend_registry = getattr(
+            cast("FastAPI", app_module.app).state, "backend_registry", None
+        )
         if backend_registry:
             repos_dict = backend_registry.global_repos.list_repos()
             global_repos = list(repos_dict.values())

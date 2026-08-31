@@ -15,7 +15,7 @@ import time
 from pathlib import Path
 from unittest.mock import patch
 
-from src.code_indexer.services.provider_health_bridge import read_provider_results
+from code_indexer.services.provider_health_bridge import read_provider_results
 
 _VALID_PROVIDER_RESULTS = {
     "provider_results": {

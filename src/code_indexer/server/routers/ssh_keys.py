@@ -17,6 +17,7 @@ from ..services.ssh_key_manager import (
     SSHKeyManager,
     KeyNotFoundError,
     HostConflictError,
+    PublicKeyNotFoundError,
 )
 from ..services.ssh_key_generator import (
     InvalidKeyNameError,
@@ -203,9 +204,25 @@ def delete_ssh_key(name: str) -> DeleteKeyResponse:
     Delete an SSH key, its config entries, and metadata.
 
     This operation is idempotent - succeeds even if key doesn't exist.
+
+    Bug #1521: ``delete_key()`` returns False when the Bug #1519 provenance
+    guard refuses to remove a same-named file this server never proved it
+    wrote.  That return value used to be discarded, so a refused deletion was
+    reported as a success -- a silent lie about a safety-critical operation.
+    409 Conflict matches this router's existing convention for "the request is
+    valid but conflicts with the current state" (see KeyAlreadyExistsError and
+    HostConflictError above).
     """
     manager = get_ssh_key_manager()
-    manager.delete_key(name)
+    if not manager.delete_key(name):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Refused to delete '{name}': an untracked file of that name "
+                f"exists in the SSH directory and this server has no record of "
+                f"creating it. Remove it manually if it is genuinely unwanted."
+            ),
+        )
     return DeleteKeyResponse(success=True, message=f"Key '{name}' deleted")
 
 
@@ -222,6 +239,8 @@ def get_public_key(name: str) -> Response:
         return Response(content=public_key, media_type="text/plain")
     except KeyNotFoundError:
         raise HTTPException(status_code=404, detail=f"Key not found: {name}")
+    except PublicKeyNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
 
 
 def assign_host(name: str, request: AssignHostRequest) -> KeyWithHostsResponse:

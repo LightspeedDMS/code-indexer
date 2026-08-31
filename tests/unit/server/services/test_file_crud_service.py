@@ -19,10 +19,14 @@ Test coverage targets:
 import hashlib
 import tempfile
 from pathlib import Path
+from unittest.mock import Mock
 
 import pytest
 
-from src.code_indexer.server.services.file_crud_service import (
+from code_indexer.server.services import (
+    file_crud_service as file_crud_service_module,
+)
+from code_indexer.server.services.file_crud_service import (
     FileCRUDService,
     HashMismatchError,
     CRUDOperationError,
@@ -46,15 +50,31 @@ def test_repo_dir():
 
 @pytest.fixture
 def service_with_mock_repo(test_repo_dir, monkeypatch):
-    """Create FileCRUDService with mocked ActivatedRepoManager."""
+    """Create FileCRUDService with a mocked, DI-wired ActivatedRepoManager
+    resolution.
+
+    Bug #1692 (corrected fix): _resolve_repo_path resolves the manager via
+    the module-level _get_activated_repo_manager() (app.state-backed at
+    call time in production), NOT the per-instance
+    service.activated_repo_manager lazy property -- so this fixture
+    monkeypatches that module-level function directly, rather than the
+    instance property, to control repo resolution for these tests.
+    """
     service = FileCRUDService()
 
-    # Mock get_activated_repo_path to return our test repo
-    def mock_get_path(username, user_alias):
-        return test_repo_dir
+    mock_manager = Mock()
+    mock_manager.get_activated_repo_path.return_value = test_repo_dir
+    # Bug #1692: _resolve_repo_path now gates on the registry
+    # (user_has_activated_repo), not merely on filesystem existence. This
+    # fixture simulates a genuinely registered activated repo, so the
+    # registry check must report True for every alias/user used in these
+    # tests.
+    mock_manager.user_has_activated_repo.return_value = True
 
     monkeypatch.setattr(
-        service.activated_repo_manager, "get_activated_repo_path", mock_get_path
+        file_crud_service_module,
+        "_get_activated_repo_manager",
+        lambda: mock_manager,
     )
 
     return service

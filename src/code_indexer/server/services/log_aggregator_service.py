@@ -56,15 +56,109 @@ class LogAggregatorService:
     DEFAULT_PAGE_SIZE = 50
     MAX_PAGE_SIZE = 1000
 
-    def __init__(self, db_path: Path):
+    def __init__(self, db_path: Path, logs_backend: Optional[Any] = None):
         """
         Initialize LogAggregatorService.
 
         Args:
             db_path: Path to SQLite logs database (e.g., ~/.cidx-server/logs.db)
+            logs_backend: Optional LogsBackend (Bug #1553). When it declares
+                is_cross_node_backend=True (a genuinely distinct cross-node
+                store, e.g. PostgreSQL in cluster mode), reads route through
+                it instead of the local SQLite file -- so reads follow the
+                same store SQLiteLogHandler's writer thread uses. A None
+                backend, or one declaring is_cross_node_backend=False (e.g.
+                solo-mode's LogsSqliteBackend, which points at this SAME
+                file), preserves the exact pre-existing local-SQLite path.
         """
         self.db_path = Path(db_path)
         self._conn_manager = DatabaseConnectionManager.get_instance(str(self.db_path))
+        self._logs_backend = logs_backend
+        self._use_backend: bool = logs_backend is not None and bool(
+            getattr(logs_backend, "is_cross_node_backend", False)
+        )
+
+    @property
+    def is_cluster_mode(self) -> bool:
+        """True when reads are routed through a cross-node backend (Bug #1553)."""
+        return self._use_backend
+
+    def _query_via_backend(
+        self,
+        page: int,
+        page_size: int,
+        sort_order: str,
+        level: Optional[str],
+        levels: Optional[List[str]],
+        source: Optional[str],
+        correlation_id: Optional[str],
+        search: Optional[str],
+        node_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Paginated query dispatched to the cross-node backend (Bug #1553)."""
+        # Invariant: only called when self._use_backend is True, which
+        # requires logs_backend is not None (see __init__). Asserted here
+        # (Messi Rule #15) so mypy's Optional[Any] typing doesn't flag a
+        # union-attr error the caller-side invariant already rules out.
+        assert self._logs_backend is not None
+        offset = (page - 1) * page_size
+        logs, total = self._logs_backend.query_logs(
+            level=level,
+            levels=levels,
+            source=source,
+            correlation_id=correlation_id,
+            search=search,
+            sort_order=sort_order,
+            node_id=node_id,
+            limit=page_size,
+            offset=offset,
+        )
+        total_pages = math.ceil(total / page_size) if total > 0 else 0
+        return {
+            "logs": logs,
+            "pagination": {
+                "page": page,
+                "page_size": page_size,
+                "total": total,
+                "total_pages": total_pages,
+            },
+        }
+
+    def _query_all_via_backend(
+        self,
+        sort_order: str,
+        level: Optional[str],
+        levels: Optional[List[str]],
+        source: Optional[str],
+        correlation_id: Optional[str],
+        search: Optional[str],
+    ) -> List[Dict[str, Any]]:
+        """Unpaginated query dispatched to the cross-node backend (Bug #1553)."""
+        # Invariant: only called when self._use_backend is True (see __init__).
+        assert self._logs_backend is not None
+        _, total = self._logs_backend.query_logs(
+            level=level,
+            levels=levels,
+            source=source,
+            correlation_id=correlation_id,
+            search=search,
+            sort_order=sort_order,
+            limit=0,
+            offset=0,
+        )
+        if total == 0:
+            return []
+        logs, _ = self._logs_backend.query_logs(
+            level=level,
+            levels=levels,
+            source=source,
+            correlation_id=correlation_id,
+            search=search,
+            sort_order=sort_order,
+            limit=total,
+            offset=0,
+        )
+        return list(logs)
 
     def query(
         self,
@@ -76,6 +170,7 @@ class LogAggregatorService:
         source: Optional[str] = None,
         correlation_id: Optional[str] = None,
         search: Optional[str] = None,
+        node_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Query logs with pagination, filtering, and sorting.
@@ -89,6 +184,10 @@ class LogAggregatorService:
             source: Filter by logger name (optional)
             correlation_id: Filter by correlation ID (optional)
             search: Text search across message and correlation_id (optional, case-insensitive)
+            node_id: Filter by cluster node ID (optional). Bug #1553: only
+                applies when dispatching to a cross-node backend -- the
+                local SQLite path never supported node_id filtering and
+                continues not to, preserving solo-mode behaviour exactly.
 
         Returns:
             Dict with "logs" array and "pagination" metadata matching API spec
@@ -101,6 +200,20 @@ class LogAggregatorService:
             page_size = self.DEFAULT_PAGE_SIZE
         else:
             page_size = min(page_size, self.MAX_PAGE_SIZE)
+
+        # Bug #1553: cross-node backend reads follow the writer's store.
+        if self._use_backend:
+            return self._query_via_backend(
+                page,
+                page_size,
+                sort_order,
+                level,
+                levels,
+                source,
+                correlation_id,
+                search,
+                node_id,
+            )
 
         # Check if database exists
         if not self.db_path.exists():
@@ -144,9 +257,9 @@ class LogAggregatorService:
                 format_error_log(
                     "GIT-GENERAL-046",
                     f"Database error querying logs: {e}",
-                    exc_info=True,
                     extra={"correlation_id": get_correlation_id()},
-                )
+                ),
+                exc_info=True,
             )
             return self._empty_response(page, page_size)
 
@@ -173,6 +286,12 @@ class LogAggregatorService:
         Returns:
             List of log entry dicts (not paginated)
         """
+        # Bug #1553: cross-node backend reads follow the writer's store.
+        if self._use_backend:
+            return self._query_all_via_backend(
+                sort_order, level, levels, source, correlation_id, search
+            )
+
         # Check if database exists
         if not self.db_path.exists():
             return []
@@ -198,9 +317,9 @@ class LogAggregatorService:
                 format_error_log(
                     "GIT-GENERAL-047",
                     f"Database error querying all logs: {e}",
-                    exc_info=True,
                     extra={"correlation_id": get_correlation_id()},
-                )
+                ),
+                exc_info=True,
             )
             return []
 
@@ -227,9 +346,9 @@ class LogAggregatorService:
                 format_error_log(
                     "GIT-GENERAL-048",
                     f"Database error counting logs: {e}",
-                    exc_info=True,
                     extra={"correlation_id": get_correlation_id()},
-                )
+                ),
+                exc_info=True,
             )
             return 0
 
@@ -349,7 +468,9 @@ class LogAggregatorService:
                 message,
                 correlation_id,
                 user_id,
-                request_path
+                request_path,
+                trace_id,
+                span_id
             FROM logs
             {where_sql}
             ORDER BY timestamp {order_direction}
@@ -397,7 +518,9 @@ class LogAggregatorService:
                 message,
                 correlation_id,
                 user_id,
-                request_path
+                request_path,
+                trace_id,
+                span_id
             FROM logs
             {where_sql}
             ORDER BY timestamp {order_direction}
@@ -418,6 +541,12 @@ class LogAggregatorService:
         """
         Convert database row to log entry dict.
 
+        Story #1676 AC2 adds trace_id/span_id -- direct row access is safe
+        here because both SELECT statements above always request these
+        columns, and SQLiteLogHandler._init_database's schema migration
+        (ALTER TABLE ADD COLUMN, run at startup before any query) guarantees
+        they exist on the `logs` table this service reads from.
+
         Args:
             row: SQLite row object
 
@@ -433,6 +562,8 @@ class LogAggregatorService:
             "correlation_id": row["correlation_id"],
             "user_id": row["user_id"],
             "request_path": row["request_path"],
+            "trace_id": row["trace_id"],
+            "span_id": row["span_id"],
         }
 
     def _empty_response(self, page: int, page_size: int) -> Dict[str, Any]:

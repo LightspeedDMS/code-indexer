@@ -13,8 +13,14 @@ from pathlib import Path
 
 from code_indexer.server.auth.user_manager import User
 from code_indexer.server.logging_utils import format_error_log
-from code_indexer.server.middleware.correlation import get_correlation_id
+from code_indexer.server.telemetry.correlation_bridge import (
+    get_current_correlation_id as get_correlation_id,
+)
 from code_indexer.server.services.config_service import get_config_service
+from code_indexer.server.services.query_admission_gate import (
+    check_query_admission,
+    memory_pressure_mcp_payload,
+)
 from code_indexer.server.repositories.background_jobs import DuplicateJobError
 from code_indexer.server.repositories.golden_repo_manager import GoldenRepoNotFoundError
 from code_indexer.server.services.repository_health_aggregator import (
@@ -36,7 +42,8 @@ from ._utils import (
     _get_available_repos,
     _error_with_suggestions,
 )
-from ._temporal_index_cmd import _build_temporal_index_cmd
+from ._temporal_index_cmd import _build_temporal_index_cmd  # noqa: F401
+from ._provider_temporal_job import _provider_temporal_index_job  # noqa: F401
 
 # _GLOBAL_SUFFIX is used in _resolve_branch_repo_path to strip the alias-manager
 # suffix before passing the base alias to golden_repo_manager.get_actual_repo_path().
@@ -229,9 +236,9 @@ def list_repo_categories(params: Dict[str, Any], user: User) -> Dict[str, Any]:
             format_error_log(
                 "MCP-GENERAL-035",
                 f"Failed to list repository categories: {e}",
-                exc_info=True,
                 extra={"correlation_id": get_correlation_id()},
-            )
+            ),
+            exc_info=True,
         )
         return _mcp_response(
             {"success": False, "error": str(e), "categories": [], "total": 0}
@@ -342,7 +349,15 @@ def check_health(params: Dict[str, Any], user: User) -> Dict[str, Any]:
         from code_indexer.server.services.health_service import health_service
 
         health_response = health_service.get_system_health()
-        node_id = getattr(_utils.app_module.app.state, "node_id", None)
+        # Bug #1709: probes via _utils._lazy_module_attr_or_none("app")
+        # instead of a bare _utils.app_module.app.state attribute chain,
+        # which would otherwise permanently construct the process-wide app
+        # singleton as a side effect of merely reading it.
+        node_id = getattr(
+            getattr(_utils._lazy_module_attr_or_none("app"), "state", None),
+            "node_id",
+            None,
+        )
 
         return _mcp_response(
             {
@@ -504,6 +519,10 @@ def _get_global_repo_status(
 
 def get_all_repositories_status(params: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Get status summary of all repositories."""
+    _admission = check_query_admission()
+    if not _admission.allowed:
+        return _mcp_response(memory_pressure_mcp_payload(_admission))
+
     try:
         repos = _utils.app_module.activated_repo_manager.list_activated_repositories(
             user.username
@@ -621,9 +640,9 @@ def _append_global_repos_to_status(status_summary: list, user: User) -> None:
             format_error_log(
                 "MCP-GENERAL-036",
                 f"Failed to load global repos status: {e}",
-                exc_info=True,
                 extra={"correlation_id": get_correlation_id()},
-            )
+            ),
+            exc_info=True,
         )
 
 
@@ -653,7 +672,11 @@ def _build_mcp_deactivating_map() -> dict:
     Fetches with is_admin=True so admin-submitted deactivations appear for all users.
     Filters client-side for operation_type=deactivate_repository and pending/running status.
     """
-    bjm = getattr(_utils.app_module, "background_job_manager", None)
+    # Bug #1709: probes via _utils._lazy_module_attr_or_none() instead of a
+    # bare getattr(_utils.app_module, name, None), which would otherwise
+    # permanently construct the process-wide app singleton as a side
+    # effect of merely reading it.
+    bjm = _utils._lazy_module_attr_or_none("background_job_manager")
     if bjm is None:
         return {}
     try:
@@ -714,9 +737,9 @@ def _load_global_repos_normalized() -> list:
             format_error_log(
                 "MCP-GENERAL-033",
                 f"Failed to load global repos from storage backend: {e}",
-                exc_info=True,
                 extra={"correlation_id": get_correlation_id()},
-            )
+            ),
+            exc_info=True,
         )
     return result
 
@@ -871,8 +894,12 @@ def get_branches(params: Dict[str, Any], user: User) -> Dict[str, Any]:
         if isinstance(repository_alias, str) and not repository_alias.endswith(
             "-global"
         ):
-            _arm = getattr(_utils.app_module, "activated_repo_manager", None)
-            _grm = getattr(_utils.app_module, "golden_repo_manager", None)
+            # Bug #1709: probes via _utils._lazy_module_attr_or_none()
+            # instead of a bare getattr(_utils.app_module, name, None),
+            # which would otherwise permanently construct the process-wide
+            # app singleton as a side effect of merely reading it.
+            _arm = _utils._lazy_module_attr_or_none("activated_repo_manager")
+            _grm = _utils._lazy_module_attr_or_none("golden_repo_manager")
             if _arm is not None and _grm is not None:
                 if not _arm.user_has_activated_repo(user.username, repository_alias):
                     from ._global_fallback import try_global_fallback
@@ -1134,7 +1161,8 @@ def handle_add_golden_repo_index(args: Dict[str, Any], user: User) -> Dict[str, 
         )
 
     try:
-        golden_repo_manager = getattr(_utils.app_module, "golden_repo_manager", None)
+        # Bug #1709: safe lazy probe -- avoids PEP-562 construction side effect.
+        golden_repo_manager = _utils._lazy_module_attr_or_none("golden_repo_manager")
         if not golden_repo_manager:
             return _mcp_response(
                 {"success": False, "error": "Golden repository manager not available"}
@@ -1174,7 +1202,8 @@ def handle_get_golden_repo_indexes(args: Dict[str, Any], user: User) -> Dict[str
         )
 
     try:
-        golden_repo_manager = getattr(_utils.app_module, "golden_repo_manager", None)
+        # Bug #1709: safe lazy probe -- avoids PEP-562 construction side effect.
+        golden_repo_manager = _utils._lazy_module_attr_or_none("golden_repo_manager")
         if not golden_repo_manager:
             return _mcp_response(
                 {"success": False, "error": "Golden repository manager not available"}
@@ -1760,7 +1789,8 @@ def _set_enable_temporal_flag(repo_alias: str) -> None:
     if not repo_alias:
         return
 
-    grm = getattr(_utils.app_module, "golden_repo_manager", None)
+    # Bug #1709: safe lazy probe -- avoids PEP-562 construction side effect.
+    grm = _utils._lazy_module_attr_or_none("golden_repo_manager")
     if grm is None:
         logger.warning(
             "_set_enable_temporal_flag: golden_repo_manager unavailable, "
@@ -1777,9 +1807,16 @@ def _set_enable_temporal_flag(repo_alias: str) -> None:
 
     try:
         if grm._sqlite_backend.update_enable_temporal(bare_alias, True):
-            repo_meta = grm.golden_repos.get(bare_alias)
+            # Bug #1481: refresh via the authoritative get_golden_repo() read
+            # and REPLACE the cache entry wholesale, instead of patching a
+            # single field on whatever object happened to already be
+            # cached. The old read-and-patch pattern silently did nothing
+            # when this worker's cache never held the alias (cross-node/
+            # cross-worker cold cache), leaving it permanently cold despite
+            # the backend write above having just succeeded.
+            repo_meta = grm.get_golden_repo(bare_alias)
             if repo_meta is not None:
-                repo_meta.enable_temporal = True
+                grm.golden_repos[bare_alias] = repo_meta
             logger.info(
                 "Set enable_temporal=True for %s in golden_repos_metadata", bare_alias
             )
@@ -1795,7 +1832,11 @@ def _set_enable_temporal_flag(repo_alias: str) -> None:
 
     global_alias = f"{bare_alias}{_GLOBAL_SUFFIX}"
     try:
-        _app_state = getattr(_utils.app_module.app, "state", None)
+        # Bug #1709: safe lazy probe -- avoids PEP-562 construction side
+        # effect. getattr()'s default parameter safely handles a None
+        # return from _lazy_module_attr_or_none() (Python's getattr never
+        # raises when a default is supplied, regardless of object type).
+        _app_state = getattr(_utils._lazy_module_attr_or_none("app"), "state", None)
         _storage_mode = (
             getattr(_app_state, "storage_mode", None) if _app_state else None
         )
@@ -1965,11 +2006,18 @@ def _run_provider_subprocess(
     from code_indexer.server.storage.postgres.embedding_stats_child_wiring import (
         build_embedding_stats_child_env,
     )
+    from code_indexer.storage.shared.hnsw_sync_state import (
+        resolve_hnsw_sync_epoch_env_var,
+    )
 
     env_with_stats = build_embedding_stats_child_env(
         get_config_service().get_config(), base_env=env
     )
     sanitized_env = build_cidx_subprocess_env(env_with_stats)
+    # Bug #1575 Part C independent re-review: this is the SHARED
+    # convergence point for both provider-index job types (semantic and
+    # temporal), so the postgres-mode signal is merged in here ONCE.
+    sanitized_env.update(resolve_hnsw_sync_epoch_env_var())
 
     try:
         run_with_popen_progress(
@@ -2033,7 +2081,13 @@ def _provider_index_job(
         elif provider_name == "voyage-ai":
             env["VOYAGE_API_KEY"] = api_key
 
-    cmd = ["cidx", "index", "--progress-json"]
+    from code_indexer.server.utils.index_command_layout import (
+        append_server_layout_args,
+    )
+
+    # Story #1488: server states the new-collection layout explicitly
+    # (CHUNKS_DB) rather than inheriting the CLI/daemon SHARDED_JSON default.
+    cmd = append_server_layout_args(["cidx", "index", "--progress-json"])
     if clear:
         cmd.append("--clear")
 
@@ -2060,122 +2114,6 @@ def _provider_index_job(
 
     return {
         "success": success,
-        "stdout": stdout_out[-_PROVIDER_JOB_OUTPUT_TAIL_CHARS:] if stdout_out else "",
-        "stderr": stderr_out[-_PROVIDER_JOB_OUTPUT_TAIL_CHARS:] if stderr_out else "",
-    }
-
-
-def _provider_temporal_index_job(
-    repo_path: str,
-    provider_name: str,
-    clear: bool = False,
-    progress_callback=None,
-    **kwargs,
-) -> Dict[str, Any]:
-    """Background job for per-provider temporal index (Story #641).
-
-    Called externally from inline_admin_ops.py via __init__.py re-exports.
-    """
-    if not repo_path or not provider_name:
-        return {
-            "success": False,
-            "error": "Missing repo_path or provider_name",
-            "provider": provider_name,
-        }
-
-    repo_alias = kwargs.get("repo_alias", "")
-    actual_path, repo_alias, is_versioned = _resolve_provider_job_repo_path(
-        repo_path, repo_alias
-    )
-    # Bug #1084 B1: refuse when a versioned snapshot could not be redirected to an
-    # existing base clone. The resolver now returns the (non-existent) base_clone
-    # path rather than the snapshot path, so check existence of actual_path
-    # directly -- the snapshot itself is NEVER indexed.
-    if is_versioned and not Path(actual_path).exists():
-        return {
-            "success": False,
-            "error": f"Base clone not found for {repo_path}",
-            "provider": provider_name,
-        }
-
-    env = _build_provider_api_key_env(provider_name)
-
-    # Bug #1313 round-4 (Codex Finding 2): in postgres/cluster mode, merge
-    # CIDX_TEMPORAL_PG_BOOTSTRAP_DIR into the provider env so the child
-    # subprocess installs the PostgreSQL temporal-metadata backend instead
-    # of silently falling back to SQLite-on-NFS. build_temporal_child_env
-    # returns a NEW dict (base_env=env, so the provider API key is
-    # preserved) in postgres mode, or None in sqlite mode -- fall back to
-    # the unmodified env in that case (byte-unchanged existing behavior).
-    # get_config_service().get_config() (not ServerConfigManager().load_config())
-    # per CLAUDE.md Config Bootstrap vs Runtime -- this module already uses
-    # get_config_service() as the sole config-read path.
-    from code_indexer.server.storage.postgres.temporal_child_wiring import (
-        build_temporal_child_env,
-    )
-
-    _server_config = get_config_service().get_config()
-    _merged_env = build_temporal_child_env(_server_config, base_env=env)
-    if _merged_env is not None:
-        env = _merged_env
-
-    # Story #1412: golden/server temporal all-branches indexing is gated
-    # behind a server-wide runtime flag, shipped OFF by default. Reuse the
-    # config already fetched above rather than a second get_config_service()
-    # call.
-    _all_branches_gate_enabled = bool(
-        getattr(_server_config.indexing_config, "temporal_all_branches_enabled", False)
-    )
-
-    # Story #1404: global temporal indexing floor date, reusing the config
-    # already fetched above rather than a second get_config_service() call
-    # (mirrors the _all_branches_gate_enabled reuse pattern immediately
-    # above).
-    _global_floor_date = getattr(
-        _server_config.temporal_indexing_config, "index_floor_date", None
-    )
-
-    temporal_options = kwargs.get("temporal_options", {}) or {}
-    cmd = _build_temporal_index_cmd(
-        clear,
-        temporal_options,
-        all_branches_gate_enabled=_all_branches_gate_enabled,
-        alias=repo_alias,
-        global_floor_date=_global_floor_date,
-    )
-
-    success, stdout_out, stderr_out = _run_provider_subprocess(
-        cmd,
-        actual_path,
-        env,
-        "temporal",
-        ["temporal"],
-        progress_callback,
-    )
-
-    if success:
-        if is_versioned and actual_path != repo_path:
-            try:
-                _post_provider_index_snapshot(
-                    repo_alias=repo_alias,
-                    base_clone_path=actual_path,
-                    old_snapshot_path=repo_path,
-                )
-            except Exception as exc:
-                logger.warning(
-                    "Post-temporal-index snapshot failed for %s: %s", repo_alias, exc
-                )
-        _set_enable_temporal_flag(repo_alias)
-    else:
-        logger.warning(
-            "Temporal provider index failed for provider=%s repo=%s",
-            provider_name,
-            repo_path,
-        )
-
-    return {
-        "success": success,
-        "provider": provider_name,
         "stdout": stdout_out[-_PROVIDER_JOB_OUTPUT_TAIL_CHARS:] if stdout_out else "",
         "stderr": stderr_out[-_PROVIDER_JOB_OUTPUT_TAIL_CHARS:] if stderr_out else "",
     }

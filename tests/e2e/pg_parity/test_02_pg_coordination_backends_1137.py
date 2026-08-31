@@ -199,6 +199,22 @@ def _pg_server_data_dir() -> str:
     )
 
 
+def _pg_golden_repos_dir() -> Path:
+    """Resolve the MAIN Phase-6 session server's ``golden_repos_dir``.
+
+    Mirrors production's own topology exactly: on every real multi-node
+    cluster sharing a PostgreSQL backend, each node ALSO bind/NFS-mounts its
+    own ``<server_dir>/data/golden-repos`` onto the SAME shared directory
+    (see ``docs/cluster-setup.md``'s "Golden Repository Shared Storage"
+    section) -- ``golden_repos_dir`` has no independent config override, it
+    is derived unconditionally from ``CIDX_SERVER_DATA_DIR``
+    (``lifespan.py``).  This helper is the single source of truth for that
+    main-server path so any throwaway/dedicated server in this test module
+    can be pointed at it (see ``_write_throwaway_config``).
+    """
+    return Path(_pg_server_data_dir()) / "data" / "golden-repos"
+
+
 def _pg_dsn() -> str:
     """UNIX-socket DSN to the ephemeral Phase-6 cluster (direct inspection only)."""
     return f"postgresql:///{_pg_db_name()}?host={_pg_data_dir()}"
@@ -904,13 +920,41 @@ def _throwaway_server_data_dir() -> Path:
     return Path.home() / ".tmp" / "cidx-e2e-pg-throwaway-1137"
 
 
+def _link_throwaway_golden_repos_dir(data_dir: Path) -> None:
+    """Link the throwaway server's golden repos directory to the session server's."""
+    main_golden_repos_dir = _pg_golden_repos_dir()
+    if not main_golden_repos_dir.is_dir():
+        pytest.skip(
+            f"main Phase-6 session server's golden_repos_dir "
+            f"'{main_golden_repos_dir}' does not exist -- this test requires "
+            "the full Phase 6 harness (e2e-automation.sh --phase 6) to have "
+            "already started the main PG-backed session server"
+        )
+    link = data_dir / "data" / "golden-repos"
+    link.parent.mkdir(parents=True, exist_ok=True)
+    if link.is_symlink():
+        if link.resolve() == main_golden_repos_dir.resolve():
+            return
+        link.unlink()
+    elif link.is_dir():
+        import shutil
+
+        shutil.rmtree(link)
+    elif link.exists():
+        link.unlink()
+    link.symlink_to(main_golden_repos_dir, target_is_directory=True)
+
+
 def _write_throwaway_config(data_dir: Path, port: int) -> None:
     """Write a bootstrap config.json for the throwaway server.
 
-    Points at the SAME ephemeral PG cluster as the shared session server so the
-    drained buckets land in the same inspectable PG database.
+    Points at the SAME ephemeral PG cluster as the shared session server so
+    the drained buckets land in the same inspectable PG database, and links
+    ``golden_repos_dir`` onto the main session server's own -- see
+    ``_link_throwaway_golden_repos_dir``.
     """
     data_dir.mkdir(parents=True, exist_ok=True)
+    _link_throwaway_golden_repos_dir(data_dir)
     config = {
         "server_dir": str(data_dir),
         "host": _THROWAWAY_HOST,

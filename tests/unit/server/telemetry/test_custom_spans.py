@@ -1,23 +1,23 @@
 """
 TDD Tests for Custom Spans (Story #700).
 
-Tests @traced decorator, create_span() context manager, and span helpers.
+Tests create_span() context manager and span helpers.
 
 All tests use real components following MESSI Rule #1: No mocks.
 """
 
 import pytest
 
-from src.code_indexer.server.utils.config_manager import TelemetryConfig
+from code_indexer.server.utils.config_manager import TelemetryConfig
 
 
 def reset_all_singletons():
     """Reset all singletons to ensure clean test state."""
-    from src.code_indexer.server.telemetry import (
+    from code_indexer.server.telemetry import (
         reset_telemetry_manager,
         reset_machine_metrics_exporter,
     )
-    from src.code_indexer.server.services.system_metrics_collector import (
+    from code_indexer.server.services.system_metrics_collector import (
         reset_system_metrics_collector,
     )
 
@@ -34,143 +34,17 @@ def reset_all_singletons():
 class TestCustomSpansImport:
     """Tests for custom spans module import behavior."""
 
-    def test_traced_decorator_can_be_imported(self):
-        """traced decorator can be imported."""
-        from src.code_indexer.server.telemetry.spans import traced
-
-        assert traced is not None
-        assert callable(traced)
-
     def test_create_span_can_be_imported(self):
         """create_span context manager can be imported."""
-        from src.code_indexer.server.telemetry.spans import create_span
+        from code_indexer.server.telemetry.spans import create_span
 
         assert create_span is not None
 
     def test_get_tracer_can_be_imported(self):
         """get_tracer function can be imported."""
-        from src.code_indexer.server.telemetry.spans import get_tracer
+        from code_indexer.server.telemetry.spans import get_tracer
 
         assert callable(get_tracer)
-
-
-# =============================================================================
-# @traced Decorator Tests
-# =============================================================================
-
-
-@pytest.mark.slow
-class TestTracedDecorator:
-    """Tests for @traced decorator functionality."""
-
-    def setup_method(self):
-        """Reset singletons before each test."""
-        reset_all_singletons()
-
-    def teardown_method(self):
-        """Reset singletons after each test."""
-        reset_all_singletons()
-
-    def test_traced_decorator_creates_span_with_function_name(self):
-        """
-        @traced decorator creates span named after function.
-        """
-        from src.code_indexer.server.telemetry import get_telemetry_manager
-        from src.code_indexer.server.telemetry.spans import traced
-
-        config = TelemetryConfig(
-            enabled=True,
-            export_traces=True,
-            collector_endpoint="http://localhost:4317",
-        )
-        _telemetry_manager = get_telemetry_manager(config)  # noqa: F841
-
-        @traced()
-        def sample_function():
-            return "result"
-
-        # Call the decorated function - should not raise
-        result = sample_function()
-        assert result == "result"
-
-    def test_traced_decorator_with_custom_name(self):
-        """
-        @traced decorator can use custom span name.
-        """
-        from src.code_indexer.server.telemetry import get_telemetry_manager
-        from src.code_indexer.server.telemetry.spans import traced
-
-        config = TelemetryConfig(
-            enabled=True,
-            export_traces=True,
-            collector_endpoint="http://localhost:4317",
-        )
-        get_telemetry_manager(config)
-
-        @traced(name="cidx.custom.operation")
-        def another_function():
-            return 42
-
-        result = another_function()
-        assert result == 42
-
-    def test_traced_decorator_preserves_function_signature(self):
-        """
-        @traced decorator preserves function name and docstring.
-        """
-        from src.code_indexer.server.telemetry.spans import traced
-
-        @traced()
-        def documented_function(arg1: str, arg2: int = 10) -> str:
-            """This is the docstring."""
-            return f"{arg1}:{arg2}"
-
-        assert documented_function.__name__ == "documented_function"
-        assert documented_function.__doc__ is not None
-        assert "docstring" in documented_function.__doc__
-
-    def test_traced_decorator_handles_exceptions(self):
-        """
-        @traced decorator records exception in span and re-raises.
-        """
-        from src.code_indexer.server.telemetry import get_telemetry_manager
-        from src.code_indexer.server.telemetry.spans import traced
-        import pytest
-
-        config = TelemetryConfig(
-            enabled=True,
-            export_traces=True,
-            collector_endpoint="http://localhost:4317",
-        )
-        get_telemetry_manager(config)
-
-        @traced()
-        def failing_function():
-            raise ValueError("intentional error")
-
-        with pytest.raises(ValueError, match="intentional error"):
-            failing_function()
-
-    def test_traced_decorator_with_attributes(self):
-        """
-        @traced decorator can add custom attributes to span.
-        """
-        from src.code_indexer.server.telemetry import get_telemetry_manager
-        from src.code_indexer.server.telemetry.spans import traced
-
-        config = TelemetryConfig(
-            enabled=True,
-            export_traces=True,
-            collector_endpoint="http://localhost:4317",
-        )
-        get_telemetry_manager(config)
-
-        @traced(attributes={"operation.type": "search", "repository": "test-repo"})
-        def search_with_attrs():
-            return "found"
-
-        result = search_with_attrs()
-        assert result == "found"
 
 
 # =============================================================================
@@ -194,8 +68,8 @@ class TestCreateSpanContextManager:
         """
         create_span() works as context manager.
         """
-        from src.code_indexer.server.telemetry import get_telemetry_manager
-        from src.code_indexer.server.telemetry.spans import create_span
+        from code_indexer.server.telemetry import get_telemetry_manager
+        from code_indexer.server.telemetry.spans import create_span
 
         config = TelemetryConfig(
             enabled=True,
@@ -212,8 +86,8 @@ class TestCreateSpanContextManager:
         """
         create_span() can set attributes on span.
         """
-        from src.code_indexer.server.telemetry import get_telemetry_manager
-        from src.code_indexer.server.telemetry.spans import create_span
+        from code_indexer.server.telemetry import get_telemetry_manager
+        from code_indexer.server.telemetry.spans import create_span
 
         config = TelemetryConfig(
             enabled=True,
@@ -232,8 +106,8 @@ class TestCreateSpanContextManager:
         """
         create_span() records exceptions in span.
         """
-        from src.code_indexer.server.telemetry import get_telemetry_manager
-        from src.code_indexer.server.telemetry.spans import create_span
+        from code_indexer.server.telemetry import get_telemetry_manager
+        from code_indexer.server.telemetry.spans import create_span
         import pytest
 
         config = TelemetryConfig(
@@ -251,11 +125,11 @@ class TestCreateSpanContextManager:
         """
         create_span() includes correlation ID when available.
         """
-        from src.code_indexer.server.telemetry import (
+        from code_indexer.server.telemetry import (
             get_telemetry_manager,
             set_current_correlation_id,
         )
-        from src.code_indexer.server.telemetry.spans import create_span
+        from code_indexer.server.telemetry.spans import create_span
 
         config = TelemetryConfig(
             enabled=True,
@@ -270,6 +144,45 @@ class TestCreateSpanContextManager:
         with create_span("cidx.test.correlated") as span:
             # Span should have correlation.id attribute
             assert span is not None
+
+    def test_create_span_adds_correlation_id_to_real_exported_span(self):
+        """
+        Behavioral regression guard for the `src.`-prefixed import bug
+        (Story #1586 code-review round 2, Codex finding): the pre-existing
+        test above only asserts `span is not None`, which would still pass
+        even if _get_correlation_id() silently returned None on every call
+        (e.g. due to the broken import). This test proves the correlation
+        id set via set_current_correlation_id() actually reaches a REAL,
+        finished, exported OTEL span's `correlation.id` attribute -- not
+        just that create_span() doesn't blow up.
+
+        Uses the real otel_test_support.active_span_exporter() helper (a
+        genuine TracerProvider + InMemorySpanExporter), already reused by
+        other span-wiring tests in this story -- no mocking of create_span,
+        the tracer, or the correlation bridge.
+        """
+        from code_indexer.server.telemetry.correlation_bridge import (
+            set_current_correlation_id,
+        )
+        from code_indexer.server.telemetry.spans import create_span
+
+        from tests.unit.server.telemetry.otel_test_support import (
+            active_span_exporter,
+        )
+
+        set_current_correlation_id("real-correlation-id-456")
+
+        with active_span_exporter() as exporter:
+            with create_span("cidx.test.correlated"):
+                pass
+
+        finished_spans = [
+            s for s in exporter.get_finished_spans() if s.name == "cidx.test.correlated"
+        ]
+        assert len(finished_spans) == 1, "cidx.test.correlated span not emitted"
+        attributes = finished_spans[0].attributes
+        assert attributes is not None
+        assert attributes.get("correlation.id") == "real-correlation-id-456"
 
 
 # =============================================================================
@@ -288,32 +201,12 @@ class TestNoopWhenDisabled:
         """Reset singletons after each test."""
         reset_all_singletons()
 
-    def test_traced_decorator_noop_when_disabled(self):
-        """
-        @traced decorator is no-op when telemetry disabled.
-        """
-        from src.code_indexer.server.telemetry import get_telemetry_manager
-        from src.code_indexer.server.telemetry.spans import traced
-
-        config = TelemetryConfig(
-            enabled=False,
-            collector_endpoint="http://localhost:4317",
-        )
-        get_telemetry_manager(config)
-
-        @traced()
-        def disabled_function():
-            return "still works"
-
-        result = disabled_function()
-        assert result == "still works"
-
     def test_create_span_noop_when_disabled(self):
         """
         create_span() is no-op when telemetry disabled.
         """
-        from src.code_indexer.server.telemetry import get_telemetry_manager
-        from src.code_indexer.server.telemetry.spans import create_span
+        from code_indexer.server.telemetry import get_telemetry_manager
+        from code_indexer.server.telemetry.spans import create_span
 
         config = TelemetryConfig(
             enabled=False,
@@ -326,42 +219,109 @@ class TestNoopWhenDisabled:
             pass
 
 
-# =============================================================================
-# Async Support Tests
-# =============================================================================
+class TestCorrelationIdImportRobustness:
+    """Bug (Story #1586 code-review Finding 9): spans.py's
+    _get_correlation_id() imports correlation_bridge via the 'src.'-prefixed
+    module path, which does not exist in a non-editable production install
+    (setuptools ships only the real 'code_indexer' package, never a
+    top-level 'src' namespace package). The broken import raises
+    ModuleNotFoundError there, silently swallowed by a bare
+    'except ImportError: return None', so every span in a real deployment
+    silently carries no correlation.id attribute.
+
+    Verified via real source inspection (inspect.getsource) of the actual
+    function under test -- no mocking of the import system or of the
+    function itself.
+    """
+
+    def test_get_correlation_id_does_not_use_broken_src_prefixed_import(self):
+        import inspect
+
+        from code_indexer.server.telemetry import spans
+
+        source = inspect.getsource(spans._get_correlation_id)
+
+        assert "from src.code_indexer" not in source
+        assert "from code_indexer.server.telemetry.correlation_bridge import" in source
 
 
-@pytest.mark.slow
-class TestAsyncSupport:
-    """Tests for async function support."""
+class TestSingletonHelperLifoRestore:
+    """Story #1586 code-review round 2, Codex finding: the test-support
+    singleton helpers (active_job_metrics_singleton() /
+    active_application_metrics_singleton()) unconditionally cleared the
+    global TelemetryManager singleton to None on exit instead of restoring
+    whatever manager was active before the context was entered -- a real
+    latent bug in shared test infrastructure. A nested use already exists
+    in-tree (tests/e2e/server/test_20_telemetry_metrics_wiring_1586.py nests
+    active_job_metrics_singleton() inside
+    active_application_metrics_singleton()): entering the inner context
+    used to shut down the OUTER's manager and replace the global, and the
+    outer's own exit then cleared to None instead of restoring what was
+    there before the outer context started.
 
-    def setup_method(self):
-        """Reset singletons before each test."""
-        reset_all_singletons()
+    Real OTEL SDK objects throughout (via the real helpers under test) --
+    MESSI Rule #1: no mocks of the code under test.
+    """
 
-    def teardown_method(self):
-        """Reset singletons after each test."""
-        reset_all_singletons()
+    def test_nested_job_metrics_singleton_restores_outer_application_metrics_manager_without_shutdown(
+        self,
+    ):
+        from code_indexer.server.telemetry.manager import peek_telemetry_manager
 
-    def test_traced_decorator_supports_async(self):
-        """
-        @traced decorator works with async functions.
-        """
-        from src.code_indexer.server.telemetry import get_telemetry_manager
-        from src.code_indexer.server.telemetry.spans import traced
-        import asyncio
-
-        config = TelemetryConfig(
-            enabled=True,
-            export_traces=True,
-            collector_endpoint="http://localhost:4317",
+        from tests.unit.server.telemetry.otel_test_support import (
+            active_application_metrics_singleton,
+            active_job_metrics_singleton,
         )
-        get_telemetry_manager(config)
 
-        @traced()
-        async def async_operation():
-            await asyncio.sleep(0.01)
-            return "async result"
+        with active_application_metrics_singleton() as (_app_metrics, _areader):
+            outer_manager = peek_telemetry_manager()
+            assert outer_manager is not None
 
-        result = asyncio.run(async_operation())
-        assert result == "async result"
+            with active_job_metrics_singleton() as (_job_metrics, _jreader):
+                # While the inner context is active, the global singleton
+                # points at the inner's own manager, not the outer's.
+                assert peek_telemetry_manager() is not outer_manager
+                # The outer's manager must survive, untouched, for the
+                # duration of the (still-active) inner context.
+                assert outer_manager.is_initialized is True
+
+            # LIFO restore: after the inner context exits, the OUTER's
+            # manager must be back in place as the global singleton --
+            # never cleared to None, and never shut down along the way.
+            assert peek_telemetry_manager() is outer_manager
+            assert outer_manager.is_initialized is True
+
+
+class TestDeadSpanUtilitiesRemoved:
+    """Anti-Orphan-Code regression guard (Story #1676, AC7).
+
+    add_span_attribute(), add_span_event(), and the @traced decorator were
+    confirmed to have zero call sites anywhere in src/ outside spans.py
+    itself and telemetry/__init__.py's re-export (independently
+    re-verified via `grep -rn "add_span_attribute\\|add_span_event\\|@traced\\b" src/`
+    during this AC), then deleted. This structural test proves the three
+    symbols are actually gone from both the spans module and the
+    telemetry package's public exports, so they cannot silently be
+    reintroduced without a test failure calling it out.
+    """
+
+    @pytest.mark.parametrize(
+        "symbol_name", ["traced", "add_span_attribute", "add_span_event"]
+    )
+    def test_dead_symbol_no_longer_exists(self, symbol_name):
+        from code_indexer.server.telemetry import spans
+        import code_indexer.server.telemetry as telemetry_package
+
+        assert not hasattr(spans, symbol_name)
+        assert not hasattr(telemetry_package, symbol_name)
+        assert symbol_name not in telemetry_package.__all__
+
+    def test_kept_symbols_still_exported(self):
+        """Confirms the deletion did not collateral-damage the symbols
+        this AC explicitly requires to be kept."""
+        from code_indexer.server.telemetry import spans
+
+        assert hasattr(spans, "create_span")
+        assert hasattr(spans, "get_tracer")
+        assert hasattr(spans, "reset_spans_state")
+        assert hasattr(spans, "_NoOpSpan")

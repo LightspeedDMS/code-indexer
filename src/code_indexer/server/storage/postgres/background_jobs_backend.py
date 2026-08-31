@@ -16,9 +16,12 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import time
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
+
+import psutil
 
 from .connection_pool import ConnectionPool
 
@@ -73,6 +76,71 @@ _ALLOWED_JOB_COLUMNS = frozenset(
         "phase_detail",
     }
 )
+
+
+def _owning_worker_process_is_alive(executing_pid: Optional[int]) -> bool:
+    """Bug #1563: True only when a job's recorded owning-worker PID is a
+    live OS process on THIS host.
+
+    Under `uvicorn --workers N`, every worker runs its own lifespan and
+    each lifespan calls cleanup_orphaned_jobs_on_startup(node_id=...).
+    The node-scoped predicate alone cannot distinguish "a sibling worker
+    on this SAME node is still alive and genuinely executing this job"
+    from "the owning process is provably gone" -- it unconditionally
+    failed every running/pending row owned by the node, including jobs
+    still executing inside a healthy sibling worker. This helper adds a
+    worker-level (PID) identity check to resolve that ambiguity, mirrored
+    identically in storage/sqlite_backends.py's helper of the same name.
+
+    - executing_pid is None: no worker identity was ever recorded for
+      this row (a legacy row from before this fix, or a row claimed via
+      DistributedJobClaimer's cross-node work-stealing queue, which does
+      not stamp this column). Returns False so the caller's pre-existing
+      unconditional-fail behavior for such rows is preserved exactly.
+    - executing_pid is a live PID: the owning worker is still running --
+      returns True so the caller does NOT fail this job.
+    - executing_pid is a dead PID: the owner is provably gone (a real
+      crash, or specifically the worker that owned it was recycled) --
+      returns False so the caller still reclaims it. A genuine full-node
+      restart kills every worker process on that node at once, so every
+      recorded pid becomes dead and every row is still correctly
+      reclaimed -- crash recovery is unaffected by this change.
+
+    MUST NOT be applied to the Bug #1512 `executing_node IS NULL` branch:
+    that branch's stale executing_pid (if any) can originate from a
+    DIFFERENT host -- job_reconciliation_service resets executing_node to
+    NULL (without touching executing_pid) specifically when the OWNING
+    node has left the cluster's active-node list, a cross-host scenario.
+    Checking pid liveness on THIS host for that branch would risk a false
+    "still alive" from an unrelated local process coincidentally reusing
+    that foreign pid number, silently reintroducing the exact bug Bug
+    #1512 fixed. That branch's own invariant ("no legitimate code path
+    ever leaves a running row with a NULL owner") already proves every
+    such row is a genuine orphan without needing a pid check at all --
+    see cleanup_orphaned_jobs_on_startup for where this split is enforced.
+
+    Known, accepted, bounded residual risk (documented rather than
+    engineered away): PID reuse. If the OS recycles a PID number between
+    the owning process's death and this check, an unrelated process could
+    coincidentally occupy the same PID and be misread as "still alive",
+    deferring reclamation of a genuine orphan until a later sweep. This
+    never causes the opposite (and far worse) failure mode of killing a
+    job that is still genuinely running.
+    """
+    if executing_pid is None:
+        return False
+    try:
+        return bool(psutil.pid_exists(executing_pid))
+    except Exception:
+        # Fail conservatively toward "cannot disprove liveness" -- never
+        # wrongly fail a job whose owner we could not prove is gone.
+        logger.warning(
+            "Bug #1563: liveness probe for owning worker pid %s raised; "
+            "treating as alive (conservative)",
+            executing_pid,
+        )
+        return True
+
 
 # Columns selected in every SELECT query (ordered — must match _row_to_dict)
 _SELECT_COLS = """
@@ -149,7 +217,7 @@ class BackgroundJobsPostgresBackend:
             "progress_info": row[18] if len(row) > 18 else None,
             "metadata": _json_col(row[19]) if len(row) > 19 else None,
             "executing_node": row[20] if len(row) > 20 else None,
-            "claimed_at": row[21] if len(row) > 21 else None,
+            "claimed_at": _dt(row[21]) if len(row) > 21 else None,
             "current_phase": row[22] if len(row) > 22 else None,
             "phase_detail": row[23] if len(row) > 23 else None,
             # Story #1032 AC12: actor_username audit trail
@@ -187,14 +255,40 @@ class BackgroundJobsPostgresBackend:
         current_phase: Optional[str] = None,
         phase_detail: Optional[str] = None,
         actor_username: Optional[str] = None,
+        *,
+        duplicate_violation_log_level: int = logging.WARNING,
     ) -> None:
         """Insert a new background job row.
+
+        Args:
+            duplicate_violation_log_level: Bug #1565 -- severity for the
+                "Duplicate active job rejected by database" log emitted
+                when idx_active_job_per_repo rejects this INSERT. Defaults
+                to WARNING, which is correct for this method's DIRECT
+                callers (JobTracker.register_job()/_insert_job(), and the
+                one-time migrate_background_jobs() JSON import) -- neither
+                expects or tolerates a duplicate, so a violation there is a
+                genuine anomaly. atomic_claim_insert() below -- the
+                EXCLUSIVE call path behind
+                register_job_if_no_conflict()'s by-design cross-node
+                single-flight guard, whose DuplicateJobError is always
+                caught and handled as an expected no-op by every real
+                caller -- passes DEBUG instead. The caller decides
+                severity; this method never guesses from context.
 
         Raises:
             IntegrityError: When a duplicate active job exists for the same
                 (operation_type, repo_alias), enforced by partial unique index
                 idx_active_job_per_repo (migration 004, Bug #536).
         """
+        # Bug #1563: stamp the OWNING WORKER's OS pid alongside the node
+        # whenever this row is being claimed (executing_node provided).
+        # Computed internally via os.getpid() -- always correct because
+        # this call always executes inside the very process taking
+        # ownership -- so no caller change is required. Rows with no
+        # owner (executing_node=None, e.g. a pod-pull-eligible row left
+        # for cross-node work-stealing) get no pid either.
+        executing_pid = os.getpid() if executing_node is not None else None
         try:
             with self._pool.connection() as conn:
                 with conn.cursor() as cur:
@@ -208,7 +302,7 @@ class BackgroundJobsPostgresBackend:
                             progress_info, metadata,
                             executing_node, claimed_at,
                             current_phase, phase_detail,
-                            actor_username
+                            actor_username, executing_pid
                         ) VALUES (
                             %s, %s, %s, %s, %s,
                             %s, %s, %s, %s, %s, %s,
@@ -217,7 +311,7 @@ class BackgroundJobsPostgresBackend:
                             %s, %s,
                             %s, %s,
                             %s, %s,
-                            %s
+                            %s, %s
                         )
                         ON CONFLICT (job_id) DO NOTHING
                         """,
@@ -261,6 +355,7 @@ class BackgroundJobsPostgresBackend:
                             current_phase,
                             phase_detail,
                             actor_username,
+                            executing_pid,
                         ),
                     )
         except Exception as exc:
@@ -269,7 +364,13 @@ class BackgroundJobsPostgresBackend:
             if "UniqueViolation" in type(exc).__name__ or (
                 hasattr(exc, "sqlstate") and getattr(exc, "sqlstate") == "23505"
             ):
-                logger.warning(
+                # Bug #1565: severity is caller-decided via
+                # duplicate_violation_log_level (see this method's own
+                # docstring) -- WARNING by default for save_job()'s direct
+                # callers, DEBUG for atomic_claim_insert()'s by-design
+                # single-flight path.
+                logger.log(
+                    duplicate_violation_log_level,
                     "Duplicate active job rejected by database: "
                     "operation_type=%s, repo_alias=%s (job_id=%s)",
                     operation_type,
@@ -316,6 +417,15 @@ class BackgroundJobsPostgresBackend:
         UniqueViolation. This method is the Protocol-compliant entry point that
         job_tracker._atomic_insert_impl uses on the backend path.
 
+        Bug #1565: this method is the EXCLUSIVE call path behind
+        JobTracker.register_job_if_no_conflict()'s by-design cross-node
+        single-flight guard -- every real caller catches the resulting
+        DuplicateJobError and treats it as an expected, handled no-op
+        (skip this tick, return HTTP 409, etc.), never an unhandled crash.
+        The duplicate-violation log is therefore emitted at DEBUG below,
+        not save_job()'s default WARNING (which remains correct for
+        save_job()'s OTHER, non-conflict-tolerant direct callers).
+
         Raises:
             psycopg.errors.UniqueViolation: When idx_active_job_per_repo rejects
                 the INSERT due to a duplicate active job for (operation_type, repo_alias).
@@ -346,6 +456,7 @@ class BackgroundJobsPostgresBackend:
             executing_node=executing_node,
             claimed_at=claimed_at,
             actor_username=actor_username,
+            duplicate_violation_log_level=logging.DEBUG,
         )
 
     def get_job(self, job_id: str) -> Optional[Dict[str, Any]]:
@@ -761,6 +872,65 @@ class BackgroundJobsPostgresBackend:
         Any job still in 'running' or 'pending' state when the server starts
         was orphaned by a previous crash or restart.
 
+        Bug #1512: a 'running' row with executing_node IS NULL is
+        unreachable by the node-scoped ``executing_node = %s`` branch on
+        EVERY node — SQL ``NULL = <anything>`` is never true, including
+        another NULL. No legitimate code path ever leaves a 'running' row
+        with a NULL owner: DistributedJobClaimer.claim_next_job's atomic
+        UPDATE always sets ``executing_node`` and ``status = 'running'``
+        together in the same statement, and register_job_if_no_conflict
+        stamps a real node_id for every non-pod-pull-eligible operation
+        type. Such a row can therefore only be a genuine bug/orphan, so ANY
+        node's startup cleanup may safely reclaim it — added as a second,
+        independent OR-branch scoped to ``status = 'running'`` only (never
+        'pending', to avoid reclaiming the legitimate PENDING pod-pull
+        work-stealing queue state, where executing_node IS NULL is the
+        normal, expected, unclaimed state).
+
+        Bug #1563: under `uvicorn --workers N`, every worker's own
+        lifespan startup calls this method with the SAME node_id, so the
+        node-scoped predicate alone cannot tell "this node crashed" apart
+        from "a single sibling worker on this same node was merely
+        recycled" — it unconditionally failed every running/pending job
+        on the whole node, including jobs genuinely still executing
+        inside a healthy sibling worker process. Fixed by adding a
+        worker-identity liveness check (see
+        _owning_worker_process_is_alive) SCOPED ONLY to the node-owned
+        branch: a row's ``executing_pid`` (stamped by
+        save_job/atomic_claim_insert at claim time) is checked against
+        THIS host's live process table via psutil.pid_exists -- only a
+        row whose owning worker process is provably gone is failed. A
+        genuine full-node restart (every worker process dies together) is
+        unaffected: every executing_pid recorded for this node becomes
+        dead by definition, so every one of them is still correctly
+        reclaimed.
+
+        The `executing_node IS NULL` branch above (Bug #1512) is
+        DELIBERATELY EXCLUDED from the pid-liveness check and always
+        unconditionally failed, exactly as before this fix. That branch's
+        executing_pid can be a STALE value from a DIFFERENT node --
+        job_reconciliation_service resets executing_node to NULL (without
+        touching executing_pid) specifically when the OWNING node has
+        left the cluster's active-node list, i.e. a cross-host scenario --
+        so checking pid liveness on THIS host for that branch would risk
+        a false "still alive" from an unrelated local process
+        coincidentally reusing that foreign pid number, silently
+        reintroducing the exact bug Bug #1512 fixed. That branch's own
+        invariant ("no legitimate code path ever leaves a running row
+        with a NULL owner") already proves every such row is a genuine
+        orphan without needing a pid check at all.
+
+        A worker-identity column was chosen over a single-designated-
+        sweeper (one primary worker per node runs the sweep, siblings
+        skip -- the existing Bug #1549 primary_instance_lock pattern)
+        because the sweeper approach only protects the case where a
+        NON-primary worker recycles. If the primary worker itself is the
+        one that dies, its replacement immediately re-acquires the
+        now-free lock and performs the exact same node-wide sweep,
+        reproducing this bug for every OTHER sibling's still-running job.
+        A per-job pid-liveness check is correct regardless of which
+        worker recycles.
+
         Returns:
             Number of orphaned jobs cleaned up.
         """
@@ -778,18 +948,50 @@ class BackgroundJobsPostgresBackend:
         error_message = "Job interrupted by server restart"
         with self._pool.connection() as conn:
             with conn.cursor() as cur:
+                # Branch A: rows this node owns. Candidate for reclaim
+                # only if the owning worker process is provably gone.
                 cur.execute(
                     """
-                    UPDATE background_jobs
-                    SET status = 'failed',
-                        error = %s,
-                        completed_at = %s
+                    SELECT job_id, executing_pid
+                    FROM background_jobs
                     WHERE status IN ('running', 'pending')
                       AND executing_node = %s
                     """,
-                    (error_message, interrupted_at, node_id),
+                    (node_id,),
                 )
-                count: int = cur.rowcount
+                node_owned_candidates = cur.fetchall()
+                job_ids_to_fail: List[str] = [
+                    row[0]
+                    for row in node_owned_candidates
+                    if not _owning_worker_process_is_alive(row[1])
+                ]
+
+                # Branch B (Bug #1512): running rows with no owner at
+                # all. Always a genuine orphan -- never pid-checked (see
+                # docstring above for why checking it would be unsafe).
+                cur.execute(
+                    """
+                    SELECT job_id
+                    FROM background_jobs
+                    WHERE status = 'running' AND executing_node IS NULL
+                    """
+                )
+                job_ids_to_fail.extend(row[0] for row in cur.fetchall())
+
+                count = 0
+                if job_ids_to_fail:
+                    cur.execute(
+                        """
+                        UPDATE background_jobs
+                        SET status = 'failed',
+                            error = %s,
+                            completed_at = %s
+                        WHERE job_id = ANY(%s)
+                          AND status IN ('running', 'pending')
+                        """,
+                        (error_message, interrupted_at, job_ids_to_fail),
+                    )
+                    count = cur.rowcount
         if count > 0:
             logger.info("Cleaned up %d orphaned jobs on server startup", count)
         return count

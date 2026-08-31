@@ -273,30 +273,87 @@ class TestValidationErrorHandling:
         assert any("user.age" in path for path in field_paths)
         assert any("user.email" in path for path in field_paths)
 
-    def test_validation_error_correlation_id_uniqueness(
+    def test_correlation_id_unique_per_call_when_no_ambient_context(
         self, error_handler: GlobalErrorHandler, mock_request: Request
     ):
-        """Test that each validation error gets a unique correlation ID."""
-        validation_error = None
+        """Bug #1648: GlobalErrorHandler._resolve_correlation_id() reuses the
+        AMBIENT request correlation id when one is active, falling back to a
+        freshly generated id only when no ambient context exists. This test
+        covers that FALLBACK branch specifically (explicit no-ambient-context
+        precondition below) -- with nothing ambient to share, each call
+        legitimately gets its own unique, freshly generated id. See
+        test_correlation_id_shared_across_calls_under_same_ambient_context
+        below for the complementary common-case branch.
+
+        tests/unit/server/conftest.py's tree-wide autouse fixture already
+        resets the ContextVar around every test; the explicit set(None)/
+        try/finally here is defense-in-depth self-containment, not a
+        substitute for it.
+        """
+        from code_indexer.server.telemetry.correlation_bridge import (
+            _correlation_id_var,
+        )
+
+        token = _correlation_id_var.set(None)  # explicit: no ambient context
         try:
-            ValidationTestModel(name="", age=-1)  # type: ignore[call-arg]
-        except PydanticValidationError as e:
-            validation_error = e
+            validation_error = None
+            try:
+                ValidationTestModel(name="", age=-1)  # type: ignore[call-arg]
+            except PydanticValidationError as e:
+                validation_error = e
 
-        # Generate multiple responses for the same error
-        response1 = error_handler.handle_validation_error(
-            validation_error, mock_request
+            # Generate multiple responses for the same error
+            response1 = error_handler.handle_validation_error(
+                validation_error, mock_request
+            )
+            response2 = error_handler.handle_validation_error(
+                validation_error, mock_request
+            )
+
+            # No ambient id active -- each call falls back to its own fresh one
+            assert response1["correlation_id"] != response2["correlation_id"]
+
+            # Both should be valid UUIDs
+            uuid.UUID(response1["correlation_id"])
+            uuid.UUID(response2["correlation_id"])
+        finally:
+            _correlation_id_var.reset(token)
+
+    def test_correlation_id_shared_across_calls_under_same_ambient_context(
+        self, error_handler: GlobalErrorHandler, mock_request: Request
+    ):
+        """Bug #1648: when an ambient request correlation id IS active,
+        multiple validation errors handled within that SAME ambient context
+        must all reuse it rather than each generating their own -- matching
+        the x-correlation-id response header and the log store's
+        correlation_id column (Bug #1641).
+        """
+        from code_indexer.server.telemetry.correlation_bridge import (
+            _correlation_id_var,
+            set_current_correlation_id,
         )
-        response2 = error_handler.handle_validation_error(
-            validation_error, mock_request
-        )
 
-        # Correlation IDs should be unique
-        assert response1["correlation_id"] != response2["correlation_id"]
+        token = _correlation_id_var.set(None)
+        try:
+            set_current_correlation_id("shared-ambient-id-1648")
 
-        # Both should be valid UUIDs
-        uuid.UUID(response1["correlation_id"])
-        uuid.UUID(response2["correlation_id"])
+            validation_error = None
+            try:
+                ValidationTestModel(name="", age=-1)  # type: ignore[call-arg]
+            except PydanticValidationError as e:
+                validation_error = e
+
+            response1 = error_handler.handle_validation_error(
+                validation_error, mock_request
+            )
+            response2 = error_handler.handle_validation_error(
+                validation_error, mock_request
+            )
+
+            assert response1["correlation_id"] == "shared-ambient-id-1648"
+            assert response2["correlation_id"] == "shared-ambient-id-1648"
+        finally:
+            _correlation_id_var.reset(token)
 
     def test_validation_error_timestamp_accuracy(
         self, error_handler: GlobalErrorHandler, mock_request: Request

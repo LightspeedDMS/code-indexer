@@ -5,18 +5,24 @@ Drop-in replacement for WikiCacheSqliteBackend using psycopg v3 sync
 connections via ConnectionPool.  Satisfies the WikiCacheBackend Protocol
 (protocols.py).
 
-Tables created on first use (CREATE TABLE IF NOT EXISTS) so no separate
-migration step is required.
+Schema (wiki_cache, wiki_sidebar_cache, wiki_article_views) is owned
+entirely by the SQL migrations (storage/postgres/migrations/sql/) — this
+backend does NOT create or alter any table. `service_init.py` always
+runs `MigrationRunner` before `StorageFactory.create_backends()`
+constructs this class, so schema is guaranteed present by the time any
+instance exists (Bug #1655 code-review remediation, F4: a previous
+self-heal `CREATE TABLE IF NOT EXISTS` here was dead code in every real
+deployment and had silently drifted out of sync with the real migration
+column names/types — removed rather than re-synced so there is no
+second copy of the schema left to drift again).
 """
 
 from __future__ import annotations
 
-import logging
 from typing import Any, Dict, List, Optional
 
 from .connection_pool import ConnectionPool
-
-logger = logging.getLogger(__name__)
+from .pg_utils import sanitize_row
 
 
 class WikiCachePostgresBackend:
@@ -29,59 +35,15 @@ class WikiCachePostgresBackend:
 
     def __init__(self, pool: ConnectionPool) -> None:
         """
-        Initialize with a shared connection pool and ensure tables exist.
+        Initialize with a shared connection pool.
+
+        Schema is assumed to already exist (see module docstring) — this
+        constructor does not touch the database.
 
         Args:
             pool: ConnectionPool instance providing psycopg v3 connections.
         """
         self._pool = pool
-        self._ensure_schema()
-
-    def _ensure_schema(self) -> None:
-        """Create wiki tables and indexes if they do not already exist."""
-        try:
-            with self._pool.connection() as conn:
-                conn.execute(
-                    """
-                    CREATE TABLE IF NOT EXISTS wiki_cache (
-                        repo_alias TEXT NOT NULL,
-                        article_path TEXT NOT NULL,
-                        rendered_html TEXT NOT NULL,
-                        title TEXT NOT NULL,
-                        file_mtime DOUBLE PRECISION NOT NULL,
-                        file_size INTEGER NOT NULL,
-                        rendered_at TEXT NOT NULL,
-                        metadata_json TEXT,
-                        PRIMARY KEY (repo_alias, article_path)
-                    )
-                    """
-                )
-                conn.execute(
-                    """
-                    CREATE TABLE IF NOT EXISTS wiki_sidebar_cache (
-                        repo_alias TEXT PRIMARY KEY,
-                        sidebar_json TEXT NOT NULL,
-                        max_mtime DOUBLE PRECISION NOT NULL,
-                        built_at TEXT NOT NULL
-                    )
-                    """
-                )
-                conn.execute(
-                    """
-                    CREATE TABLE IF NOT EXISTS wiki_article_views (
-                        repo_alias TEXT NOT NULL,
-                        article_path TEXT NOT NULL,
-                        real_views INTEGER DEFAULT 0,
-                        first_viewed_at TEXT,
-                        last_viewed_at TEXT,
-                        PRIMARY KEY (repo_alias, article_path)
-                    )
-                    """
-                )
-                conn.commit()
-        except Exception as exc:
-            logger.error("WikiCachePostgresBackend: schema setup failed: %s", exc)
-            raise
 
     def get_article(
         self, repo_alias: str, article_path: str
@@ -89,7 +51,7 @@ class WikiCachePostgresBackend:
         """Return dict with rendered_html, title, file_mtime, file_size, metadata_json or None."""
         with self._pool.connection() as conn:
             row = conn.execute(
-                "SELECT rendered_html, title, file_mtime, file_size, metadata_json "
+                "SELECT rendered_html, title, file_mtime, file_size, metadata "
                 "FROM wiki_cache WHERE repo_alias = %s AND article_path = %s",
                 (repo_alias, article_path),
             ).fetchone()
@@ -119,7 +81,7 @@ class WikiCachePostgresBackend:
             conn.execute(
                 """
                 INSERT INTO wiki_cache
-                    (repo_alias, article_path, rendered_html, title, file_mtime, file_size, rendered_at, metadata_json)
+                    (repo_alias, article_path, rendered_html, title, file_mtime, file_size, rendered_at, metadata)
                 VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT (repo_alias, article_path) DO UPDATE SET
                     rendered_html = EXCLUDED.rendered_html,
@@ -127,7 +89,7 @@ class WikiCachePostgresBackend:
                     file_mtime = EXCLUDED.file_mtime,
                     file_size = EXCLUDED.file_size,
                     rendered_at = EXCLUDED.rendered_at,
-                    metadata_json = EXCLUDED.metadata_json
+                    metadata = EXCLUDED.metadata
                 """,
                 (
                     repo_alias,
@@ -208,7 +170,19 @@ class WikiCachePostgresBackend:
         return int(row[0]) if row else 0
 
     def get_all_view_counts(self, repo_alias: str) -> List[Dict[str, Any]]:
-        """Return all view records for repo as list of dicts."""
+        """Return all view records for repo as list of dicts.
+
+        Bug #1669: PostgreSQL's TIMESTAMPTZ columns (first_viewed_at,
+        last_viewed_at) are deserialized by psycopg into native `datetime`
+        objects, unlike the SQLite path which stores/returns these as
+        ISO-8601 strings (via `datetime.utcnow().isoformat()`). Returning
+        the raw `datetime` here broke wiki_article_analytics 100% of the
+        time in cluster mode with "Object of type datetime is not JSON
+        serializable" once the result reached JSON serialization. Route
+        each row dict through the shared `sanitize_row()` helper (used by
+        other PostgreSQL backends for the same TIMESTAMPTZ-vs-string
+        divergence) so the return shape matches the SQLite path exactly.
+        """
         with self._pool.connection() as conn:
             rows = conn.execute(
                 "SELECT article_path, real_views, first_viewed_at, last_viewed_at "
@@ -216,12 +190,14 @@ class WikiCachePostgresBackend:
                 (repo_alias,),
             ).fetchall()
         return [
-            {
-                "article_path": row[0],
-                "real_views": row[1],
-                "first_viewed_at": row[2],
-                "last_viewed_at": row[3],
-            }
+            sanitize_row(
+                {
+                    "article_path": row[0],
+                    "real_views": row[1],
+                    "first_viewed_at": row[2],
+                    "last_viewed_at": row[3],
+                }
+            )
             for row in rows
         ]
 

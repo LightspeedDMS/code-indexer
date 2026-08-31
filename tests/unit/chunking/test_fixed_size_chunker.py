@@ -2,8 +2,8 @@
 
 import pytest
 from pathlib import Path
-from src.code_indexer.indexing.fixed_size_chunker import FixedSizeChunker
-from src.code_indexer.config import IndexingConfig
+from code_indexer.indexing.fixed_size_chunker import FixedSizeChunker
+from code_indexer.config import IndexingConfig
 
 
 class TestFixedSizeChunker:
@@ -169,8 +169,16 @@ class TestFixedSizeChunker:
                 f"Single chunk should have {size} chars"
             )
 
+    @pytest.mark.slow
     def test_edge_case_very_large_file(self, chunker):
-        """Test handling of very large files."""
+        """Test handling of very large files.
+
+        Marked slow (~52s locally on a 10MB input) per CLAUDE.md's
+        fast-automation.sh runtime policy (>30s MUST exclude via
+        @pytest.mark.slow); this test genuinely passes and previously was
+        excluded via a bare --deselect entry instead of this marker
+        (GitHub issue #1685 deselect audit).
+        """
         # Test with 10MB worth of characters
         large_size = 10_000_000
         text = "x" * large_size

@@ -468,6 +468,74 @@ def _reset_config_service_singleton():
     _reset_config_service_singletons()
 
 
+# Story #1600: `get_memory_governor()`/`set_memory_governor()`
+# (memory_governor.py) is the SAME kind of bare module-level singleton as
+# Bug #1428's ConfigService, and suffers the identical cross-test poisoning
+# mechanism. `code_indexer.server.app`'s module-level `app = create_app()`
+# (bottom of app.py) eagerly calls `initialize_services()`
+# (startup/service_init.py), which builds a REAL MemoryGovernor,
+# `set_memory_governor()`s it, and `.start()`s its real psutil-sampling
+# background thread -- all as a plain IMPORT side effect. Any test that
+# merely imports `code_indexer.server.mcp.handlers` (or anything else that
+# transitively imports `code_indexer.server.app`, which is nearly every
+# server-side test) is enough to trigger this construction exactly once per
+# pytest process (module caching), after which the real governor persists
+# for the rest of the process.
+#
+# Story #1600 added the FIRST live "reject-the-live-caller" consumer of
+# this governor (check_query_admission(), wired into 15 query-path MCP
+# handlers + the REST /api/query route) -- previously the only two
+# consumers (background_jobs.py, distributed_job_claimer.py) only *defer*
+# a background job, so a stray real governor sitting in RED band (its
+# documented fail-safe: RED before the first sample, and RED for up to
+# red_min_dwell_seconds, default 30s, after process start even once real
+# usage is low) was invisible. Confirmed root cause: a fresh pytest process
+# running tests/unit/server/mcp/test_browse_directory_filters.py alone
+# failed every case with a spurious memory_pressure denial, because the
+# real governor (installed via the app.py import above) was still inside
+# its RED min-dwell warm-up window and the test never touches the governor
+# itself.
+#
+# Every existing test that DOES care about the governor already
+# self-manages it via clear_memory_governor()/set_memory_governor() in its
+# own setup/teardown (see test_background_jobs_admission_gate.py,
+# test_memory_governor_lifecycle.py, test_pod_pull_work_stealing_
+# roundtrip_bug1424.py, etc.) -- a pre-test clear here is a harmless no-op
+# for those; it only restores the "no governor -> fail open" baseline for
+# every OTHER test that never anticipated a live governor being consulted.
+#
+# Both import paths reset (same dual-path rationale as
+# _CONFIG_SERVICE_MODULE_NAMES above): `code_indexer.server...`
+# (PYTHONPATH=./src, most unit tests) and `src.code_indexer.server...`
+# (some integration tests loading via the project-root prefix).
+_MEMORY_GOVERNOR_MODULE_NAMES = [
+    "code_indexer.server.services.memory_governor",
+    "src.code_indexer.server.services.memory_governor",
+]
+
+
+def _clear_memory_governor_singletons() -> None:
+    import importlib
+
+    for module_name in _MEMORY_GOVERNOR_MODULE_NAMES:
+        try:
+            module = importlib.import_module(module_name)
+        except ImportError:
+            continue
+        module.clear_memory_governor()
+
+
+@pytest.fixture(autouse=True)
+def _reset_memory_governor_singleton():
+    """Clear the MemoryGovernor module-level singleton before/after each test.
+
+    See the Story #1600 module-level comment above for full rationale.
+    """
+    _clear_memory_governor_singletons()
+    yield
+    _clear_memory_governor_singletons()
+
+
 # Bug #1370: module-level `rich.console.Console()` singletons that cache
 # color/terminal detection at import time. See
 # tests/unit/cli/test_console_singleton_test_isolation_bug1370.py for the

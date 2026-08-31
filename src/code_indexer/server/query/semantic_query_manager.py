@@ -12,10 +12,12 @@ from code_indexer.storage.filesystem_vector_store import LocalIndexNotFoundError
 import contextvars
 import json
 import logging
+import os
 import re
 import io
 import sys
 import time
+import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
 from dataclasses import dataclass
@@ -31,9 +33,11 @@ from code_indexer.services.query_strategy import (
 )
 from code_indexer.services.provider_health_monitor import ProviderHealthMonitor
 
+from .parallel_query_executor import get_global_parallel_query_executor
 from ..repositories.activated_repo_manager import ActivatedRepoManager
 from ..repositories.background_jobs import BackgroundJobManager
 from ..services.constants import is_internal_meta_repo
+from ..services.deactivation_query_drain import track_activated_repo_query
 from ...search.query import SearchResult
 from ...proxy.config_manager import ProxyConfigManager
 from ...proxy.cli_integration import _execute_query
@@ -169,6 +173,7 @@ def reconstruct_temporal_backend(
     repo_path: Path,
     repository_alias: str,
     shard_ownership: Optional[Any] = None,
+    temporal_index_dir: Optional[Path] = None,
 ) -> Tuple[Any, Path, Any]:
     """Reconstruct (config, index_path, vector_store) for a temporal query.
 
@@ -186,6 +191,12 @@ def reconstruct_temporal_backend(
             SemanticQueryManager._owns_for_cache's None-safe fail-open
             semantics: None means sharding is off / no ownership info, so
             the shared cache is always used).
+        temporal_index_dir: Bug #1529 -- the fixed, deterministic location of
+            this golden repo's temporal data, OUTSIDE any repo's own cloned
+            tree. When provided it overrides BOTH the constructed store's
+            index root and the returned index_path. None keeps the legacy
+            in-repo derivation (standalone CLI / a caller with no golden-repo
+            lineage information).
 
     Returns:
         (config, index_path, vector_store) tuple.
@@ -201,8 +212,12 @@ def reconstruct_temporal_backend(
     from ...proxy.config_manager import ConfigManager
     from ...backends.backend_factory import BackendFactory
 
-    config_manager = ConfigManager.create_with_backtrack(repo_path)
-    config = config_manager.get_config()
+    # Bug #1690: load_verified_config() verifies the resolved config
+    # genuinely describes repo_path itself, rather than blind-trusting
+    # create_with_backtrack()'s silent ancestor-backtrack / bare-Config()
+    # defaulting -- which would otherwise feed the temporal fusion
+    # dispatch the WRONG embedder/config settings for this repo.
+    config = ConfigManager.load_verified_config(repo_path)
 
     # Create vector store (Story #526: pass server cache)
     from ..app import _server_hnsw_cache
@@ -216,10 +231,111 @@ def reconstruct_temporal_backend(
         # repos it owns; non-owned repos load-and-discard (fail-open).
         hnsw_cache=(_server_hnsw_cache if owns_for_cache else None),
         memory_governor=get_memory_governor(),
+        # Bug #1529: when the caller resolved a fixed sister location for
+        # this repo's temporal data, the store MUST be rooted there -- not at
+        # repo_path's own index dir. For an ACTIVATED repo, repo_path is the
+        # activation's CoW clone, whose temporal copy (if any) is frozen at
+        # clone time and diverges from the golden repo on every refresh.
+        index_dir=temporal_index_dir,
     )
     vector_store = backend.get_vector_store_client()
-    index_path = repo_path / ".code-indexer" / "index"
+    # Both the store's root and the index_path handed to shard discovery must
+    # agree, or discovery would enumerate one location while reads hit another.
+    index_path = (
+        Path(temporal_index_dir)
+        if temporal_index_dir is not None
+        else repo_path / ".code-indexer" / "index"
+    )
     return config, index_path, vector_store
+
+
+def load_golden_temporal_config(
+    golden_repo_alias: str,
+    activated_repo_manager: Any,
+) -> Optional[Any]:
+    """Load the GOLDEN repo's OWN, CURRENT Config (Story #1461 salvage item 4).
+
+    An activated repo's CoW clone config.json is a point-in-time snapshot
+    taken at activation and is NEVER live-synced with the golden repo it
+    was cloned from. If the golden repo's active_embedder (and its
+    `embedders` registry) changes after activation, a temporal query
+    resolved purely from the clone's own config would silently select the
+    WRONG embedder -- both for shard discovery (config.temporal.
+    active_embedder) and for the query-embedding provider construction
+    that matches a resolved collection back against config.temporal.
+    embedders (temporal_fusion_dispatch._create_embedding_provider_for_
+    collection). Callers must swap the ENTIRE returned config's `temporal`
+    sub-object into their own config (never just the active_embedder
+    scalar) so both stay mutually consistent.
+
+    Uses GoldenRepoManager.get_actual_repo_path -- the SAME canonical
+    flat-vs-versioned resolver every other golden-repo-path consumer in
+    this codebase uses -- never a bespoke path derivation.
+
+    Args:
+        golden_repo_alias: The golden repo's own alias (a trailing
+            '-global' suffix, if present, is stripped -- callers may pass
+            either the bare golden alias or an is_global query's
+            '-global'-suffixed user_alias).
+        activated_repo_manager: Any object exposing a `.golden_repo_manager`
+            attribute (e.g. ActivatedRepoManager).
+
+    Returns:
+        The golden repo's real Config, or None (fail-open) if the golden
+        repo cannot be resolved or its config cannot be loaded -- callers
+        must keep using their existing (clone-derived) config in that
+        case; this function never raises.
+    """
+    if not golden_repo_alias:
+        return None
+
+    bare_alias = golden_repo_alias.removesuffix("-global")
+
+    try:
+        golden_repo_manager = activated_repo_manager.golden_repo_manager
+        golden_path = golden_repo_manager.get_actual_repo_path(bare_alias)
+    except Exception:
+        logger.warning(
+            "Failed to resolve golden repo path for temporal embedder "
+            "selection (golden_repo_alias=%s); using existing config as-is",
+            golden_repo_alias,
+            exc_info=True,
+        )
+        return None
+
+    from ...proxy.config_manager import ConfigManager
+
+    # Require a REAL, on-disk config.json directly under golden_path --
+    # ConfigManager.create_with_backtrack() silently falls back to a
+    # DEFAULT Config() when no config file is found anywhere up the
+    # directory tree, which would otherwise let a bogus/unresolvable
+    # golden_path (e.g. an under-wired collaborator in a test, or a
+    # dangling registry entry) silently overwrite a correct clone config
+    # with default (wrong) embedder settings instead of failing open.
+    golden_config_file = Path(golden_path) / ".code-indexer" / "config.json"
+    if not golden_config_file.exists():
+        logger.warning(
+            "Golden repo path has no config.json for temporal embedder "
+            "selection (golden_repo_alias=%s, path=%s); using existing "
+            "config as-is",
+            golden_repo_alias,
+            golden_path,
+        )
+        return None
+
+    try:
+        golden_config_manager = ConfigManager.create_with_backtrack(Path(golden_path))
+        return golden_config_manager.get_config()
+    except Exception:
+        logger.warning(
+            "Failed to load golden repo's own config for temporal embedder "
+            "selection (golden_repo_alias=%s, path=%s); using existing "
+            "config as-is",
+            golden_repo_alias,
+            golden_path,
+            exc_info=True,
+        )
+        return None
 
 
 def convert_temporal_result_to_query_result(
@@ -290,11 +406,32 @@ class SemanticQueryManager:
         if data_dir:
             self.data_dir = data_dir
         else:
-            home_dir = Path.home()
-            self.data_dir = str(home_dir / ".cidx-server" / "data")
+            # Bug #1522 (sibling of Bug #1517's temporal_worker.py fix): a
+            # bare, no-arg SemanticQueryManager() must NOT resolve its
+            # default data_dir purely from Path.home() -- that ignores
+            # CIDX_SERVER_DATA_DIR, the env var this codebase otherwise
+            # treats as the canonical way to locate the server's
+            # configured data directory for a standalone construction
+            # outside the normal DI chain (see
+            # ActivatedRepoIndexManager.__init__, mcp/handlers/_legacy.py,
+            # git_operations_service.py, and temporal_worker.py's
+            # run_temporal_worker per Bug #1517). On any real deployment
+            # where the server's data dir differs from the OS default,
+            # ignoring the env var here would make this manager's
+            # internally-constructed GoldenRepoManager look in the wrong
+            # metadata store, silently losing Story #1461's "use the
+            # golden repo's own current config for embedder selection"
+            # correctness fix. Byte-identical when the env var is unset
+            # (the common local/default case).
+            env_server_dir = os.environ.get("CIDX_SERVER_DATA_DIR")
+            self.data_dir = (
+                str(Path(env_server_dir) / "data")
+                if env_server_dir
+                else str(Path.home() / ".cidx-server" / "data")
+            )
 
         self.activated_repo_manager = activated_repo_manager or ActivatedRepoManager(
-            data_dir
+            self.data_dir
         )
         self.background_job_manager = background_job_manager or BackgroundJobManager()
 
@@ -314,6 +451,13 @@ class SemanticQueryManager:
         # just load-and-discard (hnsw_cache=None).
         self._shard_ownership: Optional[Any] = None
 
+        # Story #1457 AC1/AC2 live wiring: server-wide QueryTracker
+        # singleton (app.state.query_tracker). None = not yet injected (no
+        # resolver is ever constructed for a temporal query in that case --
+        # see _execute_temporal_query's gate -- byte-identical to today).
+        # Injected POST-HOC from lifespan.py, mirroring set_shard_ownership.
+        self.query_tracker: Optional[Any] = None
+
     def set_shard_ownership(self, shard_ownership: Any) -> None:
         """Inject repo-shard ownership (cluster mode only).
 
@@ -321,6 +465,16 @@ class SemanticQueryManager:
         repos this node owns; non-owned repos are served load-and-discard.
         """
         self._shard_ownership = shard_ownership
+
+    def set_query_tracker(self, query_tracker: Any) -> None:
+        """Inject the server-wide QueryTracker singleton (Story #1457 AC1/AC2).
+
+        When set (together with a golden_repo_alias), temporal queries
+        construct a REAL TemporalShardResolver whose pin() acquires actual
+        refcounts -- closing the mid-read deletion hazard. Without this, no
+        resolver is ever constructed, regardless of golden_repo_alias.
+        """
+        self.query_tracker = query_tracker
 
     def _owns_for_cache(self, repository_alias: str) -> bool:
         """Whether this node should use its shared index cache for ``alias``.
@@ -865,10 +1019,27 @@ class SemanticQueryManager:
         Returns:
             Job ID for tracking query progress
         """
+
+        # Codex HIGH finding (round 2): MCP/REST/wiki all wrap their
+        # SYNCHRONOUS inline calls to query_user_repositories() with
+        # track_activated_repo_query(), but this background-job path
+        # handed the bare method straight to submit_job(), which invokes
+        # it later on a worker thread with NO tracking wrapper at all --
+        # invisible to deactivation's bounded refcount drain. Wrap here so
+        # the SAME tracking mechanism covers this path too.
+        def _tracked_query_user_repositories(**kwargs: Any) -> Dict[str, Any]:
+            with track_activated_repo_query(
+                self.query_tracker,
+                self.activated_repo_manager,
+                kwargs.get("username", ""),
+                kwargs.get("repository_alias"),
+            ):
+                return self.query_user_repositories(**kwargs)
+
         # Submit background job
         job_id = self.background_job_manager.submit_job(
             "semantic_query",
-            self.query_user_repositories,  # type: ignore[arg-type]
+            _tracked_query_user_repositories,  # type: ignore[arg-type]
             username=username,
             query_text=query_text,
             repository_alias=repository_alias,
@@ -1051,62 +1222,133 @@ class SemanticQueryManager:
                         continue  # Skip if alias can't be resolved
 
                     repo_path = target_path
+                    # Story #1457 AC1/AC2: an is_global repo's OWN alias IS
+                    # the golden repo's alias (resolved directly above via
+                    # AliasManager against golden-repos/aliases).
+                    golden_repo_alias_for_temporal: Optional[str] = repo_alias
+                    # Story #1458 AC11: golden/-global repos have no
+                    # activation_id concept -- None preserves today's pure
+                    # path-derived FSV cache key.
+                    activation_id: Optional[str] = None
+                    # Codex HIGH finding (round 4): golden-repo queries are
+                    # a separate, already-covered refcounting concern
+                    # (_execute_tracked_search) -- leave tracking a true
+                    # no-op here.
+                    _tracking_alias: Optional[str] = None
                 # Check if repo_path is already provided
                 elif "repo_path" in repo_info and repo_info["repo_path"]:
                     repo_path = repo_info["repo_path"]
+                    # Story #1457 AC1/AC2: no golden-repo lineage info is
+                    # available for this shape -- no resolver constructed.
+                    golden_repo_alias_for_temporal = None
+                    # Story #1458 AC11: no activated-repo context for this
+                    # shape either -- None.
+                    activation_id = None
+                    # Codex HIGH finding (round 4): an explicit repo_path
+                    # bypasses activated_repo_manager entirely, so no
+                    # accurate refcount key can be constructed for it --
+                    # leave tracking a true no-op for this shape.
+                    _tracking_alias = None
                 else:
                     # Fall back to activated repo manager for regular activated repos
                     repo_path = self.activated_repo_manager.get_activated_repo_path(
                         username, repo_alias
                     )
+                    # Story #1457 AC1/AC2: the UNDERLYING golden repo this
+                    # activation was cloned from -- NEVER repo_alias itself
+                    # (the activation's own, possibly-renamed, user_alias).
+                    golden_repo_alias_for_temporal = repo_info.get("golden_repo_alias")
+                    # Story #1458 AC11: the per-clone generation/identity
+                    # token for THIS activation, threaded into FSV's
+                    # cache-key construction so a deactivate-then-reactivate
+                    # cycle at the same path is a structural cache-miss.
+                    activation_id = self.activated_repo_manager.get_activation_id(
+                        username, repo_alias
+                    )
+                    # Codex round-6 HIGH finding #9: migration 039's
+                    # activation_id column is correctly additive/nullable,
+                    # but a NULL VALUE FROM A GENUINE ACTIVATED-REPO
+                    # LOOKUP (e.g. an activation created by an OLD node
+                    # during a rolling upgrade, before activation_id
+                    # generation existed) must never be forwarded bare --
+                    # FilesystemVectorStore._activation_scoped_cache_key()
+                    # treats None as "no activation_id component", so TWO
+                    # DIFFERENT such activations at the SAME path would
+                    # derive the IDENTICAL cache key. A fresh, unique
+                    # per-call sentinel forces a structural cache miss
+                    # (genuine bypass) that can never collide with
+                    # another NULL-activation_id activation.
+                    if activation_id is None:
+                        activation_id = f"__missing_activation_id__{uuid.uuid4().hex}"
+                    # Codex HIGH finding (round 4): this is the ONLY branch
+                    # that is unambiguously "a real activated repo, resolved
+                    # via activated_repo_manager" -- the same identity the
+                    # explicit-alias query paths already track.
+                    _tracking_alias = repo_alias
 
                 # Create temporary config and search engine for this repository
                 # This would need actual implementation with proper config management
                 _strat_out: List[str] = []
-                results = self._search_single_repository(
-                    repo_path,
-                    repo_alias,
-                    query_text,
-                    limit,
-                    min_score,
-                    file_extensions,
-                    language,
-                    exclude_language,
-                    path_filter,
-                    exclude_path,
-                    accuracy,
-                    # Search mode (Story #503 - FTS Bug Fix)
-                    search_mode=search_mode,
-                    # Temporal parameters (Story #446)
-                    time_range=time_range,
-                    time_range_all=time_range_all,
-                    at_commit=at_commit,
-                    # FTS-specific parameters (Story #503 Phase 2)
-                    case_sensitive=case_sensitive,
-                    fuzzy=fuzzy,
-                    edit_distance=edit_distance,
-                    snippet_lines=snippet_lines,
-                    regex=regex,
-                    # Temporal filtering parameters (Story #503 Phase 3)
-                    diff_type=diff_type,
-                    author=author,
-                    chunk_type=chunk_type,
-                    # Query strategy parameters (Story #488 Phase 4)
-                    query_strategy=query_strategy,
-                    score_fusion=score_fusion,
-                    # Multi-provider routing (Story #593)
-                    preferred_provider=preferred_provider,
-                    # Story #883 Phase C: reuse pre-computed vector (no duplicate Voyage call)
-                    precomputed_query_vector=precomputed_query_vector,
-                    # Story #1108 (S4): per-request cache bypass
-                    no_embedding_cache_shortcut=no_embedding_cache_shortcut,
-                    # Story #1291 AC7/AC8: forward explicit embedder override
-                    temporal_embedder=temporal_embedder,
-                    # AC7 (Bug #1202): collect resolved routing decision
-                    _effective_strategy_out=_strat_out,
-                    # Bug #1298: relay the embedder-specific warning out-param
-                    _temporal_warning_out=_temporal_warning_out,
-                )
+                # Codex HIGH finding (round 4): alias-less fan-out queries
+                # were completely invisible to deactivation's bounded
+                # refcount drain -- track EACH physical repo actually
+                # searched here, keyed by the per-repository identity
+                # resolved during execution (never the possibly-absent
+                # request-level repository_alias).
+                with track_activated_repo_query(
+                    getattr(self, "query_tracker", None),
+                    self.activated_repo_manager,
+                    username,
+                    _tracking_alias,
+                ):
+                    results = self._search_single_repository(
+                        repo_path,
+                        repo_alias,
+                        query_text,
+                        limit,
+                        min_score,
+                        file_extensions,
+                        language,
+                        exclude_language,
+                        path_filter,
+                        exclude_path,
+                        accuracy,
+                        # Search mode (Story #503 - FTS Bug Fix)
+                        search_mode=search_mode,
+                        # Temporal parameters (Story #446)
+                        time_range=time_range,
+                        time_range_all=time_range_all,
+                        at_commit=at_commit,
+                        # FTS-specific parameters (Story #503 Phase 2)
+                        case_sensitive=case_sensitive,
+                        fuzzy=fuzzy,
+                        edit_distance=edit_distance,
+                        snippet_lines=snippet_lines,
+                        regex=regex,
+                        # Temporal filtering parameters (Story #503 Phase 3)
+                        diff_type=diff_type,
+                        author=author,
+                        chunk_type=chunk_type,
+                        # Query strategy parameters (Story #488 Phase 4)
+                        query_strategy=query_strategy,
+                        score_fusion=score_fusion,
+                        # Multi-provider routing (Story #593)
+                        preferred_provider=preferred_provider,
+                        # Story #883 Phase C: reuse pre-computed vector (no duplicate Voyage call)
+                        precomputed_query_vector=precomputed_query_vector,
+                        # Story #1108 (S4): per-request cache bypass
+                        no_embedding_cache_shortcut=no_embedding_cache_shortcut,
+                        # Story #1291 AC7/AC8: forward explicit embedder override
+                        temporal_embedder=temporal_embedder,
+                        # AC7 (Bug #1202): collect resolved routing decision
+                        _effective_strategy_out=_strat_out,
+                        # Bug #1298: relay the embedder-specific warning out-param
+                        _temporal_warning_out=_temporal_warning_out,
+                        # Story #1457 AC1/AC2: forward the golden repo alias.
+                        golden_repo_alias=golden_repo_alias_for_temporal,
+                        # Story #1458 AC11: forward the per-clone generation token.
+                        activation_id=activation_id,
+                    )
                 # AC7: capture routing decision from the first resolved repo
                 if _strat_out and _effective_strategy == (
                     query_strategy or "primary_only"
@@ -1159,12 +1401,19 @@ class SemanticQueryManager:
             # get_configured_providers checks env vars first, so it works
             # even with an empty config (common for server-managed repos
             # where versioned snapshots have incomplete local configs).
+            # Bug #1690: load_verified_config() verifies the resolved
+            # config genuinely describes repo_path itself, rather than
+            # blind-trusting create_with_backtrack()'s silent
+            # ancestor-backtrack / bare-Config() defaulting -- which would
+            # otherwise leak an unrelated ancestor repo's real API keys
+            # (get_configured_providers reads config.cohere.api_key
+            # directly) into THIS repo's dual-provider strategy decision.
+            # A mismatch is caught by the SAME except-Exception below,
+            # degrading to the honest env-var-only fallback.
             try:
                 from code_indexer.config import ConfigManager
 
-                config = ConfigManager.create_with_backtrack(
-                    Path(repo_path)
-                ).get_config()
+                config = ConfigManager.load_verified_config(Path(repo_path))
             except Exception as cfg_exc:
                 logger.debug(
                     "Config load failed for %s, using env-var fallback: %s",
@@ -1184,6 +1433,95 @@ class SemanticQueryManager:
                 extra=get_log_extra("QUERY-STRATEGY-003"),
             )
             return False
+
+    def _merge_multimodal_supplement(
+        self,
+        repo_path: str,
+        query_text: str,
+        limit: int,
+        results: List[QueryResult],
+        repository_alias: str,
+        min_score: Optional[float],
+        file_extensions: Optional[List[str]],
+        language: Optional[str],
+        exclude_language: Optional[str],
+        path_filter: Optional[str],
+        exclude_path: Optional[str],
+        accuracy: Optional[str],
+        activation_id: Optional[str],
+    ) -> List[QueryResult]:
+        """Bug #1480 follow-up: fold in multimodal-collection hits for the
+        parallel/failover strategies, which bypass search_repository_path's own
+        enable_multimodal fan-out (primary_only already gets multimodal via
+        search_repository_path directly, unchanged by this method).
+
+        Reuses SemanticSearchService.query_multimodal_only() (which itself
+        reuses MultiIndexQueryService's existing multimodal detection/query
+        machinery) -- never re-implements multimodal detection or merge logic.
+        Deduplicates against the already-fused code results by
+        (file_path, line_number)/(file_path, line_start), applies the same
+        min_score/file_extensions filters as the primary path, and re-sorts
+        the combined list before truncating to limit.
+        """
+        from ..services.search_service import SemanticSearchService
+
+        search_service = SemanticSearchService()
+        try:
+            multimodal_items = search_service.query_multimodal_only(
+                repo_path=repo_path,
+                query=query_text,
+                limit=limit,
+                path_filter=path_filter,
+                language=language,
+                exclude_language=exclude_language,
+                exclude_path=exclude_path,
+                accuracy=accuracy,
+                activation_id=activation_id,
+            )
+        except Exception as e:
+            # Bug #1480 follow-up: multimodal is a best-effort SUPPLEMENT to the
+            # already-fused code results. A multimodal-side failure (a provider
+            # missing a contract method, provider down, missing key, etc.) must
+            # NEVER zero the whole query -- log loudly and degrade to the code
+            # results. The primary code query already failed loud on its own.
+            logger.warning(
+                "Multimodal supplement failed for repo %s (degrading to "
+                "code-only results): %s",
+                repo_path,
+                e,
+                extra=get_log_extra("QUERY-MM-SUPPLEMENT-001"),
+            )
+            return results
+        if not multimodal_items:
+            return results
+
+        existing_keys = {(r.file_path, r.line_number) for r in results}
+        merged = list(results)
+        for item in multimodal_items:
+            if min_score is not None and item.score < min_score:
+                continue
+            if file_extensions is not None:
+                if Path(item.file_path).suffix.lower() not in [
+                    ext.lower() for ext in file_extensions
+                ]:
+                    continue
+            key = (item.file_path, item.line_start)
+            if key in existing_keys:
+                continue
+            existing_keys.add(key)
+            merged.append(
+                QueryResult(
+                    file_path=item.file_path,
+                    line_number=item.line_start,
+                    code_snippet=item.content,
+                    similarity_score=item.score,
+                    repository_alias=repository_alias,
+                    source_repo=None,
+                    source_provider="multimodal",
+                )
+            )
+        merged.sort(key=lambda r: r.similarity_score, reverse=True)
+        return merged[:limit]
 
     def _search_single_repository(
         self,
@@ -1232,6 +1570,15 @@ class SemanticQueryManager:
         # Bug #1298: out-param for the embedder-specific temporal "no
         # indexed collections" warning. Per-request, no shared state.
         _temporal_warning_out: Optional[List[str]] = None,
+        # Story #1457 AC1/AC2 live wiring: the underlying GOLDEN repo's own
+        # alias, forwarded to _execute_temporal_query on the temporal path.
+        # None (every current production caller) preserves today's behavior.
+        golden_repo_alias: Optional[str] = None,
+        # Story #1458 AC11: per-clone generation/identity token for an
+        # ACTIVATED repo query, forwarded into SemanticSearchService's
+        # FSV cache-key construction. None (golden/-global repos, CLI/solo)
+        # preserves today's pure path-derived cache key.
+        activation_id: Optional[str] = None,
     ) -> List[QueryResult]:
         """
         Search a single repository using the appropriate search service.
@@ -1301,6 +1648,7 @@ class SemanticQueryManager:
                 accuracy=accuracy,
                 provider_name=preferred_provider,
                 no_embedding_cache_shortcut=no_embedding_cache_shortcut,
+                activation_id=activation_id,
             )
             for r in results:
                 r.source_provider = preferred_provider
@@ -1388,6 +1736,7 @@ class SemanticQueryManager:
                     accuracy=accuracy,
                     provider_name="cohere",
                     no_embedding_cache_shortcut=no_embedding_cache_shortcut,
+                    activation_id=activation_id,
                 )
 
             def _to_strategy_failover(r: QueryResult) -> StrategyQueryResult:
@@ -1427,6 +1776,27 @@ class SemanticQueryManager:
                 all_failover = [
                     r for r in all_failover if r.similarity_score >= min_score
                 ]
+
+            # Bug #1480 follow-up: fold in multimodal results for the failover
+            # strategy (bypassed by search_repository_path's own multimodal
+            # fan-out, which only fires for primary_only). Semantic-only --
+            # multimodal is a vector concept, never engaged for fts/hybrid.
+            if search_mode == "semantic":
+                all_failover = self._merge_multimodal_supplement(
+                    repo_path,
+                    query_text,
+                    limit,
+                    all_failover,
+                    repository_alias,
+                    min_score,
+                    file_extensions,
+                    language,
+                    exclude_language,
+                    path_filter,
+                    exclude_path,
+                    accuracy,
+                    activation_id,
+                )
 
             return all_failover[:limit]
 
@@ -1468,6 +1838,7 @@ class SemanticQueryManager:
                         provider_name="voyage-ai",
                         # Story #1108 (S4): per-request cache bypass
                         no_embedding_cache_shortcut=no_embedding_cache_shortcut,
+                        activation_id=activation_id,
                     ),
                 ),
                 (
@@ -1487,6 +1858,7 @@ class SemanticQueryManager:
                         provider_name="cohere",
                         # Story #1108 (S4): per-request cache bypass
                         no_embedding_cache_shortcut=no_embedding_cache_shortcut,
+                        activation_id=activation_id,
                     ),
                 ),
             ]
@@ -1552,79 +1924,102 @@ class SemanticQueryManager:
             secondary_results: List[QueryResult] = []
             # Bug #678: track per-future start times for failure latency recording
             _future_start: Dict[Any, float] = {}
-            # Use explicit lifecycle (not `with`) so we can call shutdown(wait=False)
-            # on timeout — the `with` form always calls shutdown(wait=True) which
-            # blocks until all threads finish, defeating the timeout.
-            executor: ThreadPoolExecutor = ThreadPoolExecutor(max_workers=2)
-            try:
-                futures = {}
-                for name, fn in provider_tasks.items():
-                    _t0 = time.monotonic()
-                    _provider_ctx = contextvars.copy_context()
-                    fut = executor.submit(_provider_ctx.run, fn)
-                    futures[fut] = name
-                    _future_start[fut] = _t0
+            # Issue #1516: use the shared, process-wide executor singleton so
+            # worker threads (and Story #1492's ChunkStoreThreadCache entries
+            # keyed on them) are reused across requests, instead of a fresh
+            # ThreadPoolExecutor being spawned and torn down on every query.
+            # This executor MUST NEVER be shut down here — it is shared across
+            # the whole process lifetime (see parallel_query_executor.py).
+            executor: ThreadPoolExecutor = get_global_parallel_query_executor()
+            # ThreadPoolExecutor.submit() raises RuntimeError with EXACTLY
+            # one of these two message prefixes when the pool has been shut
+            # down (CPython concurrent/futures/thread.py) -- no other
+            # RuntimeError shares this prefix.
+            _SUBMIT_AFTER_SHUTDOWN_PREFIX = "cannot schedule new futures after"
+            futures = {}
+            for name, fn in provider_tasks.items():
+                _t0 = time.monotonic()
+                _provider_ctx = contextvars.copy_context()
                 try:
-                    for future in as_completed(futures, timeout=_parallel_timeout):
-                        provider_name = futures[future]
-                        _latency_ms = (
-                            time.monotonic() - _future_start[future]
-                        ) * 1000.0
-                        try:
-                            batch = future.result()
-                            if provider_name == "voyage-ai":
-                                primary_results = batch
-                            else:
-                                secondary_results = batch
-                        except Exception as _e:
-                            logger.warning(
-                                "Parallel query provider '%s' failed: %s",
-                                provider_name,
-                                _e,
-                                extra=get_log_extra("QUERY-STRATEGY-002"),
-                            )
-                            # Bug #1236: LocalIndexNotFoundError is a local storage
-                            # problem — the embedding provider completed successfully
-                            # and must NOT be sin-binned.  Only genuine provider
-                            # failures (HTTP errors, rate limits, timeouts, etc.)
-                            # should record a failure against the provider health.
-                            if not isinstance(_e, LocalIndexNotFoundError):
-                                # Bug #678: record failure so health monitor can sinbin the provider
-                                _health_monitor.record_call(
-                                    provider_name,
-                                    latency_ms=_latency_ms,
-                                    success=False,
-                                )
-                except concurrent.futures.TimeoutError:
-                    # Bug #678: capture unfinished futures BEFORE cancel() so the
-                    # done() check below correctly identifies them — cancel() marks
-                    # futures as cancelled which makes done() return True afterward.
-                    _unfinished = [fut for fut in futures if not fut.done()]
-                    for future in futures:
-                        future.cancel()
+                    fut = executor.submit(_provider_ctx.run, fn)
+                except RuntimeError as _submit_exc:
+                    if not str(_submit_exc).startswith(_SUBMIT_AFTER_SHUTDOWN_PREFIX):
+                        raise
+                    # Issue #1516 code-review Defect 2: reset_global_
+                    # parallel_query_executor() clears the singleton inside
+                    # its lock but shuts down the OLD instance OUTSIDE the
+                    # lock, so a caller holding a stale reference (this
+                    # `executor` variable, captured moments earlier) can
+                    # race a concurrent reset. This is an infra-level
+                    # pool-shutdown condition, NOT a genuine provider
+                    # failure -- skip this provider gracefully (like a
+                    # down/sin-binned provider above) and never sin-bin a
+                    # healthy provider for it.
                     logger.warning(
-                        "Parallel query timed out after %ds; some providers did not respond",
-                        _parallel_timeout,
-                        extra=get_log_extra("QUERY-STRATEGY-004"),
+                        "Parallel query provider '%s' could not be "
+                        "submitted to the shared executor (pool shutdown "
+                        "race): %s",
+                        name,
+                        _submit_exc,
+                        extra=get_log_extra("QUERY-STRATEGY-008"),
                     )
-                    # Bug #678: record timeout as failure for all unfinished providers
-                    for future in _unfinished:
-                        provider_name = futures[future]
-                        _latency_ms = (
-                            time.monotonic() - _future_start[future]
-                        ) * 1000.0
-                        _health_monitor.record_call(
+                    continue
+                futures[fut] = name
+                _future_start[fut] = _t0
+            try:
+                for future in as_completed(futures, timeout=_parallel_timeout):
+                    provider_name = futures[future]
+                    _latency_ms = (time.monotonic() - _future_start[future]) * 1000.0
+                    try:
+                        batch = future.result()
+                        if provider_name == "voyage-ai":
+                            primary_results = batch
+                        else:
+                            secondary_results = batch
+                    except Exception as _e:
+                        logger.warning(
+                            "Parallel query provider '%s' failed: %s",
                             provider_name,
-                            latency_ms=_latency_ms,
-                            success=False,
+                            _e,
+                            extra=get_log_extra("QUERY-STRATEGY-002"),
                         )
-                    # Non-blocking shutdown: let timed-out threads finish as daemons
-                    # rather than blocking here until the slow thread completes.
-                    executor.shutdown(wait=False)
-                    executor = None  # type: ignore[assignment]
-            finally:
-                if executor is not None:
-                    executor.shutdown(wait=True)
+                        # Bug #1236: LocalIndexNotFoundError is a local storage
+                        # problem — the embedding provider completed successfully
+                        # and must NOT be sin-binned.  Only genuine provider
+                        # failures (HTTP errors, rate limits, timeouts, etc.)
+                        # should record a failure against the provider health.
+                        if not isinstance(_e, LocalIndexNotFoundError):
+                            # Bug #678: record failure so health monitor can sinbin the provider
+                            _health_monitor.record_call(
+                                provider_name,
+                                latency_ms=_latency_ms,
+                                success=False,
+                            )
+            except concurrent.futures.TimeoutError:
+                # Bug #678: capture unfinished futures BEFORE cancel() so the
+                # done() check below correctly identifies them — cancel() marks
+                # futures as cancelled which makes done() return True afterward.
+                _unfinished = [fut for fut in futures if not fut.done()]
+                for future in futures:
+                    # Cancelling a not-yet-started future prevents it from ever
+                    # running; an already-running future is unaffected and keeps
+                    # running to completion on its shared-pool worker thread,
+                    # independent of this (already-abandoned) request.
+                    future.cancel()
+                logger.warning(
+                    "Parallel query timed out after %ds; some providers did not respond",
+                    _parallel_timeout,
+                    extra=get_log_extra("QUERY-STRATEGY-004"),
+                )
+                # Bug #678: record timeout as failure for all unfinished providers
+                for future in _unfinished:
+                    provider_name = futures[future]
+                    _latency_ms = (time.monotonic() - _future_start[future]) * 1000.0
+                    _health_monitor.record_call(
+                        provider_name,
+                        latency_ms=_latency_ms,
+                        success=False,
+                    )
 
             # Story #638: Symmetric score-gated filtering — cull weak provider
             # results before fusion to prevent low-quality candidates from diluting
@@ -1716,12 +2111,45 @@ class SemanticQueryManager:
                 self._last_query_degraded_providers = []
             self._last_query_degraded_providers = _degraded_in_query
 
+            # Bug #1480 follow-up: fold in multimodal results for the parallel
+            # strategy (bypassed by search_repository_path's own multimodal
+            # fan-out, which only fires for primary_only). Semantic-only --
+            # multimodal is a vector concept, never engaged for fts/hybrid.
+            if search_mode == "semantic":
+                all_results = self._merge_multimodal_supplement(
+                    repo_path,
+                    query_text,
+                    limit,
+                    all_results,
+                    repository_alias,
+                    min_score,
+                    file_extensions,
+                    language,
+                    exclude_language,
+                    path_filter,
+                    exclude_path,
+                    accuracy,
+                    activation_id,
+                )
+
             return all_results[:limit]
 
         try:
             # Check if this is a composite repository
             repo_path_obj = Path(repo_path)
             if self._is_composite_repository(repo_path_obj):
+                # Story #1461 salvage item 5 (anti-fallback / anti-silent-
+                # failure): the composite CLI path (_execute_cli_query /
+                # _build_cli_args) has no wiring for time_range/
+                # time_range_all/at_commit -- silently dropping the time
+                # filter while honoring other filters would return HTTP 200
+                # with non-temporal results and no error. Reject the WHOLE
+                # temporal request explicitly instead of partially honoring
+                # it.
+                if time_range or time_range_all or at_commit:
+                    raise SemanticQueryError(
+                        "Temporal queries are not supported for composite repositories"
+                    )
                 # Use CLI integration for composite repos (supports all filters)
                 self.logger.debug(
                     f"Composite repository detected: {repo_path}. Using CLI integration for search.",
@@ -1786,6 +2214,8 @@ class SemanticQueryManager:
                     temporal_embedder=temporal_embedder,
                     # Bug #1298: relay the embedder-specific warning out-param
                     _temporal_warning_out=_temporal_warning_out,
+                    # Story #1457 AC1/AC2: forward the golden repo alias.
+                    golden_repo_alias=golden_repo_alias,
                 )
 
             # FTS SEARCH HANDLING (Story #503 - FTS Bug Fix)
@@ -1850,6 +2280,7 @@ class SemanticQueryManager:
                 repo_path=repo_path,
                 search_request=search_request,
                 precomputed_query_vector=precomputed_query_vector,
+                activation_id=activation_id,
             )
 
             # Convert search results to QueryResult objects
@@ -1916,6 +2347,9 @@ class SemanticQueryManager:
         provider_name: Optional[str] = None,
         # Story #1108 (S4): per-request bypass of the query-embedding cache read
         no_embedding_cache_shortcut: bool = False,
+        # Story #1458 AC11: per-clone generation/identity token, forwarded
+        # into search_repository_path_with_provider's cache-key construction.
+        activation_id: Optional[str] = None,
     ) -> List[QueryResult]:
         """
         Search a single repository using an explicitly named embedding provider.
@@ -1961,6 +2395,7 @@ class SemanticQueryManager:
             repo_path=repo_path,
             search_request=search_request,
             provider_name=provider_name,
+            activation_id=activation_id,
         )
 
         results = []
@@ -2293,6 +2728,54 @@ class SemanticQueryManager:
 
         return results
 
+    def _resolve_temporal_index_dir(
+        self, golden_repo_alias: Optional[str]
+    ) -> Optional[Path]:
+        """The fixed temporal data location for a golden repo (Bug #1529).
+
+        Returns None ONLY when the caller has no golden-repo lineage
+        information at all (an explicit-repo_path query shape), in which case
+        the temporal read falls back to the legacy in-repo derivation
+        unchanged. That is a legitimate query shape, not a failure.
+
+        `golden_repos_dir` is derived exactly as the pre-existing temporal
+        code already derived it -- from `activated_repos_dir`'s parent -- so
+        no new physical-root concept is introduced.
+
+        Bug #1529 finding #2: once the golden alias IS known, the fixed root
+        is the ONLY correct location for this repo's temporal data, so a
+        failure deriving it RAISES rather than returning None. The previous
+        `except Exception: return None` sent the caller on to
+        `reconstruct_temporal_backend(repo_path, ...)` -- the ACTIVATION'S own
+        CoW clone -- silently reintroducing the frozen-at-clone-time
+        duplicate that diverges from the golden repo on every refresh, i.e.
+        exactly the defect this bug exists to close, and with no error
+        surfaced to anyone. Failing the query loudly is strictly better than
+        answering it from knowingly-wrong data.
+
+        Note the discriminator deliberately is NOT
+        `CIDX_SERVER_REFRESH_CONTEXT`: that marker is injected only into the
+        temporal CHILD SUBPROCESS by `build_temporal_child_env` and is absent
+        from the server's own process, which is where this seam runs --
+        gating on it would make this fix permanently inert.
+
+        Raises:
+            ValueError: when `golden_repo_alias` is known but its fixed
+                temporal root cannot be derived.
+        """
+        if not golden_repo_alias:
+            return None
+
+        from ...services.temporal.temporal_server_paths import (
+            server_temporal_index_root,
+        )
+
+        golden_repos_dir = (
+            Path(self.activated_repo_manager.activated_repos_dir).parent
+            / "golden-repos"
+        )
+        return server_temporal_index_root(golden_repos_dir, golden_repo_alias)
+
     def _execute_temporal_query(
         self,
         repo_path: Path,
@@ -2320,6 +2803,12 @@ class SemanticQueryManager:
         # specific message survives instead of being re-derived generically
         # by the caller. Per-request, no shared state.
         _temporal_warning_out: Optional[List[str]] = None,
+        # Story #1457 AC1/AC2 live wiring: the underlying GOLDEN repo's own
+        # alias (for is_global queries, repository_alias itself; for a
+        # regular activated repo, its golden_repo_alias -- NEVER the
+        # activated repo's own user-facing alias). None (every current
+        # production caller) constructs no resolver -- byte-identical.
+        golden_repo_alias: Optional[str] = None,
     ) -> List[QueryResult]:
         """Execute temporal query using TemporalSearchService.
 
@@ -2353,6 +2842,17 @@ class SemanticQueryManager:
         )
 
         try:
+            # Bug #1529: resolve the FIXED, deterministic location of this
+            # golden repo's temporal data -- outside any repo's own cloned
+            # tree, derived from the golden repo's alias, never from
+            # repo_path. For a regular activated repo, repo_path is that
+            # activation's CoW clone: reading temporal data from there meant
+            # reading a frozen-at-clone-time duplicate that silently diverged
+            # from the golden repo on every refresh. Both query seams (this
+            # one and the golden-repo-direct/is_global one) resolve the SAME
+            # path from the SAME module the write side uses.
+            temporal_index_dir = self._resolve_temporal_index_dir(golden_repo_alias)
+
             # Story #1400 Phase 3: shared reconstruction helper -- the SAME
             # path a future standalone temporal worker will use, not a
             # duplicate inline block.
@@ -2360,7 +2860,30 @@ class SemanticQueryManager:
                 repo_path,
                 repository_alias,
                 shard_ownership=getattr(self, "_shard_ownership", None),
+                temporal_index_dir=temporal_index_dir,
             )
+
+            # Story #1461 salvage item 4: embedder SELECTION must use the
+            # GOLDEN repo's OWN, CURRENT config -- never the activated CoW
+            # clone's point-in-time config.json snapshot (never live-synced
+            # after activation). Swap the ENTIRE config.temporal sub-object
+            # (never just active_embedder) so config.temporal.embedders
+            # stays mutually consistent with active_embedder -- otherwise
+            # _create_embedding_provider_for_collection's downstream match
+            # against a stale embedders list would silently fall back to
+            # the WRONG (clone's) active_embedder even after discovery
+            # correctly found the golden's new embedder's shards.
+            # Fail-open: golden_repo_alias=None (is_global-without-tracker,
+            # CLI, solo) or any resolution failure keeps today's
+            # clone-derived config unchanged.
+            if golden_repo_alias:
+                golden_config = load_golden_temporal_config(
+                    golden_repo_alias, self.activated_repo_manager
+                )
+                if golden_config is not None:
+                    config = config.model_copy(
+                        update={"temporal": golden_config.temporal}
+                    )
 
             # Resolve time range tuple before calling fusion dispatch
             if time_range:

@@ -101,7 +101,47 @@ class IdentityQueueHandler(logging.handlers.QueueHandler):
         a process boundary. Our QueueListener and its handlers run in-process, so
         we keep the raw record and let the real handlers format it on the listener
         thread (off the request hot path).
+
+        Bug #1641: this method runs synchronously on the ORIGINAL calling
+        (request) thread -- the last point before the record is handed off
+        to the listener thread via the queue. It is therefore the correct,
+        single central place to inject ``record.correlation_id`` from the
+        ambient request context: ``get_correlation_id()`` resolves a
+        ``contextvars`` value that would no longer be visible once the
+        record reaches the persistent listener thread (plain
+        ``threading.Thread`` instances do not inherit the calling thread's
+        context). This heals the log store's correlation_id column for
+        every ``logger.x()`` call server-wide without touching individual
+        call sites -- see ``logging_utils.inject_correlation_id``.
+
+        Story #1676 AC2: the same reasoning applies to OTEL trace/span
+        context -- ``get_trace_context()`` resolves the active span via
+        OTEL's own ``contextvars``-based current-span mechanism, which is
+        equally invisible once the record reaches the listener thread. This
+        is the single central wiring point that populates
+        ``record.trace_id``/``record.span_id`` for every ``logger.x()`` call
+        server-wide -- see ``logging_utils.inject_trace_context``.
+
+        Story #1676 AC3: for real OTLP log EXPORT (not just columnar
+        correlation), the exported LogRecord's trace_id/span_id must come
+        from the span active on THIS calling thread at log-call time, not
+        whatever OTEL context happens to be live on the listener thread when
+        the context-aware log bridge handler (async_logging module-level
+        ``register_additional_listener_handler``) eventually emits it. This
+        is the wiring point that captures the full ``Context`` object (not
+        just its string ids) via ``logging_utils.inject_otel_context`` --
+        see that function's docstring and the wrapper handler for the
+        reattach-at-export-time half of this mechanism.
         """
+        from code_indexer.server.logging_utils import (
+            inject_correlation_id,
+            inject_otel_context,
+            inject_trace_context,
+        )
+
+        inject_correlation_id(record)
+        inject_trace_context(record)
+        inject_otel_context(record)
         return record
 
     def _record_drop(self) -> None:
@@ -276,6 +316,76 @@ def install_queue_logging(
 def get_active_listener() -> Optional[DrainableQueueListener]:
     """Return the listener installed by the last ``install_queue_logging`` call."""
     return _active_listener
+
+
+# Story #1676 AC3 Requirement 4: guards mutation of the active listener's
+# ``.handlers`` tuple below. install_queue_logging() is called once, early,
+# in lifespan.py -- long before TelemetryManager (and whether export_logs is
+# enabled) is constructed ~2600 lines later in the same function. The
+# QueueListener's real-handler set is otherwise FIXED at construction time
+# (a plain tuple captured in __init__), so this is the only mechanism that
+# lets the OTEL logging bridge handler be added post-hoc, after telemetry
+# initializes, without tearing down and reinstalling the whole listener.
+_additional_handler_lock = threading.Lock()
+
+
+def register_additional_listener_handler(
+    handler: Optional[logging.Handler],
+) -> bool:
+    """Idempotently add ``handler`` to the active listener's real-handler set.
+
+    Safe to call multiple times with the SAME handler object: a second call
+    is a no-op (returns False) rather than appending a duplicate -- this is
+    the guarantee TelemetryManager relies on across repeated
+    construct/reset cycles (a known leak pattern in this codebase's own test
+    suite) to avoid ending up with more than one OTEL log bridge handler
+    wired to the listener.
+
+    Args:
+        handler: The handler to add (e.g. the context-aware OTEL log bridge
+            wrapper).
+
+    Returns:
+        True if the handler was newly added; False if ``handler`` is None,
+        it was already registered, or there is no active listener (e.g.
+        telemetry disabled, or called before install_queue_logging()/after
+        shutdown_queue_logging()). Never raises.
+    """
+    if handler is None:
+        return False
+    with _additional_handler_lock:
+        listener = _active_listener
+        if listener is None:
+            return False
+        if handler in listener.handlers:
+            return False
+        listener.handlers = tuple(listener.handlers) + (handler,)
+        return True
+
+
+def unregister_additional_listener_handler(
+    handler: Optional[logging.Handler],
+) -> bool:
+    """Remove ``handler`` from the active listener's real-handler set.
+
+    Args:
+        handler: The handler to remove.
+
+    Returns:
+        True if the handler was registered and has been removed; False if
+        ``handler`` is None, it was not registered, or there is no active
+        listener. Never raises.
+    """
+    if handler is None:
+        return False
+    with _additional_handler_lock:
+        listener = _active_listener
+        if listener is None:
+            return False
+        if handler not in listener.handlers:
+            return False
+        listener.handlers = tuple(h for h in listener.handlers if h is not handler)
+        return True
 
 
 def shutdown_queue_logging(timeout: float = 5.0) -> None:

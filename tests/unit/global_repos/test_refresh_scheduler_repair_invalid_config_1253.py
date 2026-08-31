@@ -142,11 +142,20 @@ class TestMissingConfigJsonIsSelfHealed:
                     with patch.object(scheduler, "_reconcile_registry_with_filesystem"):
                         result = scheduler._execute_refresh(alias_name)
 
-        assert len(repair_calls) == 1, (
+        # Bug #1561: count only the `cidx init` calls, not every subprocess
+        # invoked in this code path. The stale-index check (Bug #1508,
+        # refresh_scheduler.py's `_check_stale_index_metadata`) can also run
+        # `git rev-parse HEAD` when real on-disk index metadata carrying a
+        # `current_commit` is present; a bare "total subprocess count"
+        # assertion would then break on activity unrelated to this AC.
+        init_calls = [
+            (cmd, cwd) for cmd, cwd in repair_calls if cmd[:2] == ["cidx", "init"]
+        ]
+        assert len(init_calls) == 1, (
             "AC1: cidx init must be invoked exactly once to repair the "
             "missing config.json."
         )
-        cmd, cwd = repair_calls[0]
+        cmd, cwd = init_calls[0]
         assert cmd[:2] == ["cidx", "init"], f"Expected 'cidx init' command, got {cmd}"
         assert cwd == str(source_dir)
 
@@ -197,7 +206,14 @@ class TestCorruptConfigJsonIsSelfHealed:
                     with patch.object(scheduler, "_reconcile_registry_with_filesystem"):
                         result = scheduler._execute_refresh(alias_name)
 
-        assert len(repair_calls) == 1, (
+        # Bug #1561: filter for the call the AC is actually about instead of
+        # counting all subprocesses. `subprocess.run` is patched module-wide
+        # for `refresh_scheduler`, so `repair_calls` also accumulates the
+        # Bug #1508 stale-index check's `git rev-parse HEAD` calls whenever
+        # real on-disk index metadata with a `current_commit` is present --
+        # unrelated activity that must not make this assertion flaky.
+        init_calls = [c for c in repair_calls if c[:2] == ["cidx", "init"]]
+        assert len(init_calls) == 1, (
             "AC2: cidx init must be invoked exactly once to repair the "
             "corrupt config.json."
         )
@@ -286,7 +302,12 @@ class TestValidConfigNeverTriggersRepair:
                     with patch.object(scheduler, "_reconcile_registry_with_filesystem"):
                         result = scheduler._execute_refresh(alias_name)
 
-        assert repair_calls == [], (
+        # Bug #1561: assert on the `cidx init` calls specifically, not on
+        # every subprocess this code path might invoke -- unrelated
+        # subprocess activity (e.g. Bug #1508's stale-index git check) must
+        # not make this assertion flaky in either direction.
+        init_calls = [c for c in repair_calls if c[:2] == ["cidx", "init"]]
+        assert init_calls == [], (
             "AC4: cidx init repair must NOT be invoked when config.json is "
             "already valid -- this would be an unnecessary subprocess on "
             "every single healthy refresh cycle."
@@ -326,7 +347,11 @@ class TestMissingCodeIndexerDirStillSkipsGracefully:
                 with patch.object(scheduler, "_reconcile_registry_with_filesystem"):
                     result = scheduler._execute_refresh(alias_name)
 
-        assert repair_calls == [], (
+        # Bug #1561: assert on the `cidx init` calls specifically, matching
+        # the same precision fix applied to the AC1/AC2/AC4 assertions in
+        # this file.
+        init_calls = [c for c in repair_calls if c[:2] == ["cidx", "init"]]
+        assert init_calls == [], (
             "AC5: a genuinely uninitialized repo (no .code-indexer/ at all) "
             "must NOT trigger a repair attempt -- Bug #268's original "
             "'writer hasn't populated it yet' semantics are unchanged."

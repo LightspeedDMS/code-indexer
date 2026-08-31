@@ -5,6 +5,12 @@
 #   Phase 1: CLI standalone  (tests/e2e/cli_standalone/)
 #   Phase 2: CLI daemon      (tests/e2e/cli_daemon/)
 #   Phase 3: Server in-proc  (tests/e2e/server/) via FastAPI TestClient
+#            + an explicit Docker-dependent sub-check (Story #1676 AC8):
+#            tests/e2e/server/test_21_otel_live_collector_1676.py brings up
+#            a real, pinned-version OTEL Collector + Jaeger + Prometheus
+#            docker-compose stack and proves a real span/metric/log round
+#            trip through it. Runs as its OWN separate pytest invocation
+#            (excluded from Phase 3's blanket sweep via --ignore).
 #   Phase 4: CLI remote      (tests/e2e/cli_remote/) against live uvicorn subprocess
 #   Phase 5: Resiliency      (tests/e2e/phase5_resiliency/) against fault-injection server
 #   Phase 6: PG Parity       (tests/e2e/pg_parity/) against ephemeral PostgreSQL cluster
@@ -12,6 +18,10 @@
 # Phase 6 requires PostgreSQL server utilities (initdb, pg_ctl) to be installed.
 # If they are absent the phase is LOUD-SKIPPED with a clear message.
 # In CI, install postgresql-server (or equivalent) as a prerequisite.
+#
+# The Phase 3 OTEL live-collector sub-check requires Docker + `docker compose`.
+# If they are absent, the test file's own pytestmark SKIPS cleanly (not a
+# failure) with an unambiguous message.
 #
 # Usage:
 #   ./e2e-automation.sh             # Run all phases
@@ -344,17 +354,20 @@ copy_seed_repo() {
 wait_for_server() {
     local health_url="http://${E2E_SERVER_HOST}:${E2E_SERVER_PORT}/health"
     local login_url="http://${E2E_SERVER_HOST}:${E2E_SERVER_PORT}/auth/login"
-    local elapsed=0
+    # Deadline-based (not an accumulated "elapsed" counter): bash $(( )) is
+    # integer-only and a fractional POLL previously crashed this loop.
+    local start_time
+    start_time=$(date +%s)
+    local deadline=$((start_time + E2E_SERVER_READINESS_TIMEOUT))
 
     _yellow "  Waiting for server at $health_url (timeout ${E2E_SERVER_READINESS_TIMEOUT}s)..."
     _yellow "  Readiness requires: /health non-5xx AND /auth/login returns 200+token"
-    while [[ $elapsed -lt $E2E_SERVER_READINESS_TIMEOUT ]]; do
+    while [[ $(date +%s) -lt $deadline ]]; do
         # Step 1: health check
         local health_code
         health_code=$(curl -s -o /dev/null -w "%{http_code}" "$health_url" 2>/dev/null || echo "000")
         if [[ "$health_code" == "000" ]] || [[ "$health_code" -ge 500 ]]; then
             sleep "$E2E_SERVER_READINESS_POLL"
-            elapsed=$((elapsed + E2E_SERVER_READINESS_POLL))
             continue
         fi
 
@@ -371,14 +384,13 @@ wait_for_server() {
         login_body=$(echo "$login_response" | head -n-1)
 
         if [[ "$login_code" == "200" ]] && echo "$login_body" | grep -q "access_token"; then
-            _green "  Server ready after ${elapsed}s (health=$health_code, auth=200+token)"
+            _green "  Server ready after $(( $(date +%s) - start_time ))s (health=$health_code, auth=200+token)"
             return 0
         fi
 
         logger_hint="health=$health_code auth=$login_code"
         _yellow "    Not ready yet (${logger_hint}) — retrying..."
         sleep "$E2E_SERVER_READINESS_POLL"
-        elapsed=$((elapsed + E2E_SERVER_READINESS_POLL))
     done
 
     _red "ERROR: Server did not become ready within ${E2E_SERVER_READINESS_TIMEOUT}s"
@@ -394,6 +406,11 @@ run_phase() {
     local phase_num="$1"
     local phase_name="$2"
     local test_dir="$3"
+    # Optional: an absolute path to exclude from this phase's directory
+    # sweep via pytest's --ignore (Story #1676 AC8: Phase 3 excludes the
+    # Docker-dependent live-collector test file here so it can instead run
+    # as its own explicit sub-check -- see run_otel_live_collector_subcheck()).
+    local ignore_path="${4:-}"
 
     _bold "=== Phase $phase_num: $phase_name ==="
 
@@ -406,6 +423,11 @@ run_phase() {
     # while still streaming to stdout (-v --tb=short for normal visibility).
     local phase_output_file
     phase_output_file=$(mktemp)
+
+    local -a ignore_flag=()
+    if [[ -n "$ignore_path" ]]; then
+        ignore_flag=(--ignore="$ignore_path")
+    fi
 
     local pytest_exit=0
     PYTHONPATH="$SCRIPT_DIR/src" \
@@ -424,7 +446,7 @@ run_phase() {
     E2E_FAULT_SERVER_HOST="$E2E_FAULT_SERVER_HOST" \
     E2E_FAULT_SERVER_DATA_DIR="$E2E_FAULT_SERVER_DATA_DIR" \
     E2E_FAULT_GOLDEN_REPO_JOB_TIMEOUT="$E2E_FAULT_GOLDEN_REPO_JOB_TIMEOUT" \
-        python3 -m pytest "$SCRIPT_DIR/$test_dir" -v --tb=short -rs 2>&1 \
+        python3 -m pytest "$SCRIPT_DIR/$test_dir" "${ignore_flag[@]}" -v --tb=short -rs 2>&1 \
         | tee "$phase_output_file" \
         || pytest_exit=$?
 
@@ -444,6 +466,68 @@ run_phase() {
         return 0
     fi
     return $pytest_exit
+}
+
+# ---------------------------------------------------------------------------
+# Helper: Story #1676 AC8 -- Phase 3 OTEL live-collector sub-check.
+#
+# Runs tests/e2e/server/test_21_otel_live_collector_1676.py as its OWN
+# separate pytest invocation (own process), deliberately NOT folded into
+# Phase 3's blanket directory sweep above (which excludes this one file via
+# --ignore). Isolation rationale: this test constructs a SEPARATE, isolated
+# CIDX server app with telemetry pointed at a live docker-compose collector
+# stack it manages itself, and get_config_service()/get_telemetry_manager()
+# are process-wide "first call wins" singletons -- running it inside the
+# same pytest process as Phase 3's shared session `test_client` risks
+# cross-test singleton interference (the test's own fixture defends against
+# this with a save/reset/restore, but a fully separate process removes the
+# risk category entirely rather than merely mitigating it).
+#
+# The test file's own `pytestmark` skips cleanly (exit 0, SKIPPED lines)
+# when Docker/`docker compose` is unavailable -- this helper does not
+# duplicate that detection, it just runs pytest and lets the test's own
+# skip logic be the single source of truth, mirroring how the OTHER phases'
+# skip lines are captured into SKIP_LINES.
+# ---------------------------------------------------------------------------
+run_otel_live_collector_subcheck() {
+    local subcheck_label="OTEL Live Collector (Story #1676 AC8)"
+    local subcheck_test_file="tests/e2e/server/test_21_otel_live_collector_1676.py"
+
+    _bold "=== Phase 3 sub-check: $subcheck_label ==="
+
+    if [[ ! -f "$SCRIPT_DIR/$subcheck_test_file" ]]; then
+        _yellow "  $subcheck_test_file does not exist — skipping sub-check"
+        return 0
+    fi
+
+    local subcheck_output_file
+    subcheck_output_file=$(mktemp)
+
+    local subcheck_exit=0
+    PYTHONPATH="$SCRIPT_DIR/src" \
+    CIDX_TEST_FAST_SQLITE=1 \
+    E2E_ADMIN_USER="$E2E_ADMIN_USER" \
+    E2E_ADMIN_PASS="$E2E_ADMIN_PASS" \
+    E2E_VOYAGE_API_KEY="$E2E_VOYAGE_API_KEY" \
+    VOYAGE_API_KEY="${E2E_VOYAGE_API_KEY:-${VOYAGE_API_KEY:-}}" \
+        python3 -m pytest "$SCRIPT_DIR/$subcheck_test_file" -v --tb=short -rs 2>&1 \
+        | tee "$subcheck_output_file" \
+        || subcheck_exit=$?
+
+    while IFS= read -r line; do
+        case "$line" in
+            SKIPPED*|"  SKIPPED"*|"SKIP "*|"s "*)
+                SKIP_LINES+=("Phase 3 sub-check ($subcheck_label): $line")
+                ;;
+        esac
+    done < "$subcheck_output_file"
+    rm -f "$subcheck_output_file"
+
+    if [[ $subcheck_exit -eq 5 ]]; then
+        _yellow "  No tests collected in $subcheck_test_file — treating as success (exit 5)"
+        return 0
+    fi
+    return $subcheck_exit
 }
 
 # ---------------------------------------------------------------------------
@@ -530,17 +614,20 @@ start_fault_server() {
 wait_for_fault_server() {
     local health_url="http://${E2E_FAULT_SERVER_HOST}:${E2E_FAULT_SERVER_PORT}/health"
     local login_url="http://${E2E_FAULT_SERVER_HOST}:${E2E_FAULT_SERVER_PORT}/auth/login"
-    local elapsed=0
+    # Deadline-based (not an accumulated "elapsed" counter): bash $(( )) is
+    # integer-only and a fractional POLL previously crashed this loop.
+    local start_time
+    start_time=$(date +%s)
+    local deadline=$((start_time + E2E_FAULT_SERVER_READINESS_TIMEOUT))
 
     _yellow "  Waiting for fault server at $health_url (timeout ${E2E_FAULT_SERVER_READINESS_TIMEOUT}s)..."
     _yellow "  Readiness requires: /health non-5xx AND /auth/login returns 200+token"
-    while [[ $elapsed -lt $E2E_FAULT_SERVER_READINESS_TIMEOUT ]]; do
+    while [[ $(date +%s) -lt $deadline ]]; do
         # Step 1: health check
         local health_code
         health_code=$(curl -s -o /dev/null -w "%{http_code}" "$health_url" 2>/dev/null || echo "000")
         if [[ "$health_code" == "000" ]] || [[ "$health_code" -ge 500 ]]; then
             sleep "$E2E_SERVER_READINESS_POLL"
-            elapsed=$((elapsed + E2E_SERVER_READINESS_POLL))
             continue
         fi
 
@@ -557,13 +644,12 @@ wait_for_fault_server() {
         login_body=$(echo "$login_response" | head -n-1)
 
         if [[ "$login_code" == "200" ]] && echo "$login_body" | grep -q "access_token"; then
-            _green "  Fault server ready after ${elapsed}s (health=$health_code, auth=200+token)"
+            _green "  Fault server ready after $(( $(date +%s) - start_time ))s (health=$health_code, auth=200+token)"
             return 0
         fi
 
         _yellow "    Not ready yet (health=$health_code auth=$login_code) — retrying..."
         sleep "$E2E_SERVER_READINESS_POLL"
-        elapsed=$((elapsed + E2E_SERVER_READINESS_POLL))
     done
 
     _red "ERROR: Fault server did not become ready within ${E2E_FAULT_SERVER_READINESS_TIMEOUT}s"
@@ -701,17 +787,20 @@ start_pg_server() {
 wait_for_pg_server() {
     local health_url="http://${E2E_PG_SERVER_HOST}:${E2E_PG_SERVER_PORT}/health"
     local login_url="http://${E2E_PG_SERVER_HOST}:${E2E_PG_SERVER_PORT}/auth/login"
-    local elapsed=0
+    # Deadline-based (not an accumulated "elapsed" counter): bash $(( )) is
+    # integer-only and a fractional POLL previously crashed this loop.
+    local start_time
+    start_time=$(date +%s)
+    local deadline=$((start_time + E2E_PG_SERVER_READINESS_TIMEOUT))
 
     _yellow "  Waiting for PG server at $health_url (timeout ${E2E_PG_SERVER_READINESS_TIMEOUT}s)..."
     _yellow "  Readiness requires: /health non-5xx AND /auth/login returns 200+token"
-    while [[ $elapsed -lt $E2E_PG_SERVER_READINESS_TIMEOUT ]]; do
+    while [[ $(date +%s) -lt $deadline ]]; do
         # Step 1: health check
         local health_code
         health_code=$(curl -s -o /dev/null -w "%{http_code}" "$health_url" 2>/dev/null || echo "000")
         if [[ "$health_code" == "000" ]] || [[ "$health_code" -ge 500 ]]; then
             sleep "$E2E_SERVER_READINESS_POLL"
-            elapsed=$((elapsed + E2E_SERVER_READINESS_POLL))
             continue
         fi
 
@@ -728,13 +817,12 @@ wait_for_pg_server() {
         login_body=$(echo "$login_response" | head -n-1)
 
         if [[ "$login_code" == "200" ]] && echo "$login_body" | grep -q "access_token"; then
-            _green "  PG server ready after ${elapsed}s (health=$health_code, auth=200+token)"
+            _green "  PG server ready after $(( $(date +%s) - start_time ))s (health=$health_code, auth=200+token)"
             return 0
         fi
 
         _yellow "    Not ready yet (health=$health_code auth=$login_code) — retrying..."
         sleep "$E2E_SERVER_READINESS_POLL"
-        elapsed=$((elapsed + E2E_SERVER_READINESS_POLL))
     done
 
     _red "ERROR: PG server did not become ready within ${E2E_PG_SERVER_READINESS_TIMEOUT}s"
@@ -810,7 +898,25 @@ for phase_def in "${PHASE_DEFS[@]}"; do
         continue
     fi
 
-    if [[ "$phase_num" == "4" ]]; then
+    if [[ "$phase_num" == "3" ]]; then
+        # Story #1676 AC8: Phase 3's normal sweep excludes the Docker-dependent
+        # OTEL live-collector test file, which then runs as its own explicit
+        # sub-check (own pytest process -- see run_otel_live_collector_subcheck()
+        # for the isolation rationale). Both results combine into one Phase 3
+        # pass/fail via handle_phase_result.
+        phase3_exit=0
+        run_phase "$phase_num" "$phase_label" "$phase_dir" \
+            "$SCRIPT_DIR/tests/e2e/server/test_21_otel_live_collector_1676.py" \
+            || phase3_exit=$?
+
+        subcheck_exit=0
+        run_otel_live_collector_subcheck || subcheck_exit=$?
+        if [[ $subcheck_exit -ne 0 && $phase3_exit -eq 0 ]]; then
+            phase3_exit=$subcheck_exit
+        fi
+
+        handle_phase_result "$phase_num" "$phase3_exit"
+    elif [[ "$phase_num" == "4" ]]; then
         # Phase 4 requires a live server: start it, run tests, then stop it
         _bold "=== Phase 4: $phase_label ==="
         start_phase4_server

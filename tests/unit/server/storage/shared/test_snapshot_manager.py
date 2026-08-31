@@ -689,3 +689,83 @@ class TestSnapshotManagerDiscoveryCowMode:
         manager = VersionedSnapshotManager(versioned_base=str(tmp_path))
         snaps = manager.list_snapshots("my-repo-global")
         assert [ts for _, ts in snaps] == [1700000000, 1700000050]
+
+
+def _make_source_dir(tmp_path: Path) -> Path:
+    source_dir = tmp_path / "source-repo"
+    source_dir.mkdir()
+    (source_dir / "marker.txt").write_text("hello")
+    return source_dir
+
+
+def _assert_single_create_cow_snapshot_span(exporter, alias: str) -> None:
+    spans = [
+        s
+        for s in exporter.get_finished_spans()
+        if s.name == "cidx.snapshot_manager.create_cow_snapshot"
+    ]
+    assert len(spans) == 1, (
+        "expected exactly one create_cow_snapshot span on the real dispatch path"
+    )
+    assert spans[0].attributes.get("alias") == alias
+
+
+class TestSnapshotManagerCreateCowSnapshotSpanRemediation1586:
+    """Story #1586 remediation, Finding 1.
+
+    The ``cidx.snapshot_manager.create_cow_snapshot`` span wraps
+    ``create_snapshot()``'s public dispatch point itself, rather than any
+    single branch inside it, specifically so it covers the REAL production
+    path: every real deployment constructs ``VersionedSnapshotManager``
+    WITH a ``clone_backend`` (see ``_create_clone_backend_snapshot``'s own
+    docstring), so ``create_snapshot()`` always dispatches through
+    ``_create_clone_backend_snapshot`` -- a span wired only around the
+    no-backend ``_create_cow_snapshot`` fallback would be structurally
+    dead in production. These tests prove the span fires on the REAL
+    dispatch path (``_create_clone_backend_snapshot``), using a real
+    ``LocalCloneBackend`` performing an actual ``cp --reflink=auto``
+    against ``tmp_path`` -- no mocking of the code under test -- plus a
+    regression check that the no-backend CoW fallback path still emits
+    the span too.
+    """
+
+    def test_create_snapshot_clone_backend_dispatch_emits_span(
+        self, tmp_path: Path
+    ) -> None:
+        from code_indexer.server.storage.shared.clone_backend import (
+            LocalCloneBackend,
+        )
+
+        from tests.unit.server.telemetry.otel_test_support import (
+            active_span_exporter,
+        )
+
+        source_dir = _make_source_dir(tmp_path)
+        versioned_base = tmp_path / "versioned-base"
+        versioned_base.mkdir()
+        backend = LocalCloneBackend(versioned_base=str(versioned_base))
+        manager = VersionedSnapshotManager(
+            clone_backend=backend, versioned_base=str(versioned_base)
+        )
+
+        with active_span_exporter() as exporter:
+            result = manager.create_snapshot("myrepo", source_path=str(source_dir))
+
+        assert Path(result).is_dir()
+        _assert_single_create_cow_snapshot_span(exporter, "myrepo")
+
+    def test_create_snapshot_cow_fallback_dispatch_still_emits_span(
+        self, tmp_path: Path
+    ) -> None:
+        from tests.unit.server.telemetry.otel_test_support import (
+            active_span_exporter,
+        )
+
+        source_dir = _make_source_dir(tmp_path)
+        manager = VersionedSnapshotManager(versioned_base=str(tmp_path))
+
+        with active_span_exporter() as exporter:
+            result = manager.create_snapshot("myrepo", source_path=str(source_dir))
+
+        assert Path(result).is_dir()
+        _assert_single_create_cow_snapshot_span(exporter, "myrepo")

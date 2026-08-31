@@ -1,14 +1,15 @@
 """Story #1400 CRITICAL 3: service_init.py must thread the resolved node_id
 into both JobTracker and BackgroundJobManager construction.
 
-service_init.py already resolves the real cluster node_id (from
-config.json's `cluster.node_id`, defaulting to "local") for
-DependencyLatencyTracker at construction time. JobTracker and
-BackgroundJobManager were constructed without it, which meant
-cleanup_orphaned_jobs_on_startup() always ran with node_id=None -- a
-safe no-op on PostgreSQL (Bug #535 protection) but NOT the node-scoped
-cleanup CRITICAL 3 requires; and no job was ever stamped with
-executing_node at registration time.
+service_init.py resolves the real cluster node_id (from config.json's
+`cluster.node_id`, via the shared resolve_cluster_node_id() helper --
+see cluster_node_id.py for why the fallback there must agree with
+lifespan.py's cluster-services block) for DependencyLatencyTracker at
+construction time. JobTracker and BackgroundJobManager were constructed
+without it, which meant cleanup_orphaned_jobs_on_startup() always ran
+with node_id=None -- a safe no-op on PostgreSQL (Bug #535 protection) but
+NOT the node-scoped cleanup CRITICAL 3 requires; and no job was ever
+stamped with executing_node at registration time.
 
 Why a source-order test (not a full initialize_services() invocation):
 initialize_services() creates DB schemas, spawns background threads,
@@ -36,13 +37,13 @@ class TestServiceInitNodeIdWiring:
 
     def test_node_id_resolved_before_job_tracker_construction(self) -> None:
         source = self._source()
-        node_id_pos = source.find('_node_id = (\n        _cluster_cfg.get("node_id"')
+        node_id_pos = source.find("_node_id = resolve_cluster_node_id(_raw_config)")
         job_tracker_pos = source.find("job_tracker = _JobTracker(")
 
         assert node_id_pos != -1, (
-            "_node_id resolution block not found in service_init.py -- "
-            "expected the existing cluster.node_id read used by "
-            "DependencyLatencyTracker."
+            "_node_id resolution via resolve_cluster_node_id(_raw_config) not "
+            "found in service_init.py -- expected the shared cluster node-id "
+            "resolver used by DependencyLatencyTracker/JobTracker."
         )
         assert job_tracker_pos != -1, (
             "job_tracker = _JobTracker( construction not found in service_init.py."

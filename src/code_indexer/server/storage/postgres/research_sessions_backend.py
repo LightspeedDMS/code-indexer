@@ -5,8 +5,18 @@ Drop-in replacement for ResearchSessionsSqliteBackend using psycopg v3 sync
 connections via ConnectionPool.  Satisfies the ResearchSessionsBackend Protocol
 (protocols.py).
 
-Tables created on first use (CREATE TABLE IF NOT EXISTS) so no separate
-migration step is required.
+Schema (`research_sessions`, `research_messages` tables and their index) is
+owned entirely by the SQL migration
+(storage/postgres/migrations/sql/001_initial_schema.sql) -- this backend
+does NOT create or alter any table. `service_init.py` always runs
+`MigrationRunner` before `StorageFactory.create_backends()` constructs this
+class, so schema is guaranteed present by the time any instance exists
+(Issue #1697, mirroring Bug #1655/#1662: a previous self-heal
+`CREATE TABLE IF NOT EXISTS` here was dead code in every real deployment,
+and had ALSO drifted from the migration's TIMESTAMPTZ columns (declared
+TEXT here) -- removed rather than re-synced so there is no second copy
+left to drift again. Every read path in this file already normalizes via
+`pg_utils.sanitize_row()`, so the drift never caused a caller-side bug.).
 """
 
 from __future__ import annotations
@@ -31,48 +41,15 @@ class ResearchSessionsPostgresBackend:
 
     def __init__(self, pool: ConnectionPool) -> None:
         """
-        Initialize with a shared connection pool and ensure tables exist.
+        Initialize with a shared connection pool.
+
+        Schema is assumed to already exist (see module docstring) -- this
+        constructor does not touch the database.
 
         Args:
             pool: ConnectionPool instance providing psycopg v3 connections.
         """
         self._pool = pool
-        self._ensure_schema()
-
-    def _ensure_schema(self) -> None:
-        """Create research tables and indexes if they do not already exist."""
-        with self._pool.connection() as conn:
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS research_sessions (
-                    id TEXT PRIMARY KEY,
-                    name TEXT NOT NULL,
-                    folder_path TEXT NOT NULL,
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL,
-                    claude_session_id TEXT
-                )
-                """
-            )
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS research_messages (
-                    id SERIAL PRIMARY KEY,
-                    session_id TEXT NOT NULL,
-                    role TEXT NOT NULL,
-                    content TEXT NOT NULL,
-                    created_at TEXT NOT NULL,
-                    FOREIGN KEY (session_id) REFERENCES research_sessions(id) ON DELETE CASCADE
-                )
-                """
-            )
-            conn.execute(
-                """
-                CREATE INDEX IF NOT EXISTS idx_research_messages_session_id
-                ON research_messages(session_id)
-                """
-            )
-            conn.commit()
 
     def create_session(
         self,

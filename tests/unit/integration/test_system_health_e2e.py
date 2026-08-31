@@ -11,11 +11,11 @@ import json
 from pathlib import Path
 from unittest.mock import patch
 
-from src.code_indexer.api_clients.system_client import (
+from code_indexer.api_clients.system_client import (
     SystemAPIClient,
     create_system_client,
 )
-from src.code_indexer.api_clients.base_client import AuthenticationError, APIClientError
+from code_indexer.api_clients.base_client import AuthenticationError, APIClientError
 
 
 @pytest.mark.integration
@@ -155,7 +155,7 @@ class TestSystemHealthMonitoringE2E:
         """Test system client factory function integration."""
         # Test factory function with mocked credential loading
         with patch(
-            "src.code_indexer.remote.credential_manager.load_encrypted_credentials"
+            "code_indexer.remote.credential_manager.load_encrypted_credentials"
         ) as mock_load_creds:
             mock_load_creds.return_value = {
                 "username": "factory_user",
@@ -264,7 +264,7 @@ class TestSystemHealthMonitoringE2E:
         )
 
         # Verify inheritance hierarchy
-        from src.code_indexer.api_clients.base_client import CIDXRemoteAPIClient
+        from code_indexer.api_clients.base_client import CIDXRemoteAPIClient
 
         assert isinstance(system_client, CIDXRemoteAPIClient)
 

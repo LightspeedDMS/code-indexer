@@ -15,8 +15,54 @@ import errno
 import fcntl
 import logging
 import os
+from typing import Union
 
 logger = logging.getLogger(__name__)
+
+#: Accepted path shapes for the fsync helpers below.
+PathLike = Union[str, "os.PathLike[str]"]
+
+
+def fsync_path(path: PathLike) -> None:
+    """Flush a filesystem entry -- file OR directory -- identified by path.
+
+    Callers that already hold an open file object should use
+    nfs_safe_fsync(f.fileno()) directly; this exists for the publish-time
+    case where the thing to flush is named by path and may be either shape
+    (BackgroundIndexRebuilder swaps plain index files AND Tantivy FTS
+    directories through the same code).
+
+    Trust boundary: this is internal storage plumbing and performs NO path
+    validation. Every caller must pass a path the storage layer itself
+    constructed (a collection directory or an entry within it) -- never an
+    unvalidated user-supplied path.
+
+    Args:
+        path: Existing file or directory to flush.
+
+    Raises:
+        OSError: Propagated from os.open (e.g. ENOENT), or from fsync for
+            anything other than the EBADF that nfs_safe_fsync tolerates.
+    """
+    fd = os.open(os.fspath(path), os.O_RDONLY)
+    try:
+        nfs_safe_fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def fsync_directory(path: PathLike) -> None:
+    """Flush a directory so entries created/replaced in it survive a crash.
+
+    An atomic rename is not a durable one: without this the rename itself can
+    be lost on power-loss even though the renamed file's contents were
+    flushed. Call it AFTER the rename, never before. Same trust boundary as
+    fsync_path.
+
+    Args:
+        path: Directory containing the just-published entry.
+    """
+    fsync_path(path)
 
 
 def nfs_safe_fsync(fd: int) -> None:

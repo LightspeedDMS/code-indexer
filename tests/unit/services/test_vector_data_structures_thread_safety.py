@@ -14,7 +14,7 @@ import threading
 import time
 from dataclasses import FrozenInstanceError
 
-from src.code_indexer.services.vector_calculation_manager import (
+from code_indexer.services.vector_calculation_manager import (
     VectorTask,
     VectorResult,
 )

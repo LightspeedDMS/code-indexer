@@ -20,6 +20,7 @@ not a per-backend behavior.
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Dict, List, Optional, Protocol, Set, Tuple, runtime_checkable
 
 
@@ -78,4 +79,12 @@ class TemporalMetadataBackend(Protocol):
 
     def count_entries(self) -> int:
         """Count total metadata entries."""
+        ...
+
+    def copy_collection_scope(self, target_collection_path: Path) -> None:
+        """Copy this collection's metadata to a new collection scope."""
+        ...
+
+    def delete_collection_scope(self) -> None:
+        """Delete this collection's metadata after authorized cleanup."""
         ...

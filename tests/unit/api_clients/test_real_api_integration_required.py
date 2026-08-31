@@ -61,8 +61,7 @@ class TestRealAPIIntegrationRequirements:
         )
         return RemoteStatusDisplayer(repository_service=mock_repository_service)
 
-    @pytest.mark.asyncio
-    async def test_get_repository_status_makes_real_api_call(self, status_displayer):
+    def test_get_repository_status_makes_real_api_call(self, status_displayer):
         """Test get_repository_status makes actual API calls to server.
 
         This test verifies the API integration works correctly.
@@ -82,7 +81,7 @@ class TestRealAPIIntegrationRequirements:
             return_value=test_repository_details
         )
 
-        status = await status_displayer.get_repository_status(repository_alias)
+        status = status_displayer.get_repository_status(repository_alias)
 
         # Verify API client was called
         status_displayer.repository_service.get_repository_details.assert_called_once_with(
@@ -105,10 +104,7 @@ class TestRealAPIIntegrationRequirements:
         assert status.branch == "main"
         assert status.indexing_progress == 100  # 150/150 * 100
 
-    @pytest.mark.asyncio
-    async def test_get_repository_status_handles_authentication_error(
-        self, status_displayer
-    ):
+    def test_get_repository_status_handles_authentication_error(self, status_displayer):
         """Test get_repository_status properly handles authentication failures."""
         repository_alias = "test-repo"
 
@@ -118,10 +114,9 @@ class TestRealAPIIntegrationRequirements:
         )
 
         with pytest.raises(AuthenticationError, match="Invalid credentials"):
-            await status_displayer.get_repository_status(repository_alias)
+            status_displayer.get_repository_status(repository_alias)
 
-    @pytest.mark.asyncio
-    async def test_get_repository_status_handles_network_error(self, status_displayer):
+    def test_get_repository_status_handles_network_error(self, status_displayer):
         """Test get_repository_status properly handles network failures."""
         repository_alias = "test-repo"
 
@@ -131,12 +126,9 @@ class TestRealAPIIntegrationRequirements:
         )
 
         with pytest.raises(NetworkError, match="Connection failed"):
-            await status_displayer.get_repository_status(repository_alias)
+            status_displayer.get_repository_status(repository_alias)
 
-    @pytest.mark.asyncio
-    async def test_get_repository_status_handles_repository_not_found(
-        self, status_displayer
-    ):
+    def test_get_repository_status_handles_repository_not_found(self, status_displayer):
         """Test get_repository_status properly handles repository not found."""
         repository_alias = "nonexistent-repo"
 
@@ -148,12 +140,9 @@ class TestRealAPIIntegrationRequirements:
         with pytest.raises(
             RepositoryNotFoundError, match="Repository nonexistent-repo not found"
         ):
-            await status_displayer.get_repository_status(repository_alias)
+            status_displayer.get_repository_status(repository_alias)
 
-    @pytest.mark.asyncio
-    async def test_check_staleness_makes_real_timestamp_comparison(
-        self, status_displayer
-    ):
+    def test_check_staleness_makes_real_timestamp_comparison(self, status_displayer):
         """Test check_staleness makes real API calls to compare timestamps.
 
         This test verifies the timestamp comparison works correctly.
@@ -174,7 +163,7 @@ class TestRealAPIIntegrationRequirements:
             return_value=test_repository_details
         )
 
-        staleness_info = await status_displayer.check_staleness(
+        staleness_info = status_displayer.check_staleness(
             local_timestamp=local_timestamp, repository_alias=repository_alias
         )
 
@@ -197,8 +186,7 @@ class TestRealAPIIntegrationRequirements:
         # Since remote is newer (11:00 vs 10:30), local should be stale
         assert staleness_info.is_stale is True
 
-    @pytest.mark.asyncio
-    async def test_check_staleness_handles_authentication_error(self, status_displayer):
+    def test_check_staleness_handles_authentication_error(self, status_displayer):
         """Test check_staleness properly handles authentication failures."""
         local_timestamp = "2024-01-15T10:30:00Z"
         repository_alias = "test-repo"
@@ -209,12 +197,11 @@ class TestRealAPIIntegrationRequirements:
         )
 
         with pytest.raises(AuthenticationError, match="Token expired"):
-            await status_displayer.check_staleness(
+            status_displayer.check_staleness(
                 local_timestamp=local_timestamp, repository_alias=repository_alias
             )
 
-    @pytest.mark.asyncio
-    async def test_check_staleness_handles_network_error(self, status_displayer):
+    def test_check_staleness_handles_network_error(self, status_displayer):
         """Test check_staleness properly handles network failures."""
         local_timestamp = "2024-01-15T10:30:00Z"
         repository_alias = "test-repo"
@@ -225,14 +212,11 @@ class TestRealAPIIntegrationRequirements:
         )
 
         with pytest.raises(NetworkError, match="Connection timeout"):
-            await status_displayer.check_staleness(
+            status_displayer.check_staleness(
                 local_timestamp=local_timestamp, repository_alias=repository_alias
             )
 
-    @pytest.mark.asyncio
-    async def test_check_staleness_compares_timestamps_correctly(
-        self, status_displayer
-    ):
+    def test_check_staleness_compares_timestamps_correctly(self, status_displayer):
         """Test check_staleness implements proper timestamp comparison logic."""
         repository_alias = "test-repo"
 
@@ -249,7 +233,7 @@ class TestRealAPIIntegrationRequirements:
             return_value=test_repository_details
         )
 
-        staleness_info = await status_displayer.check_staleness(
+        staleness_info = status_displayer.check_staleness(
             local_timestamp="2024-01-15T10:00:00Z",  # Local is newer
             repository_alias=repository_alias,
         )
@@ -259,10 +243,7 @@ class TestRealAPIIntegrationRequirements:
         assert staleness_info.local_timestamp == "2024-01-15T10:00:00Z"
         assert staleness_info.remote_timestamp == "2024-01-15T09:00:00Z"
 
-    @pytest.mark.asyncio
-    async def test_api_client_initialization_uses_correct_credentials(
-        self, status_displayer
-    ):
+    def test_api_client_initialization_uses_correct_credentials(self, status_displayer):
         """Test that the repository service is initialized correctly."""
         repository_alias = "test-repo"
 
@@ -279,7 +260,7 @@ class TestRealAPIIntegrationRequirements:
             return_value=test_repository_details
         )
 
-        await status_displayer.get_repository_status(repository_alias)
+        status_displayer.get_repository_status(repository_alias)
 
         # Verify repository service was used correctly
         status_displayer.repository_service.get_repository_details.assert_called_once_with(

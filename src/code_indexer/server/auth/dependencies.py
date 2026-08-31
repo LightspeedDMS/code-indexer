@@ -5,7 +5,7 @@ Provides dependency injection for JWT authentication and role-based access contr
 """
 
 from code_indexer.server.middleware.correlation import get_correlation_id
-from typing import Optional, TYPE_CHECKING, Dict, Any
+from typing import Optional, TYPE_CHECKING, Dict, Any, Tuple
 from fastapi import Depends, HTTPException, status, Request, Response
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from functools import wraps
@@ -439,8 +439,26 @@ async def get_mcp_user_from_credentials(request: Request) -> Optional[User]:
     if not client_id or not client_secret:
         return None
 
-    # Verify credentials using MCPCredentialManager (AC3-AC5)
-    user_id = mcp_credential_manager.verify_credential(client_id, client_secret)
+    # Verify credentials using MCPCredentialManager (AC3-AC5).
+    # Story #1491 AC1 (Finding B1, CRITICAL): verify_credential does a
+    # bcrypt hash comparison (100-300ms pure CPU) and user_manager.get_user
+    # does a synchronous user-DB read -- running either directly on the event
+    # loop stalls EVERY concurrent request, not just this one. AC1 names BOTH
+    # as blocking work that must leave the loop, so they share ONE
+    # anyio.to_thread.run_sync boundary here rather than offloading bcrypt and
+    # then immediately reading the DB back on the loop. One boundary (not two)
+    # also halves the thread round-trips on the hottest MCP path.
+    import anyio.to_thread
+
+    def _verify_credential_and_load_user() -> Tuple[Optional[str], Optional[User]]:
+        verified_user_id = mcp_credential_manager.verify_credential(
+            client_id, client_secret
+        )
+        if not verified_user_id:
+            return None, None
+        return verified_user_id, user_manager.get_user(verified_user_id)
+
+    user_id, user = await anyio.to_thread.run_sync(_verify_credential_and_load_user)
 
     if not user_id:
         # Invalid credentials - return 401 (AC3)
@@ -450,8 +468,6 @@ async def get_mcp_user_from_credentials(request: Request) -> Optional[User]:
             headers={"WWW-Authenticate": _build_www_authenticate_header()},
         )
 
-    # Get User object
-    user = user_manager.get_user(user_id)
     if not user:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -470,12 +486,21 @@ async def get_mcp_user_from_credentials(request: Request) -> Optional[User]:
     if elevated_session_manager is not None:
         try:
             client_ip = request.client.host if request.client else "unknown"
-            elevated_session_manager.create(
-                session_key=client_id,
-                username=user.username,
-                elevated_from_ip=client_ip,
-                scope="full",
-            )
+
+            # Story #1491 AC1: elevated_session_manager.create performs a
+            # synchronous psycopg round-trip plus commit -- offload it too,
+            # via a zero-arg sync closure (no new functools import needed).
+            def _create_elevation_window() -> None:
+                elevated_session_manager.create(
+                    session_key=client_id,
+                    username=user.username,
+                    elevated_from_ip=client_ip,
+                    scope="full",
+                )
+
+            import anyio.to_thread
+
+            await anyio.to_thread.run_sync(_create_elevation_window)
         except Exception as exc:
             # Defense-in-depth: if elevation manager is misconfigured, log and
             # let the request proceed. The decorator will surface "No active
@@ -597,7 +622,18 @@ async def get_current_user_for_mcp(request: Request) -> User:
         credentials = HTTPAuthorizationCredentials(scheme="Bearer", credentials=token)
 
     try:
-        user = get_current_user(request, credentials)
+        # Story #1491 AC1 (Finding B1, CRITICAL): get_current_user performs
+        # a synchronous user DB read plus JWT-blacklist read (and, for
+        # cookie/Bearer JWTs, jwt_manager.validate_token) -- offload it to a
+        # worker thread so it never blocks the shared event loop. A zero-arg
+        # lambda closure avoids introducing a new functools import.
+        # HTTPException raised inside get_current_user propagates through
+        # run_sync unchanged (anyio re-raises worker-thread exceptions as-is).
+        import anyio.to_thread
+
+        user = await anyio.to_thread.run_sync(
+            lambda: get_current_user(request, credentials)
+        )
         # Extract jti for elevation key — Bearer path or cookie fallback path.
         # token is only set when Authorization: Bearer ... is present; when the
         # client authenticates via cidx_session cookie, token is None and we must
@@ -607,7 +643,14 @@ async def get_current_user_for_mcp(request: Request) -> User:
         _user_jti_set = False
         if _jti_token and jwt_manager:
             try:
-                payload = jwt_manager.validate_token(_jti_token)
+                # Story #1491 AC1: JWT signature validation is CPU-bound
+                # sync work -- offload it, matching the primary
+                # get_current_user call above.
+                import anyio.to_thread
+
+                payload = await anyio.to_thread.run_sync(
+                    jwt_manager.validate_token, _jti_token
+                )
                 jti = payload.get("jti")
                 if jti:
                     request.state.user_jti = str(jti)
@@ -639,11 +682,20 @@ async def get_current_user_for_mcp(request: Request) -> User:
                 if elevated_session_manager is not None:
                     try:
                         client_ip = request.client.host if request.client else "unknown"
-                        elevated_session_manager.create(
-                            session_key=session_key,
-                            username=user.username,
-                            elevated_from_ip=client_ip,
-                            scope="full",
+
+                        # Story #1491 AC1: offload the sync DB round-trip.
+                        def _create_oauth_bearer_elevation_window() -> None:
+                            elevated_session_manager.create(
+                                session_key=session_key,
+                                username=user.username,
+                                elevated_from_ip=client_ip,
+                                scope="full",
+                            )
+
+                        import anyio.to_thread
+
+                        await anyio.to_thread.run_sync(
+                            _create_oauth_bearer_elevation_window
                         )
                     except Exception as exc:
                         logger.warning(

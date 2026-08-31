@@ -40,6 +40,32 @@ _TEMPORAL_INDEXER_PATH = (
 _VECTOR_STORE_PATH = (
     "code_indexer.storage.filesystem_vector_store.FilesystemVectorStore"
 )
+# Bug #1528: cli.py's --index-commits branch now also calls
+# consolidate_legacy_temporal_shards (a lazily-imported local import,
+# patched at its defining module) before migrate/resolve run. Left
+# unmocked, it performs a REAL in-place SQLite migration against
+# whatever legacy temporal shards exist under this process's actual CWD
+# -- which, for this repo's own dogfooded `.code-indexer/index/`, is real
+# production-sized data that blows past pytest's default timeout. Must
+# be a no-op here: this test suite is about migrate/resolve ordering
+# (Bug #642), not chunk_migration_cli's own behavior (covered elsewhere).
+_CONSOLIDATE_LEGACY_TEMPORAL_SHARDS_PATH = (
+    "code_indexer.services.chunk_migration_cli.consolidate_legacy_temporal_shards"
+)
+# Story #1488 (Codex Finding 1): cli.py's --index-commits branch now acquires
+# the real repo-scoped EXCLUSIVE index-mutation lock (a real flock() on
+# .code-indexer/.index-mutation.lock under this test process's actual CWD)
+# BEFORE migrate/resolve run. This repo dogfoods itself with a permanently
+# running `code_indexer.daemon` that legitimately holds that same lock, so
+# leaving this unmocked makes acquisition fail with MigrationLockError ->
+# cli.py sys.exit(1) before migrate is ever called -- unrelated to the
+# migrate/resolve ordering (Bug #642) this suite actually verifies. Patched
+# at its defining module (it is lazily imported inside the CLI function) to
+# a no-op context manager so the test is isolated from real daemon/lock
+# state, same rationale as the consolidate_legacy_temporal_shards mock above.
+_ACQUIRE_INDEX_MUTATION_LOCK_PATH = (
+    "code_indexer.services.chunk_migration_cli.acquire_index_mutation_lock"
+)
 
 
 def _stub_indexer_result() -> MagicMock:
@@ -69,8 +95,9 @@ def _patch_index_commits_path(
     """Context manager that patches only the temporal parts of --index-commits.
 
     Allows the real ConfigManager to run (it uses backtracking from CWD).
-    Only migrate_legacy_temporal_collection, resolve, TemporalIndexer, and
-    FilesystemVectorStore are patched.
+    Only migrate_legacy_temporal_collection, resolve, TemporalIndexer,
+    FilesystemVectorStore, consolidate_legacy_temporal_shards, and the
+    index-mutation lock acquisition are patched.
 
     Yields (runner,) to the caller.
     """
@@ -87,6 +114,11 @@ def _patch_index_commits_path(
         patch(_RESOLVE_PATH, side_effect=resolve_side_effect or _default_resolve),
         patch(_TEMPORAL_INDEXER_PATH, return_value=mock_ti_instance),
         patch(_VECTOR_STORE_PATH, return_value=mock_vs_instance),
+        patch(_CONSOLIDATE_LEGACY_TEMPORAL_SHARDS_PATH, return_value=(0, 0)),
+        patch(
+            _ACQUIRE_INDEX_MUTATION_LOCK_PATH,
+            side_effect=lambda config_dir: contextlib.nullcontext(),
+        ),
     ):
         yield (runner,)
 

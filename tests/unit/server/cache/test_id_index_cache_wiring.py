@@ -236,6 +236,21 @@ class TestInvalidationParity:
         # _get_vector_size will be called; mock it out
         store._get_vector_size = MagicMock(return_value=1024)
 
+        # write_hnsw_sync_state() (Bug #1575 Part C) requires an EXISTING
+        # collection_meta.json to merge into -- it never creates the base
+        # metadata file from scratch. Write the minimal valid shape (same
+        # convention as tests/unit/storage/test_hnsw_sync_state_1575_part_c.py)
+        # so the rebuild path succeeds. This dict deliberately has no
+        # "chunks_db" key, so resolve_chunk_layout() still fail-closes to
+        # "sharded_json" -- preserving expected_key below unchanged.
+        import json
+
+        collection_path = store._get_collection_path(collection_name)
+        collection_path.mkdir(parents=True, exist_ok=True)
+        (collection_path / "collection_meta.json").write_text(
+            json.dumps({"name": collection_name, "vector_size": 1024})
+        )
+
         # Patch HNSWIndexManager where it is DEFINED (imported locally inside the method)
         with patch(
             "code_indexer.storage.hnsw_index_manager.HNSWIndexManager"
@@ -247,7 +262,11 @@ class TestInvalidationParity:
             store.rebuild_hnsw_filtered(collection_name, visible_files=set())
 
         expected_collection_path = store._get_collection_path(collection_name)
-        expected_key = str(expected_collection_path)
+        # Story #1458 AC11: invalidate() now embeds the chunks_db layout
+        # discriminator token, freshly re-derived via resolve_chunk_layout().
+        # This synthetic collection has no collection_meta.json at all, so
+        # the resolver correctly fail-closes to "sharded_json".
+        expected_key = f"{expected_collection_path}:sharded_json"
 
         hnsw_cache.invalidate.assert_called_once_with(expected_key)
         id_cache.invalidate.assert_called_once_with(expected_key)

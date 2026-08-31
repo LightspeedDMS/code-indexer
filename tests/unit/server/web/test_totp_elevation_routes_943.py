@@ -24,6 +24,7 @@ from typing import cast
 
 import httpx
 import pytest
+from fastapi import status
 from fastapi.testclient import TestClient
 
 # ---------------------------------------------------------------------------
@@ -223,7 +224,9 @@ class TestPostHandlerEndpoint:
         resp = _post_totp_form(
             client, admin_session, config_csrf_token, _INVALID_IDLE_FORM
         )
-        assert resp.status_code == 200, f"Expected 200, got {resp.status_code}"
+        assert resp.status_code == status.HTTP_400_BAD_REQUEST, (
+            f"Expected 400, got {resp.status_code}"
+        )
         assert _IDLE_TIMEOUT_VALIDATION_FRAGMENT in resp.text, (
             f"Expected idle-timeout validation message "
             f"{_IDLE_TIMEOUT_VALIDATION_FRAGMENT!r} in response. "
@@ -240,7 +243,9 @@ class TestPostHandlerEndpoint:
         resp = _post_totp_form(
             client, admin_session, csrf_token="", form_data=_VALID_FORM
         )
-        assert resp.status_code == 200, f"Expected 200, got {resp.status_code}"
+        assert resp.status_code == status.HTTP_403_FORBIDDEN, (
+            f"Expected 403, got {resp.status_code}"
+        )
         assert _CSRF_ERROR_FRAGMENT in resp.text, (
             f"{_CSRF_ERROR_FRAGMENT!r} not found in response. "
             f"Body snippet: {resp.text[:1000]!r}"

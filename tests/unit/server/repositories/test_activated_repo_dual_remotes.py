@@ -18,10 +18,10 @@ from datetime import datetime, timezone
 
 import pytest
 
-from src.code_indexer.server.repositories.activated_repo_manager import (
+from code_indexer.server.repositories.activated_repo_manager import (
     ActivatedRepoManager,
 )
-from src.code_indexer.server.repositories.golden_repo_manager import GoldenRepo
+from code_indexer.server.repositories.golden_repo_manager import GoldenRepo
 
 
 @pytest.mark.unit

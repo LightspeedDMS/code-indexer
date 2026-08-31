@@ -15,7 +15,7 @@ from unittest.mock import patch, MagicMock
 
 import pytest
 
-from src.code_indexer.server.query.semantic_query_manager import (
+from code_indexer.server.query.semantic_query_manager import (
     SemanticQueryManager,
     SemanticQueryError,
     QueryResult,
@@ -163,7 +163,7 @@ class TestSemanticQueryManager:
             accuracy=None,
             **kwargs,
         ):
-            from src.code_indexer.server.query.semantic_query_manager import QueryResult
+            from code_indexer.server.query.semantic_query_manager import QueryResult
 
             return [
                 QueryResult(
@@ -217,7 +217,7 @@ class TestSemanticQueryManager:
             accuracy=None,
             **kwargs,
         ):
-            from src.code_indexer.server.query.semantic_query_manager import QueryResult
+            from code_indexer.server.query.semantic_query_manager import QueryResult
 
             return [
                 QueryResult(
@@ -338,7 +338,7 @@ class TestSemanticQueryManager:
             accuracy=None,
             **kwargs,
         ):
-            from src.code_indexer.server.query.semantic_query_manager import QueryResult
+            from code_indexer.server.query.semantic_query_manager import QueryResult
 
             return [
                 QueryResult(
@@ -400,7 +400,7 @@ class TestSemanticQueryManager:
             accuracy=None,
             **kwargs,
         ):
-            from src.code_indexer.server.query.semantic_query_manager import QueryResult
+            from code_indexer.server.query.semantic_query_manager import QueryResult
 
             return [
                 QueryResult(

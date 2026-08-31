@@ -6,7 +6,9 @@ import logging
 from threading import Lock
 from typing import Dict, Any, Optional, TYPE_CHECKING
 
-from ...middleware.correlation import get_correlation_id
+from ...telemetry.correlation_bridge import (
+    get_current_correlation_id as get_correlation_id,
+)
 from ...auth.user_manager import User
 from ...services.ssh_key_manager import (
     SSHKeyManager,
@@ -185,7 +187,25 @@ def _delete(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     manager = get_ssh_key_manager()
 
     try:
-        manager.delete_key(name)
+        # Bug #1521: delete_key() returns False when the Bug #1519 provenance
+        # guard refuses to remove a same-named file this server never proved it
+        # wrote. That return value used to be discarded, so a refused deletion
+        # was reported as a success -- a silent lie about a safety-critical
+        # operation. The failure shape matches this handler's existing
+        # convention for a rejected request (see the missing-name branch above).
+        if not manager.delete_key(name):
+            return _mcp_response(
+                {
+                    "success": False,
+                    "error": (
+                        f"Refused to delete '{name}': an untracked file of that "
+                        f"name exists in the SSH directory and this server has "
+                        f"no record of creating it. Remove it manually if it is "
+                        f"genuinely unwanted."
+                    ),
+                }
+            )
+
         return _mcp_response(
             {
                 "success": True,

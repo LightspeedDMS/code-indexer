@@ -222,6 +222,19 @@ class AliasManager:
 
             # Atomic rename
             os.replace(tmp_path, str(alias_file))
+
+            # Story #1457 AC10: fsync the parent aliases directory so the
+            # rename survives a crash, matching the durable-rename pattern
+            # established by id_index_manager.py:203-212. create_alias is
+            # the load-bearing FIRST-publish path for every brand-new
+            # temporal quarter namespace (AC6/AC11), so this gap is closed
+            # identically to swap_alias's hardening below.
+            dir_fd = os.open(str(self.aliases_dir), os.O_RDONLY)
+            try:
+                nfs_safe_fsync(dir_fd)
+            finally:
+                os.close(dir_fd)
+
             logger.info(f"Created alias: {alias_name} -> {target_path}")
 
         except Exception as e:
@@ -397,6 +410,18 @@ class AliasManager:
 
             # Atomic rename
             os.replace(tmp_path, str(alias_file))
+
+            # Story #1457 AC10: fsync the parent aliases directory so the
+            # rename survives a crash, matching the durable-rename pattern
+            # established by id_index_manager.py:203-212 and applied to
+            # create_alias above. swap_alias is the subsequent-publish path
+            # for every temporal refresh (AC6).
+            dir_fd = os.open(str(self.aliases_dir), os.O_RDONLY)
+            try:
+                nfs_safe_fsync(dir_fd)
+            finally:
+                os.close(dir_fd)
+
             logger.info(f"Swapped alias {alias_name}: {old_target} -> {new_target}")
 
         except ValueError:

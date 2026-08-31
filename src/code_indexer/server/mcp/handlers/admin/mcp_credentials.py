@@ -17,7 +17,9 @@ from typing import Any, Dict
 from code_indexer.server.auth import dependencies
 from code_indexer.server.auth.user_manager import User, UserRole
 from code_indexer.server.logging_utils import format_error_log
-from code_indexer.server.middleware.correlation import get_correlation_id
+from code_indexer.server.telemetry.correlation_bridge import (
+    get_current_correlation_id as get_correlation_id,
+)
 from code_indexer.server.mcp.auth.elevation_decorator import require_mcp_elevation
 from code_indexer.server.mcp.handlers import _utils
 from code_indexer.server.mcp.handlers._utils import _mcp_response

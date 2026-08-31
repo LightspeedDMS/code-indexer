@@ -9,11 +9,11 @@ import pytest
 from rich.console import Console
 from io import StringIO
 
-from src.code_indexer.services.claude_tool_tracking import (
+from code_indexer.services.claude_tool_tracking import (
     ClaudePlanSummary,
     ToolUsageEvent,
 )
-from src.code_indexer.utils.status_display import (
+from code_indexer.utils.status_display import (
     StatusDisplayManager,
     StatusDisplayMode,
 )
@@ -140,7 +140,7 @@ Operation Breakdown:
 def test_markdown_processing_for_readability_preserves_left_alignment():
     """Test that markdown processing doesn't introduce centering."""
 
-    from src.code_indexer.utils.status_display import _process_markdown_for_readability
+    from code_indexer.utils.status_display import _process_markdown_for_readability
 
     # Test text with markdown that could be problematic
     test_markdown = """# Centered Header
@@ -177,7 +177,7 @@ def test_full_claude_streaming_output_formatting():
     console = Console(file=string_io, width=80, legacy_windows=False)
 
     # Create a FreeScrollStreamDisplay (used in Claude streaming)
-    from src.code_indexer.utils.status_display import FreeScrollStreamDisplay
+    from code_indexer.utils.status_display import FreeScrollStreamDisplay
 
     display = FreeScrollStreamDisplay(console=console)
     display.start("Claude Analysis")

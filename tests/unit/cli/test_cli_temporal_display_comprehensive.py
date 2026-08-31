@@ -15,7 +15,7 @@ from unittest import TestCase
 from unittest.mock import MagicMock, patch
 
 # Import the functions to test
-from src.code_indexer.cli import (
+from code_indexer.cli import (
     _display_file_chunk_match,
     _display_commit_message_match,
     display_temporal_results,
@@ -84,7 +84,7 @@ class TestCLITemporalDisplayComprehensive(TestCase):
         # No longer need to mock diff generation
 
         # Patch console.print to capture output
-        with patch("src.code_indexer.cli.console.print") as mock_print:
+        with patch("code_indexer.cli.console.print") as mock_print:
             _display_file_chunk_match(result, 1, mock_service)
 
             # Verify commit details were fetched
@@ -127,7 +127,7 @@ class TestCLITemporalDisplayComprehensive(TestCase):
 
         # Story 2: No diff generation - content is pre-computed in payloads
 
-        with patch("src.code_indexer.cli.console.print") as mock_print:
+        with patch("code_indexer.cli.console.print") as mock_print:
             _display_file_chunk_match(result, 1, mock_service)
 
             # Verify chunk content was printed with line numbers
@@ -166,7 +166,7 @@ class TestCLITemporalDisplayComprehensive(TestCase):
             {"file_path": "tests/test_auth.py", "blob_hash": "def456"},
         ]
 
-        with patch("src.code_indexer.cli.console.print") as mock_print:
+        with patch("code_indexer.cli.console.print") as mock_print:
             _display_commit_message_match(result, 1, mock_service)
 
             # Verify commit details were fetched
@@ -221,11 +221,9 @@ class TestCLITemporalDisplayComprehensive(TestCase):
 
         with (
             patch(
-                "src.code_indexer.cli._display_commit_message_match"
+                "code_indexer.cli._display_commit_message_match"
             ) as mock_commit_display,
-            patch(
-                "src.code_indexer.cli._display_file_chunk_match"
-            ) as mock_file_display,
+            patch("code_indexer.cli._display_file_chunk_match") as mock_file_display,
         ):
             display_temporal_results(results, mock_service)
 
@@ -290,11 +288,9 @@ class TestCLITemporalDisplayComprehensive(TestCase):
 
         with (
             patch(
-                "src.code_indexer.cli._display_commit_message_match"
+                "code_indexer.cli._display_commit_message_match"
             ) as mock_commit_display,
-            patch(
-                "src.code_indexer.cli._display_file_chunk_match"
-            ) as mock_file_display,
+            patch("code_indexer.cli._display_file_chunk_match") as mock_file_display,
         ):
             display_temporal_results(results, mock_service)
 

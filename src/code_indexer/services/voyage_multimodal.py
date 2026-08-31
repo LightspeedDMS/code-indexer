@@ -2,12 +2,13 @@
 
 import os
 from pathlib import Path
-from typing import Dict, Any, List, Optional, Union
+from typing import Dict, Any, List, Optional, Union, cast
 import httpx
 from rich.console import Console
 
 from ..config import VoyageAIConfig
 from .multimodal_utils import encode_image_to_base64
+from .voyage_ai import SyncClientFactory
 
 
 class VoyageMultimodalClient:
@@ -24,18 +25,36 @@ class VoyageMultimodalClient:
     - Rate limit handling
     """
 
-    def __init__(self, config: VoyageAIConfig, console: Optional[Console] = None):
+    def __init__(
+        self,
+        config: VoyageAIConfig,
+        console: Optional[Console] = None,
+        http_client_factory: Optional[SyncClientFactory] = None,
+    ):
         """Initialize VoyageMultimodalClient.
 
         Args:
             config: VoyageAI configuration (model, endpoint, timeouts, retries)
             console: Optional Rich console for logging
+            http_client_factory: An object satisfying the SyncClientFactory
+                Protocol (typically HttpClientFactory or NullFaultFactory),
+                mirroring VoyageAIClient's own constructor. Normalized to
+                NullFaultFactory() when omitted so call sites never need an
+                if-None branch.
 
         Raises:
             ValueError: If VOYAGE_API_KEY environment variable is not set
         """
         self.config = config
         self.console = console or Console()
+
+        if http_client_factory is None:
+            from code_indexer.server.fault_injection.null_factory import (
+                NullFaultFactory,
+            )
+
+            http_client_factory = NullFaultFactory()
+        self._http_client_factory: SyncClientFactory = http_client_factory
 
         # Override API endpoint for multimodal embeddings
         # VoyageAIConfig defaults to /v1/embeddings, but multimodal needs /v1/multimodalembeddings
@@ -91,7 +110,7 @@ class VoyageMultimodalClient:
             """The smallest unit including BOTH the network call and its
             status validation -- a vendor 4xx/5xx here must be recorded as
             success=False, never success=True (Story #1418)."""
-            with httpx.Client(
+            with self._http_client_factory.create_sync_client(
                 headers={
                     "Authorization": f"Bearer {self.api_key}",
                     "Content-Type": "application/json",
@@ -100,21 +119,35 @@ class VoyageMultimodalClient:
             ) as client:
                 _response = client.post(self.config.api_endpoint, json=payload)
                 _response.raise_for_status()
-            return _response
+            return cast(httpx.Response, _response)
+
+        def _count_single_text_tokens() -> int:
+            from .embedded_voyage_tokenizer import VoyageTokenizer
+
+            return VoyageTokenizer.count_tokens([text], self.config.model)
 
         from code_indexer.server.services.embedding_call_instrumentation import (
             instrument_call,
         )
+        from code_indexer.services.embedding_metrics_telemetry import (
+            time_and_record_embedding_call,
+        )
 
-        response = instrument_call(
-            provider="voyageai",
-            call_type="embed_multimodal",
+        # Story #1586 AC2: cidx.embedding.* OTEL metrics -- no internal
+        # retry loop here, so wrapping this method boundary is per-attempt.
+        response = time_and_record_embedding_call(
             model=self.config.model,
-            item_count=1,
-            token_count=0,
-            batch_size=1,
-            purpose="query" if input_type == "query" else "index",
-            fn=_do_post_and_validate,
+            count_tokens=_count_single_text_tokens,
+            call_fn=lambda: instrument_call(
+                provider="voyageai",
+                call_type="embed_multimodal",
+                model=self.config.model,
+                item_count=1,
+                token_count=0,
+                batch_size=1,
+                purpose="query" if input_type == "query" else "index",
+                fn=_do_post_and_validate,
+            ),
         )
 
         result = response.json()
@@ -195,6 +228,33 @@ class VoyageMultimodalClient:
 
         return all_embeddings
 
+    def get_embeddings_batch(
+        self,
+        texts: List[str],
+        model: Optional[str] = None,
+        *,
+        embedding_purpose: str = "document",
+        retry: bool = True,
+    ) -> List[List[float]]:
+        """Standard EmbeddingProvider batch contract (Bug #1480 follow-up).
+
+        The server-side embedding path (EmbeddingCoalescer) calls this method;
+        without it a server-side multimodal query raised AttributeError and
+        zeroed the whole result set. Embeds TEXT-ONLY queries (no images) in
+        the multimodal vector space by delegating to
+        get_multimodal_embeddings_batch, so the returned vectors match this
+        client's multimodal collection dimension (voyage-multimodal-3 = 1024).
+
+        ``model`` and ``retry`` are accepted for signature-compatibility with
+        the base contract; the multimodal batch path manages its own model and
+        retries.
+        """
+        if not texts:
+            return []
+        input_type = "query" if embedding_purpose == "query" else "document"
+        items: List[Dict[str, Any]] = [{"text": t, "image_paths": []} for t in texts]
+        return self.get_multimodal_embeddings_batch(items, input_type=input_type)
+
     def _get_model_token_limit(self) -> int:
         """Get token limit for current model.
 
@@ -264,7 +324,7 @@ class VoyageMultimodalClient:
             """The smallest unit including BOTH the network call and its
             status validation -- a vendor 4xx/5xx here must be recorded as
             success=False, never success=True (Story #1418)."""
-            with httpx.Client(
+            with self._http_client_factory.create_sync_client(
                 headers={
                     "Authorization": f"Bearer {self.api_key}",
                     "Content-Type": "application/json",
@@ -273,21 +333,32 @@ class VoyageMultimodalClient:
             ) as client:
                 _response = client.post(self.config.api_endpoint, json=payload)
                 _response.raise_for_status()
-            return _response
+            return cast(httpx.Response, _response)
 
         from code_indexer.server.services.embedding_call_instrumentation import (
             instrument_call,
         )
+        from code_indexer.services.embedding_metrics_telemetry import (
+            time_and_record_embedding_call,
+        )
 
-        response = instrument_call(
-            provider="voyageai",
-            call_type="embed_multimodal",
+        # Story #1586 AC2: cidx.embedding.* OTEL metrics -- no internal
+        # retry loop here, so wrapping this method boundary is per-attempt.
+        response = time_and_record_embedding_call(
             model=self.config.model,
-            item_count=len(items),
-            token_count=0,
-            batch_size=len(items),
-            purpose="query" if input_type == "query" else "index",
-            fn=_do_post_and_validate,
+            count_tokens=lambda: sum(
+                self._count_tokens_accurately(item["text"]) for item in items
+            ),
+            call_fn=lambda: instrument_call(
+                provider="voyageai",
+                call_type="embed_multimodal",
+                model=self.config.model,
+                item_count=len(items),
+                token_count=0,
+                batch_size=len(items),
+                purpose="query" if input_type == "query" else "index",
+                fn=_do_post_and_validate,
+            ),
         )
 
         result = response.json()
@@ -345,3 +416,49 @@ class VoyageMultimodalClient:
         "voyage-ai" correctly routes multimodal telemetry to the voyage branch.
         """
         return "voyage-ai"
+
+    def get_current_model(self) -> str:
+        """Get the current active model name.
+
+        Bug #1480 remediation: required by the server-side
+        ``QueryEmbeddingCache.qualifier()`` contract (see
+        ``server/services/query_embedding_cache.py``), which every embedding
+        provider driven through ``governed_call.coalesced_query_embedding``
+        must satisfy once the query-embedding cache is enabled. Mirrors
+        ``VoyageAIClient.get_current_model()`` exactly.
+        """
+        return str(self.config.model)
+
+    def get_model_info(self) -> Dict[str, Any]:
+        """Get information about the current model.
+
+        Bug #1480 remediation: required by the server-side
+        ``QueryEmbeddingCache.qualifier()`` contract, which reads the
+        ``"dimensions"`` key. Reuses the SAME ``_VOYAGE_MODEL_DIMENSIONS``
+        table ``VoyageAIClient.get_model_info()`` uses -- never a fabricated
+        value. Unlike the text client, this raises loudly (no silent
+        default) when the configured model has no known dimension, since a
+        wrong/undeclared dimension here would corrupt the cache qualifier.
+
+        Raises:
+            ValueError: If ``self.config.model`` has no entry in
+                ``_VOYAGE_MODEL_DIMENSIONS``.
+        """
+        from .voyage_ai import _VOYAGE_MODEL_DIMENSIONS
+
+        model_name = self.config.model
+        dimensions = _VOYAGE_MODEL_DIMENSIONS.get(model_name)
+        if dimensions is None:
+            raise ValueError(
+                f"Unknown VoyageAI multimodal model '{model_name}': no "
+                "dimension entry in _VOYAGE_MODEL_DIMENSIONS (voyage_ai.py)."
+            )
+
+        return {
+            "name": model_name,
+            "provider": "voyage-ai",
+            "dimensions": dimensions,
+            "max_tokens": self._get_model_token_limit(),
+            "supports_batch": True,
+            "api_endpoint": self.config.api_endpoint,
+        }

@@ -234,6 +234,73 @@ class FilesystemDashboardCacheBackend:
         self._write_atomic(updated)
         return None
 
+    def set_job_slot(self, job_id: str, expected_current: Optional[str]) -> bool:
+        """
+        Compare-and-swap: re-point the job slot at job_id, but only if the
+        slot currently holds expected_current (None means "no cache file, or
+        an empty/None job_id").
+
+        Exists to correct a placeholder job id to the real id returned by
+        BackgroundJobManager.submit_job() (Bug #1620), since submit_job()
+        mints its own job_id and ignores any id the caller pre-generated.
+
+        This is deliberately a CAS -- not an unconditional overwrite --
+        because a concurrent request can legitimately change the slot
+        between the caller's claim_job_slot(placeholder) and this call
+        (e.g. clearing a perceived zombie, or caching a completed result).
+        Blindly overwriting that state would clobber a legitimate
+        transition; instead the swap no-ops and logs a WARNING.
+
+        Interface-parity with DependencyMapDashboardCacheBackend.set_job_slot().
+
+        Args:
+            job_id: The real job ID to record in the slot.
+            expected_current: The job id the caller believes the slot
+                currently holds (typically its own placeholder), or None to
+                mean "the slot is currently empty / no cache file exists yet".
+
+        Returns:
+            True if the swap was applied, False if the slot no longer held
+            expected_current (no write performed).
+        """
+        cached = self.get_cached()
+
+        if cached is None:
+            if expected_current is not None:
+                logger.warning(
+                    "FilesystemDashboardCacheBackend.set_job_slot: CAS failed "
+                    "-- no cache file exists but expected_current=%r; "
+                    "job_id=%r not applied",
+                    expected_current,
+                    job_id,
+                )
+                return False
+            payload: Dict[str, Any] = {
+                "computed_at": None,
+                "job_id": job_id,
+                "result_json": None,
+                "last_failure_message": None,
+                "last_failure_at": None,
+            }
+            self._write_atomic(payload)
+            return True
+
+        current_job_id = cached.get("job_id")
+        if current_job_id != expected_current:
+            logger.warning(
+                "FilesystemDashboardCacheBackend.set_job_slot: CAS failed "
+                "-- slot holds %r, expected_current=%r; job_id=%r not applied",
+                current_job_id,
+                expected_current,
+                job_id,
+            )
+            return False
+
+        updated = dict(cached)
+        updated["job_id"] = job_id
+        self._write_atomic(updated)
+        return True
+
     def clear_job_slot_for_retry(self) -> None:
         """
         Clear job_id and failure fields to allow a clean retry.

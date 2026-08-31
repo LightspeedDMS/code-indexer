@@ -13,7 +13,7 @@ from pathlib import Path
 from unittest.mock import Mock, patch, MagicMock
 import pytest
 
-from src.code_indexer.server.query.semantic_query_manager import (
+from code_indexer.server.query.semantic_query_manager import (
     SemanticQueryManager,
 )
 from code_indexer.services.temporal.temporal_search_service import (
@@ -140,7 +140,7 @@ class TestTemporalServiceIntegration:
         call is used, not a subprocess.
 
         The patch target uses the "src."-prefixed module path (matching this
-        file's own "from src.code_indexer...SemanticQueryManager" import)
+        file's own "from code_indexer...SemanticQueryManager" import)
         because semantic_query_manager.py's internal relative import
         (`from ...services.temporal.temporal_fusion_dispatch import ...`)
         resolves relative to however ITS module was loaded -- under "src."
@@ -157,14 +157,12 @@ class TestTemporalServiceIntegration:
         temporal_dir.mkdir(parents=True, exist_ok=True)
 
         with (
-            patch("src.code_indexer.proxy.config_manager.ConfigManager"),
-            patch("src.code_indexer.backends.backend_factory.BackendFactory"),
+            patch("code_indexer.proxy.config_manager.ConfigManager"),
+            patch("code_indexer.backends.backend_factory.BackendFactory"),
+            patch("code_indexer.services.embedding_factory.EmbeddingProviderFactory"),
+            patch("code_indexer.server.app._server_hnsw_cache", None),
             patch(
-                "src.code_indexer.services.embedding_factory.EmbeddingProviderFactory"
-            ),
-            patch("src.code_indexer.server.app._server_hnsw_cache", None),
-            patch(
-                "src.code_indexer.services.temporal.temporal_fusion_dispatch"
+                "code_indexer.services.temporal.temporal_fusion_dispatch"
                 ".execute_temporal_query_with_fusion"
             ) as mock_execute_fusion,
             patch(
@@ -254,14 +252,12 @@ class TestTemporalMetadata:
         temporal_dir.mkdir(parents=True, exist_ok=True)
 
         with (
-            patch("src.code_indexer.proxy.config_manager.ConfigManager"),
-            patch("src.code_indexer.backends.backend_factory.BackendFactory"),
+            patch("code_indexer.proxy.config_manager.ConfigManager"),
+            patch("code_indexer.backends.backend_factory.BackendFactory"),
+            patch("code_indexer.services.embedding_factory.EmbeddingProviderFactory"),
+            patch("code_indexer.server.app._server_hnsw_cache", None),
             patch(
-                "src.code_indexer.services.embedding_factory.EmbeddingProviderFactory"
-            ),
-            patch("src.code_indexer.server.app._server_hnsw_cache", None),
-            patch(
-                "src.code_indexer.services.temporal.temporal_fusion_dispatch"
+                "code_indexer.services.temporal.temporal_fusion_dispatch"
                 ".execute_temporal_query_with_fusion"
             ) as mock_execute_fusion,
             patch(
@@ -334,14 +330,12 @@ class TestTemporalErrorHandling:
     ):
         """Acceptance Criterion 10: Clear error for invalid date formats."""
         with (
-            patch("src.code_indexer.proxy.config_manager.ConfigManager"),
-            patch("src.code_indexer.backends.backend_factory.BackendFactory"),
+            patch("code_indexer.proxy.config_manager.ConfigManager"),
+            patch("code_indexer.backends.backend_factory.BackendFactory"),
+            patch("code_indexer.services.embedding_factory.EmbeddingProviderFactory"),
+            patch("code_indexer.server.app._server_hnsw_cache", None),
             patch(
-                "src.code_indexer.services.embedding_factory.EmbeddingProviderFactory"
-            ),
-            patch("src.code_indexer.server.app._server_hnsw_cache", None),
-            patch(
-                "src.code_indexer.services.temporal.temporal_search_service.TemporalSearchService"
+                "code_indexer.services.temporal.temporal_search_service.TemporalSearchService"
             ) as MockTemporalService,
             patch(
                 "code_indexer.services.embedding_factory.EmbeddingProviderFactory"
@@ -372,14 +366,12 @@ class TestTemporalErrorHandling:
     ):
         """Acceptance Criterion 10: Clear error for wrong separator."""
         with (
-            patch("src.code_indexer.proxy.config_manager.ConfigManager"),
-            patch("src.code_indexer.backends.backend_factory.BackendFactory"),
+            patch("code_indexer.proxy.config_manager.ConfigManager"),
+            patch("code_indexer.backends.backend_factory.BackendFactory"),
+            patch("code_indexer.services.embedding_factory.EmbeddingProviderFactory"),
+            patch("code_indexer.server.app._server_hnsw_cache", None),
             patch(
-                "src.code_indexer.services.embedding_factory.EmbeddingProviderFactory"
-            ),
-            patch("src.code_indexer.server.app._server_hnsw_cache", None),
-            patch(
-                "src.code_indexer.services.temporal.temporal_search_service.TemporalSearchService"
+                "code_indexer.services.temporal.temporal_search_service.TemporalSearchService"
             ) as MockTemporalService,
             patch(
                 "code_indexer.services.embedding_factory.EmbeddingProviderFactory"
@@ -408,14 +400,12 @@ class TestTemporalErrorHandling:
     ):
         """Acceptance Criterion 10: Clear error for invalid date range."""
         with (
-            patch("src.code_indexer.proxy.config_manager.ConfigManager"),
-            patch("src.code_indexer.backends.backend_factory.BackendFactory"),
+            patch("code_indexer.proxy.config_manager.ConfigManager"),
+            patch("code_indexer.backends.backend_factory.BackendFactory"),
+            patch("code_indexer.services.embedding_factory.EmbeddingProviderFactory"),
+            patch("code_indexer.server.app._server_hnsw_cache", None),
             patch(
-                "src.code_indexer.services.embedding_factory.EmbeddingProviderFactory"
-            ),
-            patch("src.code_indexer.server.app._server_hnsw_cache", None),
-            patch(
-                "src.code_indexer.services.temporal.temporal_search_service.TemporalSearchService"
+                "code_indexer.services.temporal.temporal_search_service.TemporalSearchService"
             ) as MockTemporalService,
             patch(
                 "code_indexer.services.embedding_factory.EmbeddingProviderFactory"
@@ -457,14 +447,12 @@ class TestPerformanceRequirements:
         temporal_dir.mkdir(parents=True, exist_ok=True)
 
         with (
-            patch("src.code_indexer.proxy.config_manager.ConfigManager"),
-            patch("src.code_indexer.backends.backend_factory.BackendFactory"),
+            patch("code_indexer.proxy.config_manager.ConfigManager"),
+            patch("code_indexer.backends.backend_factory.BackendFactory"),
+            patch("code_indexer.services.embedding_factory.EmbeddingProviderFactory"),
+            patch("code_indexer.server.app._server_hnsw_cache", None),
             patch(
-                "src.code_indexer.services.embedding_factory.EmbeddingProviderFactory"
-            ),
-            patch("src.code_indexer.server.app._server_hnsw_cache", None),
-            patch(
-                "src.code_indexer.services.temporal.temporal_search_service.TemporalSearchService"
+                "code_indexer.services.temporal.temporal_search_service.TemporalSearchService"
             ) as MockTemporalService,
         ):
             mock_temporal_service = Mock()

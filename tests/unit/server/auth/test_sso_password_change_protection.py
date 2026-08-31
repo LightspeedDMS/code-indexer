@@ -466,24 +466,21 @@ class TestSSOPasswordChangeAPIProtection:
                     "code_indexer.server.auth.dependencies.user_manager",
                     mock_user_manager,
                 ):
-                    # Mock _create_users_page_response to capture the call
-                    with patch(
-                        "code_indexer.server.web.routes._create_users_page_response"
-                    ) as mock_response:
-                        mock_response.return_value = MagicMock()
+                    # Call the web route handler
+                    response = change_user_password(
+                        request=mock_request,
+                        username="ssouser",
+                        new_password="NewPass456!@#",
+                        confirm_password="NewPass456!@#",
+                        csrf_token="test_csrf",
+                    )
 
-                        # Call the web route handler
-                        change_user_password(
-                            request=mock_request,
-                            username="ssouser",
-                            new_password="NewPass456!@#",
-                            confirm_password="NewPass456!@#",
-                            csrf_token="test_csrf",
-                        )
-
-                        # Verify _create_users_page_response was called with error message
-                        mock_response.assert_called_once()
-                        call_kwargs = mock_response.call_args[1]
-                        assert "error_message" in call_kwargs
-                        error_msg = call_kwargs["error_message"]
-                        assert "SSO" in error_msg or "identity provider" in error_msg
+                    # NOTE: change_user_password handles SSOPasswordChangeError
+                    # via a PRG redirect (Bug #68), not by calling
+                    # _create_users_page_response with an error_message kwarg
+                    # -- verify the actual current redirect response.
+                    assert response.status_code == 303
+                    assert (
+                        "error=sso_password_change_denied"
+                        in response.headers["location"]
+                    )

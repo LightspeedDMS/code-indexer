@@ -9,10 +9,14 @@ eliminating race conditions from concurrent GlobalRegistry instances.
 
 import json
 import logging
+import math
+import os
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from types import MappingProxyType
 from typing import Any, Dict, List, Optional, Set, Tuple
+
+import psutil
 
 from .database_manager import DatabaseConnectionManager
 
@@ -1056,14 +1060,23 @@ class SyncJobsSqliteBackend:
 
     def list_jobs(self) -> list:
         """List all sync jobs."""
-        conn = self._conn_manager.get_connection()
-        cursor = conn.execute(
-            """SELECT job_id, username, user_alias, job_type, status, created_at,
-                      started_at, completed_at, repository_url, progress, error_message,
-                      phases, phase_weights, current_phase, progress_history,
-                      recovery_checkpoint, analytics_data FROM sync_jobs"""
-        )
-        return [self._row_to_dict(row) for row in cursor.fetchall()]
+        # Bug #1532 follow-up: route the raw connection through
+        # guarded_connection() so close_all() cannot close it mid-read.
+        # Correction to commit e5723217's message: this file has 82 OTHER
+        # bare-connection-fetch call sites (self._conn_manager plus the
+        # bare-fetch method name) beyond this one, not "~100+" as that
+        # commit message states -- history is immutable this deep in the
+        # chain, so the accurate count is recorded here instead. Still
+        # deliberately out of scope for a dedicated sweep, per that
+        # commit's own rationale.
+        with self._conn_manager.guarded_connection() as conn:
+            fetched = conn.execute(
+                """SELECT job_id, username, user_alias, job_type, status, created_at,
+                          started_at, completed_at, repository_url, progress, error_message,
+                          phases, phase_weights, current_phase, progress_history,
+                          recovery_checkpoint, analytics_data FROM sync_jobs"""
+            ).fetchall()
+        return [self._row_to_dict(row) for row in fetched]
 
     def delete_job(self, job_id: str) -> bool:
         """Delete a job by ID."""
@@ -1087,6 +1100,25 @@ class SyncJobsSqliteBackend:
         for audit trail.
 
         Bug #436: Orphaned jobs persist as "running" after server restart.
+
+        Bug #1563 scope note: this method is UNCONDITIONALLY unscoped
+        (no node or worker identity check at all), the same class of
+        hazard fixed for BackgroundJobsSqliteBackend/
+        BackgroundJobsPostgresBackend above/elsewhere in this module.
+        It is deliberately NOT given the same worker-pid-liveness fix
+        here: the `sync_jobs` table has no owning-node or owning-worker
+        identity column at all (unlike `background_jobs`'s
+        executing_node/executing_pid), so there is nothing to check
+        liveness against. Adding one would require a schema change in
+        storage/database_manager.py (this table's schema owner) and a
+        caller change in jobs/manager.py's SyncJobManager (the only
+        production caller, which stamps no owner today) -- both outside
+        this fix's authorized file scope. In practice this is a solo-only
+        code path today (SyncJobManager only ever constructs
+        self._sqlite_backend, never a PostgreSQL sync-jobs backend), so
+        the multi-worker recycle scenario this bug describes does not
+        currently reach it; left here as an accurate, honest scope
+        boundary rather than a silent gap.
 
         Returns:
             Number of orphaned jobs that were cleaned up.
@@ -1747,6 +1779,144 @@ class SSHKeysSqliteBackend:
 _RECONCILE_AUTO_HEAL_EVENT_ROW_ID = 1
 
 
+def _dedup_state_row_to_dict(row: Any) -> Dict[str, Any]:
+    """Story #1560: map one ``fleet_migration_dedup_state`` row (SQLite
+    tuple, column order matching every SELECT in
+    :class:`GoldenRepoMetadataSqliteBackend`'s dedup-state methods) into
+    the dict shape callers (the /health surface, dedup_state.py) expect.
+    Shared by ``record_dedup_outcome``/``get_dedup_state``/
+    ``list_dedup_states`` to avoid triplicating this field mapping."""
+    return {
+        "golden_alias": row[0],
+        "duplicate_groups": row[1],
+        "records_before": row[2],
+        "records_deleted": row[3],
+        "winner_kept_groups": row[4],
+        "whole_group_deleted_groups": row[5],
+        "collection_total": row[6],
+        "first_dropped_at": row[7],
+        "dropped_at": row[8],
+        "cleared_at": row[9],
+        "cleared_reason": row[10],
+    }
+
+
+def _insert_new_dedup_row(
+    conn: Any,
+    golden_alias: str,
+    duplicate_groups: int,
+    records_before: int,
+    records_deleted: int,
+    winner_kept_groups: int,
+    whole_group_deleted_groups: int,
+    collection_total: int,
+    now: str,
+) -> None:
+    """Story #1560 AC7: first-ever dedup outcome for `golden_alias`."""
+    conn.execute(
+        "INSERT INTO fleet_migration_dedup_state "
+        "(golden_alias, duplicate_groups, records_before, "
+        "records_deleted, winner_kept_groups, "
+        "whole_group_deleted_groups, collection_total, "
+        "first_dropped_at, dropped_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            golden_alias,
+            duplicate_groups,
+            records_before,
+            records_deleted,
+            winner_kept_groups,
+            whole_group_deleted_groups,
+            collection_total,
+            now,
+            now,
+        ),
+    )
+
+
+def _update_existing_dedup_row(
+    conn: Any,
+    golden_alias: str,
+    existing_counts: tuple,
+    duplicate_groups: int,
+    records_before: int,
+    records_deleted: int,
+    winner_kept_groups: int,
+    whole_group_deleted_groups: int,
+    collection_total: int,
+    now: str,
+) -> None:
+    """Story #1560 AC9: cumulative UPDATE. `existing_counts` is the prior
+    (duplicate_groups, records_deleted, winner_kept_groups,
+    whole_group_deleted_groups) tuple -- ADDED to, since these permanent
+    deletions must never be double-counted or discarded. `records_before`/
+    `collection_total` are OVERWRITTEN (snapshot semantics -- summing a
+    collection's size across passes would be meaningless). Resets
+    `cleared_at`/`cleared_reason` -- a fresh outcome is active again."""
+    conn.execute(
+        "UPDATE fleet_migration_dedup_state SET duplicate_groups = ?, "
+        "records_before = ?, records_deleted = ?, winner_kept_groups = ?, "
+        "whole_group_deleted_groups = ?, collection_total = ?, "
+        "dropped_at = ?, cleared_at = NULL, cleared_reason = NULL "
+        "WHERE golden_alias = ?",
+        (
+            existing_counts[0] + duplicate_groups,
+            records_before,
+            existing_counts[1] + records_deleted,
+            existing_counts[2] + winner_kept_groups,
+            existing_counts[3] + whole_group_deleted_groups,
+            collection_total,
+            now,
+            golden_alias,
+        ),
+    )
+
+
+def _apply_dedup_outcome_upsert(
+    conn: Any,
+    golden_alias: str,
+    duplicate_groups: int,
+    records_before: int,
+    records_deleted: int,
+    winner_kept_groups: int,
+    whole_group_deleted_groups: int,
+    collection_total: int,
+    now: str,
+) -> None:
+    """Story #1560 AC6/AC7/AC9: dispatch to insert or cumulative-update
+    for one `fleet_migration_dedup_state` row."""
+    existing = conn.execute(
+        "SELECT duplicate_groups, records_deleted, winner_kept_groups, "
+        "whole_group_deleted_groups FROM fleet_migration_dedup_state "
+        "WHERE golden_alias = ?",
+        (golden_alias,),
+    ).fetchone()
+    if existing is None:
+        _insert_new_dedup_row(
+            conn,
+            golden_alias,
+            duplicate_groups,
+            records_before,
+            records_deleted,
+            winner_kept_groups,
+            whole_group_deleted_groups,
+            collection_total,
+            now,
+        )
+    else:
+        _update_existing_dedup_row(
+            conn,
+            golden_alias,
+            existing,
+            duplicate_groups,
+            records_before,
+            records_deleted,
+            winner_kept_groups,
+            whole_group_deleted_groups,
+            collection_total,
+            now,
+        )
+
+
 class GoldenRepoMetadataSqliteBackend:
     """
     SQLite backend for golden repository metadata (Story #711).
@@ -1754,6 +1924,13 @@ class GoldenRepoMetadataSqliteBackend:
     Replaces golden-repos/metadata.json with atomic SQLite operations,
     eliminating race conditions from concurrent access.
     """
+
+    # Bug #1533: NODE-LOCAL storage. On a cluster node this store cannot see
+    # repos registered by any other node, so callers whose correctness depends
+    # on the cluster-wide view must refuse to read it. Declared explicitly so
+    # they can ask what this backend IS, rather than inferring "shared" from
+    # the fact that some backend was injected.
+    is_shared_backend = False
 
     def __init__(self, db_path: str) -> None:
         """
@@ -1831,7 +2008,233 @@ class GoldenRepoMetadataSqliteBackend:
             """
             )
 
+            # Issue #1477: per-golden-alias fleet-migration failure
+            # quarantine tracking (see record_fleet_migration_failure()
+            # below). Unlike the singleton-row breaker-state table above,
+            # this is keyed per golden_alias since many repos are tracked
+            # independently.
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS fleet_migration_quarantine_state (
+                    golden_alias TEXT PRIMARY KEY NOT NULL,
+                    consecutive_failure_count INTEGER NOT NULL DEFAULT 0,
+                    state_signature TEXT,
+                    first_failed_at TEXT,
+                    last_failed_at TEXT,
+                    updated_at TEXT,
+                    signature_checked_at TEXT,
+                    failure_cause TEXT
+                )
+            """
+            )
+
+            # Story #1560: per-golden-alias duplicate-point-id auto-
+            # resolution outcome tracking (see record_dedup_outcome()
+            # below). A NEW table, distinct from
+            # fleet_migration_quarantine_state above -- that one means
+            # "this repo keeps failing"; this one means "this repo
+            # migrated successfully but permanently lost N records".
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS fleet_migration_dedup_state (
+                    golden_alias TEXT PRIMARY KEY NOT NULL,
+                    duplicate_groups INTEGER NOT NULL DEFAULT 0,
+                    records_before INTEGER NOT NULL DEFAULT 0,
+                    records_deleted INTEGER NOT NULL DEFAULT 0,
+                    winner_kept_groups INTEGER NOT NULL DEFAULT 0,
+                    whole_group_deleted_groups INTEGER NOT NULL DEFAULT 0,
+                    collection_total INTEGER NOT NULL DEFAULT 0,
+                    first_dropped_at TEXT,
+                    dropped_at TEXT,
+                    cleared_at TEXT,
+                    cleared_reason TEXT
+                )
+            """
+            )
+
+            # Bug #1506: per-golden-alias ordinary-refresh integrity-gate
+            # failure quarantine tracking (see
+            # record_refresh_integrity_failure() below). Deliberately
+            # simpler than fleet_migration_quarantine_state above --
+            # ordinary refresh naturally alternates try/reset each
+            # scheduled cycle, so a bare consecutive counter (no
+            # content-signature auto-clear) is sufficient.
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS refresh_integrity_quarantine_state (
+                    golden_alias TEXT PRIMARY KEY NOT NULL,
+                    consecutive_failure_count INTEGER NOT NULL DEFAULT 0,
+                    last_detail TEXT,
+                    first_failed_at TEXT,
+                    last_failed_at TEXT,
+                    updated_at TEXT
+                )
+            """
+            )
+
+            # Bug #1539: per-golden-alias cidx-meta backup conflict-
+            # resolution failure quarantine tracking (see
+            # record_cidx_meta_conflict_failure() below). This table
+            # stores the last failure's upstream target commit SHA --
+            # NOT freeform error text (Codex round-3 review found text
+            # fingerprinting fundamentally fragile: both false-positive
+            # collisions and false-negative misses across attempts) --
+            # so the SAME underlying rebase target can be distinguished
+            # from a genuinely different one across separate,
+            # independent sync() attempts, and automatically resets the
+            # moment the world changes (new commits land upstream).
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS cidx_meta_conflict_quarantine_state (
+                    golden_alias TEXT PRIMARY KEY NOT NULL,
+                    consecutive_failure_count INTEGER NOT NULL DEFAULT 0,
+                    last_target_sha TEXT,
+                    last_detail TEXT,
+                    first_failed_at TEXT,
+                    last_failed_at TEXT,
+                    updated_at TEXT
+                )
+            """
+            )
+
+            # Bug #1567: durable pending-deletion queue for versioned-
+            # snapshot cleanup (see global_repos/cleanup_manager.py). The
+            # PRE-FIX queue lived only in per-process dicts keyed by
+            # time.monotonic() -- any restart/worker-recycle silently
+            # discarded a scheduled deletion. scheduled_at is a WALL-CLOCK
+            # epoch-seconds float (time.time()), never time.monotonic(),
+            # since the minimum-retention-age floor
+            # (CleanupManager.MIN_RETENTION_AGE_SECONDS) must survive a
+            # process restart to mean anything across processes.
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS cleanup_pending_deletion_state (
+                    index_path TEXT PRIMARY KEY NOT NULL,
+                    scheduled_at REAL NOT NULL
+                )
+            """
+            )
+
         self._conn_manager.execute_atomic(operation)
+
+    # Bug #1539's record_cidx_meta_conflict_failure /
+    # reset_cidx_meta_conflict_failure / get_cidx_meta_conflict_failure_state
+    # are RETIRED as of Bug #1555's root-cause fix: CidxMetaBackupSync.sync()
+    # is now a plain mirror-push that can never raise
+    # ConflictResolutionFailedError, so nothing ever calls these again. The
+    # cidx_meta_conflict_quarantine_state table (ensure_table_exists above)
+    # is left in place per this project's backward-compatible-migrations
+    # rule -- it simply gains no new rows.
+
+    def record_refresh_integrity_failure(self, golden_alias: str, detail: str) -> int:
+        """
+        Record one ordinary-refresh integrity-gate failure for a golden
+        repo (Bug #1506). ``detail`` (the integrity_check/flush failure
+        text) is ALWAYS overwritten to the value supplied for THIS
+        failure.
+
+        Returns:
+            The consecutive-failure count after recording this one.
+
+        Raises:
+            ValueError: golden_alias or detail is empty/blank (Codex review
+                Finding 4: matches GoldenRepoMetadataPostgresBackend's
+                validation exactly -- an empty alias/detail is a caller
+                bug that must fail loud, not be silently stored). The
+                actual increment is already atomic via ``execute_atomic``'s
+                ``BEGIN EXCLUSIVE`` transaction below (SQLite has no
+                ``INSERT ... ON CONFLICT ... RETURNING`` in this
+                environment's SQLite 3.34.1, but ``BEGIN EXCLUSIVE``
+                already serializes the read-then-update against any
+                concurrent writer for the whole transaction).
+        """
+        if not golden_alias:
+            raise ValueError("golden_alias must be a non-empty string")
+        if not detail:
+            raise ValueError("detail must be a non-empty string")
+
+        now = datetime.now(timezone.utc).isoformat()
+
+        def operation(conn):
+            row = conn.execute(
+                "SELECT consecutive_failure_count "
+                "FROM refresh_integrity_quarantine_state WHERE golden_alias = ?",
+                (golden_alias,),
+            ).fetchone()
+            if row is None:
+                conn.execute(
+                    "INSERT INTO refresh_integrity_quarantine_state "
+                    "(golden_alias, consecutive_failure_count, last_detail, "
+                    "first_failed_at, last_failed_at, updated_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    (golden_alias, 1, detail, now, now, now),
+                )
+                return 1
+
+            new_count = row[0] + 1
+            conn.execute(
+                "UPDATE refresh_integrity_quarantine_state "
+                "SET consecutive_failure_count = ?, last_detail = ?, "
+                "last_failed_at = ?, updated_at = ? "
+                "WHERE golden_alias = ?",
+                (new_count, detail, now, now, golden_alias),
+            )
+            return new_count
+
+        return self._conn_manager.execute_atomic(operation)  # type: ignore[no-any-return]
+
+    def reset_refresh_integrity_failure(self, golden_alias: str) -> None:
+        """
+        Clear any persisted refresh-integrity failure/quarantine state for
+        a golden repo (Bug #1506) -- called on a successful integrity-gate
+        pass. A no-op (never raises FOR AN UNKNOWN ALIAS) when no row
+        exists for ``golden_alias``.
+
+        Raises:
+            ValueError: golden_alias is empty/blank (Codex review Finding
+                4: matches GoldenRepoMetadataPostgresBackend).
+        """
+        if not golden_alias:
+            raise ValueError("golden_alias must be a non-empty string")
+
+        def operation(conn):
+            conn.execute(
+                "DELETE FROM refresh_integrity_quarantine_state WHERE golden_alias = ?",
+                (golden_alias,),
+            )
+
+        self._conn_manager.execute_atomic(operation)
+
+    def get_refresh_integrity_failure_state(
+        self, golden_alias: str
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Return the currently persisted refresh-integrity failure state for
+        a golden repo, or None if it has never failed (or was reset since).
+
+        Raises:
+            ValueError: golden_alias is empty/blank (Codex review Finding
+                4: matches GoldenRepoMetadataPostgresBackend).
+        """
+        if not golden_alias:
+            raise ValueError("golden_alias must be a non-empty string")
+
+        conn = self._conn_manager.get_connection()
+        row = conn.execute(
+            "SELECT golden_alias, consecutive_failure_count, last_detail, "
+            "first_failed_at, last_failed_at "
+            "FROM refresh_integrity_quarantine_state WHERE golden_alias = ?",
+            (golden_alias,),
+        ).fetchone()
+        if row is None:
+            return None
+        return {
+            "golden_alias": row[0],
+            "consecutive_failure_count": row[1],
+            "last_detail": row[2],
+            "first_failed_at": row[3],
+            "last_failed_at": row[4],
+        }
 
     def add_repo(
         self,
@@ -2389,6 +2792,422 @@ class GoldenRepoMetadataSqliteBackend:
         removed_aliases = [a for a in (removed_aliases_csv or "").split(",") if a]
         return {"removed_aliases": removed_aliases, "occurred_at": occurred_at}
 
+    def record_fleet_migration_failure(
+        self,
+        golden_alias: str,
+        state_signature: str,
+        failure_cause: Optional[str] = None,
+    ) -> int:
+        """
+        Record one fleet-migration consolidation failure for a golden repo
+        (Issue #1477).
+
+        The stored ``state_signature`` is ALWAYS overwritten to the value
+        supplied for THIS failure (a cheap, non-recursive fingerprint of
+        the repo's on-disk collection/temporal state at the moment of this
+        failure) -- this is what lets a later scheduling attempt detect a
+        GENUINE on-disk state change since the last failure, mirroring
+        description_refresh_scheduler.py's commit-based quarantine
+        auto-clear gate (Bug #1096).
+
+        ``failure_cause`` (Finding I, Codex round-5 review) is ALSO always
+        overwritten to the value supplied for THIS failure -- e.g.
+        "disk_headroom" vs "generic" -- so ``is_quarantined()`` can
+        distinguish a disk-headroom-caused quarantine (clears via a
+        disk-space oracle, independent of directory content) from a
+        corrupt-data-caused one (clears via the signature).
+
+        Returns:
+            The consecutive-failure count after recording this one.
+        """
+        now = datetime.now(timezone.utc).isoformat()
+
+        def operation(conn):
+            row = conn.execute(
+                "SELECT consecutive_failure_count "
+                "FROM fleet_migration_quarantine_state WHERE golden_alias = ?",
+                (golden_alias,),
+            ).fetchone()
+            if row is None:
+                # Issue #1477 Finding C (Codex round-3 review): every
+                # column bound via an explicit placeholder (no inline
+                # literal mixed with "?" markers) -- 8 columns, 8 "?", 8
+                # tuple elements, unambiguous to verify by eye.
+                conn.execute(
+                    "INSERT INTO fleet_migration_quarantine_state "
+                    "(golden_alias, consecutive_failure_count, state_signature, "
+                    "first_failed_at, last_failed_at, updated_at, "
+                    "signature_checked_at, failure_cause) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        golden_alias,
+                        1,
+                        state_signature,
+                        now,
+                        now,
+                        now,
+                        now,
+                        failure_cause,
+                    ),
+                )
+                return 1
+
+            new_count = row[0] + 1
+            conn.execute(
+                "UPDATE fleet_migration_quarantine_state "
+                "SET consecutive_failure_count = ?, state_signature = ?, "
+                "last_failed_at = ?, updated_at = ?, signature_checked_at = ?, "
+                "failure_cause = ? "
+                "WHERE golden_alias = ?",
+                (
+                    new_count,
+                    state_signature,
+                    now,
+                    now,
+                    now,
+                    failure_cause,
+                    golden_alias,
+                ),
+            )
+            return new_count
+
+        return self._conn_manager.execute_atomic(operation)  # type: ignore[no-any-return]
+
+    def reset_fleet_migration_failure(self, golden_alias: str) -> None:
+        """
+        Clear any persisted fleet-migration failure/quarantine state for a
+        golden repo (Issue #1477) -- called on a successful migration pass,
+        or when a quarantine is auto-cleared after detecting a genuine
+        on-disk state change since the last recorded failure.
+        """
+
+        def operation(conn):
+            conn.execute(
+                "DELETE FROM fleet_migration_quarantine_state WHERE golden_alias = ?",
+                (golden_alias,),
+            )
+
+        self._conn_manager.execute_atomic(operation)
+
+    def soft_reset_fleet_migration_failure_count(self, golden_alias: str) -> None:
+        """
+        Issue #1477 Finding N: fallback used by
+        `_clear_quarantine_after_detected_repair()` when the full reset
+        (DELETE) above fails but a plain UPDATE still works. Zeroes
+        `consecutive_failure_count` while KEEPING the row (unlike
+        `reset_fleet_migration_failure`, which deletes it) -- this is
+        what gives a just-repaired repo a genuinely fresh failure budget
+        instead of resuming from a stale, elevated count that
+        `record_fleet_migration_failure` would otherwise merely
+        increment further.
+
+        A no-op (never raises) when no row exists for `golden_alias` --
+        there is nothing to reset, not an error condition (mirrors
+        `touch_fleet_migration_failure_check`'s own no-op-on-missing-row
+        contract).
+        """
+
+        def operation(conn):
+            conn.execute(
+                "UPDATE fleet_migration_quarantine_state "
+                "SET consecutive_failure_count = ? WHERE golden_alias = ?",
+                (0, golden_alias),
+            )
+
+        self._conn_manager.execute_atomic(operation)
+
+    def touch_fleet_migration_failure_check(self, golden_alias: str) -> None:
+        """
+        Update ONLY the `signature_checked_at` throttle-bookkeeping
+        timestamp for `golden_alias` (Issue #1477 Finding C, Codex round-3
+        review) -- used when `is_quarantined()` re-verifies an unchanged
+        on-disk signature, so the NEXT recheck window starts fresh WITHOUT
+        touching `consecutive_failure_count` or `state_signature` (those
+        change ONLY via a genuine new failure or an actual detected
+        on-disk change -- never via this bookkeeping-only touch).
+
+        A no-op (never raises) when no row exists for `golden_alias` --
+        there is nothing to touch, not an error condition.
+        """
+        now = datetime.now(timezone.utc).isoformat()
+
+        def operation(conn):
+            conn.execute(
+                "UPDATE fleet_migration_quarantine_state "
+                "SET signature_checked_at = ? WHERE golden_alias = ?",
+                (now, golden_alias),
+            )
+
+        self._conn_manager.execute_atomic(operation)
+
+    def get_fleet_migration_failure_state(
+        self, golden_alias: str
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Return the currently persisted fleet-migration failure state for a
+        golden repo, or None if it has never failed (or was reset since).
+        """
+        conn = self._conn_manager.get_connection()
+        row = conn.execute(
+            "SELECT golden_alias, consecutive_failure_count, state_signature, "
+            "first_failed_at, last_failed_at, signature_checked_at, failure_cause "
+            "FROM fleet_migration_quarantine_state WHERE golden_alias = ?",
+            (golden_alias,),
+        ).fetchone()
+        if row is None:
+            return None
+        return {
+            "golden_alias": row[0],
+            "consecutive_failure_count": row[1],
+            "state_signature": row[2],
+            "first_failed_at": row[3],
+            "last_failed_at": row[4],
+            "signature_checked_at": row[5],
+            "failure_cause": row[6],
+        }
+
+    def list_fleet_migration_failure_states(self) -> List[Dict[str, Any]]:
+        """
+        Return every persisted fleet-migration failure-tracking row (Issue
+        #1477) -- used by FleetMigrationScheduler.get_stats() to compute a
+        dashboard-visible quarantined-repo count without one query per
+        golden alias.
+        """
+        conn = self._conn_manager.get_connection()
+        rows = conn.execute(
+            "SELECT golden_alias, consecutive_failure_count, state_signature, "
+            "first_failed_at, last_failed_at, signature_checked_at, failure_cause "
+            "FROM fleet_migration_quarantine_state"
+        ).fetchall()
+        return [
+            {
+                "golden_alias": row[0],
+                "consecutive_failure_count": row[1],
+                "state_signature": row[2],
+                "first_failed_at": row[3],
+                "last_failed_at": row[4],
+                "signature_checked_at": row[5],
+                "failure_cause": row[6],
+            }
+            for row in rows
+        ]
+
+    # ------------------------------------------------------------------
+    # Duplicate-point-id auto-resolution outcome state (Story #1560)
+    # ------------------------------------------------------------------
+
+    _DEDUP_STATE_SELECT_COLUMNS = (
+        "golden_alias, duplicate_groups, records_before, records_deleted, "
+        "winner_kept_groups, whole_group_deleted_groups, collection_total, "
+        "first_dropped_at, dropped_at, cleared_at, cleared_reason"
+    )
+
+    def record_dedup_outcome(
+        self,
+        golden_alias: str,
+        *,
+        duplicate_groups: int,
+        records_before: int,
+        records_deleted: int,
+        winner_kept_groups: int,
+        whole_group_deleted_groups: int,
+        collection_total: int,
+    ) -> Dict[str, Any]:
+        """Record one dedup-resolution outcome (AC6/AC7/AC9) -- see
+        `_apply_dedup_outcome_upsert` for the cumulative-vs-snapshot
+        semantics. `Dict[str, Any]` mirrors this class's own
+        `get_fleet_migration_failure_state` return-type convention.
+        Returns the resulting row."""
+        if not isinstance(golden_alias, str) or not golden_alias:
+            raise ValueError("golden_alias must be a non-empty string")
+        now = datetime.now(timezone.utc).isoformat()
+
+        def operation(conn):
+            _apply_dedup_outcome_upsert(
+                conn,
+                golden_alias,
+                duplicate_groups,
+                records_before,
+                records_deleted,
+                winner_kept_groups,
+                whole_group_deleted_groups,
+                collection_total,
+                now,
+            )
+            row = conn.execute(
+                f"SELECT {self._DEDUP_STATE_SELECT_COLUMNS} "
+                f"FROM fleet_migration_dedup_state WHERE golden_alias = ?",
+                (golden_alias,),
+            ).fetchone()
+            return _dedup_state_row_to_dict(row)
+
+        return self._conn_manager.execute_atomic(operation)  # type: ignore[no-any-return]
+
+    def get_dedup_state(self, golden_alias: str) -> Optional[Dict[str, Any]]:
+        """Currently persisted dedup-outcome state, or None if absent."""
+        if not isinstance(golden_alias, str) or not golden_alias:
+            raise ValueError("golden_alias must be a non-empty string")
+        conn = self._conn_manager.get_connection()
+        row = conn.execute(
+            f"SELECT {self._DEDUP_STATE_SELECT_COLUMNS} "
+            f"FROM fleet_migration_dedup_state WHERE golden_alias = ?",
+            (golden_alias,),
+        ).fetchone()
+        return None if row is None else _dedup_state_row_to_dict(row)
+
+    def list_dedup_states(self) -> List[Dict[str, Any]]:
+        """Every persisted dedup-outcome row -- used by the /health
+        surface (AC13-AC18)."""
+        conn = self._conn_manager.get_connection()
+        rows = conn.execute(
+            f"SELECT {self._DEDUP_STATE_SELECT_COLUMNS} "
+            f"FROM fleet_migration_dedup_state"
+        ).fetchall()
+        return [_dedup_state_row_to_dict(row) for row in rows]
+
+    def clear_dedup_state(self, golden_alias: str, reason: str) -> None:
+        """Mark a dedup-outcome state as cleared (AC8) -- e.g. after a
+        verified successful full re-index. No-op if absent."""
+        if not isinstance(golden_alias, str) or not golden_alias:
+            raise ValueError("golden_alias must be a non-empty string")
+        if not isinstance(reason, str) or not reason:
+            raise ValueError("reason must be a non-empty string")
+        now = datetime.now(timezone.utc).isoformat()
+
+        def operation(conn):
+            conn.execute(
+                "UPDATE fleet_migration_dedup_state SET cleared_at = ?, "
+                "cleared_reason = ? WHERE golden_alias = ?",
+                (now, reason, golden_alias),
+            )
+
+        self._conn_manager.execute_atomic(operation)
+
+    def clear_all_dedup_states(self, reason: str) -> int:
+        """Story #1589: bulk-clear EVERY currently-active (uncleared)
+        dedup-outcome row in one shot -- the Diagnostics tab's "Clear All
+        Dedup Warnings" action. Mirrors clear_dedup_state's semantics
+        (counts are never erased, only marked cleared) but scoped to
+        `WHERE cleared_at IS NULL` instead of a single golden_alias, so an
+        already-cleared row is left completely untouched (never
+        double-counted). Returns the number of rows actually cleared."""
+        if not isinstance(reason, str) or not reason:
+            raise ValueError("reason must be a non-empty string")
+        now = datetime.now(timezone.utc).isoformat()
+
+        def operation(conn) -> int:
+            cursor = conn.execute(
+                "UPDATE fleet_migration_dedup_state SET cleared_at = ?, "
+                "cleared_reason = ? WHERE cleared_at IS NULL",
+                (now, reason),
+            )
+            return int(cursor.rowcount)
+
+        return self._conn_manager.execute_atomic(operation)
+
+    # ------------------------------------------------------------------
+    # Cleanup pending-deletion queue (Bug #1567)
+    # ------------------------------------------------------------------
+
+    def schedule_cleanup_deletion(self, index_path: str, scheduled_at: float) -> float:
+        """
+        Durably record ``index_path`` as pending deletion.
+
+        Idempotent: if a row already exists for ``index_path``, its
+        ORIGINAL ``scheduled_at`` is preserved and returned -- a
+        re-schedule of an already-queued path must NOT reset its age
+        (mirrors the in-process ``setdefault()`` semantics
+        CleanupManager relies on: "scheduled_at" means the ORIGINAL
+        supersession moment). Otherwise inserts a new row with
+        ``scheduled_at`` and returns it unchanged.
+
+        Args:
+            index_path: Filesystem path scheduled for deletion.
+            scheduled_at: WALL-CLOCK epoch-seconds (``time.time()``) --
+                never ``time.monotonic()``, which has no meaning across
+                process restarts.
+
+        Returns:
+            The authoritative (existing-or-new) scheduled_at.
+
+        Raises:
+            ValueError: index_path is not a non-empty string, or
+                scheduled_at is not a finite number.
+        """
+        if not isinstance(index_path, str) or not index_path.strip():
+            raise ValueError(
+                f"index_path must be a non-empty string, got {index_path!r}"
+            )
+        if not isinstance(scheduled_at, (int, float)) or isinstance(scheduled_at, bool):
+            raise ValueError(
+                f"scheduled_at must be a real number, got {scheduled_at!r}"
+            )
+        scheduled_at = float(scheduled_at)
+        if not math.isfinite(scheduled_at):
+            raise ValueError(
+                f"scheduled_at must be a finite number, got {scheduled_at!r}"
+            )
+
+        def operation(conn):
+            row = conn.execute(
+                "SELECT scheduled_at FROM cleanup_pending_deletion_state "
+                "WHERE index_path = ?",
+                (index_path,),
+            ).fetchone()
+            if row is not None:
+                return float(row[0])
+            conn.execute(
+                "INSERT INTO cleanup_pending_deletion_state "
+                "(index_path, scheduled_at) VALUES (?, ?)",
+                (index_path, scheduled_at),
+            )
+            return float(scheduled_at)
+
+        return self._conn_manager.execute_atomic(operation)  # type: ignore[no-any-return]
+
+    def list_cleanup_pending_deletions(self) -> List[Dict[str, Any]]:
+        """
+        Return every durably-pending deletion row.
+
+        Used to hydrate a freshly-constructed CleanupManager's in-memory
+        queue -- recovering exactly what a PRIOR process/worker already
+        scheduled, closing the silent-loss window a bare in-process queue
+        left on every restart/worker-recycle (Bug #1567). Wrapped through
+        the same execute_atomic() transaction boundary every write in
+        this class uses, so a concurrent writer cannot be observed
+        mid-transaction.
+        """
+
+        def operation(conn):
+            rows = conn.execute(
+                "SELECT index_path, scheduled_at FROM cleanup_pending_deletion_state"
+            ).fetchall()
+            return [
+                {"index_path": row[0], "scheduled_at": float(row[1])} for row in rows
+            ]
+
+        return self._conn_manager.execute_atomic(operation)  # type: ignore[no-any-return]
+
+    def remove_cleanup_pending_deletion(self, index_path: str) -> None:
+        """Remove one durably-pending deletion row. Idempotent -- a no-op
+        when no row exists for ``index_path`` (Bug #1567).
+
+        Raises:
+            ValueError: index_path is not a non-empty string.
+        """
+        if not isinstance(index_path, str) or not index_path.strip():
+            raise ValueError(
+                f"index_path must be a non-empty string, got {index_path!r}"
+            )
+
+        def operation(conn):
+            conn.execute(
+                "DELETE FROM cleanup_pending_deletion_state WHERE index_path = ?",
+                (index_path,),
+            )
+
+        self._conn_manager.execute_atomic(operation)
+
     def close(self) -> None:
         """Close database connections."""
         self._conn_manager.close_all()
@@ -2762,6 +3581,55 @@ class DependencyMapTrackingBackend:
 _TERMINAL_JOB_STATUSES = ("completed", "completed_partial", "failed", "cancelled")
 
 
+def _owning_worker_process_is_alive(executing_pid: Optional[int]) -> bool:
+    """Bug #1563: True only when a job's recorded owning-worker PID is a
+    live OS process on THIS host.
+
+    Under `uvicorn --workers N`, every worker runs its own lifespan and
+    each lifespan calls cleanup_orphaned_jobs_on_startup(). The pre-fix
+    behavior failed EVERY running/pending job unconditionally, including
+    jobs genuinely still executing inside a healthy sibling worker
+    process that merely happened to share the same node -- because
+    "node" was the only identity ever recorded. This helper adds a
+    worker-level (PID) identity check on top, resolving exactly the
+    ambiguity between "a sibling worker on this node is still alive" and
+    "the owning process is provably gone".
+
+    - executing_pid is None: no worker identity was ever recorded for
+      this row (a legacy row from before this fix). Returns False so the
+      caller's pre-existing unconditional-fail behavior for such rows is
+      preserved exactly.
+    - executing_pid is a live PID: the owning worker is still running --
+      returns True so the caller does NOT fail this job.
+    - executing_pid is a dead PID: the owner is provably gone (a real
+      crash, or the specific worker that owned it was recycled) --
+      returns False so the caller still reclaims it, exactly as a genuine
+      full-node restart requires (every worker's PID becomes dead at
+      once, so every row is still correctly reclaimed).
+
+    Known, accepted, bounded residual risk (documented rather than
+    engineered away): PID reuse. If the OS recycles a PID number between
+    the owning process's death and this check, an unrelated process could
+    coincidentally occupy the same PID and be misread as "still alive",
+    deferring reclamation of a genuine orphan until a later sweep. This
+    never causes the opposite (and far worse) failure mode of killing a
+    job that is still genuinely running.
+    """
+    if executing_pid is None:
+        return False
+    try:
+        return bool(psutil.pid_exists(executing_pid))
+    except Exception:
+        # Fail conservatively toward "cannot disprove liveness" -- never
+        # wrongly fail a job whose owner we could not prove is gone.
+        logger.warning(
+            "Bug #1563: liveness probe for owning worker pid %s raised; "
+            "treating as alive (conservative)",
+            executing_pid,
+        )
+        return True
+
+
 class BackgroundJobsSqliteBackend:
     """
     SQLite backend for background job management.
@@ -2774,6 +3642,60 @@ class BackgroundJobsSqliteBackend:
     def __init__(self, db_path: str) -> None:
         """Initialize the backend."""
         self._conn_manager = DatabaseConnectionManager.get_instance(db_path)
+        self._ensure_executing_pid_column()
+
+    def _ensure_executing_pid_column(self) -> None:
+        """Bug #1563: idempotent, self-contained schema self-heal.
+
+        The background_jobs table's base schema is owned by
+        storage/database_manager.py, which is out of scope for this fix.
+        Rather than touch that file, this backend defensively adds its
+        own new column the same way GoldenRepoMetadataSqliteBackend
+        already does further up in this module (PRAGMA table_info check +
+        ALTER TABLE ADD COLUMN) -- idempotent and safe to run on every
+        construction, and self-heals an already-deployed database exactly
+        like a rolling PostgreSQL migration would (see migration 046).
+        """
+
+        def operation(conn):
+            cursor = conn.execute("PRAGMA table_info(background_jobs)")
+            existing_cols = {row[1] for row in cursor.fetchall()}
+            if not existing_cols:
+                # Regression fix (post-#1563): PRAGMA table_info against a
+                # table that does not exist AT ALL returns an EMPTY result
+                # set rather than raising -- it never returns a non-empty
+                # set with a missing column list, since a SQLite table
+                # cannot have zero columns. An empty result therefore means
+                # "the table itself does not exist yet", never "a table
+                # with zero columns". Falling into the ALTER branch here
+                # (as the original #1563 fix did) raised
+                # sqlite3.OperationalError: no such table: background_jobs
+                # whenever this backend is constructed BEFORE
+                # DatabaseSchema.initialize_database() has created the
+                # table -- the exact path StorageFactory._create_sqlite_backends()
+                # / create_backends() exercise when called directly against
+                # a fresh data_dir (several pre-existing unit tests do this
+                # legitimately, never touching background_jobs at all).
+                # There is nothing to migrate yet, so return without
+                # altering. Real production always calls
+                # DatabaseSchema.initialize_database() BEFORE
+                # StorageFactory.create_backends() (see service_init.py /
+                # lifespan.py), so by the time this constructor runs there
+                # the table already exists (without executing_pid, since
+                # CREATE_BACKGROUND_JOBS_TABLE never defines it) and the
+                # ALTER branch below still fires and self-heals it, on both
+                # a brand-new database and an already-deployed one.
+                return None
+            if "executing_pid" not in existing_cols:
+                conn.execute(
+                    "ALTER TABLE background_jobs ADD COLUMN executing_pid INTEGER"
+                )
+                logger.info(
+                    "Migrated background_jobs: added executing_pid column (Bug #1563)"
+                )
+            return None
+
+        self._conn_manager.execute_atomic(operation)
 
     def save_job(
         self,
@@ -2805,6 +3727,15 @@ class BackgroundJobsSqliteBackend:
     ) -> None:
         """Save a new background job."""
 
+        # Bug #1563: stamp the OWNING WORKER's OS pid alongside the node
+        # whenever this row is being claimed (executing_node provided).
+        # Computed internally via os.getpid() -- always correct because
+        # this call always executes inside the very process taking
+        # ownership -- so no caller change is required. Rows with no
+        # owner (executing_node=None, e.g. a pod-pull-eligible row left
+        # for cross-node work-stealing) get no pid either.
+        executing_pid = os.getpid() if executing_node is not None else None
+
         def operation(conn):
             conn.execute(
                 """INSERT OR IGNORE INTO background_jobs
@@ -2812,8 +3743,9 @@ class BackgroundJobsSqliteBackend:
                     result, error, progress, username, is_admin, cancelled, repo_alias,
                     resolution_attempts, claude_actions, failure_reason, extended_error,
                     language_resolution_status, current_phase, phase_detail,
-                    progress_info, metadata, executing_node, claimed_at, actor_username)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    progress_info, metadata, executing_node, claimed_at, actor_username,
+                    executing_pid)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     job_id,
                     operation_type,
@@ -2846,6 +3778,7 @@ class BackgroundJobsSqliteBackend:
                     executing_node,
                     claimed_at,
                     actor_username,
+                    executing_pid,
                 ),
             )
             return None
@@ -2897,6 +3830,11 @@ class BackgroundJobsSqliteBackend:
                 INSERT due to a duplicate active job for (operation_type, repo_alias).
         """
 
+        # Bug #1563: see save_job's identical comment -- stamp the owning
+        # worker's OS pid whenever this row is claimed with an owning
+        # node, computed internally so no caller change is required.
+        executing_pid = os.getpid() if executing_node is not None else None
+
         def operation(conn):
             conn.execute(
                 """INSERT INTO background_jobs
@@ -2904,8 +3842,9 @@ class BackgroundJobsSqliteBackend:
                     result, error, progress, username, is_admin, cancelled, repo_alias,
                     resolution_attempts, claude_actions, failure_reason, extended_error,
                     language_resolution_status, current_phase, phase_detail,
-                    progress_info, metadata, executing_node, claimed_at, actor_username)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    progress_info, metadata, executing_node, claimed_at, actor_username,
+                    executing_pid)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     job_id,
                     operation_type,
@@ -2938,6 +3877,7 @@ class BackgroundJobsSqliteBackend:
                     executing_node,
                     claimed_at,
                     actor_username,
+                    executing_pid,
                 ),
             )
             return None
@@ -3400,6 +4340,20 @@ class BackgroundJobsSqliteBackend:
         same process's restart. Node scoping only matters when a shared
         cluster backend could see another node's still-running work.
 
+        Bug #1563: even within a single node, a misconfigured or future
+        multi-worker SQLite deployment would face the exact same hazard
+        PostgreSQL cluster mode does -- a recycled worker's own startup
+        sweep would otherwise fail every running/pending row in this
+        database, including rows genuinely owned by a still-alive sibling
+        worker process. This is defended the same way as the PostgreSQL
+        backend: candidates are read first, then only rows whose recorded
+        owning-worker PID (see save_job/atomic_claim_insert) is NOT a live
+        OS process are actually failed. A genuine full-node/single-process
+        restart is unaffected -- every recorded pid on this host becomes
+        dead at once, so every row is still correctly reclaimed. See
+        _owning_worker_process_is_alive for the full contract, including
+        the documented residual PID-reuse risk.
+
         Returns:
             Number of orphaned jobs that were cleaned up.
         """
@@ -3408,12 +4362,27 @@ class BackgroundJobsSqliteBackend:
 
         def operation(conn):
             cursor = conn.execute(
-                """UPDATE background_jobs
-                   SET status = 'failed',
-                       error = ?,
-                       completed_at = ?
-                   WHERE status IN ('running', 'pending')""",
-                (error_message, interrupted_at),
+                "SELECT job_id, executing_pid FROM background_jobs "
+                "WHERE status IN ('running', 'pending')"
+            )
+            candidates = cursor.fetchall()
+            job_ids_to_fail = [
+                row[0]
+                for row in candidates
+                if not _owning_worker_process_is_alive(row[1])
+            ]
+            if not job_ids_to_fail:
+                return 0
+
+            placeholders = ", ".join("?" for _ in job_ids_to_fail)
+            cursor = conn.execute(
+                f"""UPDATE background_jobs
+                    SET status = 'failed',
+                        error = ?,
+                        completed_at = ?
+                    WHERE status IN ('running', 'pending')
+                      AND job_id IN ({placeholders})""",
+                [error_message, interrupted_at, *job_ids_to_fail],
             )
             return cursor.rowcount
 
@@ -3812,6 +4781,11 @@ class LogsSqliteBackend:
     to isolate high-volume log writes from other server state.
     """
 
+    # Bug #1553: explicit capability flag -- this backend is node-local
+    # (same file the writer and every same-process reader see), so read
+    # dispatch must NOT route through it as a distinct cross-node store.
+    is_cross_node_backend: bool = False
+
     def __init__(self, db_path: str) -> None:
         """
         Initialize the backend and create the logs table if it does not exist.
@@ -3843,6 +4817,8 @@ class LogsSqliteBackend:
                     extra_data TEXT,
                     node_id TEXT,
                     alias TEXT,
+                    trace_id TEXT,
+                    span_id TEXT,
                     created_at TEXT DEFAULT CURRENT_TIMESTAMP
                 )
                 """
@@ -3854,8 +4830,11 @@ class LogsSqliteBackend:
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_logs_correlation_id ON logs(correlation_id)"
             )
-            # Migrate existing databases: add node_id / alias columns if missing
-            # (must run BEFORE creating the indexes that reference them).
+            # Migrate existing databases: add node_id / alias / trace_id /
+            # span_id columns if missing (must run BEFORE creating the
+            # indexes that reference them). Backward-compatible additive
+            # change per the project's "Database Migrations Must Be
+            # Backward Compatible" rule.
             cursor = conn.execute("PRAGMA table_info(logs)")
             columns = {row[1] for row in cursor.fetchall()}
             if "node_id" not in columns:
@@ -3864,6 +4843,11 @@ class LogsSqliteBackend:
             # admin UI can filter lifecycle-runner failures by repo.
             if "alias" not in columns:
                 conn.execute("ALTER TABLE logs ADD COLUMN alias TEXT")
+            # Story #1676 AC2: OTEL trace/span correlation columns.
+            if "trace_id" not in columns:
+                conn.execute("ALTER TABLE logs ADD COLUMN trace_id TEXT")
+            if "span_id" not in columns:
+                conn.execute("ALTER TABLE logs ADD COLUMN span_id TEXT")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_logs_node_id ON logs(node_id)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_logs_alias ON logs(alias)")
 
@@ -3881,6 +4865,8 @@ class LogsSqliteBackend:
         extra_data: Optional[str] = None,
         node_id: Optional[str] = None,
         alias: Optional[str] = None,
+        trace_id: Optional[str] = None,
+        span_id: Optional[str] = None,
     ) -> None:
         """Insert a single log record.
 
@@ -3896,6 +4882,10 @@ class LogsSqliteBackend:
             node_id: Optional cluster node identifier (NULL in standalone).
             alias: Optional repo alias (Story #876 Phase C). Tags rows written
                 by the lifecycle-runner so operators can filter logs by repo.
+            trace_id: Optional OTEL trace ID (Story #1676 AC2). 32-char hex,
+                or the documented zero-value when no span was active.
+            span_id: Optional OTEL span ID (Story #1676 AC2). 16-char hex,
+                or the documented zero-value when no span was active.
         """
 
         def operation(conn: Any) -> None:
@@ -3903,8 +4893,9 @@ class LogsSqliteBackend:
                 """
                 INSERT INTO logs
                     (timestamp, level, source, message, correlation_id,
-                     user_id, request_path, extra_data, node_id, alias)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     user_id, request_path, extra_data, node_id, alias,
+                     trace_id, span_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     timestamp,
@@ -3917,36 +4908,51 @@ class LogsSqliteBackend:
                     extra_data,
                     node_id,
                     alias,
+                    trace_id,
+                    span_id,
                 ),
             )
 
         self._conn_manager.execute_atomic(operation)
 
-    def insert_log_batch(self, items: List[Any]) -> None:
+    def insert_log_batch(self, items: List[Any]) -> bool:
         """Insert a batch of log records in ONE transaction via executemany.
 
         Issue #1241 P1.1: batched writer to eliminate per-record commit churn.
 
+        Bug #1553: returns a real bool success signal (rather than implicit
+        None) so SQLiteLogHandler's writer loop can detect failure without
+        relying on an exception alone -- matching the sibling
+        LogsPostgresBackend, which swallows its own failures internally and
+        must report them the same way.
+
         Args:
-            items: List of 10-tuples in column order:
+            items: List of 12-tuples in column order (Story #1676 AC2 added
+                trace_id/span_id):
                 (timestamp, level, source, message, correlation_id,
-                 user_id, request_path, extra_data, node_id, alias)
+                 user_id, request_path, extra_data, node_id, alias,
+                 trace_id, span_id)
+
+        Returns:
+            True on success (including the empty-input no-op case).
         """
         if not items:
-            return
+            return True
 
         def operation(conn: Any) -> None:
             conn.executemany(
                 """
                 INSERT INTO logs
                     (timestamp, level, source, message, correlation_id,
-                     user_id, request_path, extra_data, node_id, alias)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     user_id, request_path, extra_data, node_id, alias,
+                     trace_id, span_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 items,
             )
 
         self._conn_manager.execute_atomic(operation)
+        return True
 
     def _build_query_conditions(
         self,
@@ -3956,11 +4962,25 @@ class LogsSqliteBackend:
         date_from: Optional[str],
         date_to: Optional[str],
         node_id: Optional[str],
+        levels: Optional[List[str]] = None,
+        search: Optional[str] = None,
     ) -> Tuple[str, List[Any]]:
-        """Build WHERE clause and params list for log queries."""
+        """Build WHERE clause and params list for log queries.
+
+        Bug #1553: levels/search are additive params mirroring
+        LogAggregatorService._build_where_clause's semantics exactly
+        (levels takes precedence over level; search is a case-insensitive
+        substring match across message and correlation_id) so cluster reads
+        routed through this backend keep the same filtering capability the
+        standalone aggregator already offers.
+        """
         conditions: List[str] = []
         params: List[Any] = []
-        if level is not None:
+        if levels:
+            placeholders = ",".join(["?"] * len(levels))
+            conditions.append(f"level IN ({placeholders})")
+            params.extend(levels)
+        elif level is not None:
             conditions.append("level = ?")
             params.append(level)
         if source is not None:
@@ -3978,6 +4998,11 @@ class LogsSqliteBackend:
         if node_id is not None:
             conditions.append("node_id = ?")
             params.append(node_id)
+        if search:
+            conditions.append("(message LIKE ? OR correlation_id LIKE ?)")
+            search_pattern = f"%{search}%"
+            params.append(search_pattern)
+            params.append(search_pattern)
         where_clause = ("WHERE " + " AND ".join(conditions)) if conditions else ""
         return where_clause, params
 
@@ -3986,7 +5011,8 @@ class LogsSqliteBackend:
 
         Column order matches the SELECT list in query_logs(): id, timestamp,
         level, source, message, correlation_id, user_id, request_path,
-        extra_data, node_id, alias, created_at.
+        extra_data, node_id, alias, trace_id, span_id, created_at
+        (Story #1676 AC2 appended trace_id/span_id).
         """
         return {
             "id": row[0],
@@ -4000,7 +5026,9 @@ class LogsSqliteBackend:
             "extra_data": row[8],
             "node_id": row[9],
             "alias": row[10],
-            "created_at": row[11],
+            "trace_id": row[11],
+            "span_id": row[12],
+            "created_at": row[13],
         }
 
     def query_logs(
@@ -4013,16 +5041,31 @@ class LogsSqliteBackend:
         node_id: Optional[str] = None,
         limit: int = 100,
         offset: int = 0,
+        levels: Optional[List[str]] = None,
+        search: Optional[str] = None,
+        sort_order: str = "desc",
     ) -> Tuple[List[Dict[str, Any]], int]:
         """Query log records with optional filtering and pagination.
+
+        Bug #1553: levels/search/sort_order are additive params -- their
+        defaults preserve the exact pre-existing behaviour for every caller
+        that predates them (single-level equality, no text search, DESC).
 
         Returns:
             Tuple of (list_of_log_dicts, total_count) where total_count reflects
             the full match count before pagination is applied.
         """
         where_clause, params = self._build_query_conditions(
-            level, source, correlation_id, date_from, date_to, node_id
+            level,
+            source,
+            correlation_id,
+            date_from,
+            date_to,
+            node_id,
+            levels,
+            search,
         )
+        order_direction = "ASC" if sort_order == "asc" else "DESC"
         conn = self._conn_manager.get_connection()
         total_count: int = conn.execute(
             f"SELECT COUNT(*) FROM logs {where_clause}", params
@@ -4030,9 +5073,10 @@ class LogsSqliteBackend:
         rows = conn.execute(
             f"""
             SELECT id, timestamp, level, source, message, correlation_id,
-                   user_id, request_path, extra_data, node_id, alias, created_at
+                   user_id, request_path, extra_data, node_id, alias,
+                   trace_id, span_id, created_at
             FROM logs {where_clause}
-            ORDER BY timestamp DESC
+            ORDER BY timestamp {order_direction}
             LIMIT ? OFFSET ?
             """,
             params + [limit, offset],
@@ -6920,6 +7964,79 @@ class DependencyMapDashboardCacheBackend:
         self._conn_manager.execute_atomic(_op)
         return result[0]
 
+    def set_job_slot(self, job_id: str, expected_current: Optional[str]) -> bool:
+        """
+        Compare-and-swap: re-point the job slot at job_id, but only if the
+        slot currently holds expected_current (None means "no row, or an
+        empty/NULL job_id").
+
+        Exists to correct a placeholder job id to the real id returned by
+        BackgroundJobManager.submit_job() (Bug #1620), since submit_job()
+        mints its own job_id and ignores any id the caller pre-generated.
+
+        This is deliberately a CAS -- not an unconditional overwrite --
+        because a concurrent request can legitimately change the slot
+        between the caller's claim_job_slot(placeholder) and this call
+        (e.g. clearing a perceived zombie, or caching a completed result).
+        Blindly overwriting that state would clobber a legitimate
+        transition; instead the swap no-ops and logs a WARNING.
+
+        Args:
+            job_id: The real job ID to record in the slot.
+            expected_current: The job id the caller believes the slot
+                currently holds (typically its own placeholder), or None to
+                mean "the slot is currently empty / no row exists yet".
+
+        Returns:
+            True if the swap was applied, False if the slot no longer held
+            expected_current (no write performed).
+        """
+        result: List[bool] = [False]
+
+        def _op(conn: sqlite3.Connection) -> None:
+            cursor = conn.execute(
+                "SELECT job_id FROM dependency_map_dashboard_cache WHERE cache_key = ?",
+                (self._CACHE_KEY,),
+            )
+            row = cursor.fetchone()
+
+            if row is None:
+                if expected_current is not None:
+                    result[0] = False
+                    return
+                conn.execute(
+                    """
+                    INSERT INTO dependency_map_dashboard_cache
+                        (cache_key, result_json, computed_at, job_id,
+                         last_failure_message, last_failure_at)
+                    VALUES (?, NULL, NULL, ?, NULL, NULL)
+                    """,
+                    (self._CACHE_KEY, job_id),
+                )
+                result[0] = True
+                return
+
+            current_job_id = row[0]
+            if current_job_id != expected_current:
+                result[0] = False
+                return
+
+            conn.execute(
+                "UPDATE dependency_map_dashboard_cache SET job_id = ? WHERE cache_key = ?",
+                (job_id, self._CACHE_KEY),
+            )
+            result[0] = True
+
+        self._conn_manager.execute_atomic(_op)
+        if not result[0]:
+            logger.warning(
+                "DependencyMapDashboardCacheBackend.set_job_slot: CAS failed "
+                "-- slot does not hold expected_current=%r; job_id=%r not applied",
+                expected_current,
+                job_id,
+            )
+        return result[0]
+
     def get_running_job_id(self, job_tracker: Any = None) -> Optional[str]:
         """
         Return the current job_id if a job is actively running, else None.
@@ -7112,8 +8229,23 @@ class QueryEmbeddingCacheSqliteBackend:
         embedding: bytes,
         created_at: float,
         last_used: float,
-    ) -> None:
-        """Insert or update the embedding row (upserts on composite PK conflict)."""
+    ) -> bool:
+        """Insert or update the embedding row (upserts on composite PK conflict).
+
+        Bug #1536: fails open at the backend layer (mirrors
+        QueryEmbeddingCachePostgresBackend's already-fail-open upsert()) —
+        a write failure (e.g. an OperationalError from the 30s busy-timeout
+        expiring under writer contention on this dedicated db file) is
+        logged as a WARNING and reported via a `False` return, never raised.
+        The caller (QueryEmbeddingCache.record_miss_or_shadow) uses the
+        return value to count persistent failures
+        (write_failures_since_start()) rather than relying solely on an
+        exception, since a future/alternate backend implementation might
+        fail open the same way this Postgres sibling already does.
+
+        Returns:
+            True on success, False on failure (never raises).
+        """
 
         def operation(conn: Any) -> None:
             conn.execute(
@@ -7136,7 +8268,16 @@ class QueryEmbeddingCacheSqliteBackend:
                 ),
             )
 
-        self._conn_manager.execute_atomic(operation)
+        try:
+            self._conn_manager.execute_atomic(operation)
+            return True
+        except Exception as exc:  # noqa: BLE001 -- fail-open, never raise
+            logger.warning(
+                "QueryEmbeddingCacheSqliteBackend: upsert failed: %s",
+                exc,
+                exc_info=True,
+            )
+            return False
 
     def touch_last_used(
         self,

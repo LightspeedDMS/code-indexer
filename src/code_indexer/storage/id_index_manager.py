@@ -8,12 +8,13 @@ import logging
 import os
 import struct
 from pathlib import Path
-from typing import Dict
+from typing import Dict, List, Tuple
 import threading
 
 from code_indexer.services.temporal.temporal_structure_marker import (
     STRUCTURE_MARKER_FILENAME,
 )
+from code_indexer.storage.shared.hnsw_sync_state import HNSW_SYNC_STATE_FILENAME
 from code_indexer.utils.file_locking import nfs_safe_fsync
 
 logger = logging.getLogger(__name__)
@@ -31,6 +32,13 @@ _HEADER_SIZE = 4  # bytes occupied by the uint32 entry-count field
 # temporal_progress.json / temporal_meta.json are referenced as literal
 # strings elsewhere in the temporal package (temporal_collection_naming.py,
 # temporal_migration.py) with no shared constant to import.
+# Story #1458 Codex CRITICAL finding (round 4): collection_migration.py's
+# crash-durable content-integrity manifest is migration-engine bookkeeping,
+# not a vector record -- skipped by name, same convention as the entries
+# below (a bare string literal here, no import, matching how
+# temporal_progress.json/temporal_meta.json are referenced).
+_CHUNKS_DB_CONTENT_MANIFEST_FILENAME = "chunks_db_content_manifest.json"
+
 _TEMPORAL_BOOKKEEPING_FILENAMES = frozenset(
     {
         STRUCTURE_MARKER_FILENAME,  # temporal_structure.json
@@ -45,6 +53,20 @@ class CorruptIDIndexError(Exception):
 
     Callers that catch this error may trigger rebuild_from_vectors() to
     auto-repair the index from the intact vector JSON files on disk.
+    """
+
+
+class DuplicateSourceIdError(Exception):
+    """Raised when two or more distinct source vector files share the
+    same point_id (Story #1458 round-6 Codex CRITICAL finding #5).
+
+    A primary-key store (chunks.db) cannot resolve this ambiguity --
+    silently picking one file as "the winner" would discard the other
+    file's data, and downstream cleanup would then delete BOTH source
+    files, permanently losing whichever record lost the silent race.
+    This must never be auto-resolved; it requires explicit operator
+    intervention to determine which file is correct (or whether both
+    need to be re-indexed under distinct ids).
     """
 
 
@@ -167,43 +189,42 @@ class IDIndexManager:
             return id_index
 
     def save_index(self, collection_path: Path, id_index: Dict[str, Path]) -> None:
-        """Save ID index to disk using an atomic temp-file + os.replace pattern.
+        """Save ID index to disk atomically (temp-file + os.replace).
 
-        Writes to a .bin.tmp side-car, fsyncs it, then uses os.replace() to
-        atomically swap it into place.  A directory fsync follows so the rename
-        survives a crash.  The original id_index.bin is never truncated until
-        the new file is fully written and fsynced.
-
-        Args:
-            collection_path: Path to collection directory
-            id_index: Dictionary mapping point IDs to file paths
+        Bug #1575 round 6 item 3b: per-call-unique temp filename (pid +
+        thread-id) -- a fixed name raced across the fresh
+        ``IDIndexManager()`` instance every call site constructs.
         """
         index_file = collection_path / self.INDEX_FILENAME
-        temp_file = index_file.with_suffix(".bin.tmp")
+        temp_file = index_file.with_name(
+            f"{index_file.stem}.{os.getpid()}.{threading.get_ident()}.tmp"
+        )
 
         with self._lock:
-            with open(temp_file, "wb") as f:
-                f.write(struct.pack("<I", len(id_index)))
-
-                for point_id, file_path in id_index.items():
-                    try:
-                        relative_path = file_path.relative_to(collection_path)
-                        path_str = str(relative_path)
-                    except ValueError:
-                        path_str = str(file_path)
-
-                    id_bytes = point_id.encode("utf-8")
-                    path_bytes = path_str.encode("utf-8")
-
-                    f.write(struct.pack("<H", len(id_bytes)))
-                    f.write(id_bytes)
-                    f.write(struct.pack("<H", len(path_bytes)))
-                    f.write(path_bytes)
-
-                f.flush()
-                nfs_safe_fsync(f.fileno())
-
-            os.replace(temp_file, index_file)
+            try:
+                with open(temp_file, "wb") as f:
+                    f.write(struct.pack("<I", len(id_index)))
+                    for point_id, file_path in id_index.items():
+                        try:
+                            relative_path = file_path.relative_to(collection_path)
+                            path_str = str(relative_path)
+                        except ValueError:
+                            path_str = str(file_path)
+                        id_bytes = point_id.encode("utf-8")
+                        path_bytes = path_str.encode("utf-8")
+                        f.write(struct.pack("<H", len(id_bytes)))
+                        f.write(id_bytes)
+                        f.write(struct.pack("<H", len(path_bytes)))
+                        f.write(path_bytes)
+                    f.flush()
+                    nfs_safe_fsync(f.fileno())
+                os.replace(temp_file, index_file)
+            except Exception:
+                try:
+                    temp_file.unlink(missing_ok=True)
+                except OSError as cleanup_err:
+                    logger.warning("Cleanup failed for %s: %s", temp_file, cleanup_err)
+                raise
 
             dir_fd = os.open(str(collection_path), os.O_RDONLY)
             try:
@@ -246,6 +267,181 @@ class IDIndexManager:
             # Save back to disk
             self.save_index(collection_path, existing_index)
 
+    def scan_vectors_for_id_map(self, collection_path: Path) -> Dict[str, Path]:
+        """Side-effect-free scan of all vector JSON files -> point_id map.
+
+        Story #1458 AC3 step 1: fleet migration MUST obtain the trustworthy
+        point_id -> json_path map via THIS primitive, never via
+        ``rebuild_from_vectors()`` -- that method additionally, as a side
+        effect, atomically WRITES ``id_index.bin`` back to disk (see
+        :meth:`rebuild_from_vectors`), which would silently RECREATE the
+        exact file Story #1456 (AC1/AC7) requires be RETIRED for a
+        consolidated (``chunks.db``) collection. This method NEVER reads or
+        writes ``id_index.bin`` -- it only scans the ``vector_*.json``
+        (and any other ``*.json``, excluding the well-known non-vector
+        sidecars) files on disk.
+
+        Backward-compatible bare-dict wrapper around
+        :meth:`scan_vectors_for_id_map_verbose` -- existing callers
+        (``rebuild_from_vectors`` and any other consumer) keep receiving
+        exactly this return shape.
+
+        Args:
+            collection_path: Path to collection directory.
+
+        Returns:
+            Dictionary mapping point IDs to their originating file paths.
+        """
+        id_index, _rejected_count = self.scan_vectors_for_id_map_verbose(
+            collection_path
+        )
+        return id_index
+
+    def scan_vectors_for_id_map_verbose(
+        self, collection_path: Path
+    ) -> Tuple[Dict[str, Path], int]:
+        """Side-effect-free scan of all vector JSON files -> point_id map,
+        ALSO surfacing a distinct rejected-record count (Story #1458 Codex
+        Finding #4, Messi Rule #13 anti-silent-failure).
+
+        A genuinely-empty source directory and a directory where EVERY
+        record was silently rejected as malformed both produce an empty
+        id_map via the bare-dict :meth:`scan_vectors_for_id_map` -- callers
+        that must distinguish the two (fleet migration: never flip the
+        discriminator over silently-dropped data) call THIS method instead.
+        ``rejected_count`` counts only GENUINE malformed-record rejections
+        (JSON parse error, non-dict JSON, missing/invalid ``id`` field) --
+        NOT the legitimate by-design skips (``collection_meta.json``,
+        ``id_index.bin``, temporal bookkeeping sidecars), which are not
+        vector records at all.
+
+        Args:
+            collection_path: Path to collection directory.
+
+        Returns:
+            ``(id_map, rejected_count)``.
+        """
+        import json
+
+        id_index: Dict[str, Path] = {}
+        rejected_count = 0
+        # Codex round-6 CRITICAL finding #5: two distinct source files
+        # sharing the same point_id must never be silently collapsed --
+        # collect every conflicting path per duplicated id so we can fail
+        # loud, naming all of them, once the scan completes.
+        duplicate_paths: Dict[str, List[Path]] = {}
+
+        # Scan all vector JSON files
+        scanned_count = 0
+        for json_file in collection_path.rglob("*.json"):
+            if "collection_meta" in json_file.name:
+                continue
+            if json_file.name == self.INDEX_FILENAME:
+                continue
+            if json_file.name == _CHUNKS_DB_CONTENT_MANIFEST_FILENAME:
+                continue
+            if json_file.name in _TEMPORAL_BOOKKEEPING_FILENAMES:
+                # Bug #1297: temporal marker/bookkeeping sidecars legitimately
+                # lack an 'id' field -- skip silently, no WARNING, not a
+                # rejection (not a vector record at all).
+                continue
+            if json_file.name == HNSW_SYNC_STATE_FILENAME:
+                # Bug #1619: the dedicated hnsw_sync dirty-marker file lives
+                # alongside collection_meta.json in the collection root --
+                # a bookkeeping sidecar, never a vector record.
+                continue
+
+            scanned_count += 1
+            try:
+                with open(json_file) as f:
+                    data = json.load(f)
+            except json.JSONDecodeError as exc:
+                logger.warning(
+                    "scan_vectors_for_id_map: skipping %s — JSON parse error: %s",
+                    json_file,
+                    exc,
+                )
+                rejected_count += 1
+                continue
+            except OSError as exc:
+                # Bug #1583 dual-review follow-up (opus LOW): a single
+                # unreadable file (PermissionError -- e.g. a foreign-owned
+                # file left behind under this project's documented
+                # dual-OS-user server/auto-updater deployment, Bug #879)
+                # must not abort the ENTIRE scan. Treated exactly like a
+                # malformed record: logged, counted as a rejection, and
+                # scanning continues over the rest of the collection.
+                # json.JSONDecodeError (caught above) is a ValueError
+                # subclass, never an OSError, so this clause cannot shadow
+                # it.
+                logger.warning(
+                    "scan_vectors_for_id_map: skipping %s — unreadable: %s",
+                    json_file,
+                    exc,
+                )
+                rejected_count += 1
+                continue
+
+            if not isinstance(data, dict):
+                logger.warning(
+                    "scan_vectors_for_id_map: skipping %s — expected JSON object, got %s",
+                    json_file,
+                    type(data).__name__,
+                )
+                rejected_count += 1
+                continue
+
+            if "id" not in data:
+                logger.warning(
+                    "scan_vectors_for_id_map: skipping %s — missing 'id' field",
+                    json_file,
+                )
+                rejected_count += 1
+                continue
+
+            point_id = data["id"]
+            if not isinstance(point_id, str) or not point_id:
+                logger.warning(
+                    "scan_vectors_for_id_map: skipping %s — 'id' must be a non-empty str, got %r",
+                    json_file,
+                    point_id,
+                )
+                rejected_count += 1
+                continue
+
+            if point_id in id_index:
+                duplicate_paths.setdefault(point_id, [id_index[point_id]]).append(
+                    json_file
+                )
+                continue
+
+            id_index[point_id] = json_file
+
+        if duplicate_paths:
+            details = "; ".join(
+                f"{point_id!r} -> {[str(p) for p in paths]}"
+                for point_id, paths in duplicate_paths.items()
+            )
+            raise DuplicateSourceIdError(
+                f"scan_vectors_for_id_map: duplicate source point_id(s) "
+                f"detected in {collection_path} -- {details} -- refusing "
+                f"to silently pick a winner (would cause cleanup to "
+                f"delete ALL conflicting source files while only one "
+                f"survives); operator intervention required"
+            )
+
+        if not id_index and scanned_count > 0:
+            logger.error(
+                "scan_vectors_for_id_map: suspicious zero-entry scan — "
+                "scanned %d vector files but produced no valid entries in %s "
+                "(%d rejected as malformed)",
+                scanned_count,
+                collection_path,
+                rejected_count,
+            )
+
+        return id_index, rejected_count
+
     def rebuild_from_vectors(self, collection_path: Path) -> Dict[str, Path]:
         """Rebuild ID index by scanning all vector JSON files.
 
@@ -258,68 +454,9 @@ class IDIndexManager:
         Returns:
             Dictionary mapping point IDs to file paths
         """
-        import json
         from .background_index_rebuilder import BackgroundIndexRebuilder
 
-        id_index = {}
-
-        # Scan all vector JSON files
-        scanned_count = 0
-        for json_file in collection_path.rglob("*.json"):
-            if "collection_meta" in json_file.name:
-                continue
-            if json_file.name == self.INDEX_FILENAME:
-                continue
-            if json_file.name in _TEMPORAL_BOOKKEEPING_FILENAMES:
-                # Bug #1297: temporal marker/bookkeeping sidecars legitimately
-                # lack an 'id' field -- skip silently, no WARNING.
-                continue
-
-            scanned_count += 1
-            try:
-                with open(json_file) as f:
-                    data = json.load(f)
-            except json.JSONDecodeError as exc:
-                logger.warning(
-                    "rebuild_from_vectors: skipping %s — JSON parse error: %s",
-                    json_file,
-                    exc,
-                )
-                continue
-
-            if not isinstance(data, dict):
-                logger.warning(
-                    "rebuild_from_vectors: skipping %s — expected JSON object, got %s",
-                    json_file,
-                    type(data).__name__,
-                )
-                continue
-
-            if "id" not in data:
-                logger.warning(
-                    "rebuild_from_vectors: skipping %s — missing 'id' field",
-                    json_file,
-                )
-                continue
-
-            point_id = data["id"]
-            if not isinstance(point_id, str) or not point_id:
-                logger.warning(
-                    "rebuild_from_vectors: skipping %s — 'id' must be a non-empty str, got %r",
-                    json_file,
-                    point_id,
-                )
-                continue
-
-            id_index[point_id] = json_file
-
-        if not id_index and scanned_count > 0:
-            logger.error(
-                "rebuild_from_vectors: suspicious zero-entry rebuild — "
-                "scanned %d vector files but produced no valid entries in %s",
-                scanned_count,
-                collection_path,
-            )
+        id_index = self.scan_vectors_for_id_map(collection_path)
 
         # Use BackgroundIndexRebuilder for atomic swap with locking
         rebuilder = BackgroundIndexRebuilder(collection_path)

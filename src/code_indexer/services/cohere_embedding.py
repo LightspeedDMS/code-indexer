@@ -293,15 +293,46 @@ class CohereEmbeddingProvider(EmbeddingProvider):
                 instrument_call,
             )
 
-            response = instrument_call(
-                provider="cohere",
-                call_type="embed",
+            def _count_batch_tokens() -> int:
+                from code_indexer.services.embedded_cohere_tokenizer import (
+                    count_tokens,
+                )
+
+                return int(count_tokens(texts, model=self.config.model))
+
+            # Story #1586 AC2: cidx.embedding.* OTEL metrics -- one event per
+            # real outbound HTTP attempt, the same boundary instrument_call()
+            # already wraps (per-attempt granularity, mirroring
+            # tests/unit/services/test_cohere_embedding_stats_1418.py).
+            from code_indexer.services.embedding_metrics_telemetry import (
+                record_embedding_provider_call,
+            )
+
+            _embed_metric_start = time.monotonic()
+            try:
+                response = instrument_call(
+                    provider="cohere",
+                    call_type="embed",
+                    model=self.config.model,
+                    item_count=len(texts),
+                    token_count=0,
+                    batch_size=len(texts),
+                    purpose="query" if not retry else "index",
+                    fn=_do_post_and_validate,
+                )
+            except Exception:
+                record_embedding_provider_call(
+                    model=self.config.model,
+                    duration_seconds=time.monotonic() - _embed_metric_start,
+                    status="error",
+                    count_tokens=lambda: 0,
+                )
+                raise
+            record_embedding_provider_call(
                 model=self.config.model,
-                item_count=len(texts),
-                token_count=0,
-                batch_size=len(texts),
-                purpose="query" if not retry else "index",
-                fn=_do_post_and_validate,
+                duration_seconds=time.monotonic() - _embed_metric_start,
+                status="success",
+                count_tokens=_count_batch_tokens,
             )
 
             latency_ms = (time.time() - _start) * 1000

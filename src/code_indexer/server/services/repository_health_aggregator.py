@@ -27,6 +27,7 @@ This module does NOT raise HTTPException -- that stays the router's job
 compute_repository_health).
 """
 
+import logging
 from pathlib import Path
 from typing import List, Optional, Tuple
 
@@ -37,6 +38,16 @@ from code_indexer.services.hnsw_health_service import (
     HNSWHealthService,
     check_health_batch,
 )
+from code_indexer.services.temporal.temporal_collection_naming import (
+    parse_physical_temporal_name,
+)
+from code_indexer.services.temporal.temporal_server_paths import (
+    server_temporal_index_root,
+)
+from code_indexer.storage.shared.chunk_layout import ChunkLayout, resolve_chunk_layout
+from code_indexer.storage.sqlite_chunk_store import chunk_store_has_real_data
+
+logger = logging.getLogger(__name__)
 
 # Bug #1394: shared health-check cache TTL, matching the 5-minute value both
 # routers' previous separate HNSWHealthService instances already used.
@@ -139,19 +150,38 @@ def _classify_index_type(collection_name: str) -> str:
 
 
 def collection_has_vector_shards(collection_dir: Path) -> bool:
-    """Return True if the collection holds at least one vector shard.
+    """Return True if the collection holds at least one real chunk record.
 
-    Vector shards (``vector_*.json``) are written incrementally during
-    indexing and live in nested subdirectories, so rglob is required. Their
-    presence means indexing populated the collection -- as opposed to a
-    genuinely empty / never-indexed collection directory, which has none.
+    Issue #1459 AC1/AC5: routes exclusively through the canonical
+    ``resolve_chunk_layout`` resolver -- never an independent flag/file
+    check. For a CHUNKS_DB-layout collection, real chunk data lives in
+    ``chunks.db`` (a bare ``vector_*.json`` rglob would always report False
+    even for a populated collection), so presence is checked via
+    ``chunk_store_has_real_data`` (Issue #1459 remediation Findings 2/3/4
+    -- a read-only, side-effect-free row-count query that never creates a
+    missing chunks.db and degrades gracefully on a corrupt one, the ONE
+    shared primitive this reporting surface routes through instead of
+    reimplementing "open ChunkStore -> count -> close"). For a legacy
+    SHARDED_JSON collection, presence is checked the pre-existing way:
+    vector shards (``vector_*.json``) are written incrementally during
+    indexing and live in nested subdirectories, so rglob is required.
+    Their presence means indexing populated the collection -- as opposed
+    to a genuinely empty / never-indexed collection directory, which has
+    none.
 
     Args:
         collection_dir: Path to a single collection directory.
 
     Returns:
-        True if any vector_*.json shard exists anywhere under collection_dir.
+        True if the collection holds at least one real chunk record,
+        regardless of on-disk layout.
     """
+    if resolve_chunk_layout(collection_dir) == ChunkLayout.CHUNKS_DB:
+        # bool(...) wrap: this project's known mypy quirk where this
+        # cross-module call resolves under a src.-prefixed module identity
+        # when checked from the repo root, otherwise inferring Any (see
+        # collection_migration.py's analogous documented workaround).
+        return bool(chunk_store_has_real_data(collection_dir / "chunks.db"))
     return next(collection_dir.rglob("vector_*.json"), None) is not None
 
 
@@ -193,6 +223,88 @@ def discover_health_collections(
             )
         )
 
+    return discovered
+
+
+def discover_sister_temporal_collections(
+    golden_repos_dir: Path,
+    repo_alias: str,
+    legacy_index_path: Path,
+) -> List[Tuple[str, str, Path]]:
+    """Discover queryable temporal collections in the FIXED server-owned root.
+
+    Bug #1529: rewritten. ``discover_health_collections()`` only ever scans
+    ``legacy_index_path`` (the repo clone's own ``.code-indexer/index/``), so
+    once server-context temporal indexing writes to the fixed root outside the
+    repo tree, those shards would vanish from health discovery entirely --
+    neither healthy nor unhealthy, just silently absent. This closes that gap
+    by scanning the fixed root directly.
+
+    No resolver, no alias pointers: the location is
+    ``{golden_repos_dir}/.temporal/{alias}/`` by construction (see
+    temporal_server_paths.py, the single location authority).
+
+    Only QUERYABLE shards (a real ``hnsw_index.bin``) are returned -- a shard
+    with committed rows but no HNSW yet (crash window) has nothing a health
+    check could load. ``legacy_index_path`` is still accepted (and validated)
+    for call-site compatibility; shards there are already covered by
+    ``discover_health_collections()``'s own local scan.
+
+    Args:
+        golden_repos_dir: The golden-owned root; the fixed temporal root is
+            derived from it.
+        repo_alias: The golden repo's alias (a trailing ``-global`` is
+            normalized away by the path helper).
+        legacy_index_path: The repo clone's own ``.code-indexer/index/``.
+
+    Returns:
+        List of (collection_name, index_type, hnsw_file_path) tuples --
+        collection_name is the shard's physical base name (e.g.
+        "code-indexer-temporal-voyage_code_3-2024Q1"), index_type is always
+        "temporal", sorted by collection_name for deterministic ordering.
+        Empty if the fixed root holds no queryable temporal data.
+
+    Raises:
+        ValueError: If golden_repos_dir/legacy_index_path is None or an
+            empty string, or repo_alias is empty.
+    """
+    if golden_repos_dir is None or str(golden_repos_dir) == "":
+        raise ValueError("golden_repos_dir must not be None or empty")
+    if not repo_alias:
+        raise ValueError("repo_alias must be a non-empty string")
+    if legacy_index_path is None or str(legacy_index_path) == "":
+        raise ValueError("legacy_index_path must not be None or empty")
+
+    temporal_root = server_temporal_index_root(Path(golden_repos_dir), repo_alias)
+    if not temporal_root.is_dir():
+        return []
+
+    try:
+        entries = list(temporal_root.iterdir())
+    except OSError as exc:
+        logger.warning(
+            "discover_sister_temporal_collections: could not list %s (%s); "
+            "treating as no server-owned temporal collections this call",
+            temporal_root,
+            exc,
+        )
+        return []
+
+    discovered: List[Tuple[str, str, Path]] = []
+    for entry in entries:
+        try:
+            if not entry.is_dir():
+                continue
+        except OSError:
+            continue
+        if parse_physical_temporal_name(entry.name) is None:
+            continue
+        hnsw_file = entry / "hnsw_index.bin"
+        if not hnsw_file.exists():
+            continue
+        discovered.append((entry.name, "temporal", hnsw_file))
+
+    discovered.sort(key=lambda t: t[0])
     return discovered
 
 
@@ -311,6 +423,8 @@ def compute_repository_health(
     *,
     force_refresh: bool = False,
     max_workers: int = 4,
+    golden_repos_dir: Optional[Path] = None,
+    golden_repo_alias: Optional[str] = None,
 ) -> RepositoryHealthResult:
     """Discover and aggregate health for every collection in a repository.
 
@@ -326,6 +440,15 @@ def compute_repository_health(
         force_refresh: If True, bypass cache for every collection check.
         max_workers: Maximum concurrent health checks (passed through to
             check_health_batch).
+        golden_repos_dir: GitHub Issue #1482 extension. When provided
+            together with golden_repo_alias, sister-relocated temporal
+            collections (Story #1457 AC1) are additionally discovered via
+            discover_sister_temporal_collections() and merged into the
+            aggregated result. None (the default) preserves pre-existing,
+            local-clone-only discovery exactly.
+        golden_repo_alias: The golden repo's BARE alias (no `-global`
+            suffix), required alongside golden_repos_dir to enable
+            sister-relocated temporal discovery.
 
     Returns:
         RepositoryHealthResult with per-collection health and aggregated
@@ -349,6 +472,32 @@ def compute_repository_health(
 
     discovered = discover_health_collections(index_base_path)
     incomplete = discover_incomplete_collections(index_base_path)
+
+    # GitHub Issue #1482 extension: local-clone discovery alone misses any
+    # temporal shard relocated to the golden-owned sister location (Story
+    # #1457 AC1) -- it would otherwise silently vanish from health
+    # reporting. Gated on both params being known; entirely fail-open on
+    # any resolution error, preserving local-clone-only behavior for that
+    # collection rather than breaking the whole health report.
+    if golden_repos_dir is not None and golden_repo_alias:
+        try:
+            sister_discovered = discover_sister_temporal_collections(
+                golden_repos_dir, golden_repo_alias, index_base_path
+            )
+        except Exception:
+            logger.warning(
+                "compute_repository_health: sister-relocated temporal "
+                "discovery failed for repo %s (isolated, non-fatal); "
+                "using local-clone-only discovery",
+                repo_alias,
+                exc_info=True,
+            )
+            sister_discovered = []
+        existing_names = {name for name, _index_type, _path in discovered}
+        discovered.extend(
+            entry for entry in sister_discovered if entry[0] not in existing_names
+        )
+
     if not discovered and not incomplete:
         return _empty_repository_health_result(repo_alias)
 

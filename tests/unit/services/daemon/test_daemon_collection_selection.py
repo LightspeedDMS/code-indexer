@@ -36,8 +36,20 @@ def test_daemon_selects_main_collection_not_temporal():
     temp_dir = tempfile.mkdtemp()
     try:
         project_path = Path(temp_dir)
-        index_dir = project_path / ".code-indexer" / "index"
+        code_indexer_dir = project_path / ".code-indexer"
+        index_dir = code_indexer_dir / "index"
         index_dir.mkdir(parents=True)
+
+        # Bug #1730: _load_semantic_indexes now resolves the CONFIGURED
+        # collection (via a real config.json) before selecting one, rather
+        # than blindly using an arbitrary list_collections() order. The
+        # default config's embedding model resolves to "voyage-code-3",
+        # matching this test's main_collection below.
+        from code_indexer.config import ConfigManager
+
+        ConfigManager(code_indexer_dir / "config.json").create_default_config(
+            codebase_dir=project_path
+        )
 
         # Create TWO collections: temporal (alphabetically first) and main (alphabetically second)
         temporal_collection = index_dir / "code-indexer-temporal"
@@ -106,42 +118,20 @@ def test_daemon_selects_main_collection_not_temporal():
         service = CIDXDaemonService()
         cache_entry = CacheEntry(project_path, ttl_minutes=10)
 
-        # Load semantic indexes - THIS IS WHERE THE BUG OCCURS
-        # Current code: loads collections[0] = 'code-indexer-temporal'
-        # Expected: should load 'voyage-code-3' (main collection)
+        # Load semantic indexes. Pre-#1730, this loaded collections[0] =
+        # 'code-indexer-temporal' (alphabetically first). Post-#1730, the
+        # CONFIGURED collection is resolved from the real config.json
+        # above, which never considers "code-indexer-temporal" a candidate.
         service._load_semantic_indexes(cache_entry)
 
-        # CRITICAL ASSERTION: Verify daemon loaded the CORRECT collection
-        # We can infer which collection was loaded by checking the cache_entry's loaded collection name
-        # The daemon logs which collection it loaded, but we need to verify programmatically
-
-        # After loading, check which collection the daemon actually loaded
-        # We can check this by verifying the HNSW index was loaded and inspecting metadata
-
-        # Since we can't directly access which collection name was loaded from cache_entry,
-        # we'll verify indirectly: the daemon SHOULD have loaded voyage-code-3, not temporal
-
-        # For now, document the expected behavior:
-        # - Daemon should exclude temporal collections (starting with 'code-indexer-temporal')
-        # - Daemon should load the main collection ('voyage-code-3')
-
-        # THIS TEST WILL FAIL because current code loads collections[0] = 'code-indexer-temporal'
-        # After fix, daemon should identify main collection correctly
-
-        # The fix should implement logic to:
-        # 1. Filter out temporal collections from the list
-        # 2. Select the main collection (first non-temporal collection)
-
-        # Verification: Check if HNSW index was loaded (basic sanity check)
         assert cache_entry.hnsw_index is not None, (
-            "Daemon should have loaded an HNSW index (but it loaded the WRONG collection)"
+            "Daemon should have loaded an HNSW index"
         )
-
-        # The real test: After fix, we need to verify daemon loaded 'voyage-code-3', not 'code-indexer-temporal'
-        # This requires either:
-        # A) Adding a collection_name attribute to CacheEntry
-        # B) Checking daemon logs
-        # C) Testing search results (temporal collection has different data)
+        assert cache_entry.collection_name == "voyage-code-3", (
+            f"Daemon should have loaded the MAIN collection 'voyage-code-3', "
+            f"not the temporal one, but loaded "
+            f"'{cache_entry.collection_name}'"
+        )
 
         # For now, this test documents the bug and will be enhanced after implementing the fix
 

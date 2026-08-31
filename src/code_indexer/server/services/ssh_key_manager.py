@@ -16,7 +16,7 @@ import os
 from dataclasses import dataclass, field, asdict
 from datetime import datetime
 from pathlib import Path
-from typing import Any, List, Optional
+from typing import Any, List, Optional, Tuple
 import filelock
 
 from .ssh_key_generator import SSHKeyGenerator
@@ -295,22 +295,22 @@ class SSHKeyManager:
                 # SQLite backend (Story #702)
                 key_data = self._sqlite_backend.get_key(key_name)
                 if key_data is None:
-                    raise KeyNotFoundError(f"Key not found: {key_name}")
-
-                # Check for conflicts in user section
-                if not force:
-                    conflict = self.config_manager.check_host_conflict(
-                        self.config_path, hostname
+                    return self._assign_cluster_only_key_to_host(
+                        key_name, hostname, force
                     )
-                    if conflict.exists and conflict.in_user_section:
-                        raise HostConflictError(
-                            f"Host {hostname} exists in user section. "
-                            "Use force=True or remove manually."
-                        )
+
+                self._raise_on_user_section_conflict(hostname, force)
 
                 # Add hostname if not already present
                 if hostname not in key_data["hosts"]:
                     self._sqlite_backend.assign_host(key_name, hostname)
+
+                # --- Cluster mode: mirror host assignment to PG so the sync
+                # service (which reads exclusively from PG) can materialize
+                # the Host block fleet-wide (Bug #1504). Mirrors delete_key's
+                # existing cluster-mode pattern: local write first, then PG;
+                # a PG failure is logged and re-raised, never swallowed. ---
+                self._mirror_host_assignment_to_cluster(key_name, hostname)
 
                 # Update SSH config
                 self._update_ssh_config()
@@ -326,18 +326,11 @@ class SSHKeyManager:
                 # JSON file storage (backward compatible)
                 metadata = self._load_metadata(key_name)
                 if metadata is None:
-                    raise KeyNotFoundError(f"Key not found: {key_name}")
-
-                # Check for conflicts in user section
-                if not force:
-                    conflict = self.config_manager.check_host_conflict(
-                        self.config_path, hostname
+                    return self._assign_cluster_only_key_to_host(
+                        key_name, hostname, force
                     )
-                    if conflict.exists and conflict.in_user_section:
-                        raise HostConflictError(
-                            f"Host {hostname} exists in user section. "
-                            "Use force=True or remove manually."
-                        )
+
+                self._raise_on_user_section_conflict(hostname, force)
 
                 # Add hostname to metadata if not already present
                 if hostname not in metadata.hosts:
@@ -349,6 +342,231 @@ class SSHKeyManager:
 
                 return metadata
 
+    def _raise_on_user_section_conflict(self, hostname: str, force: bool) -> None:
+        """Refuse to shadow a hand-written ``~/.ssh/config`` Host entry.
+
+        Shared verbatim by all three assignment paths (node-local SQLite,
+        node-local JSON, and the cluster-resolved path added for Bug #1526) so
+        the guard cannot drift between them.
+
+        Raises:
+            HostConflictError: ``hostname`` already appears in the user section
+                and the caller did not pass ``force=True``.
+        """
+        if force:
+            return
+
+        conflict = self.config_manager.check_host_conflict(self.config_path, hostname)
+        if conflict.exists and conflict.in_user_section:
+            raise HostConflictError(
+                f"Host {hostname} exists in user section. "
+                "Use force=True or remove manually."
+            )
+
+    def _mirror_host_assignment_to_cluster(self, key_name: str, hostname: str) -> None:
+        """Mirror a host assignment into the shared cluster backend.
+
+        Bug #1504: ``SSHKeySyncService`` reads host assignments exclusively from
+        the shared backend, so without this the Host block is never materialized
+        fleet-wide.  A no-op in solo mode (no ``_pg_backend``).
+
+        Raises:
+            Exception: whatever the backend raised.  Mirrors create_key's and
+                delete_key's policy -- log, then re-raise; never swallowed.
+        """
+        pg_backend = self._pg_backend
+        if pg_backend is None:
+            return
+
+        try:
+            pg_backend.assign_host(key_name, hostname)
+            logger.info(
+                "SSHKeyManager: assigned host '%s' to key '%s' in PG backend",
+                hostname,
+                key_name,
+            )
+        except Exception:
+            logger.exception(
+                "SSHKeyManager: failed to assign host '%s' to key '%s' in PG backend",
+                hostname,
+                key_name,
+            )
+            raise
+
+    def _assign_cluster_only_key_to_host(
+        self, key_name: str, hostname: str, force: bool
+    ) -> KeyMetadata:
+        """Assign a host to a key known only through the shared cluster backend.
+
+        Bug #1526: this node holds no local record to update, so the shared
+        backend IS the record -- and it is what ``SSHKeySyncService`` reads to
+        materialize the Host block on every node.  This node's ``~/.ssh/config``
+        is then regenerated, which now includes the cluster key because Bug #1524
+        made the list path cluster-aware.
+
+        Called with ``self._get_lock()`` already held by ``assign_key_to_host``.
+
+        Raises:
+            KeyNotFoundError: unknown locally AND in the cluster -- always the
+                outcome in solo mode, keeping that path byte-identical.
+            HostConflictError: the same user-section guard the node-local paths
+                apply, evaluated BEFORE anything is written.
+        """
+        if self._cluster_managed_key_metadata(key_name) is None:
+            raise KeyNotFoundError(f"Key not found: {key_name}")
+
+        self._raise_on_user_section_conflict(hostname, force)
+        self._mirror_host_assignment_to_cluster(key_name, hostname)
+        self._update_ssh_config()
+
+        updated = self._cluster_managed_key_metadata(key_name)
+        if updated is None:
+            raise KeyNotFoundError(
+                f"Key '{key_name}' unexpectedly missing after assignment"
+            )
+        return updated
+
+    def _has_untracked_conflicting_file(self, key_name: str) -> bool:
+        """Bug #1519 provenance guard.
+
+        When no backend/JSON metadata exists for ``key_name``, this service
+        has no proof it ever created a file by that name -- it could be an
+        unrelated file (e.g. a user's personal SSH key) that merely shares
+        a filename with a previously backend-tracked key. Returns True (and
+        logs a WARNING) only when such a same-named file is actually
+        present in ``self.ssh_dir``, so the caller can refuse to delete it
+        instead of blindly trusting the name match.
+
+        Also hardens against path-traversal in ``key_name`` (e.g.
+        ``"../foo"``): any name whose resolved path would fall outside
+        ``self.ssh_dir`` is rejected up front, before any filesystem
+        existence check is performed.
+        """
+        default_private = self.ssh_dir / key_name
+        default_public = self.ssh_dir / f"{key_name}.pub"
+
+        ssh_dir_resolved = self.ssh_dir.resolve()
+        if not (
+            default_private.resolve().is_relative_to(ssh_dir_resolved)
+            and default_public.resolve().is_relative_to(ssh_dir_resolved)
+        ):
+            logger.warning(
+                "SSHKeyManager.delete_key('%s'): key name resolves outside "
+                "ssh_dir -- refusing (path-traversal guard)",
+                key_name,
+            )
+            return True
+
+        if not (default_private.exists() or default_public.exists()):
+            return False
+
+        logger.warning(
+            "SSHKeyManager.delete_key('%s'): no tracked metadata found, "
+            "but a same-named file exists in %s -- refusing to delete "
+            "an untracked file (Bug #1519 provenance guard)",
+            key_name,
+            self.ssh_dir,
+        )
+        return True
+
+    def _unlink_key_files(self, private_path: str, public_path: str) -> None:
+        """Remove the key pair a provenance-bearing record points at.
+
+        Shared by every ``delete_key`` path (node-local SQLite, node-local
+        JSON, and the cluster-resolved path added for Bug #1527) so the three
+        cannot drift.  Absent files are not an error: delete is idempotent, and
+        a cluster-managed key legitimately has no local copy on a node that
+        never ran ``SSHKeySyncService.sync()``.
+        """
+        for path in (Path(private_path), Path(public_path)):
+            if path.exists():
+                path.unlink()
+
+    def _delete_cluster_managed_or_refuse(self, key_name: str) -> bool:
+        """Resolve a node-local delete miss against cluster truth (Bug #1527).
+
+        ``delete_key`` used to conclude "untracked" straight from a node-local
+        miss, so a genuinely cluster-managed key -- one the shared backend
+        tracks, and that Bug #1524 already reports as ``managed`` here -- hit
+        Bug #1519's provenance refusal on every node that had not itself
+        created it.  On clustered staging that made a real key undeletable
+        through HAProxy round-robin except on the minority of nodes holding a
+        local record.
+
+        The shared backend row IS provenance: this service (on some node)
+        created that key, and ``SSHKeySyncService`` materializes it here as
+        ``ssh_dir/<name>`` -- which is exactly the path
+        ``_cluster_managed_key_metadata`` returns, since
+        ``_local_materialized_paths`` rebases the row onto this node and
+        refuses any name that would not resolve to a direct child of
+        ``ssh_dir``.  Cluster truth therefore can never authorize a deletion
+        outside ``ssh_dir``, and a same-named file is only removed for a name
+        the cluster positively confirms.
+
+        When the shared backend has NO record either (solo mode always, or a
+        genuinely foreign name collision), the decision falls through to
+        ``_has_untracked_conflicting_file`` unchanged -- Bug #1519/#1521's
+        refusal is preserved verbatim, which is the whole point of routing the
+        cluster check BEFORE it rather than instead of it.
+
+        Returns:
+            True when the delete must be refused (Bug #1519 guard fired),
+            False when there is nothing to refuse -- either the key was
+            cluster-managed and its local files have now been removed, or no
+            same-named file exists at all (idempotent no-op).
+
+        Raises:
+            Exception: whatever the shared backend raised, via
+                ``_cluster_managed_key_metadata``.  Mirrors this class's policy
+                for the shared backend (log then re-raise): degrading to the
+                node-local view would silently reintroduce the false refusal.
+        """
+        metadata = self._cluster_managed_key_metadata(key_name)
+        if metadata is None:
+            return self._has_untracked_conflicting_file(key_name)
+
+        logger.info(
+            "SSHKeyManager.delete_key('%s'): no node-local record, but the "
+            "shared cluster backend confirms the key is managed -- deleting "
+            "this node's materialized copy (Bug #1527)",
+            key_name,
+        )
+        self._unlink_key_files(metadata.private_path, metadata.public_path)
+        return False
+
+    def _delete_from_cluster_backend(self, key_name: str) -> None:
+        """Remove the key's row from the shared cluster backend.
+
+        Without this the key resurrects on the next ``SSHKeySyncService.sync()``,
+        which reads exclusively from the shared backend.  A no-op in solo mode
+        (no ``_pg_backend``).
+
+        Applies to BOTH storage modes: this used to live inside ``delete_key``'s
+        SQLite-only branch, so a JSON-metadata node in cluster mode never
+        removed the shared row.  That asymmetry became load-bearing once Bug
+        #1527 let a cluster-managed key be deleted from a node holding no local
+        record -- the local files would go and the row would stay, resurrecting
+        the key on the next sync.
+
+        Raises:
+            Exception: whatever the backend raised.  Mirrors create_key's and
+                assign_key_to_host's policy -- log, then re-raise; never
+                swallowed.
+        """
+        pg_backend = self._pg_backend
+        if pg_backend is None:
+            return
+
+        try:
+            pg_backend.delete_key(key_name)
+            logger.info("SSHKeyManager: deleted key '%s' from PG backend", key_name)
+        except Exception:
+            logger.exception(
+                "SSHKeyManager: failed to delete key '%s' from PG backend",
+                key_name,
+            )
+            raise
+
     def delete_key(self, key_name: str) -> bool:
         """
         Delete an SSH key, its config entries, and metadata.
@@ -357,77 +575,57 @@ class SSHKeyManager:
             key_name: Name of the key to delete
 
         Returns:
-            True (always succeeds, idempotent operation)
+            True on success, including the idempotent case where no
+            metadata AND no on-disk file exist for key_name (nothing to
+            delete). Returns False when neither node-local metadata NOR the
+            shared cluster backend (Bug #1527) has a record of key_name but a
+            same-named file is present in ssh_dir (Bug #1519 provenance
+            guard) -- this service never proved it wrote that file, so it
+            refuses to delete it rather than blindly trusting the name.
         """
 
         with self._get_lock():
+            untracked_file_blocked = False
+
             if self._use_sqlite and self._sqlite_backend is not None:
                 # SQLite backend (Story #702)
                 key_data = self._sqlite_backend.get_key(key_name)
 
-                # Remove key files if they exist
                 if key_data:
-                    private_path = Path(key_data["private_path"])
-                    public_path = Path(key_data["public_path"])
-                    if private_path.exists():
-                        private_path.unlink()
-                    if public_path.exists():
-                        public_path.unlink()
+                    self._unlink_key_files(
+                        key_data["private_path"], key_data["public_path"]
+                    )
                 else:
-                    # Try standard location even without metadata
-                    default_private = self.ssh_dir / key_name
-                    default_public = self.ssh_dir / f"{key_name}.pub"
-                    if default_private.exists():
-                        default_private.unlink()
-                    if default_public.exists():
-                        default_public.unlink()
+                    untracked_file_blocked = self._delete_cluster_managed_or_refuse(
+                        key_name
+                    )
 
                 # Remove from SQLite (cascade deletes hosts)
                 self._sqlite_backend.delete_key(key_name)
-
-                # --- Cluster mode: remove from PG so key cannot resurrect on next sync ---
-                if self._pg_backend is not None:
-                    try:
-                        self._pg_backend.delete_key(key_name)
-                        logger.info(
-                            "SSHKeyManager: deleted key '%s' from PG backend", key_name
-                        )
-                    except Exception:
-                        logger.exception(
-                            "SSHKeyManager: failed to delete key '%s' from PG backend",
-                            key_name,
-                        )
-                        raise
             else:
                 # JSON file storage (backward compatible)
                 metadata = self._load_metadata(key_name)
 
-                # Remove key files if they exist
                 if metadata:
-                    private_path = Path(metadata.private_path)
-                    public_path = Path(metadata.public_path)
-                    if private_path.exists():
-                        private_path.unlink()
-                    if public_path.exists():
-                        public_path.unlink()
+                    self._unlink_key_files(metadata.private_path, metadata.public_path)
                 else:
-                    # Try standard location even without metadata
-                    default_private = self.ssh_dir / key_name
-                    default_public = self.ssh_dir / f"{key_name}.pub"
-                    if default_private.exists():
-                        default_private.unlink()
-                    if default_public.exists():
-                        default_public.unlink()
+                    untracked_file_blocked = self._delete_cluster_managed_or_refuse(
+                        key_name
+                    )
 
                 # Remove metadata file
                 metadata_path = self.metadata_dir / f"{key_name}.json"
                 if metadata_path.exists():
                     metadata_path.unlink()
 
+            # Cluster mode: remove from the shared backend so the key cannot
+            # resurrect on the next sync.  Applies to both storage modes above.
+            self._delete_from_cluster_backend(key_name)
+
             # Update SSH config to remove entries
             self._update_ssh_config()
 
-            return True
+            return not untracked_file_blocked
 
     def list_keys(self) -> KeyListResult:
         """
@@ -463,9 +661,14 @@ class SSHKeyManager:
                     except (json.JSONDecodeError, TypeError):
                         continue
 
+        # --- Cluster mode: union with the shared backend's truth (Bug #1524) ---
+        managed_keys = self._merge_cluster_managed_keys(managed_keys)
+
         # Discover all keys on filesystem
         all_discovered = self.discovery_service.discover_existing_keys()
-        managed_paths = {k.private_path for k in managed_keys}
+        # KeyMetadata.private_path is declared `str`; str() makes the
+        # string-to-string comparison below explicit at the call site.
+        managed_paths = {str(k.private_path) for k in managed_keys}
 
         # Find unmanaged keys
         unmanaged_keys: List[KeyInfo] = []
@@ -474,6 +677,174 @@ class SSHKeyManager:
                 unmanaged_keys.append(key_info)
 
         return KeyListResult(managed=managed_keys, unmanaged=unmanaged_keys)
+
+    def _local_materialized_paths(self, key_name: str) -> Optional[Tuple[str, str]]:
+        """Resolve where a cluster-tracked key named ``key_name`` lives on THIS node.
+
+        Returns ``(private_path, public_path)`` as strings, or None when
+        ``key_name`` cannot be trusted as a path component.  Key names reach
+        this method from a shared backend row, so they are never assumed safe:
+
+        1. The name must be a BARE FILENAME -- ``key_name == Path(key_name).name``
+           rejects anything carrying a separator (``a/b``, ``foo/../bar``), the
+           traversal names ``.``/``..``, and absolute paths, before any
+           filesystem call happens.
+        2. Both resolved paths must still be direct children of
+           ``self.ssh_dir`` -- defense in depth against a symlinked ssh_dir
+           entry, using the same containment technique
+           ``_has_untracked_conflicting_file`` applies for Bug #1519.
+        """
+        if not key_name or key_name != Path(key_name).name:
+            logger.warning(
+                "SSHKeyManager: cluster key name %r is not a bare filename -- "
+                "excluding it from this node's key list",
+                key_name,
+            )
+            return None
+
+        private_path = self.ssh_dir / key_name
+        public_path = self.ssh_dir / f"{key_name}.pub"
+        ssh_dir_resolved = self.ssh_dir.resolve()
+
+        if not (
+            private_path.resolve().parent == ssh_dir_resolved
+            and public_path.resolve().parent == ssh_dir_resolved
+        ):
+            logger.warning(
+                "SSHKeyManager: cluster key name %r does not resolve to a direct "
+                "child of %s -- excluding it from this node's key list",
+                key_name,
+                self.ssh_dir,
+            )
+            return None
+
+        return str(private_path), str(public_path)
+
+    def _merge_cluster_managed_keys(
+        self, local_keys: List[KeyMetadata]
+    ) -> List[KeyMetadata]:
+        """Union node-local managed keys with the shared cluster backend's keys.
+
+        Bug #1524: without this, "managed vs unmanaged" was decided purely from
+        node-local state, so a key created on one cluster node was reported
+        managed there and unmanaged on every other node -- for the identical
+        key, in the identical cluster, at the identical moment.  Every mutating
+        operation in this class (create_key, assign_key_to_host, delete_key)
+        already treats the shared backend as cluster truth; the read path must
+        agree with them.
+
+        A locally-tracked key keeps its local record verbatim -- only names the
+        node does not know locally are added.  Those cluster-only entries are
+        rebased onto THIS node's materialized paths (``ssh_dir/<name>``), since
+        the originating node's recorded ``private_path`` is meaningless here;
+        that is the same convention ``SSHKeySyncService`` uses when it writes
+        the key files and the ``~/.ssh/config`` IdentityFile lines.
+
+        Solo mode (no ``_pg_backend``) returns ``local_keys`` unchanged, so
+        behavior there is byte-identical to before this fix.
+
+        Raises:
+            Exception: whatever the backend raised.  Mirrors this class's
+                existing policy for the shared backend (log then re-raise):
+                silently degrading to the node-local view is exactly the
+                divergence this method exists to prevent.
+        """
+        pg_backend = self._pg_backend
+        if pg_backend is None:
+            return local_keys
+
+        try:
+            cluster_rows = pg_backend.list_keys()
+        except Exception:
+            logger.exception(
+                "SSHKeyManager: failed to list keys from PG backend",
+            )
+            raise
+
+        merged = list(local_keys)
+        known_names = {key.name for key in merged}
+        for row in cluster_rows:
+            # known_names holds strings, so a non-string name never matches
+            # here and falls through to the validation below.
+            if row.get("name") in known_names:
+                continue
+            metadata = self._cluster_row_to_local_metadata(row)
+            if metadata is None:
+                continue
+            known_names.add(metadata.name)
+            merged.append(metadata)
+
+        return merged
+
+    def _cluster_row_to_local_metadata(self, row: dict) -> Optional[KeyMetadata]:
+        """Rebase ONE shared-backend key row onto THIS node's materialized paths.
+
+        The originating node's recorded ``private_path``/``public_path`` are
+        meaningless here, so they are replaced with ``ssh_dir/<name>`` -- the
+        same convention ``SSHKeySyncService`` uses when it writes the key files
+        and the ``~/.ssh/config`` IdentityFile lines.
+
+        Returns None when the row cannot be trusted: a non-string name, or a
+        name ``_local_materialized_paths`` refuses as a path component.  Keeping
+        that validation in one place is why every cluster read -- the list path
+        and the single-key lookups alike -- goes through this method.
+        """
+        name = row.get("name")
+        if not isinstance(name, str):
+            logger.warning(
+                "SSHKeyManager: cluster key row has a non-string name (%r) -- "
+                "excluding it from this node's key list",
+                name,
+            )
+            return None
+
+        local_paths = self._local_materialized_paths(name)
+        if local_paths is None:
+            return None
+
+        metadata = self._key_metadata_from_backend(row)
+        metadata.private_path, metadata.public_path = local_paths
+        return metadata
+
+    def _cluster_managed_key_metadata(self, key_name: str) -> Optional[KeyMetadata]:
+        """Look ONE key up in the shared cluster backend (Bug #1526).
+
+        Bug #1524 made the list path union the shared backend's keys into this
+        node's view.  Without this method the single-key paths
+        (``get_public_key``, ``assign_key_to_host``) still answered from
+        node-local state alone, so the SAME node reported a key as ``managed``
+        and simultaneously denied its existence -- whenever the key had not been
+        materialized here yet (before ``SSHKeySyncService.sync()`` next runs, or
+        on a node that never independently pulled it down).
+
+        Returns None in solo mode (no ``_pg_backend``), when the shared backend
+        does not know the name, or when the row fails
+        ``_cluster_row_to_local_metadata``'s validation.  Callers translate None
+        into the same ``KeyNotFoundError`` they raised before this fix, so solo
+        behavior is byte-identical.
+
+        Raises:
+            Exception: whatever the backend raised.  Mirrors this class's
+                existing policy for the shared backend (log then re-raise):
+                silently degrading to the node-local view is exactly the
+                divergence this method exists to prevent.
+        """
+        pg_backend = self._pg_backend
+        if pg_backend is None:
+            return None
+
+        try:
+            row = pg_backend.get_key(key_name)
+        except Exception:
+            logger.exception(
+                "SSHKeyManager: failed to read key '%s' from PG backend", key_name
+            )
+            raise
+
+        if not row:
+            return None
+
+        return self._cluster_row_to_local_metadata(row)
 
     @staticmethod
     def _key_metadata_from_backend(data: dict) -> "KeyMetadata":
@@ -500,28 +871,50 @@ class SSHKeyManager:
             # SQLite backend (Story #702)
             key_data = self._sqlite_backend.get_key(key_name)
             if key_data is None:
-                raise KeyNotFoundError(f"Key not found: {key_name}")
-
-            public_path = Path(key_data["public_path"])
-            if public_path.exists():
-                return public_path.read_text().strip()
-
-            raise PublicKeyNotFoundError(
-                f"Public key file missing: {key_data['public_path']}"
-            )
+                return self._cluster_public_key(key_name)
+            public_path_str = str(key_data["public_path"])
         else:
             # JSON file storage (backward compatible)
             metadata = self._load_metadata(key_name)
             if metadata is None:
-                raise KeyNotFoundError(f"Key not found: {key_name}")
+                return self._cluster_public_key(key_name)
+            public_path_str = metadata.public_path
 
-            public_path = Path(metadata.public_path)
-            if public_path.exists():
-                return public_path.read_text().strip()
+        public_path = Path(public_path_str)
+        if public_path.exists():
+            return public_path.read_text().strip()
 
-            raise PublicKeyNotFoundError(
-                f"Public key file missing: {metadata.public_path}"
-            )
+        raise PublicKeyNotFoundError(f"Public key file missing: {public_path_str}")
+
+    def _cluster_public_key(self, key_name: str) -> str:
+        """Public key of a cluster-managed key this node does not track locally.
+
+        Bug #1526.  Prefers this node's own materialized ``<name>.pub`` file when
+        the sync service has already written it; otherwise answers from the
+        shared backend's ``public_key`` column, which is cluster truth for
+        exactly this value -- a public key is not a secret, and that row is the
+        very record ``SSHKeySyncService`` writes the file from.
+
+        Raises:
+            KeyNotFoundError: unknown locally AND in the cluster.  Also the
+                unconditional solo-mode outcome, so that path is unchanged.
+            PublicKeyNotFoundError: the key exists cluster-wide but no public
+                material is available on this node yet.  Deliberately a
+                different failure from "no such key": callers act on them
+                differently.
+        """
+        metadata = self._cluster_managed_key_metadata(key_name)
+        if metadata is None:
+            raise KeyNotFoundError(f"Key not found: {key_name}")
+
+        public_path = Path(metadata.public_path)
+        if public_path.exists():
+            return public_path.read_text().strip()
+
+        if metadata.public_key:
+            return metadata.public_key.strip()
+
+        raise PublicKeyNotFoundError(f"Public key file missing: {metadata.public_path}")
 
     def _update_ssh_config(self) -> None:
         """Update SSH config with all managed key-host mappings."""

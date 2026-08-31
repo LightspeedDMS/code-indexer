@@ -10,8 +10,8 @@ Tests that:
 
 import pytest
 
-from src.code_indexer.server.services.file_service import FileListingService
-from src.code_indexer.server.models.api_models import FileListQueryParams
+from code_indexer.server.services.file_service import FileListingService
+from code_indexer.server.models.api_models import FileListQueryParams
 
 
 class TestFileServiceExclusions:

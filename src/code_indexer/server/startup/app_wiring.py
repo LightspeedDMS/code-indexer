@@ -71,6 +71,38 @@ def create_fastapi_app(services: Dict[str, Any], lifespan: Callable) -> FastAPI:
         lifespan=lifespan,
     )
 
+    # Bug #1679: instrument the app for OTEL tracing IMMEDIATELY at
+    # construction time, before Starlette builds its ASGI middleware
+    # stack. Starlette builds that stack LAZILY on the very first ASGI
+    # message the app receives -- which is the "lifespan" startup message
+    # itself (Starlette.__call__ checks `self.middleware_stack is None`
+    # and builds it BEFORE dispatching to lifespan()). The pre-#1679 call
+    # site lived inside lifespan() (startup/lifespan.py), which runs
+    # AFTER that stack is already frozen -- FastAPIInstrumentor's
+    # monkey-patch of build_middleware_stack was therefore a structural
+    # no-op there: no exception, no warning, just zero HTTP request spans
+    # ever produced, on every deployment. This lifespan.py call site was
+    # already updated to a no-op log line (see the comment there).
+    #
+    # Gated on telemetry_config.enabled (already resolved above, from the
+    # same config_service.get_config() call lifespan() uses -- only the
+    # TelemetryManager INSTANCE is unavailable this early, not the
+    # config) rather than applied unconditionally: OpenTelemetryMiddleware
+    # does real per-request work (attribute collection, context
+    # extraction, counter/histogram calls) even when the underlying
+    # tracer is a no-op, so instrumenting unconditionally would add real
+    # overhead on every deployment with telemetry disabled -- contrary to
+    # this project's documented "zero overhead when disabled" guarantee
+    # (TelemetryConfig's and telemetry/__init__.py's docstrings). Toggling
+    # telemetry already requires a server restart (TelemetryManager
+    # itself is only constructed at lifespan/startup time), so this gate
+    # costs no runtime flexibility.
+    _telemetry_cfg = server_config.telemetry_config
+    if _telemetry_cfg is not None and _telemetry_cfg.enabled:
+        from code_indexer.server.telemetry.instrumentation import instrument_fastapi
+
+        instrument_fastapi(app)
+
     # Add CORS middleware for Claude.ai OAuth compatibility
     app.add_middleware(
         CORSMiddleware,
@@ -189,6 +221,11 @@ def create_fastapi_app(services: Dict[str, Any], lifespan: Callable) -> FastAPI:
     dependencies.user_manager = user_manager
     dependencies.oauth_manager = oauth_manager
     dependencies.mcp_credential_manager = mcp_credential_manager
+    # Bug #1732 Finding 2: wire server_config so Story #563's non-SSO API
+    # restriction (_check_non_sso_api_restriction) can actually enforce --
+    # this assignment was missing since Story #563's original commit,
+    # leaving the restriction permanently inert regardless of config.
+    dependencies.server_config = server_config
     # Bug #1144: Wire API key bearer authentication
     from code_indexer.server.auth.api_key_manager import ApiKeyManager as _ApiKeyManager
 
@@ -237,5 +274,43 @@ def create_fastapi_app(services: Dict[str, Any], lifespan: Callable) -> FastAPI:
     # Ensures manual trigger route can always access these attributes
     app.state.self_monitoring_repo_root = None
     app.state.self_monitoring_github_repo = None
+
+    # Bug #1667: wire the module-level WikiCacheInvalidator singleton to a
+    # live WikiCache instance. Prior to this fix, wiki_cache_invalidator.
+    # wiki_cache was NEVER set anywhere in production, so every one of its
+    # methods (invalidate_repo, invalidate_for_file_change,
+    # invalidate_for_git_operation, on_refresh_complete) was a permanent
+    # no-op guarded by `if self.wiki_cache is None: return` -- even though
+    # 3 live call sites (mcp/handlers/git_write.py, mcp/handlers/files.py x2)
+    # invoke it after every git write / file mutation. This mattered because
+    # WikiCache.get_sidebar() has NO independent staleness check (Story #304
+    # deliberately removed the old per-request filesystem mtime poll in
+    # favor of this event-driven invalidator) -- unlike get_article(), which
+    # still self-validates via file_mtime/file_size. Without this wiring the
+    # sidebar cache could go stale indefinitely after any git write or file
+    # mutation.
+    #
+    # This wiring is done here (app-wiring time), not via the request-time
+    # resolve_backend_registry_attr() helper other wiki_cache call sites use
+    # (e.g. golden_repo_manager.py, mcp/handlers/guides.py): at THIS point
+    # `backend_registry` is the real, already-fully-initialized instance
+    # (StorageFactory.create_backends() already ran inside
+    # initialize_services(), well before create_fastapi_app() is called --
+    # see the backend_registry comment above), not a pending-startup-window
+    # snapshot, so caching the resolved backend on the singleton here is
+    # safe and does not risk permanently wedging a node onto the wrong
+    # backend the way caching a resolve_backend_registry_attr() result
+    # during the STORAGE_MODE_PENDING_SENTINEL window would.
+    from code_indexer.server.wiki.wiki_cache import WikiCache
+    from code_indexer.server.wiki.wiki_cache_invalidator import (
+        wiki_cache_invalidator,
+    )
+
+    _wiki_cache_backend = (
+        backend_registry.wiki_cache if backend_registry is not None else None
+    )
+    wiki_cache_invalidator.set_wiki_cache(
+        WikiCache(db_path_str, storage_backend=_wiki_cache_backend)
+    )
 
     return app

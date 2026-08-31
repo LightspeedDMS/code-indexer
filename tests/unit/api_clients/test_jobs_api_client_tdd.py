@@ -5,10 +5,12 @@ Following Test-Driven Development methodology to implement job listing and manag
 functionality with real server integration (anti-mock principles).
 """
 
+import http.server
+import threading
 import pytest
 import pytest_asyncio
 from pathlib import Path
-from typing import Dict, Any, cast
+from typing import Dict, Any, ClassVar, List, cast
 
 from code_indexer.api_clients.jobs_client import JobsAPIClient
 from code_indexer.api_clients.base_client import (
@@ -22,6 +24,56 @@ from code_indexer.api_clients.network_error_handler import (
 
 # Import real infrastructure (no mocks)
 from tests.infrastructure.test_cidx_server import CIDXServerTestContext
+
+
+class _RecordingHTTPHandler(http.server.BaseHTTPRequestHandler):
+    """Minimal real (non-mocked) HTTP handler that records the exact path
+    requested for GET calls.
+
+    Bug #1720 regression harness note: this deliberately does NOT reuse the
+    CIDXServerTestContext/TestCIDXServer fixture. That fixture runs a real
+    uvicorn server via ``asyncio.create_task`` on the SAME asyncio event loop
+    the test coroutine also runs on; issuing a synchronous httpx.Client
+    request (which base_client.py's AdminAPIClient/JobsAPIClient always do)
+    from that same coroutine blocks the only thread able to service the
+    server's request handling, deterministically deadlocking until the
+    client's read timeout fires (confirmed via a minimal repro with zero
+    codebase-specific logic, independent of system load). That is a
+    pre-existing, out-of-scope infrastructure defect unrelated to #1720's
+    two findings -- these files are also permanently excluded from
+    fast-automation.sh's pytest invocation, so it was never caught by CI.
+    This handler runs a genuine ``http.server.HTTPServer`` on its own
+    background thread instead, which is immune to that deadlock because it
+    does not share an event loop with the test.
+    """
+
+    requested_paths: ClassVar[List[str]] = []
+    _paths_lock: ClassVar[threading.Lock] = threading.Lock()
+
+    def do_POST(self) -> None:
+        if self.path == "/auth/login":
+            body = b'{"access_token": "test-token-1720", "token_type": "bearer"}'
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        else:
+            self.send_response(404)
+            self.end_headers()
+
+    def do_GET(self) -> None:
+        with self.__class__._paths_lock:
+            self.__class__.requested_paths.append(self.path)
+        body = b'{"id": "job-1720", "status": "completed"}'
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, format: str, *args: Any) -> None:  # noqa: A002
+        pass
 
 
 class TestJobsAPIClientTDD:
@@ -204,6 +256,51 @@ class TestJobsAPIClientTDD:
         # This will drive implementation of individual job status retrieval
         with pytest.raises((APIClientError, AttributeError)):
             jobs_client.get_job_status("non-existent-job")
+
+    def test_get_job_status_calls_correct_real_server_url(self, tmp_path):
+        """Regression test for #1720 Finding 1.
+
+        get_job_status() must call GET /api/jobs/{job_id} -- the only route
+        the real production server registers (inline_jobs.py). Confirmed
+        live: GET /api/jobs/{id}/status 404s while GET /api/jobs/{id} 401s
+        against a real create_app() TestClient instance. This test pins
+        the CLIENT's exact request path using a minimal real (non-mocked)
+        background-thread HTTP server, deliberately bypassing the flaky
+        CIDXServerTestContext fixture (see _RecordingHTTPHandler's
+        docstring above for why).
+        """
+        _RecordingHTTPHandler.requested_paths = []
+        server = http.server.HTTPServer(("127.0.0.1", 0), _RecordingHTTPHandler)
+        port = server.server_address[1]
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+
+        try:
+            client = JobsAPIClient(
+                server_url=f"http://127.0.0.1:{port}",
+                credentials={
+                    "username": "test-user-1720",
+                    "password": "test-pass-1720",
+                },
+                project_root=tmp_path,
+            )
+            try:
+                client.get_job_status("job-1720")
+            finally:
+                client.close()
+
+            with _RecordingHTTPHandler._paths_lock:
+                recorded_paths = list(_RecordingHTTPHandler.requested_paths)
+
+            assert recorded_paths == ["/api/jobs/job-1720"], (
+                "get_job_status() must call GET /api/jobs/{job_id} (no "
+                "'/status' suffix) to match the real production route; "
+                f"actual requested paths: {recorded_paths}"
+            )
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=3)
 
     async def test_jobs_client_inherits_from_base_client(self, jobs_client):
         """Test that JobsAPIClient properly inherits from CIDXRemoteAPIClient."""

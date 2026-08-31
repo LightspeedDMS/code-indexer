@@ -11,8 +11,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from src.code_indexer.services.temporal import temporal_progressive_metadata as tpm
-from src.code_indexer.services.temporal.temporal_progressive_metadata import (
+from code_indexer.services.temporal import temporal_progressive_metadata as tpm
+from code_indexer.services.temporal.temporal_progressive_metadata import (
     TemporalProgressiveMetadata,
 )
 
@@ -59,7 +59,7 @@ class TestTemporalProgressiveMetadataDirectoryFsync(unittest.TestCase):
             patch("os.replace", side_effect=spy_replace),
             patch("os.open", side_effect=spy_open),
             patch(
-                "src.code_indexer.services.temporal.temporal_progressive_metadata.nfs_safe_fsync",
+                "code_indexer.services.temporal.temporal_progressive_metadata.nfs_safe_fsync",
                 side_effect=spy_fsync,
             ),
         ):

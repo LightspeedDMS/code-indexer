@@ -48,7 +48,6 @@ from ..routers.files import router as files_router
 from ..routers.git import router as git_router
 from ..routers.indexing import router as indexing_router
 from ..routers.cache import router as cache_router
-from ..routers.delegation_callbacks import router as delegation_callbacks_router
 from ..routers.maintenance_router import router as maintenance_router
 from ..routers.memories import router as memories_router
 from ..routers.api_keys import router as api_keys_router
@@ -63,6 +62,7 @@ from ..routers.provider_indexes import router as provider_indexes_router
 from ..routers.admin_provider_health import router as admin_provider_health_router
 from ..routers.hnsw_orphan_sweep_admin import router as hnsw_orphan_sweep_admin_router
 from ..routers.embedding_stats_admin import router as embedding_stats_admin_router
+from ..routers.dedup_warnings_admin import router as dedup_warnings_admin_router
 from ..routers.llm_creds import router as llm_creds_router
 from ..routers.debug_routes import debug_router
 from ..routers.groups import (
@@ -263,7 +263,6 @@ def register_inline_routes(
     app.include_router(users_router)
     app.include_router(audit_router)
     app.include_router(repo_categories_router)
-    app.include_router(delegation_callbacks_router)
     app.include_router(maintenance_router)
     app.include_router(api_keys_router)
     app.include_router(llm_creds_router)
@@ -278,6 +277,7 @@ def register_inline_routes(
     app.include_router(admin_provider_health_router)
     app.include_router(hnsw_orphan_sweep_admin_router)  # Story #1360
     app.include_router(embedding_stats_admin_router)  # Story #1418 Phase 3
+    app.include_router(dedup_warnings_admin_router)  # Story #1589
     app.include_router(debug_router)
     app.include_router(reaper_router, prefix="/api/admin")  # Story #967
     app.include_router(xray_router)  # Story #974

@@ -384,7 +384,6 @@ class TestPooledProductionSyncClient:
 _EXCLUDED_PATHS = frozenset(
     {
         "auth/oidc/oidc_provider.py",
-        "clients/claude_server_client.py",
         "clients/forge_client.py",
         "clients/github_actions_client.py",
         "clients/gitlab_ci_client.py",

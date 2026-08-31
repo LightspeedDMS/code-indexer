@@ -9,7 +9,7 @@ import pytest
 from click.testing import CliRunner
 import re
 
-from src.code_indexer.cli import cli
+from code_indexer.cli import cli
 
 
 class TestAdminReposAddSimple:

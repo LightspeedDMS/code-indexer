@@ -404,7 +404,7 @@ class TestFullIndexParallelProcessing:
             mock_direct_processing.return_value = mock_stats
 
             # Mock branch processing (should not be called for full index)
-            from src.code_indexer.services.high_throughput_processor import (
+            from code_indexer.services.high_throughput_processor import (
                 BranchIndexingResult,
             )
 

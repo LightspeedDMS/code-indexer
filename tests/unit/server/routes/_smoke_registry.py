@@ -32,6 +32,10 @@ EXCLUDED_ROUTES: set[str] = {
     "GET /docs/oauth2-redirect",
     # DELETE /mcp is the MCP SSE protocol disconnect, not a standard REST DELETE
     "DELETE /mcp",
+    # GET /mcp-public is the MCP SSE stream/subscribe endpoint — a plain
+    # blocking GET waits forever for a response body that never completes
+    # by design (Bug #1628).
+    "GET /mcp-public",
 }
 
 # Strings that identify real server crashes vs expected auth/validation errors.

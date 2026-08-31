@@ -15,8 +15,10 @@ inputSchema:
       description: Target symbol to reach (e.g., 'DatabaseManager', 'authenticate')
     max_depth:
       type: integer
-      default: 10
-      description: Maximum chain length to search. Default 10. Max 10. Higher values find longer chains but slower query.
+      default: 3
+      minimum: 1
+      maximum: 3
+      description: Maximum chain length to search. Default 3. Max 3 (values above 3 are rejected) -- narrower than other SCIP tools because this query enumerates all distinct paths, not just the shortest, so cost grows combinatorially with depth.
     repository_alias:
       type:
       - string

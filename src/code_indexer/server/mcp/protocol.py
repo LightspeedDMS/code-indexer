@@ -80,9 +80,85 @@ _HANDLER_TIMEOUT_OVERRIDES: Dict[str, int] = {
     "search_code": SEARCH_HANDLER_TIMEOUT_SECONDS,
 }
 
+# Membership in this set is a property of the TOOL, not of the dispatch
+# branch: an exempt tool gets NO asyncio.wait_for on either branch.
+#
+# regex_search -- DELIBERATE, DOCUMENTED DEVIATION from AC2's literal
+# wording (Story #1491 review item 8). AC2's scenario text says "the regex
+# search is subject to the dispatcher's timeout guard"; it is not, and that
+# is an intentional decision rather than an oversight:
+#
+#   * As of AC2 regex_search is SYNC-dispatched (the registry entry is the
+#     plain-def handle_regex_search_sync), so it now takes the executor
+#     branch. Its synchronous work leaving the event loop -- the actual
+#     starvation hazard report Finding B2 identified -- is fully achieved by
+#     that change alone, independently of any deadline.
+#   * _omni_regex_search loops repos SEQUENTIALLY, each repo bounded by its
+#     own search_limits_config.timeout_seconds subprocess call, so an omni
+#     search over N repos has a legitimate cumulative runtime of
+#     N x single-repo-floor. No single fixed outer deadline (however
+#     derived) can accommodate an unbounded N without truncating correct
+#     work.
+#   * An outer wait_for around run_in_executor cannot cancel the worker
+#     thread anyway: on expiry it abandons a still-running thread while
+#     returning a timeout error. That is strictly worse than no deadline --
+#     the work continues, unbounded and now unobserved, and the client is
+#     told it failed.
+#
+# So regex_search remains governed solely by
+# search_limits_config.timeout_seconds plus its own ripgrep subprocess
+# timeout (Issue #1398 Group A) -- exactly its pre-#1491 semantics, which
+# this story preserves rather than changes. _resolve_handler_timeout's
+# result for "regex_search" is therefore computed but never used to bound
+# its dispatch. Any future change here must also update the "Query & Search
+# Timeouts Consolidation (Issue #1398)" section of CLAUDE.md, which records
+# the same deviation.
+#
+# Story #1491 AC6 code-review follow-up (secondary finding): the same
+# review that caught regex_search asked every OTHER async-dispatched MCP
+# tool be individually classified. Reading each handler's real
+# implementation (mcp/handlers/xray.py, mcp/handlers/cicd.py):
+#
+#   xray_search / xray_explore: the single-repo path accepts a client-
+#   supplied, server-validated await_seconds (range [0, 45.0] --
+#   _AWAIT_SECONDS_MAX in xray.py) and genuinely awaits the background
+#   job inline for up to that long before returning {"job_id": ...}.
+#   default_handler_timeout_seconds is Web-UI configurable down to 10s
+#   (config_manager.py validates [10, 300]) -- an operator lowering it
+#   for unrelated reasons would truncate a legitimate, server-approved
+#   45s xray wait and discard the job_id the client needs to poll. The
+#   multi-repo (list alias) path submits jobs with no inline wait at all
+#   and is unaffected either way, but the tool is exempted wholesale for
+#   simplicity (matches xray_search's own design: it already owns and
+#   validates its bound, so no outer generic cap should re-govern it).
+#
+#   gh_actions_search_logs / gitlab_ci_search_logs / ci_search_logs: each
+#   delegates to a client (GitHubActionsClient.search_logs /
+#   GitLabCIClient.search_logs) that fetches the job list for ONE
+#   run/pipeline, then loops SEQUENTIALLY over every job making one more
+#   HTTP GET (+ regex scan) per job -- structurally identical to
+#   _omni_regex_search's sequential fan-out bug. A workflow run/pipeline
+#   with dozens of matrix-build jobs has legitimate cumulative runtime
+#   that can exceed 60s.
+#
+#   Every OTHER cicd.py handler (list_runs, get_run, get_job_logs,
+#   retry_run, cancel_run, and their gitlab_ci_*/ci_* equivalents) makes
+#   exactly ONE bounded external API call with no per-item loop --
+#   genuinely safe under the 60s default, left ungoverned by this set.
+_ASYNC_DISPATCH_TIMEOUT_EXEMPT_TOOLS = frozenset(
+    {
+        "regex_search",
+        "xray_search",
+        "xray_explore",
+        "gh_actions_search_logs",
+        "gitlab_ci_search_logs",
+        "ci_search_logs",
+    }
+)
+
 
 def _resolve_handler_timeout(tool_name: str) -> int:
-    """Return the effective timeout in seconds for a given tool's sync handler.
+    """Return the effective timeout in seconds for a given tool's handler.
 
     Issue #1398: reads the live, Web-UI-configurable SearchTimeoutsConfig
     instead of the module-level hardcoded constants below (which now exist
@@ -234,6 +310,7 @@ async def _invoke_handler(
     timeout_seconds: float = HANDLER_TIMEOUT_SECONDS,
     http_request: Optional[Request] = None,
     http_response: Optional[Response] = None,
+    tool_name: Optional[str] = None,
 ) -> Any:
     """
     Invoke handler with appropriate parameters.
@@ -260,6 +337,12 @@ async def _invoke_handler(
         http_response: The real FastAPI Response object, injected into handlers
             that declare an `http_response` parameter (e.g. handle_authenticate,
             which needs it to set the HttpOnly cidx_session cookie).
+        tool_name: The MCP tool name being dispatched, used ONLY to check
+            _ASYNC_DISPATCH_TIMEOUT_EXEMPT_TOOLS -- which is honoured on BOTH
+            the async and the sync/executor branch, since membership is a
+            property of the tool rather than of the dispatch mechanism. See
+            that constant for the full per-tool rationale, including the
+            deliberate deviation from AC2's literal wording for regex_search.
 
     Returns:
         Handler result
@@ -305,21 +388,61 @@ async def _invoke_handler(
     )
 
     if is_async:
-        return await handler(*call_args, **extra_kwargs)
+        if tool_name in _ASYNC_DISPATCH_TIMEOUT_EXEMPT_TOOLS:
+            # Story #1491 AC6 code-review fix: regex_search's
+            # _omni_regex_search loops repos SEQUENTIALLY, each bounded by
+            # its own search_limits_config.timeout_seconds subprocess
+            # call -- an omni search over N repos has legitimate
+            # cumulative runtime of N x single-repo-floor, which no fixed
+            # outer deadline can accommodate. regex_search stays fully
+            # unbounded here, governed solely by its own configured
+            # search_limits_config.timeout_seconds + ripgrep subprocess
+            # timeout (Issue #1398 Group A) -- never this MCP-layer value.
+            return await handler(*call_args, **extra_kwargs)
+        # Story #1491 AC6 (Finding B6, hardening): the async branch is now
+        # bounded by the same timeout_seconds/_resolve_handler_timeout
+        # mechanism the sync branch already uses, producing the identical
+        # timeout error shape on expiry. This does NOT interrupt
+        # synchronous work inside a coroutine (asyncio.wait_for can only
+        # cancel at an actual await point) -- it exists to bound handlers
+        # that are genuinely awaitable throughout, and to bound any future
+        # async handler that regresses into a long-running await.
+        try:
+            return await asyncio.wait_for(
+                handler(*call_args, **extra_kwargs),
+                timeout=timeout_seconds,
+            )
+        except asyncio.TimeoutError:
+            return {
+                "success": False,
+                "error": f"Tool execution timed out after {timeout_seconds} seconds",
+            }
     else:
-        # Story #1400 CRITICAL 5 dynamic half: only the sync-dispatch
-        # branch enforces an outer asyncio.wait_for timeout (the async
-        # branch has none, per the documented sync/async distinction), so
-        # only here is there a meaningful deadline to compute. A handler
-        # that declares handler_deadline_monotonic can use it to bound its
-        # own internal work (e.g. the temporal foreground waiter) so it
-        # always returns before THIS timeout fires with no job_id.
+        # Story #1400 CRITICAL 5 dynamic half: the sync-dispatch branch
+        # enforces an outer asyncio.wait_for timeout via executor offload
+        # (the async branch above uses a direct wait_for since it is
+        # already a coroutine). A handler that declares
+        # handler_deadline_monotonic can use it to bound its own internal
+        # work (e.g. the temporal foreground waiter) so it always returns
+        # before THIS timeout fires with no job_id.
         if "handler_deadline_monotonic" in sig.parameters:
             extra_kwargs["handler_deadline_monotonic"] = (
                 time.monotonic() + timeout_seconds
             )
         loop = asyncio.get_running_loop()
         bound = functools.partial(handler, *call_args, **extra_kwargs)
+        if tool_name in _ASYNC_DISPATCH_TIMEOUT_EXEMPT_TOOLS:
+            # Story #1491 AC2: the exemption is a property of the TOOL, not of
+            # the dispatch branch. regex_search became sync-dispatched so its
+            # synchronous work leaves the event loop; that offload must not
+            # also silently impose an MCP-layer deadline it never had. Exempt
+            # tools are offloaded WITHOUT an outer wait_for, staying governed
+            # solely by their own configured timeouts (for regex_search:
+            # search_limits_config.timeout_seconds plus the ripgrep subprocess
+            # timeout, Issue #1398 Group A). Note an outer wait_for could not
+            # have cancelled the executor's thread anyway -- it would only have
+            # abandoned it while returning a timeout error.
+            return await loop.run_in_executor(None, bound)
         try:
             return await asyncio.wait_for(
                 loop.run_in_executor(None, bound),
@@ -783,6 +906,7 @@ async def handle_tools_call(
             timeout_seconds=handler_timeout,
             http_request=http_request,
             http_response=http_response,
+            tool_name=tool_name,
         )
 
     # Bug #350: Protocol-level API metrics tracking.

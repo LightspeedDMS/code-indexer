@@ -428,45 +428,6 @@ curl -X POST http://localhost:8090/api/query \
 - Connects Claude to CIDX server
 - Semantic search in conversations
 
-### Claude Delegation (v8.5+)
-
-Enable AI-powered code analysis workflows on protected repositories without exposing source code to clients.
-
-**How It Works**:
-1. Admin defines **delegation functions** - pre-approved AI workflows (code review, analysis, etc.)
-2. Users execute functions via MCP tools (`list_delegation_functions`, `execute_delegation_function`)
-3. CIDX server delegates to Claude Server, which has direct repository access
-4. Results returned to user - source code never leaves the server
-
-**Key Components**:
-- **Delegation Repository**: Git repo containing function definitions (YAML/JSON)
-- **Function Templates**: Jinja2 templates for AI prompts with parameter substitution
-- **Group Access Control**: Functions restricted to specific user groups
-- **Callback Completion**: Efficient job polling with server-side callbacks
-
-**Example Function Definition**:
-```yaml
-name: code_review
-description: Review code changes for quality and security
-allowed_groups: ["developers", "reviewers"]
-parameters:
-  - name: file_path
-    required: true
-    description: Path to file to review
-prompt_template: |
-  Review the following code for:
-  - Security vulnerabilities
-  - Code quality issues
-  - Best practice violations
-
-  File: {{ file_path }}
-```
-
-**MCP Tools**:
-- `list_delegation_functions` - List available functions for current user
-- `execute_delegation_function` - Start a delegation job
-- `poll_delegation_job` - Wait for job completion and get results
-
 ### Self-Monitoring & Diagnostics (v8.8.2+)
 
 Automated server health monitoring with intelligent log analysis.
@@ -554,12 +515,11 @@ is captured and logged at WARNING level).
 
 ### Group-Based Security (v8.5+)
 
-Fine-grained access control using group membership for both repository access and delegation functions.
+Fine-grained access control using group membership for repository access.
 
 **Features**:
 - Users belong to one or more groups
 - Golden repositories can be restricted to specific groups
-- Delegation functions filtered by `allowed_groups`
 - Admin impersonation respects target user's groups
 
 **Configuration**:

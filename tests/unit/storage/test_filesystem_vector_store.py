@@ -36,7 +36,9 @@ class TestFilesystemVectorStoreCore:
         """
         from code_indexer.storage.filesystem_vector_store import FilesystemVectorStore
 
-        store = FilesystemVectorStore(base_path=tmp_path)
+        store = FilesystemVectorStore(
+            base_path=tmp_path, use_chunks_db_for_new_collections=False
+        )
 
         result = store.create_collection("test_coll", vector_size=1536)
 
@@ -73,7 +75,9 @@ class TestFilesystemVectorStoreCore:
         """
         from code_indexer.storage.filesystem_vector_store import FilesystemVectorStore
 
-        store = FilesystemVectorStore(base_path=tmp_path)
+        store = FilesystemVectorStore(
+            base_path=tmp_path, use_chunks_db_for_new_collections=False
+        )
         store.create_collection("test_coll", vector_size=1536)
 
         points = [
@@ -94,9 +98,13 @@ class TestFilesystemVectorStoreCore:
 
         assert result["status"] == "ok", "upsert should succeed"
 
-        # Verify JSON files exist on filesystem
+        # Verify JSON files exist on filesystem. Select by the actual
+        # vector-record naming convention (vector_*.json) rather than a
+        # "not collection_meta" blacklist -- Bug #1619 added a second,
+        # small bookkeeping sidecar (hnsw_sync_state.json) to the
+        # collection root that a blacklist approach would wrongly match.
         json_files = list((tmp_path / "test_coll").rglob("*.json"))
-        vector_files = [f for f in json_files if "collection_meta" not in f.name]
+        vector_files = [f for f in json_files if f.name.startswith("vector_")]
 
         assert len(vector_files) >= 1, "At least one vector file should exist"
 
@@ -120,7 +128,9 @@ class TestFilesystemVectorStoreCore:
         """
         from code_indexer.storage.filesystem_vector_store import FilesystemVectorStore
 
-        store = FilesystemVectorStore(base_path=tmp_path)
+        store = FilesystemVectorStore(
+            base_path=tmp_path, use_chunks_db_for_new_collections=False
+        )
         store.create_collection("test_coll", vector_size=1536)
 
         points = [
@@ -139,7 +149,7 @@ class TestFilesystemVectorStoreCore:
 
         # Find all vector JSON files
         vector_files = [
-            f for f in coll_path.rglob("*.json") if "collection_meta" not in f.name
+            f for f in coll_path.rglob("*.json") if f.name.startswith("vector_")
         ]
         assert len(vector_files) == 5, "Should have 5 vector files"
 
@@ -160,7 +170,9 @@ class TestFilesystemVectorStoreCore:
         """
         from code_indexer.storage.filesystem_vector_store import FilesystemVectorStore
 
-        store = FilesystemVectorStore(base_path=tmp_path)
+        store = FilesystemVectorStore(
+            base_path=tmp_path, use_chunks_db_for_new_collections=False
+        )
 
         # Non-existent collection
         assert store.collection_exists("nonexistent") is False
@@ -180,7 +192,9 @@ class TestFilesystemVectorStoreCore:
         """
         from code_indexer.storage.filesystem_vector_store import FilesystemVectorStore
 
-        store = FilesystemVectorStore(base_path=tmp_path)
+        store = FilesystemVectorStore(
+            base_path=tmp_path, use_chunks_db_for_new_collections=False
+        )
 
         # Initially empty
         collections = store.list_collections()
@@ -206,7 +220,9 @@ class TestFilesystemVectorStoreCore:
         """
         from code_indexer.storage.filesystem_vector_store import FilesystemVectorStore
 
-        store = FilesystemVectorStore(base_path=tmp_path)
+        store = FilesystemVectorStore(
+            base_path=tmp_path, use_chunks_db_for_new_collections=False
+        )
         store.create_collection("test_coll", vector_size=1536)
 
         # Initially zero
@@ -236,7 +252,9 @@ class TestFilesystemVectorStoreCore:
         """
         from code_indexer.storage.filesystem_vector_store import FilesystemVectorStore
 
-        store = FilesystemVectorStore(base_path=tmp_path)
+        store = FilesystemVectorStore(
+            base_path=tmp_path, use_chunks_db_for_new_collections=False
+        )
         store.create_collection("test_coll", vector_size=1536)
 
         # Store 10 vectors
@@ -274,7 +292,9 @@ class TestFilesystemVectorStoreCore:
         """
         from code_indexer.storage.filesystem_vector_store import FilesystemVectorStore
 
-        store = FilesystemVectorStore(base_path=tmp_path)
+        store = FilesystemVectorStore(
+            base_path=tmp_path, use_chunks_db_for_new_collections=False
+        )
         store.create_collection("test_coll", vector_size=1536)
 
         def write_batch(start_idx):
@@ -301,7 +321,7 @@ class TestFilesystemVectorStoreCore:
         # No corrupted JSON files
         coll_path = tmp_path / "test_coll"
         for json_file in coll_path.rglob("*.json"):
-            if "collection_meta" in json_file.name:
+            if not json_file.name.startswith("vector_"):
                 continue
             with open(json_file) as f:
                 data = json.load(f)  # Should not raise JSONDecodeError
@@ -317,7 +337,9 @@ class TestFilesystemVectorStoreCore:
         """
         from code_indexer.storage.filesystem_vector_store import FilesystemVectorStore
 
-        store = FilesystemVectorStore(base_path=tmp_path)
+        store = FilesystemVectorStore(
+            base_path=tmp_path, use_chunks_db_for_new_collections=False
+        )
         store.create_collection("test_coll", vector_size=1536)
 
         points = [
@@ -340,7 +362,7 @@ class TestFilesystemVectorStoreCore:
         # Verify files actually exist on filesystem
         coll_path = tmp_path / "test_coll"
         json_count = sum(
-            1 for _ in coll_path.rglob("*.json") if "collection_meta" not in _.name
+            1 for _ in coll_path.rglob("*.json") if _.name.startswith("vector_")
         )
         assert json_count == 1000
 
@@ -359,7 +381,9 @@ class TestChunkContentStorageAndRetrieval:
         from code_indexer.storage.filesystem_vector_store import FilesystemVectorStore
 
         # No git init - plain directory
-        store = FilesystemVectorStore(base_path=tmp_path)
+        store = FilesystemVectorStore(
+            base_path=tmp_path, use_chunks_db_for_new_collections=False
+        )
         store.create_collection("test_coll", vector_size=1536)
 
         points = [
@@ -380,7 +404,7 @@ class TestChunkContentStorageAndRetrieval:
         # Verify JSON DOES contain chunk text (no git fallback)
         coll_path = tmp_path / "test_coll"
         json_files = [
-            f for f in coll_path.rglob("*.json") if "collection_meta" not in f.name
+            f for f in coll_path.rglob("*.json") if f.name.startswith("vector_")
         ]
         with open(json_files[0]) as f:
             data = json.load(f)
@@ -419,7 +443,11 @@ class TestChunkContentStorageAndRetrieval:
         # No modifications - clean state
         from code_indexer.storage.filesystem_vector_store import FilesystemVectorStore
 
-        store = FilesystemVectorStore(base_path=tmp_path, project_root=tmp_path)
+        store = FilesystemVectorStore(
+            base_path=tmp_path,
+            project_root=tmp_path,
+            use_chunks_db_for_new_collections=False,
+        )
         store.create_collection("test_coll", vector_size=1536)
 
         points = [
@@ -440,7 +468,7 @@ class TestChunkContentStorageAndRetrieval:
         # Verify git_blob_hash stored (no chunk_text)
         coll_path = tmp_path / "test_coll"
         json_files = [
-            f for f in coll_path.rglob("*.json") if "collection_meta" not in f.name
+            f for f in coll_path.rglob("*.json") if f.name.startswith("vector_")
         ]
         with open(json_files[0]) as f:
             data = json.load(f)
@@ -483,7 +511,11 @@ class TestChunkContentStorageAndRetrieval:
 
         from code_indexer.storage.filesystem_vector_store import FilesystemVectorStore
 
-        store = FilesystemVectorStore(base_path=tmp_path, project_root=tmp_path)
+        store = FilesystemVectorStore(
+            base_path=tmp_path,
+            project_root=tmp_path,
+            use_chunks_db_for_new_collections=False,
+        )
         store.create_collection("test_coll", vector_size=1536)
 
         points = [
@@ -504,7 +536,7 @@ class TestChunkContentStorageAndRetrieval:
         # Verify chunk_text stored (not git_blob_hash)
         coll_path = tmp_path / "test_coll"
         json_files = [
-            f for f in coll_path.rglob("*.json") if "collection_meta" not in f.name
+            f for f in coll_path.rglob("*.json") if f.name.startswith("vector_")
         ]
         with open(json_files[0]) as f:
             data = json.load(f)
@@ -533,7 +565,9 @@ class TestSearchMethods:
         """
         from code_indexer.storage.filesystem_vector_store import FilesystemVectorStore
 
-        store = FilesystemVectorStore(base_path=tmp_path)
+        store = FilesystemVectorStore(
+            base_path=tmp_path, use_chunks_db_for_new_collections=False
+        )
         store.create_collection("test_coll", vector_size=1536)
 
         # Store a vector
@@ -568,7 +602,9 @@ class TestSearchMethods:
         """
         from code_indexer.storage.filesystem_vector_store import FilesystemVectorStore
 
-        store = FilesystemVectorStore(base_path=tmp_path)
+        store = FilesystemVectorStore(
+            base_path=tmp_path, use_chunks_db_for_new_collections=False
+        )
         store.create_collection("test_coll", vector_size=1536)
 
         result = store.get_point("nonexistent", "test_coll")
@@ -583,7 +619,9 @@ class TestSearchMethods:
         """
         from code_indexer.storage.filesystem_vector_store import FilesystemVectorStore
 
-        store = FilesystemVectorStore(base_path=tmp_path)
+        store = FilesystemVectorStore(
+            base_path=tmp_path, use_chunks_db_for_new_collections=False
+        )
         store.create_collection("test_coll", vector_size=1536)
 
         # Store 10 vectors
@@ -621,7 +659,9 @@ class TestSearchMethods:
         """
         from code_indexer.storage.filesystem_vector_store import FilesystemVectorStore
 
-        store = FilesystemVectorStore(base_path=tmp_path)
+        store = FilesystemVectorStore(
+            base_path=tmp_path, use_chunks_db_for_new_collections=False
+        )
         store.create_collection("test_coll", vector_size=1536)
 
         # Store 20 vectors
@@ -669,7 +709,9 @@ class TestSearchMethods:
         """
         from code_indexer.storage.filesystem_vector_store import FilesystemVectorStore
 
-        store = FilesystemVectorStore(base_path=tmp_path)
+        store = FilesystemVectorStore(
+            base_path=tmp_path, use_chunks_db_for_new_collections=False
+        )
         store.create_collection("test_coll", vector_size=1536)
 
         points = [
@@ -699,7 +741,9 @@ class TestSearchMethods:
         """
         from code_indexer.storage.filesystem_vector_store import FilesystemVectorStore
 
-        store = FilesystemVectorStore(base_path=tmp_path)
+        store = FilesystemVectorStore(
+            base_path=tmp_path, use_chunks_db_for_new_collections=False
+        )
         store.create_collection("test_coll", vector_size=1536)
 
         # Store 10 vectors
@@ -752,7 +796,9 @@ class TestSearchMethods:
         """
         from code_indexer.storage.filesystem_vector_store import FilesystemVectorStore
 
-        store = FilesystemVectorStore(base_path=tmp_path)
+        store = FilesystemVectorStore(
+            base_path=tmp_path, use_chunks_db_for_new_collections=False
+        )
         store.create_collection("test_coll", vector_size=1536)
 
         points = [
@@ -791,7 +837,9 @@ class TestSearchMethods:
         """
         from code_indexer.storage.filesystem_vector_store import FilesystemVectorStore
 
-        store = FilesystemVectorStore(base_path=tmp_path)
+        store = FilesystemVectorStore(
+            base_path=tmp_path, use_chunks_db_for_new_collections=False
+        )
         store.create_collection("test_coll", vector_size=1536)
 
         # Store vectors with different languages
@@ -869,7 +917,9 @@ class TestBatchGitOperations:
             ["git", "commit", "-m", "test"], cwd=tmp_path, capture_output=True
         )
 
-        store = FilesystemVectorStore(base_path=tmp_path)
+        store = FilesystemVectorStore(
+            base_path=tmp_path, use_chunks_db_for_new_collections=False
+        )
 
         # Measure batch operation time
         start = time.time()
@@ -915,7 +965,9 @@ class TestBatchGitOperations:
         for i in range(10):
             (tmp_path / f"file_{i}.py").write_text(f"# Modified {i}\n")
 
-        store = FilesystemVectorStore(base_path=tmp_path)
+        store = FilesystemVectorStore(
+            base_path=tmp_path, use_chunks_db_for_new_collections=False
+        )
 
         # Measure batch operation time
         start = time.time()
@@ -938,7 +990,9 @@ class TestProgressReporting:
         """
         from code_indexer.storage.filesystem_vector_store import FilesystemVectorStore
 
-        store = FilesystemVectorStore(base_path=tmp_path)
+        store = FilesystemVectorStore(
+            base_path=tmp_path, use_chunks_db_for_new_collections=False
+        )
         store.create_collection("test_coll", vector_size=1536)
 
         # Track callback invocations
@@ -1021,7 +1075,9 @@ class TestFilesystemClientCompatibility:
         class MockConfig:
             pass
 
-        store = FilesystemVectorStore(base_path=tmp_path)
+        store = FilesystemVectorStore(
+            base_path=tmp_path, use_chunks_db_for_new_collections=False
+        )
         provider = MockEmbeddingProvider()
         config = MockConfig()
 
@@ -1052,7 +1108,9 @@ class TestFilesystemClientCompatibility:
         class MockConfig:
             pass
 
-        store = FilesystemVectorStore(base_path=tmp_path)
+        store = FilesystemVectorStore(
+            base_path=tmp_path, use_chunks_db_for_new_collections=False
+        )
         provider = MockEmbeddingProvider()
         config = MockConfig()
 
@@ -1075,7 +1133,9 @@ class TestFilesystemClientCompatibility:
         """
         from code_indexer.storage.filesystem_vector_store import FilesystemVectorStore
 
-        store = FilesystemVectorStore(base_path=tmp_path)
+        store = FilesystemVectorStore(
+            base_path=tmp_path, use_chunks_db_for_new_collections=False
+        )
         store.create_collection("test_coll", vector_size=1536)
 
         # Store 10 vectors
@@ -1112,7 +1172,9 @@ class TestFilesystemClientCompatibility:
         """
         from code_indexer.storage.filesystem_vector_store import FilesystemVectorStore
 
-        store = FilesystemVectorStore(base_path=tmp_path)
+        store = FilesystemVectorStore(
+            base_path=tmp_path, use_chunks_db_for_new_collections=False
+        )
 
         vector = np.random.randn(1536).tolist()
         payload = {"path": "test.py", "language": "python"}
@@ -1132,7 +1194,9 @@ class TestFilesystemClientCompatibility:
         """
         from code_indexer.storage.filesystem_vector_store import FilesystemVectorStore
 
-        store = FilesystemVectorStore(base_path=tmp_path)
+        store = FilesystemVectorStore(
+            base_path=tmp_path, use_chunks_db_for_new_collections=False
+        )
         store.create_collection("test_coll", vector_size=1536)
 
         # Store vectors with different languages
@@ -1179,7 +1243,9 @@ class TestFilesystemClientCompatibility:
         """
         from code_indexer.storage.filesystem_vector_store import FilesystemVectorStore
 
-        store = FilesystemVectorStore(base_path=tmp_path)
+        store = FilesystemVectorStore(
+            base_path=tmp_path, use_chunks_db_for_new_collections=False
+        )
         store.create_collection("test_coll", vector_size=1536)
 
         info = store.get_collection_info("test_coll")
@@ -1198,7 +1264,9 @@ class TestFilesystemClientCompatibility:
         """
         from code_indexer.storage.filesystem_vector_store import FilesystemVectorStore
 
-        store = FilesystemVectorStore(base_path=tmp_path)
+        store = FilesystemVectorStore(
+            base_path=tmp_path, use_chunks_db_for_new_collections=False
+        )
 
         assert store.health_check() is True
 
@@ -1211,7 +1279,9 @@ class TestFilesystemClientCompatibility:
         """
         from code_indexer.storage.filesystem_vector_store import FilesystemVectorStore
 
-        store = FilesystemVectorStore(base_path=tmp_path)
+        store = FilesystemVectorStore(
+            base_path=tmp_path, use_chunks_db_for_new_collections=False
+        )
         store.create_collection("test_coll", vector_size=1536)
 
         # Store initial points
@@ -1256,7 +1326,9 @@ class TestFilesystemClientCompatibility:
         class MockConfig:
             pass
 
-        store = FilesystemVectorStore(base_path=tmp_path)
+        store = FilesystemVectorStore(
+            base_path=tmp_path, use_chunks_db_for_new_collections=False
+        )
         provider = MockEmbeddingProvider()
         config = MockConfig()
 
@@ -1275,7 +1347,9 @@ class TestFilesystemClientCompatibility:
         """
         from code_indexer.storage.filesystem_vector_store import FilesystemVectorStore
 
-        store = FilesystemVectorStore(base_path=tmp_path)
+        store = FilesystemVectorStore(
+            base_path=tmp_path, use_chunks_db_for_new_collections=False
+        )
         store.create_collection("test_coll", vector_size=1536)
 
         # Should not raise error
@@ -1290,7 +1364,9 @@ class TestFilesystemClientCompatibility:
         """
         from code_indexer.storage.filesystem_vector_store import FilesystemVectorStore
 
-        store = FilesystemVectorStore(base_path=tmp_path)
+        store = FilesystemVectorStore(
+            base_path=tmp_path, use_chunks_db_for_new_collections=False
+        )
         store.create_collection("test_coll", vector_size=1536)
 
         result = store.rebuild_payload_indexes("test_coll")
@@ -1329,7 +1405,9 @@ class TestHNSWStalenessCoordination:
         from code_indexer.storage.filesystem_vector_store import FilesystemVectorStore
         from code_indexer.storage.hnsw_index_manager import HNSWIndexManager
 
-        store = FilesystemVectorStore(base_path=tmp_path)
+        store = FilesystemVectorStore(
+            base_path=tmp_path, use_chunks_db_for_new_collections=False
+        )
         store.create_collection("test_coll", vector_size=_STALENESS_VECTOR_DIM)
         collection_path = tmp_path / "test_coll"
         hnsw_manager = HNSWIndexManager(
@@ -1396,7 +1474,9 @@ class TestHNSWStalenessCoordination:
         from code_indexer.storage.filesystem_vector_store import FilesystemVectorStore
         from code_indexer.storage.hnsw_index_manager import HNSWIndexManager
 
-        store = FilesystemVectorStore(base_path=tmp_path)
+        store = FilesystemVectorStore(
+            base_path=tmp_path, use_chunks_db_for_new_collections=False
+        )
         store.create_collection("test_coll", vector_size=1536)
 
         # Index with normal HNSW build
@@ -1458,7 +1538,11 @@ class TestStory3ContentRetrievalAndStaleness:
         from code_indexer.storage.filesystem_vector_store import FilesystemVectorStore
 
         # No git init - plain directory
-        store = FilesystemVectorStore(base_path=tmp_path, project_root=tmp_path)
+        store = FilesystemVectorStore(
+            base_path=tmp_path,
+            project_root=tmp_path,
+            use_chunks_db_for_new_collections=False,
+        )
         store.create_collection("test_coll", vector_size=1536)
 
         content = "def hello():\n    return 'world'\n"
@@ -1527,7 +1611,11 @@ class TestStory3ContentRetrievalAndStaleness:
             ["git", "commit", "-m", "test"], cwd=tmp_path, capture_output=True
         )
 
-        store = FilesystemVectorStore(base_path=tmp_path, project_root=tmp_path)
+        store = FilesystemVectorStore(
+            base_path=tmp_path,
+            project_root=tmp_path,
+            use_chunks_db_for_new_collections=False,
+        )
         store.create_collection("test_coll", vector_size=1536)
 
         points = [
@@ -1593,7 +1681,11 @@ class TestStory3ContentRetrievalAndStaleness:
             ["git", "commit", "-m", "test"], cwd=tmp_path, capture_output=True
         )
 
-        store = FilesystemVectorStore(base_path=tmp_path, project_root=tmp_path)
+        store = FilesystemVectorStore(
+            base_path=tmp_path,
+            project_root=tmp_path,
+            use_chunks_db_for_new_collections=False,
+        )
         store.create_collection("test_coll", vector_size=1536)
 
         points = [
@@ -1669,7 +1761,11 @@ class TestStory3ContentRetrievalAndStaleness:
             ["git", "commit", "-m", "test"], cwd=tmp_path, capture_output=True
         )
 
-        store = FilesystemVectorStore(base_path=tmp_path, project_root=tmp_path)
+        store = FilesystemVectorStore(
+            base_path=tmp_path,
+            project_root=tmp_path,
+            use_chunks_db_for_new_collections=False,
+        )
         store.create_collection("test_coll", vector_size=1536)
 
         points = [
@@ -1749,7 +1845,11 @@ class TestStory3ContentRetrievalAndStaleness:
         git_hash = result.stdout.split()[2]
 
         # Compute our hash
-        store = FilesystemVectorStore(base_path=tmp_path, project_root=tmp_path)
+        store = FilesystemVectorStore(
+            base_path=tmp_path,
+            project_root=tmp_path,
+            use_chunks_db_for_new_collections=False,
+        )
         our_hash = store._compute_file_hash(test_file)
 
         assert our_hash == git_hash
@@ -1792,7 +1892,11 @@ class TestStory3ContentRetrievalAndStaleness:
         blob_hash = result.stdout.split()[2]
 
         # Retrieve chunk (1-based lines 2-3, which are "line 1" and "line 2")
-        store = FilesystemVectorStore(base_path=tmp_path, project_root=tmp_path)
+        store = FilesystemVectorStore(
+            base_path=tmp_path,
+            project_root=tmp_path,
+            use_chunks_db_for_new_collections=False,
+        )
         chunk = store._retrieve_from_git_blob(blob_hash, start_line=2, end_line=3)
 
         assert chunk == "line 1\nline 2\n"
@@ -1807,7 +1911,11 @@ class TestStory3ContentRetrievalAndStaleness:
         from code_indexer.storage.filesystem_vector_store import FilesystemVectorStore
 
         # Non-git for simplicity
-        store = FilesystemVectorStore(base_path=tmp_path, project_root=tmp_path)
+        store = FilesystemVectorStore(
+            base_path=tmp_path,
+            project_root=tmp_path,
+            use_chunks_db_for_new_collections=False,
+        )
         store.create_collection("test_coll", vector_size=1536)
 
         points = [

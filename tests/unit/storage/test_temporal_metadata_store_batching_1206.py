@@ -19,7 +19,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import List, Tuple
 
-from src.code_indexer.storage.temporal_metadata_store import TemporalMetadataStore
+from code_indexer.storage.temporal_metadata_store import TemporalMetadataStore
 
 
 class TestSaveMetadataBatch:

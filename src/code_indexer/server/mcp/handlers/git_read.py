@@ -28,8 +28,14 @@ from typing import Any, Dict, List, Optional
 
 from code_indexer.server.auth.user_manager import User
 from code_indexer.server.logging_utils import format_error_log
-from code_indexer.server.middleware.correlation import get_correlation_id
+from code_indexer.server.telemetry.correlation_bridge import (
+    get_current_correlation_id as get_correlation_id,
+)
 from code_indexer.server.services.config_service import get_config_service
+from code_indexer.server.services.query_admission_gate import (
+    check_query_admission,
+    memory_pressure_mcp_payload,
+)
 from code_indexer.server.services.git_operations_service import (
     GitCommandError,
     git_operations_service,
@@ -876,6 +882,10 @@ def _omni_git_search_commits(args: Dict[str, Any], user: User) -> Dict[str, Any]
 
 def handle_git_search_commits(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Handler for git_search_commits tool - search commit messages."""
+    _admission = check_query_admission()
+    if not _admission.allowed:
+        return _mcp_response(memory_pressure_mcp_payload(_admission))
+
     from . import _utils
 
     leg = _get_legacy()
@@ -995,6 +1005,10 @@ def handle_git_search_commits(args: Dict[str, Any], user: User) -> Dict[str, Any
 
 def handle_git_search_diffs(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Handler for git_search_diffs tool - search for code changes (pickaxe search)."""
+    _admission = check_query_admission()
+    if not _admission.allowed:
+        return _mcp_response(memory_pressure_mcp_payload(_admission))
+
     from . import _utils
 
     leg = _get_legacy()

@@ -157,6 +157,75 @@ class TestSCIPToolSchemasExistence:
         assert len(SCIP_TOOLS) == 7, "Expected exactly 7 SCIP tools"
 
 
+class TestSCIPCallchainMaxDepthSchema:
+    """Bug #1603 code review (Priority 2, item 1; round 2 Priority 3 item A):
+    scip_callchain's inputSchema is the LIVE MCP contract (TOOL_REGISTRY
+    reads it directly from scip_callchain.md's YAML frontmatter) -- it must
+    advertise the real [1, 3] max_depth cap the handler now enforces, not
+    the stale [1, 10] contract from before this bug's remediation. Pins the
+    schema so it cannot silently drift back, mirroring Bug #1356's
+    schema-pin precedent above.
+
+    Round 2: previously hardcoded the literal `3` instead of importing
+    _MAX_CALLCHAIN_DEPTH from handlers/scip.py, so these tests would keep
+    passing even if the handler's constant changed and the doc did not --
+    now imports the real constant so the pin is genuine doc-to-code
+    agreement, not two independent literals that happen to match today.
+    """
+
+    def test_max_depth_default_is_3(self):
+        from code_indexer.server.mcp.handlers.scip import _MAX_CALLCHAIN_DEPTH
+
+        max_depth_schema = TOOL_REGISTRY["scip_callchain"]["inputSchema"]["properties"][
+            "max_depth"
+        ]
+        assert max_depth_schema["default"] == _MAX_CALLCHAIN_DEPTH, (
+            "scip_callchain's advertised max_depth default must match "
+            "_MAX_CALLCHAIN_DEPTH in handlers/scip.py "
+            f"({_MAX_CALLCHAIN_DEPTH}), got: {max_depth_schema['default']}"
+        )
+
+    def test_max_depth_description_documents_cap_of_3(self):
+        from code_indexer.server.mcp.handlers.scip import _MAX_CALLCHAIN_DEPTH
+
+        max_depth_schema = TOOL_REGISTRY["scip_callchain"]["inputSchema"]["properties"][
+            "max_depth"
+        ]
+        description = max_depth_schema.get("description", "").lower()
+        assert f"max {_MAX_CALLCHAIN_DEPTH}" in description, (
+            "scip_callchain's max_depth description must explicitly "
+            f"document the real cap ('Max {_MAX_CALLCHAIN_DEPTH}'), got: "
+            f"{description!r}"
+        )
+        assert "max 10" not in description, (
+            "scip_callchain's max_depth description must not still "
+            f"advertise the stale [1, 10] contract, got: {description!r}"
+        )
+
+    def test_max_depth_schema_has_minimum_and_maximum_bounds(self):
+        """Bug #1603 round 2 Priority 3 item A: the YAML schema itself must
+        machine-enforce the cap via minimum/maximum keys, not just prose in
+        the description -- an MCP client validating against the advertised
+        JSON schema would otherwise still accept max_depth: 10 and only get
+        rejected at runtime by the handler. Mirrors the minimum/maximum
+        pattern already used by search/search_code.md's edit_distance field.
+        """
+        from code_indexer.server.mcp.handlers.scip import _MAX_CALLCHAIN_DEPTH
+
+        max_depth_schema = TOOL_REGISTRY["scip_callchain"]["inputSchema"]["properties"][
+            "max_depth"
+        ]
+        assert max_depth_schema.get("minimum") == 1, (
+            "scip_callchain's max_depth schema must advertise minimum: 1, "
+            f"got: {max_depth_schema.get('minimum')!r}"
+        )
+        assert max_depth_schema.get("maximum") == _MAX_CALLCHAIN_DEPTH, (
+            "scip_callchain's max_depth schema must advertise maximum "
+            f"matching _MAX_CALLCHAIN_DEPTH ({_MAX_CALLCHAIN_DEPTH}), got: "
+            f"{max_depth_schema.get('maximum')!r}"
+        )
+
+
 class TestSCIPToolSchemaBackwardCompatibility:
     """Ensure schema changes don't break existing functionality."""
 

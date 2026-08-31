@@ -216,6 +216,21 @@ class SyncJobsPostgresBackend:
         Any sync job still in 'running' or 'pending' state when the server
         starts was orphaned by a previous crash or restart.
 
+        Bug #1563 scope note: this method is UNCONDITIONALLY unscoped (no
+        node or worker identity check), the same hazard class fixed for
+        BackgroundJobsPostgresBackend.cleanup_orphaned_jobs_on_startup.
+        Deliberately NOT given the same worker-pid-liveness fix here: the
+        `sync_jobs` table has no owning-node/owning-worker column at all
+        to check liveness against, and adding one would need a schema
+        change plus a caller change in jobs/manager.py's SyncJobManager,
+        both outside this fix's authorized file scope. Also confirmed (by
+        repository-wide search) that this specific method has ZERO live
+        callers today -- SyncJobManager only ever constructs
+        self._sqlite_backend, never a PostgreSQL sync-jobs backend -- so
+        no current production behavior is affected either way. Left as
+        an accurate, honest scope boundary rather than a silent gap, for
+        whoever wires this backend up in the future.
+
         Returns:
             Number of orphaned jobs cleaned up.
         """

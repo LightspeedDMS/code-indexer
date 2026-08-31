@@ -19,12 +19,38 @@ import json
 import os
 import stat
 from pathlib import Path
+from typing import List, Set
 from unittest.mock import MagicMock
 
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+MANIFEST_NAME = ".cidx-ssh-keys.json"
+
+# Bug #1521: the manifest is a SINGLE file shared by every server process
+# pointed at one ssh directory, so its entries are namespaced by a stable
+# backend identity (``{"version": 2, "backends": {<id>: [names]}}``) instead of
+# the old flat ``{"keys": [...]}`` list.  Production backends derive that
+# identity from their own locator (SQLite db path / PostgreSQL DSN); a
+# MagicMock has none, which by design disables stale-key cleanup -- so these
+# tests state the identity outright.
+TEST_BACKEND_IDENTITY = "test-backend-identity"
+
+
+def _write_manifest(ssh_dir: Path, names: List[str]) -> None:
+    """Seed a v2 manifest claiming the given names for the test backend."""
+    ssh_dir.mkdir(parents=True, exist_ok=True)
+    (ssh_dir / MANIFEST_NAME).write_text(
+        json.dumps({"version": 2, "backends": {TEST_BACKEND_IDENTITY: sorted(names)}})
+    )
+
+
+def _managed_names(ssh_dir: Path) -> Set[str]:
+    """Read back the names the test backend currently claims to manage."""
+    data = json.loads((ssh_dir / MANIFEST_NAME).read_text())
+    return set(data["backends"].get(TEST_BACKEND_IDENTITY, []))
 
 
 def _make_backend(keys: list) -> MagicMock:
@@ -53,7 +79,11 @@ def _key_data(
 def _make_service(backend, ssh_dir: Path):
     from code_indexer.server.services.ssh_key_sync_service import SSHKeySyncService
 
-    return SSHKeySyncService(ssh_keys_backend=backend, ssh_dir=str(ssh_dir))
+    return SSHKeySyncService(
+        ssh_keys_backend=backend,
+        ssh_dir=str(ssh_dir),
+        backend_identity=TEST_BACKEND_IDENTITY,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -150,9 +180,9 @@ class TestSyncSkipsExistingKeys:
 
 class TestSyncRemovesStaleKeys:
     def test_stale_private_key_removed(self, tmp_path: Path) -> None:
-        # Manifest says we manage "old_key" but backend no longer has it
-        manifest = {"keys": ["old_key"]}
-        (tmp_path / ".cidx-ssh-keys.json").write_text(json.dumps(manifest))
+        # Manifest says THIS backend manages "old_key" but the backend no
+        # longer has it -- the legitimate stale-cleanup case.
+        _write_manifest(tmp_path, ["old_key"])
         (tmp_path / "old_key").write_text("STALE_PRIVATE")
         (tmp_path / "old_key.pub").write_text("STALE_PUBLIC")
 
@@ -176,15 +206,13 @@ class TestSyncRemovesStaleKeys:
         assert (tmp_path / "user_own_key").exists()
 
     def test_stale_key_removed_from_manifest(self, tmp_path: Path) -> None:
-        manifest = {"keys": ["old_key"]}
-        (tmp_path / ".cidx-ssh-keys.json").write_text(json.dumps(manifest))
+        _write_manifest(tmp_path, ["old_key"])
 
         backend = _make_backend([])
         svc = _make_service(backend, tmp_path)
         svc.sync()
 
-        updated = json.loads((tmp_path / ".cidx-ssh-keys.json").read_text())
-        assert "old_key" not in updated["keys"]
+        assert "old_key" not in _managed_names(tmp_path)
 
 
 # ---------------------------------------------------------------------------
@@ -205,8 +233,7 @@ class TestManifestTracking:
         svc = _make_service(backend, tmp_path)
         svc.sync()
 
-        data = json.loads((tmp_path / ".cidx-ssh-keys.json").read_text())
-        assert set(data["keys"]) == {"key_x", "key_y"}
+        assert _managed_names(tmp_path) == {"key_x", "key_y"}
 
     def test_manifest_updated_when_key_added(self, tmp_path: Path) -> None:
         # First sync: one key
@@ -218,8 +245,7 @@ class TestManifestTracking:
         backend.list_keys.return_value = [_key_data("key_a"), _key_data("key_b")]
         svc.sync()
 
-        data = json.loads((tmp_path / ".cidx-ssh-keys.json").read_text())
-        assert set(data["keys"]) == {"key_a", "key_b"}
+        assert _managed_names(tmp_path) == {"key_a", "key_b"}
 
     def test_corrupted_manifest_treated_as_empty(self, tmp_path: Path) -> None:
         # Write garbage JSON
@@ -435,3 +461,154 @@ class TestBackendErrorHandling:
 
         assert nested_dir.exists()
         assert result["errors"] == []
+
+
+# ---------------------------------------------------------------------------
+# Tests: safety guard against real ~/.ssh under pytest (real incident,
+# 2026-08-02 -- a test that forgot to override ssh_dir let sync() delete
+# three genuine private keys from the developer's actual home directory)
+# ---------------------------------------------------------------------------
+
+
+class TestManifestProvenanceBug1519:
+    """Regression tests for Bug #1519.
+
+    SSHKeySyncService.sync() previously recorded a backend-reported key name
+    in the manifest as "managed by us" unconditionally (``_update_manifest
+    (backend_names)``), even when the write for that name was skipped
+    because a same-named file already existed on disk. A later backend
+    rename/retirement of that name then caused the stale-key cleanup step to
+    unlink() a file this service never actually wrote -- confirmed in a real
+    production incident (2026-08-03) that deleted a personal
+    ``~/.ssh/id_ed25519`` keypair.
+    """
+
+    def test_skipped_write_due_to_name_collision_is_not_recorded_as_managed(
+        self, tmp_path: Path
+    ) -> None:
+        # A pre-existing, unrelated personal key file that happens to share
+        # a filename with a backend-tracked key.
+        (tmp_path / "id_ed25519").write_text("PERSONAL_PRIVATE_KEY_CONTENT")
+        (tmp_path / "id_ed25519.pub").write_text("ssh-ed25519 PERSONAL_PUBLIC")
+
+        backend = _make_backend([_key_data("id_ed25519")])
+        svc = _make_service(backend, tmp_path)
+
+        result = svc.sync()
+
+        # The write is correctly skipped (file already exists)...
+        assert "id_ed25519" not in result["written"]
+        assert "id_ed25519" in result["unchanged"]
+
+        # ...and critically, the manifest must NOT claim we manage it --
+        # this service never proved it wrote this file.
+        assert "id_ed25519" not in _managed_names(tmp_path)
+
+    def test_personal_key_survives_backend_rename_after_name_collision(
+        self, tmp_path: Path
+    ) -> None:
+        """Full incident reproduction (issue #1519):
+
+        1. A personal id_ed25519 key exists, unrelated to CIDX.
+        2. A backend-tracked key of the same name registers; sync() skips
+           the write because the file already exists.
+        3. The backend key is later renamed/retired (no longer reported).
+        4. A second sync() must NOT delete the personal key -- this service
+           never provably wrote it.
+        """
+        original_private = "PERSONAL_PRIVATE_KEY_CONTENT"
+        original_public = "ssh-ed25519 PERSONAL_PUBLIC"
+        (tmp_path / "id_ed25519").write_text(original_private)
+        (tmp_path / "id_ed25519.pub").write_text(original_public)
+
+        # Step 2: backend reports a same-named key; sync() skips the write.
+        backend = _make_backend([_key_data("id_ed25519")])
+        svc = _make_service(backend, tmp_path)
+        svc.sync()
+
+        # Step 3: the backend key is renamed/retired -- no longer reported.
+        backend.list_keys.return_value = []
+
+        # Step 4: second sync() must NOT delete the personal key.
+        result = svc.sync()
+
+        assert (tmp_path / "id_ed25519").exists()
+        assert (tmp_path / "id_ed25519.pub").exists()
+        assert (tmp_path / "id_ed25519").read_text() == original_private
+        assert (tmp_path / "id_ed25519.pub").read_text() == original_public
+        assert "id_ed25519" not in result["removed"]
+
+    def test_genuinely_written_key_still_cleaned_up_when_backend_drops_it(
+        self, tmp_path: Path
+    ) -> None:
+        """Opposite case -- no regression: a key this service DID legitimately
+        write (fresh backend key, no local file conflict) must still be
+        correctly recorded as managed and cleaned up as stale once the
+        backend later drops it."""
+        backend = _make_backend([_key_data("fresh_key")])
+        svc = _make_service(backend, tmp_path)
+
+        first = svc.sync()
+        assert "fresh_key" in first["written"]
+
+        assert "fresh_key" in _managed_names(tmp_path)
+
+        # Backend drops the key.
+        backend.list_keys.return_value = []
+        second = svc.sync()
+
+        assert "fresh_key" in second["removed"]
+        assert not (tmp_path / "fresh_key").exists()
+        assert not (tmp_path / "fresh_key.pub").exists()
+
+
+class TestRealHomeUnderPytestGuard:
+    """sync() must refuse to touch the real, unoverridden ~/.ssh while a
+    test process is active, regardless of what the backend reports. This
+    guard can never affect a legitimate test, since every legitimate test
+    passes an explicit tmp_path-based ssh_dir -- it exists solely to make
+    an accidentally-real ssh_dir a loud no-op instead of a silent deletion
+    of the developer's actual keys."""
+
+    def test_sync_refuses_when_ssh_dir_is_real_home_under_pytest(self) -> None:
+        from code_indexer.server.services.ssh_key_sync_service import (
+            SSHKeySyncService,
+        )
+
+        # Backend reports NO keys -- exactly the shape that triggered the
+        # real incident (an empty/fake test backend reconciling against a
+        # manifest of previously-real keys would delete everything).
+        backend = _make_backend([])
+        # Deliberately DO NOT override ssh_dir -- this reproduces the bug:
+        # relying on the class default, which resolves to the real ~/.ssh.
+        svc = SSHKeySyncService(ssh_keys_backend=backend)
+
+        # PYTEST_CURRENT_TEST is set by pytest itself for the duration of
+        # every test -- no monkeypatching needed, this test genuinely runs
+        # under pytest right now.
+        assert "PYTEST_CURRENT_TEST" in os.environ
+
+        result = svc.sync()
+
+        assert result["written"] == []
+        assert result["removed"] == []
+        assert result["unchanged"] == []
+        assert any("refus" in e.lower() for e in result["errors"])
+        # The backend must never even be consulted -- the guard fires
+        # before any read/write/delete against the real filesystem.
+        backend.list_keys.assert_not_called()
+
+    def test_sync_proceeds_normally_when_ssh_dir_is_tmp_path_under_pytest(
+        self, tmp_path: Path
+    ) -> None:
+        """Every existing, legitimate test in this file uses tmp_path --
+        confirm the guard is a true no-op for that case (it must not
+        regress any of the tests above)."""
+        backend = _make_backend([_key_data("akey")])
+        svc = _make_service(backend, tmp_path)
+
+        result = svc.sync()
+
+        assert result["written"] == ["akey"]
+        assert result["errors"] == []
+        assert (tmp_path / "akey").exists()

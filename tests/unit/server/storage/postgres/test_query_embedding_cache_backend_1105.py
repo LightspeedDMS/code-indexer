@@ -71,9 +71,18 @@ def _encode_vec(vec: list) -> bytes:
 # ---------------------------------------------------------------------------
 
 
-class TestSchemaCreation:
-    def test_schema_created_on_init(self) -> None:
-        """__init__ must call CREATE TABLE IF NOT EXISTS and CREATE INDEX IF NOT EXISTS."""
+class TestConstructorDoesNotCreateTables:
+    """Issue #1697 (mirrors Bug #1655/#1662): the self-heal
+    `CREATE TABLE IF NOT EXISTS` / `CREATE INDEX IF NOT EXISTS` block in
+    QueryEmbeddingCachePostgresBackend._ensure_schema() was dead code in
+    production -- `service_init.py` always runs MigrationRunner before
+    StorageFactory.create_backends() constructs any PostgreSQL backend in
+    postgres storage mode, and migration 028_query_embedding_cache.sql
+    already declares the identical table/index. The dead block is removed
+    entirely, so construction no longer talks to the database at all.
+    """
+
+    def test_constructor_issues_zero_conn_execute_calls(self) -> None:
         pool = _make_mock_pool()
         conn = _get_conn(pool)
         from code_indexer.server.storage.postgres.query_embedding_cache_backend import (
@@ -81,26 +90,8 @@ class TestSchemaCreation:
         )
 
         QueryEmbeddingCachePostgresBackend(pool)
-        calls = conn.execute.call_args_list
-        # Two execute calls: CREATE TABLE + CREATE INDEX
-        assert len(calls) >= 2
-        first_sql = str(calls[0])
-        second_sql = str(calls[1])
-        assert "query_embedding_cache" in first_sql
-        assert "CREATE TABLE IF NOT EXISTS" in first_sql
-        assert "idx_qec_last_used" in second_sql
 
-    def test_schema_creation_fail_open(self) -> None:
-        """Schema setup failure must NOT raise — backend still constructs."""
-        pool = MagicMock()
-        pool.connection.side_effect = RuntimeError("DB down")
-        from code_indexer.server.storage.postgres.query_embedding_cache_backend import (
-            QueryEmbeddingCachePostgresBackend,
-        )
-
-        # Must not raise
-        backend = QueryEmbeddingCachePostgresBackend(pool)
-        assert backend is not None
+        assert conn.execute.call_count == 0
 
 
 # ---------------------------------------------------------------------------
@@ -198,6 +189,36 @@ class TestUpsert:
         backend._pool = pool
         # Must not raise
         backend.upsert("k1", "voyage-ai", "voyage-code-3", 1, b"\x00", 0.0, 0.0)
+
+    def test_upsert_returns_true_on_success(self) -> None:
+        """Bug #1536: upsert() must report success via return value so
+        QueryEmbeddingCache.record_miss_or_shadow's write_failures_since_start()
+        counter is accurate on the PostgreSQL/cluster deployment path too."""
+        pool = _make_mock_pool()
+        backend = _make_backend(pool)
+        blob = _encode_vec([1.0])
+        now = time.time()
+        result = backend.upsert("k1", "voyage-ai", "voyage-code-3", 1, blob, now, now)
+        assert result is True
+
+    def test_upsert_returns_false_on_failure(self) -> None:
+        """Bug #1536: the fail-open swallow must surface False, not None, so
+        the caller can count the failure instead of it looking identical to
+        a successful write."""
+        pool = MagicMock()
+        pool.connection.side_effect = RuntimeError("DB down")
+        from code_indexer.server.storage.postgres.query_embedding_cache_backend import (
+            QueryEmbeddingCachePostgresBackend,
+        )
+
+        backend = QueryEmbeddingCachePostgresBackend.__new__(
+            QueryEmbeddingCachePostgresBackend
+        )
+        backend._pool = pool
+        result = backend.upsert(
+            "k1", "voyage-ai", "voyage-code-3", 1, b"\x00", 0.0, 0.0
+        )
+        assert result is False
 
 
 # ---------------------------------------------------------------------------

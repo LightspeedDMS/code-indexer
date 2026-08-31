@@ -187,3 +187,72 @@ class TestWriteLockRegistry:
         )
 
         scheduler.release_write_lock("concurrent-repo")
+
+
+class TestAcquireWriteLockCustomTtlAndReleaseReturnValue:
+    """Bug #1580 follow-up (adversarial review): golden_repo_write_lock_guard
+    needs a caller-supplied TTL (WriteLockManager's 1-hour default silently
+    expires mid-run on a multi-hour indexing job) and a checkable release
+    result (so a failed release can be surfaced instead of swallowed)."""
+
+    _CUSTOM_TTL_SECONDS = 1
+    _EXPIRATION_WAIT_SECONDS = 1.1
+
+    def test_acquire_write_lock_forwards_custom_ttl_seconds(self, scheduler):
+        """A custom ttl_seconds must reach WriteLockManager.acquire -- proven
+        by a real short TTL expiring via staleness eviction and allowing
+        re-acquisition well before the 1-hour default would."""
+        import time
+
+        acquired = scheduler.acquire_write_lock(
+            "cidx-meta", ttl_seconds=self._CUSTOM_TTL_SECONDS
+        )
+        assert acquired is True
+        try:
+            # Still held immediately (well under the short TTL).
+            assert (
+                scheduler.acquire_write_lock(
+                    "cidx-meta", ttl_seconds=self._CUSTOM_TTL_SECONDS
+                )
+                is False
+            )
+
+            time.sleep(self._EXPIRATION_WAIT_SECONDS)
+
+            # The short TTL (not the 1-hour default) must have expired by
+            # now, letting a fresh acquire succeed via staleness eviction.
+            reacquired = scheduler.acquire_write_lock(
+                "cidx-meta", ttl_seconds=self._CUSTOM_TTL_SECONDS
+            )
+            assert reacquired is True, (
+                "expected the custom ttl_seconds to actually govern "
+                "staleness eviction -- if the 1-hour default were used "
+                "instead, this re-acquire would still be blocked"
+            )
+        finally:
+            released = scheduler.release_write_lock("cidx-meta")
+            assert released is True
+
+    def test_release_write_lock_returns_true_on_success_false_on_mismatch(
+        self, scheduler
+    ):
+        """release_write_lock() must return the underlying boolean result,
+        not None -- callers need to detect and surface a failed release."""
+        acquired = scheduler.acquire_write_lock("cidx-meta")
+        assert acquired is True
+        try:
+            mismatch_result = scheduler.release_write_lock(
+                "cidx-meta", owner_name="other-owner"
+            )
+            assert mismatch_result is False, (
+                "release_write_lock() must return False on an owner "
+                f"mismatch, got {mismatch_result!r}"
+            )
+        finally:
+            released = scheduler.release_write_lock(
+                "cidx-meta", owner_name="refresh_scheduler"
+            )
+            assert released is True, (
+                f"release_write_lock() must return True on a successful "
+                f"release, got {released!r}"
+            )

@@ -4,8 +4,26 @@ PostgreSQL backend for OAuth 2.1 storage (Story #514).
 Drop-in replacement for OAuthSqliteBackend using psycopg v3 sync connections
 via ConnectionPool.  Satisfies the OAuthBackend Protocol (protocols.py).
 
-Tables created on first use (CREATE TABLE IF NOT EXISTS) so no separate
-migration step is required for these tables.
+Schema (`oauth_clients`, `oauth_codes`, `oauth_tokens`, `oidc_identity_links`
+tables and their indexes) is owned entirely by the SQL migration
+(storage/postgres/migrations/sql/025_runtime_only_tables.sql) -- this
+backend does NOT create or alter any table. `service_init.py` always runs
+`MigrationRunner` before `StorageFactory.create_backends()` constructs this
+class, so schema is guaranteed present by the time any instance exists
+(Issue #1697, mirroring Bug #1655/#1662: a previous self-heal
+`CREATE TABLE IF NOT EXISTS` block here was dead code in every real
+deployment -- removed rather than kept as a second, drift-prone copy of
+the schema).
+
+Construction DOES still perform ONE genuinely live side effect: seeding the
+synthetic `client_credentials` row into `oauth_clients` (ON CONFLICT DO
+NOTHING). No migration replicates this row, and `oauth_manager.py`'s own
+equivalent seeding path (`_init_database`/`_do_init`) is skipped entirely
+whenever a `storage_backend` is supplied -- the postgres/cluster
+construction path this class serves. Without it,
+`oauth_tokens.client_id = 'client_credentials'` would violate its FK
+constraint and the client_credentials OAuth grant type would be broken
+cluster-wide.
 """
 
 from __future__ import annotations
@@ -40,77 +58,26 @@ class OAuthPostgresBackend:
 
     def __init__(self, pool: ConnectionPool) -> None:
         """
-        Initialize with a shared connection pool and ensure tables exist.
+        Initialize with a shared connection pool and seed the synthetic
+        client_credentials client row.
+
+        Schema (tables/indexes) is assumed to already exist (see module
+        docstring) -- this constructor does not create or alter any table.
 
         Args:
             pool: ConnectionPool instance providing psycopg v3 connections.
         """
         self._pool = pool
-        self._ensure_schema()
+        self._seed_client_credentials_client()
 
-    def _ensure_schema(self) -> None:
-        """Create all OAuth tables if they do not already exist."""
+    def _seed_client_credentials_client(self) -> None:
+        """Seed the synthetic `client_credentials` row into oauth_clients
+        (ON CONFLICT DO NOTHING) so oauth_tokens.client_id = 'client_credentials'
+        satisfies its FK constraint. This row is never used for authorization
+        flows. See module docstring for why this seed must live here rather
+        than in a migration or oauth_manager.py."""
         try:
             with self._pool.connection() as conn:
-                conn.execute(
-                    """
-                    CREATE TABLE IF NOT EXISTS oauth_clients (
-                        client_id TEXT PRIMARY KEY,
-                        client_name TEXT NOT NULL,
-                        redirect_uris TEXT NOT NULL,
-                        created_at TEXT NOT NULL,
-                        metadata TEXT
-                    )
-                    """
-                )
-                conn.execute(
-                    """
-                    CREATE TABLE IF NOT EXISTS oauth_codes (
-                        code TEXT PRIMARY KEY,
-                        client_id TEXT NOT NULL,
-                        user_id TEXT NOT NULL,
-                        code_challenge TEXT NOT NULL,
-                        redirect_uri TEXT NOT NULL,
-                        expires_at TEXT NOT NULL,
-                        used BOOLEAN DEFAULT FALSE,
-                        FOREIGN KEY (client_id) REFERENCES oauth_clients (client_id)
-                    )
-                    """
-                )
-                conn.execute(
-                    """
-                    CREATE TABLE IF NOT EXISTS oauth_tokens (
-                        token_id TEXT PRIMARY KEY,
-                        client_id TEXT NOT NULL,
-                        user_id TEXT NOT NULL,
-                        access_token TEXT UNIQUE NOT NULL,
-                        refresh_token TEXT UNIQUE,
-                        expires_at TEXT NOT NULL,
-                        created_at TEXT NOT NULL,
-                        last_activity TEXT NOT NULL,
-                        hard_expires_at TEXT NOT NULL,
-                        FOREIGN KEY (client_id) REFERENCES oauth_clients (client_id)
-                    )
-                    """
-                )
-                conn.execute(
-                    "CREATE INDEX IF NOT EXISTS idx_tokens_access ON oauth_tokens (access_token)"
-                )
-                conn.execute(
-                    """
-                    CREATE TABLE IF NOT EXISTS oidc_identity_links (
-                        username TEXT NOT NULL PRIMARY KEY,
-                        subject TEXT NOT NULL UNIQUE,
-                        email TEXT,
-                        linked_at TEXT NOT NULL,
-                        last_login TEXT
-                    )
-                    """
-                )
-                conn.execute(
-                    "CREATE INDEX IF NOT EXISTS idx_oidc_subject ON oidc_identity_links (subject)"
-                )
-                # Seed synthetic client_credentials row to satisfy FK constraint.
                 conn.execute(
                     """
                     INSERT INTO oauth_clients
@@ -128,7 +95,9 @@ class OAuthPostgresBackend:
                 )
                 conn.commit()
         except Exception as exc:
-            logger.warning("OAuthPostgresBackend: schema setup failed: %s", exc)
+            logger.warning(
+                "OAuthPostgresBackend: client_credentials seed failed: %s", exc
+            )
 
     def register_client(
         self,

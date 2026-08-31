@@ -3,7 +3,7 @@ name: admin_logs_query
 category: admin
 required_permission: manage_users
 tl_dr: Query operational logs from SQLite database with pagination and filtering.
-slim_description: "Query paginated operational logs with optional filters for search text, log level, and correlation_id."
+slim_description: "Query paginated operational logs with optional filters for search text, log level, and correlation_id. Each entry includes trace_id/span_id for OTEL trace correlation."
 inputSchema:
   type: object
   properties:
@@ -55,6 +55,12 @@ outputSchema:
             type:
             - string
             - 'null'
+          trace_id:
+            type: string
+            description: OTEL trace ID (32-char hex, or "0"*32 zero-value when no span was active)
+          span_id:
+            type: string
+            description: OTEL span ID (16-char hex, or "0"*16 zero-value when no span was active)
           user_id:
             type:
             - string
@@ -81,7 +87,7 @@ outputSchema:
   - pagination
 ---
 
-Query operational logs from SQLite database with pagination and filtering. Requires MCP elevation (TOTP step-up). USE CASES: (1) View recent server logs, (2) Search for specific errors/events, (3) Trace requests by correlation_id, (4) Filter by log level. RETURNS: Paginated array of log entries with timestamp, level, source, message, correlation_id, user_id, request_path. PERMISSIONS: Requires admin role (admin only).
+Query operational logs from SQLite database with pagination and filtering. Requires MCP elevation (TOTP step-up). USE CASES: (1) View recent server logs, (2) Search for specific errors/events, (3) Trace requests by correlation_id, (4) Filter by log level, (5) Jump from a log line to its OTEL trace via trace_id/span_id. RETURNS: Paginated array of log entries with timestamp, level, source, message, correlation_id, trace_id, span_id, user_id, request_path. trace_id/span_id are always populated -- real hex IDs when the log occurred inside an active OTEL span, or the documented zero-values ("0"*32 / "0"*16) when telemetry was disabled or no span was active. PERMISSIONS: Requires admin role (admin only).
 
 ERRORS:
 - elevation_required: TOTP step-up needed

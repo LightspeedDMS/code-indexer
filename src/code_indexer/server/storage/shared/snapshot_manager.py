@@ -24,9 +24,15 @@ from __future__ import annotations
 import logging
 import re
 import subprocess
+import threading
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING, List, Optional, Tuple
+
+# Story #1586 AC5: custom span around golden-repo CoW snapshot creation.
+# create_span() no-ops (yields a _NoOpSpan) when OTEL tracing is
+# unavailable/uninitialized.
+from code_indexer.server.telemetry.spans import create_span
 
 from .snapshot_paths import is_versioned_snapshot as _is_versioned_snapshot
 
@@ -39,8 +45,89 @@ _V_TIMESTAMP_CAPTURE_RE = re.compile(r"^v_(\d+)$")
 
 logger = logging.getLogger(__name__)
 
+
+def _ensure_source_tree_readable_for_clone(source_path: str) -> None:
+    """Best-effort widen *source_path*'s permissions so a different-OS-user,
+    remote-executing clone backend (the CoW daemon, Issue #1511) can read it.
+
+    The CoW daemon runs `cp --reflink=auto -a` as its own OS user, which is
+    typically NOT the OS user (`cidx index`) that wrote the golden-repo's
+    index files -- those files commonly end up at restrictive mode 600 from
+    that process's ambient umask, causing "Permission denied" for every
+    clone attempt. This preflight defensively ensures group+other can at
+    least read (and, for directories, traverse) every entry under
+    *source_path* before handing it to such a backend.
+
+    Bug #1511 follow-up: the original implementation walked the tree in
+    Python (`os.walk` + a separate `os.stat`/`os.chmod` pair per entry). For
+    a golden repo with hundreds of thousands of small index/shard files over
+    NFS (e.g. evolution's temporal quarter-shard directories), that is one
+    or two network round trips PER FILE and measurably hung repository
+    activation for 30+ minutes in production (proven live via py-spy). Two
+    batched `find ... -exec chmod ... {} +` calls -- one scoped to
+    directories, one to files -- do the equivalent additive-only widening
+    in one native traversal each, instead of a Python-level round trip per
+    entry. Directories get `g+rx,o+rx` (read+traverse); files get
+    `g+r,o+r` ONLY (never execute -- a single combined `chmod ... X` pass
+    would risk setting the execute bit on a plain file that already had
+    some other execute bit set, which this project's contract forbids).
+
+    Never strips existing permissions -- only ADDS bits. Resilient to
+    partial failures: `find -exec chmod ... +` batches many paths per
+    invoked `chmod`, and GNU chmod continues past an individual failing
+    path within a batch rather than aborting -- a non-zero overall exit is
+    logged as a WARNING, never raised (the downstream `cp` call will
+    surface a loud, clear error if something still can't be read after this
+    preflight runs).
+    """
+
+    def _run_chmod(entry_type: str, mode: str) -> None:
+        try:
+            result = subprocess.run(
+                [
+                    "find",
+                    source_path,
+                    "-type",
+                    entry_type,
+                    "-exec",
+                    "chmod",
+                    mode,
+                    "{}",
+                    "+",
+                ],
+                capture_output=True,
+                text=True,
+            )
+            if result.returncode != 0:
+                logger.warning(
+                    "CoW-daemon clone readability preflight (%s) on '%s' "
+                    "reported errors (exit %d); continuing: %s",
+                    entry_type,
+                    source_path,
+                    result.returncode,
+                    result.stderr.strip(),
+                )
+        except OSError as exc:
+            logger.warning(
+                "Failed to run permission-widening preflight (%s) on '%s' "
+                "for CoW-daemon clone readability; continuing: %s",
+                entry_type,
+                source_path,
+                exc,
+            )
+
+    _run_chmod("d", "g+rx,o+rx")
+    _run_chmod("f", "g+r,o+r")
+
+
 #: Default timeout in seconds for the filesystem CoW ``cp`` command.
 _DEFAULT_COW_TIMEOUT = 600
+
+#: Story #1457 AC9: bounded retry count for collision-checked version-id
+#: generation. Two version-creations for the same namespace within the same
+#: wall-clock second would otherwise collide on ``v_{timestamp}``; this bound
+#: gives a provable termination guarantee for the collision-retry loop.
+_MAX_VERSION_ID_COLLISION_RETRIES = 100
 
 
 class VersionedSnapshotManager:
@@ -85,6 +172,11 @@ class VersionedSnapshotManager:
         self._versioned_base = versioned_base
         self._cow_timeout = cow_timeout
         self._clone_backend = clone_backend
+        # Story #1457 HIGH #8 (2026-07-23 code review): serializes the
+        # collision-check-then-create sequence within this process --
+        # closes the intra-process TOCTOU window a genuinely concurrent
+        # (not just sequential) same-second creation would otherwise hit.
+        self._snapshot_lock = threading.Lock()
 
     # ------------------------------------------------------------------
     # Mode helpers
@@ -127,14 +219,111 @@ class VersionedSnapshotManager:
         """
         timestamp = int(time.time())
 
-        if self._clone_backend is not None:
+        # Story #1586 AC5 (Finding 1): the span wraps this public dispatch
+        # point -- create_snapshot() itself -- rather than any single
+        # branch below, so it covers all three real branches (clone_backend,
+        # FlexClone, and the CoW fallback) with one instrumentation point.
+        # This matters because every real deployment constructs this
+        # manager WITH a clone_backend, so create_snapshot() always
+        # dispatches through _create_clone_backend_snapshot; a span wired
+        # only around _create_cow_snapshot (a fallback branch production
+        # never reaches) would be structurally dead in production.
+        with create_span(
+            "cidx.snapshot_manager.create_cow_snapshot",
+            attributes={"alias": alias},
+        ):
+            if self._clone_backend is not None:
+                return self._create_clone_backend_snapshot(
+                    alias, source_path, timestamp
+                )
+
+            if self._flexclone is not None:
+                return self._create_flexclone_snapshot(alias, timestamp)
+            return self._create_cow_snapshot(alias, source_path, timestamp)
+
+    def _create_clone_backend_snapshot(
+        self, alias: str, source_path: str, timestamp: int
+    ) -> str:
+        """Dispatch to ``self._clone_backend.create_clone`` -- collision-
+        checked when the backend is path-based (Story #1457 HIGH #8,
+        2026-07-23 code review).
+
+        Prior to this fix, this was the PRODUCTION dispatch path (every
+        real deployment constructs VersionedSnapshotManager WITH a
+        clone_backend) and had ZERO collision protection at all -- the
+        story's own AC9 retry loop only ever protected
+        ``_create_cow_snapshot``, a fallback path production never
+        reaches. For a path-based backend (``LocalCloneBackend``, which
+        uses the SAME ``{versioned_base}/.versioned/{alias}/v_{ts}``
+        convention as the CoW fallback -- detected via the
+        ``_versioned_base`` attribute, mirroring the existing
+        ``_backend_mount_point()`` pattern of reaching into backend
+        internals), pre-check the destination and retry with an
+        incremented timestamp on collision, exactly like
+        ``_create_cow_snapshot`` already does.
+
+        Non-path-based backends (ONTAP, cow-daemon -- remote-resource-
+        named, no local filesystem path to pre-check) are dispatched
+        unchanged; their own collision handling is Epic #1454 scope, not
+        this fix (no live ONTAP/daemon infrastructure available to safely
+        verify a fix against here).
+        """
+        assert self._clone_backend is not None  # caller-guaranteed (create_snapshot)
+
+        # Issue #1511: the CoW daemon runs as a different OS user (on a
+        # different host) than the process that wrote the golden-repo's
+        # index files, which commonly end up at restrictive mode 600 from
+        # that writer's ambient umask -- causing `cp --reflink=auto -a` to
+        # fail with "Permission denied" for every clone attempt. Defensively
+        # widen the source tree's readability before handing it to the
+        # daemon. Gated by class name, mirroring the existing
+        # backend-name-based dispatch in list_snapshots(); LocalCloneBackend
+        # (same OS user) and OntapCloneBackend (different mechanism
+        # entirely) are intentionally left untouched.
+        if type(self._clone_backend).__name__ == "CowDaemonBackend":
+            _ensure_source_tree_readable_for_clone(source_path)
+
+        backend_versioned_base = getattr(self._clone_backend, "_versioned_base", None)
+        if backend_versioned_base is None:
             return self._clone_backend.create_clone(
                 source_path, alias, f"v_{timestamp}"
             )
 
-        if self._flexclone is not None:
-            return self._create_flexclone_snapshot(alias, timestamp)
-        return self._create_cow_snapshot(alias, source_path, timestamp)
+        # Story #1457 HIGH #8: the lock closes the intra-process TOCTOU
+        # window between the existence check and the actual create --
+        # a genuinely CONCURRENT (not just sequential) same-second
+        # creation would otherwise still collide even with the retry
+        # loop below (two threads could both observe "not yet taken"
+        # before either finishes creating). A coarse lock serializing
+        # snapshot creation within this process is the accepted
+        # correctness-over-throughput tradeoff this codebase already
+        # uses elsewhere for infrequent, correctness-critical operations.
+        with self._snapshot_lock:
+            namespace_dir = Path(backend_versioned_base) / ".versioned" / alias
+            candidate_timestamp = timestamp
+            candidate_path = namespace_dir / f"v_{candidate_timestamp}"
+            for _attempt in range(_MAX_VERSION_ID_COLLISION_RETRIES):
+                if not candidate_path.exists():
+                    break
+                logger.warning(
+                    "Clone backend snapshot collision for alias '%s' at "
+                    "'%s'; retrying with incremented version id",
+                    alias,
+                    candidate_path,
+                )
+                candidate_timestamp += 1
+                candidate_path = namespace_dir / f"v_{candidate_timestamp}"
+            else:
+                raise RuntimeError(
+                    f"Failed to generate a collision-free version id for "
+                    f"alias '{alias}' after "
+                    f"{_MAX_VERSION_ID_COLLISION_RETRIES} attempts "
+                    f"starting at v_{timestamp}"
+                )
+
+            return self._clone_backend.create_clone(
+                source_path, alias, f"v_{candidate_timestamp}"
+            )
 
     def delete_snapshot(self, alias: str, version_path: str) -> bool:
         """Delete a versioned snapshot.
@@ -396,11 +585,38 @@ class VersionedSnapshotManager:
     # ------------------------------------------------------------------
 
     def _create_cow_snapshot(self, alias: str, source_path: str, timestamp: int) -> str:
-        """Create a CoW directory snapshot using ``cp --reflink=auto``."""
-        versioned_path = (
-            Path(self._versioned_base) / ".versioned" / alias / f"v_{timestamp}"
-        )
-        versioned_path.parent.mkdir(parents=True, exist_ok=True)
+        """Create a CoW directory snapshot using ``cp --reflink=auto``.
+
+        Story #1457 AC9: version-id generation is collision-checked. Two
+        version-creations for the SAME namespace within the SAME wall-clock
+        second would otherwise collide on the identical ``v_{timestamp}``
+        destination -- and ``cp --reflink=auto -a source <existing-dir>``
+        copies INSIDE the existing directory (nesting) rather than erroring,
+        producing a structurally corrupt snapshot. On collision, retry with
+        an incremented timestamp within a bounded iteration count.
+        """
+        namespace_dir = Path(self._versioned_base) / ".versioned" / alias
+        namespace_dir.mkdir(parents=True, exist_ok=True)
+
+        candidate_timestamp = timestamp
+        versioned_path = namespace_dir / f"v_{candidate_timestamp}"
+        for _attempt in range(_MAX_VERSION_ID_COLLISION_RETRIES):
+            if not versioned_path.exists():
+                break
+            logger.warning(
+                "CoW snapshot collision for alias '%s' at '%s'; retrying "
+                "with incremented version id",
+                alias,
+                versioned_path,
+            )
+            candidate_timestamp += 1
+            versioned_path = namespace_dir / f"v_{candidate_timestamp}"
+        else:
+            raise RuntimeError(
+                f"Failed to generate a collision-free version id for alias "
+                f"'{alias}' after {_MAX_VERSION_ID_COLLISION_RETRIES} attempts "
+                f"starting at v_{timestamp}"
+            )
 
         logger.info(
             "Creating CoW snapshot for alias '%s' at '%s' from '%s'",

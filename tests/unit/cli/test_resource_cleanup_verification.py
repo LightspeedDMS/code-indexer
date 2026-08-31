@@ -5,8 +5,8 @@ from click.testing import CliRunner
 from pathlib import Path
 
 # Import CLI components
-from src.code_indexer.cli import cli
-from src.code_indexer.api_clients.repos_client import ActivatedRepository
+from code_indexer.cli import cli
+from code_indexer.api_clients.repos_client import ActivatedRepository
 
 
 class TestResourceCleanupFix:
@@ -16,10 +16,10 @@ class TestResourceCleanupFix:
         """Setup test environment for each test."""
         self.runner = CliRunner()
 
-    @patch("src.code_indexer.remote.sync_execution._load_remote_configuration")
-    @patch("src.code_indexer.remote.sync_execution._load_and_decrypt_credentials")
-    @patch("src.code_indexer.mode_detection.command_mode_detector.find_project_root")
-    @patch("src.code_indexer.cli.ReposAPIClient")
+    @patch("code_indexer.remote.sync_execution._load_remote_configuration")
+    @patch("code_indexer.remote.sync_execution._load_and_decrypt_credentials")
+    @patch("code_indexer.mode_detection.command_mode_detector.find_project_root")
+    @patch("code_indexer.cli.ReposAPIClient")
     def test_repos_list_client_resource_cleanup(
         self,
         mock_repos_client_class,
@@ -66,12 +66,12 @@ class TestResourceCleanupFix:
         # CRITICAL: Verify that client.close() was called for proper resource cleanup
         mock_client.close.assert_called_once()
 
-    @patch("src.code_indexer.mode_detection.command_mode_detector.find_project_root")
-    @patch("src.code_indexer.remote.config.load_remote_configuration")
-    @patch("src.code_indexer.remote.credential_manager.ProjectCredentialManager")
-    @patch("src.code_indexer.remote.credential_manager.load_encrypted_credentials")
-    @patch("src.code_indexer.cli.AdminAPIClient")
-    @patch("src.code_indexer.cli.run_async")
+    @patch("code_indexer.mode_detection.command_mode_detector.find_project_root")
+    @patch("code_indexer.remote.config.load_remote_configuration")
+    @patch("code_indexer.remote.credential_manager.ProjectCredentialManager")
+    @patch("code_indexer.remote.credential_manager.load_encrypted_credentials")
+    @patch("code_indexer.cli.AdminAPIClient")
+    @patch("code_indexer.cli.run_async")
     def test_admin_repos_list_client_resource_cleanup(
         self,
         mock_run_async,

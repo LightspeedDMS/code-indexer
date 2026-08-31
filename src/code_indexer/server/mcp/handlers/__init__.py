@@ -79,9 +79,34 @@ class _ForwardingModule(_types.ModuleType):
     package namespace into ``_legacy``'s namespace (when the name exists
     there), making all existing ``patch("handlers.X")`` calls work
     transparently without touching any test file.
+
+    Bug #1610 (test-isolation only, zero production impact): a name being
+    present in a submodule's ``__dict__`` does NOT by itself mean that name
+    is a forwarded alias of the package-level symbol.  A submodule may
+    independently define its OWN, unrelated function/object under a
+    coincidentally-matching name (e.g. ``xray.py`` defines its own local
+    ``_resolve_repo_path(alias)``, unrelated to the package-level
+    ``_resolve_repo_path`` re-exported from ``_legacy.py``).  Blindly
+    mirroring every write onto any submodule whose ``__dict__`` merely
+    contains the same name corrupts that submodule's independent binding the
+    moment something (e.g. ``mock.patch``'s restore-via-setattr on exit)
+    writes to the package-level name.  To distinguish a genuine forward
+    target from a coincidental name collision, we compare the submodule's
+    CURRENT value for ``name`` against the package's OWN PREVIOUS value for
+    ``name`` (captured below, before this write).  A genuinely forwarded
+    name's submodule binding is always identical (``is``) to the package's
+    previous binding, because it either came from the very same import or
+    was itself propagated here on an earlier write; an independently
+    defined, same-named local symbol never matches that identity and is
+    therefore left untouched.
     """
 
     def __setattr__(self, name: str, value: _Any) -> None:
+        # Capture the package's own current binding BEFORE overwriting it,
+        # so we can tell a genuine forward target (identical to this) apart
+        # from a submodule's own, independently-defined, same-named symbol.
+        _unset = object()
+        old_value = self.__dict__.get(name, _unset)
         # Always set on ourselves first.
         super().__setattr__(name, value)
         if not name.startswith("__"):
@@ -90,7 +115,11 @@ class _ForwardingModule(_types.ModuleType):
             # not in this package __init__.  Without forwarding, patch("handlers.X")
             # replaces only the __init__ copy, leaving _legacy.X untouched.
             legacy = _sys.modules.get("code_indexer.server.mcp.handlers._legacy")
-            if legacy is not None and name in legacy.__dict__:
+            if (
+                legacy is not None
+                and name in legacy.__dict__
+                and legacy.__dict__[name] is old_value
+            ):
                 legacy.__dict__[name] = value
             # Propagate into extracted domain submodules so that callers in
             # those modules also see the patched binding.  When a handler moves
@@ -102,7 +131,6 @@ class _ForwardingModule(_types.ModuleType):
                 "code_indexer.server.mcp.handlers.scip",
                 "code_indexer.server.mcp.handlers.guides",
                 "code_indexer.server.mcp.handlers.ssh_keys",
-                "code_indexer.server.mcp.handlers.delegation",
                 "code_indexer.server.mcp.handlers.pull_requests",
                 "code_indexer.server.mcp.handlers.git_read",
                 "code_indexer.server.mcp.handlers.git_write",
@@ -116,7 +144,11 @@ class _ForwardingModule(_types.ModuleType):
                 "code_indexer.server.mcp.handlers.xray",
             ):
                 _submod = _sys.modules.get(_submod_name)
-                if _submod is not None and name in _submod.__dict__:
+                if (
+                    _submod is not None
+                    and name in _submod.__dict__
+                    and _submod.__dict__[name] is old_value
+                ):
                     _submod.__dict__[name] = value
             # app_module lives in _utils and is accessed as _utils.app_module
             # in _legacy.py (not as a bare name).  Forward writes here so that
@@ -186,30 +218,6 @@ from code_indexer.server.mcp.handlers.repos import (  # noqa: F401, E402
     _resolve_golden_repo_base_clone,
     _resolve_golden_repo_path,
     _post_provider_index_snapshot,
-)
-
-from code_indexer.server.mcp.handlers.delegation import (  # noqa: F401, E402
-    # Public handlers extracted from _legacy (Story #496 delegation step)
-    handle_list_delegation_functions,
-    handle_execute_delegation_function,
-    handle_poll_delegation_job,
-    handle_execute_open_delegation,
-    handle_cs_register_repository,
-    handle_cs_list_repositories,
-    handle_cs_check_health,
-    # Private helpers used by tests and external consumers
-    _get_cidx_callback_base_url,
-    _get_delegation_config,
-    _get_delegation_function_repo_path,
-    _get_repo_ready_timeout,
-    _get_user_groups,
-    _load_packages_context,
-    _lookup_golden_repo_for_cs,
-    _resolve_guardrails,
-    _validate_collaborative_params,
-    _validate_competitive_params,
-    _validate_function_parameters,
-    _validate_open_delegation_params,
 )
 
 from code_indexer.server.mcp.handlers.pull_requests import (  # noqa: F401, E402

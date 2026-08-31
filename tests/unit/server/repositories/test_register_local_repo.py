@@ -12,10 +12,10 @@ import threading
 
 import pytest
 
-from src.code_indexer.server.repositories.golden_repo_manager import (
+from code_indexer.server.repositories.golden_repo_manager import (
     GoldenRepoManager,
 )
-from src.code_indexer.server.repositories.background_jobs import BackgroundJobManager
+from code_indexer.server.repositories.background_jobs import BackgroundJobManager
 
 
 @pytest.mark.slow

@@ -5,13 +5,18 @@ sibling domain module (search, repos, files, etc.).  All domain modules import
 from here; nothing here imports from them.
 """
 
-from code_indexer.server.middleware.correlation import get_correlation_id
+from code_indexer.server.telemetry.correlation_bridge import (
+    get_current_correlation_id as get_correlation_id,
+)
 
 import difflib
 import json
 import logging
 import pathspec
+import types
+from contextlib import contextmanager
 from dataclasses import dataclass
+from datetime import date, datetime
 from typing import Dict, Any, Optional, List, Union, TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -26,6 +31,62 @@ from code_indexer.server.services.constants import is_internal_meta_repo
 logger = logging.getLogger(__name__)
 
 HTTP_STATUS_BAD_REQUEST = 400
+
+
+def _lazy_module_attr_or_none(name: str) -> Any:
+    """Read a lazy PEP-562 attribute off ``app_module`` without constructing it.
+
+    Bug #1709: generalizes the technique Bug #1678/#1693 introduced as
+    ``_lazy_singleton_app_or_none()`` in xray.py (there scoped to the
+    ``"app"`` attribute name only) to ANY lazy-constructed module-level name
+    on ``code_indexer.server.app``. Names such as ``"activated_repo_manager"``,
+    ``"golden_repo_manager"``, and ``"background_job_manager"`` are ALL
+    members of that module's ``_LAZY_INIT_ATTRS`` and trigger the identical
+    ``__getattr__`` construction side effect that a bare
+    ``getattr(app_module, name, None)`` probe suffers for ``"app"`` --
+    Python invokes ``__getattr__`` whenever normal attribute lookup (which
+    checks ``__dict__`` first) fails, and ``getattr()`` only catches the
+    resulting ``AttributeError`` afterward; it does not prevent the call.
+
+    Reading ``__dict__.get(name)`` directly on a genuine ``ModuleType``
+    bypasses ``__getattr__`` entirely -- it returns ``None`` until the
+    singleton has genuinely already been constructed elsewhere, instead of
+    permanently constructing it as a side effect of merely probing it.
+
+    Test stand-ins that replace ``app_module`` with a ``MagicMock()`` (the
+    established pattern, e.g. test_xray_cell_limiter.py) are not
+    ``types.ModuleType`` instances, so they fall through to a plain
+    ``getattr()`` call -- preserving normal Mock attribute-interception
+    semantics for tests that rely on it.
+
+    Bug #1709 remediation: a raw ``__dict__`` read alone missed one more
+    scenario app.py's own ``__getattr__`` handles -- ``unittest.mock.patch
+    .object(app_module, name, ...)`` called WITHOUT ``create=True`` when
+    ``name`` is not yet a literal ``__dict__`` key. Mock's ``get_original()``
+    then captures the value via a ``getattr()`` fallback (``is_local=False``)
+    -- which itself constructs the singleton -- and its teardown calls
+    ``delattr(target, name)`` rather than restoring it, permanently removing
+    ``name`` from ``__dict__`` even though the singleton is fully
+    constructed and cached in ``_lazy_values``. Ordinary attribute access
+    (``getattr(app_module, name, ...)``/``hasattr()``) transparently
+    recovers via that same ``_lazy_values`` fallback inside
+    ``__getattr__``; this helper must match that exact recovery semantics
+    instead of permanently returning ``None``. Reading ``_initialized``/
+    ``_lazy_values`` is always safe: both are plain, unconditionally
+    module-level-assigned globals (never lazy themselves, always present in
+    ``__dict__`` from import time), so this can never itself trigger real
+    construction.
+    """
+    mod = app_module
+    if isinstance(mod, types.ModuleType):
+        if name in mod.__dict__:
+            return mod.__dict__[name]
+        if mod.__dict__.get("_initialized") and name in mod.__dict__.get(
+            "_lazy_values", {}
+        ):
+            return mod.__dict__["_lazy_values"][name]
+        return None
+    return getattr(mod, name, None)
 
 
 @dataclass
@@ -105,7 +166,7 @@ def cap_breach_response(breach: CapBreach) -> "Dict[str, Any]":
         "cap": breach.configured_cap,
         "remediation": _cap_breach_message(breach),
     }
-    return {"content": [{"type": "text", "text": json.dumps(payload)}]}
+    return _mcp_response(payload)
 
 
 def cap_breach_http_exception(breach: CapBreach) -> None:
@@ -244,6 +305,34 @@ def _enrich_with_wiki_url(
     result_dict["wiki_url"] = f"/wiki/{wiki_alias}/{article_path}"
 
 
+def _json_default(obj: Any) -> str:
+    """Typed defensive fallback for json.dumps() at the MCP response boundary.
+
+    Bug #1645 (defense-in-depth hardening): Bug #1642 fixed the one live
+    instance of a non-JSON-native value leaking into an MCP response (a raw
+    ``datetime`` from AuditLogPostgresBackend), but that fix was applied at
+    the data-access layer (``sanitize_row()``), not at this shared
+    serialization boundary. A future handler that forwards any other
+    non-JSON-native value directly into a response would reproduce the same
+    class of 100%-failure bug. This function is that boundary's guard.
+
+    Deliberately NOT a blanket ``str(obj)`` fallback -- that was considered
+    and rejected: it would silently paper over a genuinely wrong object type
+    reaching a response instead of failing loudly (this project's
+    anti-silent-failure stance), and ``str(datetime)`` emits a space
+    separator while ``.isoformat()`` emits the "T" separator used everywhere
+    else in this codebase. Only ``datetime``/``date`` are converted; every
+    other type raises TypeError, matching json.dumps()'s own default error
+    shape so callers see a familiar message.
+
+    Raises:
+        TypeError: obj is not a datetime/date instance.
+    """
+    if isinstance(obj, (datetime, date)):
+        return obj.isoformat()
+    raise TypeError(f"Object of type {type(obj).__name__} is not JSON serializable")
+
+
 def _mcp_response(data: Dict[str, Any]) -> Dict[str, Any]:
     """Wrap response data in MCP-compliant content array format.
 
@@ -263,7 +352,19 @@ def _mcp_response(data: Dict[str, Any]) -> Dict[str, Any]:
     Returns:
         MCP-compliant response with content array
     """
-    return {"content": [{"type": "text", "text": json.dumps(data, indent=2)}]}
+    # Story #1491 AC7 (Finding C3): indent=2 forces CPython's pure-Python
+    # _iterencode fallback (5-10x slower, fully GIL-held) instead of the C
+    # encoder (c_make_encoder). Whitespace is not part of the MCP content
+    # contract -- clients parse this as JSON -- so dropping indentation is
+    # a pure performance fix with no semantic response change.
+    #
+    # Bug #1645: default=_json_default is a defense-in-depth typed fallback
+    # -- it converts a stray datetime/date to an ISO-8601 string and raises
+    # loudly (never silently stringifies) for anything else that isn't
+    # natively JSON-serializable.
+    return {
+        "content": [{"type": "text", "text": json.dumps(data, default=_json_default)}]
+    }
 
 
 def _get_golden_repos_dir() -> str:
@@ -318,6 +419,19 @@ def _get_query_tracker():
     return getattr(app_module.app.state, "query_tracker", None)
 
 
+def _get_activated_repo_manager():
+    """Get the DI-wired ActivatedRepoManager from app.state (Bug #1533).
+
+    Returns:
+        The server's own ActivatedRepoManager -- the one wired to the SHARED
+        (PostgreSQL, in cluster mode) metadata backend -- or None if startup
+        has not populated app.state yet. Callers must never substitute a
+        locally-constructed manager: that instance reads node-local metadata,
+        which on a cluster node is empty for repos activated elsewhere.
+    """
+    return getattr(app_module.app.state, "activated_repo_manager", None)
+
+
 def _get_app_refresh_scheduler():
     """Get RefreshScheduler from app.state via global_lifecycle_manager (Story #231).
 
@@ -328,6 +442,128 @@ def _get_app_refresh_scheduler():
     if lifecycle_manager is None:
         return None
     return getattr(lifecycle_manager, "refresh_scheduler", None)
+
+
+#: Bug #1580 follow-up (adversarial review, HIGH severity): this guard
+#: wraps a `cidx index --index-commits` subprocess, which this project's
+#: indexing-path invariant (CLAUDE.md) documents as having NO
+#: job/subprocess timeout -- a large repo can legitimately take hours.
+#: WriteLockManager.acquire()'s own DEFAULT TTL is 1 hour, so acquiring
+#: without an explicit override would silently expire mid-run and defeat
+#: the lock. Matches the SAME 24-hour convention already established by
+#: temporal_legacy_migration/locking.py's
+#: TEMPORAL_LEGACY_MIGRATION_LOCK_TTL_SECONDS and
+#: refresh_scheduler.py's own fleet-migration-derived
+#: _REFRESH_PUBLISH_LOCK_TTL_SECONDS / MIGRATION_LOCK_TTL_SECONDS --
+#: reusing the same justified value rather than inventing a new one.
+#:
+#: Accepted residual (Round 3 adversarial review, simplification pass):
+#: a run that genuinely exceeds 24 hours outlives this TTL and loses lock
+#: protection for the remainder of its run -- there is deliberately NO
+#: renewal/heartbeat mechanism here. One was built, mirroring
+#: temporal_legacy_migration/locking.py's own heartbeat pattern, and went
+#: through three adversarial review rounds, each surfacing a NEW,
+#: strictly worse HIGH-severity bug than the one before it: (a) a failed
+#: renew() was only logged, never signaled to the guarded operation, so
+#: the caller kept running believing it was still locked when it might
+#: not be; (b) a bounded join-on-release could itself time out against
+#: this project's hard-NFS mount (which can block I/O indefinitely) and
+#: let the heartbeat fire one more renew() AFTER release() had already
+#: deleted the lock file -- recreating a fresh 24-hour "ghost lock" that
+#: would block all future legitimate work on that alias; and (c) every
+#: provider-temporal job shares the literal owner_name
+#: "provider_temporal_index" with no per-acquisition generation token, so
+#: an orphaned heartbeat thread from a lock-losing job could renew what
+#: it believes is "its" lock but is actually a LATER, different job's
+#: lock on the same alias. Removed rather than patched a fourth time,
+#: because: (a) the underlying cross-process race this guard closes (the
+#: temporal-legacy-migration mover vs. in-place consolidation racing on
+#: the same shard tree) was independently characterized as narrow,
+#: low-probability, and bounded to loud/safe/recoverable failures even
+#: before any lock coordination existed here; (b) a heartbeat mechanism
+#: was attempted and repeatedly produced new, worse bugs across review
+#: rounds instead of converging; and (c) a 24-hour TTL WITHOUT renewal is
+#: still a large improvement over the pre-existing baseline of ZERO lock
+#: coordination between these two code paths. Mirrors the same
+#: accept-the-narrow-residual-over-endless-patching judgment call already
+#: recorded for Bug #1584's crash-window residual in
+#: storage/shared/collection_migration.py and Bug #1538's NFS
+#: client-revalidation residual documented in this project's CLAUDE.md.
+GOLDEN_REPO_WRITE_LOCK_GUARD_TTL_SECONDS = 24 * 60 * 60
+
+
+@contextmanager
+def golden_repo_write_lock_guard(alias: str, owner_name: str):
+    """Acquire the golden repo's RefreshScheduler write lock for *alias*
+    (bare alias, no "-global" suffix) for the duration of the `with` block.
+
+    Cross-process race investigation (deferred from Bug #1580): the
+    temporal-legacy-migration mover (TemporalLegacyMigrationScheduler)
+    relocates legacy temporal shards under this SAME write lock
+    (locking.guarded_by_refresh_lock). Any other writer that mutates the
+    same golden repo's temporal storage while mover.py is mid-relocation
+    must hold this lock too, mirroring add_indexes_to_golden_repo's own
+    acquire/finally-release pattern.
+
+    Acquired with GOLDEN_REPO_WRITE_LOCK_GUARD_TTL_SECONDS (24 hours), NOT
+    WriteLockManager's 1-hour default -- see that constant's docstring,
+    including the accepted no-heartbeat residual for runs that outlive
+    the 24-hour TTL.
+
+    Yields True when the lock is held for the duration of the block --
+    either because it was genuinely acquired, or because no
+    RefreshScheduler is wired at all (a legitimate no-op, e.g. solo/CLI
+    mode with no scheduler, byte-identical-when-unavailable, matching
+    every other caller of _get_app_refresh_scheduler() in this package).
+    Yields False when another writer already holds a genuine, non-empty
+    alias's lock -- the caller MUST check this and skip its own work
+    rather than proceed.
+
+    Raises:
+        ValueError: a RefreshScheduler IS wired but *alias* is empty or
+            whitespace-only. This is deliberately NOT treated as a
+            no-op: every real writer (mover.py included) always locks a
+            real, non-empty alias, so a blank alias while a scheduler is
+            wired indicates a genuine upstream wiring gap (e.g.
+            _resolve_provider_job_repo_path leaving repo_alias empty for
+            a real, non-versioned repo path) rather than an absent lock
+            mechanism -- silently proceeding unlocked here would reopen
+            the exact cross-process race this guard exists to close.
+            Never raised when no scheduler is wired at all (see above).
+    """
+    scheduler = _get_app_refresh_scheduler()
+    acquired = False
+    try:
+        if scheduler is not None:
+            if not alias or not alias.strip():
+                raise ValueError(
+                    "golden_repo_write_lock_guard: a RefreshScheduler is "
+                    f"wired but alias={alias!r} is blank/whitespace-only "
+                    f"for owner_name={owner_name!r} -- refusing to proceed "
+                    "unlocked. A real writer always locks a non-empty "
+                    "alias; this indicates a genuine upstream wiring gap, "
+                    "not a legitimate no-op."
+                )
+            acquired = scheduler.acquire_write_lock(
+                alias,
+                owner_name=owner_name,
+                ttl_seconds=GOLDEN_REPO_WRITE_LOCK_GUARD_TTL_SECONDS,
+            )
+            if not acquired:
+                yield False
+                return
+        yield True
+    finally:
+        if acquired:
+            released = scheduler.release_write_lock(alias, owner_name=owner_name)
+            if not released:
+                logger.error(
+                    "golden_repo_write_lock_guard: failed to release write "
+                    "lock for alias=%r owner_name=%r -- lock may be left "
+                    "behind for staleness eviction to reclaim",
+                    alias,
+                    owner_name,
+                )
 
 
 def _get_access_filtering_service():
@@ -376,6 +612,16 @@ def _apply_payload_truncation(
     Handles both 'content' field (REST API format) and 'code_snippet' field
     (semantic search QueryResult.to_dict() format).
 
+    Story #1492 AC2 (Finding C4): mirrors the already-correct
+    ``_apply_fts_payload_truncation`` implementation -- a single batched
+    ``payload_cache.store_batch()`` call for ALL oversized results in this
+    pass, instead of one ``PayloadCache.store()`` INSERT+commit per result
+    (Bug #1181's store_batch invariant, previously unmet on this specific
+    semantic path). Preview computation is inlined here (rather than calling
+    ``truncate_result()``, which internally calls the per-result ``store()``)
+    so the batching applies uniformly regardless of field name
+    (content vs code_snippet).
+
     Args:
         results: List of search result dicts with 'content' or 'code_snippet' field
 
@@ -387,7 +633,17 @@ def _apply_payload_truncation(
         # Cache not available, return results unchanged
         return results
 
-    for result_dict in results:
+    preview_size = payload_cache.config.preview_size_chars
+
+    # Track ORIGINAL LIST POSITIONS. Note: if the SAME dict object were ever
+    # aliased at two list positions, both positions are queued here and both
+    # get processed below via pop(field_name, None) (idempotent -- never a
+    # KeyError on the second pass, unlike `del`).
+    large_result_indices: List[int] = []
+    large_field_names: List[str] = []
+    large_contents: List[str] = []
+
+    for idx, result_dict in enumerate(results):
         # Handle both content and code_snippet fields (Bug Fix #683)
         # Logic for field selection:
         # - If ONLY code_snippet exists: truncate code_snippet (semantic search format)
@@ -416,29 +672,43 @@ def _apply_payload_truncation(
             result_dict["has_more"] = False
             continue
 
-        try:
-            truncated = payload_cache.truncate_result(content)  # Sync call
-            if truncated.get("has_more", False):
-                # Large content: replace with preview and cache handle
-                result_dict["preview"] = truncated["preview"]
-                result_dict["cache_handle"] = truncated["cache_handle"]
-                result_dict["has_more"] = True
-                result_dict["total_size"] = truncated["total_size"]
-                del result_dict[field_name]  # Remove full content
-            else:
-                # Small content: keep as-is, add metadata
-                result_dict["cache_handle"] = None
-                result_dict["has_more"] = False
-        except Exception as e:
-            # Log error but don't fail the search
-            logger.warning(
-                format_error_log(
-                    "MCP-GENERAL-023",
-                    f"Failed to truncate result: {e}",
-                    extra={"correlation_id": get_correlation_id()},
-                )
+        if len(content) > preview_size:
+            large_result_indices.append(idx)
+            large_field_names.append(field_name)
+            large_contents.append(content)
+        else:
+            # Small content: keep as-is, add metadata
+            result_dict["cache_handle"] = None
+            result_dict["has_more"] = False
+
+    if not large_contents:
+        return results
+
+    try:
+        handles = payload_cache.store_batch(large_contents)  # ONE transaction
+        for result_idx, field_name, content, handle in zip(
+            large_result_indices, large_field_names, large_contents, handles
+        ):
+            result_dict = results[result_idx]
+            result_dict["preview"] = content[:preview_size]
+            result_dict["cache_handle"] = handle
+            result_dict["has_more"] = True
+            result_dict["total_size"] = len(content)
+            # pop(..., None) rather than `del`: idempotent against an
+            # aliased dict object visited twice (see comment above).
+            result_dict.pop(field_name, None)  # Remove full content
+    except Exception as e:
+        # Log error but don't fail the search
+        logger.warning(
+            format_error_log(
+                "MCP-GENERAL-023",
+                f"Failed to batch-store results in payload truncation: {e}",
+                extra={"correlation_id": get_correlation_id()},
             )
-            # Keep original content on error
+        )
+        # Keep original content on error
+        for result_idx in large_result_indices:
+            result_dict = results[result_idx]
             result_dict["cache_handle"] = None
             result_dict["has_more"] = False
 

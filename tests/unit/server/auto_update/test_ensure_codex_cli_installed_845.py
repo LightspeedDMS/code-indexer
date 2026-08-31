@@ -17,9 +17,11 @@ which patches sibling _ensure_* methods to isolate the step under test.
 """
 
 import logging
+import os
 import subprocess
 from contextlib import contextmanager
 from pathlib import Path
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -68,7 +70,7 @@ def _patch_npm_env(subprocess_side_effects):
 
 @contextmanager
 def _patch_execute_siblings(executor, *, claude_side_effect=None):
-    """Patch all execute() sibling step helpers except _ensure_codex_cli_installed.
+    """Patch the execute() sibling step helpers, except _ensure_codex_cli_installed.
 
     Follows the established project pattern from test_execute_calls_ensure_claude_cli_updated:
     sibling methods are patched so only the step under test runs for real.
@@ -85,9 +87,19 @@ def _patch_execute_siblings(executor, *, claude_side_effect=None):
 
     # Use ExitStack to avoid Python 3.9 "too many statically nested blocks" limit
     # when combining more than ~20 context managers in a single with (...) expression.
-    from contextlib import ExitStack
+    from contextlib import AbstractContextManager, ExitStack
 
-    patches = [
+    # Explicit annotation: the list mixes several unittest.mock._patch[...]
+    # specializations (patch.object with different return_value/side_effect
+    # types) plus patch.dict's return type. Without this, mypy widens the
+    # list's inferred element type to the bare `object`, which
+    # ExitStack.enter_context() rejects (it expects
+    # AbstractContextManager[...]). unittest.mock.patch/patch.object/patch.dict
+    # all return objects implementing __enter__/__exit__ ("Any" import is at
+    # module top, line 24), so they genuinely satisfy the
+    # AbstractContextManager protocol -- this is a correct annotation, not
+    # error suppression.
+    patches: list[AbstractContextManager[Any]] = [
         patch.object(executor, "git_pull", return_value=True),
         patch.object(executor, "git_submodule_update", return_value=True),
         patch.object(executor, "_build_hnswlib_with_fallback", return_value=True),
@@ -120,6 +132,80 @@ def _patch_execute_siblings(executor, *, claude_side_effect=None):
         patch.object(executor, "_ensure_systemd_claude_path", return_value=True),
         patch.object(executor, "_ensure_rust_toolchain", return_value=True),
         patch.object(executor, "_calculate_auto_update_hash", return_value="abc123"),
+        patch.object(executor, "_ensure_cli_dependencies_synced", return_value=True),
+        # Bug #1731: these 3 execute() siblings were unpatched and only
+        # "bounded by accident, not explicit isolation" -- confirmed via a
+        # runtime spy probe that execute()'s control flow DOES reach them
+        # (no earlier `return False` short-circuits it out), and that their
+        # real implementations were only no-op'ing today because this
+        # machine's on-disk ~/.cidx-server/config.json happens to have
+        # clone_backend="local" (_restart_auto_update_service's own guard
+        # is a patched _calculate_auto_update_hash constant above, which
+        # makes it genuinely unreached -- patched here anyway for the same
+        # explicit-isolation discipline as its siblings).
+        patch.object(executor, "_restart_auto_update_service", return_value=True),
+        patch.object(
+            executor,
+            "_ensure_activated_repos_symlink_for_cow_daemon",
+            return_value=True,
+        ),
+        patch.object(executor, "_ensure_daemon_storage_path", return_value=True),
+        # Found during this same fix's due-diligence pass over the issue's
+        # "lower priority" list: _deploy_tmpdir is unconditionally called by
+        # execute() with NO internal guard at all (the very first thing
+        # execute() does) and performs a real mkdir(parents=True,
+        # exist_ok=True) on the live filesystem every test run. Its return
+        # value is assigned by execute() into the PROCESS-GLOBAL
+        # os.environ["TMPDIR"] (nothing else reads it back in these fully
+        # mocked scenarios), so a plain synthetic sentinel string is used
+        # here -- mirroring the "abc123" sentinel already used above for
+        # _calculate_auto_update_hash -- and the patch.dict(os.environ)
+        # entry below restores the real environment on exit so this
+        # sentinel never leaks into a later test in the same pytest
+        # process.
+        # _ensure_golden_repos_symlink_for_cow_daemon and
+        # _ensure_cow_storage_mount_options share the identical
+        # clone_backend != "cow-daemon" accidental short-circuit as the two
+        # Bug #1731-named methods above, so the same fix applies to them.
+        patch.object(
+            executor, "_deploy_tmpdir", return_value="test-deploy-tmp-sentinel"
+        ),
+        patch.object(
+            executor, "_ensure_golden_repos_symlink_for_cow_daemon", return_value=True
+        ),
+        patch.object(executor, "_ensure_cow_storage_mount_options", return_value=True),
+        # Code review fix (935dfaa4 REQUIRED FIX 1): _ensure_cli_hnswlib_capability
+        # was previously left unguarded on the mistaken belief that the
+        # tests' own shutil.which patches cover it the same way they cover
+        # ensure_scip_python. They do NOT: _get_cli_python_interpreter()
+        # (deployment_executor.py:1245) proceeds past shutil.which("cidx")
+        # to a real Path(cidx_bin).read_text() call regardless of what
+        # shutil.which returns, and on a host where /usr/bin/cidx genuinely
+        # exists (a plausible layout for a root-level pip install or a CI
+        # container -- just not this dev machine, where the real cidx is at
+        # ~/.local/bin/cidx) this reaches a real subprocess.run call that
+        # would consume test_execute_continues_when_ensure_codex_fails's
+        # single-element subprocess.run side_effect list meant for a
+        # different call site, crashing with StopIteration. Guarding this
+        # explicitly removes the accidental, machine-state-dependent safety
+        # this exact method previously relied on.
+        patch.object(executor, "_ensure_cli_hnswlib_capability", return_value=True),
+        # Optional consistency fix noted in code review: _write_status_file
+        # shares the identical dead-branch gate (_calculate_auto_update_hash
+        # patched to a constant above) as _restart_auto_update_service,
+        # which is already guarded above for explicit-isolation-discipline
+        # consistency -- guarded here for the same reason.
+        patch.object(executor, "_write_status_file", return_value=None),
+        # Code review fix (935dfaa4 REQUIRED FIX 2): execute() assigns
+        # _deploy_tmpdir()'s return value into the PROCESS-GLOBAL
+        # os.environ["TMPDIR"] with nothing restoring it afterward.
+        # patch.dict(os.environ) snapshots the real environment on enter
+        # and restores it verbatim on exit, so this test's sentinel value
+        # can never leak into a later test in the same pytest process
+        # (relevant under pytest-randomly reordering, and for any later
+        # test that spawns a subprocess trusting TMPDIR -- pip, npm, git,
+        # cargo, ripgrep).
+        patch.dict(os.environ),
     ]
     with ExitStack() as stack:
         for p in patches:

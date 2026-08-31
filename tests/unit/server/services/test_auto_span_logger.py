@@ -9,9 +9,9 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from src.code_indexer.server.services.auto_span_logger import AutoSpanLogger
-from src.code_indexer.server.services.langfuse_client import LangfuseClient
-from src.code_indexer.server.services.trace_state_manager import TraceStateManager
+from code_indexer.server.services.auto_span_logger import AutoSpanLogger
+from code_indexer.server.services.langfuse_client import LangfuseClient
+from code_indexer.server.services.trace_state_manager import TraceStateManager
 
 
 @pytest.fixture

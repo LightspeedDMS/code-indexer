@@ -259,7 +259,6 @@ class DeploymentExecutor:
                 format_error_log(
                     "DEPLOY-GENERAL-080",
                     "JWT secret file not found - server may not be initialized",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
             return None
@@ -268,7 +267,6 @@ class DeploymentExecutor:
                 format_error_log(
                     "DEPLOY-GENERAL-081",
                     f"Error generating JWT token: {e}",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
             return None
@@ -287,7 +285,6 @@ class DeploymentExecutor:
                     format_error_log(
                         "DEPLOY-GENERAL-082",
                         "Could not obtain auth token for maintenance mode",
-                        extra={"correlation_id": get_correlation_id()},
                     )
                 )
                 return False
@@ -307,7 +304,6 @@ class DeploymentExecutor:
                 format_error_log(
                     "DEPLOY-GENERAL-001",
                     f"Failed to enter maintenance mode: {response.status_code}",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
             return False
@@ -317,7 +313,6 @@ class DeploymentExecutor:
                 format_error_log(
                     "DEPLOY-GENERAL-002",
                     "Could not connect to server for maintenance mode - proceeding anyway",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
             return False
@@ -326,7 +321,6 @@ class DeploymentExecutor:
                 format_error_log(
                     "DEPLOY-GENERAL-003",
                     f"Error entering maintenance mode: {e}",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
             return False
@@ -349,7 +343,6 @@ class DeploymentExecutor:
                     format_error_log(
                         "DEPLOY-GENERAL-083",
                         "Could not obtain auth token for drain timeout - using fallback",
-                        extra={"correlation_id": get_correlation_id()},
                     )
                 )
                 fallback_timeout = 7200
@@ -374,7 +367,6 @@ class DeploymentExecutor:
                 format_error_log(
                     "DEPLOY-GENERAL-029",
                     f"Server returned invalid drain timeout response: {response.status_code}",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
 
@@ -383,7 +375,6 @@ class DeploymentExecutor:
                 format_error_log(
                     "DEPLOY-GENERAL-030",
                     "Could not connect to server for drain timeout - using fallback",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
         except Exception as e:
@@ -391,7 +382,6 @@ class DeploymentExecutor:
                 format_error_log(
                     "DEPLOY-GENERAL-031",
                     f"Error getting drain timeout: {e}",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
 
@@ -437,7 +427,6 @@ class DeploymentExecutor:
                         format_error_log(
                             "DEPLOY-GENERAL-084",
                             "Could not obtain auth token for drain status check",
-                            extra={"correlation_id": get_correlation_id()},
                         )
                     )
                     # Auth-token failure is not a connection failure — reset
@@ -475,7 +464,6 @@ class DeploymentExecutor:
                         "DEPLOY-GENERAL-004",
                         f"Could not connect to server for drain status "
                         f"(consecutive failures: {consecutive_conn_errors})",
-                        extra={"correlation_id": get_correlation_id()},
                     )
                 )
                 if consecutive_conn_errors >= max_consecutive_conn_errors:
@@ -486,7 +474,6 @@ class DeploymentExecutor:
                             "consecutive polls — assuming drained and proceeding "
                             "with deployment (Bug #882: avoids burning systemd "
                             "TimeoutStartSec budget).",
-                            extra={"correlation_id": get_correlation_id()},
                         )
                     )
                     return True
@@ -497,7 +484,6 @@ class DeploymentExecutor:
                     format_error_log(
                         "DEPLOY-GENERAL-005",
                         f"Error checking drain status: {e}",
-                        extra={"correlation_id": get_correlation_id()},
                     )
                 )
 
@@ -507,7 +493,6 @@ class DeploymentExecutor:
             format_error_log(
                 "DEPLOY-GENERAL-006",
                 f"Drain timeout ({drain_timeout}s) exceeded",
-                extra={"correlation_id": get_correlation_id()},
             )
         )
         return False
@@ -526,7 +511,6 @@ class DeploymentExecutor:
                     format_error_log(
                         "DEPLOY-GENERAL-085",
                         "Could not obtain auth token to exit maintenance mode",
-                        extra={"correlation_id": get_correlation_id()},
                     )
                 )
                 return False
@@ -546,7 +530,6 @@ class DeploymentExecutor:
                 format_error_log(
                     "DEPLOY-GENERAL-007",
                     f"Failed to exit maintenance mode: {response.status_code}",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
             return False
@@ -556,7 +539,6 @@ class DeploymentExecutor:
                 format_error_log(
                     "DEPLOY-GENERAL-008",
                     f"Error exiting maintenance mode: {e}",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
             return False
@@ -577,7 +559,6 @@ class DeploymentExecutor:
                     format_error_log(
                         "DEPLOY-GENERAL-086",
                         "Could not obtain auth token to fetch running jobs for logging",
-                        extra={"correlation_id": get_correlation_id()},
                     )
                 )
                 return []
@@ -598,7 +579,6 @@ class DeploymentExecutor:
                 format_error_log(
                     "DEPLOY-GENERAL-009",
                     "Could not connect to server to get running jobs",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
             return []
@@ -607,7 +587,6 @@ class DeploymentExecutor:
                 format_error_log(
                     "DEPLOY-GENERAL-010",
                     f"Error getting running jobs: {e}",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
             return []
@@ -632,7 +611,6 @@ class DeploymentExecutor:
                     format_error_log(
                         "DEPLOY-GENERAL-011",
                         f"Git pull failed: {result.stderr}",
-                        extra={"correlation_id": get_correlation_id()},
                     )
                 )
                 return False
@@ -734,7 +712,6 @@ class DeploymentExecutor:
                     format_error_log(
                         "DEPLOY-GENERAL-060",
                         f"Failed to remove git modules directory: {result.stderr}",
-                        extra={"correlation_id": get_correlation_id()},
                     )
                 )
                 return False
@@ -757,7 +734,6 @@ class DeploymentExecutor:
                     format_error_log(
                         "DEPLOY-GENERAL-061",
                         f"Failed to remove worktree directory: {result.stderr}",
-                        extra={"correlation_id": get_correlation_id()},
                     )
                 )
                 return False
@@ -774,7 +750,6 @@ class DeploymentExecutor:
                 format_error_log(
                     "DEPLOY-GENERAL-062",
                     f"Exception during submodule cleanup: {e}",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
             return False
@@ -864,7 +839,6 @@ class DeploymentExecutor:
                             format_error_log(
                                 "DEPLOY-GENERAL-063",
                                 "Failed to clean up submodule state, cannot retry",
-                                extra={"correlation_id": get_correlation_id()},
                             )
                         )
                         return False
@@ -887,7 +861,6 @@ class DeploymentExecutor:
                             format_error_log(
                                 "DEPLOY-GENERAL-064",
                                 f"Submodule update retry failed: {result.stderr}",
-                                extra={"correlation_id": get_correlation_id()},
                             )
                         )
                         return False
@@ -897,7 +870,6 @@ class DeploymentExecutor:
                         format_error_log(
                             "DEPLOY-GENERAL-040",
                             f"Git submodule update failed (non-recoverable): {result.stderr}",
-                            extra={"correlation_id": get_correlation_id()},
                         )
                     )
                     return False
@@ -938,7 +910,6 @@ class DeploymentExecutor:
                         format_error_log(
                             "DEPLOY-GENERAL-070",
                             f"Failed to remove existing fallback directory: {e}",
-                            extra={"correlation_id": get_correlation_id()},
                         )
                     )
                     return False
@@ -978,7 +949,6 @@ class DeploymentExecutor:
                     format_error_log(
                         "DEPLOY-GENERAL-071",
                         f"Failed to clone hnswlib standalone: {result.stderr}",
-                        extra={"correlation_id": get_correlation_id()},
                     )
                 )
                 return False
@@ -994,7 +964,6 @@ class DeploymentExecutor:
                 format_error_log(
                     "DEPLOY-GENERAL-071",
                     "Hnswlib standalone clone timed out after 60 seconds",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
             return False
@@ -1003,7 +972,6 @@ class DeploymentExecutor:
                 format_error_log(
                     "DEPLOY-GENERAL-071",
                     f"Exception during hnswlib standalone clone: {e}",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
             return False
@@ -1142,7 +1110,6 @@ class DeploymentExecutor:
             format_error_log(
                 "DEPLOY-GENERAL-045",
                 "Failed to install build dependencies - no compatible package manager",
-                extra={"correlation_id": get_correlation_id()},
             )
         )
         return False
@@ -1465,7 +1432,6 @@ class DeploymentExecutor:
             format_error_log(
                 "DEPLOY-GENERAL-209",
                 self._cli_hnswlib_failure_message(cli_python),
-                extra={"correlation_id": get_correlation_id()},
             )
         )
         return False
@@ -1601,7 +1567,6 @@ class DeploymentExecutor:
                 format_error_log(
                     "DEPLOY-GENERAL-046",
                     "Cannot build custom hnswlib - build dependencies unavailable",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
             return False
@@ -1697,7 +1662,6 @@ class DeploymentExecutor:
                     format_error_log(
                         "DEPLOY-GENERAL-047",
                         f"pybind11 installation failed: {pybind_result.stderr}",
-                        extra={"correlation_id": get_correlation_id()},
                     )
                 )
                 return False
@@ -1766,7 +1730,6 @@ class DeploymentExecutor:
                             f"Custom hnswlib build failed but the fork's capability "
                             f"is still present; continuing deploy: "
                             f"{result.stderr[:MAX_ERROR_SNIPPET_LENGTH]}",
-                            extra={"correlation_id": get_correlation_id()},
                         )
                     )
                     return True
@@ -1774,7 +1737,6 @@ class DeploymentExecutor:
                     format_error_log(
                         "DEPLOY-GENERAL-042",
                         f"Custom hnswlib build failed: {result.stderr}",
-                        extra={"correlation_id": get_correlation_id()},
                     )
                 )
                 return False
@@ -1793,7 +1755,6 @@ class DeploymentExecutor:
                 format_error_log(
                     "DEPLOY-GENERAL-043",
                     "Custom hnswlib build timed out after 5 minutes",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
             return False
@@ -1853,7 +1814,6 @@ class DeploymentExecutor:
                 format_error_log(
                     "DEPLOY-GENERAL-073",
                     "Both submodule and fallback clone approaches failed",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
             return False
@@ -1870,7 +1830,6 @@ class DeploymentExecutor:
                 format_error_log(
                     "DEPLOY-GENERAL-072",
                     "Fallback build failed",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
             return False
@@ -2045,7 +2004,6 @@ class DeploymentExecutor:
                     format_error_log(
                         "DEPLOY-GENERAL-032",
                         f"Failed to write {service_path}: {result.stderr}",
-                        extra={"correlation_id": get_correlation_id()},
                     )
                 )
                 return False
@@ -2060,7 +2018,6 @@ class DeploymentExecutor:
                     format_error_log(
                         "DEPLOY-GENERAL-033",
                         f"Failed to reload systemd: {result.stderr}",
-                        extra={"correlation_id": get_correlation_id()},
                     )
                 )
                 return False
@@ -2072,7 +2029,6 @@ class DeploymentExecutor:
                 format_error_log(
                     "DEPLOY-GENERAL-034",
                     f"Error writing service file: {e}",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
             return False
@@ -2525,7 +2481,6 @@ class DeploymentExecutor:
                     format_error_log(
                         "DEPLOY-GENERAL-143",
                         f"Failed to write MALLOC_ARENA_MAX change to {service_path}",
-                        extra={"correlation_id": get_correlation_id()},
                     )
                 )
                 return False
@@ -2536,7 +2491,6 @@ class DeploymentExecutor:
                 format_error_log(
                     "DEPLOY-GENERAL-143",
                     f"Error managing MALLOC_ARENA_MAX in service file: {exc}",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
             return False
@@ -2666,7 +2620,6 @@ class DeploymentExecutor:
                     format_error_log(
                         "DEPLOY-GENERAL-012",
                         f"Pip install failed: {result.stderr}",
-                        extra={"correlation_id": get_correlation_id()},
                     )
                 )
                 return False
@@ -2728,7 +2681,6 @@ class DeploymentExecutor:
                         "DEPLOY-GENERAL-211",
                         f"Failed to sync CLI Python environment ({cli_python}) "
                         f"dependencies via pip install -e .: {result.stderr}",
-                        extra={"correlation_id": get_correlation_id()},
                     )
                 )
                 return False
@@ -2746,7 +2698,6 @@ class DeploymentExecutor:
                     "DEPLOY-GENERAL-211",
                     f"Exception while syncing CLI Python environment "
                     f"({cli_python}) dependencies: {e}",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
             return False
@@ -2786,14 +2737,12 @@ class DeploymentExecutor:
                             f"Forcing restart - running job: job_id={job_id}, "
                             f"operation_type={operation_type}, started_at={started_at}, "
                             f"progress={progress}%",
-                            extra={"correlation_id": get_correlation_id()},
                         )
                     )
                 logger.warning(
                     format_error_log(
                         "DEPLOY-GENERAL-014",
                         "Drain timeout exceeded, forcing restart",
-                        extra={"correlation_id": get_correlation_id()},
                     )
                 )
             else:
@@ -2806,7 +2755,6 @@ class DeploymentExecutor:
                 format_error_log(
                     "DEPLOY-GENERAL-015",
                     "Could not enter maintenance mode, proceeding with restart",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
 
@@ -2823,7 +2771,6 @@ class DeploymentExecutor:
                     format_error_log(
                         "DEPLOY-GENERAL-016",
                         f"Server restart failed: {result.stderr}",
-                        extra={"correlation_id": get_correlation_id()},
                     )
                 )
                 return False
@@ -2887,7 +2834,6 @@ class DeploymentExecutor:
                     format_error_log(
                         "DEPLOY-GENERAL-199",
                         f"DEPLOY: applied_launch.json corrupt — preserving live ExecStart: {exc}",
-                        extra={"correlation_id": get_correlation_id()},
                     )
                 )
                 return None
@@ -3017,7 +2963,6 @@ class DeploymentExecutor:
                 format_error_log(
                     "DEPLOY-GENERAL-017",
                     f"Service file not found: {service_path}",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
             return None
@@ -3063,7 +3008,6 @@ class DeploymentExecutor:
                 format_error_log(
                     "DEPLOY-GENERAL-018",
                     f"sudo tee failed updating service file: {tee.stderr}",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
             return False
@@ -3077,7 +3021,6 @@ class DeploymentExecutor:
                 format_error_log(
                     "DEPLOY-GENERAL-173",
                     f"daemon-reload failed after launch config update: {reload.stderr}",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
         return True
@@ -3093,7 +3036,6 @@ class DeploymentExecutor:
                 format_error_log(
                     "DEPLOY-GENERAL-200",
                     f"_ensure_launch_config: invalid mode={mode!r}",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
             return None
@@ -3133,7 +3075,6 @@ class DeploymentExecutor:
                 format_error_log(
                     "DEPLOY-GENERAL-019",
                     f"Error in _ensure_launch_config(mode={mode}): {exc}",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
             return None
@@ -3183,7 +3124,6 @@ class DeploymentExecutor:
                     format_error_log(
                         "DEPLOY-GENERAL-022",
                         f"Service file not found: {service_path}",
-                        extra={"correlation_id": get_correlation_id()},
                     )
                 )
                 return True  # Not an error if service doesn't exist yet
@@ -3238,7 +3178,6 @@ class DeploymentExecutor:
                     format_error_log(
                         "DEPLOY-GENERAL-023",
                         "Could not find insertion point for CIDX_REPO_ROOT",
-                        extra={"correlation_id": get_correlation_id()},
                     )
                 )
                 return True  # Not a fatal error
@@ -3256,7 +3195,6 @@ class DeploymentExecutor:
                     format_error_log(
                         "DEPLOY-GENERAL-024",
                         f"Failed to update service file: {result.stderr}",
-                        extra={"correlation_id": get_correlation_id()},
                     )
                 )
                 return False
@@ -3277,7 +3215,6 @@ class DeploymentExecutor:
                 format_error_log(
                     "DEPLOY-GENERAL-025",
                     f"Error checking CIDX_REPO_ROOT config: {e}",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
             return False
@@ -3301,7 +3238,6 @@ class DeploymentExecutor:
                     format_error_log(
                         "DEPLOY-GENERAL-026",
                         f"Service file not found: {service_path}",
-                        extra={"correlation_id": get_correlation_id()},
                     )
                 )
                 return True  # Not a fatal error if service doesn't exist yet
@@ -3370,7 +3306,6 @@ class DeploymentExecutor:
                     format_error_log(
                         "DEPLOY-GENERAL-027",
                         f"Failed to add git safe.directory: {add_result.stderr}",
-                        extra={"correlation_id": get_correlation_id()},
                     )
                 )
                 return False
@@ -3386,7 +3321,6 @@ class DeploymentExecutor:
                 format_error_log(
                     "DEPLOY-GENERAL-028",
                     f"Error configuring git safe.directory: {e}",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
             return False
@@ -3417,7 +3351,6 @@ class DeploymentExecutor:
                     format_error_log(
                         "DEPLOY-GENERAL-215",
                         f"Service file not found: {service_path}",
-                        extra={"correlation_id": get_correlation_id()},
                     )
                 )
                 return True  # Not a fatal error if service doesn't exist yet
@@ -3485,7 +3418,6 @@ class DeploymentExecutor:
                         "DEPLOY-GENERAL-216",
                         f"Failed to add git safe.directory wildcard: "
                         f"{add_result.stderr}",
-                        extra={"correlation_id": get_correlation_id()},
                     )
                 )
                 return False
@@ -3501,7 +3433,6 @@ class DeploymentExecutor:
                 format_error_log(
                     "DEPLOY-GENERAL-217",
                     f"Error configuring git safe.directory wildcard: {e}",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
             return False
@@ -3526,7 +3457,6 @@ class DeploymentExecutor:
                     format_error_log(
                         "DEPLOY-GENERAL-052",
                         f"Service file not found: {service_path}",
-                        extra={"correlation_id": get_correlation_id()},
                     )
                 )
                 return True  # Not a fatal error if service doesn't exist yet
@@ -3577,7 +3507,6 @@ class DeploymentExecutor:
                     format_error_log(
                         "DEPLOY-GENERAL-053",
                         f"Failed to create sudoers rule: {tee_result.stderr}",
-                        extra={"correlation_id": get_correlation_id()},
                     )
                 )
                 return False
@@ -3592,7 +3521,6 @@ class DeploymentExecutor:
                     format_error_log(
                         "DEPLOY-GENERAL-054",
                         f"Failed to set sudoers permissions: {chmod_result.stderr}",
-                        extra={"correlation_id": get_correlation_id()},
                     )
                 )
                 # Remove file with wrong permissions
@@ -3611,7 +3539,6 @@ class DeploymentExecutor:
                     format_error_log(
                         "DEPLOY-GENERAL-055",
                         f"Sudoers validation failed: {visudo_result.stderr}",
-                        extra={"correlation_id": get_correlation_id()},
                     )
                 )
                 # Remove invalid sudoers file
@@ -3631,7 +3558,6 @@ class DeploymentExecutor:
                 format_error_log(
                     "DEPLOY-GENERAL-056",
                     f"Error configuring sudoers restart rule: {e}",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
             return False
@@ -3829,7 +3755,6 @@ class DeploymentExecutor:
                     format_error_log(
                         "DEPLOY-GENERAL-050",
                         f"Failed to restart auto-update service: {result.stderr}",
-                        extra={"correlation_id": get_correlation_id()},
                     )
                 )
                 return False
@@ -3845,7 +3770,6 @@ class DeploymentExecutor:
                 format_error_log(
                     "DEPLOY-GENERAL-051",
                     f"Exception restarting auto-update service: {e}",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
             return False
@@ -3888,7 +3812,6 @@ class DeploymentExecutor:
                     format_error_log(
                         "DEPLOY-GENERAL-090",
                         f"Failed to write /etc/sysctl.d/99-cidx-memory.conf: {write_result.stderr}",
-                        extra={"correlation_id": get_correlation_id()},
                     )
                 )
                 return False
@@ -3902,7 +3825,6 @@ class DeploymentExecutor:
                     format_error_log(
                         "DEPLOY-GENERAL-091",
                         f"Failed to apply sysctl config via sysctl -p: {apply_result.stderr}",
-                        extra={"correlation_id": get_correlation_id()},
                     )
                 )
                 return False
@@ -3918,7 +3840,6 @@ class DeploymentExecutor:
                 format_error_log(
                     "DEPLOY-GENERAL-092",
                     f"Exception configuring memory overcommit: {e}",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
             return False
@@ -3965,7 +3886,6 @@ class DeploymentExecutor:
                         "DEPLOY-GENERAL-093",
                         f"fallocate -l 4G /swapfile failed: {fallocate_result.stderr} "
                         "- swap is an OOM optimization, continuing without it",
-                        extra={"correlation_id": get_correlation_id()},
                     )
                 )
                 return True  # Bug #1254: non-fatal, swap is best-effort
@@ -3980,7 +3900,6 @@ class DeploymentExecutor:
                         "DEPLOY-GENERAL-094",
                         f"chmod 600 /swapfile failed: {chmod_result.stderr} "
                         "- swap is an OOM optimization, continuing without it",
-                        extra={"correlation_id": get_correlation_id()},
                     )
                 )
                 return True  # Bug #1254: non-fatal, swap is best-effort
@@ -3995,7 +3914,6 @@ class DeploymentExecutor:
                         "DEPLOY-GENERAL-095",
                         f"mkswap /swapfile failed: {mkswap_result.stderr} "
                         "- swap is an OOM optimization, continuing without it",
-                        extra={"correlation_id": get_correlation_id()},
                     )
                 )
                 return True  # Bug #1254: non-fatal, swap is best-effort
@@ -4010,7 +3928,6 @@ class DeploymentExecutor:
                         "DEPLOY-GENERAL-096",
                         f"swapon /swapfile failed: {swapon_result.stderr} "
                         "- swap is an OOM optimization, continuing without it",
-                        extra={"correlation_id": get_correlation_id()},
                     )
                 )
                 return True  # Bug #1254: non-fatal, swap is best-effort
@@ -4031,7 +3948,6 @@ class DeploymentExecutor:
                             "DEPLOY-GENERAL-097",
                             f"Failed to append /swapfile entry to /etc/fstab: {tee_result.stderr} "
                             "- swap is active but will not survive reboot",
-                            extra={"correlation_id": get_correlation_id()},
                         )
                     )
                     # Still return True - swap IS active
@@ -4048,7 +3964,6 @@ class DeploymentExecutor:
                     "DEPLOY-GENERAL-098",
                     f"Exception creating swap file: {e} "
                     "- swap is an OOM optimization, continuing without it",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
             return True  # Bug #1254: non-fatal, swap is best-effort
@@ -4104,7 +4019,6 @@ class DeploymentExecutor:
                 format_error_log(
                     "DEPLOY-GENERAL-020",
                     "Deployment failed at git pull step",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
             return False
@@ -4136,7 +4050,6 @@ class DeploymentExecutor:
                         "DEPLOY-GENERAL-141",
                         "Self-restart smoke-test timed out (>10s) — aborting self-restart "
                         "(Bug #884): new auto-updater code may have import-time side effect.",
-                        extra={"correlation_id": get_correlation_id()},
                     )
                 )
                 self._write_status_file("failed", "self-restart smoke-test timed out")
@@ -4148,7 +4061,6 @@ class DeploymentExecutor:
                         f"Self-restart smoke-test failed (rc={smoke.returncode}) — aborting "
                         f"self-restart (Bug #884). stderr: "
                         f"{smoke.stderr.decode('utf-8', errors='replace')}",
-                        extra={"correlation_id": get_correlation_id()},
                     )
                 )
                 self._write_status_file(
@@ -4193,7 +4105,6 @@ class DeploymentExecutor:
                 format_error_log(
                     "DEPLOY-GENERAL-044",
                     "Deployment failed at custom hnswlib build step (both submodule and fallback)",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
             return False
@@ -4226,7 +4137,6 @@ class DeploymentExecutor:
                     "indexing subprocesses may still fail with AttributeError "
                     "on check_integrity()/repair_orphans(). See "
                     "docs/hnswlib-custom-build.md.",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
 
@@ -4251,7 +4161,6 @@ class DeploymentExecutor:
                     "CLI system-wide dependency sync failed -- indexing "
                     "subprocesses may still fail with ModuleNotFoundError for "
                     "dependencies added since the CLI's last install.",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
 
@@ -4261,7 +4170,6 @@ class DeploymentExecutor:
                 format_error_log(
                     "DEPLOY-GENERAL-021",
                     "Deployment failed at pip install step",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
             return False
@@ -4348,7 +4256,6 @@ class DeploymentExecutor:
                 format_error_log(
                     "DEPLOY-GENERAL-144",
                     "Codex CLI could not be verified/installed — feature effectively disabled",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
 
@@ -4364,7 +4271,6 @@ class DeploymentExecutor:
                 format_error_log(
                     "DEPLOY-GENERAL-035",
                     "Ripgrep installation failed",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
 
@@ -4394,7 +4300,6 @@ class DeploymentExecutor:
                     "DEPLOY-GENERAL-057",
                     "Sudoers restart rule could not be verified/created - "
                     "server self-restart may fail",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
 
@@ -4405,7 +4310,6 @@ class DeploymentExecutor:
                     "DEPLOY-GENERAL-099",
                     "Memory overcommit could not be configured - "
                     "subprocess fork may fail with ENOMEM on high VmPeak",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
 
@@ -4416,7 +4320,6 @@ class DeploymentExecutor:
                     "DEPLOY-GENERAL-100",
                     "Swap file could not be created - "
                     "no swap safety net for OOM conditions",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
 
@@ -4427,7 +4330,6 @@ class DeploymentExecutor:
                     "DEPLOY-GENERAL-106",
                     "Claude CLI update skipped or failed - "
                     "Claude CLI may be running a stale version",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
 
@@ -4438,7 +4340,6 @@ class DeploymentExecutor:
                     "DEPLOY-GENERAL-158",
                     "Pace-maker install/update skipped or failed - "
                     "pace-maker pacing enforcement may be unavailable",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
 
@@ -4451,7 +4352,6 @@ class DeploymentExecutor:
                     "DEPLOY-GENERAL-164",
                     "Claude CLI install skipped or failed - "
                     "research assistant feature may be unavailable",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
 
@@ -4462,7 +4362,6 @@ class DeploymentExecutor:
                     "DEPLOY-GENERAL-165",
                     "NFS research symlink setup failed - "
                     "research sessions may not be accessible across cluster nodes",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
 
@@ -4473,7 +4372,6 @@ class DeploymentExecutor:
                     "DEPLOY-GENERAL-166",
                     "activated-repos symlink setup failed - "
                     "CoW-daemon activation may not function correctly",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
 
@@ -4488,7 +4386,6 @@ class DeploymentExecutor:
                     "daemon_storage_path setup failed - "
                     "CoW-daemon versioned-snapshot publish may fail loud "
                     "with a path-translation error",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
 
@@ -4502,7 +4399,24 @@ class DeploymentExecutor:
                     "DEPLOY-GENERAL-208",
                     "golden-repos symlink setup failed - "
                     "per-user CoW-daemon activation may not function correctly",
-                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
+
+        # Step 14.8: Issue #1510 - Ensure the cow-storage NFS mount is
+        # NFSv3 with `nolock` (non-fatal). NFSv4's own OPEN/LOCK state
+        # machine bypasses nolock entirely (empirically confirmed
+        # ineffective on the live staging mount), so the whole mount is
+        # upgraded to NFSv3, matching the golden-repos mount precedent.
+        # Self-heals already-deployed nodes whose fstab entry predates
+        # this fix; fresh installs already get it from
+        # scripts/install-cidx-server.sh.
+        if not self._ensure_cow_storage_mount_options():
+            logger.warning(
+                format_error_log(
+                    "DEPLOY-GENERAL-221",
+                    "cow-storage NFSv3+nolock mount upgrade self-heal failed - "
+                    "NFSv4 lock-manager state loss may still cause SQLite "
+                    "disk I/O errors on this node",
                 )
             )
 
@@ -4513,7 +4427,6 @@ class DeploymentExecutor:
                     "DEPLOY-GENERAL-171",
                     "systemd PATH update failed - "
                     "Claude CLI may not be found when invoked via systemd service",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
 
@@ -4570,7 +4483,6 @@ class DeploymentExecutor:
                 format_error_log(
                     "DEPLOY-GENERAL-101",
                     "npm not found — Claude CLI update skipped",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
             return False
@@ -4586,7 +4498,6 @@ class DeploymentExecutor:
                 format_error_log(
                     "DEPLOY-GENERAL-102",
                     "Claude CLI updated via npm",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
             return True
@@ -4595,7 +4506,6 @@ class DeploymentExecutor:
                 format_error_log(
                     "DEPLOY-GENERAL-103",
                     f"Claude CLI update failed: {e.stderr}",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
             return False
@@ -4604,7 +4514,6 @@ class DeploymentExecutor:
                 format_error_log(
                     "DEPLOY-GENERAL-104",
                     f"Claude CLI update timed out after {CLAUDE_CLI_UPDATE_TIMEOUT_SECONDS}s: {e}",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
             return False
@@ -4613,7 +4522,6 @@ class DeploymentExecutor:
                 format_error_log(
                     "DEPLOY-GENERAL-105",
                     f"Claude CLI update spawn failed: {e}",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
             return False
@@ -4643,7 +4551,6 @@ class DeploymentExecutor:
                         "DEPLOY-GENERAL-144",
                         f"npm install @openai/codex failed (exit {result.returncode}): "
                         f"{result.stderr}",
-                        extra={"correlation_id": get_correlation_id()},
                     )
                 )
                 return False
@@ -4653,7 +4560,6 @@ class DeploymentExecutor:
                 format_error_log(
                     "DEPLOY-GENERAL-144",
                     f"npm install @openai/codex timed out after {CODEX_CLI_INSTALL_TIMEOUT_SECONDS}s",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
             return False
@@ -4662,7 +4568,6 @@ class DeploymentExecutor:
                 format_error_log(
                     "DEPLOY-GENERAL-144",
                     f"npm install @openai/codex could not be spawned: {exc}",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
             return False
@@ -4733,7 +4638,6 @@ class DeploymentExecutor:
                             "DEPLOY-GENERAL-150",
                             f"Server user {server_user!r} not found in passwd — "
                             "using current HOME for pace-maker clone",
-                            extra={"correlation_id": get_correlation_id()},
                         )
                     )
 
@@ -4753,7 +4657,6 @@ class DeploymentExecutor:
                         format_error_log(
                             "DEPLOY-GENERAL-151",
                             f"pace-maker git clone failed: {result.stderr[:200]}",
-                            extra={"correlation_id": get_correlation_id()},
                         )
                     )
                     return False
@@ -4769,7 +4672,6 @@ class DeploymentExecutor:
                         format_error_log(
                             "DEPLOY-GENERAL-152",
                             f"pace-maker git pull failed: {result.stderr[:200]}",
-                            extra={"correlation_id": get_correlation_id()},
                         )
                     )
                     return False
@@ -4805,7 +4707,6 @@ class DeploymentExecutor:
                     format_error_log(
                         "DEPLOY-GENERAL-153",
                         f"pace-maker install.sh failed: {result.stderr[:200]}",
-                        extra={"correlation_id": get_correlation_id()},
                     )
                 )
                 return False
@@ -4826,7 +4727,6 @@ class DeploymentExecutor:
                         format_error_log(
                             "DEPLOY-GENERAL-154",
                             f"pace-maker off failed: {result.stderr[:200]}",
-                            extra={"correlation_id": get_correlation_id()},
                         )
                     )
 
@@ -4849,7 +4749,6 @@ class DeploymentExecutor:
                     format_error_log(
                         "DEPLOY-GENERAL-155",
                         f"Failed to record pace_maker_clone_path in config: {e}",
-                        extra={"correlation_id": get_correlation_id()},
                     )
                 )
 
@@ -4865,7 +4764,6 @@ class DeploymentExecutor:
                 format_error_log(
                     "DEPLOY-GENERAL-156",
                     f"pace-maker operation timed out: {e}",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
             return False
@@ -4874,7 +4772,6 @@ class DeploymentExecutor:
                 format_error_log(
                     "DEPLOY-GENERAL-157",
                     f"pace-maker install/update failed: {e}",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
             return False
@@ -5278,7 +5175,6 @@ class DeploymentExecutor:
                         "DEPLOY-GENERAL-160",
                         f"Claude CLI installer failed (rc={result.returncode}): "
                         f"{result.stderr[:200]}",
-                        extra={"correlation_id": get_correlation_id()},
                     )
                 )
                 return False
@@ -5292,7 +5188,6 @@ class DeploymentExecutor:
                 format_error_log(
                     "DEPLOY-GENERAL-161",
                     f"Claude CLI installer timed out after {CLAUDE_INSTALL_TIMEOUT_SECONDS}s",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
             return False
@@ -5301,7 +5196,6 @@ class DeploymentExecutor:
                 format_error_log(
                     "DEPLOY-GENERAL-162",
                     f"Claude CLI install failed with exception: {e}",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
             return False
@@ -5462,7 +5356,6 @@ class DeploymentExecutor:
                 format_error_log(
                     "DEPLOY-GENERAL-163",
                     f"NFS research symlink setup failed: {e}",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
             return False
@@ -5538,7 +5431,6 @@ class DeploymentExecutor:
                 format_error_log(
                     "DEPLOY-GENERAL-167",
                     f"Bug #1052: activated-repos symlink setup failed: {e}",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
             return False
@@ -5581,7 +5473,6 @@ class DeploymentExecutor:
                     "Bug #1320: could not read co-located CoW daemon config "
                     f"at {COW_DAEMON_HOST_CONFIG_PATH} for daemon_storage_path "
                     f"auto-detect: {e}",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
 
@@ -5662,7 +5553,6 @@ class DeploymentExecutor:
                         f"{COW_DAEMON_HOST_CONFIG_PATH}) — leaving unset; "
                         "CowDaemonBackend will fail loud on the next "
                         "versioned-snapshot publish that needs path translation",
-                        extra={"correlation_id": get_correlation_id()},
                     )
                 )
                 return True
@@ -5690,7 +5580,6 @@ class DeploymentExecutor:
                 format_error_log(
                     "DEPLOY-GENERAL-205",
                     f"Bug #1320: daemon_storage_path setup failed: {e}",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
             return False
@@ -5810,7 +5699,6 @@ class DeploymentExecutor:
                     "DEPLOY-GENERAL-214",
                     f"Bug #1464: failed to repair {resource_name} symlink "
                     f"{link_path} from {current_target} to {target}: {e}",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
             return False
@@ -5904,7 +5792,6 @@ class DeploymentExecutor:
                     f"{legacy_path}, then either remove it (if it is a stale "
                     f"empty backup) or reconcile its contents with "
                     f"{link_path} before retrying.",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
             return False
@@ -5920,7 +5807,6 @@ class DeploymentExecutor:
                     f"Bug #{bug_number}: symlink creation failed after "
                     f"backing up {link_path} to {legacy_path}: {e}. Rolling "
                     f"back the rename so no partial state is left behind.",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
             legacy_path.rename(link_path)
@@ -6008,10 +5894,249 @@ class DeploymentExecutor:
                 format_error_log(
                     "DEPLOY-GENERAL-207",
                     f"Bug #1337: golden-repos symlink setup failed: {e}",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
             return False
+
+    def _ensure_cow_storage_mount_options(
+        self, *, fstab_path: str = "/etc/fstab"
+    ) -> bool:
+        """Issue #1510 follow-up: idempotently upgrade the cow-storage NFS
+        mount's /etc/fstab entry to NFSv3 with `nolock` (fstype=nfs,
+        vers=3,nolock in options), and best-effort applies it to the live
+        mount via a full umount/mount cycle.
+
+        Root cause: this cluster's shared NFS mount was originally NFSv4.1
+        and observed suffering chronic server-side lock-manager state loss
+        (dmesg "NFS: <server>: lost N locks" bursts), which directly caused
+        a SQLite `disk I/O error` during a golden-repo refresh -- SQLite's
+        chunks.db writes depend on real OS-level byte-range locks. A prior
+        fix added `nolock` to the NFSv4.1 mount alone and empirically
+        confirmed it has ZERO effect there: NFSv4 integrates locking into
+        the protocol's own OPEN/LOCK state machine, bypassing the separate
+        NLM protocol `nolock` actually controls (an NFSv3-only mechanism).
+        This method instead upgrades the whole mount to NFSv3, where
+        `nolock` genuinely disables server-side lock negotiation --
+        matching this project's existing golden-repos mount precedent
+        (`vers=3,nolock,hard`). Safe for the same reason as before: this
+        project's own WriteLockManager already serializes writers per-repo
+        at the application layer, so nolock's only real risk (genuine
+        concurrent writers with no external coordination) does not apply.
+
+        scripts/install-cidx-server.sh already writes fstype=nfs with
+        `vers=3,nolock` into fresh fstab entries and the live mount command
+        for NEW installs. This method is the idempotent self-heal for
+        ALREADY-DEPLOYED nodes whose fstab entry predates this fix, per
+        this project's Auto-Updater Idempotent Deployment mandate (a
+        template/installer-only fix would leave already-running nodes
+        permanently broken).
+
+        Only applies to `clone_backend=cow-daemon` nodes with a configured
+        `cow_daemon.mount_point` -- non-cow-daemon nodes (local backend,
+        no NFS mount) have nothing to repair.
+
+        Non-fatal: any exception, unreadable fstab, or failed sudo write is
+        logged at WARNING and returns False. A no-op case (already NFSv3
+        with nolock, or no fstab entry matches the mount point at all)
+        returns True. A successful fstab rewrite attempts a live
+        umount+mount cycle -- a filesystem-type AND locking-protocol change
+        cannot be applied via `mount -o remount` (that only re-applies
+        compatible options on the SAME already-mounted filesystem type). If
+        the live umount fails (e.g. EBUSY, mount in active use), the mount
+        is left completely untouched and an INFO log documents that a
+        future reboot or manual remount will apply the fstab fix. If the
+        umount SUCCEEDS but the follow-up mount fails, this is a genuine
+        failure (mount point left unmounted) and is logged at WARNING,
+        returning False so callers can escalate.
+
+        Args:
+            fstab_path: Path to the fstab file to read/repair. Defaults to
+                the real system fstab; overridable for testing.
+
+        Returns:
+            True on no-op or successful repair, False on failure.
+        """
+        try:
+            from code_indexer.server.utils.config_manager import ServerConfigManager
+
+            config = ServerConfigManager(
+                server_dir_path=str(_cidx_data_dir)
+            ).load_config()
+
+            clone_backend = getattr(config, "clone_backend", "local") or "local"
+            if clone_backend != "cow-daemon":
+                logger.debug(
+                    "Issue #1510: clone_backend=%r, not cow-daemon — skipping "
+                    "cow-storage mount options self-heal",
+                    clone_backend,
+                    extra={"correlation_id": get_correlation_id()},
+                )
+                return True
+
+            cow_cfg = getattr(config, "cow_daemon", None)
+            mount_point = getattr(cow_cfg, "mount_point", "") if cow_cfg else ""
+            if not mount_point:
+                logger.debug(
+                    "Issue #1510: clone_backend=cow-daemon but "
+                    "cow_daemon.mount_point is empty — skipping cow-storage "
+                    "mount options self-heal",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+                return True
+
+            try:
+                current_content = Path(fstab_path).read_text()
+            except OSError as e:
+                logger.warning(
+                    format_error_log(
+                        "DEPLOY-GENERAL-218",
+                        f"Issue #1510: could not read {fstab_path}: {e}",
+                    )
+                )
+                return False
+
+            updated_content = self._upgrade_cow_storage_fstab_entry_to_nfsv3(
+                current_content, mount_point
+            )
+            if updated_content is None:
+                logger.debug(
+                    "Issue #1510: cow-storage fstab entry for %s is already "
+                    "NFSv3 with nolock (or no matching entry found) — "
+                    "nothing to repair",
+                    mount_point,
+                    extra={"correlation_id": get_correlation_id()},
+                )
+                return True
+
+            tee_result = self._run_systemd_op_with_retry(
+                ["sudo", "tee", fstab_path], input=updated_content
+            )
+            if tee_result.returncode != 0:
+                logger.warning(
+                    format_error_log(
+                        "DEPLOY-GENERAL-219",
+                        f"Issue #1510: failed to upgrade {fstab_path} entry "
+                        f"for {mount_point} to NFSv3+nolock: {tee_result.stderr}",
+                    )
+                )
+                return False
+
+            logger.info(
+                "Issue #1510: upgraded %s entry for %s to NFSv3+nolock",
+                fstab_path,
+                mount_point,
+                extra={"correlation_id": get_correlation_id()},
+            )
+
+            umount_result = self._run_systemd_op_with_retry(
+                ["sudo", "umount", mount_point]
+            )
+            if umount_result.returncode != 0:
+                logger.info(
+                    "Issue #1510: could not live-unmount %s to apply "
+                    "NFSv3+nolock (%s) — fstab is corrected; the mount "
+                    "itself was left untouched, and a future reboot or "
+                    "manual remount will apply it",
+                    mount_point,
+                    umount_result.stderr.strip(),
+                    extra={"correlation_id": get_correlation_id()},
+                )
+                return True
+
+            mount_result = self._run_systemd_op_with_retry(
+                ["sudo", "mount", mount_point]
+            )
+            if mount_result.returncode != 0:
+                logger.warning(
+                    format_error_log(
+                        "DEPLOY-GENERAL-222",
+                        f"Issue #1510: unmounted {mount_point} to apply "
+                        f"NFSv3+nolock but the follow-up mount failed: "
+                        f"{mount_result.stderr}. Mount point is now "
+                        f"UNMOUNTED — manual intervention required.",
+                    )
+                )
+                return False
+
+            logger.info(
+                "Issue #1510: remounted %s as NFSv3+nolock",
+                mount_point,
+                extra={"correlation_id": get_correlation_id()},
+            )
+            return True
+
+        except Exception as e:
+            logger.warning(
+                format_error_log(
+                    "DEPLOY-GENERAL-220",
+                    f"Issue #1510: cow-storage mount options self-heal failed: {e}",
+                )
+            )
+            return False
+
+    @staticmethod
+    def _upgrade_cow_storage_fstab_entry_to_nfsv3(
+        content: str, mount_point: str
+    ) -> Optional[str]:
+        """Return updated fstab content with the cow-storage entry upgraded
+        to NFSv3 + nolock (fstype rewritten to `nfs`, options gain
+        `vers=3,nolock` -- any pre-existing `vers=*` option is replaced),
+        or None if no change is needed (already fstype=nfs with vers=3 and
+        nolock present, or no matching entry exists at all).
+
+        Issue #1510 follow-up: `nolock`/`local_lock` has zero effect on
+        NFSv4 (its own OPEN/LOCK state machine bypasses the separate NLM
+        protocol `nolock` controls), so the fstype and locking option must
+        move together -- adding `nolock` alone (as the original #1510 fix
+        did) is a no-op on an NFSv4 mount.
+
+        Pure string transformation -- no filesystem/subprocess access --
+        so it is independently unit-testable without mocking sudo/systemd.
+        Preserves the original line's leading whitespace and line ending;
+        only the fstype and options fields are rewritten in place.
+        """
+        lines = content.splitlines(keepends=True)
+        for i, line in enumerate(lines):
+            stripped = line.rstrip("\r\n")
+            ending = line[len(stripped) :]
+            lstripped = stripped.lstrip()
+            if not lstripped or lstripped.startswith("#"):
+                continue
+            leading_ws = stripped[: len(stripped) - len(lstripped)]
+            fields = lstripped.split()
+            if len(fields) < 4 or fields[1] != mount_point:
+                continue
+
+            fstype = fields[2]
+            options_field = fields[3]
+            options = [o for o in options_field.split(",") if o]
+
+            already_nfsv3_nolock = (
+                fstype == "nfs" and "vers=3" in options and "nolock" in options
+            )
+            if already_nfsv3_nolock:
+                return None
+
+            non_version_options = [
+                o for o in options if not o.startswith("vers=") and o != "nolock"
+            ]
+            new_options: list = []
+            inserted = False
+            for o in non_version_options:
+                new_options.append(o)
+                if o == "_netdev" and not inserted:
+                    new_options.extend(["vers=3", "nolock"])
+                    inserted = True
+            if not inserted:
+                new_options = ["vers=3", "nolock"] + new_options
+
+            new_fields = list(fields)
+            new_fields[2] = "nfs"
+            new_fields[3] = ",".join(new_options)
+            new_lstripped = " ".join(new_fields)
+            lines[i] = leading_ws + new_lstripped + ending
+            return "".join(lines)
+        return None
 
     @staticmethod
     def _build_updated_service_content(content: str, local_bin: str) -> str:
@@ -6133,7 +6258,6 @@ class DeploymentExecutor:
                 format_error_log(
                     "DEPLOY-GENERAL-169",
                     f"sudo tee could not be invoked for {service_file}: {e}",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
             return False
@@ -6143,7 +6267,6 @@ class DeploymentExecutor:
                     "DEPLOY-GENERAL-169",
                     f"sudo tee failed writing {service_file}: "
                     f"{result.stderr[:MAX_ERROR_SNIPPET_LENGTH]}",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
             return False
@@ -6162,7 +6285,6 @@ class DeploymentExecutor:
                 format_error_log(
                     "DEPLOY-GENERAL-170",
                     f"systemctl daemon-reload could not be invoked: {e}",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
             return False
@@ -6172,7 +6294,6 @@ class DeploymentExecutor:
                     "DEPLOY-GENERAL-170",
                     f"systemctl daemon-reload failed: "
                     f"{result.stderr[:MAX_ERROR_SNIPPET_LENGTH]}",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
             return False
@@ -6190,7 +6311,6 @@ class DeploymentExecutor:
                 format_error_log(
                     "DEPLOY-GENERAL-168",
                     f"Systemd service file not found: {service_file}",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
             return False
@@ -6231,7 +6351,6 @@ class DeploymentExecutor:
                 format_error_log(
                     "DEPLOY-GENERAL-168",
                     f"Systemd service file not found: {service_file}",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
             return False
@@ -6290,7 +6409,6 @@ class DeploymentExecutor:
                 format_error_log(
                     "DEPLOY-GENERAL-168",
                     f"Systemd service file not found: {service_file}",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
             return False

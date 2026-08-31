@@ -7,14 +7,14 @@ and browsing functionality as defined in Story 4.
 import pytest
 from unittest.mock import Mock, patch
 
-from src.code_indexer.api_clients.repos_client import (
+from code_indexer.api_clients.repos_client import (
     ReposAPIClient,
     ActivatedRepository,
     GoldenRepository,
     RepositoryDiscoveryResult,
     RepositoryStatusSummary,
 )
-from src.code_indexer.api_clients.base_client import APIClientError, AuthenticationError
+from code_indexer.api_clients.base_client import APIClientError, AuthenticationError
 
 
 class TestReposAPIClientInitialization:
@@ -22,7 +22,7 @@ class TestReposAPIClientInitialization:
 
     def test_repos_client_inherits_from_base_client(self):
         """Test that ReposAPIClient properly inherits from CIDXRemoteAPIClient."""
-        with patch("src.code_indexer.api_clients.repos_client.CIDXRemoteAPIClient"):
+        with patch("code_indexer.api_clients.repos_client.CIDXRemoteAPIClient"):
             client = ReposAPIClient(
                 server_url="https://test.example.com",
                 credentials={"username": "test", "password": "test"},
@@ -32,7 +32,7 @@ class TestReposAPIClientInitialization:
 
     def test_repos_client_initialization_with_credentials(self):
         """Test ReposAPIClient initialization with project credentials."""
-        with patch("src.code_indexer.api_clients.repos_client.CIDXRemoteAPIClient"):
+        with patch("code_indexer.api_clients.repos_client.CIDXRemoteAPIClient"):
             from pathlib import Path
 
             client = ReposAPIClient(
@@ -43,87 +43,115 @@ class TestReposAPIClientInitialization:
             assert client is not None
 
 
+def _build_activated_repos_list_response(aliases):
+    """Build a minimal /api/repos list response for the given aliases.
+
+    The list endpoint carries no sync_status field (#1740): the server does
+    not populate a real per-repo sync status on this route, matching the
+    real ActivatedRepositoryInfo payload shape.
+    """
+    return {
+        "repositories": [
+            {
+                "user_alias": alias,
+                "current_branch": "main",
+                "last_accessed": "2024-01-15T10:30:00Z",
+                "activated_at": "2024-01-10T14:20:00Z",
+            }
+            for alias in aliases
+        ],
+        "total_count": len(aliases),
+    }
+
+
+def _mock_ok_response(payload):
+    """Build a Mock HTTP response object returning payload as JSON, status 200."""
+    response = Mock()
+    response.status_code = 200
+    response.json.return_value = payload
+    return response
+
+
 class TestActivatedRepositoryOperations:
     """Test operations for managing activated repositories."""
 
     @pytest.fixture
     def mock_client(self):
         """Create a mock ReposAPIClient for testing."""
-        with patch("src.code_indexer.api_clients.repos_client.CIDXRemoteAPIClient"):
+        with patch("code_indexer.api_clients.repos_client.CIDXRemoteAPIClient"):
             return ReposAPIClient(
                 server_url="https://test.example.com",
                 credentials={"username": "test", "password": "test"},
             )
 
     @pytest.mark.asyncio
-    async def test_list_activated_repositories_success(self, mock_client):
-        """Test successful listing of activated repositories."""
-        # Mock HTTP response
-        mock_response_data = {
-            "repositories": [
-                {
-                    "alias": "web-app",
-                    "current_branch": "main",
-                    "sync_status": "synced",
-                    "last_sync": "2024-01-15T10:30:00Z",
-                    "activation_date": "2024-01-10T14:20:00Z",
-                    "conflict_details": None,
-                },
-                {
-                    "alias": "api-service",
-                    "current_branch": "feature/v2",
-                    "sync_status": "needs_sync",
-                    "last_sync": "2024-01-14T08:15:00Z",
-                    "activation_date": "2024-01-12T09:45:00Z",
-                    "conflict_details": None,
-                },
-            ],
-            "total_count": 2,
-        }
+    async def test_list_activated_repositories_reports_unknown_sync_status_without_n_plus_one(
+        self, mock_client
+    ):
+        """#1740 Option B: sync_status is an honest constant, no N+1 lookups.
 
-        # Mock HTTP response
-        mock_response = Mock()
-        mock_response.status_code = 200
-        mock_response.json.return_value = mock_response_data
+        Earlier commit 8377fdfb resolved a "real" per-repo sync_status by
+        calling GET /api/repos/{alias}/sync-status once per activated repo
+        inside list_activated_repositories -- an N+1 HTTP pattern for a
+        low-traffic display column, and the server route it called still
+        just returned a hardcoded default (#1740 review REJECT finding 1:
+        the fix was functionally inert). This proves the client makes
+        exactly ONE request for the whole listing and reports "unknown"
+        honestly rather than a per-repo value it cannot actually verify.
+        """
+        list_response_data = _build_activated_repos_list_response(
+            ["web-app", "api-service", "billing-service"]
+        )
 
         with patch.object(
-            mock_client, "_authenticated_request", return_value=mock_response
+            mock_client,
+            "_authenticated_request",
+            return_value=_mock_ok_response(list_response_data),
+        ) as mock_request:
+            repositories = mock_client.list_activated_repositories()
+
+        assert len(repositories) == 3
+        assert all(repo.sync_status == "unknown" for repo in repositories)
+        assert mock_request.call_count == 1
+        mock_request.assert_called_once_with("GET", "/api/repos", params={})
+
+    @pytest.mark.asyncio
+    async def test_list_activated_repositories_success(self, mock_client):
+        """Test successful listing of activated repositories."""
+        list_response_data = _build_activated_repos_list_response(
+            ["web-app", "api-service"]
+        )
+
+        with patch.object(
+            mock_client,
+            "_authenticated_request",
+            return_value=_mock_ok_response(list_response_data),
         ):
             repositories = mock_client.list_activated_repositories()
 
         assert len(repositories) == 2
         assert repositories[0].alias == "web-app"
-        assert repositories[0].sync_status == "synced"
         assert repositories[1].alias == "api-service"
-        assert repositories[1].sync_status == "needs_sync"
+        # sync_status is a constant "unknown" (#1740 Option B) -- the list
+        # endpoint provides no real per-repo status and resolving one via a
+        # per-repo HTTP call is not worth the N+1 cost for this low-traffic
+        # display column.
+        assert repositories[0].sync_status == "unknown"
+        assert repositories[1].sync_status == "unknown"
 
     @pytest.mark.asyncio
     async def test_list_activated_repositories_with_filter(self, mock_client):
         """Test listing activated repositories with filter parameter."""
-        mock_response_data = {
-            "repositories": [
-                {
-                    "alias": "web-app",
-                    "current_branch": "main",
-                    "sync_status": "synced",
-                    "last_sync": "2024-01-15T10:30:00Z",
-                    "activation_date": "2024-01-10T14:20:00Z",
-                    "conflict_details": None,
-                }
-            ],
-            "total_count": 1,
-        }
-
-        mock_response = Mock()
-        mock_response.status_code = 200
-        mock_response.json.return_value = mock_response_data
+        list_response_data = _build_activated_repos_list_response(["web-app"])
 
         with patch.object(
-            mock_client, "_authenticated_request", return_value=mock_response
+            mock_client,
+            "_authenticated_request",
+            return_value=_mock_ok_response(list_response_data),
         ) as mock_request:
             repositories = mock_client.list_activated_repositories(filter_pattern="web")
 
-        # Verify the request was made with correct parameters
+        # Exactly one request for the whole listing -- no per-repo lookup.
         mock_request.assert_called_once_with(
             "GET", "/api/repos", params={"filter": "web"}
         )
@@ -178,7 +206,7 @@ class TestGoldenRepositoryOperations:
     @pytest.fixture
     def mock_client(self):
         """Create a mock ReposAPIClient for testing."""
-        with patch("src.code_indexer.api_clients.repos_client.CIDXRemoteAPIClient"):
+        with patch("code_indexer.api_clients.repos_client.CIDXRemoteAPIClient"):
             return ReposAPIClient(
                 server_url="https://test.example.com",
                 credentials={"username": "test", "password": "test"},
@@ -281,7 +309,7 @@ class TestRepositoryDiscoveryOperations:
     @pytest.fixture
     def mock_client(self):
         """Create a mock ReposAPIClient for testing."""
-        with patch("src.code_indexer.api_clients.repos_client.CIDXRemoteAPIClient"):
+        with patch("code_indexer.api_clients.repos_client.CIDXRemoteAPIClient"):
             return ReposAPIClient(
                 server_url="https://test.example.com",
                 credentials={"username": "test", "password": "test"},
@@ -423,7 +451,7 @@ class TestRepositoryStatusOperations:
     @pytest.fixture
     def mock_client(self):
         """Create a mock ReposAPIClient for testing."""
-        with patch("src.code_indexer.api_clients.repos_client.CIDXRemoteAPIClient"):
+        with patch("code_indexer.api_clients.repos_client.CIDXRemoteAPIClient"):
             return ReposAPIClient(
                 server_url="https://test.example.com",
                 credentials={"username": "test", "password": "test"},
@@ -601,7 +629,7 @@ class TestErrorHandling:
     @pytest.fixture
     def mock_client(self):
         """Create a mock ReposAPIClient for testing."""
-        with patch("src.code_indexer.api_clients.repos_client.CIDXRemoteAPIClient"):
+        with patch("code_indexer.api_clients.repos_client.CIDXRemoteAPIClient"):
             return ReposAPIClient(
                 server_url="https://test.example.com",
                 credentials={"username": "test", "password": "test"},

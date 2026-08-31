@@ -11,7 +11,7 @@ import json
 import numpy as np
 
 
-from src.code_indexer.storage.filesystem_vector_store import FilesystemVectorStore
+from code_indexer.storage.filesystem_vector_store import FilesystemVectorStore
 
 
 class TestTemporalDiffContentBug:
@@ -55,6 +55,7 @@ class TestTemporalDiffContentBug:
             vector_store = FilesystemVectorStore(
                 base_path=tmpdir_path / ".code-indexer" / "index",
                 project_root=tmpdir_path,
+                use_chunks_db_for_new_collections=False,
             )
 
             # Create collection
@@ -172,6 +173,7 @@ class TestTemporalDiffContentBug:
             vector_store = FilesystemVectorStore(
                 base_path=tmpdir_path / ".code-indexer" / "index",
                 project_root=tmpdir_path,
+                use_chunks_db_for_new_collections=False,
             )
 
             # Create collection

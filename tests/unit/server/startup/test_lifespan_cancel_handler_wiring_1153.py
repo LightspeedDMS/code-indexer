@@ -26,13 +26,13 @@ from pathlib import Path
 
 import pytest
 
-from src.code_indexer.server.repositories.background_jobs import (
+from code_indexer.server.repositories.background_jobs import (
     BackgroundJobManager,
     JobStatus,
 )
-from src.code_indexer.server.services.job_tracker import JobTracker
-from src.code_indexer.server.storage.database_manager import DatabaseSchema
-from src.code_indexer.server.utils.config_manager import BackgroundJobsConfig
+from code_indexer.server.services.job_tracker import JobTracker
+from code_indexer.server.storage.database_manager import DatabaseSchema
+from code_indexer.server.utils.config_manager import BackgroundJobsConfig
 
 
 _REPO_ROOT = Path(__file__).resolve().parents[4]

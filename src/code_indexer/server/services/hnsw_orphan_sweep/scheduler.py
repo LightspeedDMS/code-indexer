@@ -26,7 +26,7 @@ from __future__ import annotations
 import logging
 import threading
 from datetime import datetime, timezone
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, Optional, cast
 
 from code_indexer.server.repositories.background_jobs import DuplicateJobError
 from code_indexer.server.services.hnsw_orphan_sweep.discovery import (
@@ -51,6 +51,11 @@ _DISABLED_POLL_SECONDS = 60
 # Safe fallback cadence when config cannot be read.
 _DEFAULT_TICK_INTERVAL_MINUTES = 7
 _DEFAULT_BATCH_SIZE = 15
+
+# Bug #1529: _PERSISTENCE_OUTCOME_ALIASES existed solely to map the two
+# now-deleted sister-temporal outcomes onto the state backend's original
+# Story #1360 vocabulary. Fixed-path temporal shards produce ordinary
+# in-place outcomes, so no aliasing is needed any more.
 
 # Fail-open default operating-hours window: (0, 0) means "always on" (24x7),
 # matching the pre-#1397 default behavior.
@@ -116,7 +121,8 @@ class HNSWOrphanRepairSweepScheduler:
             config_service: Object with ``get_config()`` returning a config
                 exposing ``hnsw_orphan_repair_sweep_config`` (enabled,
                 batch_size, tick_interval_minutes).
-            process_fn: Injectable per-item processor (defaults to the real
+            process_fn: Injectable per-item processor for golden/activated
+                (in-repo) candidates (defaults to the real
                 ``process_candidate``); tests may inject a spy/fake.
             now_fn: Injectable clock hook returning the current time (defaults
                 to the real UTC wall clock). Used by the operating-hours
@@ -217,12 +223,16 @@ class HNSWOrphanRepairSweepScheduler:
         state = self._state_backend.get_state()
         cursor = state["last_completed_key"]
 
-        candidates = sorted(
+        all_candidates = list(
             enumerate_sweep_candidates(
                 self._golden_repo_manager, self._activated_repo_manager
-            ),
-            key=lambda c: c.sort_key,
+            )
         )
+        # Bug #1529: no separate sister enumeration. Server-context temporal
+        # shards live at a FIXED, mutable path and are yielded by
+        # enumerate_sweep_candidates above (kind="golden_temporal"), so they
+        # flow through the SAME in-place repair as every other collection.
+        candidates = sorted(all_candidates, key=lambda c: c.sort_key)
         pending = [c for c in candidates if cursor is None or c.sort_key > cursor]
         batch = pending[:batch_size]
 
@@ -260,8 +270,49 @@ class HNSWOrphanRepairSweepScheduler:
     def _process_one(self, candidate: Any) -> SweepOutcome:
         """Fail-soft wrapper: any unexpected exception from the per-item
         processor is loud (logged) but counted as ERROR, never aborting the
-        tick (AC2: a failure on one index does not abort the pass)."""
+        tick (AC2: a failure on one index does not abort the pass).
+
+        Bug #1529: there is no longer a second processor. Every candidate --
+        golden, activated, and the fixed-path ``golden_temporal`` shards --
+        is repaired IN PLACE by the same ``process_fn``.
+
+        Bug #1542 (Codex-review Q2 follow-up): the REAL ``process_candidate``
+        accepts an optional ``activated_repo_manager`` kwarg it uses to
+        resolve an activated-repo candidate's ``activation_id`` for correct
+        cache-key composition (Story #1458 AC11). Passing that kwarg to an
+        arbitrary injected ``process_fn`` (test fakes declared as
+        ``Callable[[Any], SweepOutcome]``, e.g. ``spy_process(candidate)``)
+        would break the single-argument injection contract those tests
+        rely on.
+
+        Dispatch is decided via a STRUCTURAL capability marker
+        (``process_candidate.supports_activated_repo_manager``), NOT an
+        identity check (``fn is process_candidate``) -- an identity check
+        is a silent-failure trap: any legitimate wrapper, ``functools
+        .partial``, decorator, or instrumentation layer around
+        ``process_candidate`` would fail it and silently fall back to the
+        "no activation_id" branch with zero diagnostic, even in real
+        production code. A plain function attribute survives
+        ``functools.wraps``-based wrapping (its ``WRAPPER_UPDATES`` copies
+        ``__dict__``, where this attribute lives), so a wrapper decorated
+        with ``@functools.wraps(process_candidate)`` inherits the marker
+        automatically and is dispatched exactly like the bare function --
+        test fakes that don't opt in (plain functions/lambdas with no such
+        attribute) fall through to the plain single-argument call below.
+        """
         try:
+            if getattr(self._process_fn, "supports_activated_repo_manager", False):
+                # `self._process_fn` is declared `Callable[[Any],
+                # SweepOutcome]`, which mypy takes literally (no extra
+                # kwarg) -- cast is safe here because the runtime check
+                # above is the actual contract enforcement, not the static
+                # type.
+                activation_aware_fn = cast(
+                    Callable[..., SweepOutcome], self._process_fn
+                )
+                return activation_aware_fn(
+                    candidate, activated_repo_manager=self._activated_repo_manager
+                )
             return self._process_fn(candidate)
         except Exception:
             logger.error(

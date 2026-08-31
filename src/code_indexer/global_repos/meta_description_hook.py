@@ -234,12 +234,26 @@ def atomic_write_description(
             release_write_lock.  Skipped when None.
 
     Raises:
-        Any exception from acquire_write_lock, file write, or os.replace.
+        LifecycleLockUnavailableError: If refresh_scheduler is provided and
+            acquire_write_lock returns False (another writer already holds
+            the cidx-meta write lock).
+        Any exception from file write or os.replace.
     """
+    from code_indexer.global_repos.lifecycle_batch_runner import (
+        LifecycleLockUnavailableError,
+    )
+
     lock_acquired = False
     if refresh_scheduler is not None:
-        refresh_scheduler.acquire_write_lock("cidx-meta", owner_name="lifecycle_writer")
-        lock_acquired = True
+        lock_acquired = refresh_scheduler.acquire_write_lock(
+            "cidx-meta", owner_name="lifecycle_writer"
+        )
+        if not lock_acquired:
+            raise LifecycleLockUnavailableError(
+                "Could not acquire write lock for 'cidx-meta' "
+                "(owner='lifecycle_writer'); another writer holds it -- "
+                "retry later"
+            )
 
     try:
         fd, tmp_path = tempfile.mkstemp(dir=str(target_path.parent), suffix=".tmp")
@@ -431,8 +445,19 @@ def on_repo_added(
         finally:
             tmp_path.unlink(missing_ok=True)
 
-    # Single atomic write with (verified or original) content — always ONCE
-    atomic_write_description(md_file, verified_content)
+    # Single atomic write with (verified or original) content — always ONCE.
+    # Bug #1506 7th-pass review: forward the configured module-level
+    # _refresh_scheduler so the cidx-meta write-lock protection added to
+    # atomic_write_description() in the 6th-pass review actually engages on
+    # this real production writer (it was previously called with no
+    # scheduler, making the lock check inert here). A LifecycleLockUnavailable
+    # Error raised here propagates out of on_repo_added(); both real callers
+    # (golden_repo_manager.py) already wrap this call in a broad
+    # try/except Exception that logs and continues without failing golden
+    # repo registration, so this is a safe, already-handled failure mode.
+    atomic_write_description(
+        md_file, verified_content, refresh_scheduler=_refresh_scheduler
+    )
 
     logger.info(f"Created meta description file: {md_file}")
 

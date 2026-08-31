@@ -57,6 +57,14 @@ class IndexTypeStatus(BaseModel):
     last_updated: Optional[str] = Field(None, description="Last update time (ISO 8601)")
     document_count: int = Field(0, description="Number of indexed documents")
     size_bytes: Optional[int] = Field(None, description="Index size in bytes")
+    error: Optional[str] = Field(
+        None,
+        description=(
+            "Diagnostic message when the index status could not be "
+            "reliably determined (e.g. corrupt or incomplete metadata) -- "
+            "distinct from a genuinely absent index. None when healthy."
+        ),
+    )
 
 
 class GetIndexStatusResponse(BaseModel):
@@ -150,9 +158,9 @@ def trigger_reindex(
             format_error_log(
                 "WEB-GENERAL-017",
                 f"Trigger reindex failed for {alias}: {e}",
-                exc_info=True,
                 extra={"correlation_id": get_correlation_id()},
-            )
+            ),
+            exc_info=True,
         )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -209,8 +217,20 @@ def get_index_status(
             return default
 
         def transform_index_status(status_data: Dict[str, Any]) -> IndexTypeStatus:
-            """Transform service status to IndexTypeStatus model."""
-            exists = status_data.get("status") != "not_indexed"
+            """Transform service status to IndexTypeStatus model.
+
+            Issue #1476 round-3 dual-review remediation: a service-layer
+            "error" status (Issue #1476 round-2 -- a real index whose
+            metadata could not be reliably read/validated) must never be
+            silently collapsed into a bare exists=True with zero
+            diagnostic signal. It is mapped to exists=False plus a
+            populated `error` message, distinct from the normal
+            "not_indexed" (genuinely absent, no index ever built) case,
+            which continues to report exists=False with no error.
+            """
+            reported_status = status_data.get("status")
+            has_error = reported_status == "error"
+            exists = (not has_error) and reported_status != "not_indexed"
 
             # Get last updated timestamp (try different field names)
             last_updated = (
@@ -239,6 +259,7 @@ def get_index_status(
                 last_updated=last_updated,
                 document_count=document_count,
                 size_bytes=size_bytes,
+                error=status_data.get("error") if has_error else None,
             )
 
         return GetIndexStatusResponse(
@@ -263,9 +284,9 @@ def get_index_status(
             format_error_log(
                 "WEB-GENERAL-019",
                 f"Get index status failed for {alias}: {e}",
-                exc_info=True,
                 extra={"correlation_id": get_correlation_id()},
-            )
+            ),
+            exc_info=True,
         )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -320,9 +341,9 @@ def get_temporal_status(
             format_error_log(
                 "WEB-GENERAL-021",
                 f"Get temporal status failed for {alias}: {e}",
-                exc_info=True,
                 extra={"correlation_id": get_correlation_id()},
-            )
+            ),
+            exc_info=True,
         )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,

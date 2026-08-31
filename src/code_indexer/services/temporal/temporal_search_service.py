@@ -375,6 +375,7 @@ class TemporalSearchService:
         no_embedding_cache_shortcut: bool = False,
         at_commit_ts: Optional[int] = None,
         precomputed_query_vector: Optional[List[float]] = None,
+        true_user_limit: Optional[int] = None,
     ) -> TemporalSearchResults:
         """Execute temporal semantic search with time-range filtering.
 
@@ -402,6 +403,17 @@ class TemporalSearchService:
                 embedder. When set, embedding is skipped entirely (FSV and
                 non-FSV paths alike) -- mirrors the omni fan-out's
                 precomputed_query_vector reuse.
+            true_user_limit: (Story #1493 AC1) Optional ORIGINAL
+                user-requested result limit, supplied by
+                execute_temporal_query_with_fusion's caller when `limit`
+                itself has already been multiplied by the shard-level
+                TEMPORAL_OVERFETCH_MULTIPLIER before reaching this method.
+                Used ONLY to bound the COMBINED (shard x chunk-type)
+                overfetch multiplier at TEMPORAL_COMBINED_OVERFETCH_CEILING
+                -- never used for any other purpose. Defaults to `limit`
+                itself when omitted (a direct caller with no shard-level
+                pre-multiplication), which makes the cap a no-op unless the
+                chunk-type multiplier alone already exceeds the ceiling.
 
         Returns:
             TemporalSearchResults with filtered results
@@ -557,6 +569,23 @@ class TemporalSearchService:
             search_limit = limit
             logger.debug(f"[DEBUG] no post_filters, using exact limit={limit}")
 
+        # Story #1493 AC1: bound the COMBINED (shard x chunk-type) overfetch
+        # multiplier at the ONE authoritative ceiling in temporal_fusion.py.
+        # true_user_limit is the ORIGINAL user-requested limit (before any
+        # shard-level pre-multiplication by the dispatch layer); defaults to
+        # `limit` itself when the caller queries directly (making the cap a
+        # no-op unless the chunk-type multiplier alone already exceeds the
+        # ceiling). Queries whose natural combined multiplier is already at
+        # or below the ceiling are returned byte-identical.
+        from .temporal_fusion import cap_combined_overfetch_search_limit
+
+        _true_user_limit_for_cap = (
+            true_user_limit if true_user_limit is not None else limit
+        )
+        search_limit = cap_combined_overfetch_search_limit(
+            _true_user_limit_for_cap, search_limit
+        )
+
         # Execute vector search using the same pattern as regular query command
         from ...storage.filesystem_vector_store import FilesystemVectorStore
 
@@ -576,6 +605,12 @@ class TemporalSearchService:
                 lazy_load=True,  # Enable lazy loading with early exit optimization
                 prefetch_limit=search_limit,  # Use calculated over-fetch limit
                 precomputed_query_vector=precomputed_query_vector,
+                # Story #1493 AC2: forwards chunk_type so FSV's hydration
+                # loop can skip a full decode for any candidate that is
+                # DEFINITELY the opposite chunk type (derived from point_id
+                # alone, zero I/O) -- the is_head post-filter below would
+                # discard it anyway.
+                temporal_chunk_type=chunk_type,
             )
             # Type: Tuple[List[Dict[str, Any]], Dict[str, Any]] when return_timing=True
             raw_results, _timing_info = search_result  # type: ignore

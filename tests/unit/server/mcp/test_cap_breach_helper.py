@@ -98,6 +98,46 @@ def test_cap_breach_response_returns_mcp_envelope_with_all_fields_and_pattern():
 
 
 # ---------------------------------------------------------------------------
+# Test 2b (Bug #1674) — cap_breach_response() must delegate to _mcp_response(),
+# the single hardened serialization choke point established by Bug #1645
+# (defensive _json_default fallback), instead of calling bare json.dumps()
+# directly and duplicating the envelope shape.
+# ---------------------------------------------------------------------------
+
+
+def test_cap_breach_response_delegates_to_mcp_response_choke_point():
+    """cap_breach_response() must build the exact expected payload dict and
+    return precisely what _mcp_response(payload) returns -- proving it routes
+    through the single hardened serialization boundary rather than
+    duplicating it with a bare json.dumps() call.
+    """
+    from unittest.mock import patch
+    from code_indexer.server.mcp.handlers import _utils
+
+    breach = _make_breach()
+    expected_payload = {
+        "success": False,
+        "error": breach.error_code,
+        "pattern": breach.pattern,
+        "observed": breach.observed_count,
+        "cap": breach.configured_cap,
+        "remediation": _utils._cap_breach_message(breach),
+    }
+
+    sentinel = {"content": [{"type": "text", "text": "sentinel-from-_mcp_response"}]}
+    with patch.object(
+        _utils, "_mcp_response", return_value=sentinel
+    ) as mock_mcp_response:
+        response = _utils.cap_breach_response(breach)
+
+    mock_mcp_response.assert_called_once_with(expected_payload)
+    assert response is sentinel, (
+        f"cap_breach_response() must return exactly what _mcp_response() "
+        f"returned, got {response!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
 # Test 3 — cap_breach_http_exception() raises HTTPException with 400
 # ---------------------------------------------------------------------------
 

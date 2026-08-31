@@ -176,6 +176,29 @@ class SmartIndexer(HighThroughputProcessor):
                     continue
 
                 status = parts[0]
+
+                # Codex round-6 MEDIUM finding (Bug #1467 follow-up):
+                # classify a RENAME record's old and new paths
+                # INDEPENDENTLY, before the common exclude-filter check
+                # below -- never after. parts[1] for a rename is the OLD
+                # path; applying the common filter to it FIRST would
+                # `continue` past the whole line (dropping new_path too)
+                # whenever the old path happens to be excluded, even if
+                # the new path is genuinely included and should be
+                # indexed as new.
+                if status.startswith("R"):
+                    # Renamed file: R100\told_path\tnew_path
+                    if len(parts) >= 3:
+                        old_path = parts[1]
+                        new_path = parts[2]
+                        renamed.append((old_path, new_path))
+                        # Treat rename as delete old + add new for indexing
+                        if self._should_index_file(old_path):
+                            deleted.append(old_path)
+                        if self._should_index_file(new_path):
+                            added.append(new_path)
+                    continue
+
                 file_path = parts[1]
 
                 # Filter files based on our indexing criteria
@@ -188,17 +211,6 @@ class SmartIndexer(HighThroughputProcessor):
                     modified.append(file_path)
                 elif status == "D":
                     deleted.append(file_path)
-                elif status.startswith("R"):
-                    # Renamed file: R100\told_path\tnew_path
-                    if len(parts) >= 3:
-                        old_path = parts[1]
-                        new_path = parts[2]
-                        renamed.append((old_path, new_path))
-                        # Treat rename as delete old + add new for indexing
-                        if self._should_index_file(old_path):
-                            deleted.append(old_path)
-                        if self._should_index_file(new_path):
-                            added.append(new_path)
 
             logger.info(
                 f"Git delta: +{len(added)} ~{len(modified)} -{len(deleted)} R{len(renamed)}"
@@ -216,19 +228,60 @@ class SmartIndexer(HighThroughputProcessor):
         try:
             path = Path(file_path)
 
+            base_result = True
+
             # Check file extension (lstrip dot: .java -> java to match config format)
             if path.suffix.lower().lstrip(".") not in self.config.file_extensions:
-                return False
+                base_result = False
 
             # Check exclude patterns using path component boundaries
             # (not substring: "build" must match "build/" dir, not "builder/")
-            parts = Path(file_path).parts
-            for exclude_dir in self.config.exclude_dirs:
-                if exclude_dir in parts:
-                    return False
+            if base_result:
+                parts = Path(file_path).parts
+                for exclude_dir in self.config.exclude_dirs:
+                    if exclude_dir in parts:
+                        base_result = False
+                        break
 
-            return True
-        except Exception:
+            # Bug #1467: also apply the canonical FileFinder exclude_spec
+            # (e.g. .code-indexer-override.yaml and other generated
+            # config artifacts). This git-diff-based incremental
+            # discovery path previously reimplemented only the
+            # extension/exclude_dirs subset of file_finder.py's
+            # filtering, silently diverging from the first (full-walk)
+            # index run's scope -- letting a generated artifact slip
+            # through as a real "changed file" once committed to git.
+            # Pure string matching, safe for deleted files too (no
+            # filesystem access, unlike file_finder's other checks).
+            if base_result and self.file_finder.matches_exclude_pattern(file_path):
+                base_result = False
+
+            # Codex Finding #10 (MEDIUM): apply the SAME force-include/
+            # force-exclude override parity full discovery
+            # (file_finder.py's _should_include_file) already has, reusing
+            # the SAME OverrideFilterService instance rather than
+            # reimplementing its pattern logic -- without this, a file
+            # matching .code-indexer-override.yaml's force_include_patterns
+            # is correctly indexed on the first (full-walk) run but
+            # silently rejected once committed and picked up incrementally.
+            override_filter_service = getattr(
+                self.file_finder, "override_filter_service", None
+            )
+            if override_filter_service is not None:
+                return bool(
+                    override_filter_service.should_include_file(path, base_result)
+                )
+
+            return base_result
+        except Exception as exc:
+            # Fail-soft is intentional here: a single malformed git-diff
+            # path must not abort the whole delta computation loop. The
+            # exception is logged (not silently swallowed) so a genuine
+            # filtering bug remains diagnosable.
+            logger.debug(
+                f"_should_index_file: treating '{file_path}' as not-indexed "
+                f"after unexpected error: {exc}"
+            )
             return False
 
     def _delete_files_from_backend(
@@ -1056,17 +1109,26 @@ class SmartIndexer(HighThroughputProcessor):
         # TRACK 2: Filesystem timestamp for uncommitted changes
         working_dir_files = list(self.file_finder.find_modified_files(resume_timestamp))
 
-        # Combine both tracks, removing duplicates
-        all_files_to_index = list(
-            set([str(f) for f in committed_files] + [str(f) for f in working_dir_files])
-        )
-
-        # Convert to Path objects, ensuring absolute paths
+        # Combine both tracks, de-duplicating on the absolutized path.
+        # committed_files (Track 1, git delta) are REPO-RELATIVE strings;
+        # working_dir_files (Track 2, mtime scan) are already ABSOLUTE.
+        # Absolutize every entry FIRST, then de-duplicate -- otherwise the
+        # same physical file reported by both tracks in two different
+        # string formats (e.g. "src/a.py" vs "/repo/src/a.py") survives as
+        # two distinct set members and gets indexed twice (Bug #1574).
+        # NOTE: deliberately NOT calling .resolve() here -- both tracks
+        # already share the same codebase_dir prefix, so plain
+        # absolutization (prefixing with codebase_dir) is sufficient to
+        # unify them. Calling .resolve() would follow symlinks and could
+        # break the downstream relative_to(codebase_dir) computation if
+        # codebase_dir itself is a symlinked path.
         codebase = Path(self.config.codebase_dir)
-        files_to_index = [
+        unique_files_to_index = {
             codebase / f if not Path(f).is_absolute() else Path(f)
-            for f in all_files_to_index
-        ]
+            for f in [str(f) for f in committed_files]
+            + [str(f) for f in working_dir_files]
+        }
+        files_to_index = list(unique_files_to_index)
 
         if not files_to_index and not deleted_files:
             # SAFETY CHECK: Detect corrupted state before marking as completed
@@ -1364,6 +1426,13 @@ class SmartIndexer(HighThroughputProcessor):
                 info=f"Checking database collection '{collection_name}' for indexed files...",
             )
 
+        # Issue #1505: defensive default so a mocked/failed snapshot never
+        # leaves this attribute missing before the main reconcile loop reads it.
+        self._reconcile_db_content_ids: Dict[str, str] = {}
+        # Codex #1505 review, Finding 1: same defensive default for the
+        # hidden_branches map the branch-visibility loop reads.
+        self._reconcile_hidden_branches: Dict[str, List[str]] = {}
+
         # Get indexed files using efficient snapshot approach (no infinite loops, minimal memory)
         indexed_files_with_timestamps = self._get_indexed_files_snapshot(
             collection_name, progress_callback
@@ -1380,6 +1449,23 @@ class SmartIndexer(HighThroughputProcessor):
 
         # Bug #471: Batch-check all modified files in one subprocess call
         self._reconcile_modified_files = self._get_modified_files_set()
+
+        # Issue #1505: Batch-fetch every tracked file's committed blob hash in
+        # ONE `git ls-tree -r HEAD` subprocess call, instead of spawning a
+        # `git log -1 -- path` subprocess PER unchanged file inside the loop
+        # below. Only meaningful for git-available repos; non-git repos keep
+        # their existing mtime/size-only comparison scheme untouched.
+        if self.git_topology_service.is_git_available():
+            self._reconcile_head_blob_hashes = self._get_head_blob_hash_map()
+        else:
+            self._reconcile_head_blob_hashes = {}
+
+        # Codex #1505 review, Finding 2: track how many files fall back to
+        # the slow per-file `git log` content-id computation during this
+        # reconcile run, so a high fallback rate (map failed/mostly-empty)
+        # can be surfaced LOUDLY after the main per-file loop below instead
+        # of silently degrading to the O(N) stall Issue #1505 fixed.
+        self._reconcile_fallback_count = 0
 
         # Find files that need to be indexed using working directory aware comparison
         files_to_index = []
@@ -1412,11 +1498,13 @@ class SmartIndexer(HighThroughputProcessor):
                     files_to_index.append(file_path)
                     missing_files += 1
                 else:
-                    # File exists in database - check if content changed
-                    # Get ANY version of this file from database (not branch-filtered)
-                    db_content_id = self._get_any_content_id_for_file(
-                        relative_path, collection_name
-                    )
+                    # File exists in database - check if content changed.
+                    # Issue #1505: look up the pre-computed batched content-id
+                    # map (built once in `_get_indexed_files_snapshot` from
+                    # the same bulk scroll already used for the timestamp
+                    # snapshot) instead of issuing a per-file scroll_points
+                    # query via `_get_any_content_id_for_file`.
+                    db_content_id = self._reconcile_db_content_ids.get(relative_path)
 
                     if db_content_id and current_effective_id != db_content_id:
                         # Content changed - needs re-indexing
@@ -1432,6 +1520,33 @@ class SmartIndexer(HighThroughputProcessor):
                 # File might have issues, log and skip
                 logger.warning(f"Failed to analyze file {file_path} for reconcile: {e}")
                 continue
+
+        # Codex #1505 review, Finding 2: a degraded reconcile run (batched
+        # HEAD blob-hash map failed/mostly-empty, forcing most or all
+        # committed files onto the slow per-file `git log` fallback) must
+        # be LOUD and observable -- never a silent multi-hour O(N) stall,
+        # per this project's anti-silent-failure rule. Correctness is
+        # unaffected either way; only visibility is added here, and
+        # reconcile is never hard-aborted (a degraded-but-working reconcile
+        # beats a failed one).
+        if self.git_topology_service.is_git_available() and all_files_to_index:
+            fallback_count = getattr(self, "_reconcile_fallback_count", 0)
+            total_files = len(all_files_to_index)
+            fallback_ratio = fallback_count / total_files
+            map_entirely_empty = not self._reconcile_head_blob_hashes
+            if (map_entirely_empty and fallback_count > 0) or fallback_ratio > 0.10:
+                logger.error(
+                    "RECONCILE DEGRADED: %d/%d files (%.1f%%) fell back to "
+                    "the slow per-file `git log` content-id lookup this "
+                    "run because the batched HEAD blob-hash map "
+                    "(_get_head_blob_hash_map) was empty or missing "
+                    "entries for most files. This can reintroduce the "
+                    "O(N) per-file git-subprocess stall Issue #1505 fixed "
+                    "-- investigate git ls-tree failures.",
+                    fallback_count,
+                    total_files,
+                    fallback_ratio * 100,
+                )
 
         # NEW: For git projects, unhide files that should be visible in current branch
         files_unhidden = 0  # Initialize for all code paths
@@ -1457,30 +1572,22 @@ class SmartIndexer(HighThroughputProcessor):
 
                 # Check if this file exists on disk in current branch (should be visible)
                 if relative_file_path in disk_files_set:
-                    # File exists on disk, check if it's hidden for current branch
-                    content_points, _ = self.vector_store_client.scroll_points(
-                        filter_conditions={
-                            "must": [
-                                {"key": "type", "match": {"value": "content"}},
-                                {"key": "path", "match": {"value": relative_file_path}},
-                            ]
-                        },
-                        limit=1,  # Just need to check one point
-                        collection_name=collection_name,
+                    # Codex #1505 review, Finding 1: derive hidden_branches
+                    # from the bulk snapshot already fetched in
+                    # `_get_indexed_files_snapshot` instead of issuing a
+                    # fresh `scroll_points` query PER indexed file -- this
+                    # loop previously defeated the O(1)-ish DB-call goal of
+                    # Issue #1505's fix by reintroducing a per-file query in
+                    # the same reconcile pass.
+                    hidden_branches = self._reconcile_hidden_branches.get(
+                        relative_file_path, []
                     )
-
-                    if content_points:
-                        hidden_branches = (
-                            content_points[0]
-                            .get("payload", {})
-                            .get("hidden_branches", [])
+                    if current_branch in hidden_branches:
+                        # File exists on disk but is hidden for current branch - unhide it
+                        self._ensure_file_visible_in_branch_thread_safe(
+                            relative_file_path, current_branch, collection_name
                         )
-                        if current_branch in hidden_branches:
-                            # File exists on disk but is hidden for current branch - unhide it
-                            self._ensure_file_visible_in_branch_thread_safe(
-                                relative_file_path, current_branch, collection_name
-                            )
-                            files_unhidden += 1
+                        files_unhidden += 1
 
             if files_unhidden > 0 and progress_callback:
                 progress_callback(
@@ -1602,55 +1709,85 @@ class SmartIndexer(HighThroughputProcessor):
         # Store file list for resumability
         self.progressive_metadata.set_files_to_index(files_to_index)
 
+        # BEGIN INDEXING SESSION (O(n) optimization - defer index rebuilding).
+        # Bug #1575 Fix 4: hoisted BEFORE the non-git modified-file delete
+        # loop below (previously called only after it) so every delete
+        # this loop triggers lands INSIDE the session -- tracked via
+        # _indexing_session_changes and persisted ONCE at end_indexing(),
+        # instead of each delete independently persisting path_index.bin
+        # (and co-persisting the entire id_index.bin) on its own. Measured
+        # 5.6x slower incremental refresh on a 4000-file collection.
+        self.vector_store_client.begin_indexing(collection_name)
+
         # CRITICAL FIX: In non-git mode, delete old chunks for modified files before re-indexing
         # This ensures old content doesn't persist alongside new content
-        if not self.is_git_aware() and files_to_index:
-            collection_name = self.vector_store_client.resolve_collection_name(
-                self.config, self.embedding_provider
-            )
+        #
+        # Bug #1575 round 6, item 2: this whole section runs AFTER
+        # begin_indexing() opened a session but BEFORE the BranchAwareIndexer
+        # try/finally below (whose finally calls end_indexing()) starts. An
+        # exception here (delete_by_filter() or progress_callback() raising)
+        # used to propagate WITHOUT ever finalizing the session --
+        # permanently leaking it (self._indexing_session_changes and this
+        # collection's cached PathIndex/id_index stay open until process
+        # restart, disabling out-of-session Gap D/B persistence). Wrapped in
+        # its own try/except so end_indexing() always runs before any
+        # exception from this section propagates.
+        try:
+            if not self.is_git_aware() and files_to_index:
+                # Get relative paths that are being modified (not newly added)
+                modified_relative_files = []
+                for file_path in files_to_index:
+                    try:
+                        # Check if this file was previously indexed (exists in database)
+                        # indexed_files_with_timestamps has Path objects as keys
+                        if file_path in indexed_files_with_timestamps:
+                            if file_path.is_absolute():
+                                relative_path = str(
+                                    file_path.relative_to(self.config.codebase_dir)
+                                )
+                            else:
+                                relative_path = str(file_path)
+                            modified_relative_files.append(relative_path)
+                    except ValueError:
+                        continue
 
-            # Get relative paths that are being modified (not newly added)
-            modified_relative_files = []
-            for file_path in files_to_index:
-                try:
-                    # Check if this file was previously indexed (exists in database)
-                    # indexed_files_with_timestamps has Path objects as keys
-                    if file_path in indexed_files_with_timestamps:
-                        if file_path.is_absolute():
-                            relative_path = str(
-                                file_path.relative_to(self.config.codebase_dir)
-                            )
-                        else:
-                            relative_path = str(file_path)
-                        modified_relative_files.append(relative_path)
-                except ValueError:
-                    continue
+                # Delete old chunks for modified files
+                if modified_relative_files:
+                    deleted_count = 0
+                    for relative_file_path in modified_relative_files:
+                        # Bug #1575 Fix 4 investigation: was previously called
+                        # as (filter_dict, collection_name) -- the WRONG order
+                        # against the real FilesystemVectorStore.delete_by_filter
+                        # (self, collection_name, filter_conditions) signature.
+                        # Confirmed live: the swapped call raised TypeError
+                        # inside scroll_points, caught by delete_by_filter's own
+                        # broad except-Exception and silently turned into
+                        # `return False` -- this cleanup had never actually
+                        # deleted anything. Fixed to the correct order.
+                        success = self.vector_store_client.delete_by_filter(
+                            collection_name,
+                            {
+                                "must": [
+                                    {
+                                        "key": "path",
+                                        "match": {"value": relative_file_path},
+                                    }
+                                ]
+                            },
+                        )
+                        if success:
+                            deleted_count += 1
 
-            # Delete old chunks for modified files
-            if modified_relative_files:
-                deleted_count = 0
-                for relative_file_path in modified_relative_files:
-                    success = self.vector_store_client.delete_by_filter(
-                        {
-                            "must": [
-                                {"key": "path", "match": {"value": relative_file_path}}
-                            ]
-                        },
-                        collection_name,
-                    )
-                    if success:
-                        deleted_count += 1
-
-                if progress_callback and deleted_count > 0:
-                    progress_callback(
-                        0,
-                        0,
-                        Path(""),
-                        info=f"🗑️  Cleaned up old content for {deleted_count} modified files",
-                    )
-
-        # BEGIN INDEXING SESSION (O(n) optimization - defer index rebuilding)
-        self.vector_store_client.begin_indexing(collection_name)
+                    if progress_callback and deleted_count > 0:
+                        progress_callback(
+                            0,
+                            0,
+                            Path(""),
+                            info=f"🗑️  Cleaned up old content for {deleted_count} modified files",
+                        )
+        except Exception:
+            self.vector_store_client.end_indexing(collection_name, progress_callback)
+            raise
 
         # Use BranchAwareIndexer for git-aware processing with parallel embeddings (SINGLE PROCESSING PATH)
         try:
@@ -2064,9 +2201,17 @@ class SmartIndexer(HighThroughputProcessor):
                 relative_path = str(file_path)
 
             # Delete all existing chunks for this file
+            # Bug #1575 follow-up: was previously called as
+            # (filter_dict, collection_name) -- the WRONG order against the
+            # real FilesystemVectorStore.delete_by_filter(self,
+            # collection_name, filter_conditions) signature. The swapped
+            # call raised TypeError inside scroll_points, caught by
+            # delete_by_filter's own broad except-Exception and silently
+            # turned into `return False` -- this cleanup had never actually
+            # deleted anything. Fixed to the correct order.
             success = self.vector_store_client.delete_by_filter(
-                {"must": [{"key": "path", "match": {"value": relative_path}}]},
                 collection_name,
+                {"must": [{"key": "path", "match": {"value": relative_path}}]},
             )
             if success:
                 files_cleaned += 1
@@ -2278,6 +2423,7 @@ class SmartIndexer(HighThroughputProcessor):
 
             if absolute_paths:
                 # Use BranchAwareIndexer for git-aware processing with parallel embeddings (SINGLE PROCESSING PATH)
+                collection_name = None
                 try:
                     # Get current branch for indexing
                     current_branch = (
@@ -2290,6 +2436,21 @@ class SmartIndexer(HighThroughputProcessor):
                     )
 
                     # Use high-throughput parallel processing for incremental files (4-8x faster)
+                    # Bug #1575 Part C Defect 1 (dual-review corroborated):
+                    # defer_finalization=True -- this method (not
+                    # process_branch_changes_high_throughput itself) applies
+                    # branch isolation below via
+                    # hide_files_not_in_branch_thread_safe(), which is what
+                    # registers the branch-visibility context
+                    # end_indexing()'s decision engine needs. Finalizing
+                    # INSIDE process_branch_changes_high_throughput's own
+                    # finally block (the pre-fix behavior) closed the
+                    # indexing session BEFORE that context existed,
+                    # orphaning it -- exactly the ghost-vector regression
+                    # this fix closes. The SAME finalization pass that
+                    # closes this session now happens in THIS method's own
+                    # finally block below, AFTER
+                    # hide_files_not_in_branch_thread_safe runs.
                     branch_result = self.process_branch_changes_high_throughput(
                         old_branch="",  # No old branch for process files incrementally
                         new_branch=current_branch,
@@ -2301,6 +2462,7 @@ class SmartIndexer(HighThroughputProcessor):
                         watch_mode=watch_mode,  # Pass through watch_mode
                         fts_manager=fts_manager,  # type: ignore[name-defined]  # noqa: F821 (lazy-loaded FTS manager)
                         skip_branch_isolation=True,  # Branch isolation handled separately below
+                        defer_finalization=True,  # Bug #1575 Part C Defect 1
                     )
 
                     # For incremental file processing, also ensure branch isolation
@@ -2341,6 +2503,24 @@ class SmartIndexer(HighThroughputProcessor):
                         f"Git-aware incremental processing failed and fallbacks are disabled. "
                         f"Original error: {e}"
                     ) from e
+                finally:
+                    # Bug #1575 Part C Defect 1: finalize (end_indexing) the
+                    # SAME indexing session process_branch_changes_high_throughput
+                    # began (defer_finalization=True above), now that
+                    # branch-isolation context has been established by
+                    # hide_files_not_in_branch_thread_safe(). Guarded on
+                    # collection_name being resolved -- if
+                    # resolve_collection_name() itself raised,
+                    # begin_indexing() was never called and there is
+                    # nothing to finalize. Runs on the exception path too,
+                    # matching the pre-fix "always finalize indexes, even
+                    # on exception" contract.
+                    if collection_name is not None:
+                        self._finalize_indexing_session(
+                            collection_name,
+                            progress_callback=None,
+                            watch_mode=watch_mode,
+                        )
 
                 if not quiet:
                     logger.info(
@@ -2373,6 +2553,17 @@ class SmartIndexer(HighThroughputProcessor):
             Dict mapping file paths to their timestamps
         """
         indexed_files_with_timestamps: Dict[Path, float] = {}
+        # Issue #1505: derived in the SAME bulk-scroll pass as the timestamp
+        # snapshot above, so the main reconcile loop can look up each file's
+        # DB-side content id via a plain in-memory dict lookup instead of a
+        # per-file `scroll_points` query (`_get_any_content_id_for_file`).
+        db_content_ids: Dict[str, str] = {}
+        # Codex #1505 review, Finding 1: derived in this SAME bulk-scroll
+        # pass too, so the branch-visibility ("unhide") check in
+        # `_do_reconcile_with_database` can look up each file's
+        # `hidden_branches` via an in-memory dict lookup instead of issuing
+        # a fresh `scroll_points` query PER indexed file.
+        db_hidden_branches: Dict[str, List[str]] = {}
 
         try:
             if progress_callback:
@@ -2415,6 +2606,28 @@ class SmartIndexer(HighThroughputProcessor):
                 ):
                     indexed_files_with_timestamps[file_path] = timestamp
 
+                # Issue #1505: derive this file's DB-side content id once,
+                # first point encountered per relative path wins (mirrors
+                # the pre-existing `limit=1` first-match semantics of the
+                # per-file scroll query this replaces).
+                try:
+                    relative_key = str(file_path.relative_to(self.config.codebase_dir))
+                except ValueError:
+                    relative_key = str(path_from_db)
+                if relative_key not in db_content_ids:
+                    db_content_ids[relative_key] = (
+                        self._derive_db_content_id_from_point(relative_key, point)
+                    )
+
+                # Codex #1505 review, Finding 1: capture hidden_branches for
+                # this path once too, first point wins -- mirrors the
+                # pre-existing `limit=1` first-match semantics of the
+                # per-file scroll query this replaces.
+                if relative_key not in db_hidden_branches:
+                    db_hidden_branches[relative_key] = payload.get(
+                        "hidden_branches", []
+                    )
+
             if progress_callback:
                 progress_callback(
                     0,
@@ -2434,8 +2647,51 @@ class SmartIndexer(HighThroughputProcessor):
                 )
             # Return empty dict - reconcile will treat all files as new
             indexed_files_with_timestamps = {}
+            db_content_ids = {}
+            db_hidden_branches = {}
 
+        self._reconcile_db_content_ids = db_content_ids
+        self._reconcile_hidden_branches = db_hidden_branches
         return indexed_files_with_timestamps
+
+    def _derive_db_content_id_from_point(
+        self, relative_path: str, point: Dict[str, Any]
+    ) -> str:
+        """Derive the DB-side content id for a file from an already-fetched
+        content point's payload, without any additional store query.
+
+        Mirrors `_get_any_content_id_for_file`'s identity scheme: working_dir
+        (mtime/size-identified) points use the mtime/size id; committed
+        points prefer the git blob hash (Issue #1505 -- precise,
+        single-batch-derivable) and fall back to the legacy git commit hash
+        for older data that predates the blob-hash field.
+
+        Codex #1505 review, Finding 3: real point ids are deterministic
+        UUID5 strings (see `git_aware_processor.py` /
+        `high_throughput_processor.py`'s `_create_point_id`) and NEVER
+        contain a "working_dir" substring -- a previous string-match check
+        on the point id was dead code against real persisted data. The
+        authoritative signal is the payload shape itself:
+        `high_throughput_processor.py`'s `_create_vector_point` writes
+        `filesystem_mtime`/`filesystem_size` payload fields ONLY for a
+        non-git-available (mtime/size-identified) file, and never alongside
+        `git_blob_hash`/`git_commit_hash`.
+        """
+        payload = point.get("payload", {})
+
+        if "filesystem_mtime" in payload:
+            return (
+                f"{relative_path}:working_dir:"
+                f"{payload.get('filesystem_mtime', 'unknown')}:"
+                f"{payload.get('filesystem_size', 0)}"
+            )
+
+        blob_hash = payload.get("git_blob_hash")
+        if blob_hash:
+            return f"{relative_path}:blob:{blob_hash}"
+
+        git_commit = payload.get("git_commit_hash", "unknown")
+        return f"{relative_path}:{git_commit}"
 
     def _scroll_all_content_points(self, collection_name: str) -> List[Dict[str, Any]]:
         """Scroll through all content points and return them as a list.
@@ -2629,15 +2885,11 @@ class SmartIndexer(HighThroughputProcessor):
             if not points:
                 return None
 
-            # Return the content ID from database
-            payload = points[0].get("payload", {})
-            git_commit = payload.get("git_commit_hash", "unknown")
-
-            # Check if this is working_dir content
-            if "working_dir" in str(points[0].get("id", "")):
-                return f"{file_path}:working_dir:{payload.get('filesystem_mtime', 'unknown')}:{payload.get('file_size', 0)}"
-            else:
-                return f"{file_path}:{git_commit}"
+            # Issue #1505: reuse the shared derivation helper so this method
+            # stays consistent with the batched-path identity scheme
+            # (blob-hash-first, commit-hash fallback) instead of duplicating
+            # the formatting logic.
+            return self._derive_db_content_id_from_point(file_path, points[0])
 
         except Exception as e:
             logger.warning(f"Failed to get content ID for {file_path}: {e}")
@@ -2796,10 +3048,18 @@ class SmartIndexer(HighThroughputProcessor):
         else:
             # DEADLOCK FIX: Use hard delete without verification
             # Trust synchronous operations - verification was causing 5+ minute hangs
+            # Bug #1575 follow-up: was previously called as
+            # (filter_dict, collection_name) -- the WRONG order against the
+            # real FilesystemVectorStore.delete_by_filter(self,
+            # collection_name, filter_conditions) signature. The swapped
+            # call raised TypeError inside scroll_points, caught by
+            # delete_by_filter's own broad except-Exception and silently
+            # turned into `return False` -- this cleanup had never actually
+            # deleted anything. Fixed to the correct order.
             success = bool(
                 self.vector_store_client.delete_by_filter(
-                    {"must": [{"key": "path", "match": {"value": file_path}}]},
                     collection_name,
+                    {"must": [{"key": "path", "match": {"value": file_path}}]},
                 )
             )
             if success:
@@ -2979,9 +3239,100 @@ class SmartIndexer(HighThroughputProcessor):
                 # Fallback if stat fails
                 return f"{file_path}:working_dir_error"
         else:
-            # File matches committed version - use commit-based ID
+            # File matches committed version - use blob-hash based ID.
+            # Issue #1505: prefer the O(1) batched HEAD blob-hash lookup
+            # (built once per reconcile run via `_get_head_blob_hash_map`)
+            # over the per-file `git log -1 -- path` subprocess call. Only
+            # fall back to the original per-file computation for the rare
+            # file with no entry in the committed tree (e.g. untracked via
+            # `git rm --cached` while left on disk) -- graceful degradation
+            # for just that one file, never a silent skip.
+            head_blob_hashes = getattr(self, "_reconcile_head_blob_hashes", {})
+            blob_hash = head_blob_hashes.get(file_path)
+            if blob_hash is not None:
+                return f"{file_path}:blob:{blob_hash}"
+
+            # Codex #1505 review, Finding 2: count every fallback so the
+            # main reconcile loop can detect and loudly report a
+            # degraded (map-failed/mostly-empty) run. `_reconcile_fallback_count`
+            # is initialized to 0 in `_do_reconcile_with_database` alongside
+            # `_reconcile_head_blob_hashes`; `getattr` is a defensive
+            # fallback for any direct caller of this method in isolation
+            # (e.g. unit tests) that never ran that init.
+            self._reconcile_fallback_count = (
+                getattr(self, "_reconcile_fallback_count", 0) + 1
+            )
             commit = self._get_file_commit(file_path)
             return f"{file_path}:{commit}"
+
+    def _get_head_blob_hash_map(self) -> Dict[str, str]:
+        """Batch-fetch every tracked file's committed blob hash at HEAD.
+
+        Issue #1505: a single `git ls-tree -r HEAD` invocation returns the
+        blob hash for every path in the committed tree, replacing what used
+        to be a `git log -1 -- path` subprocess spawned PER unchanged file.
+        Uses `-z` (NUL-terminated records) so paths containing unusual
+        characters (spaces, newlines) are parsed correctly.
+
+        Returns:
+            Dict mapping relative file path -> 40-character blob hash SHA.
+            Empty dict on any failure (callers gracefully fall back to the
+            original per-file `_get_file_commit` computation for any path
+            missing from the map -- never silently skip a file).
+        """
+        try:
+            result = subprocess.run(
+                ["git", "ls-tree", "-r", "-z", "HEAD"],
+                cwd=self.config.codebase_dir,
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+            if result.returncode != 0:
+                # Codex #1505 review, Finding 2: a silent `{}` here made
+                # every committed file fall back to the per-file `git log`
+                # path with NO indication why -- log LOUDLY (return code +
+                # stderr) so this failure mode is diagnosable instead of
+                # silently reintroducing Issue #1505's O(N) stall.
+                logger.warning(
+                    "_get_head_blob_hash_map: `git ls-tree -r HEAD` failed "
+                    "(return code %s): %s; reconcile will fall back to the "
+                    "slow per-file `git log` content-id lookup for every "
+                    "committed file in this run",
+                    result.returncode,
+                    result.stderr.strip() if result.stderr else "(no stderr)",
+                )
+                return {}
+
+            mapping: Dict[str, str] = {}
+            # Codex #1505 review, Finding 5: count malformed/unparsable
+            # entries instead of silently skipping them.
+            malformed_count = 0
+            for entry in result.stdout.split("\0"):
+                if not entry:
+                    continue
+                try:
+                    meta, path = entry.split("\t", 1)
+                except ValueError:
+                    malformed_count += 1
+                    continue
+                meta_parts = meta.split(" ")
+                if len(meta_parts) < 3:
+                    malformed_count += 1
+                    continue
+                blob_sha = meta_parts[2]
+                mapping[path] = blob_sha
+            if malformed_count:
+                logger.warning(
+                    "_get_head_blob_hash_map: skipped %d malformed `git "
+                    "ls-tree` entr%s while building the HEAD blob-hash map",
+                    malformed_count,
+                    "y" if malformed_count == 1 else "ies",
+                )
+            return mapping
+        except Exception as e:
+            logger.warning(f"Failed to batch-fetch HEAD blob hashes: {e}")
+            return {}
 
     def _get_modified_files_set(self) -> set:
         """Get set of files that differ from HEAD (unstaged + staged) in one batch call.

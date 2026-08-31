@@ -381,7 +381,6 @@ from .scip import (  # noqa: F401, E402
     handle_scip_cleanup_history,
     handle_scip_cleanup_workspaces,
     handle_scip_cleanup_status,
-    _filter_audit_entries as _filter_audit_entries,
     _parse_log_details as _parse_log_details,
     _get_pr_logs_from_service as _get_pr_logs_from_service,
     _get_cleanup_logs_from_service as _get_cleanup_logs_from_service,
@@ -513,40 +512,7 @@ _cicd_register(HANDLER_REGISTRY)
 # Story #679: Semantic Search with Payload Control - Cache Retrieval Handler
 # ============================================================================
 
-# =============================================================================
-# Delegation handlers extracted to delegation.py (Story #496)
-# =============================================================================
-
 from .depmap import _register as _depmap_register  # noqa: E402
-from .delegation import _register as _delegation_register  # noqa: E402
-from .delegation import (  # noqa: F401, E402
-    handle_list_delegation_functions,
-    handle_execute_delegation_function,
-    handle_poll_delegation_job,
-    handle_execute_open_delegation,
-    handle_cs_register_repository,
-    handle_cs_list_repositories,
-    handle_cs_check_health,
-    _get_delegation_function_repo_path,
-    _get_user_groups,
-    _get_delegation_config,
-    _validate_function_parameters,
-    _ensure_repos_registered,
-    _get_cidx_callback_base_url,
-    _load_packages_context,
-    _resolve_guardrails,
-    _get_repo_ready_timeout,
-    _validate_collaborative_params,
-    _validate_competitive_params,
-    _validate_open_delegation_params,
-    _register_open_delegation_callback,
-    _submit_open_delegation_job,
-    _submit_collaborative_delegation_job,
-    _submit_competitive_delegation_job,
-    _lookup_golden_repo_for_cs,
-)
-
-_delegation_register(HANDLER_REGISTRY)
 
 
 # handle_query_audit_logs, handle_enter_maintenance_mode, handle_exit_maintenance_mode
@@ -632,7 +598,6 @@ class _LegacyForwardingModule(types.ModuleType):
                 "code_indexer.server.mcp.handlers.scip",
                 "code_indexer.server.mcp.handlers.guides",
                 "code_indexer.server.mcp.handlers.ssh_keys",
-                "code_indexer.server.mcp.handlers.delegation",
                 "code_indexer.server.mcp.handlers.pull_requests",
                 "code_indexer.server.mcp.handlers.git_read",
                 "code_indexer.server.mcp.handlers.git_write",

@@ -21,6 +21,10 @@ if TYPE_CHECKING:
 
 from code_indexer.server.auth.user_manager import User, UserRole
 from code_indexer.server.services.config_service import get_config_service
+from code_indexer.server.services.query_admission_gate import (
+    check_query_admission,
+    memory_pressure_mcp_payload,
+)
 from code_indexer.xray.sandbox import validate_rust_evaluator
 from code_indexer.xray.search_engine import XRaySearchEngine
 
@@ -37,8 +41,13 @@ def _get_cidx_meta_path() -> Path:
 
     Raises:
         RuntimeError: If golden_repo_manager is not configured in the app module.
+
+    Bug #1709: probes via `_utils._lazy_module_attr_or_none()` instead of a
+    bare `getattr(_utils.app_module, "golden_repo_manager", None)`, which
+    would otherwise permanently construct the process-wide app singleton as
+    a side effect of merely reading it.
     """
-    grm = getattr(_utils.app_module, "golden_repo_manager", None)
+    grm = _utils._lazy_module_attr_or_none("golden_repo_manager")
     if grm is None:
         raise RuntimeError(
             "cidx-meta path not available: golden_repo_manager not configured in app module"
@@ -54,6 +63,19 @@ _TIMEOUT_MAX = 600
 _DUMP_AST_MAX_NODES_DEFAULT = 500
 _DUMP_AST_MAX_NODES_MIN = 1
 _DUMP_AST_MAX_NODES_MAX = 2000
+
+# Story #1494 AC1 (Finding A2, GIL-blocking analysis report, HIGH):
+# tree-sitter 0.21.3 holds the GIL for the ENTIRE parse duration (measured
+# 0.89x thread scaling -- no release at all; 159ms whole-process freeze
+# parsing a 759KB file). handle_xray_dump_ast() parses in-process with no
+# size cap on the source file -- max_nodes bounds only the serialized
+# output, not the parse itself. The Rust xray-cli subprocess (the safe
+# scan path used by handle_xray_search/handle_xray_explore) has no
+# AST-dump capability -- verified by inspecting rust/xray-cli/src/main.rs,
+# which only supports --dynlib/--files/--json evaluator-scan mode -- so
+# per the report's mitigation 2, this caps the in-process parse by file
+# size instead of relocating it to a subprocess.
+_DUMP_AST_MAX_FILE_SIZE_BYTES = 256 * 1024
 
 # Default Rust evaluator used when the caller omits evaluator_code.
 # Returns one finding per file at the root node's start line.
@@ -203,20 +225,54 @@ _AWAIT_SECONDS_WARN_THRESHOLD: float = 30.0
 _AWAIT_POLL_INTERVAL = 0.05
 
 
+def _lazy_singleton_app_or_none() -> Any:
+    """The already-constructed `code_indexer.server.app` singleton, or None.
+
+    Bug #1678: `code_indexer.server.app.app` is a PEP 562 `__getattr__` lazy
+    singleton (Bug #1638) -- a bare `getattr(_utils.app_module, "app", None)`
+    is NOT side-effect-free, since Python invokes `__getattr__` whenever
+    normal attribute lookup fails, and `getattr()` only catches the resulting
+    AttributeError afterward. Calling that from a lifespan startup path
+    (as set_xray_executor/set_xray_cell_limiter do) permanently constructs
+    and caches the process-wide singleton the first time an INDEPENDENTLY
+    created app (e.g. a test fixture's own `create_app()` call) starts its
+    own lifespan -- leaking that fixture's stale services into the singleton
+    for the rest of the process.
+
+    Bug #1709 (code review remediation of commit 45e7fa4e, Blocker 1): this
+    is now a thin alias for `_utils._lazy_module_attr_or_none("app")` -- the
+    generalized form of this exact function, which ALSO recovers via
+    `app_module._lazy_values` after a `unittest.mock.patch.object(app_module,
+    "app", ...)` (no `create=True`) delattr-then-hasattr teardown sequence
+    elsewhere in a test session (see that helper's own docstring for the
+    full rationale). This function's original raw `__dict__.get("app")`
+    read missed that recovery path and permanently returned `None` for the
+    rest of the process once such a teardown had occurred -- kept as a
+    named alias (rather than inlined at each call site) so #1693's existing
+    call sites need zero changes.
+    """
+    return _utils._lazy_module_attr_or_none("app")
+
+
 def set_xray_executor(executor: ThreadPoolExecutor) -> None:
     """Store the dedicated xray ThreadPoolExecutor on app.state (called from lifespan).
 
     Bug #1070: xray compute must run on a dedicated pool isolated from the 5-worker
     BackgroundJobManager pool. lifespan calls this after constructing the executor.
 
-    Raises:
-        RuntimeError: If the app instance is not yet available (startup wiring error).
+    Bug #1678: this mirror-write onto the process-wide singleton is a no-op
+    (not an error) when that singleton hasn't been constructed yet -- e.g. a
+    test fixture that built its own app via `create_app()` directly, whose
+    lifespan already set `app.state.xray_executor` on the real, correct app
+    object immediately before calling this function.
     """
-    app = getattr(_utils.app_module, "app", None)
+    app = _lazy_singleton_app_or_none()
     if app is None:
-        raise RuntimeError(
-            "set_xray_executor called before app is available — startup wiring error"
+        logger.debug(
+            "set_xray_executor: no process-wide app singleton yet -- skipping "
+            "mirror write (expected for an independently-constructed app)"
         )
+        return
     app.state.xray_executor = executor
 
 
@@ -225,8 +281,14 @@ def _get_xray_executor() -> ThreadPoolExecutor:
 
     Raises:
         RuntimeError: If app or xray_executor is not configured.
+
+    Bug #1693: probes via `_lazy_singleton_app_or_none()` (the same
+    side-effect-free helper #1678 introduced for the setters) instead of a
+    bare `getattr(_utils.app_module, "app", None)`, which would otherwise
+    permanently construct the process-wide app singleton as a side effect
+    of merely reading it (see `_lazy_singleton_app_or_none()`'s docstring).
     """
-    app = getattr(_utils.app_module, "app", None)
+    app = _lazy_singleton_app_or_none()
     if app is None:
         raise RuntimeError("xray_executor not available: app is not configured")
     executor = getattr(app.state, "xray_executor", None)
@@ -243,20 +305,32 @@ def set_xray_cell_limiter(limiter: "ResizableLimiter") -> None:
     All xray scan executions (xray_search, xray_explore, xray_search_batch cells)
     compete for the same N slots globally. N is driven by xray_worker_threads config.
 
-    Raises:
-        RuntimeError: If the app instance is not yet available (startup wiring error).
+    Bug #1678: this mirror-write onto the process-wide singleton is a no-op
+    (not an error) when that singleton hasn't been constructed yet -- see
+    `_lazy_singleton_app_or_none()` and `set_xray_executor()` for the full
+    rationale (lifespan already set `app.state.xray_cell_limiter` on the
+    real, correct app object immediately before calling this function).
     """
-    app = getattr(_utils.app_module, "app", None)
+    app = _lazy_singleton_app_or_none()
     if app is None:
-        raise RuntimeError(
-            "set_xray_cell_limiter called before app is available — startup wiring error"
+        logger.debug(
+            "set_xray_cell_limiter: no process-wide app singleton yet -- "
+            "skipping mirror write (expected for an independently-"
+            "constructed app)"
         )
+        return
     app.state.xray_cell_limiter = limiter
 
 
 def _get_xray_cell_limiter() -> "Optional[ResizableLimiter]":
-    """Return the xray cell limiter from app.state, or None if not wired (CLI/test)."""
-    app = getattr(_utils.app_module, "app", None)
+    """Return the xray cell limiter from app.state, or None if not wired (CLI/test).
+
+    Bug #1693: probes via `_lazy_singleton_app_or_none()` instead of a bare
+    `getattr(_utils.app_module, "app", None)`, which would otherwise
+    permanently construct the process-wide app singleton as a side effect
+    of merely reading it.
+    """
+    app = _lazy_singleton_app_or_none()
     if app is None:
         return None
     return getattr(app.state, "xray_cell_limiter", None)
@@ -268,8 +342,14 @@ def _get_job_tracker() -> Any:
     Bug #1070: xray uses register_job() directly (no conflict check) instead of
     submit_job() which calls register_job_if_no_conflict() — that gate serializes
     concurrent xray calls on the same repo, which is wrong for read-only operations.
+
+    Bug #1709: probes via `_utils._lazy_module_attr_or_none()` instead of a
+    direct unconditional `_utils.app_module.job_tracker` attribute access,
+    which would otherwise permanently construct the process-wide app
+    singleton as a side effect of merely reading it (same fix already
+    applied to `_get_background_job_manager()` immediately above).
     """
-    return _utils.app_module.job_tracker
+    return _utils._lazy_module_attr_or_none("job_tracker")
 
 
 def handle_store_xray_pattern(params: Dict[str, Any], user: User) -> Dict[str, Any]:
@@ -339,8 +419,32 @@ def _get_background_job_manager():
     """Return the live BackgroundJobManager from the app module.
 
     Extracted for easy mocking in unit tests.
+
+    Bug #1709: probes via `_utils._lazy_module_attr_or_none()` instead of a
+    direct unconditional `_utils.app_module.background_job_manager`
+    attribute access, which -- for the same PEP-562 `__getattr__` reason as
+    the other lazy attribute probes fixed in this module -- would otherwise
+    permanently construct the process-wide app singleton as a side effect
+    of merely reading it. In real production usage this handler only ever
+    runs after the app singleton is fully constructed, so the returned
+    value is identical; only premature/test access now safely observes
+    `None` instead of forcing construction.
+
+    Returns:
+        The live BackgroundJobManager. Callers in this module dereference
+        the result unconditionally (e.g. `bjm.register_child_process(...)`,
+        `bjm.cancel_job(...)`) without a None-check -- this is safe because
+        a real MCP request handler only ever executes after server startup
+        has genuinely constructed and wired the singleton; a `None` result
+        is reachable only via premature/test access (see above), which no
+        real request path can trigger. A guard here that raised
+        `RuntimeError` (mirroring `_get_xray_executor()`'s shape) was
+        deliberately NOT added: doing so would turn this function into an
+        eager-construction trigger again for the exact test scenarios this
+        fix targets, where `None` is the correct, expected, and harmless
+        transient value.
     """
-    return _utils.app_module.background_job_manager
+    return _utils._lazy_module_attr_or_none("background_job_manager")
 
 
 async def _await_xray_future(
@@ -388,6 +492,10 @@ async def handle_xray_search(params: Dict[str, Any], user: User) -> Dict[str, An
         xray_extras_not_installed — tree-sitter extras not available.
         xray_evaluator_validation_failed — evaluator AST whitelist violation.
     """
+    _admission = check_query_admission()
+    if not _admission.allowed:
+        return _mcp_response(memory_pressure_mcp_payload(_admission))
+
     # ------------------------------------------------------------------
     # 1. Auth + permission check
     # ------------------------------------------------------------------
@@ -613,6 +721,16 @@ async def handle_xray_search(params: Dict[str, Any], user: User) -> Dict[str, An
                     bjm.register_child_process(jid, proc)
 
                 try:
+                    # Bug #1590 AC3: transition to "running" only once
+                    # execution actually starts (after the cell-limiter slot
+                    # is held, before Phase 1 begins) -- so the dashboard can
+                    # distinguish "queued, no worker slot yet" from
+                    # "actively executing". Code-review finding F2: this
+                    # call MUST be inside this try block -- placed before it,
+                    # a raising update_status() (e.g. a SQLite write
+                    # failure) would skip the finally below and leak the
+                    # held xray cell-limiter slot forever.
+                    _get_job_tracker().update_status(jid, status="running")
                     result = _E().run(
                         repo_path=rp,
                         driver_regex=driver_regex,
@@ -688,8 +806,13 @@ async def handle_xray_search(params: Dict[str, Any], user: User) -> Dict[str, An
 
     # Story #1039: bare-to-global alias fallback (read-only handler).
     if isinstance(repo_alias_parsed, str) and not repo_alias_parsed.endswith("-global"):
-        _arm = getattr(_utils.app_module, "activated_repo_manager", None)
-        _grm = getattr(_utils.app_module, "golden_repo_manager", None)
+        # Bug #1709: probes via _utils._lazy_module_attr_or_none() (the
+        # generalized form of Bug #1693's _lazy_singleton_app_or_none())
+        # instead of a bare getattr(_utils.app_module, name, None), which
+        # would otherwise permanently construct the process-wide app
+        # singleton as a side effect of merely reading it.
+        _arm = _utils._lazy_module_attr_or_none("activated_repo_manager")
+        _grm = _utils._lazy_module_attr_or_none("golden_repo_manager")
         if _arm is not None and _grm is not None:
             if not _arm.user_has_activated_repo(user.username, repo_alias_parsed):
                 from ._global_fallback import try_global_fallback
@@ -787,6 +910,15 @@ async def handle_xray_search(params: Dict[str, Any], user: User) -> Dict[str, An
             bjm.register_child_process(job_id, proc)
 
         try:
+            # Bug #1590 AC3: transition to "running" only once execution
+            # actually starts (after the cell-limiter slot is held, before
+            # Phase 1 begins) -- so the dashboard can distinguish "queued,
+            # no worker slot yet" from "actively executing". Code-review
+            # finding F2: this call MUST be inside this try block --
+            # placed before it, a raising update_status() (e.g. a SQLite
+            # write failure) would skip the finally below and leak the
+            # held xray cell-limiter slot forever.
+            job_tracker.update_status(job_id, status="running")
             result = _Engine().run(
                 repo_path=repo_path,
                 driver_regex=driver_regex,
@@ -880,6 +1012,19 @@ def _make_xray_explore_job_fn(  # type: ignore[no-untyped-def]
                 bjm.register_child_process(job_id_holder[0], proc)
 
         try:
+            # Bug #1590 AC3: transition to "running" only once execution
+            # actually starts (after the cell-limiter slot is held, before
+            # Phase 1 begins) -- so the dashboard can distinguish "queued,
+            # no worker slot yet" from "actively executing". job_id_holder
+            # is a single-element list populated by the caller before
+            # job_fn runs (both single-repo and multi-repo/omni explore
+            # paths). Code-review finding F2: this call MUST be inside
+            # this try block -- placed before it, a raising
+            # update_status() (e.g. a SQLite write failure) would skip the
+            # finally below and leak the held xray cell-limiter slot
+            # forever.
+            if job_id_holder:
+                _get_job_tracker().update_status(job_id_holder[0], status="running")
             result = _Engine().run(
                 repo_path=repo_path,
                 driver_regex=driver_regex,
@@ -1058,6 +1203,10 @@ async def handle_xray_explore(params: Dict[str, Any], user: User) -> Dict[str, A
         xray_extras_not_installed      — tree-sitter extras not available.
         xray_evaluator_validation_failed — evaluator AST whitelist violation.
     """
+    _admission = check_query_admission()
+    if not _admission.allowed:
+        return _mcp_response(memory_pressure_mcp_payload(_admission))
+
     # ------------------------------------------------------------------
     # 1. Auth + permission check
     # ------------------------------------------------------------------
@@ -1295,8 +1444,13 @@ async def handle_xray_explore(params: Dict[str, Any], user: User) -> Dict[str, A
 
     # Story #1039: bare-to-global alias fallback (read-only handler).
     if isinstance(repo_alias_parsed, str) and not repo_alias_parsed.endswith("-global"):
-        _arm = getattr(_utils.app_module, "activated_repo_manager", None)
-        _grm = getattr(_utils.app_module, "golden_repo_manager", None)
+        # Bug #1709: probes via _utils._lazy_module_attr_or_none() (the
+        # generalized form of Bug #1693's _lazy_singleton_app_or_none())
+        # instead of a bare getattr(_utils.app_module, name, None), which
+        # would otherwise permanently construct the process-wide app
+        # singleton as a side effect of merely reading it.
+        _arm = _utils._lazy_module_attr_or_none("activated_repo_manager")
+        _grm = _utils._lazy_module_attr_or_none("golden_repo_manager")
         if _arm is not None and _grm is not None:
             if not _arm.user_has_activated_repo(user.username, repo_alias_parsed):
                 from ._global_fallback import try_global_fallback
@@ -1428,8 +1582,13 @@ def handle_xray_dump_ast(params: Dict[str, Any], user: User) -> Dict[str, Any]:
 
     # Story #1039: bare-to-global alias fallback (read-only handler).
     if isinstance(repo_alias, str) and not repo_alias.endswith("-global"):
-        _arm = getattr(_utils.app_module, "activated_repo_manager", None)
-        _grm = getattr(_utils.app_module, "golden_repo_manager", None)
+        # Bug #1709: probes via _utils._lazy_module_attr_or_none() (the
+        # generalized form of Bug #1693's _lazy_singleton_app_or_none())
+        # instead of a bare getattr(_utils.app_module, name, None), which
+        # would otherwise permanently construct the process-wide app
+        # singleton as a side effect of merely reading it.
+        _arm = _utils._lazy_module_attr_or_none("activated_repo_manager")
+        _grm = _utils._lazy_module_attr_or_none("golden_repo_manager")
         if _arm is not None and _grm is not None:
             if not _arm.user_has_activated_repo(user.username, repo_alias):
                 from ._global_fallback import try_global_fallback
@@ -1477,6 +1636,26 @@ def handle_xray_dump_ast(params: Dict[str, Any], user: User) -> Dict[str, Any]:
             {
                 "error": "file_not_found",
                 "message": f"File not found: {file_path_raw!r}",
+            }
+        )
+
+    # 5.5. File-size cap (Story #1494 AC1, Finding A2): refuse BEFORE
+    # touching tree-sitter at all -- os.stat() is a cheap syscall, so a
+    # file above the cap is rejected near-instantly instead of triggering
+    # an unbounded, GIL-held in-process parse (159ms measured on a 759KB
+    # file per the report; scales with file size, with no upper bound).
+    file_size = target.stat().st_size
+    if file_size > _DUMP_AST_MAX_FILE_SIZE_BYTES:
+        return _mcp_response(
+            {
+                "error": "file_too_large",
+                "message": (
+                    f"AST dump refused: file exceeds the in-process parse "
+                    f"size limit of {_DUMP_AST_MAX_FILE_SIZE_BYTES} bytes "
+                    f"(file is {file_size} bytes). Narrow to a smaller "
+                    f"file, or use xray_search/xray_explore (the Rust "
+                    f"subprocess scan path) which has no such limit."
+                ),
             }
         )
 
@@ -1560,7 +1739,13 @@ def handle_cidx_fetch_cached_payload(
             }
         )
 
-    payload_cache = getattr(_utils.app_module.app.state, "payload_cache", None)
+    # Bug #1709: probes via _lazy_singleton_app_or_none() instead of a bare
+    # _utils.app_module.app.state attribute chain, which would otherwise
+    # permanently construct the process-wide app singleton as a side effect
+    # of merely reading it (see _lazy_singleton_app_or_none()'s docstring).
+    payload_cache = getattr(
+        getattr(_lazy_singleton_app_or_none(), "state", None), "payload_cache", None
+    )
     if payload_cache is None:
         return _mcp_response(
             {
@@ -1623,7 +1808,13 @@ def _truncate_xray_result(result: Dict[str, Any]) -> Dict[str, Any]:
     """
     import json
 
-    payload_cache = getattr(_utils.app_module.app.state, "payload_cache", None)
+    # Bug #1709: probes via _lazy_singleton_app_or_none() instead of a bare
+    # _utils.app_module.app.state attribute chain, which would otherwise
+    # permanently construct the process-wide app singleton as a side effect
+    # of merely reading it (see _lazy_singleton_app_or_none()'s docstring).
+    payload_cache = getattr(
+        getattr(_lazy_singleton_app_or_none(), "state", None), "payload_cache", None
+    )
     if payload_cache is None:
         return result
 

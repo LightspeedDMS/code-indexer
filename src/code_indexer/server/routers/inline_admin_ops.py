@@ -145,9 +145,9 @@ def register_admin_ops_routes(
                 format_error_log(
                     "APP-GENERAL-030",
                     f"SCIP workspace cleanup failed: {e}",
-                    exc_info=True,
                     extra={"correlation_id": get_correlation_id()},
-                )
+                ),
+                exc_info=True,
             )
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -183,9 +183,9 @@ def register_admin_ops_routes(
                 format_error_log(
                     "APP-GENERAL-031",
                     f"Failed to get SCIP cleanup status: {e}",
-                    exc_info=True,
                     extra={"correlation_id": get_correlation_id()},
-                )
+                ),
+                exc_info=True,
             )
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -345,8 +345,13 @@ def register_admin_ops_routes(
             HTTPException: If job submission fails
         """
         try:
-            # Validate repo exists before scheduling
-            if alias not in golden_repo_manager.golden_repos:
+            # Validate repo exists before scheduling.
+            # Bug #1481: use get_golden_repo() (authoritative shared-backend
+            # read), NOT the raw per-worker `golden_repos` cache dict -- in a
+            # cluster, a repo registered on another node/worker is invisible
+            # to this worker's cache, causing false 404s (see Bug #1316's
+            # identical fix pattern in add_golden_repo_index above).
+            if golden_repo_manager.get_golden_repo(alias) is None:
                 raise HTTPException(
                     status_code=status.HTTP_404_NOT_FOUND,
                     detail=f"Golden repository '{alias}' not found",
@@ -529,11 +534,19 @@ def register_admin_ops_routes(
                     temporal_options=_temporal_opts,
                     # Pod-pull: reconstruction params for
                     # _provider_temporal_index_job (temporal_options → **kwargs).
+                    # Bug (Round 3, Finding 1): repo_alias MUST be included --
+                    # a different cluster node reconstructing this job purely
+                    # from this dict (lifespan.py's _pp_provider_temporal ->
+                    # _provider_temporal_index_job(**metadata, ...)) reads
+                    # kwargs.get("repo_alias", "") and passes it into
+                    # golden_repo_write_lock_guard, which raises ValueError
+                    # on a blank alias whenever a RefreshScheduler is wired.
                     metadata={
                         "repo_path": repo_path,
                         "provider_name": request.providers[0],
                         "clear": False,
                         "temporal_options": _temporal_opts,
+                        "repo_alias": alias,
                     },
                 )
                 job_ids.append(provider_job_id)
@@ -1156,9 +1169,9 @@ def register_admin_ops_routes(
                 format_error_log(
                     "APP-SEL-001",
                     f"Failed to query search event log: {e}",
-                    exc_info=True,
                     extra={"correlation_id": get_correlation_id()},
-                )
+                ),
+                exc_info=True,
             )
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,

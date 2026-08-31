@@ -31,6 +31,7 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.templating import Jinja2Templates
 
 from code_indexer.server.auth import dependencies
+from code_indexer.server.storage.json_column import parse_json_column
 from .routes import (
     _require_admin_session,
     _create_login_redirect,
@@ -284,6 +285,17 @@ class _NullJobTracker:
     def get_job(self, job_id: str):
         return None
 
+    def fail_job(self, job_id: str, **kwargs) -> None:
+        # Bug #1620: DependencyMapDashboardJobRunner.run's except block
+        # calls self._tracker.fail_job(...) unconditionally. Without this
+        # no-op, a missing method here raises AttributeError, which
+        # replaces (masks) the real dashboard_service failure as the job's
+        # recorded error.
+        pass
+
+    def cancel_job(self, job_id: str) -> None:
+        pass
+
 
 def _submit_dashboard_job(
     cache_backend, bg_job_manager, dashboard_service, job_tracker
@@ -337,10 +349,19 @@ def _submit_dashboard_job(
     )
 
     try:
+        # Bug #1620: submit_job() unconditionally injects job_id as a KEYWORD
+        # whenever the target function's signature declares one (runner.run
+        # does). Passing new_job_id POSITIONALLY here used to collide with
+        # that injection -- both bound to the same parameter, raising
+        # TypeError: run() got multiple values for argument 'job_id' on
+        # every single call. Zero positionals after func is the correct
+        # contract (see temporal_live_dispatch.py's run_temporal_worker
+        # submission for the same pattern); submit_job mints its OWN job_id
+        # regardless of new_job_id, which is why the slot is re-pointed to
+        # the real returned id below.
         submitted_id = bg_job_manager.submit_job(
             _DASHBOARD_OP_TYPE,
             runner.run,
-            new_job_id,
             submitter_username="system",
             is_admin=True,
             repo_alias="__depmap_dashboard__",
@@ -360,7 +381,16 @@ def _submit_dashboard_job(
 
     actual_id = str(submitted_id)
     if actual_id != new_job_id:
-        cache_backend.claim_job_slot(actual_id)
+        # Bug #1620: claim_job_slot() is compare-and-swap-if-empty and
+        # silently no-ops here because the slot is already occupied by our
+        # own placeholder new_job_id -- it cannot re-point an occupied
+        # slot. set_job_slot() is a CAS keyed on our own placeholder: it
+        # re-points the slot to the id BackgroundJobManager actually
+        # tracks, but no-ops (with its own WARNING log) if the slot
+        # already changed hands concurrently (e.g. a zombie-detection
+        # clear, or a completed result already cached) rather than
+        # clobbering that legitimate state.
+        cache_backend.set_job_slot(actual_id, expected_current=new_job_id)
     return actual_id
 
 
@@ -422,32 +452,12 @@ def _render_complete_response(request, session, cached_row: dict) -> HTMLRespons
 
     # Story D Bug #874: pre-parse phase_timings_json str -> dict for each run row
     # so the template iterates a real dict rather than needing a Jinja filter.
+    # Bug #1622: on PostgreSQL this value is already a dict (JSONB) rather
+    # than a JSON string — parse_json_column() handles both.
     for row in job_status.get("run_history", []):
-        raw = row.get("phase_timings_json")
-        if raw is None:
-            # Absent value — no warning; expected for legacy or NULL rows.
-            row["phase_timings_parsed"] = None
-        else:
-            try:
-                parsed = _json.loads(raw)
-            except (ValueError, TypeError) as exc:
-                logger.warning(
-                    "_render_complete_response: malformed phase_timings_json %r: %s",
-                    raw,
-                    exc,
-                )
-                row["phase_timings_parsed"] = None
-            else:
-                if not isinstance(parsed, dict):
-                    logger.warning(
-                        "_render_complete_response: phase_timings_json parsed to %s "
-                        "(expected dict), ignoring: %r",
-                        type(parsed).__name__,
-                        raw,
-                    )
-                    row["phase_timings_parsed"] = None
-                else:
-                    row["phase_timings_parsed"] = parsed
+        row["phase_timings_parsed"] = parse_json_column(
+            row.get("phase_timings_json"), dict, "phase_timings_json"
+        )
 
     return templates.TemplateResponse(
         request,
@@ -1345,13 +1355,18 @@ def _get_known_repo_names() -> Optional[Set[str]]:
         server_dir = config_manager.server_dir
         db_path = str(server_dir / "data" / "cidx_server.db")
 
-        conn = DatabaseConnectionManager.get_instance(db_path).get_connection()
-        # INNER JOIN excludes orphaned global_repos entries (repos removed from
-        # golden_repos_metadata but whose global_repos row was never cleaned up).
-        rows = conn.execute(
-            "SELECT g.repo_name FROM global_repos g"
-            " INNER JOIN golden_repos_metadata m ON g.repo_name = m.alias"
-        ).fetchall()
+        # Bug #1532 follow-up: route the raw connection through
+        # guarded_connection() so close_all() cannot close it mid-read.
+        with DatabaseConnectionManager.get_instance(
+            db_path
+        ).guarded_connection() as conn:
+            # INNER JOIN excludes orphaned global_repos entries (repos removed
+            # from golden_repos_metadata but whose global_repos row was never
+            # cleaned up).
+            rows = conn.execute(
+                "SELECT g.repo_name FROM global_repos g"
+                " INNER JOIN golden_repos_metadata m ON g.repo_name = m.alias"
+            ).fetchall()
         return {row[0] for row in rows}
     except Exception as e:
         logger.warning("Failed to get known repo names for Check 6: %s", e)

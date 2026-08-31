@@ -9,10 +9,7 @@ Story #645 AC7.
 
 import pytest
 from code_indexer.server.services.scip_self_healing import SCIPSelfHealingService
-from code_indexer.server.repositories.background_jobs import (
-    BackgroundJobManager,
-    JobStatus,
-)
+from code_indexer.server.repositories.background_jobs import JobStatus
 
 
 @pytest.mark.slow
@@ -20,10 +17,10 @@ class TestSCIPSelfHealingServiceAC7:
     """Test AC7: Job Completion Logic with Partial Resolution Support."""
 
     @pytest.fixture
-    def job_manager(self, tmp_path):
+    def job_manager(self, tmp_path, background_job_manager_factory):
         """Create a BackgroundJobManager for testing."""
         storage_path = tmp_path / "jobs.json"
-        return BackgroundJobManager(storage_path=str(storage_path))
+        return background_job_manager_factory(storage_path=str(storage_path))
 
     @pytest.fixture
     def service(self, job_manager, tmp_path):

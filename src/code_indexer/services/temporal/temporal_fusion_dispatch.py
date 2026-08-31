@@ -308,17 +308,21 @@ def execute_temporal_query_with_fusion(
         no_embedding_cache_shortcut=no_embedding_cache_shortcut,
         at_commit_ts=at_commit_ts,
         precomputed_query_vector=precomputed_query_vector,
+        true_user_limit=limit,
         display_limit=limit,
         on_shard_complete=on_shard_complete,
         cancel_check=cancel_check,
         maybe_inject_internal_latency=maybe_inject_internal_latency,
     )
+    # Bug #1529: the pin-exhaustion warning is gone with the resolver -- a
+    # shard's path is fixed, so there is no alias swap to lose a race against.
     if not results_by_shard:
         return TemporalSearchResults(
             results=[],
             query=query_text,
             filter_type="time_range" if time_range else "none",
             filter_value=time_range,
+            warning=None,
             shards_total=len(shards),
             shards_attempted=shards_attempted,
             shards_succeeded=shards_succeeded,
@@ -330,6 +334,7 @@ def execute_temporal_query_with_fusion(
         filter_type="time_range" if time_range else "none",
         filter_value=time_range,
         total_found=len(merged),
+        warning=None,
         shards_total=len(shards),
         shards_attempted=shards_attempted,
         shards_succeeded=shards_succeeded,
@@ -432,6 +437,10 @@ def _discover_provider_shards_with_pruning(
     if provider_filter and provider_filter not in resolved_embedder:
         return []
 
+    # Bug #1529: shard discovery is a direct scan of index_path again. The
+    # caller is responsible for having rooted index_path at the correct
+    # location (the fixed .temporal/{alias}/ root in server context), so
+    # there is nothing left for a resolver to redirect.
     shards = get_overlapping_shards(resolved_embedder, index_path, dt_start, dt_end)
     if not shards:
         return []
@@ -466,6 +475,12 @@ def _query_shards_raw(
     no_embedding_cache_shortcut: bool = False,
     at_commit_ts: Optional[int] = None,
     precomputed_query_vector: Optional[List[float]] = None,
+    # Story #1493 AC1: the ORIGINAL user-requested limit, forwarded to every
+    # per-shard _query_single_provider call so TemporalSearchService can
+    # bound the COMBINED (shard x chunk-type) overfetch multiplier against
+    # the real user request rather than the already-shard-multiplied
+    # overfetch_limit above.
+    true_user_limit: Optional[int] = None,
     # Story #1400 Phase 4: display limit for the per-shard cumulative fuse
     # passed to on_shard_complete. None-safe: falls back to overfetch_limit
     # (a safe, if slightly-generous, upper bound) when omitted -- existing
@@ -493,6 +508,10 @@ def _query_shards_raw(
         completed (success OR swallowed exception); shards_succeeded
         excludes exceptions (a normal empty result still counts as success).
 
+        Bug #1529: the former 4th element, pin_exhausted_shards, is gone
+        along with the resolver -- a shard's physical path is fixed, so
+        there is no alias swap for a read to lose a race against.
+
     Raises:
         InterruptedError: if cancel_check() returns True before a shard is
             queried (Story #1400 CRITICAL 2 cooperative cancellation).
@@ -517,11 +536,14 @@ def _query_shards_raw(
             maybe_inject_internal_latency("temporal-shard")
         _t0 = _time.time()
         shard_succeeded_this_attempt = False
+        # Bug #1529: no resolver, no pin. A temporal shard's physical path is
+        # fixed, so the shard is read under its own name.
+        _query_coll_name = shard_name
         try:
             result = _query_single_provider(
                 config,
                 vector_store,
-                shard_name,
+                _query_coll_name,
                 query_text,
                 overfetch_limit,
                 time_range,
@@ -535,13 +557,19 @@ def _query_shards_raw(
                 no_embedding_cache_shortcut=no_embedding_cache_shortcut,
                 at_commit_ts=at_commit_ts,
                 precomputed_query_vector=precomputed_query_vector,
+                true_user_limit=true_user_limit,
             )
             if result.results:
-                results_by_shard[collection_display_name(shard_name)] = result.results
-            record_temporal_success(shard_name, (_time.time() - _t0) * 1000)
+                results_by_shard[collection_display_name(_query_coll_name)] = (
+                    result.results
+                )
+            record_temporal_success(_query_coll_name, (_time.time() - _t0) * 1000)
             shard_succeeded_this_attempt = True
+        # Bug #1529: the TemporalShardPinExhaustedError and
+        # _TemporalFailureAlreadyRecorded clauses are GONE -- both were
+        # reachable only through the retired resolver pin/nested-pin path.
         except Exception as e:
-            record_temporal_failure(shard_name, (_time.time() - _t0) * 1000)
+            record_temporal_failure(_query_coll_name, (_time.time() - _t0) * 1000)
             logger.warning("Temporal shard query failed for %s: %s", shard_name, e)
         finally:
             # Story #1213 Story 3: Conditional eviction via MemoryGovernor.
@@ -556,7 +584,11 @@ def _query_shards_raw(
             #   - gov disabled / RED / pre-first-sample → should_evict returns True → evict
             #   - gov GREEN                        → should_evict returns False → retain
             #
-            # Cache key: str((base_path / shard_name).resolve()) — matches #1171 exactly.
+            # Cache key: Bug #1538 -- composed by the store itself, in
+            # evict_shard_hnsw_entry() below. NEVER hand-built here: search()
+            # stores the entry under a key that also embeds the chunk-layout
+            # token (Story #1458 AC11), so a bare path string silently
+            # matches nothing.
             _hnsw_cache = getattr(vector_store, "hnsw_index_cache", None)
             if _hnsw_cache is not None:
                 _gov = getattr(vector_store, "memory_governor", None)
@@ -575,8 +607,7 @@ def _query_shards_raw(
                         )
                         _should_evict = True  # explicit fail-safe
                 if _should_evict:
-                    _shard_path = Path(vector_store.base_path) / shard_name
-                    _hnsw_cache.invalidate(str(_shard_path.resolve()))
+                    evict_shard_hnsw_entry(vector_store, shard_name)
                     # Only update governor counters/trim/log when governor is healthy;
                     # a broken governor must not prevent the eviction from completing.
                     if _gov is not None and _gov_healthy:
@@ -602,6 +633,62 @@ def _query_shards_raw(
     return results_by_shard, shards_attempted, shards_succeeded
 
 
+#: A temporal shard name addresses one collection directory directly under the
+#: store's base_path, so it must never carry a path separator or a drive
+#: prefix. Checked explicitly rather than via ``Path``: on POSIX,
+#: ``Path("a\\b").name`` is the whole string and ``Path("C:\\x")`` is not
+#: absolute, so ``Path`` alone would accept both.
+_FORBIDDEN_SHARD_NAME_CHARS = frozenset({"/", "\\", ":"})
+_FORBIDDEN_SHARD_NAMES = frozenset({".", ".."})
+
+
+def evict_shard_hnsw_entry(vector_store: Any, shard_name: str) -> None:
+    """Drop ``shard_name``'s HNSW graph from the shared server index cache.
+
+    Bug #1538: the key MUST come from the store's own
+    ``hnsw_cache_key_for_collection()``. ``search()`` stores the entry under a
+    key that embeds Story #1458 AC11's chunk-layout token (and, for an
+    activated repo, its ``activation_id``), so the bare
+    ``base_path/shard_name`` string this eviction used to pass matched
+    nothing -- making every temporal shard eviction a silent no-op and leaving
+    each worker holding a shard graph the MemoryGovernor believed it had
+    dropped. Under Bug #1529's fixed-path layout, that lingering entry is
+    exactly what a post-refresh read can then serve stale from.
+
+    No-op when the store has no shared cache (the CLI/solo path).
+
+    ``vector_store`` is typed ``Any`` for the same reason every other function
+    in this module types it that way: this dispatch layer is deliberately
+    duck-typed over the store, and importing ``FilesystemVectorStore`` here
+    would add a concrete storage-layer dependency to a service module that
+    currently has none.
+
+    Args:
+        vector_store: The store the shard was read through.
+        shard_name: Temporal shard collection name, relative to the store's
+            ``base_path`` -- the same name the read used. Must be a plain
+            single-segment name.
+
+    Raises:
+        ValueError: If ``shard_name`` is empty, is ``.``/``..``, or contains a
+            path separator or drive-prefix character.
+    """
+    if (
+        not shard_name
+        or shard_name in _FORBIDDEN_SHARD_NAMES
+        or any(char in _FORBIDDEN_SHARD_NAME_CHARS for char in shard_name)
+    ):
+        raise ValueError(
+            "shard_name must be a single non-empty path segment without "
+            f"separators, drive prefix or traversal, got {shard_name!r}"
+        )
+    hnsw_cache = getattr(vector_store, "hnsw_index_cache", None)
+    if hnsw_cache is None:
+        return
+    collection_path = Path(vector_store.base_path) / shard_name
+    hnsw_cache.invalidate(vector_store.hnsw_cache_key_for_collection(collection_path))
+
+
 def _query_single_provider(
     config: Any,
     vector_store: Any,
@@ -625,9 +712,13 @@ def _query_single_provider(
     # seam across sequential shards of the SAME embedder). Forwarded verbatim
     # to TemporalSearchService.query_temporal.
     precomputed_query_vector: Optional[List[float]] = None,
+    # Story #1493 AC1: the ORIGINAL user-requested limit, forwarded verbatim
+    # to TemporalSearchService.query_temporal so it can bound the COMBINED
+    # (shard x chunk-type) overfetch multiplier against the real user
+    # request rather than the already-shard-multiplied `limit` above.
+    true_user_limit: Optional[int] = None,
 ) -> Any:
     """Query a single temporal provider directly (no fusion)."""
-    import time as _time
     from .temporal_search_service import TemporalSearchService
     from .temporal_search_service import ALL_TIME_RANGE
 
@@ -647,27 +738,29 @@ def _query_single_provider(
     # pass through as a 1-element list; None/empty -> None.
     path_filter = parse_exclude_patterns(file_path_filter) or None
 
-    _t0 = _time.time()
-    try:
-        results = service.query_temporal(
-            query=query_text,
-            time_range=resolved_range,
-            limit=limit,
-            path_filter=path_filter,
-            language=[language] if language else None,
-            exclude_language=[exclude_language] if exclude_language else None,
-            exclude_path=parse_exclude_patterns(exclude_path) or None,
-            diff_types=diff_types,
-            author=author,
-            chunk_type=chunk_type,
-            no_embedding_cache_shortcut=no_embedding_cache_shortcut,
-            at_commit_ts=at_commit_ts,
-            precomputed_query_vector=precomputed_query_vector,
-        )
-        record_temporal_success(coll_name, (_time.time() - _t0) * 1000)
-    except Exception:
-        record_temporal_failure(coll_name, (_time.time() - _t0) * 1000)
-        raise
+    # Story #1457 HIGH #9 (2026-07-23 code review): record_temporal_success/
+    # record_temporal_failure are NOT called here -- this function's ONE
+    # caller, _query_shards_raw, already times and records both outcomes
+    # at its own outer boundary. Recording here too double-counted every
+    # temporal query result against ProviderHealthMonitor's circuit
+    # breaker. Consolidated to ONE recording boundary; exceptions simply
+    # propagate to the caller unchanged.
+    results = service.query_temporal(
+        query=query_text,
+        time_range=resolved_range,
+        limit=limit,
+        path_filter=path_filter,
+        language=[language] if language else None,
+        exclude_language=[exclude_language] if exclude_language else None,
+        exclude_path=parse_exclude_patterns(exclude_path) or None,
+        diff_types=diff_types,
+        author=author,
+        chunk_type=chunk_type,
+        no_embedding_cache_shortcut=no_embedding_cache_shortcut,
+        at_commit_ts=at_commit_ts,
+        precomputed_query_vector=precomputed_query_vector,
+        true_user_limit=true_user_limit,
+    )
 
     from .temporal_collection_naming import collection_display_name
 

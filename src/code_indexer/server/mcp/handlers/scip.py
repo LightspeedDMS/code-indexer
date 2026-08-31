@@ -7,15 +7,22 @@ PR history, cleanup history, cleanup workspaces, and cleanup status.
 
 from __future__ import annotations
 
-import json
 import logging
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional
 
 from code_indexer.server.auth.user_manager import User, UserRole
 from code_indexer.server.logging_utils import format_error_log
-from code_indexer.server.middleware.correlation import get_correlation_id
+from code_indexer.server.telemetry.correlation_bridge import (
+    get_current_correlation_id as get_correlation_id,
+)
 from code_indexer.server.services.config_service import get_config_service
+from code_indexer.server.storage.json_column import parse_json_column
+from code_indexer.server.services.query_admission_gate import (
+    check_query_admission,
+    memory_pressure_mcp_payload,
+)
 from code_indexer.server.mcp import reranking as _mcp_reranking
+from code_indexer.scip.database.queries import MAX_DEPTH_CAP as _MAX_CALLCHAIN_DEPTH
 
 from . import _utils
 from ._utils import (
@@ -49,6 +56,24 @@ _SCIP_CONTEXT_TIMEOUT_SECONDS = 30
 # Audit log pagination bounds
 _MIN_AUDIT_LIMIT = 1
 _MAX_AUDIT_LIMIT = 1000
+
+# Depth bounds shared by scip_impact, scip_dependents, and
+# scip_dependencies (Bug #1599 / Bug #1602 / Bug #1604). All three now
+# REJECT (success: False) an out-of-range depth instead of clamping,
+# matching scip_callchain's loud-reject contract (Bug #1614 for
+# dependents/dependencies, Bug #1672 for impact).
+_MIN_SCIP_DEPTH = 1
+_MAX_SCIP_DEPTH = 10
+
+# _MAX_CALLCHAIN_DEPTH is imported from queries.py's MAX_DEPTH_CAP,
+# ensuring consistent depth limits (Bug #1603 code review Priority 4 / O1).
+
+# Limit bounds for scip_references (scip depth-clamp remediation family,
+# Bugs #1599/#1602/#1604). Mirrors the REST sibling GET /scip/references
+# route's Query(..., ge=1, le=10000) bound. queries.py/find_references
+# treats limit<=0 as UNLIMITED, a live resource-exhaustion gap otherwise.
+_MIN_SCIP_LIMIT = 1
+_MAX_SCIP_LIMIT = 10000
 
 # Maximum chains returned from scip_callchain
 _MAX_CALL_CHAINS_RETURNED = 100
@@ -92,36 +117,6 @@ def _compute_fetch_limit(requested_limit: int, rerank_query: Optional[str]) -> i
 # ---------------------------------------------------------------------------
 
 
-def _filter_audit_entries(
-    entries: List[Dict[str, Any]],
-    filter_user: Optional[str],
-    action: Optional[str],
-    from_date: Optional[str],
-    to_date: Optional[str],
-    limit: int,
-) -> List[Dict[str, Any]]:
-    """Filter audit log entries by user, action, and date range.
-
-    Used by both handle_scip_pr_history/handle_scip_cleanup_history (this module)
-    and handle_query_audit_logs (currently in _legacy.py, to be extracted to
-    admin.py in a future Story #496 step).
-    """
-    filtered = entries
-    if filter_user:
-        filtered = [
-            e for e in filtered if e.get("user", "").lower() == filter_user.lower()
-        ]
-    if action:
-        filtered = [
-            e for e in filtered if action.lower() in e.get("action", "").lower()
-        ]
-    if from_date:
-        filtered = [e for e in filtered if e.get("timestamp", "") >= from_date]
-    if to_date:
-        filtered = [e for e in filtered if e.get("timestamp", "") <= to_date]
-    return filtered[:limit]
-
-
 def _parse_log_details(row: dict) -> dict:
     """Parse the details JSON field of an audit_logs row into a flat dict.
 
@@ -129,14 +124,27 @@ def _parse_log_details(row: dict) -> dict:
     payload lives inside the ``details`` JSON column.  This helper merges the
     top-level row fields with the decoded details so callers get the same shape
     that the old PasswordChangeAuditLogger flat-file parsing produced.
+
+    ``audit_logs.details`` is TEXT on BOTH SQLite and PostgreSQL (see
+    ``storage/postgres/migrations/sql/002_groups_access_schema.sql`` --
+    it drops the migration-001 JSONB-shaped ``audit_logs`` table and
+    recreates it with a ``details TEXT`` column; ``PostgresAuditLogBackend
+    .log()``/``.log_raw()`` always write a ``json.dumps()`` string or
+    ``None``). This is NOT the same root-cause class as the genuinely
+    live JSONB columns fixed in Bug #1622/#1652/#1655 -- Bug #1654 was
+    filed from a static read of two call sites without checking the
+    actual DDL, and no PostgreSQL JSONB-as-dict value can reach this
+    function in production. ``parse_json_column`` is reused here purely
+    for consistency with ``admin/__init__.py``'s already-tolerant
+    dict-or-str handling of this same column, and as defense-in-depth
+    should the column ever be migrated to JSONB in the future -- not to
+    fix a live data-loss bug. Note: an empty-string ``details`` (``""``)
+    now logs a ``parse_json_column`` WARNING before yielding ``{}``
+    (previously silent); harmless in practice since every write path
+    supplies either a real JSON string or ``None``, never ``""``.
     """
     flat = dict(row)
-    details_str = row.get("details") or "{}"
-    try:
-        inner = json.loads(details_str)
-    except (ValueError, TypeError) as e:
-        logger.warning("Failed to parse audit log details JSON: %s", e)
-        inner = {}
+    inner = parse_json_column(row.get("details"), dict, "audit_logs.details") or {}
     flat.update(inner)
     return flat
 
@@ -144,7 +152,11 @@ def _parse_log_details(row: dict) -> dict:
 def _get_pr_logs_from_service(limit: int, repo_alias: Optional[str] = None) -> list:
     """Fetch PR logs from AuditLogService."""
 
-    svc = getattr(getattr(_utils.app_module, "app", None), "state", None)
+    # Bug #1709: probes via _utils._lazy_module_attr_or_none("app") instead
+    # of a bare getattr(_utils.app_module, "app", None), which would
+    # otherwise permanently construct the process-wide app singleton as a
+    # side effect of merely reading it.
+    svc = getattr(_utils._lazy_module_attr_or_none("app"), "state", None)
     audit_service = getattr(svc, "audit_service", None) if svc else None
     if audit_service is None:
         raise RuntimeError("AuditLogService not available on app.state")
@@ -155,7 +167,11 @@ def _get_pr_logs_from_service(limit: int, repo_alias: Optional[str] = None) -> l
 def _get_cleanup_logs_from_service(limit: int, repo_path: Optional[str] = None) -> list:
     """Fetch cleanup logs from AuditLogService."""
 
-    svc = getattr(getattr(_utils.app_module, "app", None), "state", None)
+    # Bug #1709: probes via _utils._lazy_module_attr_or_none("app") instead
+    # of a bare getattr(_utils.app_module, "app", None), which would
+    # otherwise permanently construct the process-wide app singleton as a
+    # side effect of merely reading it.
+    svc = getattr(_utils._lazy_module_attr_or_none("app"), "state", None)
     audit_service = getattr(svc, "audit_service", None) if svc else None
     if audit_service is None:
         raise RuntimeError("AuditLogService not available on app.state")
@@ -170,8 +186,14 @@ def _get_cleanup_logs_from_service(limit: int, repo_path: Optional[str] = None) 
 
 def _execute_workspace_cleanup() -> Dict[str, Any]:
     """Execute workspace cleanup and return result dict."""
+    # Bug #1709: probes via _utils._lazy_module_attr_or_none("app") instead
+    # of a bare _utils.app_module.app.state attribute chain, which would
+    # otherwise permanently construct the process-wide app singleton as a
+    # side effect of merely reading it.
     workspace_cleanup_service = getattr(
-        _utils.app_module.app.state, "workspace_cleanup_service", None
+        getattr(_utils._lazy_module_attr_or_none("app"), "state", None),
+        "workspace_cleanup_service",
+        None,
     )
     if workspace_cleanup_service:
         result = workspace_cleanup_service.cleanup_workspaces()
@@ -273,8 +295,12 @@ def scip_definition(params: Dict[str, Any], user: User) -> Dict[str, Any]:
         if isinstance(repository_alias, str) and not repository_alias.endswith(
             "-global"
         ):
-            _arm = getattr(_utils.app_module, "activated_repo_manager", None)
-            _grm = getattr(_utils.app_module, "golden_repo_manager", None)
+            # Bug #1709: probes via _utils._lazy_module_attr_or_none() instead
+            # of a bare getattr(_utils.app_module, name, None), which would
+            # otherwise permanently construct the process-wide app singleton
+            # as a side effect of merely reading it.
+            _arm = _utils._lazy_module_attr_or_none("activated_repo_manager")
+            _grm = _utils._lazy_module_attr_or_none("golden_repo_manager")
             if _arm is not None and _grm is not None:
                 if not _arm.user_has_activated_repo(user.username, repository_alias):
                     from ._global_fallback import try_global_fallback
@@ -345,6 +371,14 @@ def scip_references(params: Dict[str, Any], user: User) -> Dict[str, Any]:
     try:
         symbol = params.get("symbol")
         requested_limit = _coerce_int(params.get("limit"), 100)
+
+        # scip depth-clamp remediation family (Bugs #1599/#1602/#1604):
+        # clamp limit to a safe [1, 10000] range, mirroring the REST
+        # sibling GET /scip/references route and the depth-clamp idiom
+        # used elsewhere in this file. Unclamped, find_references treats
+        # limit<=0 as UNLIMITED -- a live resource-exhaustion gap.
+        requested_limit = max(_MIN_SCIP_LIMIT, min(_MAX_SCIP_LIMIT, requested_limit))
+
         exact = params.get("exact", False)
         project = params.get("project")
         repository_alias = params.get("repository_alias")
@@ -361,8 +395,12 @@ def scip_references(params: Dict[str, Any], user: User) -> Dict[str, Any]:
         if isinstance(repository_alias, str) and not repository_alias.endswith(
             "-global"
         ):
-            _arm = getattr(_utils.app_module, "activated_repo_manager", None)
-            _grm = getattr(_utils.app_module, "golden_repo_manager", None)
+            # Bug #1709: probes via _utils._lazy_module_attr_or_none() instead
+            # of a bare getattr(_utils.app_module, name, None), which would
+            # otherwise permanently construct the process-wide app singleton
+            # as a side effect of merely reading it.
+            _arm = _utils._lazy_module_attr_or_none("activated_repo_manager")
+            _grm = _utils._lazy_module_attr_or_none("golden_repo_manager")
             if _arm is not None and _grm is not None:
                 if not _arm.user_has_activated_repo(user.username, repository_alias):
                     from ._global_fallback import try_global_fallback
@@ -459,6 +497,35 @@ def scip_dependencies(params: Dict[str, Any], user: User) -> Dict[str, Any]:
     try:
         symbol = params.get("symbol")
         depth = _coerce_int(params.get("depth"), 1)
+
+        # Bug #1614: reject (not clamp) an out-of-range depth, mirroring
+        # scip_callchain's loud-reject contract for max_depth (Bug #1603)
+        # and the REST/service-layer siblings (GET /scip/dependencies
+        # depth=0/11 -> HTTP 422; POST /api/scip/multi/dependencies
+        # max_depth=0 -> structured error). The prior Bug #1604 fix
+        # silently clamped out-of-range depth to [1, 10] with no error/
+        # warning field, hiding the caller's mistake behind a misleading
+        # success:true.
+        #
+        # Validation order note: this checks depth BEFORE symbol presence
+        # (below), so {"depth": 99} with no symbol returns the depth error
+        # first. This is the opposite order from scip_callchain, which
+        # validates symbol format before max_depth. Both orderings are
+        # legitimate -- this comment exists so a future reader isn't
+        # confused by the inconsistency between sibling handlers.
+        if depth < _MIN_SCIP_DEPTH or depth > _MAX_SCIP_DEPTH:
+            return _mcp_response(
+                {
+                    "success": False,
+                    "error": (
+                        f"depth must be between {_MIN_SCIP_DEPTH} and "
+                        f"{_MAX_SCIP_DEPTH}, got {depth}"
+                    ),
+                    "results": [],
+                    "symbol": symbol,
+                }
+            )
+
         exact = params.get("exact", False)
         project = params.get("project")
         repository_alias = params.get("repository_alias")
@@ -472,8 +539,12 @@ def scip_dependencies(params: Dict[str, Any], user: User) -> Dict[str, Any]:
         if isinstance(repository_alias, str) and not repository_alias.endswith(
             "-global"
         ):
-            _arm = getattr(_utils.app_module, "activated_repo_manager", None)
-            _grm = getattr(_utils.app_module, "golden_repo_manager", None)
+            # Bug #1709: probes via _utils._lazy_module_attr_or_none() instead
+            # of a bare getattr(_utils.app_module, name, None), which would
+            # otherwise permanently construct the process-wide app singleton
+            # as a side effect of merely reading it.
+            _arm = _utils._lazy_module_attr_or_none("activated_repo_manager")
+            _grm = _utils._lazy_module_attr_or_none("golden_repo_manager")
             if _arm is not None and _grm is not None:
                 if not _arm.user_has_activated_repo(user.username, repository_alias):
                     from ._global_fallback import try_global_fallback
@@ -543,6 +614,35 @@ def scip_dependents(params: Dict[str, Any], user: User) -> Dict[str, Any]:
     try:
         symbol = params.get("symbol")
         depth = _coerce_int(params.get("depth"), 1)
+
+        # Bug #1614: reject (not clamp) an out-of-range depth, mirroring
+        # scip_callchain's loud-reject contract for max_depth (Bug #1603)
+        # and the REST/service-layer siblings (GET /scip/dependents
+        # depth=0/11 -> HTTP 422; POST /api/scip/multi/dependents
+        # max_depth=0 -> structured error). The prior Bug #1602 fix
+        # silently clamped out-of-range depth to [1, 10] with no error/
+        # warning field, hiding the caller's mistake behind a misleading
+        # success:true.
+        #
+        # Validation order note: this checks depth BEFORE symbol presence
+        # (below), so {"depth": 99} with no symbol returns the depth error
+        # first. This is the opposite order from scip_callchain, which
+        # validates symbol format before max_depth. Both orderings are
+        # legitimate -- this comment exists so a future reader isn't
+        # confused by the inconsistency between sibling handlers.
+        if depth < _MIN_SCIP_DEPTH or depth > _MAX_SCIP_DEPTH:
+            return _mcp_response(
+                {
+                    "success": False,
+                    "error": (
+                        f"depth must be between {_MIN_SCIP_DEPTH} and "
+                        f"{_MAX_SCIP_DEPTH}, got {depth}"
+                    ),
+                    "results": [],
+                    "symbol": symbol,
+                }
+            )
+
         exact = params.get("exact", False)
         project = params.get("project")
         repository_alias = params.get("repository_alias")
@@ -556,8 +656,12 @@ def scip_dependents(params: Dict[str, Any], user: User) -> Dict[str, Any]:
         if isinstance(repository_alias, str) and not repository_alias.endswith(
             "-global"
         ):
-            _arm = getattr(_utils.app_module, "activated_repo_manager", None)
-            _grm = getattr(_utils.app_module, "golden_repo_manager", None)
+            # Bug #1709: probes via _utils._lazy_module_attr_or_none() instead
+            # of a bare getattr(_utils.app_module, name, None), which would
+            # otherwise permanently construct the process-wide app singleton
+            # as a side effect of merely reading it.
+            _arm = _utils._lazy_module_attr_or_none("activated_repo_manager")
+            _grm = _utils._lazy_module_attr_or_none("golden_repo_manager")
             if _arm is not None and _grm is not None:
                 if not _arm.user_has_activated_repo(user.username, repository_alias):
                     from ._global_fallback import try_global_fallback
@@ -615,17 +719,50 @@ def scip_impact(params: Dict[str, Any], user: User) -> Dict[str, Any]:
     Args:
         params: Dictionary containing:
             - symbol: Symbol name to analyze
-            - depth: Optional traversal depth (default 3, max 10)
+            - depth: Optional traversal depth (default 3). Must be between
+              1 and 10 (inclusive); out-of-range values are rejected.
             - repository_alias: Optional repository name to filter SCIP indexes
         user: Authenticated user (for permission checking)
 
     Returns:
         MCP-compliant response with impact analysis results
     """
+    _admission = check_query_admission()
+    if not _admission.allowed:
+        return _mcp_response(memory_pressure_mcp_payload(_admission))
+
     try:
         symbol = params.get("symbol")
         depth = _coerce_int(params.get("depth"), 3)
         repository_alias = params.get("repository_alias")
+
+        # Bug #1672: reject (not clamp) an out-of-range depth, mirroring
+        # scip_dependencies/scip_dependents above (Bug #1614) and
+        # scip_callchain's loud-reject contract for max_depth (Bug #1603).
+        # The prior Bug #1599 fix silently clamped out-of-range depth to
+        # [1, 10] with no error/warning field, hiding the caller's mistake
+        # behind a misleading success:true -- the exact anti-pattern #1614
+        # already fixed on the two sibling handlers in this file, and #1639
+        # fixed at the CLI/remote-client/engine layers for this same
+        # `impact` operation (deliberately leaving this MCP handler
+        # untouched as a separate, later fix). Consistency across sibling
+        # tools sharing the identical depth parameter semantics outweighs
+        # preserving the historical one-off clamp exception. Response
+        # fields (affected_symbols/affected_files) match this handler's own
+        # existing error contract below, not the siblings' `results` field.
+        if depth < _MIN_SCIP_DEPTH or depth > _MAX_SCIP_DEPTH:
+            return _mcp_response(
+                {
+                    "success": False,
+                    "error": (
+                        f"depth must be between {_MIN_SCIP_DEPTH} and "
+                        f"{_MAX_SCIP_DEPTH}, got {depth}"
+                    ),
+                    "affected_symbols": [],
+                    "affected_files": [],
+                    "symbol": symbol,
+                }
+            )
 
         if not symbol:
             return _mcp_response(
@@ -636,8 +773,12 @@ def scip_impact(params: Dict[str, Any], user: User) -> Dict[str, Any]:
         if isinstance(repository_alias, str) and not repository_alias.endswith(
             "-global"
         ):
-            _arm = getattr(_utils.app_module, "activated_repo_manager", None)
-            _grm = getattr(_utils.app_module, "golden_repo_manager", None)
+            # Bug #1709: probes via _utils._lazy_module_attr_or_none() instead
+            # of a bare getattr(_utils.app_module, name, None), which would
+            # otherwise permanently construct the process-wide app singleton
+            # as a side effect of merely reading it.
+            _arm = _utils._lazy_module_attr_or_none("activated_repo_manager")
+            _grm = _utils._lazy_module_attr_or_none("golden_repo_manager")
             if _arm is not None and _grm is not None:
                 if not _arm.user_has_activated_repo(user.username, repository_alias):
                     from ._global_fallback import try_global_fallback
@@ -689,7 +830,8 @@ def scip_callchain(params: Dict[str, Any], user: User) -> Dict[str, Any]:
         params: Dictionary containing:
             - from_symbol: Starting symbol
             - to_symbol: Target symbol
-            - max_depth: Optional maximum chain length (default 10, max 10)
+            - max_depth: Optional maximum chain length (default 3, max 3;
+              see _MAX_CALLCHAIN_DEPTH -- Bug #1603)
             - repository_alias: Optional repository name to filter SCIP indexes
         user: Authenticated user (for permission checking)
 
@@ -699,7 +841,7 @@ def scip_callchain(params: Dict[str, Any], user: User) -> Dict[str, Any]:
     try:
         from_symbol = params.get("from_symbol")
         to_symbol = params.get("to_symbol")
-        max_depth = params.get("max_depth", 10)
+        max_depth = _coerce_int(params.get("max_depth"), 3)
         repository_alias = params.get("repository_alias")
 
         # Validate symbol formats
@@ -727,18 +869,36 @@ def scip_callchain(params: Dict[str, Any], user: User) -> Dict[str, Any]:
                 }
             )
 
-        # Validate and clamp max_depth to safe range [1, 10]
-        if max_depth < 1:
-            max_depth = 1
-        elif max_depth > 10:
-            max_depth = 10
+        # Reject (not clamp) an out-of-range max_depth -- [1,
+        # _MAX_CALLCHAIN_DEPTH], deliberately narrower than
+        # scip_impact/scip_dependents/scip_dependencies's [1,
+        # _MAX_SCIP_DEPTH]. Bug #1603 code review Priority 2: matches the
+        # REST route's FastAPI Query(le=3) HTTP 422 behavior instead of
+        # silently downgrading with only a server-side WARNING log.
+        if max_depth < _MIN_SCIP_DEPTH or max_depth > _MAX_CALLCHAIN_DEPTH:
+            return _mcp_response(
+                {
+                    "success": False,
+                    "error": (
+                        f"max_depth must be between {_MIN_SCIP_DEPTH} and "
+                        f"{_MAX_CALLCHAIN_DEPTH}, got {max_depth}"
+                    ),
+                    "from_symbol": from_symbol,
+                    "to_symbol": to_symbol,
+                    "chains": [],
+                }
+            )
 
         # Story #1039: bare-to-global alias fallback (read-only handler).
         if isinstance(repository_alias, str) and not repository_alias.endswith(
             "-global"
         ):
-            _arm = getattr(_utils.app_module, "activated_repo_manager", None)
-            _grm = getattr(_utils.app_module, "golden_repo_manager", None)
+            # Bug #1709: probes via _utils._lazy_module_attr_or_none() instead
+            # of a bare getattr(_utils.app_module, name, None), which would
+            # otherwise permanently construct the process-wide app singleton
+            # as a side effect of merely reading it.
+            _arm = _utils._lazy_module_attr_or_none("activated_repo_manager")
+            _grm = _utils._lazy_module_attr_or_none("golden_repo_manager")
             if _arm is not None and _grm is not None:
                 if not _arm.user_has_activated_repo(user.username, repository_alias):
                     from ._global_fallback import try_global_fallback
@@ -756,7 +916,7 @@ def scip_callchain(params: Dict[str, Any], user: User) -> Dict[str, Any]:
 
         # Delegate to SCIPQueryService (Story #40)
         service = _get_scip_query_service()
-        all_chains = service.trace_callchain(
+        all_chains, timeout_errors = service.trace_callchain(
             from_symbol=from_symbol,
             to_symbol=to_symbol,
             max_depth=max_depth,
@@ -764,6 +924,26 @@ def scip_callchain(params: Dict[str, Any], user: User) -> Dict[str, Any]:
             repository_alias=repository_alias,
             username=user.username,
         )
+
+        if timeout_errors:
+            # Bug #1603 code review Priority 1: a timeout must never be
+            # reported as an indistinguishable empty success.
+            logger.warning(
+                f"scip_callchain timeout for {from_symbol!r} -> "
+                f"{to_symbol!r}: {timeout_errors}"
+            )
+            return _mcp_response(
+                {
+                    "success": False,
+                    "error": (
+                        "Query timeout exceeded while tracing call chain: "
+                        f"{timeout_errors[0]}"
+                    ),
+                    "from_symbol": from_symbol,
+                    "to_symbol": to_symbol,
+                    "chains": [],
+                }
+            )
 
         unique_chains = _deduplicate_and_sort_chains(all_chains)
         max_depth_reached = any(
@@ -775,6 +955,17 @@ def scip_callchain(params: Dict[str, Any], user: User) -> Dict[str, Any]:
             from_symbol, to_symbol, len(unique_chains)
         )
 
+        # Bug #1613: this was hardcoded to 0, permanently misleading callers
+        # (a real query with 100 real chains still reported 0 files
+        # searched). find_scip_files() is the SAME lookup trace_callchain()
+        # already performs internally to select which .scip.db files to
+        # search, so this reports the real, honest count.
+        scip_files_searched = len(
+            service.find_scip_files(
+                repository_alias=repository_alias, username=user.username
+            )
+        )
+
         return _mcp_response(
             {
                 "success": True,
@@ -783,8 +974,7 @@ def scip_callchain(params: Dict[str, Any], user: User) -> Dict[str, Any]:
                 "total_chains_found": len(unique_chains),
                 "truncated": truncated,
                 "max_depth_reached": max_depth_reached,
-                # Note: scip_files_searched not available via service API
-                "scip_files_searched": 0,
+                "scip_files_searched": scip_files_searched,
                 "repository_filter": repository_alias if repository_alias else "all",
                 "chains": returned_chains,
                 "diagnostic": diagnostic,
@@ -829,8 +1019,12 @@ def scip_context(params: Dict[str, Any], user: User) -> Dict[str, Any]:
         if isinstance(repository_alias, str) and not repository_alias.endswith(
             "-global"
         ):
-            _arm = getattr(_utils.app_module, "activated_repo_manager", None)
-            _grm = getattr(_utils.app_module, "golden_repo_manager", None)
+            # Bug #1709: probes via _utils._lazy_module_attr_or_none() instead
+            # of a bare getattr(_utils.app_module, name, None), which would
+            # otherwise permanently construct the process-wide app singleton
+            # as a side effect of merely reading it.
+            _arm = _utils._lazy_module_attr_or_none("activated_repo_manager")
+            _grm = _utils._lazy_module_attr_or_none("golden_repo_manager")
             if _arm is not None and _grm is not None:
                 if not _arm.user_has_activated_repo(user.username, repository_alias):
                     from ._global_fallback import try_global_fallback
@@ -1146,8 +1340,14 @@ def handle_scip_cleanup_status(args: Dict[str, Any], user: User) -> Dict[str, An
                 }
             )
 
+        # Bug #1709: probes via _utils._lazy_module_attr_or_none("app")
+        # instead of a bare _utils.app_module.app.state attribute chain,
+        # which would otherwise permanently construct the process-wide app
+        # singleton as a side effect of merely reading it.
         workspace_cleanup_service = getattr(
-            _utils.app_module.app.state, "workspace_cleanup_service", None
+            getattr(_utils._lazy_module_attr_or_none("app"), "state", None),
+            "workspace_cleanup_service",
+            None,
         )
         service_status = (
             workspace_cleanup_service.get_cleanup_status()

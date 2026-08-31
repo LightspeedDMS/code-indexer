@@ -7,7 +7,10 @@ Provides admin web interface routes for CIDX server administration.
 from code_indexer import __version__ as _cidx_version
 from code_indexer.server.middleware.correlation import get_correlation_id
 
+import asyncio
+import functools
 import html
+from concurrent.futures import ThreadPoolExecutor
 import json
 import logging
 import os
@@ -47,12 +50,91 @@ from .auth import (
 )
 from ..services.ci_token_manager import CITokenManager, TokenValidationError
 from ..services.config_service import get_config_service
+from ..utils.bounded_submission_gate import (
+    BoundedSubmissionGate,
+    SubmissionGateOverloadedError,
+)
 from code_indexer import __version__ as cidx_version
 from code_indexer.server.logging_utils import format_error_log, get_log_extra
 from code_indexer.server.auto_update.deployment_executor import RESTART_SIGNAL_PATH
 from code_indexer.server.storage.database_manager import DatabaseConnectionManager
 
 logger = logging.getLogger(__name__)
+
+# Story #1491 AC3: upper bound on how many synchronous git ls-remote branch
+# fetches fetch_discovery_branches may offload to the executor at once. The
+# story requires the introduced concurrency to be BOUNDED -- a large
+# auto-discovery repo list must never fan out into an unbounded burst of git
+# subprocesses.
+_DISCOVERY_BRANCH_FETCH_MAX_CONCURRENCY = 8
+
+# Story #1491 review item 11: that bound must be PROCESS-WIDE, not per-request.
+# It was originally an asyncio.Semaphore constructed inside
+# fetch_discovery_branches, which bounded a single request's fan-out and nothing
+# else: K concurrent admin discovery requests permitted 8 x K simultaneous git
+# subprocesses -- exactly the burst AC3 exists to prevent (measured: two
+# concurrent requests reached 16).
+#
+# A dedicated pool is the limiter rather than a shared counter, for two specific
+# reasons:
+#   * An asyncio.Semaphore binds to the event loop that first awaits it, so a
+#     module-level one is a cross-loop hazard: a second loop in the same process
+#     (tests, or any loop-per-thread work such as the sync-dispatched handlers
+#     this same story introduced) either raises or shares nothing.
+#   * A threading.Semaphore acquired INSIDE the default executor would bound the
+#     git processes but hold default-executor threads hostage while they waited,
+#     starving every other run_in_executor caller in the process.
+# The pool size IS the bound: excess work queues inside this pool (never dropped,
+# never widened), the shared default executor is untouched, and no asyncio
+# primitive is involved. Created lazily so importing this module starts no
+# threads; never shut down, because it lives exactly as long as the process and
+# holds at most _DISCOVERY_BRANCH_FETCH_MAX_CONCURRENCY idle threads.
+_DISCOVERY_BRANCH_FETCH_EXECUTOR: Optional[ThreadPoolExecutor] = None
+_DISCOVERY_BRANCH_FETCH_EXECUTOR_LOCK = threading.Lock()
+
+# Story #1491 dual-review round 4: the pool above bounds how many fetches RUN,
+# but a ThreadPoolExecutor's internal work queue is an unbounded SimpleQueue --
+# so a large repo list (or several concurrent requests) could still hand it an
+# unlimited number of PENDING git tasks, growing memory with no ceiling and no
+# signal. This is the admission budget that closes that: at most this many
+# fetches may be outstanding (submitted and unfinished) process-wide, which caps
+# the pool's queue at OUTSTANDING - MAX_CONCURRENCY entries. Excess callers wait
+# in async space, holding no thread and no queue slot.
+#
+# 2x the worker count: enough queued work that a finishing worker always has its
+# next fetch ready (no throughput loss versus today), while keeping the queue a
+# fixed, small number of pending tasks rather than an unbounded backlog.
+_DISCOVERY_BRANCH_FETCH_MAX_OUTSTANDING = 2 * _DISCOVERY_BRANCH_FETCH_MAX_CONCURRENCY
+
+# ONE shared gate is the entire bound, held module-level for exactly the reason
+# the pool is (review item 11): a gate constructed per request would bound a
+# single request and nothing else.
+_DISCOVERY_BRANCH_FETCH_GATE: Optional[BoundedSubmissionGate] = None
+_DISCOVERY_BRANCH_FETCH_GATE_LOCK = threading.Lock()
+
+
+def _get_discovery_branch_fetch_executor() -> ThreadPoolExecutor:
+    """Return the process-wide bounded pool for synchronous ls-remote fetches."""
+    global _DISCOVERY_BRANCH_FETCH_EXECUTOR
+    with _DISCOVERY_BRANCH_FETCH_EXECUTOR_LOCK:
+        if _DISCOVERY_BRANCH_FETCH_EXECUTOR is None:
+            _DISCOVERY_BRANCH_FETCH_EXECUTOR = ThreadPoolExecutor(
+                max_workers=_DISCOVERY_BRANCH_FETCH_MAX_CONCURRENCY,
+                thread_name_prefix="discovery-branch-fetch",
+            )
+        return _DISCOVERY_BRANCH_FETCH_EXECUTOR
+
+
+def _get_discovery_branch_fetch_gate() -> BoundedSubmissionGate:
+    """Return the process-wide submission budget for ls-remote fetches."""
+    global _DISCOVERY_BRANCH_FETCH_GATE
+    with _DISCOVERY_BRANCH_FETCH_GATE_LOCK:
+        if _DISCOVERY_BRANCH_FETCH_GATE is None:
+            _DISCOVERY_BRANCH_FETCH_GATE = BoundedSubmissionGate(
+                _DISCOVERY_BRANCH_FETCH_MAX_OUTSTANDING
+            )
+        return _DISCOVERY_BRANCH_FETCH_GATE
+
 
 # Self-Monitoring constants (Story #74)
 SCAN_HISTORY_LIMIT = 50
@@ -125,6 +207,15 @@ RESTART_REQUIRED_FIELDS = [
     "machine_metrics_enabled",
     "machine_metrics_interval_seconds",
     "deployment_environment",
+    # telemetry.trace_sample_rate -- Story #1676 AC4: captured once into
+    # the ParentBased(TraceIdRatioBased(...)) sampler at TracerProvider
+    # construction, same lifecycle as its telemetry.* siblings above.
+    "trace_sample_rate",
+    # telemetry.export_logs -- Story #1676 AC3: captured once into the
+    # LoggerProvider + context-aware log bridge handler registration at
+    # TelemetryManager construction, same lifecycle as its telemetry.*
+    # siblings above.
+    "export_logs",
     # langfuse.* TRACING-CREDENTIAL fields only (frozen into an eagerly
     # created client at startup). Pull-sync fields (pull_enabled, pull_host,
     # pull_trace_age_days, pull_max_concurrent_observations, pull_projects)
@@ -295,6 +386,14 @@ _VALID_CONFIG_SECTIONS = (
     "activated_reaper",
     # Story #1397 - HNSW orphan-repair sweep operating-hours window config
     "hnsw_orphan_sweep",
+    # Issue #1530 - Indexing-subprocess activity watchdog configuration
+    "indexing_watchdog",
+    # Story #1458 (Epic #1454) - Fleet migration scheduler configuration
+    "fleet_migration",
+    # Issue #1548 - Legacy temporal shard relocation configuration
+    "temporal_legacy_migration",
+    # Issue #1546 Phase 2 - DB-backed alias lock rollout gate
+    "alias_lock",
     # Issue #1398 - Query & search timeouts configuration
     "search_timeouts",
     # Story #977 - X-Ray precision AST-aware code search configuration
@@ -1389,9 +1488,9 @@ def langfuse_sync_trigger(request: Request):
             format_error_log(
                 "LANGFUSE-SYNC-001",
                 f"Failed to trigger Langfuse sync: {e}",
-                exc_info=True,
                 extra={"correlation_id": get_correlation_id()},
-            )
+            ),
+            exc_info=True,
         )
         # M5: Generic error message (keep detailed logging above)
         return JSONResponse(
@@ -3044,11 +3143,38 @@ def _resolve_alias_metadata(
     return global_alias, globally_queryable, version, last_refresh, index_path
 
 
-def _detect_index_flags(index_path: Optional[str]) -> dict:
+def _golden_repos_dir_from_env() -> Path:
+    """Resolve the golden-repos root from CIDX_SERVER_DATA_DIR.
+
+    Mirrors the SAME `os.environ.get("CIDX_SERVER_DATA_DIR",
+    os.path.expanduser("~/.cidx-server"))` bootstrap-config convention
+    already used at multiple other call sites in this module (e.g.
+    `_get_golden_repos_list`, `_get_single_repo_enriched`) -- extracted
+    here as a single named helper rather than a fourth inline copy, for
+    GitHub Issue #1459 AC4's resolver-aware temporal detection.
+    """
+    server_data_dir = os.environ.get(
+        "CIDX_SERVER_DATA_DIR", os.path.expanduser("~/.cidx-server")
+    )
+    return Path(server_data_dir) / "data" / "golden-repos"
+
+
+def _detect_index_flags(
+    index_path: Optional[str], repo_alias: Optional[str] = None
+) -> dict:
     """
     Return has_semantic/has_fts/has_temporal/has_scip flags via filesystem inspection.
 
     All flags default False when index_path is None or the .code-indexer dir is absent.
+
+    Args:
+        index_path: Golden repo clone (or resolved global index) path.
+        repo_alias: The golden repo's BARE alias. When provided AND the
+            local-clone temporal scan finds nothing, temporal detection
+            additionally routes through the shared TemporalShardResolver-
+            based get_temporal_repo_status() helper (GitHub Issue #1459
+            AC4) so temporal data relocated to Story #1457's sister
+            location is still detected, never a false "not indexed".
     """
     flags = {
         "has_semantic": False,
@@ -3084,6 +3210,20 @@ def _detect_index_flags(index_path: Optional[str]) -> dict:
     )
     if temporal_dir is not None:
         flags["has_temporal"] = True
+    elif repo_alias:
+        # Resolver-aware detection (GitHub Issue #1459 AC4): routes through
+        # the SAME TemporalShardResolver/catalog mechanism the query path
+        # uses, never a parallel sister-root scan.
+        from code_indexer.services.temporal.temporal_status import (
+            get_temporal_repo_status,
+        )
+
+        temporal_status = get_temporal_repo_status(
+            golden_repos_dir=_golden_repos_dir_from_env(),
+            repo_alias=repo_alias,
+            legacy_index_path=index_dir,
+        )
+        flags["has_temporal"] = temporal_status.is_queryable
     scip_dir = (
         index_base / "scip"
     )  # CRITICAL: only .scip.db persists after cidx scip generate
@@ -3186,7 +3326,7 @@ def _get_golden_repos_list(backend_registry=None):
                 index_path = repo.get("clone_path")
             # temporal_status deferred to details partial (_get_single_repo_enriched)
             # to avoid per-alias overhead on initial page load (Finding 3 / AC1).
-            repo.update(_detect_index_flags(index_path))
+            repo.update(_detect_index_flags(index_path, repo_alias=alias))
             cat = category_lookup.get(alias, {})
             repo.update(
                 {
@@ -3454,8 +3594,12 @@ def refresh_golden_repo(
     # Try to refresh the repository
     try:
         manager = _get_golden_repo_manager()
-        # Validate repo exists before scheduling
-        if alias not in manager.golden_repos:
+        # Validate repo exists before scheduling.
+        # Bug #1481: use get_golden_repo() (authoritative shared-backend
+        # read), NOT the raw per-worker `golden_repos` cache dict -- in a
+        # cluster, a repo registered/refreshed on another node/worker is
+        # invisible to this worker's cache, causing false "not found" errors.
+        if manager.get_golden_repo(alias) is None:
             raise Exception(f"Repository '{alias}' not found")
         # Delegate to RefreshScheduler (index-source-first versioned pipeline)
         from code_indexer.server import app as app_module
@@ -3507,8 +3651,12 @@ def force_resync_golden_repo(
     # Try to force re-sync the repository
     try:
         manager = _get_golden_repo_manager()
-        # Validate repo exists before scheduling
-        if alias not in manager.golden_repos:
+        # Validate repo exists before scheduling.
+        # Bug #1481: use get_golden_repo() (authoritative shared-backend
+        # read), NOT the raw per-worker `golden_repos` cache dict -- in a
+        # cluster, a repo registered/refreshed on another node/worker is
+        # invisible to this worker's cache, causing false "not found" errors.
+        if manager.get_golden_repo(alias) is None:
             raise Exception(f"Repository '{alias}' not found")
         # Delegate to RefreshScheduler with force_reset=True
         from code_indexer.server import app as app_module
@@ -3569,8 +3717,15 @@ def toggle_wiki_enabled(
             from ..wiki.wiki_cache import WikiCache
             from ..wiki.wiki_service import WikiService
             from ...global_repos.alias_manager import AliasManager
+            from ..utils.registry_factory import resolve_backend_registry_attr
 
-            cache = WikiCache(manager.db_path)
+            # Bug #1665: resolve the shared PostgreSQL wiki_cache backend in
+            # cluster mode so this hook sees the same store regardless of
+            # which node handles the request.
+            wiki_backend, _ = resolve_backend_registry_attr(
+                "wiki_cache", caller_name="web.routes.toggle_wiki_enabled"
+            )
+            cache = WikiCache(manager.db_path, storage_backend=wiki_backend)
             cache.ensure_tables()
             aliases_dir = str(Path(manager.golden_repos_dir) / "aliases")
             actual_path = AliasManager(aliases_dir).read_alias(f"{alias}-global")
@@ -3735,9 +3890,15 @@ def refresh_wiki_cache(
             status_code=400,
         )
     from ..wiki.wiki_cache import WikiCache
+    from ..utils.registry_factory import resolve_backend_registry_attr
 
     manager = _get_golden_repo_manager()
-    cache = WikiCache(manager.db_path)
+    # Bug #1665: resolve the shared PostgreSQL wiki_cache backend in
+    # cluster mode so this invalidation is visible to every node.
+    wiki_backend, _ = resolve_backend_registry_attr(
+        "wiki_cache", caller_name="web.routes.refresh_wiki_cache"
+    )
+    cache = WikiCache(manager.db_path, storage_backend=wiki_backend)
     cache.invalidate_repo(alias)
     return _create_golden_repos_page_response(
         request, session, success_message="Wiki cache cleared"
@@ -4077,7 +4238,7 @@ def _get_single_repo_enriched(alias: str, backend_registry=None) -> Optional[dic
     if not g_queryable:
         index_path = repo.get("clone_path")
     repo["temporal_status"] = _load_temporal_status(g_alias, alias)
-    repo.update(_detect_index_flags(index_path))
+    repo.update(_detect_index_flags(index_path, repo_alias=alias))
     cat = _build_category_lookup().get(alias, {})
     repo.update(
         {
@@ -4165,18 +4326,33 @@ def golden_repo_details_partial(request: Request, alias: str):
 
 
 def _get_activated_repo_manager():
-    """Get activated repository manager, handling import lazily to avoid circular imports."""
-    from ..repositories.activated_repo_manager import ActivatedRepoManager
-    import os
-    from pathlib import Path
+    """Get activated repository manager from app state.
 
-    # Get data directory from environment or use default
-    # Must match app.py: data_dir = server_data_dir / "data"
-    server_data_dir = os.environ.get(
-        "CIDX_SERVER_DATA_DIR", os.path.expanduser("~/.cidx-server")
-    )
-    data_dir = str(Path(server_data_dir) / "data")
-    return ActivatedRepoManager(data_dir=data_dir)
+    Bug #1670: this previously constructed a brand-new
+    ActivatedRepoManager(data_dir=...) on every call, which is NEVER wired
+    with set_connection_pool() -- so it always fell back to the local
+    per-node JSON-file store regardless of storage_mode. In cluster
+    (postgres) mode, activation/deactivation/wiki-toggle writes go through
+    the properly-wired app.state.activated_repo_manager singleton (its
+    _pool is set post-hoc in lifespan.py), so a fresh, pool-less instance
+    here could never see those rows -- confirmed live: toggle_user_wiki_enabled
+    raised "Repository '...' not found" for a repo GET /api/repos correctly
+    listed as active on the same node.
+
+    Fixed to resolve the SAME shared singleton the working paths use,
+    mirroring this file's own _get_golden_repo_manager() and the
+    (already-correct) _get_activated_repo_manager() in
+    routers/activated_repos.py.
+    """
+    from code_indexer.server import app as app_module
+
+    manager = getattr(app_module.app.state, "activated_repo_manager", None)
+    if manager is None:
+        raise RuntimeError(
+            "activated_repo_manager not initialized. "
+            "Server must set app.state.activated_repo_manager during startup."
+        )
+    return manager
 
 
 def _get_all_activated_repos() -> list:
@@ -4655,9 +4831,16 @@ def toggle_user_wiki_enabled(
         if not enabling:
             try:
                 from ..wiki.wiki_cache import WikiCache
+                from ..utils.registry_factory import resolve_backend_registry_attr
 
                 golden_manager = _get_golden_repo_manager()
-                cache = WikiCache(golden_manager.db_path)
+                # Bug #1665: resolve the shared PostgreSQL wiki_cache
+                # backend in cluster mode so this invalidation is visible
+                # to every node.
+                wiki_backend, _ = resolve_backend_registry_attr(
+                    "wiki_cache", caller_name="web.routes.toggle_user_wiki_enabled"
+                )
+                cache = WikiCache(golden_manager.db_path, storage_backend=wiki_backend)
                 cache.invalidate_user_wiki(username, alias)
             except Exception as cache_exc:
                 logger.warning(
@@ -5379,6 +5562,7 @@ def query_submit(
         # Handle SCIP query mode
         if search_mode == "scip":
             from code_indexer.scip.query.primitives import SCIPQueryEngine
+            from code_indexer.scip.database.queries import QueryTimeoutError
             import glob
 
             # Find the username for this repository
@@ -5477,9 +5661,25 @@ def query_submit(
                                     )
                                 scip_file = Path(scip_files[0])
                                 engine = SCIPQueryEngine(scip_file)
-                                chains = engine.trace_call_chain(
-                                    parts[0], parts[1], max_depth=5
+                                from code_indexer.scip.database.queries import (
+                                    MAX_DEPTH_CAP,
                                 )
+
+                                timeout_errors: List[str] = []
+                                chains = engine.trace_call_chain(
+                                    parts[0],
+                                    parts[1],
+                                    max_depth=MAX_DEPTH_CAP,
+                                    timeout_errors=timeout_errors,
+                                )
+                                if timeout_errors:
+                                    # Bug #1603 code review round 4 Priority
+                                    # 1: a timeout must never be reported as
+                                    # the indistinguishable empty-results
+                                    # success rendered below.
+                                    raise QueryTimeoutError(
+                                        f"Callchain query timed out: {timeout_errors[0]}"
+                                    )
                                 for chain in chains:
                                     query_results.append(
                                         QueryResult(
@@ -5562,6 +5762,15 @@ def query_submit(
                                         "scip_kind": result.kind,
                                     }
                                 )
+                        except QueryTimeoutError as e:
+                            logger.warning(
+                                format_error_log(
+                                    "STORE-GENERAL-051",
+                                    f"SCIP callchain query timed out: {e}",
+                                ),
+                                extra={"correlation_id": get_correlation_id()},
+                            )
+                            error_message = f"Callchain query timed out for repository '{user_alias}': {e}. Try a smaller max-depth or narrower symbols."
                         except FileNotFoundError as e:
                             logger.error(
                                 format_error_log(
@@ -5796,6 +6005,7 @@ def _execute_scip_query(
     Returns tuple of (results_list, error_message).
     """
     from code_indexer.scip.query.primitives import SCIPQueryEngine, QueryResult
+    from code_indexer.scip.database.queries import QueryTimeoutError
     import glob
 
     results: List[Dict[str, Any]] = []
@@ -5857,7 +6067,22 @@ def _execute_scip_query(
                     "Call chain requires two symbols: 'from_symbol to_symbol'"
                 )
             engine = SCIPQueryEngine(Path(scip_files[0]))
-            chains = engine.trace_call_chain(parts[0], parts[1], max_depth=5)
+            from code_indexer.scip.database.queries import MAX_DEPTH_CAP
+
+            timeout_errors: List[str] = []
+            chains = engine.trace_call_chain(
+                parts[0],
+                parts[1],
+                max_depth=MAX_DEPTH_CAP,
+                timeout_errors=timeout_errors,
+            )
+            if timeout_errors:
+                # Bug #1603 code review round 4 Priority 1: a timeout must
+                # never be reported as the indistinguishable empty-results
+                # success rendered below.
+                raise QueryTimeoutError(
+                    f"Callchain query timed out: {timeout_errors[0]}"
+                )
             query_results = [
                 QueryResult(
                     symbol=" -> ".join(c.path),
@@ -5927,6 +6152,17 @@ def _execute_scip_query(
                     "scip_kind": result.kind,
                 }
             )
+    except QueryTimeoutError as e:
+        logger.warning(
+            format_error_log(
+                "STORE-GENERAL-052", f"SCIP callchain query timed out: {e}"
+            ),
+            extra={"correlation_id": get_correlation_id()},
+        )
+        return (
+            results,
+            f"Callchain query timed out for repository '{user_alias}': {e}. Try a smaller max-depth or narrower symbols.",
+        )
     except FileNotFoundError as e:
         logger.error(
             format_error_log(
@@ -6353,6 +6589,13 @@ def _get_current_config() -> dict:
         ActivatedReaperConfig,
         # Story #1397 - HNSW orphan-repair sweep operating-hours window config
         HNSWOrphanRepairSweepConfig,
+        IndexingWatchdogConfig,
+        # Story #1458 (Epic #1454) - Fleet migration scheduler configuration
+        FleetMigrationConfig,
+        # Issue #1548 - Legacy temporal shard relocation configuration
+        TemporalLegacyMigrationConfig,
+        # Issue #1546 Phase 2 - DB-backed alias lock rollout gate
+        AliasLockConfig,
         # Issue #1398 - Query & search timeouts configuration
         SearchTimeoutsConfig,
         # Story #1418 Phase 3 - Embedding & reranker call tracking config
@@ -6392,9 +6635,6 @@ def _get_current_config() -> dict:
     if not langfuse_config:
         # Provide defaults if langfuse config is missing
         langfuse_config = asdict(LangfuseConfig())
-
-    # Get claude_delegation config (Story #721)
-    claude_delegation_config = settings.get("claude_delegation", {})
 
     # Get search_limits, file_content_limits, and golden_repos config (Story #3)
     # Provide defaults if config sections are missing (backward compatibility)
@@ -6536,7 +6776,6 @@ def _get_current_config() -> dict:
         "oidc": oidc_config,
         "telemetry": telemetry_config,
         "langfuse": langfuse_config,
-        "claude_delegation": claude_delegation_config,
         "search_limits": search_limits_config,
         "golden_repos": golden_repos_config,
         # Story #3 - Phase 2: P0/P1 settings
@@ -6585,6 +6824,20 @@ def _get_current_config() -> dict:
         "hnsw_orphan_sweep": settings.get(
             "hnsw_orphan_sweep", asdict(HNSWOrphanRepairSweepConfig())
         ),
+        # Issue #1530: Indexing-subprocess activity watchdog configuration
+        "indexing_watchdog": settings.get(
+            "indexing_watchdog", asdict(IndexingWatchdogConfig())
+        ),
+        # Story #1458 (Epic #1454): Fleet migration scheduler configuration
+        "fleet_migration": settings.get(
+            "fleet_migration", asdict(FleetMigrationConfig())
+        ),
+        # Issue #1548: Legacy temporal shard relocation configuration
+        "temporal_legacy_migration": settings.get(
+            "temporal_legacy_migration", asdict(TemporalLegacyMigrationConfig())
+        ),
+        # Issue #1546 Phase 2: DB-backed alias lock rollout gate
+        "alias_lock": settings.get("alias_lock", asdict(AliasLockConfig())),
         # Issue #1398: Query & search timeouts configuration
         "search_timeouts": settings.get(
             "search_timeouts", asdict(SearchTimeoutsConfig())
@@ -6941,6 +7194,23 @@ def _validate_config_section(section: str, data: dict) -> Optional[str]:
                     return "Machine metrics interval must be at least 1 second"
             except (ValueError, TypeError):
                 return "Machine metrics interval must be a valid number"
+
+        # Story #1676 AC4: validate trace_sample_rate is in [0.0, 1.0].
+        # Rejected, never clamped.
+        _TRACE_SAMPLE_RATE_MIN = 0.0
+        _TRACE_SAMPLE_RATE_MAX = 1.0
+        trace_sample_rate = data.get("trace_sample_rate")
+        if trace_sample_rate is not None:
+            try:
+                trace_sample_rate_float = float(trace_sample_rate)
+                if not (
+                    _TRACE_SAMPLE_RATE_MIN
+                    <= trace_sample_rate_float
+                    <= _TRACE_SAMPLE_RATE_MAX
+                ):
+                    return "Trace sample rate must be between 0.0 and 1.0"
+            except (ValueError, TypeError):
+                return "Trace sample rate must be a valid number"
 
     elif section == "langfuse":
         # Validate Langfuse host URL format
@@ -7477,6 +7747,51 @@ def _validate_config_section(section: str, data: dict) -> Optional[str]:
             except (ValueError, TypeError):
                 return "Batch Size must be a valid number"
 
+    elif section == "indexing_watchdog":
+        # Issue #1530: indexing-subprocess activity watchdog configuration
+        # validation. Bounds are IMPORTED from config_manager.py (never
+        # duplicated as literals) so both layers can never drift apart.
+        from ..utils.config_manager import (
+            INDEXING_WATCHDOG_MAX_STALE_ACTIVITY_TIMEOUT_SECONDS,
+            INDEXING_WATCHDOG_MIN_STALE_ACTIVITY_TIMEOUT_SECONDS,
+        )
+
+        stale_timeout = data.get("stale_activity_timeout_seconds")
+        if stale_timeout is not None:
+            try:
+                val_float = float(stale_timeout)
+                if not (
+                    INDEXING_WATCHDOG_MIN_STALE_ACTIVITY_TIMEOUT_SECONDS
+                    <= val_float
+                    <= INDEXING_WATCHDOG_MAX_STALE_ACTIVITY_TIMEOUT_SECONDS
+                ):
+                    return (
+                        f"Stale Activity Timeout must be between "
+                        f"{INDEXING_WATCHDOG_MIN_STALE_ACTIVITY_TIMEOUT_SECONDS} and "
+                        f"{INDEXING_WATCHDOG_MAX_STALE_ACTIVITY_TIMEOUT_SECONDS} seconds"
+                    )
+            except (ValueError, TypeError):
+                return "Stale Activity Timeout must be a valid number"
+
+    elif section == "fleet_migration":
+        # Story #1458 (Epic #1454), round-6 item #10: fleet migration
+        # scheduler configuration validation -- mirrors the
+        # hnsw_orphan_sweep tick_interval_minutes check exactly.
+        tick_interval_minutes = data.get("tick_interval_minutes")
+        if tick_interval_minutes is not None:
+            try:
+                val_int = int(tick_interval_minutes)
+                if val_int < 1:
+                    return "Tick Interval Minutes must be at least 1"
+            except (ValueError, TypeError):
+                return "Tick Interval Minutes must be a valid number"
+
+    elif section == "temporal_legacy_migration":
+        # Issue #1548: both fields are booleans (Yes/No <select>) -- no
+        # numeric range validation needed, mirroring how fleet_migration's
+        # own boolean fields (enabled, canary_gate_enabled) require none.
+        pass
+
     elif section == "search_timeouts":
         # Issue #1398: Query & search timeouts configuration validation.
         # Ranges mirror config_manager.validate_config's SearchTimeoutsConfig checks.
@@ -7885,8 +8200,15 @@ def _create_config_page_response(
     success_message: Optional[str] = None,
     error_message: Optional[str] = None,
     validation_errors: Optional[dict] = None,
+    status_code: int = 200,
 ) -> HTMLResponse:
-    """Create config page response with all necessary context."""
+    """Create config page response with all necessary context.
+
+    Issue #1554: ``status_code`` defaults to 200 (byte-identical to every
+    pre-existing caller). Callers rendering a REJECTED write must pass the
+    correct 4xx/5xx so the HTTP status code alone -- not just the rendered
+    HTML body -- tells a caller whether the write succeeded.
+    """
     csrf_token = generate_csrf_token()
     config = _get_current_config()
 
@@ -7897,18 +8219,6 @@ def _create_config_page_response(
     # Get token data for masking in template
     github_token_data = token_manager.get_token("github")
     gitlab_token_data = token_manager.get_token("gitlab")
-
-    # Get golden repos for delegation config dropdown (Story #459)
-    golden_repos_list = []
-    try:
-        grm = _get_golden_repo_manager()
-        if grm:
-            repos = grm.list_golden_repos()
-            golden_repos_list = sorted(
-                [r.get("alias", "") for r in repos if r.get("alias")]
-            )
-    except Exception as e:
-        logger.warning("Failed to fetch golden repos for config dropdown: %s", e)
 
     response = templates.TemplateResponse(
         request,
@@ -7927,8 +8237,8 @@ def _create_config_page_response(
             "github_token_data": github_token_data,
             "gitlab_token_data": gitlab_token_data,
             "restart_required_fields": RESTART_REQUIRED_FIELDS,
-            "golden_repos_list": golden_repos_list,
         },
+        status_code=status_code,
     )
 
     set_csrf_cookie(response, csrf_token)
@@ -8653,43 +8963,170 @@ async def fetch_discovery_branches(request: Request):
         # Get token manager to retrieve stored credentials
         token_manager = _get_token_manager()
 
-        # Build requests and fetch branches
-        results = {}  # type: ignore[var-annotated]
+        # Story #1491 AC3 (report Finding B3): fetch_remote_branches is
+        # SYNCHRONOUS -- subprocess.run(["git","ls-remote",...], timeout=30).
+        # Calling it in a plain sequential loop from this async route froze the
+        # whole event loop for N x 30 s when N remotes were unreachable. Each
+        # call is now offloaded to the default executor, with concurrency
+        # BOUNDED by _DISCOVERY_BRANCH_FETCH_MAX_CONCURRENCY so a large repo
+        # list can never fan out into an unbounded burst of git subprocesses.
+        #
+        # Semantics are deliberately unchanged: credential lookups still run
+        # once per repo in the original order, the per-repo response dicts are
+        # built from the same fields, the missing-clone_url entry still keys on
+        # str(repo), results are inserted in the ORIGINAL request order (so
+        # duplicate clone_urls collapse exactly as before), and an unexpected
+        # exception still propagates to the outer handler as a 500. The 30 s
+        # per-remote timeout lives inside fetch_remote_branches and is
+        # untouched.
+        loop = asyncio.get_running_loop()
+        # Review item 11: the bound is PROCESS-WIDE, enforced by the size of the
+        # shared pool below -- not by a per-request limiter, which bounded one
+        # request while K concurrent requests still burst 8 x K git subprocesses.
+        executor = _get_discovery_branch_fetch_executor()
+
+        # Round 4: submission itself is budgeted by the process-wide gate added
+        # alongside the pool. Without it, every planned fetch was handed to the
+        # pool immediately and the surplus piled up in its unbounded internal
+        # queue; now at most _DISCOVERY_BRANCH_FETCH_MAX_OUTSTANDING are ever in
+        # the pool at once and the rest wait here -- suspended coroutines only,
+        # no thread parked and no queue slot held.
+        gate = _get_discovery_branch_fetch_gate()
+
+        async def _fetch_one(
+            clone_url: str, platform: str, credentials: Optional[str]
+        ) -> Dict[str, Any]:
+            try:
+                await gate.acquire()
+            except SubmissionGateOverloadedError as overloaded:
+                # Story #1491 (review round 7): degrade THIS repository, never
+                # the whole request. Letting the overload propagate discarded
+                # the entire result set -- including every repository that had
+                # already succeeded -- and turned an ordinary large-org
+                # discovery into an HTTP 500. The shape here matches the
+                # existing "Missing clone_url" degradation so the client
+                # handles it through the same per-repo error path.
+                logger.warning(
+                    format_error_log(
+                        "STORE-GENERAL-045",
+                        f"Branch discovery shed load for {clone_url}: {overloaded}",
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                )
+                return {
+                    "branches": [],
+                    "default_branch": None,
+                    "error": "Server busy - branch discovery deferred, please retry",
+                }
+            try:
+                result = await loop.run_in_executor(
+                    executor,
+                    functools.partial(
+                        service.fetch_remote_branches,
+                        clone_url=clone_url,
+                        platform=platform,
+                        credentials=credentials,
+                    ),
+                )
+            finally:
+                gate.release()
+            return {
+                "branches": result.branches,
+                "default_branch": result.default_branch,
+                "error": result.error,
+            }
+
+        # Pass 1: resolve response keys + credentials sequentially on the loop
+        # (cheap local token reads). NO task is created in this pass -- that is
+        # deliberate. token_manager.get_token() is a real credential-store read
+        # that can raise; if tasks were created as we went, a failure on repo N
+        # would leave the tasks for repos 0..N-1 running and never awaited
+        # (unretrieved exceptions, git subprocesses outliving the response).
+        # Planning fully first means an exception here escapes with zero tasks
+        # in flight.
+        # Story #1491 (review item 2): CITokenManager.get_token() performs real
+        # SYNCHRONOUS backend access, so calling it from this async route put
+        # blocking I/O straight back onto the event loop -- the exact defect
+        # class this story exists to remove, and it would have negated the
+        # subprocess offload below on any slow credential store. It is now
+        # offloaded to a worker thread. Each distinct platform is resolved
+        # exactly ONCE per request rather than once per repository, so a
+        # 50-repo GitHub discovery does one token read instead of fifty.
+        requested_platforms = {
+            repo.get("platform", "github") for repo in repos if repo.get("clone_url")
+        }
+        credentials_by_platform: Dict[str, Optional[str]] = {}
+        for platform_name in sorted(requested_platforms):
+            if platform_name not in ("github", "gitlab"):
+                # Unknown platform: same as before -- no credentials attached.
+                credentials_by_platform[platform_name] = None
+                continue
+            token_data = await asyncio.to_thread(token_manager.get_token, platform_name)
+            credentials_by_platform[platform_name] = (
+                token_data.token if token_data else None
+            )
+
+        plan: List[Tuple[str, Optional[Tuple[str, str, Optional[str]]]]] = []
         for repo in repos:
             clone_url = repo.get("clone_url")
             platform = repo.get("platform", "github")
 
             if not clone_url:
-                results[str(repo)] = {
+                plan.append((str(repo), None))
+                continue
+
+            credentials = credentials_by_platform.get(platform)
+            plan.append((clone_url, (clone_url, platform, credentials)))
+
+        # The plan is complete, so task creation below can no longer be
+        # interleaved with anything that raises (a credential-store failure
+        # escapes with zero tasks in flight).
+        planned = plan
+
+        # Pass 2: run the fetches in sequential WINDOWS, each at most
+        # _DISCOVERY_BRANCH_FETCH_MAX_CONCURRENCY wide.
+        #
+        # Story #1491 (review round 7): bounding the fan-out HERE, at the
+        # source, is what makes a large discovery safe. Creating one task per
+        # repository up front and letting them all pile up on the submission
+        # gate meant a 100-repo request -- an ordinary large-org discovery --
+        # queued far more waiters than the gate would hold and was rejected
+        # outright, discarding every repository that had already succeeded.
+        # Windowing means this request never has more outstanding acquires
+        # than the gate's own capacity, so it bounds its own memory AND never
+        # provokes rejection on its own behalf. The per-repo degradation in
+        # _fetch_one remains only as a cross-request safety net.
+        #
+        # Within a window, return_exceptions=True guarantees EVERY task is
+        # awaited, so no sibling is orphaned with an unretrieved exception when
+        # one fetch fails. A genuine failure is then re-raised in ORIGINAL
+        # request order, surfacing to the outer handler exactly as before.
+        results: Dict[str, Dict[str, Any]] = {}
+        window: List[Tuple[str, "asyncio.Future"]] = []
+
+        async def _drain_window() -> None:
+            if not window:
+                return
+            await asyncio.gather(*(task for _, task in window), return_exceptions=True)
+            for window_key, task in window:
+                task_error = task.exception()
+                if task_error is not None:
+                    raise task_error
+                results[window_key] = task.result()
+            window.clear()
+
+        for key, fetch_args in planned:
+            if fetch_args is None:
+                results[key] = {
                     "branches": [],
                     "default_branch": None,
                     "error": "Missing clone_url",
                 }
                 continue
-
-            # Retrieve credentials based on platform
-            credentials = None
-            if platform == "gitlab":
-                token_data = token_manager.get_token("gitlab")
-                if token_data:
-                    credentials = token_data.token
-            elif platform == "github":
-                token_data = token_manager.get_token("github")
-                if token_data:
-                    credentials = token_data.token
-
-            # Fetch branches for this repo with credentials
-            result = service.fetch_remote_branches(
-                clone_url=clone_url,
-                platform=platform,
-                credentials=credentials,
-            )
-
-            results[clone_url] = {
-                "branches": result.branches,
-                "default_branch": result.default_branch,
-                "error": result.error,
-            }
+            window.append((key, asyncio.ensure_future(_fetch_one(*fetch_args))))
+            if len(window) >= _DISCOVERY_BRANCH_FETCH_MAX_CONCURRENCY:
+                await _drain_window()
+        await _drain_window()
 
         return JSONResponse(content=results)
 
@@ -8703,9 +9140,9 @@ async def fetch_discovery_branches(request: Request):
             format_error_log(
                 "STORE-GENERAL-044",
                 f"Error fetching discovery branches: {e}",
-                exc_info=True,
                 extra={"correlation_id": get_correlation_id()},
-            )
+            ),
+            exc_info=True,
         )
         return JSONResponse(
             status_code=500,
@@ -8721,149 +9158,6 @@ def config_page(request: Request):
         return _create_login_redirect(request)
 
     return _create_config_page_response(request, session)
-
-
-@web_router.post(
-    "/config/claude_delegation",
-    response_class=HTMLResponse,
-    dependencies=[Depends(dependencies.require_elevation())],
-)
-async def update_claude_delegation_config(
-    request: Request,
-    csrf_token: Optional[str] = Form(None),
-):
-    """Update Claude Delegation configuration with connectivity validation (Story #721)."""
-    from ..services.config_service import get_config_service
-    from ..config.delegation_config import ClaudeDelegationConfig
-
-    session = _require_admin_session(request)
-    if not session:
-        return HTMLResponse(content="", status_code=401)
-
-    if not validate_login_csrf_token(request, csrf_token):
-        return _create_config_page_response(
-            request, session, error_message="Invalid CSRF token"
-        )
-
-    form_data = await request.form()
-    config_service = get_config_service()
-    delegation_manager = config_service.get_delegation_manager()
-
-    # Extract credential, preserving existing if empty
-    credential = form_data.get("claude_server_credential", "")
-    if not credential:
-        existing = delegation_manager.load_config()
-        credential = existing.claude_server_credential if existing else ""
-
-    url = form_data.get("claude_server_url", "").strip()  # type: ignore[union-attr]
-    username = form_data.get("claude_server_username", "").strip()  # type: ignore[union-attr]
-
-    if not url or not username or not credential:
-        return _create_config_page_response(
-            request,
-            session,
-            error_message="URL, username, and credential are required",
-            validation_errors={"claude_delegation": "Missing required fields"},
-        )
-
-    # Validate connectivity before saving
-    cred_type = form_data.get("claude_server_credential_type", "password")
-    skip_ssl = form_data.get("skip_ssl_verify", "false").lower() == "true"  # type: ignore[union-attr]
-    result = delegation_manager.validate_connectivity(
-        url,
-        username,
-        str(credential),
-        cred_type,  # type: ignore[arg-type]
-        skip_ssl_verify=skip_ssl,
-    )
-
-    if not result.success:
-        return _create_config_page_response(
-            request,
-            session,
-            error_message=f"Connection failed: {result.error_message}",
-            validation_errors={"claude_delegation": result.error_message},
-        )
-
-    # Save configuration with encrypted credential
-    from ..config.delegation_config import DEFAULT_FUNCTION_REPO_ALIAS
-
-    cidx_callback_url = form_data.get("cidx_callback_url", "").strip()  # type: ignore[union-attr]  # Story #720
-    skip_ssl_verify = form_data.get("skip_ssl_verify", "false").lower() == "true"  # type: ignore[union-attr]
-    guardrails_enabled = (
-        form_data.get("guardrails_enabled", "true").lower() == "true"  # type: ignore[union-attr]
-    )  # Story #457
-    delegation_guardrails_repo = form_data.get(  # type: ignore[union-attr]
-        "delegation_guardrails_repo", ""
-    ).strip()  # Story #457
-    delegation_default_engine = form_data.get(  # type: ignore[union-attr]
-        "delegation_default_engine", "claude-code"
-    ).strip()  # Story #459
-    delegation_default_mode = form_data.get(  # type: ignore[union-attr]
-        "delegation_default_mode", "single"
-    ).strip()  # Story #459
-
-    # Validate guardrails repo exists in golden repos (Story #459)
-    if delegation_guardrails_repo:
-        try:
-            grm = _get_golden_repo_manager()
-            if grm:
-                grm.get_actual_repo_path(delegation_guardrails_repo)
-        except Exception:
-            return _create_config_page_response(
-                request,
-                session,
-                error_message=f"Guardrails repository '{delegation_guardrails_repo}' not found in golden repos. Please select a valid repository or leave empty.",
-                validation_errors={
-                    "claude_delegation": f"Invalid guardrails repo: {delegation_guardrails_repo}"
-                },
-            )
-
-    # Validate engine and mode values (Story #459)
-    VALID_ENGINES = {"claude-code", "codex", "gemini", "opencode", "q"}
-    VALID_MODES = {"single", "collaborative", "competitive"}
-
-    if delegation_default_engine not in VALID_ENGINES:
-        return _create_config_page_response(
-            request,
-            session,
-            error_message=f"Invalid engine '{delegation_default_engine}'. Must be one of: {', '.join(sorted(VALID_ENGINES))}",
-            validation_errors={
-                "claude_delegation": f"Invalid engine: {delegation_default_engine}"
-            },
-        )
-
-    if delegation_default_mode not in VALID_MODES:
-        return _create_config_page_response(
-            request,
-            session,
-            error_message=f"Invalid mode '{delegation_default_mode}'. Must be one of: {', '.join(sorted(VALID_MODES))}",
-            validation_errors={
-                "claude_delegation": f"Invalid mode: {delegation_default_mode}"
-            },
-        )
-
-    config = ClaudeDelegationConfig(
-        function_repo_alias=form_data.get("function_repo_alias", "").strip()  # type: ignore[union-attr]
-        or DEFAULT_FUNCTION_REPO_ALIAS,
-        claude_server_url=url,
-        claude_server_username=username,
-        claude_server_credential_type=cred_type,  # type: ignore[arg-type]
-        claude_server_credential=credential,  # type: ignore[arg-type]
-        cidx_callback_url=cidx_callback_url,
-        skip_ssl_verify=skip_ssl_verify,
-        guardrails_enabled=guardrails_enabled,
-        delegation_guardrails_repo=delegation_guardrails_repo,
-        delegation_default_engine=delegation_default_engine,
-        delegation_default_mode=delegation_default_mode,
-    )
-    delegation_manager.save_config(config)
-
-    return _create_config_page_response(
-        request,
-        session,
-        success_message="Claude Delegation configuration saved and verified",
-    )
 
 
 # NOTE: This specific route MUST come BEFORE /config/{section} to avoid being
@@ -8887,7 +9181,10 @@ def reset_config(
     # Validate CSRF token
     if not validate_login_csrf_token(request, csrf_token):
         return _create_config_page_response(
-            request, session, error_message="Invalid CSRF token"
+            request,
+            session,
+            error_message="Invalid CSRF token",
+            status_code=status.HTTP_403_FORBIDDEN,
         )
 
     # Reset to defaults using ConfigService
@@ -8912,6 +9209,7 @@ def reset_config(
             request,
             session,
             error_message=f"Failed to reset configuration: {str(e)}",
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
         )
 
 
@@ -8935,7 +9233,10 @@ async def update_langfuse_pull_config(
 
     if not validate_login_csrf_token(request, csrf_token):
         return _create_config_page_response(
-            request, session, error_message="Invalid CSRF token"
+            request,
+            session,
+            error_message="Invalid CSRF token",
+            status_code=status.HTTP_403_FORBIDDEN,
         )
 
     form_data = await request.form()
@@ -8989,6 +9290,7 @@ async def update_langfuse_pull_config(
             session,
             error_message=f"Failed to save configuration: {str(e)}",
             validation_errors={"langfuse_pull": str(e)},
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
         )
 
 
@@ -9020,7 +9322,10 @@ async def update_cidx_meta_backup_config(
 
     if not validate_login_csrf_token(request, csrf_token):
         return _create_config_page_response(
-            request, session, error_message="Invalid CSRF token"
+            request,
+            session,
+            error_message="Invalid CSRF token",
+            status_code=status.HTTP_403_FORBIDDEN,
         )
 
     form_data = await request.form()
@@ -9042,6 +9347,7 @@ async def update_cidx_meta_backup_config(
                 validation_errors={
                     "cidx_meta_backup": f"No SSH key configured for {hostname}"
                 },
+                status_code=status.HTTP_400_BAD_REQUEST,
             )
 
     try:
@@ -9066,6 +9372,7 @@ async def update_cidx_meta_backup_config(
             session,
             error_message=f"Failed to save configuration: {str(e)}",
             validation_errors={"cidx_meta_backup": str(e)},
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
         )
 
 
@@ -9155,13 +9462,19 @@ async def update_config_section(
     # Validate CSRF token
     if not validate_login_csrf_token(request, csrf_token):
         return _create_config_page_response(
-            request, session, error_message="Invalid CSRF token"
+            request,
+            session,
+            error_message="Invalid CSRF token",
+            status_code=status.HTTP_403_FORBIDDEN,
         )
 
     # Validate section
     if section not in _VALID_CONFIG_SECTIONS:
         return _create_config_page_response(
-            request, session, error_message=f"Invalid section: {section}"
+            request,
+            session,
+            error_message=f"Invalid section: {section}",
+            status_code=status.HTTP_400_BAD_REQUEST,
         )
 
     # Get form data
@@ -9176,6 +9489,7 @@ async def update_config_section(
             session,
             error_message=error,
             validation_errors={section: error},
+            status_code=status.HTTP_400_BAD_REQUEST,
         )
 
     # Save configuration using ConfigService
@@ -9206,6 +9520,7 @@ async def update_config_section(
                         "Missing required field: elevation_enforcement_enabled, "
                         "elevation_idle_timeout_seconds, or elevation_max_age_seconds"
                     ),
+                    status_code=status.HTTP_400_BAD_REQUEST,
                 )
 
             try:
@@ -9213,7 +9528,10 @@ async def update_config_section(
                 _max_age = int(str(_raw_max_age))
             except (ValueError, TypeError) as _e:
                 return _create_config_page_response(
-                    request, session, error_message=f"Invalid numeric value: {_e}"
+                    request,
+                    session,
+                    error_message=f"Invalid numeric value: {_e}",
+                    status_code=status.HTTP_400_BAD_REQUEST,
                 )
 
             _enabled = str(_raw_enabled).lower() in _TOTP_TRUTHY_SET
@@ -9260,6 +9578,7 @@ async def update_config_section(
                         "HAProxy backend and firewall port-lock warning. "
                         "Please confirm the change via the confirmation dialog."
                     ),
+                    status_code=status.HTTP_400_BAD_REQUEST,
                 )
 
         # Strip the confirm flag from data before passing to update_setting
@@ -9309,15 +9628,16 @@ async def update_config_section(
                     format_error_log(
                         "STORE-GENERAL-047",
                         f"Failed to reload OIDC configuration: {e}",
-                        exc_info=True,
                         extra={"correlation_id": get_correlation_id()},
-                    )
+                    ),
+                    exc_info=True,
                 )
                 config_service.load_config()  # Reload from file to undo in-memory changes
                 return _create_config_page_response(
                     request,
                     session,
                     error_message=f"Invalid OIDC configuration: {str(e)}. Changes not saved.",
+                    status_code=status.HTTP_400_BAD_REQUEST,
                 )
             config_service.save_config(config)
         else:
@@ -9338,6 +9658,7 @@ async def update_config_section(
             request,
             session,
             error_message=f"Failed to save configuration: {str(e)}",
+            status_code=status.HTTP_400_BAD_REQUEST,
         )
     except Exception as e:
         logger.error(
@@ -9350,6 +9671,7 @@ async def update_config_section(
             request,
             session,
             error_message=f"Failed to save configuration: {str(e)}",
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
         )
 
 
@@ -9426,13 +9748,19 @@ def save_api_key(
     # Validate CSRF token
     if not validate_login_csrf_token(request, csrf_token):
         return _create_config_page_response(
-            request, session, error_message="Invalid CSRF token"
+            request,
+            session,
+            error_message="Invalid CSRF token",
+            status_code=status.HTTP_403_FORBIDDEN,
         )
 
     # Validate platform
     if platform not in ["github", "gitlab"]:
         return _create_config_page_response(
-            request, session, error_message=f"Invalid platform: {platform}"
+            request,
+            session,
+            error_message=f"Invalid platform: {platform}",
+            status_code=status.HTTP_400_BAD_REQUEST,
         )
 
     # Save token using CITokenManager - use same server_dir as config service
@@ -9454,6 +9782,7 @@ def save_api_key(
             session,
             error_message=f"Invalid token format: {str(e)}",
             validation_errors={"api_keys": str(e)},
+            status_code=status.HTTP_400_BAD_REQUEST,
         )
     except Exception as e:
         logger.error(
@@ -9466,6 +9795,7 @@ def save_api_key(
             request,
             session,
             error_message=f"Failed to save API key: {str(e)}",
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
         )
 
 
@@ -10458,7 +10788,23 @@ def delete_ssh_key(
 
     try:
         manager = _get_ssh_key_manager()
-        manager.delete_key(key_name)
+
+        # Bug #1521: delete_key() returns False when the Bug #1519 provenance
+        # guard refuses to remove a same-named file this server never proved it
+        # wrote. That return value used to be discarded, so a refused deletion
+        # was rendered as a success -- a silent lie about a safety-critical
+        # operation.
+        if not manager.delete_key(key_name):
+            return _create_ssh_keys_page_response(
+                request,
+                session,
+                error_message=(
+                    f"Refused to delete '{key_name}': an untracked file of that "
+                    f"name exists in the SSH directory and this server has no "
+                    f"record of creating it. Remove it manually if it is "
+                    f"genuinely unwanted."
+                ),
+            )
 
         return _create_ssh_keys_page_response(
             request,
@@ -10560,50 +10906,28 @@ def logs_page(
     # Generate CSRF token for forms
     csrf_token = generate_csrf_token()
 
-    # Story #501 AC4: use LogsBackend when available (cluster/postgres mode)
+    # Bug #1553: LogAggregatorService is the ONE place that decides whether
+    # reads go to the cross-node backend or the local file (via the
+    # is_cross_node_backend capability check) -- replaces the duplicated
+    # inline branch + fragile "Postgres" in type(x).__name__ string match.
     logs_backend = getattr(request.app.state, "logs_backend", None)
-    # is_cluster_mode is True when the backend is PostgreSQL (node_id column visible)
-    is_cluster_mode = (
-        logs_backend is not None and "Postgres" in type(logs_backend).__name__
+    log_db_path = request.app.state.log_db_path
+    from ..services.log_aggregator_service import LogAggregatorService
+
+    service = LogAggregatorService(log_db_path, logs_backend=logs_backend)
+    levels = [level] if level else None
+    result = service.query(
+        page=page,
+        page_size=50,
+        sort_order="desc",
+        search=search,
+        levels=levels,
+        source=logger or None,
+        node_id=node_id or None,
     )
-
-    if logs_backend is not None and is_cluster_mode:
-        # Cluster mode: use LogsBackend.query_logs() for cross-node aggregation
-        import math
-
-        page_size = 50
-        offset = (page - 1) * page_size
-        log_list, total = logs_backend.query_logs(
-            level=level or None,
-            source=logger or None,
-            node_id=node_id or None,
-            limit=page_size,
-            offset=offset,
-        )
-        total_pages = math.ceil(total / page_size) if total > 0 else 0
-        logs = log_list
-        pagination = {
-            "page": page,
-            "page_size": page_size,
-            "total": total,
-            "total_pages": total_pages,
-        }
-    else:
-        # Standalone mode: use LogAggregatorService (SQLite, supports text search)
-        log_db_path = request.app.state.log_db_path
-        from ..services.log_aggregator_service import LogAggregatorService
-
-        service = LogAggregatorService(log_db_path)
-        levels = [level] if level else None
-        result = service.query(
-            page=page,
-            page_size=50,
-            sort_order="desc",
-            search=search,
-            levels=levels,
-        )
-        logs = result["logs"]
-        pagination = result["pagination"]
+    logs = result["logs"]
+    pagination = result["pagination"]
+    is_cluster_mode = service.is_cluster_mode
 
     # Render template
     response = templates.TemplateResponse(
@@ -10660,50 +10984,28 @@ def logs_list_partial(
     if not csrf_token:
         csrf_token = generate_csrf_token()
 
-    # Story #501 AC4: use LogsBackend when available (cluster/postgres mode)
+    # Bug #1553: LogAggregatorService is the ONE place that decides whether
+    # reads go to the cross-node backend or the local file (via the
+    # is_cross_node_backend capability check) -- replaces the duplicated
+    # inline branch + fragile "Postgres" in type(x).__name__ string match.
     logs_backend = getattr(request.app.state, "logs_backend", None)
-    # is_cluster_mode is True when the backend is PostgreSQL (node_id column visible)
-    is_cluster_mode = (
-        logs_backend is not None and "Postgres" in type(logs_backend).__name__
+    log_db_path = request.app.state.log_db_path
+    from ..services.log_aggregator_service import LogAggregatorService
+
+    service = LogAggregatorService(log_db_path, logs_backend=logs_backend)
+    levels = [level] if level else None
+    result = service.query(
+        page=page,
+        page_size=50,
+        sort_order="desc",
+        search=search,
+        levels=levels,
+        source=logger or None,
+        node_id=node_id or None,
     )
-
-    if logs_backend is not None and is_cluster_mode:
-        # Cluster mode: use LogsBackend.query_logs() for cross-node aggregation
-        import math
-
-        page_size = 50
-        offset = (page - 1) * page_size
-        log_list, total = logs_backend.query_logs(
-            level=level or None,
-            source=logger or None,
-            node_id=node_id or None,
-            limit=page_size,
-            offset=offset,
-        )
-        total_pages = math.ceil(total / page_size) if total > 0 else 0
-        logs = log_list
-        pagination = {
-            "page": page,
-            "page_size": page_size,
-            "total": total,
-            "total_pages": total_pages,
-        }
-    else:
-        # Standalone mode: use LogAggregatorService (SQLite, supports text search)
-        log_db_path = request.app.state.log_db_path
-        from ..services.log_aggregator_service import LogAggregatorService
-
-        service = LogAggregatorService(log_db_path)
-        levels = [level] if level else None
-        result = service.query(
-            page=page,
-            page_size=50,
-            sort_order="desc",
-            search=search,
-            levels=levels,
-        )
-        logs = result["logs"]
-        pagination = result["pagination"]
+    logs = result["logs"]
+    pagination = result["pagination"]
+    is_cluster_mode = service.is_cluster_mode
 
     # Render partial template
     response = templates.TemplateResponse(
@@ -10756,13 +11058,15 @@ def export_logs_web(
             status_code=400, detail="Invalid format. Must be 'json' or 'csv'"
         )
 
-    # Get log database path from app state
+    # Get log database path from app state. Bug #1553: pass logs_backend so
+    # cluster-mode exports follow the same store the writer thread uses --
+    # this endpoint previously had NO backend awareness at all.
     log_db_path = request.app.state.log_db_path
+    logs_backend = getattr(request.app.state, "logs_backend", None)
 
-    # Create LogAggregatorService instance
     from ..services.log_aggregator_service import LogAggregatorService
 
-    service = LogAggregatorService(log_db_path)
+    service = LogAggregatorService(log_db_path, logs_backend=logs_backend)
 
     # Parse level parameter
     levels = None
@@ -11267,37 +11571,41 @@ def _load_self_monitoring_data(
     issues = []
 
     try:
-        conn = DatabaseConnectionManager.get_instance(str(db_path)).get_connection()
-        cursor = conn.cursor()
-        cursor.row_factory = sqlite3.Row
+        # Bug #1532 follow-up: route the raw connection through
+        # guarded_connection() so close_all() cannot close it mid-read.
+        with DatabaseConnectionManager.get_instance(
+            str(db_path)
+        ).guarded_connection() as conn:
+            cursor = conn.cursor()
+            cursor.row_factory = sqlite3.Row
 
-        # Load scans (most recent first)
-        cursor.execute(
-            """
-            SELECT scan_id, started_at, completed_at, status,
-                   log_id_start, log_id_end, issues_created, error_message
-            FROM self_monitoring_scans
-            ORDER BY started_at DESC
-            LIMIT ?
-            """,
-            (SCAN_HISTORY_LIMIT,),
-        )
-        scans = [dict(row) for row in cursor.fetchall()]
+            # Load scans (most recent first)
+            cursor.execute(
+                """
+                SELECT scan_id, started_at, completed_at, status,
+                       log_id_start, log_id_end, issues_created, error_message
+                FROM self_monitoring_scans
+                ORDER BY started_at DESC
+                LIMIT ?
+                """,
+                (SCAN_HISTORY_LIMIT,),
+            )
+            scans = [dict(row) for row in cursor.fetchall()]
+
+            # Load issues (most recent first)
+            cursor.execute(
+                """
+                SELECT id, scan_id, github_issue_number, github_issue_url,
+                       classification, title, fingerprint,
+                       source_log_ids, source_files, created_at
+                FROM self_monitoring_issues
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                (ISSUES_HISTORY_LIMIT,),
+            )
+            issues = [dict(row) for row in cursor.fetchall()]
         _add_scan_duration(scans)
-
-        # Load issues (most recent first)
-        cursor.execute(
-            """
-            SELECT id, scan_id, github_issue_number, github_issue_url,
-                   classification, title, fingerprint,
-                   source_log_ids, source_files, created_at
-            FROM self_monitoring_issues
-            ORDER BY created_at DESC
-            LIMIT ?
-            """,
-            (ISSUES_HISTORY_LIMIT,),
-        )
-        issues = [dict(row) for row in cursor.fetchall()]
     except Exception as e:
         logger.error(
             format_error_log(
@@ -11359,17 +11667,21 @@ def _get_last_scan_time(
             return None
 
     try:
-        conn = DatabaseConnectionManager.get_instance(str(db_path)).get_connection()
-        cursor = conn.cursor()
-        cursor.row_factory = sqlite3.Row
-        cursor.execute("""
-            SELECT started_at
-            FROM self_monitoring_scans
-            ORDER BY started_at DESC
-            LIMIT 1
-            """)
-        row = cursor.fetchone()
-        return row["started_at"] if row else None
+        # Bug #1532 follow-up: route the raw connection through
+        # guarded_connection() so close_all() cannot close it mid-read.
+        with DatabaseConnectionManager.get_instance(
+            str(db_path)
+        ).guarded_connection() as conn:
+            cursor = conn.cursor()
+            cursor.row_factory = sqlite3.Row
+            cursor.execute("""
+                SELECT started_at
+                FROM self_monitoring_scans
+                ORDER BY started_at DESC
+                LIMIT 1
+                """)
+            row = cursor.fetchone()
+            return row["started_at"] if row else None
     except Exception as e:
         logger.error(
             format_error_log(
@@ -11446,15 +11758,19 @@ def _get_scan_status(
             return "Idle"
 
     try:
-        conn = DatabaseConnectionManager.get_instance(str(db_path)).get_connection()
-        cursor = conn.cursor()
-        cursor.execute("""
-            SELECT COUNT(*)
-            FROM self_monitoring_scans
-            WHERE completed_at IS NULL
-            """)
-        count = cursor.fetchone()[0]
-        return "Running..." if count > 0 else "Idle"
+        # Bug #1532 follow-up: route the raw connection through
+        # guarded_connection() so close_all() cannot close it mid-read.
+        with DatabaseConnectionManager.get_instance(
+            str(db_path)
+        ).guarded_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT COUNT(*)
+                FROM self_monitoring_scans
+                WHERE completed_at IS NULL
+                """)
+            count = cursor.fetchone()[0]
+            return "Running..." if count > 0 else "Idle"
     except Exception as e:
         logger.error(
             format_error_log(

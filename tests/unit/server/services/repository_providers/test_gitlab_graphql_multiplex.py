@@ -8,7 +8,7 @@ import pytest
 from datetime import datetime
 from unittest.mock import Mock
 
-from src.code_indexer.server.services.repository_providers.gitlab_provider import (
+from code_indexer.server.services.repository_providers.gitlab_provider import (
     GitLabProvider,
 )
 

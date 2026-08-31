@@ -9,7 +9,7 @@ aggregation chunk size in characters, default 4096).
 import pytest
 from pydantic import ValidationError
 
-from src.code_indexer.config import Config, TemporalConfig
+from code_indexer.config import Config, TemporalConfig
 
 
 class TestTemporalEmbedderConfig1290:

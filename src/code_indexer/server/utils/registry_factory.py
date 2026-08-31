@@ -242,10 +242,8 @@ def resolve_backend_registry_attr(
     backend = None
     postgres_mode_without_backend = False
 
-    app_module = sys.modules.get("code_indexer.server.app")
-    _app = getattr(app_module, "app", None) if app_module is not None else None
-    _app_state = getattr(_app, "state", None)
-    if _app_state and getattr(_app_state, "storage_mode", None) == "postgres":
+    _app_state = _running_server_app_state()
+    if _app_state is not None and is_postgres_storage_mode():
         _br = getattr(_app_state, "backend_registry", None)
         if _br is not None:
             backend = getattr(_br, attr_name)
@@ -257,6 +255,96 @@ def resolve_backend_registry_attr(
                 caller_name or "resolve_backend_registry_attr",
             )
     return backend, postgres_mode_without_backend
+
+
+def _running_server_app_state() -> Optional[Any]:
+    """The running server's ``app.state``, or None outside a server process.
+
+    Looked up via ``sys.modules.get()`` -- a pure dict lookup -- never an
+    ``import``, which would trigger a fresh (expensive: FastAPI app + all
+    routers + DB pools) import in a pure CLI process. See
+    :func:`resolve_backend_registry_attr` for the full rationale.
+
+    Bug #1678: the module's ``app`` attribute is a PEP 562 ``__getattr__``
+    lazy singleton (Bug #1638) -- a bare ``getattr(app_module, "app", None)``
+    is NOT side-effect-free, because Python invokes ``__getattr__`` whenever
+    normal attribute lookup fails and only THEN does ``getattr()`` catch the
+    resulting ``AttributeError`` to return the default. That means this
+    "just probing" call used to construct and permanently cache the
+    process-wide app singleton the first time anything reached it -- even
+    from deep inside an unrelated, independently-constructed ``create_app()``
+    call (e.g. a test fixture building its own temp-dir-scoped app), leaking
+    that fixture's stale services into the singleton for the rest of the
+    process. ``app_module.__dict__.get("app")`` is a plain dict lookup: it
+    NEVER invokes ``__getattr__``, so it correctly returns ``None`` until the
+    singleton has genuinely, already been constructed via a real
+    ``app_module.app`` access elsewhere (e.g. uvicorn's entrypoint or another
+    module doing ``from code_indexer.server import app as app_module``).
+    """
+    app_module = sys.modules.get("code_indexer.server.app")
+    _app = app_module.__dict__.get("app") if app_module is not None else None
+    return getattr(_app, "state", None)
+
+
+def is_postgres_storage_mode() -> bool:
+    """Whether this process is a server running in postgres/cluster mode.
+
+    THE single authority for the ``app.state.storage_mode == "postgres"``
+    probe (Bug #1533): callers outside this module must use this instead of
+    reimplementing the ``sys.modules`` app.state introspection. Returns
+    False outside a server process (pure CLI, no app.state) and in
+    solo/SQLite mode.
+    """
+    _app_state = _running_server_app_state()
+    if _app_state is None:
+        return False
+    return bool(getattr(_app_state, "storage_mode", None) == "postgres")
+
+
+STORAGE_MODE_PENDING_SENTINEL = "__pending__"
+"""Explicit, in-band marker `lifespan.py` stamps onto
+``app.state.storage_mode`` as the very first thing its startup function
+does, immediately overwritten a few lines later with the real resolved
+value ("sqlite"/"postgres"). Exists solely to close Issue #1546 Fix 1
+(Codex review): ``AliasLockStoreFactory.resolve()`` must never be able to
+silently cache a node-local SQLite lock store chosen while cluster mode is
+still genuinely unknown -- see :func:`is_storage_mode_undetermined`.
+"""
+
+
+def is_storage_mode_undetermined() -> bool:
+    """True ONLY during the brief real-server startup window where
+    ``app.state.storage_mode`` has been explicitly stamped with
+    :data:`STORAGE_MODE_PENDING_SENTINEL` but not yet overwritten with its
+    real value.
+
+    Deliberately narrower than "the storage_mode attribute is simply
+    absent": the overwhelming majority of this project's unit tests import
+    ``code_indexer.server.app`` (which populates ``app.state``) without
+    ever running its ``lifespan`` context manager, so ``storage_mode`` is
+    never assigned there at all -- that must NOT be confused with the
+    genuine pending window, or every such test would start failing loud.
+    Only ``lifespan.py``'s own startup code ever writes the sentinel, so
+    this function returns False for: no server process at all (pure CLI),
+    a server process whose lifespan never ran (most unit tests), and a
+    server process whose storage mode is already resolved to any real
+    value ("sqlite" or "postgres"). It returns True only for the narrow,
+    real in-process window the sentinel marks.
+
+    Issue #1546 Fix 1 (Codex review): without this signal,
+    ``AliasLockStoreFactory.resolve()`` would treat "not yet known" the
+    same as "definitely not postgres" (``is_postgres_storage_mode()``
+    returns False in both cases) and silently cache a node-local SQLite
+    lock store that other cluster nodes cannot see -- reproducing the
+    exact split-brain bug this mechanism exists to eliminate. Callers that
+    must never make that mistake check this FIRST and fail loud instead.
+    """
+    _app_state = _running_server_app_state()
+    if _app_state is None:
+        return False
+    return bool(
+        getattr(_app_state, "storage_mode", None) == STORAGE_MODE_PENDING_SENTINEL
+    )
 
 
 def resolve_backend_registry_state(caller_name: str = "") -> Tuple[Optional[Any], bool]:

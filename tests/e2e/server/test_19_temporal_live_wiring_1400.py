@@ -40,12 +40,16 @@ test_18_temporal_dual_embedder_1292.py) -- skips loudly if absent.
 from __future__ import annotations
 
 import time
+import uuid
 from pathlib import Path
 from typing import Iterator
 
 import pytest
 from fastapi.testclient import TestClient
 
+from code_indexer.services.temporal.temporal_server_paths import (
+    server_temporal_index_root,
+)
 from tests.e2e.server.conftest import AdminTokenProvider
 from tests.e2e.server.mcp_helpers import call_mcp_tool, parse_mcp_result
 
@@ -55,6 +59,25 @@ _JOB_TIMEOUT = 900.0
 _JOB_POLL = 0.5
 _POLL_SEARCH_JOB_TIMEOUT = 120.0
 _POLL_SEARCH_JOB_INTERVAL = 1.0
+
+# Bug #1520: TemporalDedupCache (temporal_dedup_cache.py) is a real,
+# per-process singleton spanning the ENTIRE Phase 3 pytest session (~292
+# tests, one process). Its dedup signature is a SHA256 over a dict that
+# includes query_text verbatim (temporal_live_dispatch.py's
+# _worker_input_signature_dict -- query_text flows unmodified from the raw
+# MCP/REST request all the way into that dict; confirmed by reading
+# temporal_worker_input_adapters.py, there is no stripping/normalization
+# anywhere on that path). This file's tests already used distinct
+# query_text strings per test to avoid a WITHIN-file collision, but that
+# only defends against the temporal queries in THIS file -- it cannot
+# defend against any other Phase 3 test file whose request signature
+# (alias + query_text + filters) might ever coincide. Appending this
+# per-process-unique token (generated once at module import, i.e. once per
+# pytest process/session) to every query_text below (see usage at line
+# ~239 and others) makes the resulting signature structurally impossible
+# to have ever been seen before by TemporalDedupCache, in this run or any
+# other -- independent of whatever base phrase is used.
+_UNIQUE_QUERY_SUFFIX = uuid.uuid4().hex[:12]
 
 
 def _wait_for_job(client: TestClient, job_id: str, headers: dict, label: str) -> None:
@@ -110,8 +133,13 @@ def live_wiring_repo(
     golden_repo_dir = test_client_data_dir / "data" / "golden-repos" / _ALIAS
     assert golden_repo_dir.exists(), f"golden repo clone missing at {golden_repo_dir}"
 
+    # Bug #1529: server-context temporal reads resolve to a FIXED path
+    # outside the repo clone (server_temporal_index_root), never the repo's
+    # own .code-indexer/index/ -- seed there or queries find nothing.
     src_index_dir = _PREBUILT_REPO / ".code-indexer" / "index"
-    dst_index_dir = golden_repo_dir / ".code-indexer" / "index"
+    golden_repos_dir = test_client_data_dir / "data" / "golden-repos"
+    dst_index_dir = server_temporal_index_root(golden_repos_dir, _ALIAS)
+    dst_index_dir.mkdir(parents=True, exist_ok=True)
     for shard_dir in src_index_dir.glob("code-indexer-temporal-*"):
         shutil.copytree(shard_dir, dst_index_dir / shard_dir.name, dirs_exist_ok=True)
 
@@ -236,7 +264,7 @@ class TestMcpForcedHandoffAndPoll:
             "search_code",
             {
                 "repository_alias": live_wiring_repo,
-                "query_text": "temporal query async hybrid execution",
+                "query_text": f"temporal query async hybrid execution {_UNIQUE_QUERY_SUFFIX}",
                 "time_range_all": True,
                 "limit": 5,
             },
@@ -268,7 +296,7 @@ class TestMcpForcedHandoffAndPoll:
             "search_code",
             {
                 "repository_alias": live_wiring_repo,
-                "query_text": "quarterly shard routing temporal indexer",
+                "query_text": f"quarterly shard routing temporal indexer {_UNIQUE_QUERY_SUFFIX}",
                 "time_range_all": True,
                 "limit": 5,
             },
@@ -306,7 +334,7 @@ class TestRestForcedHandoffAndPoll:
         resp = test_client.post(
             "/api/query",
             json={
-                "query_text": "REST door temporal async hybrid execution proof",
+                "query_text": f"REST door temporal async hybrid execution proof {_UNIQUE_QUERY_SUFFIX}",
                 "repository_alias": live_wiring_repo,
                 "time_range_all": True,
                 "limit": 5,
@@ -335,7 +363,7 @@ class TestRestForcedHandoffAndPoll:
         submit_resp = test_client.post(
             "/api/query",
             json={
-                "query_text": "REST door quarterly shard routing indexer proof",
+                "query_text": f"REST door quarterly shard routing indexer proof {_UNIQUE_QUERY_SUFFIX}",
                 "repository_alias": live_wiring_repo,
                 "time_range_all": True,
                 "limit": 5,
@@ -371,7 +399,7 @@ class TestNonTemporalQueryUnaffected:
             "search_code",
             {
                 "repository_alias": live_wiring_repo,
-                "query_text": "authentication logic",
+                "query_text": f"authentication logic {_UNIQUE_QUERY_SUFFIX}",
                 "limit": 5,
             },
             auth_headers,

@@ -887,17 +887,24 @@ class TestCorrelationIdInlineQueryImport:
         2. Setting _correlation_id_var to a known value
         3. Asserting get_current_correlation_id() returns that value
 
-        If inline_query.py used the old import (middleware.correlation.get_correlation_id),
-        that function reads from a DIFFERENT ContextVar (_correlation_id, not _correlation_id_var)
-        and would return None when only _correlation_id_var is set.
+        Bug #1632 update: middleware.correlation.get_correlation_id() now
+        DELEGATES to telemetry.correlation_bridge.get_current_correlation_id()
+        (rather than reading its own separate, never-populated ContextVar), so
+        the two readers are unified and both must return the SAME value here.
+        This test used to assert the old (pre-#1632) module stayed at None to
+        document the divergence bug; now that the divergence is fixed at the
+        source, asserting continued divergence would be asserting a
+        regression. inline_query.py itself still correctly imports directly
+        from correlation_bridge (see the sibling source-level test above) —
+        this test now additionally proves the two readers agree.
         """
         from code_indexer.server.telemetry.correlation_bridge import (
             _correlation_id_var,
             get_current_correlation_id,
         )
 
-        # Also verify the old middleware's ContextVar is separate — setting bridge var
-        # does NOT affect the old module's var
+        # Bug #1632: the old middleware's module-level function now delegates
+        # to the SAME bridge ContextVar -- no longer a separate, dead store.
         from code_indexer.server.middleware import correlation as old_corr_mod
 
         token = _correlation_id_var.set("test-corr-id-123")
@@ -905,7 +912,7 @@ class TestCorrelationIdInlineQueryImport:
             # This is the function that inline_query.py now aliases as get_correlation_id
             result = get_current_correlation_id()
 
-            # The old (wrong) function reads from a different ContextVar — always None here
+            # Post-#1632: the old module's reader delegates to the same store.
             old_result = old_corr_mod.get_correlation_id()
         finally:
             _correlation_id_var.reset(token)
@@ -916,9 +923,9 @@ class TestCorrelationIdInlineQueryImport:
                 result
             )
         )
-        assert old_result is None, (
-            "The OLD get_correlation_id() from middleware.correlation reads from a DIFFERENT "
-            "ContextVar that is never populated (middleware never registered). Got: {!r}".format(
+        assert old_result == "test-corr-id-123", (
+            "Bug #1632: middleware.correlation.get_correlation_id() must now DELEGATE "
+            "to the wired bridge reader and return the SAME value, not diverge. Got: {!r}".format(
                 old_result
             )
         )

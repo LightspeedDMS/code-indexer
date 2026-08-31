@@ -59,7 +59,7 @@ class TestDaemonTemporalIndexing(TestCase):
 
     def test_perform_indexing_without_index_commits_flag(self):
         """Test that normal indexing uses SmartIndexer (not temporal)."""
-        from src.code_indexer.services.rpyc_daemon import CIDXDaemonService
+        from code_indexer.services.rpyc_daemon import CIDXDaemonService
 
         service = CIDXDaemonService()
 
@@ -69,13 +69,11 @@ class TestDaemonTemporalIndexing(TestCase):
         # Patch SmartIndexer and its dependencies at import locations inside method
         with (
             patch(
-                "src.code_indexer.services.smart_indexer.SmartIndexer"
+                "code_indexer.services.smart_indexer.SmartIndexer"
             ) as mock_smart_indexer,
+            patch("code_indexer.services.embedding_factory.EmbeddingProviderFactory"),
             patch(
-                "src.code_indexer.services.embedding_factory.EmbeddingProviderFactory"
-            ),
-            patch(
-                "src.code_indexer.backends.backend_factory.BackendFactory"
+                "code_indexer.backends.backend_factory.BackendFactory"
             ) as mock_backend_factory,
         ):
             mock_indexer = MagicMock()
@@ -100,7 +98,7 @@ class TestDaemonTemporalIndexing(TestCase):
 
     def test_perform_indexing_with_index_commits_flag(self):
         """Test that index_commits=True triggers TemporalIndexer."""
-        from src.code_indexer.services.rpyc_daemon import CIDXDaemonService
+        from code_indexer.services.rpyc_daemon import CIDXDaemonService
 
         service = CIDXDaemonService()
 
@@ -110,13 +108,13 @@ class TestDaemonTemporalIndexing(TestCase):
         # Patch TemporalIndexer and FilesystemVectorStore at their actual import paths
         with (
             patch(
-                "src.code_indexer.services.temporal.temporal_indexer.TemporalIndexer"
+                "code_indexer.services.temporal.temporal_indexer.TemporalIndexer"
             ) as mock_temporal,
             patch(
-                "src.code_indexer.storage.filesystem_vector_store.FilesystemVectorStore"
+                "code_indexer.storage.filesystem_vector_store.FilesystemVectorStore"
             ) as mock_vector_store,
             patch(
-                "src.code_indexer.services.file_chunking_manager.FileChunkingManager"
+                "code_indexer.services.file_chunking_manager.FileChunkingManager"
             ) as mock_fcm,
         ):
             mock_indexer = MagicMock()
@@ -160,18 +158,16 @@ class TestDaemonTemporalIndexing(TestCase):
 
     def test_perform_indexing_temporal_with_all_branches(self):
         """Test temporal indexing with all_branches=True."""
-        from src.code_indexer.services.rpyc_daemon import CIDXDaemonService
+        from code_indexer.services.rpyc_daemon import CIDXDaemonService
 
         service = CIDXDaemonService()
         callback = MagicMock()
 
         with (
             patch(
-                "src.code_indexer.services.temporal.temporal_indexer.TemporalIndexer"
+                "code_indexer.services.temporal.temporal_indexer.TemporalIndexer"
             ) as mock_temporal,
-            patch(
-                "src.code_indexer.storage.filesystem_vector_store.FilesystemVectorStore"
-            ),
+            patch("code_indexer.storage.filesystem_vector_store.FilesystemVectorStore"),
         ):
             mock_indexer = MagicMock()
             mock_temporal.return_value = mock_indexer
@@ -200,18 +196,16 @@ class TestDaemonTemporalIndexing(TestCase):
 
     def test_perform_indexing_temporal_error_handling(self):
         """Test that temporal indexing errors are properly propagated."""
-        from src.code_indexer.services.rpyc_daemon import CIDXDaemonService
+        from code_indexer.services.rpyc_daemon import CIDXDaemonService
 
         service = CIDXDaemonService()
         callback = MagicMock()
 
         with (
             patch(
-                "src.code_indexer.services.temporal.temporal_indexer.TemporalIndexer"
+                "code_indexer.services.temporal.temporal_indexer.TemporalIndexer"
             ) as mock_temporal,
-            patch(
-                "src.code_indexer.storage.filesystem_vector_store.FilesystemVectorStore"
-            ),
+            patch("code_indexer.storage.filesystem_vector_store.FilesystemVectorStore"),
         ):
             mock_indexer = MagicMock()
             mock_temporal.return_value = mock_indexer
@@ -231,7 +225,7 @@ class TestDaemonTemporalIndexing(TestCase):
 
     def test_exposed_index_with_index_commits_flag(self):
         """Test that exposed_index API correctly passes index_commits to _perform_indexing."""
-        from src.code_indexer.services.rpyc_daemon import CIDXDaemonService
+        from code_indexer.services.rpyc_daemon import CIDXDaemonService
 
         service = CIDXDaemonService()
 

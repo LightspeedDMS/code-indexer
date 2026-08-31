@@ -9,7 +9,15 @@ methods return dicts/lists, not coroutines.
 Codex review rd3 (Bug #749 gap closure) found additional crash sites:
   - cli.py:9664 — asyncio.run(auth_client.change_password(...))
   - cli.py:13474, 13587, 13683 — `async with JobsAPIClient(...)` on a sync client
-    (JobsAPIClient inherits only sync __enter__/__exit__ from CIDXRemoteAPIClient)
+
+Note (updated for #1734, following #1724): CIDXRemoteAPIClient gained
+__aenter__/__aexit__ alongside its existing sync __enter__/__exit__, purely
+for structural/protocol symmetry -- JobsAPIClient, RemoteQueryClient, and
+RepositoryLinkingClient all inherit both pairs now, so `async with` on any
+of them is no longer a hard crash. The guard below still rejects it in CLI
+code, because every underlying client method remains blocking/synchronous:
+using `async with` there would misleadingly imply non-blocking I/O that
+does not exist. The CLI's own convention stays plain `with`.
 
 Two violation rules are enforced across ALL cli*.py files:
   "asyncio_run"  — asyncio.run() wrapping a sync client method call

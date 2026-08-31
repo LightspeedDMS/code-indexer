@@ -51,17 +51,41 @@ class AutoWatchManager:
         self._lock = threading.RLock()  # Use RLock to allow reentrant calls
         self._shutdown_event = threading.Event()
 
-        # Start background timeout checker thread
-        self._timeout_thread = threading.Thread(
-            target=self._timeout_checker_loop,
-            daemon=True,
-            name="AutoWatchTimeoutChecker",
-        )
-        self._timeout_thread.start()
-        logger.info(
-            "AutoWatchManager timeout checker thread started",
-            extra={"correlation_id": get_correlation_id()},
-        )
+        # Bug #1689: the background timeout-checker thread used to start
+        # unconditionally right here, so the module-level
+        # `auto_watch_manager = AutoWatchManager()` singleton (bottom of
+        # this file) spawned a thread as a pure import-time side effect --
+        # the exact Bug #1638/#1650 anti-pattern documented in CLAUDE.md's
+        # "Module-Level Service Singletons Must Be Lazy (PEP 562)" section.
+        # __init__ must stay cheap: the thread is now started lazily, on
+        # first real start_watch() call, via
+        # _ensure_timeout_thread_started() below -- the only entry point
+        # that ever adds state for the checker to examine.
+        self._timeout_thread: Optional[threading.Thread] = None
+        self._timeout_thread_lock = threading.RLock()
+
+    def _ensure_timeout_thread_started(self) -> None:
+        """Lazily start the background timeout-checker thread on first
+        real use (Bug #1689). Idempotent and thread-safe (double-checked
+        locking): concurrent first-time start_watch() callers must only
+        ever start ONE checker thread.
+        """
+        if self._timeout_thread is not None:
+            return
+        with self._timeout_thread_lock:
+            if self._timeout_thread is not None:
+                return
+            timeout_thread = threading.Thread(
+                target=self._timeout_checker_loop,
+                daemon=True,
+                name="AutoWatchTimeoutChecker",
+            )
+            timeout_thread.start()
+            self._timeout_thread = timeout_thread
+            logger.info(
+                "AutoWatchManager timeout checker thread started",
+                extra={"correlation_id": get_correlation_id()},
+            )
 
     def is_watching(self, repo_path: str) -> bool:
         """
@@ -109,6 +133,10 @@ class AutoWatchManager:
                 "message": "Auto-watch is disabled",
             }
 
+        # Bug #1689: lazily start the background timeout-checker thread on
+        # first real watch action, instead of eagerly in __init__.
+        self._ensure_timeout_thread_started()
+
         timeout_seconds = timeout if timeout is not None else self.default_timeout
 
         with self._lock:
@@ -129,7 +157,88 @@ class AutoWatchManager:
             try:
                 # Initialize configuration
                 config_manager = ConfigManager.create_with_backtrack(Path(repo_path))
+
+                # Bug #1683 (round 3): create_with_backtrack() unconditionally
+                # returns a ConfigManager even when NO config was found for
+                # repo_path (or any parent) -- it silently defaults
+                # config_path to `{start_dir}/.code-indexer/config.json`,
+                # which does not exist. get_config()/load() then falls back
+                # to a bare `Config()` whose codebase_dir is the unresolved
+                # relative `Path(".")`, which resolves against the SERVER
+                # PROCESS's CWD -- not repo_path. Every caller of this
+                # primitive (files.py's 3 handlers today, any future caller
+                # tomorrow) was exposed to this trap; guarding one caller is
+                # not sufficient (Messi Rule 13 anti-silent-failure: check
+                # the return before trusting it; Messi Rule 2 anti-fallback:
+                # fail loud instead of substituting a fallback location).
+                if not config_manager.config_path.exists():
+                    logger.warning(
+                        format_error_log(
+                            "APP-GENERAL-068",
+                            f"Refusing to start watch for {repo_path}: no "
+                            f".code-indexer/config.json found for this path "
+                            f"or any parent directory (Bug #1683 round 3)",
+                            extra={"correlation_id": get_correlation_id()},
+                        )
+                    )
+                    return {
+                        "status": "error",
+                        "message": (
+                            f"No .code-indexer config found for {repo_path}; "
+                            f"refusing to start watch"
+                        ),
+                    }
+
                 config = config_manager.get_config()
+
+                # Defense-in-depth: even with a real config file found
+                # up-tree, verify it actually describes repo_path exactly.
+                # This MUST be strict equality, not "equal-or-ancestor":
+                # the only production caller passes the activated-repo
+                # root, whose own config lives at
+                # `<repo_path>/.code-indexer/`, so codebase_dir ==
+                # repo_path always holds for every legitimate case. Any
+                # wider check that permits codebase_dir to be a strict
+                # ANCESTOR of repo_path is not a safe relaxation -- it is
+                # precisely the unsafe direction: `find_config_path` walks
+                # UP the tree from repo_path, so a repo lacking its own
+                # config.json but sitting under an ancestor that happens
+                # to carry one (e.g. the server data root itself) would
+                # pass an ancestor-permitting check and then have
+                # `DaemonWatchManager` watch/index the ANCESTOR instead of
+                # repo_path (Bug #1683 round 4 -- reproduced live: an
+                # ancestor `.code-indexer/config.json` whose codebase_dir
+                # pointed at the server data directory let a watch request
+                # for an activated repo silently index the entire
+                # server-data tree, including cidx_server.db and every
+                # golden repo). This guard is reachable two ways in
+                # practice: (1) the `CODEBASE_DIR` env-var override path in
+                # `create_with_backtrack`, which ignores repo_path entirely
+                # and can point anywhere; and (2) exactly the ancestor
+                # shape just described, whenever repo_path itself has no
+                # config of its own.
+                resolved_codebase_dir = Path(config.codebase_dir).resolve()
+                resolved_repo_path = Path(repo_path).resolve()
+                if resolved_repo_path != resolved_codebase_dir:
+                    logger.warning(
+                        format_error_log(
+                            "APP-GENERAL-069",
+                            f"Refusing to start watch for {repo_path}: "
+                            f"resolved config.codebase_dir "
+                            f"({resolved_codebase_dir}) does not exactly "
+                            f"match the requested repo path "
+                            f"(Bug #1683 round 4)",
+                            extra={"correlation_id": get_correlation_id()},
+                        )
+                    )
+                    return {
+                        "status": "error",
+                        "message": (
+                            f"config.codebase_dir ({resolved_codebase_dir}) "
+                            f"does not match repo path {repo_path}; refusing "
+                            f"to start watch"
+                        ),
+                    }
 
                 # Create daemon watch manager
                 watch_instance = DaemonWatchManager()
@@ -357,8 +466,11 @@ class AutoWatchManager:
         # Signal background thread to stop
         self._shutdown_event.set()
 
-        # Wait for thread to terminate (with timeout)
-        if self._timeout_thread.is_alive():
+        # Wait for thread to terminate (with timeout). Bug #1689: the
+        # checker thread is now started lazily (may still be None if
+        # start_watch() was never called, or was only ever called while
+        # auto_watch_enabled=False) -- must not raise AttributeError.
+        if self._timeout_thread is not None and self._timeout_thread.is_alive():
             self._timeout_thread.join(timeout=self.SHUTDOWN_THREAD_JOIN_TIMEOUT_SECONDS)
             if self._timeout_thread.is_alive():
                 logger.warning(

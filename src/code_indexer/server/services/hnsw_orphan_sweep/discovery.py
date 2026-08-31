@@ -31,6 +31,10 @@ from typing import Any, Iterator
 
 from code_indexer.storage.hnsw_index_manager import HNSWIndexManager
 from code_indexer.server.storage.shared.snapshot_paths import is_versioned_snapshot
+from code_indexer.services.temporal.temporal_server_paths import (
+    resolve_golden_repo_coordinates,
+    server_temporal_index_root,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -68,8 +72,31 @@ def iter_index_files_for_repo(repo_root: Path) -> Iterator[Path]:
     Returns:
         Iterator of relative Paths, each pointing at an ``hnsw_index.bin``.
     """
-    index_root = repo_root.joinpath(*_INDEX_ROOT_SEGMENTS)
+    yield from iter_hnsw_collections_under(
+        repo_root.joinpath(*_INDEX_ROOT_SEGMENTS), relative_to=repo_root
+    )
 
+
+def iter_hnsw_collections_under(
+    index_root: Path, *, relative_to: Path
+) -> Iterator[Path]:
+    """Walk an ARBITRARY index root, yielding real HNSW collections.
+
+    Extracted from :func:`iter_index_files_for_repo` by Bug #1529 so the
+    server's fixed temporal index root (``{golden_repos_dir}/.temporal/
+    {alias}/``, which is NOT under any repo's ``.code-indexer/index/``) is
+    swept by the SAME discovery and the SAME in-place repair path as every
+    other collection -- rather than the bespoke sister-pointer/version
+    enumeration Story #1457 needed. Same "hnsw_index.bin + collection_meta.
+    json pair" definition, same ``.versioned/`` skip, same never-raises
+    contract.
+
+    Args:
+        index_root: Directory to walk.
+        relative_to: Base the yielded paths are made relative to (this is
+            what forms the stable cursor key, so it must match whatever the
+            candidate's own root is).
+    """
     try:
         if not index_root.is_dir():
             return
@@ -104,14 +131,14 @@ def iter_index_files_for_repo(repo_root: Path) -> Iterator[Path]:
             continue
 
         try:
-            yield bin_path.relative_to(repo_root)
+            yield bin_path.relative_to(relative_to)
         except ValueError:
-            # Unreachable in practice (bin_path always under repo_root via
-            # rglob), but a discovery generator must never raise.
+            # Unreachable in practice (bin_path always under the walked root
+            # via rglob), but a discovery generator must never raise.
             logger.debug(
-                "iter_index_files_for_repo: %s is not relative to %s; skipping",
+                "iter_hnsw_collections_under: %s is not relative to %s; skipping",
                 bin_path,
-                repo_root,
+                relative_to,
             )
             continue
 
@@ -172,6 +199,51 @@ def _golden_candidates(golden_repo_manager: Any) -> Iterator[SweepCandidate]:
                 repo_root=repo_root,
                 index_relpath=relpath,
                 kind="golden",
+                alias=alias,
+            )
+
+        # Bug #1529: server-context temporal data lives at a FIXED root
+        # outside the repo's own tree, so the walk above cannot see it. Those
+        # shards are ordinary MUTABLE collection directories (no versions, no
+        # alias pointers), so they are swept and repaired IN PLACE exactly
+        # like everything else -- this replaces Story #1457's bespoke
+        # sister-pointer candidate/repair pair entirely.
+        #
+        # Bug #1529 finding #6: the derivation MUST go through
+        # resolve_golden_repo_coordinates, never a bare `repo_root.parent`.
+        # get_actual_repo_path() can legitimately return the VERSIONED form
+        # ({golden_repos_dir}/.versioned/{alias}/v_*/ -- see memory
+        # feedback_versioned_path_trap), whose .parent is
+        # {golden_repos_dir}/.versioned/{alias}; the temporal root computed
+        # from that never exists, so every versioned-topology repo's temporal
+        # shards were silently skipped, voiding Epic #1333's zero-tolerance
+        # orphan guarantee for them. The resolver handles BOTH layouts and
+        # returns identical coordinates for each.
+        coordinates = resolve_golden_repo_coordinates(repo_root)
+        if coordinates is None:
+            # Never a silent skip: an unrecognized layout is a real temporal
+            # sweep coverage hole, and invisibility is what let finding #6
+            # survive review in the first place.
+            logger.warning(
+                "enumerate_sweep_candidates: could not derive the fixed "
+                "temporal index root for golden repo '%s' from %s "
+                "(unrecognized layout); its temporal shards are NOT being "
+                "swept this pass",
+                alias,
+                repo_root,
+            )
+            continue
+
+        golden_repos_dir, bare_alias = coordinates
+        temporal_root = server_temporal_index_root(golden_repos_dir, bare_alias)
+        for relpath in iter_hnsw_collections_under(
+            temporal_root, relative_to=temporal_root
+        ):
+            yield SweepCandidate(
+                sort_key=f"golden_temporal:{alias}:{relpath}",
+                repo_root=temporal_root,
+                index_relpath=relpath,
+                kind="golden_temporal",
                 alias=alias,
             )
 

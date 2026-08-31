@@ -17,16 +17,54 @@ logger = logging.getLogger(__name__)
 console = Console()
 
 
-def _any_temporal_collection_exists(index_base: Path) -> bool:
-    """Return True if any temporal collection directory exists under index_base."""
+def _any_temporal_collection_exists(index_base: Path, project_root: Path) -> bool:
+    """Return True if any temporal collection directory exists under
+    index_base, OR (GitHub Issue #1482 extension) this repo's temporal data
+    lives at the golden-owned FIXED root outside the clone -- the ONE genuine
+    standalone case where project_root structurally IS a golden repo's own
+    clone. An ordinary standalone repo (the common case) has no such
+    structure: resolve_golden_repo_coordinates() returns None and this falls
+    back to the pre-existing local-scan-only result, unchanged.
+
+    Bug #1529 note: the "sister location" this originally described, and the
+    sister-root detection module it called, are both retired. The fixed root
+    (`{golden_repos_dir}/.temporal/{alias}/`) is the only non-local location
+    consulted today.
+    """
     from .services.temporal.temporal_collection_naming import is_temporal_collection
 
-    if not index_base.exists():
-        return False
-    return any(
+    if index_base.exists() and any(
         entry.is_dir() and is_temporal_collection(entry.name)
         for entry in index_base.iterdir()
-    )
+    ):
+        return True
+
+    try:
+        # Bug #1529: the same structural golden-repo detection, now provided
+        # by temporal_server_paths (the single authority on temporal data
+        # location) instead of the retired sister-root-detection module.
+        from .services.temporal.temporal_server_paths import (
+            resolve_golden_repo_coordinates,
+        )
+
+        coordinates = resolve_golden_repo_coordinates(project_root)
+        if coordinates is None:
+            return False
+        golden_repos_dir, repo_alias = coordinates
+
+        from .services.temporal.temporal_status import get_temporal_repo_status
+
+        status = get_temporal_repo_status(golden_repos_dir, repo_alias, index_base)
+        return status.has_data
+    except Exception:
+        logger.warning(
+            "_any_temporal_collection_exists: fixed-root temporal "
+            "detection failed for %s (isolated, non-fatal); using "
+            "local-scan-only result",
+            project_root,
+            exc_info=True,
+        )
+        return False
 
 
 def detect_existing_indexes(project_root: Path) -> Dict[str, bool]:
@@ -55,7 +93,7 @@ def detect_existing_indexes(project_root: Path) -> Dict[str, bool]:
     return {
         "semantic": (index_base / "code-indexer-HEAD").exists(),
         "fts": (index_base / "tantivy-fts").exists(),
-        "temporal": _any_temporal_collection_exists(index_base),
+        "temporal": _any_temporal_collection_exists(index_base, project_root),
     }
 
 

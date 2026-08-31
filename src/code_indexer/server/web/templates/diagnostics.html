@@ -52,6 +52,21 @@
     <div id="generate-descriptions-status" style="margin-top: 0.5rem;"></div>
 </div>
 
+<!-- Story #1589: Clear All Dedup Warnings Button -->
+<div class="clear-dedup-warnings-section" style="margin-bottom: 2rem;">
+    <button
+        id="clear-dedup-warnings-btn"
+        class="clear-dedup-warnings-button"
+        onclick="clearAllDedupWarnings()"
+    >
+        Clear All Dedup Warnings
+    </button>
+    <p style="color: var(--muted-color); font-size: 0.875rem; margin-top: 0.5rem;">
+        Dismiss all currently-active fleet-migration dedup warnings (data-completeness signals) without re-indexing affected repositories.
+    </p>
+    <div id="clear-dedup-warnings-status" style="margin-top: 0.5rem;"></div>
+</div>
+
 <!-- Diagnostics Results Section with HTMX Polling -->
 <section id="diagnostics-results" class="diagnostics-section">
 
@@ -185,6 +200,21 @@
 
 .generate-descriptions-button:hover {
     background-color: #0d47a1;
+}
+
+/* Story #1589: Clear All Dedup Warnings button */
+.clear-dedup-warnings-button {
+    background-color: #ef6c00;
+    color: white;
+    border: none;
+    padding: 0.75rem 1.5rem;
+    border-radius: 0.25rem;
+    cursor: pointer;
+    font-weight: 600;
+}
+
+.clear-dedup-warnings-button:hover {
+    background-color: #e65100;
 }
 
 .diagnostics-header {
@@ -461,6 +491,64 @@ function restartServer() {
         statusDiv.appendChild(errorMsg);
         restartBtn.disabled = false;
         restartBtn.textContent = 'Restart Server';
+    });
+}
+
+// Story #1589: Clear All Dedup Warnings from the Diagnostics tab
+function clearAllDedupWarnings() {
+    // Show confirmation dialog BEFORE any API call is made (AC7)
+    if (!window.confirm("Clear all currently-active fleet-migration dedup warnings? This dismisses the data-completeness signal without re-indexing affected repositories.")) {
+        return; // User cancelled -- no API call made
+    }
+
+    // Get CSRF token from data attribute
+    const csrfData = document.getElementById('csrf-data');
+    const csrfToken = csrfData ? csrfData.getAttribute('data-csrf-token') : '';
+
+    // Disable button while in-flight
+    const btn = document.getElementById('clear-dedup-warnings-btn');
+    const statusDiv = document.getElementById('clear-dedup-warnings-status');
+    btn.disabled = true;
+    btn.textContent = 'Clearing...';
+    statusDiv.innerHTML = '';
+
+    // Call POST /api/admin/diagnostics/dedup-warnings/clear-all
+    fetch('/api/admin/diagnostics/dedup-warnings/clear-all', {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+            'X-CSRF-Token': csrfToken
+        }
+    })
+    .then(response => {
+        if (response.ok) {
+            return response.json();
+        } else if (response.status === 403) {
+            throw new Error('Insufficient permissions. Admin access required.');
+        } else {
+            throw new Error('Request failed. Status: ' + response.status);
+        }
+    })
+    .then(data => {
+        // Success toast (Code Review Issue #5 precedent: textContent, not innerHTML)
+        const successMsg = document.createElement('p');
+        successMsg.style.color = '#4caf50';
+        successMsg.style.fontWeight = '600';
+        successMsg.textContent = 'Cleared ' + data.cleared_count + ' dedup warning(s).';
+        statusDiv.innerHTML = '';
+        statusDiv.appendChild(successMsg);
+        btn.disabled = false;
+        btn.textContent = 'Clear All Dedup Warnings';
+    })
+    .catch(error => {
+        const errorMsg = document.createElement('p');
+        errorMsg.style.color = '#d32f2f';
+        errorMsg.style.fontWeight = '600';
+        errorMsg.textContent = 'Error: ' + error.message;
+        statusDiv.innerHTML = '';
+        statusDiv.appendChild(errorMsg);
+        btn.disabled = false;
+        btn.textContent = 'Clear All Dedup Warnings';
     });
 }
 </script>

@@ -37,8 +37,9 @@ import hashlib
 import logging
 import re
 from pathlib import Path
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 
+from .shared.chunk_layout import ChunkLayout, resolve_chunk_layout
 from .temporal_metadata_backend_registry import get_temporal_metadata_backend_factory
 
 logger = logging.getLogger(__name__)
@@ -69,6 +70,41 @@ def generate_hash_prefix(point_id: str) -> str:
         16-character SHA256 hash prefix
     """
     return hashlib.sha256(point_id.encode()).hexdigest()[:HASH_PREFIX_LENGTH]
+
+
+def canonical_content_digest_rows(
+    rows: Sequence[Tuple[Any, ...]],
+) -> List[Tuple[Any, ...]]:
+    """Sort ``content_digest()`` row tuples into a NULL-order-neutral
+    canonical order, shared by every backend's ``content_digest()``.
+
+    Issue #1548 round-5 secondary finding 4: both
+    ``TemporalMetadataSqliteBackend.content_digest()`` and
+    ``TemporalMetadataPostgresBackend.content_digest()`` previously relied
+    on a bare SQL ``ORDER BY`` over columns that can be NULL (e.g.
+    ``commit_hash``, ``file_path``). SQLite sorts NULL FIRST in an
+    ascending ``ORDER BY``; PostgreSQL sorts NULL LAST by default. Two
+    backends holding IDENTICAL logical rows -- at least one of which has a
+    NULL in an ordered column -- could therefore disagree on row order and
+    produce DIFFERENT digests for the exact same data, defeating
+    ``mover.py``'s cross-backend content-digest comparison
+    (``_metadata_scope_relocation_verified``).
+
+    This re-sorts in Python, AFTER fetching, with a key that compares
+    ``(value is None, value)`` per column: the boolean flag is compared
+    FIRST, so a NULL always sorts consistently -- after every non-null
+    value in that column -- on EITHER backend, and the underlying value is
+    only ever compared against another value of the same nullness (never
+    None against a real value, which would raise ``TypeError`` in Python
+    3). Applying this in Python, independent of either database engine's
+    own default, is what makes the resulting order -- and therefore the
+    digest -- backend-independent by construction rather than by
+    coincidence of two engines' NULL-ordering defaults happening to agree.
+    """
+    return sorted(
+        rows,
+        key=lambda row: tuple((value is None, value) for value in row),
+    )
 
 
 class TemporalFormatError(Exception):
@@ -223,19 +259,37 @@ class TemporalMetadataStore:
     def detect_format(cls, collection_path: Path) -> str:
         """Detect temporal collection format (v1 or v2).
 
-        Bug #1313 Step 8: backend-aware. In PostgreSQL/cluster mode (registry
-        factory set), temporal_metadata.db NEVER exists on disk -- the
-        metadata lives in PostgreSQL. Detection there is path-local instead:
-        presence of at least one ``vector_<16-hex>.json`` file (v1 cannot
-        exist in a PG cluster since it postdates Story #669/#1313). CLI/solo
-        behavior (no factory) is UNCHANGED: presence of temporal_metadata.db.
+        Story #1457 (2026-07-24 round-4 re-review, Codex finding):
+        resolve_chunk_layout() is checked FIRST and is AUTHORITATIVE --
+        a consolidated CHUNKS_DB-layout collection (Epic #1454 / Story
+        #1457 AC6's sister-location build) is always "v2", regardless of
+        backend (PG or SQLite/solo), since it has neither legacy
+        vector_<16hex>.json files NOR (in PG mode) any reliance on
+        temporal_metadata.db at all. Without this check first, a healthy
+        PG-mode CHUNKS_DB shard was misreported as "v1" needing reindex
+        by the legacy SHARDED_JSON-only detection below.
+
+        For SHARDED_JSON-layout collections (resolve_chunk_layout()
+        returns SHARDED_JSON -- including collections with no
+        collection_meta.json discriminator at all), falls back to the
+        pre-existing Bug #1313 Step 8 backend-aware detection: in
+        PostgreSQL/cluster mode (registry factory set), temporal_metadata.db
+        NEVER exists on disk -- the metadata lives in PostgreSQL. Detection
+        there is path-local instead: presence of at least one
+        ``vector_<16-hex>.json`` file (v1 cannot exist in a PG cluster
+        since it postdates Story #669/#1313). CLI/solo behavior (no
+        factory) is UNCHANGED: presence of temporal_metadata.db.
 
         Args:
             collection_path: Path to temporal collection directory
 
         Returns:
-            "v2" if the active backend's v2 marker is present, "v1" otherwise
+            "v2" if CHUNKS_DB layout or the active backend's v2 marker is
+            present, "v1" otherwise
         """
+        if resolve_chunk_layout(collection_path) == ChunkLayout.CHUNKS_DB:
+            return "v2"
+
         if get_temporal_metadata_backend_factory() is not None:
             return "v2" if cls._has_v2_vector_file(collection_path) else "v1"
 

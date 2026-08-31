@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
@@ -40,6 +41,12 @@ class GoldenRepoMetadataPostgresBackend:
     Satisfies the GoldenRepoMetadataBackend Protocol (protocols.py).
     All mutations use explicit transactions via the connection pool.
     """
+
+    # Bug #1533: the SHARED, cross-node store. Counterpart of
+    # GoldenRepoMetadataSqliteBackend.is_shared_backend (False) -- callers
+    # that must see the cluster-wide view check this rather than assuming an
+    # injected backend is necessarily the shared one.
+    is_shared_backend = True
 
     def __init__(self, pool: ConnectionPool) -> None:
         """
@@ -611,6 +618,615 @@ class GoldenRepoMetadataPostgresBackend:
         removed_aliases_csv, occurred_at = row
         removed_aliases = [a for a in (removed_aliases_csv or "").split(",") if a]
         return {"removed_aliases": removed_aliases, "occurred_at": occurred_at}
+
+    # ------------------------------------------------------------------
+    # Fleet-migration failure quarantine (Issue #1477)
+    # ------------------------------------------------------------------
+
+    def record_fleet_migration_failure(
+        self,
+        golden_alias: str,
+        state_signature: str,
+        failure_cause: Optional[str] = None,
+    ) -> int:
+        """
+        Record one fleet-migration consolidation failure for a golden repo
+        (Issue #1477). See GoldenRepoMetadataSqliteBackend for the full
+        contract -- this is the drop-in PostgreSQL (cluster-mode) mirror.
+
+        ``failure_cause`` (Finding I, Codex round-5 review) is ALSO
+        always overwritten to the value supplied for THIS failure -- see
+        GoldenRepoMetadataSqliteBackend for the full contract.
+
+        Returns:
+            The consecutive-failure count after recording this one.
+
+        Raises:
+            ValueError: golden_alias or state_signature is empty/blank.
+        """
+        if not golden_alias:
+            raise ValueError("golden_alias must be a non-empty string")
+        if not state_signature:
+            raise ValueError("state_signature must be a non-empty string")
+
+        now = datetime.now(timezone.utc)
+
+        # Issue #1477 Finding L (Codex round-6 review, live-reproduced
+        # against real concurrent PostgreSQL connections): a separate
+        # SELECT followed by a Python-computed count+1 INSERT/UPDATE is a
+        # classic lost-update race -- two concurrent connections can both
+        # read the same starting count, both compute the same next value,
+        # and one increment silently vanishes. This is now a SINGLE atomic
+        # statement: PostgreSQL's own row-level ON CONFLICT handling
+        # performs the increment server-side, so there is no window
+        # between a read and a write for a second connection to land in.
+        #
+        # Every column bound via an explicit placeholder (no inline
+        # literal mixed with "%s" markers) -- 8 columns, 8 "%s", 8 tuple
+        # elements for the VALUES clause, unambiguous to verify by eye.
+        with self._pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "INSERT INTO fleet_migration_quarantine_state "
+                    "(golden_alias, consecutive_failure_count, "
+                    "state_signature, first_failed_at, last_failed_at, "
+                    "updated_at, signature_checked_at, failure_cause) "
+                    "VALUES (%s, %s, %s, %s, %s, %s, %s, %s) "
+                    "ON CONFLICT (golden_alias) DO UPDATE SET "
+                    "consecutive_failure_count = "
+                    "fleet_migration_quarantine_state.consecutive_failure_count + 1, "
+                    "state_signature = EXCLUDED.state_signature, "
+                    "last_failed_at = EXCLUDED.last_failed_at, "
+                    "updated_at = EXCLUDED.updated_at, "
+                    "signature_checked_at = EXCLUDED.signature_checked_at, "
+                    "failure_cause = EXCLUDED.failure_cause "
+                    "RETURNING consecutive_failure_count",
+                    (
+                        golden_alias,
+                        1,
+                        state_signature,
+                        now,
+                        now,
+                        now,
+                        now,
+                        failure_cause,
+                    ),
+                )
+                row = cur.fetchone()
+            conn.commit()
+
+        count: int = row[0]
+        return count
+
+    def reset_fleet_migration_failure(self, golden_alias: str) -> None:
+        """Clear any persisted fleet-migration failure/quarantine state for
+        a golden repo (Issue #1477). See GoldenRepoMetadataSqliteBackend
+        for the full contract.
+
+        Raises:
+            ValueError: golden_alias is empty/blank.
+        """
+        if not golden_alias:
+            raise ValueError("golden_alias must be a non-empty string")
+
+        with self._pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "DELETE FROM fleet_migration_quarantine_state "
+                    "WHERE golden_alias = %s",
+                    (golden_alias,),
+                )
+            conn.commit()
+
+    def soft_reset_fleet_migration_failure_count(self, golden_alias: str) -> None:
+        """Issue #1477 Finding N: fallback used by
+        `_clear_quarantine_after_detected_repair()` when the full reset
+        (DELETE, above) fails but a plain UPDATE still works. Zeroes
+        `consecutive_failure_count` while KEEPING the row -- gives a
+        just-repaired repo a genuinely fresh failure budget instead of
+        resuming from a stale, elevated count. See
+        GoldenRepoMetadataSqliteBackend for the full contract.
+
+        Raises:
+            ValueError: golden_alias is empty/blank.
+        """
+        if not golden_alias:
+            raise ValueError("golden_alias must be a non-empty string")
+
+        with self._pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE fleet_migration_quarantine_state "
+                    "SET consecutive_failure_count = %s WHERE golden_alias = %s",
+                    (0, golden_alias),
+                )
+            conn.commit()
+
+    def touch_fleet_migration_failure_check(self, golden_alias: str) -> None:
+        """Update ONLY the `signature_checked_at` throttle-bookkeeping
+        timestamp for `golden_alias` (Issue #1477 Finding C, Codex round-3
+        review). See GoldenRepoMetadataSqliteBackend for the full
+        contract -- this is the drop-in PostgreSQL (cluster-mode) mirror.
+
+        A no-op (never raises) when no row exists for `golden_alias`.
+
+        Raises:
+            ValueError: golden_alias is empty/blank.
+        """
+        if not golden_alias:
+            raise ValueError("golden_alias must be a non-empty string")
+
+        now = datetime.now(timezone.utc)
+
+        with self._pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE fleet_migration_quarantine_state "
+                    "SET signature_checked_at = %s WHERE golden_alias = %s",
+                    (now, golden_alias),
+                )
+            conn.commit()
+
+    def get_fleet_migration_failure_state(
+        self, golden_alias: str
+    ) -> Optional[Dict[str, Any]]:
+        """Return the currently persisted fleet-migration failure state for
+        a golden repo, or None if it has never failed (or was reset
+        since). See GoldenRepoMetadataSqliteBackend for the full
+        contract.
+
+        Raises:
+            ValueError: golden_alias is empty/blank.
+        """
+        if not golden_alias:
+            raise ValueError("golden_alias must be a non-empty string")
+
+        with self._pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT golden_alias, consecutive_failure_count, "
+                    "state_signature, first_failed_at, last_failed_at, "
+                    "signature_checked_at, failure_cause "
+                    "FROM fleet_migration_quarantine_state WHERE golden_alias = %s",
+                    (golden_alias,),
+                )
+                row = cur.fetchone()
+
+        if row is None:
+            return None
+        return {
+            "golden_alias": row[0],
+            "consecutive_failure_count": row[1],
+            "state_signature": row[2],
+            "first_failed_at": row[3],
+            "last_failed_at": row[4],
+            "signature_checked_at": row[5],
+            "failure_cause": row[6],
+        }
+
+    def list_fleet_migration_failure_states(self) -> List[Dict[str, Any]]:
+        """Return every persisted fleet-migration failure-tracking row
+        (Issue #1477). See GoldenRepoMetadataSqliteBackend for the full
+        contract."""
+        with self._pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT golden_alias, consecutive_failure_count, "
+                    "state_signature, first_failed_at, last_failed_at, "
+                    "signature_checked_at, failure_cause "
+                    "FROM fleet_migration_quarantine_state"
+                )
+                rows = cur.fetchall()
+
+        return [
+            {
+                "golden_alias": row[0],
+                "consecutive_failure_count": row[1],
+                "state_signature": row[2],
+                "first_failed_at": row[3],
+                "last_failed_at": row[4],
+                "signature_checked_at": row[5],
+                "failure_cause": row[6],
+            }
+            for row in rows
+        ]
+
+    # Bug #1539's cidx-meta backup conflict-resolution failure quarantine
+    # (record_cidx_meta_conflict_failure / reset_cidx_meta_conflict_failure /
+    # get_cidx_meta_conflict_failure_state) is RETIRED as of Bug #1555's
+    # root-cause fix: CidxMetaBackupSync.sync() is now a plain mirror-push
+    # that can never raise ConflictResolutionFailedError, so nothing ever
+    # calls these again. The cidx_meta_conflict_quarantine_state table
+    # (migration 044) is left in place per this project's backward-
+    # compatible-migrations rule -- it simply gains no new rows.
+
+    # ------------------------------------------------------------------
+    # Ordinary-refresh integrity-gate failure quarantine (Bug #1506)
+    # ------------------------------------------------------------------
+
+    def record_refresh_integrity_failure(self, golden_alias: str, detail: str) -> int:
+        """Record one ordinary-refresh integrity-gate failure for a golden
+        repo (Bug #1506). See GoldenRepoMetadataSqliteBackend for the full
+        contract -- this is the drop-in PostgreSQL (cluster-mode) mirror.
+        A single atomic ``INSERT ... ON CONFLICT ... RETURNING`` statement
+        performs the increment server-side (mirrors
+        record_fleet_migration_failure's lost-update-race fix above).
+
+        Returns:
+            The consecutive-failure count after recording this one.
+
+        Raises:
+            ValueError: golden_alias or detail is empty/blank.
+        """
+        if not golden_alias:
+            raise ValueError("golden_alias must be a non-empty string")
+        if not detail:
+            raise ValueError("detail must be a non-empty string")
+
+        now = datetime.now(timezone.utc)
+
+        with self._pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "INSERT INTO refresh_integrity_quarantine_state "
+                    "(golden_alias, consecutive_failure_count, last_detail, "
+                    "first_failed_at, last_failed_at, updated_at) "
+                    "VALUES (%s, %s, %s, %s, %s, %s) "
+                    "ON CONFLICT (golden_alias) DO UPDATE SET "
+                    "consecutive_failure_count = "
+                    "refresh_integrity_quarantine_state.consecutive_failure_count + 1, "
+                    "last_detail = EXCLUDED.last_detail, "
+                    "last_failed_at = EXCLUDED.last_failed_at, "
+                    "updated_at = EXCLUDED.updated_at "
+                    "RETURNING consecutive_failure_count",
+                    (golden_alias, 1, detail, now, now, now),
+                )
+                row = cur.fetchone()
+            conn.commit()
+
+        count: int = row[0]
+        return count
+
+    def reset_refresh_integrity_failure(self, golden_alias: str) -> None:
+        """Clear any persisted refresh-integrity failure/quarantine state
+        for a golden repo (Bug #1506). See GoldenRepoMetadataSqliteBackend
+        for the full contract.
+
+        Raises:
+            ValueError: golden_alias is empty/blank.
+        """
+        if not golden_alias:
+            raise ValueError("golden_alias must be a non-empty string")
+
+        with self._pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "DELETE FROM refresh_integrity_quarantine_state "
+                    "WHERE golden_alias = %s",
+                    (golden_alias,),
+                )
+            conn.commit()
+
+    def get_refresh_integrity_failure_state(
+        self, golden_alias: str
+    ) -> Optional[Dict[str, Any]]:
+        """Return the currently persisted refresh-integrity failure state
+        for a golden repo, or None if it has never failed (or was reset
+        since). See GoldenRepoMetadataSqliteBackend for the full contract.
+
+        Raises:
+            ValueError: golden_alias is empty/blank.
+        """
+        if not golden_alias:
+            raise ValueError("golden_alias must be a non-empty string")
+
+        with self._pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT golden_alias, consecutive_failure_count, "
+                    "last_detail, first_failed_at, last_failed_at "
+                    "FROM refresh_integrity_quarantine_state "
+                    "WHERE golden_alias = %s",
+                    (golden_alias,),
+                )
+                row = cur.fetchone()
+
+        if row is None:
+            return None
+        return {
+            "golden_alias": row[0],
+            "consecutive_failure_count": row[1],
+            "last_detail": row[2],
+            "first_failed_at": row[3],
+            "last_failed_at": row[4],
+        }
+
+    # ------------------------------------------------------------------
+    # Duplicate-point-id auto-resolution outcome state (Story #1560)
+    #
+    # Reachable exactly like every other method on this class: via
+    # dedup_state.py's _get_dedup_backend(golden_repo_manager), which
+    # duck-types whatever backend GoldenRepoManager/StorageFactory
+    # injected (this class in cluster/postgres mode,
+    # GoldenRepoMetadataSqliteBackend in solo/sqlite mode) and calls
+    # backend.record_dedup_outcome(...) generically -- there is no
+    # PG-specific call site anywhere for ANY method here, and none is
+    # needed; that is this codebase's established integration pattern.
+    # ------------------------------------------------------------------
+
+    _DEDUP_STATE_SELECT_COLUMNS = (
+        "golden_alias, duplicate_groups, records_before, records_deleted, "
+        "winner_kept_groups, whole_group_deleted_groups, collection_total, "
+        "first_dropped_at, dropped_at, cleared_at, cleared_reason"
+    )
+
+    # AC9: cumulative fields ADDED server-side via `+=` on conflict (a
+    # single atomic statement -- avoids the read-then-write lost-update
+    # race record_fleet_migration_failure's own PG mirror already
+    # guards against for an analogous counter); records_before/
+    # collection_total OVERWRITTEN (snapshot semantics);
+    # first_dropped_at absent from SET so a conflict never touches it;
+    # cleared_at/cleared_reason reset -- a fresh outcome is active again.
+    _RECORD_DEDUP_OUTCOME_SQL = (
+        "INSERT INTO fleet_migration_dedup_state "
+        "(golden_alias, duplicate_groups, records_before, records_deleted, "
+        "winner_kept_groups, whole_group_deleted_groups, collection_total, "
+        "first_dropped_at, dropped_at) "
+        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s) "
+        "ON CONFLICT (golden_alias) DO UPDATE SET "
+        "duplicate_groups = fleet_migration_dedup_state.duplicate_groups "
+        "+ EXCLUDED.duplicate_groups, "
+        "records_before = EXCLUDED.records_before, "
+        "records_deleted = fleet_migration_dedup_state.records_deleted "
+        "+ EXCLUDED.records_deleted, "
+        "winner_kept_groups = fleet_migration_dedup_state.winner_kept_groups "
+        "+ EXCLUDED.winner_kept_groups, "
+        "whole_group_deleted_groups = "
+        "fleet_migration_dedup_state.whole_group_deleted_groups "
+        "+ EXCLUDED.whole_group_deleted_groups, "
+        "collection_total = EXCLUDED.collection_total, "
+        "dropped_at = EXCLUDED.dropped_at, "
+        "cleared_at = NULL, cleared_reason = NULL "
+        f"RETURNING {_DEDUP_STATE_SELECT_COLUMNS}"
+    )
+
+    @staticmethod
+    def _dedup_state_row_to_dict(row: Any) -> Dict[str, Any]:
+        """`row: Any` -- a psycopg cursor row tuple; column types vary
+        and have no single precise static type in this codebase's
+        convention (mirrors sqlite_backends.py's identical helper)."""
+        return {
+            "golden_alias": row[0],
+            "duplicate_groups": row[1],
+            "records_before": row[2],
+            "records_deleted": row[3],
+            "winner_kept_groups": row[4],
+            "whole_group_deleted_groups": row[5],
+            "collection_total": row[6],
+            "first_dropped_at": row[7],
+            "dropped_at": row[8],
+            "cleared_at": row[9],
+            "cleared_reason": row[10],
+        }
+
+    def record_dedup_outcome(
+        self,
+        golden_alias: str,
+        *,
+        duplicate_groups: int,
+        records_before: int,
+        records_deleted: int,
+        winner_kept_groups: int,
+        whole_group_deleted_groups: int,
+        collection_total: int,
+    ) -> Dict[str, Any]:
+        """Record one dedup-resolution outcome (AC6/AC7/AC9) -- see
+        `_RECORD_DEDUP_OUTCOME_SQL` for the cumulative-vs-snapshot
+        semantics. Numeric parameters are trusted at their type-hinted
+        `int` contract with zero additional runtime range validation --
+        matching every OTHER method in this class (e.g.
+        `record_fleet_migration_failure`'s implicit `+1` counter,
+        `soft_reset_fleet_migration_failure_count`'s hardcoded `0`) and
+        the already-accepted SQLite mirror in sqlite_backends.py.
+
+        Raises:
+            ValueError: golden_alias is not a non-empty (non-whitespace)
+                string.
+        """
+        if not isinstance(golden_alias, str) or not golden_alias.strip():
+            raise ValueError(
+                f"golden_alias must be a non-empty string, got {golden_alias!r}"
+            )
+        now = datetime.now(timezone.utc)
+
+        with self._pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    self._RECORD_DEDUP_OUTCOME_SQL,
+                    (
+                        golden_alias,
+                        duplicate_groups,
+                        records_before,
+                        records_deleted,
+                        winner_kept_groups,
+                        whole_group_deleted_groups,
+                        collection_total,
+                        now,
+                        now,
+                    ),
+                )
+                row = cur.fetchone()
+            conn.commit()
+
+        assert row is not None, (
+            "INSERT ... RETURNING on fleet_migration_dedup_state must "
+            "always yield exactly one row"
+        )
+        return self._dedup_state_row_to_dict(row)
+
+    def get_dedup_state(self, golden_alias: str) -> Optional[Dict[str, Any]]:
+        """Currently persisted dedup-outcome state, or None if absent.
+
+        Raises:
+            ValueError: golden_alias is not a non-empty (non-whitespace)
+                string.
+        """
+        if not isinstance(golden_alias, str) or not golden_alias.strip():
+            raise ValueError(
+                f"golden_alias must be a non-empty string, got {golden_alias!r}"
+            )
+
+        with self._pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"SELECT {self._DEDUP_STATE_SELECT_COLUMNS} "
+                    f"FROM fleet_migration_dedup_state WHERE golden_alias = %s",
+                    (golden_alias,),
+                )
+                row = cur.fetchone()
+
+        return None if row is None else self._dedup_state_row_to_dict(row)
+
+    def list_dedup_states(self) -> List[Dict[str, Any]]:
+        """Every persisted dedup-outcome row -- used by the /health
+        surface (AC13-AC18)."""
+        with self._pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"SELECT {self._DEDUP_STATE_SELECT_COLUMNS} "
+                    f"FROM fleet_migration_dedup_state"
+                )
+                rows = cur.fetchall()
+
+        return [self._dedup_state_row_to_dict(row) for row in rows]
+
+    def clear_dedup_state(self, golden_alias: str, reason: str) -> None:
+        """Mark a dedup-outcome state as cleared (AC8). No-op if absent.
+
+        Raises:
+            ValueError: golden_alias or reason is not a non-empty
+                (non-whitespace) string.
+        """
+        if not isinstance(golden_alias, str) or not golden_alias.strip():
+            raise ValueError(
+                f"golden_alias must be a non-empty string, got {golden_alias!r}"
+            )
+        if not isinstance(reason, str) or not reason.strip():
+            raise ValueError(f"reason must be a non-empty string, got {reason!r}")
+        now = datetime.now(timezone.utc)
+
+        with self._pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE fleet_migration_dedup_state SET cleared_at = %s, "
+                    "cleared_reason = %s WHERE golden_alias = %s",
+                    (now, reason, golden_alias),
+                )
+            conn.commit()
+
+    def clear_all_dedup_states(self, reason: str) -> int:
+        """Story #1589: bulk-clear EVERY currently-active (uncleared)
+        dedup-outcome row in one shot -- the Diagnostics tab's "Clear All
+        Dedup Warnings" action. Mirrors clear_dedup_state's semantics
+        (counts are never erased, only marked cleared) but scoped to
+        `WHERE cleared_at IS NULL` instead of a single golden_alias, so an
+        already-cleared row is left completely untouched (never
+        double-counted). Returns the number of rows actually cleared.
+
+        Raises:
+            ValueError: reason is not a non-empty (non-whitespace) string.
+        """
+        if not isinstance(reason, str) or not reason.strip():
+            raise ValueError(f"reason must be a non-empty string, got {reason!r}")
+        now = datetime.now(timezone.utc)
+
+        with self._pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE fleet_migration_dedup_state SET cleared_at = %s, "
+                    "cleared_reason = %s WHERE cleared_at IS NULL",
+                    (now, reason),
+                )
+                cleared_count = int(cur.rowcount)
+            conn.commit()
+        return cleared_count
+
+    # ------------------------------------------------------------------
+    # Cleanup pending-deletion queue (Bug #1567)
+    # ------------------------------------------------------------------
+
+    def schedule_cleanup_deletion(self, index_path: str, scheduled_at: float) -> float:
+        """
+        Durably record ``index_path`` as pending deletion. See
+        GoldenRepoMetadataSqliteBackend for the full contract -- this is
+        the drop-in PostgreSQL (cluster-mode) mirror.
+
+        Raises:
+            ValueError: index_path is not a non-empty string, or
+                scheduled_at is not a finite number.
+        """
+        if not isinstance(index_path, str) or not index_path.strip():
+            raise ValueError(
+                f"index_path must be a non-empty string, got {index_path!r}"
+            )
+        if not isinstance(scheduled_at, (int, float)) or isinstance(scheduled_at, bool):
+            raise ValueError(
+                f"scheduled_at must be a real number, got {scheduled_at!r}"
+            )
+        scheduled_at = float(scheduled_at)
+        if not math.isfinite(scheduled_at):
+            raise ValueError(
+                f"scheduled_at must be a finite number, got {scheduled_at!r}"
+            )
+
+        with self._pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT scheduled_at FROM cleanup_pending_deletion_state "
+                    "WHERE index_path = %s",
+                    (index_path,),
+                )
+                row = cur.fetchone()
+                if row is not None:
+                    return float(row[0])
+                cur.execute(
+                    "INSERT INTO cleanup_pending_deletion_state "
+                    "(index_path, scheduled_at) VALUES (%s, %s)",
+                    (index_path, scheduled_at),
+                )
+            conn.commit()
+        return float(scheduled_at)
+
+    def list_cleanup_pending_deletions(self) -> List[Dict[str, Any]]:
+        """Return every durably-pending deletion row. See
+        GoldenRepoMetadataSqliteBackend for the full contract -- this is
+        the drop-in PostgreSQL (cluster-mode) mirror."""
+        with self._pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT index_path, scheduled_at FROM cleanup_pending_deletion_state"
+                )
+                rows = cur.fetchall()
+        return [{"index_path": row[0], "scheduled_at": float(row[1])} for row in rows]
+
+    def remove_cleanup_pending_deletion(self, index_path: str) -> None:
+        """Remove one durably-pending deletion row, idempotent. See
+        GoldenRepoMetadataSqliteBackend for the full contract.
+
+        Raises:
+            ValueError: index_path is not a non-empty string.
+        """
+        if not isinstance(index_path, str) or not index_path.strip():
+            raise ValueError(
+                f"index_path must be a non-empty string, got {index_path!r}"
+            )
+        with self._pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "DELETE FROM cleanup_pending_deletion_state WHERE index_path = %s",
+                    (index_path,),
+                )
+            conn.commit()
 
     def close(self) -> None:
         """Close the underlying connection pool."""

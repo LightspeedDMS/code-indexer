@@ -9,6 +9,7 @@ import json
 import logging
 import multiprocessing
 import queue
+import subprocess
 import threading
 import time
 import uuid
@@ -16,7 +17,7 @@ import inspect
 from datetime import datetime, timezone, timedelta
 from enum import Enum
 from pathlib import Path
-from typing import Dict, Any, Optional, Callable, TYPE_CHECKING, List
+from typing import Dict, Any, Optional, Callable, TYPE_CHECKING, List, Union
 from dataclasses import dataclass, asdict, fields
 
 # Bug #878 Fix A.3: The outer finally in _execute_job iterates registered
@@ -40,6 +41,51 @@ if TYPE_CHECKING:
     )
     from code_indexer.server.storage.sqlite_backends import BackgroundJobsSqliteBackend
     from code_indexer.server.services.job_tracker import JobTracker
+
+
+# Bug #1535: operation_types whose callers deliberately, by design, never
+# pass repo_alias to submit_job. For these operation_types, a missing
+# repo_alias is expected happy-path behavior on EVERY successful call, not
+# a signal of a caller bug -- log it at DEBUG so it stays discoverable
+# without flooding the WARNING channel the mandatory post-E2E log-audit
+# gate relies on. Every OTHER operation_type keeps the original WARNING
+# (AC5's intent: a missing repo_alias there usually does indicate a real
+# bug). Known intentional shapes, confirmed at each call site:
+#   - "temporal_query" (Story #1400's temporal_live_dispatch.py `_submit`
+#     closure): BGM's register_job_if_no_conflict per-(operation_type,
+#     repo_alias) uniqueness gate is the wrong dedup tool for temporal
+#     queries -- correct dedup granularity is the full query signature,
+#     enforced separately by TemporalDedupCache.
+#   - "xray_search_batch" (xray_batch.py): "no per-repo dedup; concurrent
+#     batches allowed" -- an explicit design comment at the call site.
+#   - "query_analytics_export" (inline_admin_ops.py's
+#     trigger_query_analytics_export): a global, cross-repo export job
+#     with no single owning repo_alias.
+_OPERATIONS_WITHOUT_REPO_ALIAS_BY_DESIGN = frozenset(
+    {"temporal_query", "xray_search_batch", "query_analytics_export"}
+)
+
+# Bug #1535: the "{platform}_discovery" family (web/routes.py's
+# discovery_start, CLAUDE.md's "Auto-Discovery Background Job Pattern")
+# constructs operation_type dynamically per platform and always submits
+# with repo_alias=None ("Manual dedup: repo_alias=None bypasses BGM atomic
+# DB gate" -- the discovery job is deliberately not repo-scoped for BGM's
+# dedup gate). A suffix match, not a fixed platform set, so a future
+# platform added to _resolve_provider is covered automatically.
+_OPERATION_SUFFIXES_WITHOUT_REPO_ALIAS_BY_DESIGN = ("_discovery",)
+
+
+def _operation_omits_repo_alias_by_design(operation_type: str) -> bool:
+    """Bug #1535: True when `operation_type` is a known, intentional,
+    permanent repo_alias=None omission (exact match or suffix-pattern
+    match), so submit_job should log the omission at DEBUG rather than
+    WARNING."""
+    if operation_type in _OPERATIONS_WITHOUT_REPO_ALIAS_BY_DESIGN:
+        return True
+    return any(
+        operation_type.endswith(suffix)
+        for suffix in _OPERATION_SUFFIXES_WITHOUT_REPO_ALIAS_BY_DESIGN
+    )
 
 
 class JobStatus(str, Enum):
@@ -137,6 +183,19 @@ _MAX_OP_TYPE_SCAN = 10000
 # Cancellation checks (_check_db_cancellation) also fire on every tick.
 PROGRESS_DEBOUNCE_INTERVAL: float = 0.5
 
+# Bug #1478 part b: minimum consecutive-call progress delta that bypasses the
+# debounce above and persists immediately. A fast burst of coarse jumps
+# (e.g. 10->20->30->40) followed by a stall used to leave the shared DB row
+# stuck at an earlier value in the burst -- only the first tick after the
+# debounce window truly persisted -- while the in-memory job object (visible
+# only to the node actually running the job) already held the true, later
+# value. Under HAProxy round-robin, a poll routed to a different node then
+# read the stale DB row, producing non-monotonic progress oscillation across
+# repeated polls of the same job. A milestone-sized jump like this is rare
+# and cheap to persist immediately; ordinary fine-grained ticks (delta < 10)
+# are unaffected and continue to respect PROGRESS_DEBOUNCE_INTERVAL.
+PROGRESS_COARSE_JUMP_THRESHOLD: int = 10
+
 # Bug #1063 Part 4: Hard cap on page_size for list_jobs() and get_jobs_for_display().
 # Prevents unbounded DB fetches caused by large or uncapped page_size values.
 # The dashboard and API consumers use at most 50 rows per page in practice.
@@ -195,6 +254,7 @@ class BackgroundJobManager:
         storage_backend: Optional[Any] = None,
         node_id: Optional[str] = None,
         cluster_mode: bool = False,
+        is_primary_instance: bool = True,
     ):
         """Initialize enhanced background job manager.
 
@@ -287,6 +347,12 @@ class BackgroundJobManager:
         # are left PENDING in PG for cross-pod claiming instead of dispatched to
         # this pod's local pool. False = legacy single-pod behavior (solo/CLI).
         self._cluster_mode: bool = cluster_mode
+
+        # Bug #1549: True (default) when this process confirmed it is the
+        # sole live instance for this data directory. False disables the
+        # unscoped SQLite-flavored orphan-cleanup sweeps below, which would
+        # otherwise mark another live instance's just-created jobs failed.
+        self._is_primary_instance: bool = is_primary_instance
 
         # Bug #1153: Cancel-handler registry keyed by operation_type.
         # Handlers are callables that signal cooperative cancellation to the
@@ -632,10 +698,20 @@ class BackgroundJobManager:
 
         # AC5: Validate repo_alias to prevent "unknown" values
         if repo_alias is None:
-            logging.warning(
-                f"Job submitted without repo_alias for operation '{operation_type}' "
-                f"by user '{submitter_username}'. Consider providing repo_alias."
-            )
+            # Bug #1535: some operation_types (e.g. "temporal_query") omit
+            # repo_alias by design on EVERY call -- that is happy-path, not
+            # a caller mistake, so it must not flood the WARNING channel.
+            if _operation_omits_repo_alias_by_design(operation_type):
+                logging.debug(
+                    f"Job submitted without repo_alias for operation '{operation_type}' "
+                    f"by user '{submitter_username}' (expected -- this operation_type "
+                    f"never supplies repo_alias by design)."
+                )
+            else:
+                logging.warning(
+                    f"Job submitted without repo_alias for operation '{operation_type}' "
+                    f"by user '{submitter_username}'. Consider providing repo_alias."
+                )
         elif repo_alias.lower() == "unknown":
             logging.warning(
                 f"Job submitted with repo_alias='unknown' for operation '{operation_type}' "
@@ -1037,7 +1113,9 @@ class BackgroundJobManager:
     _SIGKILL_JOIN_SECONDS: float = 1.0
 
     def register_child_process(
-        self, job_id: str, process: "multiprocessing.Process"
+        self,
+        job_id: str,
+        process: Union["multiprocessing.Process", "subprocess.Popen[Any]"],
     ) -> None:
         """Register a child process for a job so it can be terminated on cancel.
 
@@ -1046,7 +1124,9 @@ class BackgroundJobManager:
 
         Args:
             job_id: The job that owns this process.
-            process: A multiprocessing.Process instance to track.
+            process: A multiprocessing.Process (X-Ray sandbox spawn path) or a
+                subprocess.Popen (X-Ray Rust dynlib spawn path, Bug #1495) to
+                track. _terminate_child_processes handles both polymorphically.
         """
         with self._child_processes_lock:
             if job_id not in self._child_processes:
@@ -1069,11 +1149,50 @@ class BackgroundJobManager:
         with self._child_processes_lock:
             self._child_processes.pop(job_id, None)
 
+    @staticmethod
+    def _process_is_alive(proc: Any) -> bool:
+        """Liveness check, polymorphic over multiprocessing.Process and
+        subprocess.Popen (Bug #1495).
+
+        multiprocessing.Process (X-Ray sandbox spawn path) exposes
+        is_alive(). subprocess.Popen (X-Ray Rust dynlib spawn path,
+        xray/rust_backend.py) has no is_alive()/join() at all -- it exposes
+        poll() instead, which returns None while the process is still
+        running.
+        """
+        if hasattr(proc, "is_alive"):
+            return bool(proc.is_alive())
+        return proc.poll() is None
+
+    @staticmethod
+    def _process_join(proc: Any, timeout: float) -> None:
+        """Bounded wait, polymorphic over multiprocessing.Process and
+        subprocess.Popen (Bug #1495).
+
+        multiprocessing.Process.join(timeout=...) returns (without raising)
+        whether or not the process exited in time. subprocess.Popen.wait(
+        timeout=...) instead RAISES subprocess.TimeoutExpired when the
+        timeout elapses -- that is not an error here, it means "still
+        alive", exactly like a join() that returns with the process still
+        running.
+        """
+        if hasattr(proc, "join"):
+            proc.join(timeout=timeout)
+        else:
+            try:
+                proc.wait(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                pass
+
     def _terminate_child_processes(self, job_id: str) -> None:
         """Send SIGTERM then SIGKILL (after grace period) to all child processes.
 
         Implements the AC6 two-phase termination: SIGTERM first, then
         escalate to SIGKILL for processes that survive the grace period.
+        Handles both multiprocessing.Process and subprocess.Popen (Bug
+        #1495) registered handles -- terminate()/kill() exist natively on
+        both, only the liveness/wait APIs differ (see _process_is_alive /
+        _process_join above).
 
         Args:
             job_id: The job whose child processes should be terminated.
@@ -1083,15 +1202,15 @@ class BackgroundJobManager:
 
         # Phase 1: SIGTERM all alive processes
         for proc in processes:
-            if proc.is_alive():
+            if self._process_is_alive(proc):
                 proc.terminate()
 
         # Phase 2: wait grace period then SIGKILL survivors
         for proc in processes:
-            proc.join(timeout=self._SIGTERM_GRACE_SECONDS)
-            if proc.is_alive():
+            self._process_join(proc, self._SIGTERM_GRACE_SECONDS)
+            if self._process_is_alive(proc):
                 proc.kill()
-                proc.join(timeout=self._SIGKILL_JOIN_SECONDS)
+                self._process_join(proc, self._SIGKILL_JOIN_SECONDS)
 
     def cancel_job(
         self, job_id: str, username: str, is_admin: bool = False
@@ -1255,13 +1374,32 @@ class BackgroundJobManager:
 
         now = datetime.now(timezone.utc)
 
-        with self._lock:
-            for job in list(self.jobs.values()):
-                if job.status in (JobStatus.RUNNING, JobStatus.PENDING):
-                    job.status = JobStatus.FAILED
-                    job.completed_at = now
-                    job.error = error
-                    count += 1
+        # Bug #1549 Finding 2a: this in-memory marking must be governed by
+        # the same primary-instance decision as the DB-level sweep below --
+        # a non-primary worker's own self.jobs dict can hold OTHER live
+        # workers'/nodes' running/pending jobs (loaded via list_jobs() at
+        # construction time, see _load_jobs_sqlite), so marking them FAILED
+        # here would misreport a live job as failed regardless of what the
+        # shared DB says. Default is_primary_instance=True preserves
+        # existing behavior for every pre-#1549 caller.
+        if self._is_primary_instance:
+            with self._lock:
+                for job in list(self.jobs.values()):
+                    if job.status in (JobStatus.RUNNING, JobStatus.PENDING):
+                        job.status = JobStatus.FAILED
+                        job.completed_at = now
+                        job.error = error
+                        count += 1
+        else:
+            # Finding 2b: routine under `uvicorn --workers N` (exactly one
+            # worker acquires the lock; the rest correctly skip on EVERY
+            # multi-worker startup) -- demoted to DEBUG per the Bug #1535
+            # precedent so this doesn't break the post-E2E log-audit gate.
+            logging.debug(
+                "fail_orphaned_jobs: skipping in-memory orphan marking -- "
+                "this process could not confirm it is the primary server "
+                "instance (Bug #1549)"
+            )
 
         # Story #1400 CRITICAL 3: the unscoped sweep below (no node filter)
         # is only safe for solo/SQLite (single process -- every
@@ -1282,6 +1420,19 @@ class BackgroundJobManager:
                 "fail_orphaned_jobs: skipping unscoped PostgreSQL sweep "
                 "(Story #1400 CRITICAL 3) -- node-scoped cleanup runs via "
                 "JobTracker.cleanup_orphaned_jobs_on_startup(node_id) instead"
+            )
+        elif self._sqlite_backend is not None and not self._is_primary_instance:
+            # Bug #1549: this sweep is unscoped (no time/process filter) --
+            # skip it when this process could not confirm it is the
+            # primary server instance, mirroring the guard applied to the
+            # constructor-time sweep in _load_jobs_sqlite(). Finding 2b:
+            # routine under `uvicorn --workers N` -- demoted to DEBUG per
+            # the Bug #1535 precedent so this doesn't break the post-E2E
+            # log-audit gate.
+            logging.debug(
+                "fail_orphaned_jobs: skipping unscoped SQLite sweep -- this "
+                "process could not confirm it is the primary server "
+                "instance (Bug #1549)"
             )
         elif self._sqlite_backend is not None:
             try:
@@ -1454,6 +1605,17 @@ class BackgroundJobManager:
                 # _last_persist_time is a single-element list used as a mutable
                 # closure cell (Python closures cannot rebind bare names).
                 _last_persist_time: list = [0.0]
+                # Bug #1478 part b: tracks the progress value seen on the
+                # PREVIOUS progress_callback invocation (not the value last
+                # actually persisted to the DB). The baseline is deliberately
+                # "previous call" rather than "cumulative since last actual
+                # persist" so that a long run of many fine (delta < 1
+                # threshold) ticks is never affected by the bypass below,
+                # regardless of how much total distance the progress value
+                # travels over that run. Initialized to 10, matching the
+                # job.progress = 10 already persisted synchronously at the
+                # RUNNING transition above.
+                _last_seen_progress: list = [10]
 
                 def progress_callback(
                     progress: int,
@@ -1474,9 +1636,24 @@ class BackgroundJobManager:
                     # get_job() is always current even when the persist is skipped.
                     # Story #267 Component 3-4: Persist outside lock.
                     now_ts = time.monotonic()
-                    if now_ts - _last_persist_time[0] >= PROGRESS_DEBOUNCE_INTERVAL:
+                    # Bug #1478 part b: a coarse jump (delta >= threshold since
+                    # the immediately preceding call) bypasses the debounce and
+                    # persists immediately -- this closes the cross-node
+                    # non-monotonic progress oscillation where a fast burst of
+                    # coarse milestones (e.g. 10->20->30->40) followed by a
+                    # long stall left the shared DB row stuck at an earlier
+                    # value in the burst until the next tick, which may never
+                    # come in time (or at all) if the job stalls.
+                    is_coarse_jump = (
+                        progress - _last_seen_progress[0]
+                        >= PROGRESS_COARSE_JUMP_THRESHOLD
+                    )
+                    if is_coarse_jump or (
+                        now_ts - _last_persist_time[0] >= PROGRESS_DEBOUNCE_INTERVAL
+                    ):
                         self._persist_jobs(job_id=job_id)
                         _last_persist_time[0] = now_ts
+                    _last_seen_progress[0] = progress
                     # Bug #584: Check DB for cross-node cancellation on every tick
                     # (cheap read; must not be gated by the debounce window).
                     self._check_db_cancellation(job_id)
@@ -2455,12 +2632,30 @@ class BackgroundJobManager:
         try:
             # Story #723: Clean up orphaned jobs on server startup
             # This must happen BEFORE loading jobs into memory to ensure
-            # the in-memory state reflects the cleaned-up database state
-            orphan_count = self._sqlite_backend.cleanup_orphaned_jobs_on_startup()
-            if orphan_count > 0:
-                logging.info(
-                    f"Cleaned up {orphan_count} orphaned jobs on server startup"
+            # the in-memory state reflects the cleaned-up database state.
+            # Bug #1549: skip this unscoped sweep when this process could
+            # not confirm it is the primary instance -- see
+            # JobTracker._should_skip_unscoped_orphan_sweep for the same
+            # guard applied to the sibling JobTracker sweep.
+            _backend_type_name = type(self._sqlite_backend).__name__
+            if (
+                _backend_type_name != "BackgroundJobsPostgresBackend"
+                and not self._is_primary_instance
+            ):
+                # Finding 2b: routine under `uvicorn --workers N` -- demoted
+                # to DEBUG per the Bug #1535 precedent so this doesn't break
+                # the post-E2E log-audit gate.
+                logging.debug(
+                    "BackgroundJobManager: skipping unscoped SQLite "
+                    "orphan-cleanup sweep -- this process could not confirm "
+                    "it is the primary server instance (Bug #1549)"
                 )
+            else:
+                orphan_count = self._sqlite_backend.cleanup_orphaned_jobs_on_startup()
+                if orphan_count > 0:
+                    logging.info(
+                        f"Cleaned up {orphan_count} orphaned jobs on server startup"
+                    )
 
             # Story #267 Component 6: Startup cleanup of old completed/failed jobs
             # Story #400 - AC5: Use DataRetentionConfig.background_jobs_retention_hours

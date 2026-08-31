@@ -26,9 +26,9 @@ from typing import List
 
 import numpy as np
 
-from src.code_indexer.storage.filesystem_vector_store import FilesystemVectorStore
-from src.code_indexer.storage.temporal_metadata_store import TemporalMetadataStore
-from src.code_indexer.services.temporal.temporal_progressive_metadata import (
+from code_indexer.storage.filesystem_vector_store import FilesystemVectorStore
+from code_indexer.storage.temporal_metadata_store import TemporalMetadataStore
+from code_indexer.services.temporal.temporal_progressive_metadata import (
     TemporalProgressiveMetadata,
 )
 
@@ -42,11 +42,18 @@ def _make_store(base: str) -> FilesystemVectorStore:
     """Create a FilesystemVectorStore backed by a fresh temp directory."""
     index_path = Path(base) / ".code-indexer" / "index"
     index_path.mkdir(parents=True, exist_ok=True)
-    return FilesystemVectorStore(base_path=index_path)
+    # Bug #1528: temporal collections are CHUNKS_DB by default now. This
+    # suite is specifically about the LEGACY path's batched metadata write
+    # and its vector_*.json filename formula, so pin that layout explicitly
+    # (the CHUNKS_DB path's own metadata write is covered by
+    # tests/unit/storage/test_temporal_chunks_db_layout_1528.py).
+    return FilesystemVectorStore(
+        base_path=index_path, use_chunks_db_for_new_collections=False
+    )
 
 
 def _get_temporal_collection_name() -> str:
-    from src.code_indexer.services.temporal.temporal_collection_naming import (
+    from code_indexer.services.temporal.temporal_collection_naming import (
         LEGACY_TEMPORAL_COLLECTION,
     )
 
@@ -447,7 +454,7 @@ class TestHotPathWiring:
 
         This fails until temporal_indexer.py line 1231 is updated.
         """
-        import src.code_indexer.services.temporal.temporal_indexer as ti_mod
+        import code_indexer.services.temporal.temporal_indexer as ti_mod
 
         source = inspect.getsource(ti_mod)
 

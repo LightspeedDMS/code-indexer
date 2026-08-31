@@ -4,8 +4,8 @@ from pathlib import Path
 import tempfile
 import shutil
 
-from src.code_indexer.indexing.chunker import TextChunker
-from src.code_indexer.config import IndexingConfig
+from code_indexer.indexing.chunker import TextChunker
+from code_indexer.config import IndexingConfig
 
 
 class TestTextChunkerImagesIntegration:

@@ -38,7 +38,9 @@ VECTOR_C = [0.3] * VECTOR_SIZE
 
 def make_store(tmp_path: Path) -> FilesystemVectorStore:
     """Create a fresh FilesystemVectorStore in tmp_path."""
-    store = FilesystemVectorStore(base_path=tmp_path)
+    store = FilesystemVectorStore(
+        base_path=tmp_path, use_chunks_db_for_new_collections=False
+    )
     store.create_collection(COLLECTION, vector_size=VECTOR_SIZE)
     store.begin_indexing(COLLECTION)
     return store
@@ -181,7 +183,7 @@ class TestNoHnswWarningWhenSharedPointId:
 
     The warning that must NOT appear:
         'Vector file not found for point <id>, skipping'
-    emitted by _apply_incremental_hnsw_batch_update when a point_id appears
+    emitted by _apply_visibility_aware_incremental_update when a point_id appears
     in changes["added"] but its vector file is absent from _id_index.
     """
 

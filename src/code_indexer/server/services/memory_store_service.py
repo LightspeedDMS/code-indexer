@@ -85,12 +85,22 @@ class RateLimitError(Exception):
 class RefreshSchedulerProtocol(Protocol):
     """Minimal subset of refresh_scheduler used by MemoryStoreService."""
 
-    def acquire_write_lock(self, alias: str, owner_name: str) -> bool: ...
+    def acquire_write_lock(
+        self,
+        alias: str,
+        owner_name: str,
+        ttl_seconds: Optional[int] = None,
+    ) -> bool: ...
 
-    # Story #932 follow-up: ttl_seconds removed — the real RefreshScheduler.acquire_write_lock
-    # delegates to WriteLockManager which owns TTL internally; the kwarg was never forwarded.
+    # ttl_seconds is forwarded by the real RefreshScheduler.acquire_write_lock into
+    # the underlying WriteLockManager, which honors it as the lock's TTL when set.
 
-    def release_write_lock(self, alias: str, owner_name: str) -> None: ...
+    def release_write_lock(
+        self,
+        alias: str,
+        owner_name: str,
+        owner_token: Optional[str] = None,
+    ) -> bool: ...
 
     def is_write_locked(self, alias: str) -> bool: ...
 

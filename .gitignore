@@ -200,3 +200,9 @@ coverage.json
 /rust/xray-core/.claude/tdd-guard
 .tmp_token
 /tmp
+
+# Story #1676 AC8: this specific docker-compose.yml is a deliberately
+# checked-in test fixture (pinned OTEL Collector/Jaeger/Prometheus stack
+# for the live-collector E2E test), not a generated artifact -- exempt it
+# from the blanket docker-compose.yml ignore rules above.
+!tests/otel-collector/docker-compose.yml

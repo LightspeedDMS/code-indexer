@@ -162,9 +162,9 @@ class ClaudeCliManager:
                 format_error_log(
                     "APP-GENERAL-064",
                     f"Failed to sync API key via ApiKeySyncService: {e}",
-                    exc_info=True,
                     extra={"correlation_id": get_correlation_id()},
-                )
+                ),
+                exc_info=True,
             )
 
     def sync_api_key(self) -> None:
@@ -258,9 +258,9 @@ class ClaudeCliManager:
                 format_error_log(
                     "AUTH-GENERAL-010",
                     f"Failed to sync API key: {e}",
-                    exc_info=True,
                     extra={"correlation_id": get_correlation_id()},
-                )
+                ),
+                exc_info=True,
             )
             raise
 
@@ -567,14 +567,26 @@ class ClaudeCliManager:
             from code_indexer.server.storage.postgres.embedding_stats_child_wiring import (
                 build_embedding_stats_child_env,
             )
+            from code_indexer.server.utils.index_command_layout import (
+                append_server_layout_args,
+            )
+            from code_indexer.storage.shared.hnsw_sync_state import (
+                resolve_hnsw_sync_epoch_env_var,
+            )
 
+            # Story #1488: server states the new-collection layout explicitly
+            # (CHUNKS_DB) rather than inheriting the CLI SHARDED_JSON default.
+            # Bug #1575 Part C independent re-review: this spawn previously
+            # never set CIDX_HNSW_SYNC_EPOCH_POSTGRES_MODE_ENV at all.
+            _reindex_env = build_cidx_subprocess_env(
+                build_embedding_stats_child_env(get_config_service().get_config())
+            )
+            _reindex_env.update(resolve_hnsw_sync_epoch_env_var())
             _result = subprocess.run(
-                ["cidx", "index"],
+                append_server_layout_args(["cidx", "index"]),
                 cwd=str(self._meta_dir),
                 capture_output=True,
-                env=build_cidx_subprocess_env(
-                    build_embedding_stats_child_env(get_config_service().get_config())
-                ),
+                env=_reindex_env,
                 check=False,
             )
             if _result.returncode == 0:
@@ -695,9 +707,9 @@ class ClaudeCliManager:
                     format_error_log(
                         "AUTH-GENERAL-016",
                         f"{thread_name} error: {e}",
-                        exc_info=True,
                         extra={"correlation_id": get_correlation_id()},
-                    )
+                    ),
+                    exc_info=True,
                 )
 
         logger.debug(
@@ -769,9 +781,9 @@ class ClaudeCliManager:
                 format_error_log(
                     "AUTH-GENERAL-018",
                     f"Error processing {repo_path}: {e}",
-                    exc_info=True,
                     extra={"correlation_id": get_correlation_id()},
-                )
+                ),
+                exc_info=True,
             )
             callback(False, str(e))
 

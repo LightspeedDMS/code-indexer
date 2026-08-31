@@ -8,7 +8,6 @@ and service layer integration.
 from code_indexer.server.middleware.correlation import get_correlation_id
 
 import logging
-import os
 import subprocess
 from typing import Any, Optional
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -52,10 +51,48 @@ logger = logging.getLogger(__name__)
 
 # Create router with prefix and tags
 router = APIRouter(prefix="/api/v1/repos/{alias}/git", tags=["git"])
-_server_data_dir = os.environ.get("CIDX_SERVER_DATA_DIR")
-activated_repo_manager = ActivatedRepoManager(
-    data_dir=os.path.join(_server_data_dir, "data") if _server_data_dir else None
-)
+
+
+# Bug #1699 originally fixed an import-time side effect here (a bare
+# `activated_repo_manager = ActivatedRepoManager(...)` ran unconditionally
+# at module import, constructing a nested GoldenRepoManager that touched
+# the live server DB) by deferring construction to first call via a
+# module-level double-checked-locking singleton.
+#
+# That fix deferred WHEN the manager was built but not WHICH instance:
+# it still constructed its own node-local, unpooled ActivatedRepoManager,
+# entirely separate from the DI-wired `app.state.activated_repo_manager`
+# singleton built in startup/service_init.py. Bug #1692 proved this exact
+# shape causes a real cluster-mode outage in file_crud_service.py: a
+# node-local instance's user_has_activated_repo()/get_activated_repo_path()
+# fall back to scanning local {alias}_metadata.json files that
+# PostgreSQL/cluster-mode activation never writes, making every genuinely
+# activated cluster repo indistinguishable from an orphan.
+#
+# git.py's three handlers below (git_cat, git_blame, git_file_history)
+# only ever needed a WORKING manager for path resolution, not one that
+# agrees with the cluster's shared registry state -- so the divergence
+# never caused an observable bug here. But the duplicate instance is
+# inherently fragile the moment a future change starts relying on
+# agreement with the shared registry (Bug #1702).
+#
+# Fix: converge on the same DI-wired resolution pattern already used by
+# routers/repository_health.py's _get_activated_repo_manager() and by
+# file_crud_service.py's Bug #1692 fix -- resolve
+# app.state.activated_repo_manager at call time, fail loud (RuntimeError)
+# if the server hasn't wired it during startup. No node-local
+# construction and no module-level singleton/lock remain.
+def _get_activated_repo_manager() -> ActivatedRepoManager:
+    """Get the DI-wired ActivatedRepoManager from app.state (Bug #1702)."""
+    from code_indexer.server import app as app_module
+
+    manager = getattr(app_module.app.state, "activated_repo_manager", None)
+    if manager is None:
+        raise RuntimeError(
+            "activated_repo_manager not initialized. "
+            "Server must set app.state.activated_repo_manager during startup."
+        )
+    return manager
 
 
 # Git Status/Inspection Endpoints
@@ -93,9 +130,9 @@ def git_status(alias: str, user: User = Depends(get_current_user)) -> GitStatusR
             format_error_log(
                 "SVC-GENERAL-007",
                 f"Git status failed for {alias}: {e}",
-                exc_info=True,
                 extra={"correlation_id": get_correlation_id()},
-            )
+            ),
+            exc_info=True,
         )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -170,9 +207,9 @@ def git_diff(
             format_error_log(
                 "SVC-GENERAL-009",
                 f"Git diff failed for {alias}: {e}",
-                exc_info=True,
                 extra={"correlation_id": get_correlation_id()},
-            )
+            ),
+            exc_info=True,
         )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -257,9 +294,9 @@ def git_log(
             format_error_log(
                 "SVC-GENERAL-011",
                 f"Git log failed for {alias}: {e}",
-                exc_info=True,
                 extra={"correlation_id": get_correlation_id()},
-            )
+            ),
+            exc_info=True,
         )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -316,9 +353,9 @@ def git_stage(
             format_error_log(
                 "SVC-GENERAL-014",
                 f"Git stage failed for {alias}: {e}",
-                exc_info=True,
                 extra={"correlation_id": get_correlation_id()},
-            )
+            ),
+            exc_info=True,
         )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -362,9 +399,9 @@ def git_unstage(
             format_error_log(
                 "TELEM-GENERAL-002",
                 f"Git unstage failed for {alias}: {e}",
-                exc_info=True,
                 extra={"correlation_id": get_correlation_id()},
-            )
+            ),
+            exc_info=True,
         )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -422,9 +459,9 @@ def git_commit(
             format_error_log(
                 "TELEM-GENERAL-005",
                 f"Git commit failed for {alias}: {e}",
-                exc_info=True,
                 extra={"correlation_id": get_correlation_id()},
-            )
+            ),
+            exc_info=True,
         )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -476,9 +513,9 @@ def git_push(
             format_error_log(
                 "TELEM-GENERAL-007",
                 f"Git push failed for {alias}: {e}",
-                exc_info=True,
                 extra={"correlation_id": get_correlation_id()},
-            )
+            ),
+            exc_info=True,
         )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -527,9 +564,9 @@ def git_pull(
             format_error_log(
                 "VALID-GENERAL-001",
                 f"Git pull failed for {alias}: {e}",
-                exc_info=True,
                 extra={"correlation_id": get_correlation_id()},
-            )
+            ),
+            exc_info=True,
         )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -574,9 +611,9 @@ def git_fetch(
             format_error_log(
                 "VALID-GENERAL-003",
                 f"Git fetch failed for {alias}: {e}",
-                exc_info=True,
                 extra={"correlation_id": get_correlation_id()},
-            )
+            ),
+            exc_info=True,
         )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -647,9 +684,9 @@ def git_reset(
             format_error_log(
                 "VALID-GENERAL-007",
                 f"Git reset failed for {alias}: {e}",
-                exc_info=True,
                 extra={"correlation_id": get_correlation_id()},
-            )
+            ),
+            exc_info=True,
         )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -707,9 +744,9 @@ def git_clean(
             format_error_log(
                 "VALID-GENERAL-010",
                 f"Git clean failed for {alias}: {e}",
-                exc_info=True,
                 extra={"correlation_id": get_correlation_id()},
-            )
+            ),
+            exc_info=True,
         )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -751,9 +788,9 @@ def git_merge_abort(
             format_error_log(
                 "WEB-GENERAL-001",
                 f"Git merge abort failed for {alias}: {e}",
-                exc_info=True,
                 extra={"correlation_id": get_correlation_id()},
-            )
+            ),
+            exc_info=True,
         )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -797,9 +834,9 @@ def git_checkout_file(
             format_error_log(
                 "WEB-GENERAL-003",
                 f"Git checkout file failed for {alias}: {e}",
-                exc_info=True,
                 extra={"correlation_id": get_correlation_id()},
-            )
+            ),
+            exc_info=True,
         )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -844,9 +881,9 @@ def git_branch_list(
             format_error_log(
                 "WEB-GENERAL-005",
                 f"Git branch list failed for {alias}: {e}",
-                exc_info=True,
                 extra={"correlation_id": get_correlation_id()},
-            )
+            ),
+            exc_info=True,
         )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -910,9 +947,9 @@ def git_branch_create(
             format_error_log(
                 "WEB-GENERAL-009",
                 f"Git branch create failed for {alias}: {e}",
-                exc_info=True,
                 extra={"correlation_id": get_correlation_id()},
-            )
+            ),
+            exc_info=True,
         )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -956,9 +993,9 @@ def git_branch_switch(
             format_error_log(
                 "WEB-GENERAL-011",
                 f"Git branch switch failed for {alias}: {e}",
-                exc_info=True,
                 extra={"correlation_id": get_correlation_id()},
-            )
+            ),
+            exc_info=True,
         )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -1018,9 +1055,9 @@ def git_branch_delete(
             format_error_log(
                 "WEB-GENERAL-014",
                 f"Git branch delete failed for {alias}: {e}",
-                exc_info=True,
                 extra={"correlation_id": get_correlation_id()},
-            )
+            ),
+            exc_info=True,
         )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -1054,7 +1091,9 @@ def git_cat(
         )
 
     try:
-        repo_path = activated_repo_manager.get_activated_repo_path(user.username, alias)
+        repo_path = _get_activated_repo_manager().get_activated_repo_path(
+            user.username, alias
+        )
     except FileNotFoundError as exc:
         logger.warning(
             format_error_log(
@@ -1180,7 +1219,9 @@ def git_blame(
         )
 
     try:
-        repo_path = activated_repo_manager.get_activated_repo_path(user.username, alias)
+        repo_path = _get_activated_repo_manager().get_activated_repo_path(
+            user.username, alias
+        )
     except FileNotFoundError as exc:
         logger.warning(
             format_error_log(
@@ -1292,7 +1333,9 @@ def git_file_history(
         )
 
     try:
-        repo_path = activated_repo_manager.get_activated_repo_path(user.username, alias)
+        repo_path = _get_activated_repo_manager().get_activated_repo_path(
+            user.username, alias
+        )
     except FileNotFoundError as exc:
         logger.warning(
             format_error_log(

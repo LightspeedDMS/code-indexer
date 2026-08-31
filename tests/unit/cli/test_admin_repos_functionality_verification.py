@@ -8,7 +8,7 @@ structure without requiring actual server connectivity.
 import pytest
 from click.testing import CliRunner
 
-from src.code_indexer.cli import cli
+from code_indexer.cli import cli
 
 
 class TestAdminReposFunctionalityVerification:

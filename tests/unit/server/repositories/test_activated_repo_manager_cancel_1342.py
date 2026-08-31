@@ -29,15 +29,15 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from src.code_indexer.server.repositories.activated_repo_manager import (
+from code_indexer.server.repositories.activated_repo_manager import (
     ActivatedRepoError,
     ActivatedRepoManager,
 )
-from src.code_indexer.server.repositories.golden_repo_manager import GoldenRepo
-from src.code_indexer.server.utils.cancellable_subprocess import (
+from code_indexer.server.repositories.golden_repo_manager import GoldenRepo
+from code_indexer.server.utils.cancellable_subprocess import (
     SubprocessCancelledError,
 )
-from src.code_indexer.server.utils.config_manager import ServerResourceConfig
+from code_indexer.server.utils.config_manager import ServerResourceConfig
 
 
 @pytest.fixture
@@ -209,7 +209,7 @@ class TestDoActivateRepositoryCancelWiring:
         mock_clone_backend.create_clone_at_path.side_effect = _fake_clone
 
         with patch(
-            "src.code_indexer.server.repositories.activated_repo_manager"
+            "code_indexer.server.repositories.activated_repo_manager"
             ".CommitterResolutionService"
         ) as mock_committer_cls:
             mock_committer_cls.return_value.resolve_committer_email.return_value = (
@@ -237,12 +237,12 @@ class TestDoActivateRepositoryCancelWiring:
 
         with (
             patch(
-                "src.code_indexer.server.repositories.activated_repo_manager"
+                "code_indexer.server.repositories.activated_repo_manager"
                 ".subprocess.run",
                 return_value=successful_git,
             ),
             patch(
-                "src.code_indexer.server.repositories.activated_repo_manager"
+                "code_indexer.server.repositories.activated_repo_manager"
                 ".CommitterResolutionService"
             ) as mock_committer_cls,
         ):

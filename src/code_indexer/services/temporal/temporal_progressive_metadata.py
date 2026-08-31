@@ -20,6 +20,32 @@ logger = logging.getLogger(__name__)
 FORMAT_VERSION = 2
 VALID_STATES = {"idle", "building", "failed"}
 
+# Sentinel distinguishing "key absent" from any legitimate stored value
+# (including None) when validating strict-mode schema (#1461-7 review).
+_MISSING = object()
+
+
+class TemporalProgressMetadataCorruptError(RuntimeError):
+    """Raised in STRICT mode when temporal_progress.json exists but is
+    corrupt, unreadable, or structurally malformed (Bug #1461 sub-part
+    7b).
+
+    Write/publish/reconcile-classification callers MUST use strict=True:
+    silently defaulting to an empty completed-commits set on corruption
+    (the lenient behavior) would masquerade as "nothing has ever been
+    indexed" and cause every already-indexed commit to be misclassified
+    as PARTIAL -- deleting its points and re-queuing it for a full,
+    destructive, potentially multi-hour re-embed (the exact incident
+    class of Bug #1390/#1406, now triggered by plain file corruption).
+
+    Read-only/status/dashboard callers keep the lenient default
+    (strict=False): they must never crash, so they still log a WARNING
+    and return default/empty data on corruption, unchanged.
+
+    A genuinely ABSENT progress file is NOT corruption in either mode --
+    a brand-new shard/version legitimately has no progress file yet.
+    """
+
 
 class TemporalProgressiveMetadata:
     """Track progressive state for temporal indexing with atomic writes and locking."""
@@ -90,21 +116,42 @@ class TemporalProgressiveMetadata:
         self._pending.add(commit_hash)
         self.flush_pending()
 
-    def mark_completed(self, commit_hashes: list) -> None:
-        """Mark multiple commits as completed."""
+    def mark_completed(self, commit_hashes: list, strict: bool = False) -> None:
+        """Mark multiple commits as completed.
+
+        Args:
+            strict: Bug #1461 sub-part 7b. When True, a pre-existing but
+                corrupt/unreadable temporal_progress.json raises
+                TemporalProgressMetadataCorruptError instead of being
+                silently treated as empty (which would otherwise discard
+                every historical completion marker on this write).
+                Write/publish call sites (e.g. consolidated-version
+                build) MUST pass True. Default False preserves the
+                original lenient behavior for every other caller.
+        """
         self._atomic_update(
-            lambda data: data["completed_commits"].extend(commit_hashes)
+            lambda data: data["completed_commits"].extend(commit_hashes),
+            strict=strict,
         )
 
-    def load_completed(self) -> Set[str]:
+    def load_completed(self, strict: bool = False) -> Set[str]:
         """Load set of completed commit hashes.
 
         Returns the union of on-disk flushed commits and any in-memory staged
         commits not yet flushed.  A fresh instance (after crash/restart) returns
         only flushed commits — staged-but-unflushed commits are intentionally
         absent (correct crash-resume semantics: the indexer will re-index them).
+
+        Args:
+            strict: Bug #1461 sub-part 7b. When True, a pre-existing but
+                corrupt/unreadable temporal_progress.json raises
+                TemporalProgressMetadataCorruptError instead of returning
+                an empty set (which would otherwise misclassify every
+                already-indexed commit as PARTIAL for a reconciliation
+                caller). Reconciliation call sites MUST pass True.
+                Default False preserves the original lenient behavior.
         """
-        data = self._load()
+        data = self._load(strict=strict)
         on_disk = set(data.get("completed_commits", []))
         with self._pending_lock:
             pending_snapshot = set(self._pending)
@@ -132,14 +179,30 @@ class TemporalProgressiveMetadata:
         """Load and return the full progress data dict."""
         return self._load()
 
-    def _load(self) -> dict:
-        """Load progress data, migrating legacy format if needed."""
+    def _load(self, strict: bool = False) -> dict:
+        """Load progress data, migrating legacy format if needed.
+
+        Args:
+            strict: Bug #1461 sub-part 7b. When True, a present-but-
+                corrupt (JSONDecodeError), unreadable (IOError), or
+                structurally malformed (not a dict) file raises
+                TemporalProgressMetadataCorruptError naming the file
+                path, instead of logging a WARNING and silently
+                returning empty defaults. A genuinely ABSENT file is
+                NOT corruption in either mode -- it still returns
+                default data.
+        """
         if not self.progress_path.exists():
             return self._default_data()
         try:
             with open(self.progress_path) as f:
                 data = json.load(f)
         except (json.JSONDecodeError, IOError) as e:
+            if strict:
+                raise TemporalProgressMetadataCorruptError(
+                    f"Corrupt or unreadable temporal progress metadata "
+                    f"at {self.progress_path}: {e}"
+                ) from e
             logger.warning(
                 "Failed to load %s, returning default data: %s",
                 self.progress_path,
@@ -147,9 +210,47 @@ class TemporalProgressiveMetadata:
             )
             return self._default_data()
 
+        if not isinstance(data, dict):
+            if strict:
+                raise TemporalProgressMetadataCorruptError(
+                    f"Malformed temporal progress metadata at "
+                    f"{self.progress_path}: expected a JSON object, got "
+                    f"{type(data).__name__}"
+                )
+            logger.warning(
+                "Malformed %s (expected a JSON object, got %s), returning default data",
+                self.progress_path,
+                type(data).__name__,
+            )
+            return self._default_data()
+
         # Migrate legacy format if needed
         if "format_version" not in data:
             data = self._migrate_legacy(data)
+        elif strict:
+            # #1461-7 review (LOW, defense-in-depth): a file that parses as
+            # valid JSON and is already migrated (format_version present)
+            # can still be schema-invalid -- completed_commits missing
+            # entirely or present but not a list. Passing the two checks
+            # above (parseable JSON, is a dict) is not sufficient:
+            # load_completed()'s `data.get("completed_commits", [])` would
+            # otherwise silently treat the malformed value as an empty/
+            # garbage completed-commit set, which a strict reconciliation
+            # caller would misclassify as "nothing has ever been indexed"
+            # -- the exact Bug #1390/#1406 incident class, now triggered by
+            # a structurally malformed (but syntactically valid) file
+            # rather than outright corruption. Migrated data is exempt:
+            # _migrate_legacy() always produces a valid completed_commits
+            # list, so this check only needs to run when migration did NOT
+            # just run.
+            commits_value = data.get("completed_commits", _MISSING)
+            if commits_value is _MISSING or not isinstance(commits_value, list):
+                raise TemporalProgressMetadataCorruptError(
+                    f"Malformed temporal progress metadata at "
+                    f"{self.progress_path}: 'completed_commits' must be a "
+                    f"list, got "
+                    f"{'missing' if commits_value is _MISSING else type(commits_value).__name__}"
+                )
 
         return dict(data)
 
@@ -190,11 +291,16 @@ class TemporalProgressiveMetadata:
             "state": "idle",
         }
 
-    def _atomic_update(self, modifier) -> None:  # type: ignore[type-arg]
+    def _atomic_update(self, modifier, strict: bool = False) -> None:  # type: ignore[type-arg]
         """Atomic read-modify-write under file lock.
 
         Acquires lock, reads current data, applies modifier, deduplicates
         commits, writes atomically.
+
+        Args:
+            strict: Bug #1461 sub-part 7b. Threaded into the internal
+                self._load(strict=strict) call -- see TemporalProgress
+                MetadataCorruptError's docstring for the full rationale.
         """
         self.temporal_dir.mkdir(parents=True, exist_ok=True)
         lock_file = open(self._lock_path, "w")
@@ -204,7 +310,7 @@ class TemporalProgressiveMetadata:
             _used_lockf = nfs_safe_flock(lock_file.fileno(), fcntl.LOCK_EX)
             _lock_acquired = True
 
-            data = self._load()
+            data = self._load(strict=strict)
             modifier(data)
 
             # Deduplicate and sort commits

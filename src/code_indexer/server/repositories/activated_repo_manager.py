@@ -11,6 +11,10 @@ from code_indexer.server.utils.cow_utils import _safe_makedirs_cow
 from code_indexer.server.utils.cancellable_subprocess import (
     SubprocessCancelledError,
 )
+from code_indexer.server.storage.shared.snapshot_manager import (
+    _ensure_source_tree_readable_for_clone,
+)
+from code_indexer.server.storage.json_column import parse_json_column
 from code_indexer.utils.subprocess_env import build_cidx_subprocess_env
 
 import json
@@ -19,11 +23,12 @@ import shutil
 import subprocess
 import logging
 import time
+import uuid
 
 # yaml import removed - using json for config files
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING, Dict, List, Optional, Any, Callable
+from typing import TYPE_CHECKING, Dict, List, Optional, Any, Callable, Union
 
 if TYPE_CHECKING:
     from code_indexer.server.storage.shared.clone_backend import CloneBackend
@@ -32,9 +37,11 @@ from pydantic import BaseModel
 from .golden_repo_manager import GoldenRepoManager
 from .background_jobs import BackgroundJobManager
 from ..services.committer_resolution_service import CommitterResolutionService
+from ..services.deactivation_query_drain import wait_for_activated_repo_query_drain
 from ..services.job_tracker import DuplicateJobError
 from ..git.git_subprocess_env import build_non_interactive_git_env
 from ...config import GitServiceConfig
+from ...services.git_hook_manager import GitHookManager
 
 
 def _dict_row_factory() -> Any:
@@ -63,6 +70,26 @@ class ActivatedRepoError(Exception):
 
 class GitOperationError(ActivatedRepoError):
     """Exception raised when git operations fail."""
+
+    pass
+
+
+class ActivatedRepoCloneNotStartedError(ActivatedRepoError):
+    """Bug #1618: raised by `_clone_with_copy_on_write`'s two pre-clone
+    guard branches (an in-flight refresh detected via
+    `check_refresh_not_in_progress`, or a failed `acquire_write_lock`) --
+    both of which fail BEFORE `self._clone_backend.create_clone_at_path(...)`
+    is ever reached, so no clone was attempted and no orphan directory can
+    possibly exist.
+
+    `_do_activate_repository`'s clone-phase exception handler distinguishes
+    this from a genuine (post-clone-attempt) `ActivatedRepoError` so it can
+    skip the Bug #1349 orphan-cleanup bounded retry loop entirely --
+    running that loop here would burn ~12s of real time.sleep() waiting for
+    a clone that could never materialize, and its exhaustion WARNING
+    ("a late-materializing async clone may still be in flight") would be
+    definitionally false.
+    """
 
     pass
 
@@ -234,6 +261,12 @@ class ActivatedRepoManager:
         # Bug #1203: injected index manager for branch-delta reindex on
         # non-default branch activations/switches/syncs. None = skip reindex.
         self._index_manager = index_manager
+        # Story #1458 AC13: server's QueryTracker, wired post-hoc via
+        # set_query_tracker() (mirrors set_connection_pool). None (CLI/
+        # solo, or not-yet-wired server startup) makes the deactivation
+        # drain a no-op -- the SAME fail-open contract
+        # wait_for_activated_repo_query_drain already has for a None tracker.
+        self._query_tracker: Any = None
 
     def set_connection_pool(self, pool: Any) -> None:
         """Set PostgreSQL connection pool for cluster mode.
@@ -245,6 +278,52 @@ class ActivatedRepoManager:
         self.logger.info(
             "ActivatedRepoManager: using PostgreSQL connection pool (cluster mode)"
         )
+
+    def uses_shared_metadata_stores(self) -> bool:
+        """Whether BOTH metadata stores this manager exposes are the SHARED
+        (cross-node) ones rather than this node's own local files (Bug #1533).
+
+        Two INDEPENDENT stores are involved, and half wired is not wired:
+
+        1. Activation metadata -- this manager's own PostgreSQL connection
+           pool (``set_connection_pool``). Without it, reads hit node-local
+           JSON files that are empty for repos activated on any other node,
+           and an empty read is indistinguishable from "this repo is not
+           activated".
+        2. Golden-repo metadata -- ``self.golden_repo_manager``'s backend,
+           which must BE the shared one (``has_shared_metadata_backend()``),
+           not merely something that was injected. Without it, a lineage
+           lookup that correctly resolves the golden alias STILL fails on the
+           golden lookup with GoldenRepoNotFoundError ("Loaded 0 golden repos
+           from SQLite"), which ``load_golden_temporal_config`` swallows
+           fail-open -- silently degrading temporal embedder selection.
+
+        Both halves check CAPABILITY, never mere presence: a pool object that
+        cannot hand out connections, or a node-local SQLite backend that
+        happened to be injected, would each let a miswired cluster node read
+        node-local state -- the exact bug class this guard exists to close.
+
+        Callers whose correctness depends on the cluster-wide view must treat
+        False as "I cannot answer", never as a negative answer.
+        """
+        # `callable`, not `hasattr`: a pool exposing `connection` as a plain
+        # (non-callable) attribute cannot hand out connections, so presence
+        # alone does not establish the capability being checked for.
+        if self._pool is None:
+            return False
+        if not callable(getattr(self._pool, "connection", None)):
+            return False
+        return self.golden_repo_manager.has_shared_metadata_backend() is True
+
+    def set_query_tracker(self, query_tracker: Any) -> None:
+        """Wire the server's QueryTracker (Story #1458 AC13).
+
+        Used by the deactivation drain (_do_deactivate_single /
+        _do_deactivate_composite) to wait for an in-flight, same-worker-
+        process activated-repo query to release its refcount before the
+        trashed clone's consolidated chunks.db is physically purged.
+        """
+        self._query_tracker = query_tracker
 
     def set_shared_repos_dir(self, shared_dir: str) -> None:
         """Set NFS shared directory for activated repo clones in cluster mode."""
@@ -320,6 +399,11 @@ class ActivatedRepoManager:
                 "ssh_key_used",
                 "is_composite",
                 "wiki_enabled",
+                # Story #1458 AC11: activation_id has its own dedicated
+                # column (backward-compatible ADD COLUMN migration) --
+                # excluded here so it is never double-stuffed into the
+                # generic metadata_json catch-all blob.
+                "activation_id",
             )
         }
         with self._pool.connection() as conn:
@@ -327,8 +411,8 @@ class ActivatedRepoManager:
                 "INSERT INTO activated_repos "
                 "(username, user_alias, golden_repo_alias, repo_path, current_branch, "
                 "activated_at, last_accessed, git_committer_email, ssh_key_used, "
-                "is_composite, wiki_enabled, metadata_json) "
-                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) "
+                "is_composite, wiki_enabled, activation_id, metadata_json) "
+                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) "
                 "ON CONFLICT (username, user_alias) DO UPDATE SET "
                 "golden_repo_alias = EXCLUDED.golden_repo_alias, "
                 "repo_path = EXCLUDED.repo_path, "
@@ -338,6 +422,7 @@ class ActivatedRepoManager:
                 "ssh_key_used = EXCLUDED.ssh_key_used, "
                 "is_composite = EXCLUDED.is_composite, "
                 "wiki_enabled = EXCLUDED.wiki_enabled, "
+                "activation_id = EXCLUDED.activation_id, "
                 "metadata_json = EXCLUDED.metadata_json",
                 (
                     username,
@@ -351,6 +436,7 @@ class ActivatedRepoManager:
                     metadata.get("ssh_key_used") or None,
                     metadata.get("is_composite", False),
                     metadata.get("wiki_enabled", False),
+                    metadata.get("activation_id"),
                     json.dumps(extra) if extra else None,
                 ),
             )
@@ -415,16 +501,32 @@ class ActivatedRepoManager:
             "ssh_key_used": row.get("ssh_key_used"),
             "is_composite": bool(row.get("is_composite", False)),
             "wiki_enabled": bool(row.get("wiki_enabled", False)),
+            # Story #1458 AC11: dedicated column, NULL for any row inserted
+            # before this migration -- degrades gracefully to None.
+            "activation_id": row.get("activation_id"),
         }
         metadata_json = row.get("metadata_json")
         if metadata_json:
-            extra = (
-                metadata_json
-                if isinstance(metadata_json, dict)
-                else json.loads(metadata_json)
-            )
-            result.update(extra)
+            extra = parse_json_column(metadata_json, dict, "metadata_json")
+            if extra:
+                result.update(extra)
         return result
+
+    def get_activation_id(self, username: str, user_alias: str) -> Optional[str]:
+        """Return the persisted per-activation UUID token for this
+        activated repo, or None (Story #1458 AC11).
+
+        None covers three cases uniformly: the repo is not activated at
+        all, its metadata predates this story's field (JSON file with no
+        "activation_id" key, or a PG row with a NULL column), or the field
+        is present but empty -- callers must always treat None as "no
+        clone-generation token available" and fall back to the pure
+        path-derived cache key (see FilesystemVectorStore.activation_id).
+        """
+        metadata = self._load_metadata(username, user_alias)
+        if metadata is None:
+            return None
+        return metadata.get("activation_id")
 
     def _delete_metadata(self, username: str, user_alias: str) -> None:
         """Delete activated repo metadata (PG or JSON file)."""
@@ -900,6 +1002,11 @@ class ActivatedRepoManager:
             # Step 6: Create metadata file with discovered repos
             update_progress(95, "Creating composite repository metadata")
             activated_at = datetime.now(timezone.utc).isoformat()
+            # Story #1458 AC11 (Finding 7): a dedicated, guaranteed-unique
+            # per-activation UUID -- activated_at alone is second-resolution
+            # and collision-prone within one clock tick, insufficient as a
+            # per-clone generation/identity token on its own.
+            activation_id = str(uuid.uuid4())
 
             # Get discovered repos from proxy config
             discovered_repos = proxy_config.get_repositories()
@@ -913,6 +1020,7 @@ class ActivatedRepoManager:
                 "discovered_repos": discovered_repos,
                 "activated_at": activated_at,
                 "last_accessed": activated_at,
+                "activation_id": activation_id,
             }
 
             try:
@@ -1090,10 +1198,28 @@ class ActivatedRepoManager:
         # 404 when the dir was gone, with no front-door cleanup path.
         # _load_metadata() dispatches to PG (cluster) or JSON file (solo) and is
         # the single source of truth for both modes.
+        #
+        # Bug #1514: the mirror-image gap.  An activation that fails AFTER
+        # creating the on-disk clone but BEFORE writing the metadata
+        # registration row leaves an orphan directory with no registry
+        # entry.  _do_deactivate_repository (the background-job worker)
+        # already has correct orphan-cleanup logic for exactly this case
+        # (Bug #1030 Fix A: no metadata, dir exists -> remove dir, return
+        # success), but it was unreachable through this front door, which
+        # used to raise "not found" whenever metadata was absent -- with
+        # no regard for whether an on-disk directory still existed.  Only
+        # a request with NEITHER metadata NOR an on-disk directory is a
+        # genuine 404; when a directory exists, route through the same
+        # background-job path so the existing worker-side cleanup runs.
+        # get_activated_repo_path() is the same pre-existing, already-used
+        # path-construction primitive _do_deactivate_repository's own
+        # orphan branch relies on -- no new path-handling logic is added.
         if self._load_metadata(username, user_alias) is None:
-            raise ActivatedRepoError(
-                f"Activated repository '{user_alias}' not found for user '{username}'"
-            )
+            repo_dir = self.get_activated_repo_path(username, user_alias)
+            if not os.path.exists(repo_dir):
+                raise ActivatedRepoError(
+                    f"Activated repository '{user_alias}' not found for user '{username}'"
+                )
 
         # Submit background job
         job_id = self.background_job_manager.submit_job(
@@ -1149,6 +1275,12 @@ class ActivatedRepoManager:
             raise ActivatedRepoError(
                 f"Activated repository '{user_alias}' not found for user '{username}'"
             )
+
+        # Bug #1514: self-heal the activated repo's OWN stale-path
+        # post-checkout hook BEFORE any of this method's checkout paths
+        # (remote-tracking switch, local switch, or create-branch
+        # checkout) can trigger it.
+        self._ensure_branch_hook_self_heal(repo_dir)
 
         try:
             # Step 1: Determine if we should attempt to fetch from remote
@@ -2045,6 +2177,18 @@ class ActivatedRepoManager:
                     cancel_check=cancel_check,
                     golden_repo_alias=golden_repo_alias,
                 )
+            except ActivatedRepoCloneNotStartedError:
+                # Bug #1618: the clone step was never reached (write-lock
+                # acquisition failed, or a refresh was already in flight for
+                # this golden repo) -- no clone backend call happened, so no
+                # orphan directory can possibly exist. Re-raise immediately
+                # WITHOUT invoking the Bug #1349 cleanup grace loop below:
+                # running it here would waste ~12s of real time.sleep() and
+                # log a definitionally-false "late-materializing async
+                # clone" WARNING. This except clause must stay ABOVE the
+                # broader `except ActivatedRepoError:` below since this is a
+                # subtype of it.
+                raise
             except ActivatedRepoError:
                 # Bug #1345/#1349: a cancel (or any other failure) during the
                 # CLONE phase must not leave an orphaned partial clone
@@ -2072,6 +2216,13 @@ class ActivatedRepoManager:
             # Switch to requested branch if different from default
             if branch_name != golden_repo.default_branch:
                 update_progress(70, f"Switching to branch '{branch_name}'")
+                # Bug #1514: self-heal the activated repo's OWN stale-path
+                # post-checkout hook (inherited byte-for-byte from the CoW
+                # clone) BEFORE this checkout fires it -- the first
+                # checkout on a freshly-cloned activated repo happens
+                # before any indexing ever runs, so ensure_hook_installed()
+                # never gets a chance to self-heal via the indexing flow.
+                self._ensure_branch_hook_self_heal(activated_repo_path)
                 result = subprocess.run(
                     ["git", "checkout", "-B", branch_name, f"origin/{branch_name}"],
                     cwd=activated_repo_path,
@@ -2176,6 +2327,10 @@ class ActivatedRepoManager:
             # Create metadata file
             update_progress(90, "Creating repository metadata")
             activated_at = datetime.now(timezone.utc).isoformat()
+            # Story #1458 AC11 (Finding 7): see the composite-activation
+            # site above for the full rationale -- same dedicated,
+            # guaranteed-unique per-activation UUID token.
+            activation_id = str(uuid.uuid4())
             metadata = {
                 "username": username,
                 "user_alias": user_alias,
@@ -2185,6 +2340,7 @@ class ActivatedRepoManager:
                 "last_accessed": activated_at,
                 "git_committer_email": git_committer_email,
                 "ssh_key_used": ssh_key_used,
+                "activation_id": activation_id,
             }
 
             self._save_metadata(username, user_alias, metadata)
@@ -2410,7 +2566,34 @@ class ActivatedRepoManager:
             if os.path.exists(repo_dir):
                 rename_was_attempted = True
                 trash_root = os.path.join(self.activated_repos_dir, ".trash")
+                # Codex round-6 HIGH finding #6b: the real admission
+                # barrier -- mark this path quiescing BEFORE the drain
+                # wait even starts, so a NEW query arriving after this
+                # point is refused by track_activated_repo_query()
+                # rather than racing the drain-then-rename sequence
+                # (drain observes zero -> a late query starts anyway ->
+                # rename proceeds -> the query reads a path that's
+                # already gone). Cleared in the finally below on every
+                # exit path so a later reactivation at this same path is
+                # never permanently and incorrectly refused.
+                if self._query_tracker is not None:
+                    self._query_tracker.mark_quiescing(repo_dir)
                 try:
+                    # Story #1458 AC13 / Codex HIGH finding (round 5): the
+                    # bounded drain for an in-flight, same-worker-process
+                    # activated-repo query MUST complete BEFORE the
+                    # destructive Phase-1 rename, not after it. The prior
+                    # ordering (rename first, drain second) let the rename
+                    # yank repo_dir out from under an in-flight reader
+                    # before the drain even started checking for
+                    # stragglers -- exactly the race this drain exists to
+                    # prevent. Keyed by the ORIGINAL, pre-rename repo_dir
+                    # -- the SAME path-key format _search_activated_repo's
+                    # QueryTracker wiring uses. Fail-open when
+                    # self._query_tracker is None (never blocks
+                    # deactivation).
+                    wait_for_activated_repo_query_drain(self._query_tracker, repo_dir)
+
                     # Phase 1: fd-anchored atomic rename into .trash.
                     trash_name = _fd_anchored_phase1_rename(
                         activated_repos_dir=self.activated_repos_dir,
@@ -2441,6 +2624,7 @@ class ActivatedRepoManager:
                                 "impact": "minor",
                             },
                         )
+
                     # Phase 2: slow recursive delete via fd-anchored helper.
                     try:
                         _safe_purge_trash_entry(trash_root, trash_name)
@@ -2490,6 +2674,14 @@ class ActivatedRepoManager:
                             "requires_admin_cleanup": True,
                         },
                     )
+                finally:
+                    # Codex round-6 HIGH finding #6b: clear the quiescing
+                    # mark on EVERY exit path (success or failure) -- a
+                    # later reactivation at this same path must never be
+                    # permanently and incorrectly refused because a prior
+                    # deactivation attempt left it marked.
+                    if self._query_tracker is not None:
+                        self._query_tracker.clear_quiescing(repo_dir)
 
             # Remove metadata via dual-mode helper.
             # GHOST REPO PREVENTION (codex RED-review fix): use the explicit
@@ -2637,7 +2829,30 @@ class ActivatedRepoManager:
             if repo_path.exists():
                 rename_was_attempted = True
                 trash_root = os.path.join(self.activated_repos_dir, ".trash")
+                # Codex round-6 HIGH finding #6b: the real admission
+                # barrier, mirroring _do_deactivate_single exactly --
+                # mark this path quiescing BEFORE the drain wait even
+                # starts. Cleared in the finally below on every exit
+                # path so a later reactivation is never permanently and
+                # incorrectly refused.
+                if self._query_tracker is not None:
+                    self._query_tracker.mark_quiescing(str(repo_path))
                 try:
+                    # Story #1458 AC13 / Codex HIGH finding (round 6,
+                    # matches Claude's independent finding): the bounded
+                    # drain for an in-flight, same-worker-process
+                    # activated-repo query MUST complete BEFORE the
+                    # destructive Phase-1 rename, not after it --
+                    # matching _do_deactivate_single's already-fixed
+                    # ordering exactly (a PRIOR version of this comment
+                    # falsely claimed this call site already mirrored
+                    # that ordering; it only mirrored the drain
+                    # mechanics, not the sequencing). Keyed by the
+                    # ORIGINAL, pre-rename repo_path.
+                    wait_for_activated_repo_query_drain(
+                        self._query_tracker, str(repo_path)
+                    )
+
                     trash_name = _fd_anchored_phase1_rename(
                         activated_repos_dir=self.activated_repos_dir,
                         username=username,
@@ -2673,6 +2888,7 @@ class ActivatedRepoManager:
                                 "impact": "minor",
                             },
                         )
+
                     # Phase 2: fd-anchored recursive delete.
                     try:
                         _safe_purge_trash_entry(trash_root, trash_name)
@@ -2723,6 +2939,11 @@ class ActivatedRepoManager:
                             "requires_admin_cleanup": True,
                         },
                     )
+                finally:
+                    # Codex round-6 HIGH finding #6b: clear the quiescing
+                    # mark on EVERY exit path (success or failure).
+                    if self._query_tracker is not None:
+                        self._query_tracker.clear_quiescing(str(repo_path))
 
             # Step 4: Remove metadata via dual-mode helper.
             # GHOST REPO PREVENTION (codex RED-review fix): use explicit
@@ -3080,7 +3301,11 @@ class ActivatedRepoManager:
             try:
                 scheduler.check_refresh_not_in_progress(golden_repo_alias)
             except DuplicateJobError as e:
-                raise ActivatedRepoError(
+                # Bug #1618: this branch runs BEFORE any clone is attempted --
+                # use the distinct subtype so the caller's cleanup handler
+                # can skip the Bug #1349 orphan-cleanup grace loop, which is
+                # meaningless here (no clone, no possible orphan directory).
+                raise ActivatedRepoCloneNotStartedError(
                     f"Cannot activate golden repository '{golden_repo_alias}': "
                     f"a refresh is currently in progress for it ({e}). "
                     "Retry activation once the refresh completes."
@@ -3094,7 +3319,10 @@ class ActivatedRepoManager:
             if not scheduler.acquire_write_lock(
                 golden_repo_alias, owner_name="activation_clone"
             ):
-                raise ActivatedRepoError(
+                # Bug #1618: this branch also runs BEFORE any clone is
+                # attempted -- same distinct subtype/rationale as the
+                # DuplicateJobError branch above.
+                raise ActivatedRepoCloneNotStartedError(
                     f"Cannot clone golden repository '{golden_repo_alias}': "
                     "write lock is already held by another writer. "
                     "Retry activation once it completes."
@@ -3128,6 +3356,21 @@ class ActivatedRepoManager:
                 if rc is not None
                 else self._COW_CLONE_TIMEOUT_DEFAULT
             )
+            # Issue #1511 (second call site): the CoW daemon runs as a
+            # different OS user (on a different host) than the process that
+            # wrote the golden-repo's index files, which commonly end up at
+            # restrictive mode 600 from that writer's ambient umask --
+            # causing `cp --reflink=auto -a` to fail with "Permission
+            # denied" for every activation clone attempt. The original
+            # #1511 fix only wired this preflight into
+            # VersionedSnapshotManager._create_clone_backend_snapshot
+            # (refresh/snapshot creation); activation calls
+            # create_clone_at_path directly and never went through that
+            # path, so the failure reproduced live on staging. Gated
+            # identically by class name (LocalCloneBackend / OntapCloneBackend
+            # are intentionally left untouched).
+            if type(self._clone_backend).__name__ == "CowDaemonBackend":
+                _ensure_source_tree_readable_for_clone(source_path)
             self._clone_backend.create_clone_at_path(
                 source_path,
                 dest_path,
@@ -3140,6 +3383,15 @@ class ActivatedRepoManager:
                 f"CoW clone successful: {source_path} -> {dest_path}",
                 extra={"correlation_id": get_correlation_id()},
             )
+
+            # Issue #1546 AC5: ownership-loss checkpoint immediately
+            # after the (potentially very long) CoW clone completes --
+            # detects the write lock is no longer legitimately held
+            # before any further git manipulation continues under it.
+            if scheduler is not None:
+                scheduler.raise_if_write_lock_ownership_lost(
+                    golden_repo_alias, owner_name="activation_clone"
+                )
 
             # Step 2: Detect and convert bare repositories (Story #636)
             # Golden repos are stored as bare, but activated repos need working trees
@@ -3805,6 +4057,49 @@ class ActivatedRepoManager:
             f"Branch-delta reindex completed for '{user_alias}'",
             extra={"correlation_id": get_correlation_id()},
         )
+
+    def _ensure_branch_hook_self_heal(self, repo_dir: Union[str, Path]) -> None:
+        """
+        Bug #1514: self-heal the activated repo's OWN post-checkout git
+        hook, in-place, before any `git checkout` runs against it.
+
+        A CoW clone of an activated repository copies
+        `.git/hooks/post-checkout` byte-for-byte from the golden repo's
+        own clone -- if that hook predates the #1514 dynamic-path fix (or
+        was itself inherited from yet another machine), it bakes in a
+        stale, install-time absolute path that dereferences to the WRONG
+        machine's metadata.json. `GitHookManager.ensure_hook_installed()`
+        already implements the self-heal (remove + reinstall with the
+        dynamic-path implementation) for the CLI indexing flow
+        (`smart_indexer.py`) -- this method reuses that SAME primitive for
+        the activation / branch-switch flow, which never gave it a chance
+        to run because the stale hook fires on the very FIRST checkout,
+        before any indexing has ever touched the activated repo's own
+        copy.
+
+        This is a best-effort repair: it must NEVER raise or abort
+        activation/branch-switch on failure, mirroring
+        `smart_indexer.py`'s own try/except-and-warn pattern around
+        `ensure_hook_installed()`.
+
+        Args:
+            repo_dir: Path (or path-like string) to the ACTIVATED repo's
+                own clone directory -- never the golden repo's path.
+        """
+        if not repo_dir:
+            self.logger.warning("Skipping git hook self-heal: repo_dir is empty/None")
+            return
+        try:
+            metadata_file = Path(repo_dir) / ".code-indexer" / "metadata.json"
+            git_hook_manager = GitHookManager(
+                repo_path=Path(repo_dir), metadata_file=metadata_file
+            )
+            git_hook_manager.ensure_hook_installed()
+        except Exception as e:
+            self.logger.warning(
+                f"Failed to self-heal git hook for activated repo at '{repo_dir}': {e}",
+                extra={"correlation_id": get_correlation_id()},
+            )
 
     def _validate_branch_name(self, branch_name: str) -> None:
         """

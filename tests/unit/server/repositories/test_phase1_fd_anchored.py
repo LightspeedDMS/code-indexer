@@ -15,7 +15,7 @@ from pathlib import Path
 
 import pytest
 
-from src.code_indexer.server.repositories.activated_repo_manager import (
+from code_indexer.server.repositories.activated_repo_manager import (
     _fd_anchored_phase1_rename,
 )
 

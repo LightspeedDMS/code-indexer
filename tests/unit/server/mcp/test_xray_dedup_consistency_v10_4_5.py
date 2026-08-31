@@ -64,11 +64,11 @@ def _make_user(
     )
 
 
-def _make_bjm() -> BackgroundJobManager:
+def _make_bjm(background_job_manager_factory) -> BackgroundJobManager:
     """In-memory BackgroundJobManager — no SQLite, no disk I/O."""
     from code_indexer.server.utils.config_manager import ServerResourceConfig
 
-    return BackgroundJobManager(resource_config=ServerResourceConfig())
+    return background_job_manager_factory(resource_config=ServerResourceConfig())
 
 
 def _make_event_job(release_event: threading.Event) -> Callable[[Any], Dict[str, Any]]:
@@ -124,14 +124,17 @@ def _wait_for_completion(bjm: BackgroundJobManager, job_id: str, username: str) 
     )
 
 
-def _assert_duplicate_for_same_operation(operation_type: str) -> None:
+def _assert_duplicate_for_same_operation(
+    operation_type: str,
+    background_job_manager_factory: Callable[..., BackgroundJobManager],
+) -> None:
     """Submit two concurrent jobs of the same operation_type against the same repo.
 
     Holds the first job RUNNING via a threading.Event, asserts dedup behaviour,
     then releases the event and waits for all jobs to finish.
     """
     user = _make_user()
-    bjm = _make_bjm()
+    bjm = _make_bjm(background_job_manager_factory)
     result_queue: queue.Queue = queue.Queue()
     release_event = threading.Event()
     submitted_job_ids: List[str] = []
@@ -169,9 +172,11 @@ def _assert_duplicate_for_same_operation(operation_type: str) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_xray_search_two_concurrent_same_repo_raises_duplicate():
+def test_xray_search_two_concurrent_same_repo_raises_duplicate(
+    background_job_manager_factory,
+):
     """Two concurrent xray_search submits against same repo -> exactly one DuplicateJobError."""
-    _assert_duplicate_for_same_operation("xray_search")
+    _assert_duplicate_for_same_operation("xray_search", background_job_manager_factory)
 
 
 # ---------------------------------------------------------------------------
@@ -179,9 +184,11 @@ def test_xray_search_two_concurrent_same_repo_raises_duplicate():
 # ---------------------------------------------------------------------------
 
 
-def test_xray_explore_two_concurrent_same_repo_raises_duplicate():
+def test_xray_explore_two_concurrent_same_repo_raises_duplicate(
+    background_job_manager_factory,
+):
     """Two concurrent xray_explore submits against same repo -> exactly one DuplicateJobError."""
-    _assert_duplicate_for_same_operation("xray_explore")
+    _assert_duplicate_for_same_operation("xray_explore", background_job_manager_factory)
 
 
 # ---------------------------------------------------------------------------
@@ -189,10 +196,10 @@ def test_xray_explore_two_concurrent_same_repo_raises_duplicate():
 # ---------------------------------------------------------------------------
 
 
-def test_xray_search_after_completion_succeeds():
+def test_xray_search_after_completion_succeeds(background_job_manager_factory):
     """Submit xray_search -> wait for completion -> submit again -> both succeed."""
     user = _make_user()
-    bjm = _make_bjm()
+    bjm = _make_bjm(background_job_manager_factory)
 
     job_id1 = bjm.submit_job(
         operation_type="xray_search",
@@ -218,10 +225,10 @@ def test_xray_search_after_completion_succeeds():
 # ---------------------------------------------------------------------------
 
 
-def test_dedup_is_per_operation_type():
+def test_dedup_is_per_operation_type(background_job_manager_factory):
     """xray_search and xray_explore concurrently against same repo -> both succeed."""
     user = _make_user()
-    bjm = _make_bjm()
+    bjm = _make_bjm(background_job_manager_factory)
     result_queue: queue.Queue = queue.Queue()
     release_event = threading.Event()
     submitted_job_ids: List[str] = []
