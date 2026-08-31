@@ -45,7 +45,9 @@ class TestCLIStalenessDisplayIntegration:
             patch(
                 "code_indexer.disabled_commands.detect_current_mode"
             ) as mock_detect_mode,
-            patch("code_indexer.cli.asyncio.run") as mock_asyncio,
+            patch(
+                "code_indexer.remote.query_execution.execute_remote_query"
+            ) as mock_execute_remote_query,
             patch(
                 "code_indexer.mode_detection.command_mode_detector.CommandModeDetector"
             ) as mock_detector,
@@ -74,7 +76,7 @@ class TestCLIStalenessDisplayIntegration:
                 staleness_indicator="🟡 30m stale",
             )
 
-            mock_asyncio.return_value = [enhanced_result]
+            mock_execute_remote_query.return_value = [enhanced_result]
 
             # Run query command
             result = cli_runner.invoke(
@@ -156,6 +158,10 @@ class TestCLIStalenessDisplayIntegration:
 
             mock_config_manager = Mock()
             mock_config_manager.load.return_value = mock_config
+            # Avoid triggering real daemon-connection-attempt/fallback logic
+            # (unrelated to this test's local-mode staleness display intent,
+            # and the fallback path itself is currently broken -- see #1757).
+            mock_config_manager.get_daemon_config.return_value = None
 
             # Run query command
             result = cli_runner.invoke(
@@ -247,7 +253,9 @@ class TestCLIStalenessDisplayIntegration:
             patch(
                 "code_indexer.disabled_commands.detect_current_mode"
             ) as mock_detect_mode,
-            patch("code_indexer.cli.asyncio.run") as mock_asyncio,
+            patch(
+                "code_indexer.remote.query_execution.execute_remote_query"
+            ) as mock_execute_remote_query,
         ):
             mock_detect_mode.return_value = "remote"
             enhanced_result = EnhancedQueryResultItem(
@@ -265,7 +273,7 @@ class TestCLIStalenessDisplayIntegration:
                 staleness_indicator="🟠 1h stale",
             )
 
-            mock_asyncio.return_value = [enhanced_result]
+            mock_execute_remote_query.return_value = [enhanced_result]
 
             result = cli_runner.invoke(
                 query,
@@ -291,7 +299,9 @@ class TestCLIStalenessDisplayIntegration:
             patch(
                 "code_indexer.disabled_commands.detect_current_mode"
             ) as mock_detect_mode,
-            patch("code_indexer.cli.asyncio.run") as mock_asyncio,
+            patch(
+                "code_indexer.remote.query_execution.execute_remote_query"
+            ) as mock_execute_remote_query,
         ):
             mock_detect_mode.return_value = "remote"
             enhanced_result = EnhancedQueryResultItem(
@@ -314,7 +324,7 @@ class TestCLIStalenessDisplayIntegration:
                 },
             )
 
-            mock_asyncio.return_value = [enhanced_result]
+            mock_execute_remote_query.return_value = [enhanced_result]
 
             result = cli_runner.invoke(
                 query,
@@ -412,10 +422,12 @@ class TestCLIStalenessDisplayIntegration:
             patch(
                 "code_indexer.disabled_commands.detect_current_mode"
             ) as mock_detect_mode,
-            patch("code_indexer.cli.asyncio.run") as mock_asyncio,
+            patch(
+                "code_indexer.remote.query_execution.execute_remote_query"
+            ) as mock_execute_remote_query,
         ):
             mock_detect_mode.return_value = "remote"
-            mock_asyncio.return_value = [basic_result]
+            mock_execute_remote_query.return_value = [basic_result]
 
             result = cli_runner.invoke(
                 query,
