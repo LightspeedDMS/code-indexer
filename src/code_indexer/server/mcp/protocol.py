@@ -1442,10 +1442,16 @@ async def process_public_jsonrpc_request(
                     result = await handler(auth_arguments, http_request, http_response)
                 else:
                     loop = asyncio.get_running_loop()
+                    # Bug #1755 (code-review follow-up): this is a THIRD,
+                    # independent run_in_executor call site sharing the same
+                    # missing-copy_context() bug as _invoke_handler's two
+                    # sync branches -- ContextVars (correlation_id, etc.) do
+                    # not cross into the executor thread on their own.
+                    ctx = contextvars.copy_context()
                     bound = functools.partial(
                         handler, auth_arguments, http_request, http_response
                     )
-                    result = await loop.run_in_executor(None, bound)
+                    result = await loop.run_in_executor(None, ctx.run, bound)
                 return create_jsonrpc_response(result, request_id)
 
             if user is None:

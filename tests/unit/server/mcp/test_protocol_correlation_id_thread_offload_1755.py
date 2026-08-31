@@ -27,11 +27,17 @@ single parametrized test exercises both, since "get_file_content" is not in
 
 import inspect
 from datetime import datetime
+from unittest.mock import MagicMock, patch
 
 import pytest
+from fastapi import Request, Response
 
 from code_indexer.server.auth.user_manager import User, UserRole
-from code_indexer.server.mcp.protocol import _invoke_handler
+from code_indexer.server.mcp.protocol import (
+    _ASYNC_DISPATCH_TIMEOUT_EXEMPT_TOOLS,
+    _invoke_handler,
+    process_public_jsonrpc_request,
+)
 from code_indexer.server.telemetry.correlation_bridge import (
     get_current_correlation_id,
     set_current_correlation_id,
@@ -57,6 +63,16 @@ class TestSyncHandlerThreadOffloadPreservesCorrelationId:
     - "get_file_content": not exempt -> asyncio.wait_for(run_in_executor(...))
     - "regex_search": exempt -> bare run_in_executor(...) early return
     """
+
+    def test_exempt_tool_membership_matches_parametrization(self):
+        """Explicit membership guard (code-review nit): the parametrization
+        above relies on "regex_search" being exempt and "get_file_content"
+        NOT being exempt to exercise both run_in_executor branches. If a
+        future change moves either tool's membership, the parametrized test
+        would silently stop covering one branch instead of failing loudly.
+        """
+        assert "regex_search" in _ASYNC_DISPATCH_TIMEOUT_EXEMPT_TOOLS
+        assert "get_file_content" not in _ASYNC_DISPATCH_TIMEOUT_EXEMPT_TOOLS
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
@@ -92,6 +108,60 @@ class TestSyncHandlerThreadOffloadPreservesCorrelationId:
         assert observed["correlation_id"] == expected_correlation_id, (
             f"correlation_id was lost crossing the run_in_executor thread "
             f"boundary for tool_name={tool_name!r}: observed "
+            f"{observed['correlation_id']!r}, expected "
+            f"{expected_correlation_id!r}"
+        )
+
+
+class TestAuthenticateSyncDispatchPreservesCorrelationId:
+    """Bug #1755 follow-up (code review nit): the 'authenticate' tools/call
+    special case in process_public_jsonrpc_request (protocol.py ~line 1448)
+    has its OWN independent ``loop.run_in_executor(None, bound)`` call for
+    sync ``handle_authenticate`` handlers -- separate from _invoke_handler's
+    sync branch and sharing the identical missing-copy_context() bug.
+
+    The real handle_authenticate has no logger calls today (nothing to
+    observe), so this test substitutes a synthetic sync handler via
+    HANDLER_REGISTRY patching to force a correlation_id read inside the
+    executor thread and prove propagation on THIS specific dispatch path.
+    """
+
+    @pytest.mark.asyncio
+    async def test_authenticate_sync_dispatch_preserves_correlation_id(self):
+        observed = {}
+
+        def fake_authenticate_handler(args, http_request, http_response):
+            observed["correlation_id"] = get_current_correlation_id()
+            return {"success": True}
+
+        expected_correlation_id = "test-correlation-id-authenticate-branch"
+        set_current_correlation_id(expected_correlation_id)
+        try:
+            with patch.dict(
+                "code_indexer.server.mcp.handlers.HANDLER_REGISTRY",
+                {"authenticate": fake_authenticate_handler},
+            ):
+                result = await process_public_jsonrpc_request(
+                    request_data={
+                        "jsonrpc": "2.0",
+                        "id": 1,
+                        "method": "tools/call",
+                        "params": {
+                            "name": "authenticate",
+                            "arguments": {"username": "u", "api_key": "k"},
+                        },
+                    },
+                    user=None,
+                    http_request=MagicMock(spec=Request),
+                    http_response=MagicMock(spec=Response),
+                )
+        finally:
+            set_current_correlation_id(None)  # type: ignore[arg-type]
+
+        assert result["result"] == {"success": True}
+        assert observed["correlation_id"] == expected_correlation_id, (
+            "correlation_id was lost crossing the authenticate special-case "
+            "run_in_executor thread boundary: observed "
             f"{observed['correlation_id']!r}, expected "
             f"{expected_correlation_id!r}"
         )
