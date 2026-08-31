@@ -56,6 +56,7 @@ HNSW/BF indexes) and therefore excluded from fast-automation.sh by its
 import threading
 import time
 from pathlib import Path
+from typing import Callable, Tuple
 
 import numpy as np
 import pytest
@@ -83,7 +84,9 @@ BINDINGS_CPP_PATH = (
 )
 
 
-def _max_recorder_gap(blocking_fn, *, min_call_seconds):
+def _max_recorder_gap(
+    blocking_fn: Callable[[], None], *, min_call_seconds: float
+) -> Tuple[float, float]:
     """Run `blocking_fn()` (a SINGLE native call) on the main thread while a
     background "recorder" thread continuously appends monotonic timestamps.
 
@@ -146,6 +149,67 @@ def _assert_gil_released(
     )
 
 
+# Self-calibrating wrapper around _max_recorder_gap (Bug #1748, same spirit
+# as Bug #1741's original resize_index()-only fix, now shared/generalized).
+# build_blocking_fn(target) must return a fresh SINGLE-native-call closure
+# sized by `target` (e.g. a max_elements-style workload knob). If that call
+# completes faster than min_call_seconds, _max_recorder_gap raises an
+# AssertionError containing "too fast to meaningfully exercise"; the target
+# is grown (guaranteed-progress: at least +1) and re-measured as a fresh,
+# independent single-call attempt (never a loop around the timed call
+# itself), up to max_attempts attempts total. Any other AssertionError
+# (e.g. the actual GIL-release ratio check) propagates immediately,
+# unretried. Always returns a genuine (max_gap, call_duration) float pair
+# or raises -- never leaves an Optional/None value for the caller (the bug
+# fixed here: mypy could not prove the equivalent hand-rolled loop in
+# TestResizeIndexReleasesGIL never falls through without a real value).
+def _calibrate_and_measure(
+    build_blocking_fn: Callable[[int], Callable[[], None]],
+    *,
+    initial_target: int,
+    growth_factor: float,
+    min_call_seconds: float,
+    max_attempts: int,
+    native_call_name: str,
+) -> Tuple[float, float]:
+    """Retry with a grown workload until min_call_seconds is cleared, or raise."""
+    assert initial_target > 0, "initial_target must be positive"
+    assert growth_factor > 1, "growth_factor must exceed 1 to make progress"
+    assert min_call_seconds > 0, "min_call_seconds must be positive"
+    assert max_attempts > 0, "max_attempts must be positive"
+
+    target = initial_target
+    for attempt in range(1, max_attempts + 1):
+        try:
+            return _max_recorder_gap(
+                build_blocking_fn(target), min_call_seconds=min_call_seconds
+            )
+        except AssertionError as exc:
+            if "too fast to meaningfully exercise" not in str(exc):
+                raise
+            if attempt == max_attempts:
+                raise AssertionError(
+                    f"{native_call_name} calibration failed to produce a "
+                    f"call lasting >= {min_call_seconds}s after "
+                    f"{max_attempts} attempts (largest attempted workload "
+                    f"target={target}) -- this host is too fast to measure "
+                    f"{native_call_name}'s GIL-release behavior even at "
+                    "the largest attempted workload; raise the initial "
+                    "target or growth factor"
+                ) from exc
+            # Guaranteed-progress growth: int() truncation can otherwise
+            # leave target unchanged for a growth_factor close to 1.
+            target = max(target + 1, int(target * growth_factor))
+
+    # Unreachable: the loop above always either returns or raises. This
+    # satisfies mypy's requirement that every path returns Tuple[float,
+    # float] -- no Optional.
+    raise AssertionError(
+        f"{native_call_name} calibration loop exited without a result or "
+        "an exception -- this should be unreachable"
+    )
+
+
 def _build_hnsw_index(n, *, dim, m, ef_construction, seed, num_threads=8):
     """Build a real hnswlib.Index with n random float32 vectors."""
     rng = np.random.default_rng(seed)
@@ -155,6 +219,138 @@ def _build_hnsw_index(n, *, dim, m, ef_construction, seed, num_threads=8):
     index.set_num_threads(num_threads)
     index.add_items(data)
     return index, data
+
+
+# ---------------------------------------------------------------------------
+# Unit tests for the self-calibration helper itself (Bug #1748). Fast and
+# deterministic -- a synthetic blocking_fn whose duration is a simple
+# function of the calibration target, so these never touch hnswlib/real
+# timing variance and are NOT marked slow. They exist specifically to prove
+# _calibrate_and_measure() (a) always returns a real (float, float) tuple
+# instead of ever leaking a None-sentinel to the caller, (b) actually grows
+# the workload and retries when a call completes faster than the floor, and
+# (c) fails loudly with a clear diagnostic when even the largest attempted
+# workload cannot clear the floor -- the exact bug class Bug #1748 found.
+# ---------------------------------------------------------------------------
+
+# Synthetic-workload tuning for the tests below: sleep duration is
+# target_value * this multiplier, giving fully deterministic, controllable
+# call durations without touching hnswlib or real allocation timing.
+_HELPER_TEST_SLEEP_SECONDS_PER_TARGET_UNIT = 0.01
+_HELPER_TEST_INITIAL_TARGET = 1
+_HELPER_TEST_GROWTH_FACTOR = 4.0
+_HELPER_TEST_RETRY_MIN_CALL_SECONDS = 0.03
+_HELPER_TEST_NO_RETRY_MIN_CALL_SECONDS = 0.02
+_HELPER_TEST_NO_RETRY_SLEEP_SECONDS = 0.03
+_HELPER_TEST_DEFAULT_MAX_ATTEMPTS = 5
+_HELPER_TEST_EXHAUSTED_GROWTH_FACTOR = 2.0
+_HELPER_TEST_EXHAUSTED_MIN_CALL_SECONDS = 1.0
+_HELPER_TEST_EXHAUSTED_MAX_ATTEMPTS = 2
+_HELPER_TEST_PROPAGATE_MIN_CALL_SECONDS = 0.01
+_HELPER_TEST_PROPAGATE_MAX_ATTEMPTS = 3
+
+
+class TestCalibrateAndMeasureHelperRetryBehavior:
+    def test_grows_target_and_retries_until_min_call_seconds_met(self):
+        attempted_targets = []
+
+        def _build(target):
+            attempted_targets.append(target)
+
+            def _do():
+                time.sleep(target * _HELPER_TEST_SLEEP_SECONDS_PER_TARGET_UNIT)
+
+            return _do
+
+        max_gap, call_duration = _calibrate_and_measure(
+            _build,
+            initial_target=_HELPER_TEST_INITIAL_TARGET,
+            growth_factor=_HELPER_TEST_GROWTH_FACTOR,
+            min_call_seconds=_HELPER_TEST_RETRY_MIN_CALL_SECONDS,
+            max_attempts=_HELPER_TEST_DEFAULT_MAX_ATTEMPTS,
+            native_call_name="synthetic()",
+        )
+
+        assert isinstance(max_gap, float)
+        assert isinstance(call_duration, float)
+        assert call_duration >= _HELPER_TEST_RETRY_MIN_CALL_SECONDS
+        assert len(attempted_targets) >= 2, (
+            "expected at least one retry with a grown target since the "
+            "initial target is under the floor"
+        )
+        assert all(b > a for a, b in zip(attempted_targets, attempted_targets[1:])), (
+            "target must grow strictly on every retry"
+        )
+
+    def test_succeeds_on_first_attempt_without_retry_when_already_slow_enough(self):
+        attempted_targets = []
+
+        def _build(target):
+            attempted_targets.append(target)
+
+            def _do():
+                time.sleep(_HELPER_TEST_NO_RETRY_SLEEP_SECONDS)
+
+            return _do
+
+        max_gap, call_duration = _calibrate_and_measure(
+            _build,
+            initial_target=_HELPER_TEST_INITIAL_TARGET,
+            growth_factor=_HELPER_TEST_GROWTH_FACTOR,
+            min_call_seconds=_HELPER_TEST_NO_RETRY_MIN_CALL_SECONDS,
+            max_attempts=_HELPER_TEST_DEFAULT_MAX_ATTEMPTS,
+            native_call_name="synthetic()",
+        )
+
+        assert call_duration >= _HELPER_TEST_NO_RETRY_MIN_CALL_SECONDS
+        assert attempted_targets == [_HELPER_TEST_INITIAL_TARGET]
+
+
+class TestCalibrateAndMeasureHelperErrorBehavior:
+    def test_raises_clear_diagnostic_after_exhausting_max_attempts(self):
+        def _build(target):
+            def _do():
+                pass  # near-instant regardless of target -- never meets floor
+
+            return _do
+
+        with pytest.raises(AssertionError, match="calibration failed"):
+            _calibrate_and_measure(
+                _build,
+                initial_target=_HELPER_TEST_INITIAL_TARGET,
+                growth_factor=_HELPER_TEST_EXHAUSTED_GROWTH_FACTOR,
+                min_call_seconds=_HELPER_TEST_EXHAUSTED_MIN_CALL_SECONDS,
+                max_attempts=_HELPER_TEST_EXHAUSTED_MAX_ATTEMPTS,
+                native_call_name="synthetic()",
+            )
+
+    def test_propagates_non_calibration_assertion_errors_after_exactly_one_attempt(
+        self,
+    ):
+        attempted_targets = []
+
+        def _build(target):
+            attempted_targets.append(target)
+
+            def _do():
+                assert False, "unrelated failure, not a calibration issue"
+
+            return _do
+
+        with pytest.raises(AssertionError, match="unrelated failure"):
+            _calibrate_and_measure(
+                _build,
+                initial_target=_HELPER_TEST_INITIAL_TARGET,
+                growth_factor=_HELPER_TEST_EXHAUSTED_GROWTH_FACTOR,
+                min_call_seconds=_HELPER_TEST_PROPAGATE_MIN_CALL_SECONDS,
+                max_attempts=_HELPER_TEST_PROPAGATE_MAX_ATTEMPTS,
+                native_call_name="synthetic()",
+            )
+
+        assert attempted_targets == [_HELPER_TEST_INITIAL_TARGET], (
+            "a non-calibration AssertionError must propagate immediately, "
+            "never triggering a retry"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -168,19 +364,41 @@ class TestInitIndexReleasesGIL:
     max_elements -- a large max_elements makes this a meaningfully long
     native call even with zero data added. dim=32/M=8 (rather than this
     project's production dim=128/M=16) keeps peak RSS bounded to roughly
-    350MB instead of several GB, while still exceeding MIN_CALL_SECONDS."""
+    350MB instead of several GB, while still exceeding MIN_CALL_SECONDS.
+
+    Bug #1748: a fixed max_elements (originally 8,000,000, no retry) was
+    the OTHER still-flaky test after #1741 -- #1741 self-calibrated only
+    resize_index()'s test, leaving this one exposed to the identical
+    fast-host problem (observed live on this host: consistently
+    0.045-0.065s, under the 0.08s floor, on every one of 5 consecutive
+    runs). Fixed with the same self-calibrating workload sizing via the
+    shared _calibrate_and_measure() helper -- if a single init_index()
+    call at the current target doesn't clear MIN_CALL_SECONDS, the target
+    is grown by INITIAL_MAX_ELEMENTS_GROWTH_FACTOR and re-measured as a
+    fresh, independent single-call attempt, bounded by
+    MAX_CALIBRATION_ATTEMPTS."""
 
     DIM = 32
-    MAX_ELEMENTS = 8_000_000
+    INITIAL_MAX_ELEMENTS = 8_000_000
+    INITIAL_MAX_ELEMENTS_GROWTH_FACTOR = 1.5
     MIN_CALL_SECONDS = 0.08
+    MAX_CALIBRATION_ATTEMPTS = 5
 
     def test_init_index_releases_gil_during_native_call(self):
-        def _do_init():
-            index = hnswlib.Index(space="l2", dim=self.DIM)
-            index.init_index(max_elements=self.MAX_ELEMENTS, M=8, ef_construction=40)
+        def _build(target):
+            def _do_init():
+                index = hnswlib.Index(space="l2", dim=self.DIM)
+                index.init_index(max_elements=target, M=8, ef_construction=40)
 
-        max_gap, call_duration = _max_recorder_gap(
-            _do_init, min_call_seconds=self.MIN_CALL_SECONDS
+            return _do_init
+
+        max_gap, call_duration = _calibrate_and_measure(
+            _build,
+            initial_target=self.INITIAL_MAX_ELEMENTS,
+            growth_factor=self.INITIAL_MAX_ELEMENTS_GROWTH_FACTOR,
+            min_call_seconds=self.MIN_CALL_SECONDS,
+            max_attempts=self.MAX_CALIBRATION_ATTEMPTS,
+            native_call_name="init_index()",
         )
         _assert_gil_released(max_gap, call_duration, native_call_name="init_index()")
 
@@ -215,7 +433,17 @@ class TestResizeIndexReleasesGIL:
     ONE native call, timed in its own dedicated _max_recorder_gap()
     invocation (its own recorder thread, its own warmup/cooldown) -- the
     loop is across separate, independent measurements, never inside the
-    timed blocking_fn() region itself."""
+    timed blocking_fn() region itself.
+
+    Bug #1748: the calibration loop above used to be hand-rolled directly
+    in this test method, with max_gap/call_duration seeded to None. mypy
+    (under --check-untyped-defs, the project's real lint.sh flags) could
+    not prove the loop always exits via break or raise, so it kept both
+    locals typed Optional[Any] at the final _assert_gil_released() call --
+    2 arg-type errors, even though None could never actually reach there
+    at runtime. Now uses the shared _calibrate_and_measure() helper, which
+    always returns a real (float, float) tuple or raises, eliminating the
+    Optional at its source instead of asserting it away."""
 
     DIM = 32
     TINY_ELEMENTS = 1_000
@@ -231,36 +459,20 @@ class TestResizeIndexReleasesGIL:
         return index
 
     def test_resize_index_releases_gil_during_native_call(self, tiny_index):
-        target = self.INITIAL_RESIZE_TARGET
-        max_gap = None
-        call_duration = None
+        def _build(target):
+            def _do_resize():
+                tiny_index.resize_index(target)
 
-        for attempt in range(1, self.MAX_CALIBRATION_ATTEMPTS + 1):
+            return _do_resize
 
-            def _do_resize(resize_target=target):
-                tiny_index.resize_index(resize_target)
-
-            try:
-                max_gap, call_duration = _max_recorder_gap(
-                    _do_resize, min_call_seconds=self.MIN_CALL_SECONDS
-                )
-                break
-            except AssertionError as exc:
-                if "too fast to meaningfully exercise" not in str(exc):
-                    raise
-                if attempt == self.MAX_CALIBRATION_ATTEMPTS:
-                    raise AssertionError(
-                        "resize_index() calibration failed to produce a "
-                        f"call lasting >= {self.MIN_CALL_SECONDS}s after "
-                        f"{self.MAX_CALIBRATION_ATTEMPTS} attempts (largest "
-                        f"attempted resize target={target}) -- this host is "
-                        "too fast to measure resize_index()'s GIL-release "
-                        "behavior even at the largest attempted workload; "
-                        "raise INITIAL_RESIZE_TARGET or "
-                        "RESIZE_TARGET_GROWTH_FACTOR"
-                    ) from exc
-                target = int(target * self.RESIZE_TARGET_GROWTH_FACTOR)
-
+        max_gap, call_duration = _calibrate_and_measure(
+            _build,
+            initial_target=self.INITIAL_RESIZE_TARGET,
+            growth_factor=self.RESIZE_TARGET_GROWTH_FACTOR,
+            min_call_seconds=self.MIN_CALL_SECONDS,
+            max_attempts=self.MAX_CALIBRATION_ATTEMPTS,
+            native_call_name="resize_index()",
+        )
         _assert_gil_released(max_gap, call_duration, native_call_name="resize_index()")
 
 
