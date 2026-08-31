@@ -13,122 +13,99 @@ from code_indexer.cli import (
 class TestCLITemporalDisplayStory21(unittest.TestCase):
     """Test cases for Story 2.1 CLI temporal display changes."""
 
-    def test_display_file_chunk_with_diff(self):
-        """Test that file chunk matches display with diff and proper format."""
-        # Create mock result
+    def _make_result(self, **overrides):
+        """Build a Mock result object for display-function tests.
+
+        Story 2 (no SQLite): commit metadata comes from result.temporal_context,
+        not from a temporal_service fetch call.
+        """
         result = Mock()
-        result.metadata = {
-            "type": "file_chunk",
-            "file_path": "src/auth.py",
-            "line_start": 45,
-            "line_end": 67,
-            "commit_hash": "def5678abc123",
-            "blob_hash": "blob789",
-        }
-        result.score = 0.95
-        result.content = """def validate_token(self, token):
-    if not token:
-        return False
+        result.contributing_providers = None
+        result.temporal_context = {}
+        for key, value in overrides.items():
+            setattr(result, key, value)
+        return result
 
-    if token.expired():
-        logger.warning("Token expired")
-        raise TokenExpiredError()
+    def test_display_file_chunk_with_diff(self):
+        """Test that file chunk matches display shows header, message, and content.
 
-    return True"""
+        NOTE: Story 2 (no SQLite) removed diff generation entirely --
+        _display_file_chunk_match no longer calls temporal_service methods;
+        commit metadata comes from result.temporal_context and content is
+        always shown directly with line numbers, never as a diff.
+        """
+        result = self._make_result(
+            metadata={
+                "type": "file_chunk",
+                "file_path": "src/auth.py",
+                "line_start": 45,
+                "line_end": 67,
+                "commit_hash": "def5678abc123",
+                "author_email": "john@example.com",
+            },
+            score=0.95,
+            content="def validate_token(self, token):\n    return True",
+            temporal_context={
+                "commit_date": "2024-06-20 14:32:15",
+                "author_name": "John Doe",
+                "commit_message": (
+                    "Fix token expiry bug in JWT validation.\n"
+                    "to verify exception handling."
+                ),
+            },
+        )
+        temporal_service = Mock()  # unused by current implementation
 
-        # Mock temporal service
-        temporal_service = Mock()
-
-        # Mock commit details
-        temporal_service._fetch_commit_details.return_value = {
-            "hash": "def5678abc123",
-            "date": "2024-06-20 14:32:15",
-            "author_name": "John Doe",
-            "author_email": "john@example.com",
-            "message": "Fix token expiry bug in JWT validation.\nNow properly logs warning and raises TokenExpiredError\ninstead of silently returning False. Updated tests\nto verify exception handling.",
-        }
-
-        # Mock diff generation
-        diff_output = """[DIFF - Changes from parent abc1234 to def5678]
-
-45   def validate_token(self, token):
-46       if not token:
-47           return False
-48
-49       if token.expired():
-50  -        return False
-50  +        logger.warning("Token expired")
-51  +        raise TokenExpiredError()
-52
-53       return True"""
-        temporal_service._generate_chunk_diff.return_value = diff_output
-
-        # Capture output
         with patch("code_indexer.cli.console") as mock_console:
             _display_file_chunk_match(result, 1, temporal_service)
-
-            # Verify display calls
             calls = mock_console.print.call_args_list
 
-            # Check header format
             self.assertTrue(any("1. src/auth.py:45-67" in str(call) for call in calls))
             self.assertTrue(any("Score: 0.95" in str(call) for call in calls))
             self.assertTrue(any("Commit: def5678" in str(call) for call in calls))
             self.assertTrue(any("2024-06-20 14:32:15" in str(call) for call in calls))
             self.assertTrue(any("John Doe" in str(call) for call in calls))
             self.assertTrue(any("john@example.com" in str(call) for call in calls))
-
-            # Check full commit message is displayed
             self.assertTrue(any("Fix token expiry bug" in str(call) for call in calls))
             self.assertTrue(
                 any("verify exception handling" in str(call) for call in calls)
             )
-
-            # Check diff is displayed
-            self.assertTrue(any("[DIFF" in str(call) for call in calls))
+            # Content is shown directly with line numbers (no diff anymore)
+            self.assertTrue(
+                any(
+                    "45" in str(call) and "def validate_token" in str(call)
+                    for call in calls
+                )
+            )
+            self.assertFalse(any("[DIFF" in str(call) for call in calls))
 
     def test_display_commit_message_match(self):
-        """Test that commit message matches display with proper format."""
-        # Create mock result
-        result = Mock()
-        result.metadata = {
-            "type": "commit_message",
-            "commit_hash": "abc1234def567",
-            "char_start": 0,
-            "char_end": 150,
-        }
-        result.score = 0.89
-        result.content = """Add JWT validation with support for RS256 algorithm.
-Updated token parsing to handle new claims format.
-Fixed issue with expired tokens not being rejected."""
+        """Test that commit message matches display with proper format.
 
-        # Mock temporal service
-        temporal_service = Mock()
+        NOTE: Story 2 (no SQLite) removed per-file "Files Modified" listing
+        entirely -- _display_commit_message_match no longer calls
+        temporal_service._fetch_commit_details/_fetch_commit_file_changes; it
+        always prints a fixed "tracked in diff-based index" note instead.
+        """
+        result = self._make_result(
+            metadata={
+                "type": "commit_message",
+                "commit_hash": "abc1234def567",
+                "author_email": "jane@example.com",
+            },
+            score=0.89,
+            content="Add JWT validation with support for RS256 algorithm.",
+            temporal_context={
+                "commit_date": "2024-03-15 10:15:22",
+                "author_name": "Jane Smith",
+            },
+        )
+        temporal_service = Mock()  # unused by current implementation
 
-        # Mock commit details
-        temporal_service._fetch_commit_details.return_value = {
-            "hash": "abc1234def567",
-            "date": "2024-03-15 10:15:22",
-            "author_name": "Jane Smith",
-            "author_email": "jane@example.com",
-            "message": result.content,  # Full message
-        }
-
-        # Mock file changes
-        temporal_service._fetch_commit_file_changes.return_value = [
-            {"file_path": "src/auth.py", "blob_hash": "blob1"},
-            {"file_path": "src/tokens.py", "blob_hash": "blob2"},
-            {"file_path": "tests/test_auth.py", "blob_hash": "blob3"},
-        ]
-
-        # Capture output
         with patch("code_indexer.cli.console") as mock_console:
             _display_commit_message_match(result, 2, temporal_service)
-
-            # Verify display calls
             calls = mock_console.print.call_args_list
 
-            # Check header format
             self.assertTrue(
                 any("[COMMIT MESSAGE MATCH]" in str(call) for call in calls)
             )
@@ -136,18 +113,17 @@ Fixed issue with expired tokens not being rejected."""
             self.assertTrue(any("Commit: abc1234" in str(call) for call in calls))
             self.assertTrue(any("2024-03-15 10:15:22" in str(call) for call in calls))
             self.assertTrue(any("Jane Smith" in str(call) for call in calls))
-
-            # Check message content
+            self.assertTrue(any("jane@example.com" in str(call) for call in calls))
             self.assertTrue(
                 any("Message (matching section)" in str(call) for call in calls)
             )
             self.assertTrue(any("Add JWT validation" in str(call) for call in calls))
-
-            # Check files modified
-            self.assertTrue(any("Files Modified (3)" in str(call) for call in calls))
-            self.assertTrue(any("src/auth.py" in str(call) for call in calls))
-            self.assertTrue(any("src/tokens.py" in str(call) for call in calls))
-            self.assertTrue(any("tests/test_auth.py" in str(call) for call in calls))
+            self.assertTrue(
+                any(
+                    "File changes tracked in diff-based index" in str(call)
+                    for call in calls
+                )
+            )
 
     def test_display_order_commit_messages_first(self):
         """Test that commit messages are displayed before file chunks."""
@@ -215,83 +191,82 @@ Fixed issue with expired tokens not being rejected."""
                 self.assertEqual(calls[1][0], (file_result2, 3, temporal_service))
 
     def test_display_file_chunk_no_diff_shows_content(self):
-        """Test that when no diff is available, chunk content is shown with line numbers."""
-        result = Mock()
-        result.metadata = {
-            "type": "file_chunk",
-            "file_path": "src/new_file.py",
-            "line_start": 10,
-            "line_end": 12,
-            "commit_hash": "initial123",
-            "blob_hash": "blob456",
-        }
-        result.score = 0.87
-        result.content = """def new_function():
-    # This is a new file
-    return True"""
-
+        """Test that chunk content is shown with line numbers (no diff exists anymore)."""
+        result = self._make_result(
+            metadata={
+                "type": "file_chunk",
+                "file_path": "src/new_file.py",
+                "line_start": 10,
+                "line_end": 12,
+                "commit_hash": "initial123",
+                "author_email": "dev@example.com",
+            },
+            score=0.87,
+            content="def new_function():\n    return True",
+            temporal_context={
+                "commit_date": "2024-01-01 09:00:00",
+                "author_name": "Developer",
+                "commit_message": "Add new file",
+            },
+        )
+        # temporal_service is a required positional arg on the function
+        # signature but is not read by the current implementation.
         temporal_service = Mock()
-        temporal_service._fetch_commit_details.return_value = {
-            "hash": "initial123",
-            "date": "2024-01-01 09:00:00",
-            "author_name": "Developer",
-            "author_email": "dev@example.com",
-            "message": "Add new file",
-        }
-
-        # No diff available (initial commit or new file)
-        temporal_service._generate_chunk_diff.return_value = None
 
         with patch("code_indexer.cli.console") as mock_console:
             _display_file_chunk_match(result, 1, temporal_service)
-
             calls = mock_console.print.call_args_list
 
-            # Should show content with line numbers when no diff
+            # Should show content with line numbers
             self.assertTrue(
                 any(
                     "10" in str(call) and "def new_function()" in str(call)
                     for call in calls
                 )
-                or any("def new_function()" in str(call) for call in calls)
             )
 
     def test_display_commit_message_many_files(self):
-        """Test that commit message display handles many files gracefully."""
-        result = Mock()
-        result.metadata = {"type": "commit_message", "commit_hash": "bigcommit123"}
-        result.score = 0.75
-        result.content = "Massive refactoring"
+        """Test that a long, multi-line commit message displays fully.
 
+        NOTE: Story 2 (no SQLite) removed the "Files Modified (N)" listing
+        this test originally exercised entirely -- _display_commit_message_match
+        always prints a fixed "tracked in diff-based index" note now,
+        verified live to hold regardless of file count. Repurposed to test
+        genuinely distinct current behavior: no truncation of long messages.
+        """
+        long_message = "\n".join(f"Change {i}: refactored module {i}" for i in range(15))
+        result = self._make_result(
+            metadata={
+                "type": "commit_message",
+                "commit_hash": "bigcommit123",
+                "author_email": "refactor@example.com",
+            },
+            score=0.75,
+            content=long_message,
+            temporal_context={
+                "commit_date": "2024-02-01",
+                "author_name": "Refactorer",
+            },
+        )
+        # temporal_service is a required positional arg on the function
+        # signature but is not read by the current implementation.
         temporal_service = Mock()
-        temporal_service._fetch_commit_details.return_value = {
-            "hash": "bigcommit123",
-            "date": "2024-02-01",
-            "author_name": "Refactorer",
-            "author_email": "refactor@example.com",
-            "message": result.content,
-        }
-
-        # Create 15 file changes
-        files = [
-            {"file_path": f"src/file{i}.py", "blob_hash": f"blob{i}"} for i in range(15)
-        ]
-        temporal_service._fetch_commit_file_changes.return_value = files
 
         with patch("code_indexer.cli.console") as mock_console:
             _display_commit_message_match(result, 1, temporal_service)
-
             calls = mock_console.print.call_args_list
 
-            # Should show Files Modified (15)
-            self.assertTrue(any("Files Modified (15)" in str(call) for call in calls))
-
-            # Should show first 10 files
-            for i in range(10):
-                self.assertTrue(any(f"src/file{i}.py" in str(call) for call in calls))
-
-            # Should show "and 5 more"
-            self.assertTrue(any("and 5 more" in str(call) for call in calls))
+            # Full message should be shown, no truncation for any line
+            for i in range(15):
+                self.assertTrue(
+                    any(f"Change {i}: refactored module {i}" in str(call) for call in calls)
+                )
+            self.assertTrue(
+                any(
+                    "File changes tracked in diff-based index" in str(call)
+                    for call in calls
+                )
+            )
 
 
 if __name__ == "__main__":
