@@ -990,14 +990,19 @@ UNRECOVERABLE_FAILURE_CAUSE = "unrecoverable_corruption"
 #: `"dedup_gate_rejected"` status). Unlike `GENERIC_FAILURE_CAUSE`, this
 #: is a CONFIRMED, specific diagnosis: a bare retry cannot possibly
 #: succeed until the gate-breaking record (missing/foreign `unique_key`)
-#: is fixed by a human or an unrelated re-index. Deliberately excluded
-#: from `reset_duplicate_caused_quarantine_if_resolved`'s scope (see
-#: that function) -- resetting a repo known to be stuck for THIS reason
-#: would reset, immediately re-attempt, immediately re-fail identically,
-#: and re-quarantine on every tick, hogging the scheduler and starving
-#: every alphabetically-later fleet-migration candidate (Bug #1477's
-#: starvation failure mode). Clears only via manual review / an explicit
-#: reset, exactly like UNRECOVERABLE_FAILURE_CAUSE.
+#: is fixed by a human or an unrelated re-index -- UNLESS the gate itself
+#: has since started passing (Issue #1751: e.g. Bug #1747 taught the gate
+#: to skip a hidden_branches-only bookkeeping sentinel it used to reject
+#: on). `reset_duplicate_caused_quarantine_if_resolved` (see that
+#: function) therefore no longer excludes this cause unconditionally --
+#: it re-evaluates the gate-aware predicate (`collection_has_duplicate_
+#: point_ids`) as a bounded, one-shot, deterministic check: still-genuine
+#: gate rejections correctly stay quarantined (never reset-retry-refail
+#: on every tick, preserving Bug #1477's starvation protection), while a
+#: now-gate-passing collection resets and gets a fair retry. Clears
+#: automatically via that re-check, or via manual review / an explicit
+#: reset for a still-genuine rejection, exactly like
+#: UNRECOVERABLE_FAILURE_CAUSE.
 DEDUP_GATE_REJECTED_FAILURE_CAUSE = "dedup_gate_rejected"
 
 
@@ -1130,6 +1135,15 @@ def reset_duplicate_caused_quarantine_if_resolved(
     `_clear_quarantine_after_detected_repair` (existing reset/fallback
     logic) rather than reimplementing either. Returns True iff reset.
 
+    Issue #1751: the gate-agnostic path above applies to GENERIC-cause
+    quarantines only. A repo whose persisted `failure_cause` is
+    `DEDUP_GATE_REJECTED_FAILURE_CAUSE` takes a SEPARATE branch instead,
+    re-evaluating the GATE-AWARE `collection_has_duplicate_point_ids`
+    (the exact predicate Bug #1747 fixed to skip hidden_branches-only
+    bookkeeping sentinels) -- see that branch's own inline comment for
+    the full rationale. `UNRECOVERABLE_FAILURE_CAUSE`/
+    `DISK_HEADROOM_FAILURE_CAUSE` remain excluded entirely, unchanged.
+
     Raises:
         QuarantineStateUnavailableError: propagated from
             `get_failure_state()` on a genuine backend READ failure.
@@ -1144,24 +1158,69 @@ def reset_duplicate_caused_quarantine_if_resolved(
     # disk-headroom auto-clear (based on the preflight re-passing); this
     # function must not duplicate or override that separate mechanism.
     #
-    # Bug #1579: a DEDUP_GATE_REJECTED_FAILURE_CAUSE quarantine is a
-    # CONFIRMED gate rejection -- unlike a bare GENERIC-cause quarantine
-    # (which might be a legacy crash whose collection would now pass the
-    # gate), this cause means we already KNOW a bare retry will fail
-    # identically. Resetting it anyway would reset, immediately
-    # re-attempt, immediately re-fail, and re-quarantine on every single
-    # tick -- hogging the scheduler and starving every alphabetically-
-    # later fleet-migration candidate (Bug #1477's starvation failure
-    # mode, empirically reproduced while building this fix). Excluded
-    # here exactly like the two causes above; clears only via manual
-    # review after the underlying data/schema issue is fixed.
+    # Bug #1579 / Issue #1751: a permanently-unrecoverable OR a
+    # disk-headroom quarantine has nothing to do with duplicate-point-id
+    # resolution -- neither is fixed by deleting duplicates, so this
+    # reset must never unblock either. is_quarantined() already has its
+    # own correct disk-headroom auto-clear (based on the preflight
+    # re-passing); this function must not duplicate or override that
+    # separate mechanism.
     if state.get("failure_cause") in (
         UNRECOVERABLE_FAILURE_CAUSE,
         DISK_HEADROOM_FAILURE_CAUSE,
-        DEDUP_GATE_REJECTED_FAILURE_CAUSE,
     ):
         return False
     if int(state.get("consecutive_failure_count", 0)) < threshold:
+        return False
+
+    if state.get("failure_cause") == DEDUP_GATE_REJECTED_FAILURE_CAUSE:
+        # Issue #1751: Bug #1579's ORIGINAL rationale for excluding this
+        # cause unconditionally ("we already KNOW a bare retry will fail
+        # identically") is now FALSE for exactly the subset of
+        # dedup_gate_rejected quarantines Bug #1747 fixed -- a collection
+        # whose only gate-adjacent record is a hidden_branches-only
+        # bookkeeping sentinel now genuinely PASSES the whole-collection
+        # identity gate, so a retry would genuinely succeed. The only
+        # other escape hatch (is_quarantined()'s directory-content-
+        # signature auto-clear) never fires for a repo with no new
+        # commits since quarantine, leaving it stuck indefinitely even
+        # though the gate itself already passes.
+        #
+        # This re-evaluates the GATE-AWARE collection_has_duplicate_
+        # point_ids -- the EXACT predicate #1747 already fixed -- rather
+        # than the gate-agnostic collection_has_any_duplicate_point_ids
+        # used below for GENERIC-cause quarantines: "does the gate pass"
+        # is precisely the question a dedup_gate_rejected quarantine
+        # needs answered, deterministically, from current on-disk state
+        # (never time-dependent) -- so this is a bounded, one-shot
+        # re-check, not a loop, and carries no starvation risk. A
+        # collection still genuinely rejected by the gate (a real bad
+        # record, unrelated to #1747's sentinel fix) correctly returns
+        # False here and stays quarantined -- Bug #1579's protection
+        # against a futile reset-retry-refail cycle is unweakened.
+        from code_indexer.storage.shared.collection_dedup_repair import (
+            collection_has_duplicate_point_ids,
+        )
+
+        for collection_dir in candidate.semantic_collection_dirs:
+            if collection_has_duplicate_point_ids(collection_dir):
+                logger.info(
+                    "Issue #1751: repo %r was quarantined for "
+                    "dedup_gate_rejected, and %s now genuinely PASSES "
+                    "the whole-collection identity gate (Bug #1747's "
+                    "hidden_branches-sentinel fix) -- resetting "
+                    "quarantine so the next attempt can succeed, "
+                    "independent of any directory-content-signature "
+                    "change.",
+                    candidate.golden_alias,
+                    collection_dir,
+                )
+                _clear_quarantine_after_detected_repair(
+                    golden_repo_manager,
+                    candidate.golden_alias,
+                    reason="dedup_gate_rejected cause now gate-passing (issue #1751)",
+                )
+                return True
         return False
 
     from code_indexer.storage.shared.collection_dedup_repair import (
