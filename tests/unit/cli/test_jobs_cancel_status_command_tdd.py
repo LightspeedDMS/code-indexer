@@ -5,9 +5,11 @@ Following Test-Driven Development methodology to test the jobs cancel and status
 commands with real CLI integration and safety features.
 """
 
+from pathlib import Path
+
 import pytest
 from click.testing import CliRunner
-from unittest.mock import patch, AsyncMock
+from unittest.mock import patch, Mock
 
 from code_indexer.cli import cli
 
@@ -59,17 +61,31 @@ class TestJobsCancelStatusCommandTDD:
         assert result.exit_code != 0
         assert "Missing argument" in result.output or "Usage:" in result.output
 
-    @patch("code_indexer.cli.load_remote_configuration")
+    @patch("code_indexer.disabled_commands.detect_current_mode", return_value="remote")
+    @patch("code_indexer.remote.credential_manager.ProjectCredentialManager")
+    @patch("code_indexer.remote.config.load_remote_configuration")
     @patch("code_indexer.cli.find_project_root")
-    @patch("code_indexer.cli.load_encrypted_credentials")
+    @patch("code_indexer.remote.credential_manager.load_encrypted_credentials")
     def test_jobs_cancel_prompts_for_confirmation(
-        self, mock_load_creds, mock_find_root, mock_load_config, cli_runner
+        self,
+        mock_load_creds,
+        mock_find_root,
+        mock_load_config,
+        mock_cred_manager_class,
+        mock_detect_mode,
+        cli_runner,
     ):
         """Test that jobs cancel prompts for confirmation without --force."""
         # Setup mocks
-        mock_find_root.return_value = "/test/path"
-        mock_load_config.return_value = {"server_url": "http://test.com"}
+        mock_find_root.return_value = Path("/test/path")
+        mock_load_config.return_value = {
+            "server_url": "http://test.com",
+            "username": "user",
+        }
         mock_load_creds.return_value = {"username": "user", "password": "pass"}
+        mock_cred_manager_class.return_value.decrypt_credentials.return_value = Mock(
+            username="user", password="pass", server_url="http://test.com"
+        )
 
         with patch("builtins.input", return_value="n"):  # User says no
             result = cli_runner.invoke(cli, ["jobs", "cancel", "test-job-123"])
@@ -79,25 +95,42 @@ class TestJobsCancelStatusCommandTDD:
                 "Operation cancelled" in result.output or "Cancelled" in result.output
             )
 
-    @patch("code_indexer.cli.load_remote_configuration")
+    @patch("code_indexer.disabled_commands.detect_current_mode", return_value="remote")
+    @patch("code_indexer.remote.credential_manager.ProjectCredentialManager")
+    @patch("code_indexer.remote.config.load_remote_configuration")
     @patch("code_indexer.cli.find_project_root")
-    @patch("code_indexer.cli.load_encrypted_credentials")
+    @patch("code_indexer.remote.credential_manager.load_encrypted_credentials")
     def test_jobs_cancel_with_force_skips_confirmation(
-        self, mock_load_creds, mock_find_root, mock_load_config, cli_runner
+        self,
+        mock_load_creds,
+        mock_find_root,
+        mock_load_config,
+        mock_cred_manager_class,
+        mock_detect_mode,
+        cli_runner,
     ):
         """Test that jobs cancel with --force skips confirmation."""
         # Setup mocks
-        mock_find_root.return_value = "/test/path"
-        mock_load_config.return_value = {"server_url": "http://test.com"}
+        mock_find_root.return_value = Path("/test/path")
+        mock_load_config.return_value = {
+            "server_url": "http://test.com",
+            "username": "user",
+        }
         mock_load_creds.return_value = {"username": "user", "password": "pass"}
+        mock_cred_manager_class.return_value.decrypt_credentials.return_value = Mock(
+            username="user", password="pass", server_url="http://test.com"
+        )
 
-        # Mock the API client
-        mock_api_client = AsyncMock()
+        # Mock the API client (cancel_job/__enter__/__exit__ are synchronous --
+        # inherited from CIDXRemoteAPIClient in base_client.py)
+        mock_api_client = Mock()
         mock_api_client.cancel_job.return_value = {
             "job_id": "test-job-123",
             "status": "cancelled",
             "message": "Job cancelled successfully",
         }
+        mock_api_client.__enter__ = Mock(return_value=mock_api_client)
+        mock_api_client.__exit__ = Mock(return_value=False)
 
         with patch(
             "code_indexer.api_clients.jobs_client.JobsAPIClient",
@@ -114,17 +147,31 @@ class TestJobsCancelStatusCommandTDD:
                 or "cancelled" in result.output.lower()
             )
 
-    @patch("code_indexer.cli.load_remote_configuration")
+    @patch("code_indexer.disabled_commands.detect_current_mode", return_value="remote")
+    @patch("code_indexer.remote.credential_manager.ProjectCredentialManager")
+    @patch("code_indexer.remote.config.load_remote_configuration")
     @patch("code_indexer.cli.find_project_root")
-    @patch("code_indexer.cli.load_encrypted_credentials")
+    @patch("code_indexer.remote.credential_manager.load_encrypted_credentials")
     def test_jobs_status_displays_job_details(
-        self, mock_load_creds, mock_find_root, mock_load_config, cli_runner
+        self,
+        mock_load_creds,
+        mock_find_root,
+        mock_load_config,
+        mock_cred_manager_class,
+        mock_detect_mode,
+        cli_runner,
     ):
         """Test that jobs status displays detailed job information."""
         # Setup mocks
-        mock_find_root.return_value = "/test/path"
-        mock_load_config.return_value = {"server_url": "http://test.com"}
+        mock_find_root.return_value = Path("/test/path")
+        mock_load_config.return_value = {
+            "server_url": "http://test.com",
+            "username": "user",
+        }
         mock_load_creds.return_value = {"username": "user", "password": "pass"}
+        mock_cred_manager_class.return_value.decrypt_credentials.return_value = Mock(
+            username="user", password="pass", server_url="http://test.com"
+        )
 
         # Mock job status response
         mock_job_status = {
@@ -138,9 +185,12 @@ class TestJobsCancelStatusCommandTDD:
             "username": "testuser",
         }
 
-        # Mock the API client
-        mock_api_client = AsyncMock()
+        # Mock the API client (get_job_status/__enter__/__exit__ are
+        # synchronous -- inherited from CIDXRemoteAPIClient in base_client.py)
+        mock_api_client = Mock()
         mock_api_client.get_job_status.return_value = mock_job_status
+        mock_api_client.__enter__ = Mock(return_value=mock_api_client)
+        mock_api_client.__exit__ = Mock(return_value=False)
 
         with patch(
             "code_indexer.api_clients.jobs_client.JobsAPIClient",
@@ -150,9 +200,9 @@ class TestJobsCancelStatusCommandTDD:
 
             # Should display job details
             assert "test-job-123" in result.output
-            assert "running" in result.output
+            assert "Running" in result.output
             assert "45" in result.output  # progress
-            assert "index" in result.output  # operation type
+            assert "Index" in result.output  # operation type
 
     def test_jobs_cancel_error_handling(self, cli_runner):
         """Test that jobs cancel handles errors gracefully."""
