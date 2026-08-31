@@ -843,6 +843,9 @@ class ConfigService:
             # Issue #1530 - Indexing-subprocess activity watchdog configuration
             "indexing_watchdog": _indexing_watchdog_settings(config),
             "fleet_migration": _fleet_migration_settings(config),
+            # Issue #1548 / Issue #1749: Legacy temporal shard relocation
+            # configuration -- was defined but never wired into this dict.
+            "temporal_legacy_migration": _temporal_legacy_migration_settings(config),
             "alias_lock": _alias_lock_settings(config),
             # Issue #1398 - Query & search timeouts Web UI configuration
             "search_timeouts": _search_timeouts_settings(config),
