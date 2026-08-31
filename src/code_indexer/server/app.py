@@ -161,6 +161,15 @@ from .startup.bootstrap import (  # noqa: F401
 )
 
 
+# Bug #1758: explicit busy-wait timeout (seconds) for every raw sqlite3.connect()
+# in TokenBlacklist. Matches the 30s convention DatabaseConnectionManager sets via
+# `PRAGMA busy_timeout = 30000` (storage/database_manager.py:1854), so a brief lock
+# held by a concurrent process (e.g. an auto-updater-triggered server restart
+# briefly overlapping a request) is absorbed by SQLite's own internal wait instead
+# of raising 'database is locked' after Python's own 5.0s sqlite3.connect() default.
+_SQLITE_LOCK_TIMEOUT_SECONDS = 30.0
+
+
 # Bug #583: Token blacklist for logout — cluster-aware (DB-backed).
 class TokenBlacklist:
     """Token blacklist for JWT logout. In-memory + optional DB backend."""
@@ -222,24 +231,38 @@ class TokenBlacklist:
         import time
 
         assert self._sqlite_db_path is not None
-        conn = sqlite3.connect(self._sqlite_db_path)
-        conn.execute(
-            "INSERT OR IGNORE INTO token_blacklist (jti, blacklisted_at) VALUES (?, ?)",
-            (jti, time.time()),
+        # Bug #1758: explicit busy-wait timeout so a brief lock held by a
+        # concurrent process (e.g. an auto-updater-triggered server restart
+        # briefly overlapping a logout request) is absorbed by SQLite's own
+        # internal wait instead of raising 'database is locked' after
+        # Python's own 5.0s sqlite3.connect() default.
+        conn = sqlite3.connect(
+            self._sqlite_db_path, timeout=_SQLITE_LOCK_TIMEOUT_SECONDS
         )
-        conn.commit()
-        conn.close()
+        try:
+            conn.execute(
+                "INSERT OR IGNORE INTO token_blacklist (jti, blacklisted_at) VALUES (?, ?)",
+                (jti, time.time()),
+            )
+            conn.commit()
+        finally:
+            conn.close()
 
     def _sqlite_contains(self, jti: str) -> bool:
         import sqlite3
 
         assert self._sqlite_db_path is not None
-        conn = sqlite3.connect(self._sqlite_db_path)
-        row = conn.execute(
-            "SELECT 1 FROM token_blacklist WHERE jti = ?", (jti,)
-        ).fetchone()
-        conn.close()
-        return row is not None
+        # Bug #1758: see _sqlite_add's comment -- same busy-wait timeout.
+        conn = sqlite3.connect(
+            self._sqlite_db_path, timeout=_SQLITE_LOCK_TIMEOUT_SECONDS
+        )
+        try:
+            row = conn.execute(
+                "SELECT 1 FROM token_blacklist WHERE jti = ?", (jti,)
+            ).fetchone()
+            return row is not None
+        finally:
+            conn.close()
 
     def prune_expired(self, ttl_seconds: int) -> int:
         """Delete expired token blacklist entries older than ttl_seconds.
@@ -278,7 +301,10 @@ class TokenBlacklist:
         import sqlite3
 
         assert self._sqlite_db_path is not None
-        conn = sqlite3.connect(self._sqlite_db_path)
+        # Bug #1758: see _sqlite_add's comment -- same busy-wait timeout.
+        conn = sqlite3.connect(
+            self._sqlite_db_path, timeout=_SQLITE_LOCK_TIMEOUT_SECONDS
+        )
         try:
             rows = conn.execute(
                 "SELECT jti FROM token_blacklist WHERE blacklisted_at < ?", (cutoff,)
