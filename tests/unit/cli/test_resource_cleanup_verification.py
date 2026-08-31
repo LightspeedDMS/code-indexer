@@ -1,6 +1,7 @@
 """Test to verify API client resource cleanup fix."""
 
-from unittest.mock import Mock, patch, AsyncMock
+import pytest
+from unittest.mock import Mock, patch
 from click.testing import CliRunner
 from pathlib import Path
 
@@ -11,6 +12,22 @@ from code_indexer.api_clients.repos_client import ActivatedRepository
 
 class TestResourceCleanupFix:
     """Test class for verifying resource cleanup fix."""
+
+    @pytest.fixture(autouse=True)
+    def mock_remote_mode_gate(self):
+        """Auto-mock the require_mode("remote") gate on repos_group/admin_group.
+
+        disabled_commands.py independently binds detect_current_mode via its
+        own module-level import, so it is unaffected by patching
+        find_project_root at code_indexer.mode_detection.command_mode_detector
+        (see #1742). Without this, every gated group invocation raises
+        DisabledCommandError before the mocked API clients are ever reached.
+        """
+        with patch(
+            "code_indexer.disabled_commands.detect_current_mode",
+            return_value="remote",
+        ):
+            yield
 
     def setup_method(self):
         """Setup test environment for each test."""
@@ -41,8 +58,8 @@ class TestResourceCleanupFix:
         mock_client = Mock()
         mock_repos_client_class.return_value = mock_client
 
-        # Mock the async methods
-        mock_client.list_activated_repositories = AsyncMock(
+        # Mock the client methods (all synchronous on the real ReposAPIClient)
+        mock_client.list_activated_repositories = Mock(
             return_value=[
                 ActivatedRepository(
                     alias="my-project",
@@ -54,7 +71,7 @@ class TestResourceCleanupFix:
                 )
             ]
         )
-        mock_client.close = AsyncMock()
+        mock_client.close = Mock()
 
         # Execute the command
         result = self.runner.invoke(cli, ["repos", "list"])
@@ -70,11 +87,9 @@ class TestResourceCleanupFix:
     @patch("code_indexer.remote.config.load_remote_configuration")
     @patch("code_indexer.remote.credential_manager.ProjectCredentialManager")
     @patch("code_indexer.remote.credential_manager.load_encrypted_credentials")
-    @patch("code_indexer.cli.AdminAPIClient")
-    @patch("code_indexer.cli.run_async")
+    @patch("code_indexer.api_clients.admin_client.AdminAPIClient")
     def test_admin_repos_list_client_resource_cleanup(
         self,
-        mock_run_async,
         mock_admin_client_class,
         mock_load_credentials,
         mock_credential_manager_class,
@@ -84,7 +99,10 @@ class TestResourceCleanupFix:
         """Test that admin repos list properly closes API client after use."""
         # Setup basic mocks
         mock_find_project_root.return_value = Path("/fake/project")
-        mock_load_config.return_value = {"server_url": "http://localhost:8000"}
+        mock_load_config.return_value = {
+            "server_url": "http://localhost:8000",
+            "username": "admin",
+        }
 
         # Create credential manager mock
         mock_credential_manager = Mock()
@@ -97,11 +115,11 @@ class TestResourceCleanupFix:
 
         # Mock AdminAPIClient
         mock_admin_client = Mock()
-        mock_admin_client.close = AsyncMock()
+        mock_admin_client.close = Mock()
         mock_admin_client_class.return_value = mock_admin_client
 
         # Mock successful response
-        mock_run_async.return_value = {
+        mock_admin_client.list_golden_repositories.return_value = {
             "golden_repositories": [
                 {
                     "alias": "test-repo",
@@ -122,7 +140,8 @@ class TestResourceCleanupFix:
         )
         assert "test-repo" in result.output
 
-        # CRITICAL: Verify that client.close() was called for proper resource cleanup
-        # Note: The actual close() call happens within run_async, so we verify that
-        # the mock_run_async was called which contains the close() logic
-        mock_run_async.assert_called_once()
+        # CRITICAL: Verify that client.close() was called for proper resource cleanup.
+        # Note: cli.py's admin_repos_list genuinely calls close() twice (inner
+        # finally in fetch_admin_data() + outer finally) -- idempotent in the
+        # real client, so we assert it was called rather than an exact count.
+        mock_admin_client.close.assert_called()
