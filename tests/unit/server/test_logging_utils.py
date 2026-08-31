@@ -26,6 +26,26 @@ def test_format_error_log():
     assert message == "[MCP-TOOL-042] Tool execution failed"
 
 
+def test_format_error_log_rejects_extra_kwarg():
+    """Bug #1649/#1716: format_error_log() is a plain string-formatting
+    helper, not logger.error()/logger.warning() -- it has no real 'extra='
+    mechanism. A caller passing extra={...} (intending to reach Python
+    logging's real extra= parameter) instead got that dict silently
+    stringified verbatim into the returned message text, e.g.
+    "[X] msg extra={'correlation_id': 'abc'}", live in production logs.
+
+    format_error_log() must fail loud on this specific mistake so it can
+    never silently recur, per Messi Rule #13 (anti-silent-failure)."""
+    from code_indexer.server.logging_utils import format_error_log
+
+    with pytest.raises(TypeError, match="extra"):
+        format_error_log(
+            "APP-GENERAL-001",
+            "Something failed",
+            extra={"correlation_id": "abc-123"},
+        )
+
+
 def test_sanitize_sensitive_data():
     """Test that sensitive data like passwords and tokens are sanitized."""
     from code_indexer.server.logging_utils import sanitize_for_logging
