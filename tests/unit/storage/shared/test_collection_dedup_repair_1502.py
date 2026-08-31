@@ -126,6 +126,37 @@ def _write_record(
     return file_path
 
 
+def _write_hidden_branches_sentinel_record(
+    collection_dir: Path,
+    *,
+    point_id: str,
+    vector: list,
+    hidden_branches: Optional[List[str]] = None,
+) -> Path:
+    """Bug #1747: write a real vector_<id>.json record matching the EXACT
+    production shape of the non-content bookkeeping sentinel confirmed on
+    4 live repos (65 affected records) -- written/touched by Story #339's
+    branch-visibility-hiding path (FilesystemVectorStore's
+    _batch_update_payload_only / _batch_update_points): payload is ONLY
+    {"hidden_branches": [...]} -- no path/unique_key/content fields at
+    all -- and the top-level chunk_text is always the empty string.
+    Deliberately NOT using _write_record (which always writes a full
+    content-shaped payload) -- this is a structurally different, narrower
+    record shape, matching the issue's confirmed on-disk evidence exactly.
+    """
+    record: Dict[str, Any] = {
+        "id": point_id,
+        "vector": vector,
+        "payload": {"hidden_branches": hidden_branches or ["feature-hidden"]},
+        "chunk_text": "",
+    }
+    shard_dir = collection_dir / point_id[:2] / point_id[2:4]
+    shard_dir.mkdir(parents=True, exist_ok=True)
+    file_path = shard_dir / f"vector_{point_id}.json"
+    file_path.write_text(json.dumps(record))
+    return file_path
+
+
 def _write_collection_meta(
     collection_dir: Path,
     id_mapping: Optional[Dict[str, str]] = None,
@@ -2248,3 +2279,280 @@ class TestRepairEmptyCollection:
         assert result.duplicate_groups == 0
         assert result.records_renumbered == 0
         assert not _marker_path(tmp_path).exists()
+
+
+class TestBug1747SentinelAllowsGateToPass:
+    """Bug #1747: production incident confirmed on 4 real repos (65
+    affected records) -- the whole-collection identity gate rejects an
+    ENTIRE collection the moment it finds a hidden_branches-only
+    bookkeeping sentinel record (Story #339's branch-visibility-hiding
+    write path: FilesystemVectorStore._batch_update_payload_only /
+    _batch_update_points), even when the collection ALSO has a genuine
+    duplicate point_id group the gate exists to catch."""
+
+    def _make_duplicate_plus_sentinel_fixture(self, tmp_path: Path) -> Dict[str, Any]:
+        """ONE genuine duplicate point_id group (the normal case the
+        gate exists to catch) PLUS ONE hidden_branches-only sentinel
+        record with the exact confirmed production shape -- both real,
+        on-disk, in the SAME collection."""
+        _write_collection_meta(tmp_path)
+        winner_path = _write_record(
+            tmp_path,
+            project_id="proj",
+            file_hash="sha256:hb1747",
+            index=0,
+            vector=[0.1, 0.2, 0.3, 0.4],
+            line_start=1,
+            line_end=10,
+            shard_suffix="-a",
+        )
+        loser_path = _write_record(
+            tmp_path,
+            project_id="proj",
+            file_hash="sha256:hb1747",
+            index=0,
+            vector=[0.9, 0.9, 0.9, 0.9],
+            line_start=1,
+            line_end=10,
+            shard_suffix="-b",
+        )
+        shared_point_id = _point_id("proj", "sha256:hb1747", 0)
+        IDIndexManager().save_index(tmp_path, {shared_point_id: winner_path})
+
+        sentinel_id = hashlib.md5(b"hidden-branches-sentinel-1747").hexdigest()
+        sentinel_path = _write_hidden_branches_sentinel_record(
+            tmp_path,
+            point_id=sentinel_id,
+            vector=[0.5, 0.5, 0.5, 0.5],
+            hidden_branches=["feature-x"],
+        )
+        return {
+            "winner_path": winner_path,
+            "loser_path": loser_path,
+            "shared_point_id": shared_point_id,
+            "sentinel_id": sentinel_id,
+            "sentinel_path": sentinel_path,
+        }
+
+    def test_scenario1_duplicate_group_resolved_and_sentinel_left_untouched(
+        self, tmp_path: Path
+    ) -> None:
+        """Scenario 1: real gate + real full repair. The genuine
+        duplicate group must still be resolved (loser deleted, winner
+        survives) and the hidden_branches-only sentinel must no longer
+        fail the whole-collection identity gate -- yet the sentinel
+        itself is left completely BYTE-IDENTICAL (it carries no
+        unique_key/line info to renumber by)."""
+        fixture = self._make_duplicate_plus_sentinel_fixture(tmp_path)
+        sentinel_before = fixture["sentinel_path"].read_bytes()
+
+        result = repair_duplicate_and_shifted_points(tmp_path)
+
+        assert result.gate_passed is True, (
+            "Bug #1747: a hidden_branches-only bookkeeping sentinel must "
+            "not fail the whole-collection identity gate"
+        )
+        assert result.duplicate_groups == 1
+        assert result.records_deleted == 1
+        assert result.winner_kept_groups == 1
+        assert not fixture["loser_path"].exists()
+        assert fixture["sentinel_path"].exists()
+        assert fixture["sentinel_path"].read_bytes() == sentinel_before, (
+            "the sentinel record must be left completely untouched"
+        )
+
+        _assert_derived_artifacts_consistent(tmp_path)
+        assert fixture["sentinel_id"] in _current_json_tree_ids(tmp_path)
+
+    def test_scenario2_consolidate_collection_in_place_no_longer_gate_rejected(
+        self, tmp_path: Path
+    ) -> None:
+        """Scenario 2: same fixture through the full, real production
+        entrypoint (consolidate_collection_in_place) -- must no longer
+        report status="dedup_gate_rejected", and the resulting chunks.db
+        must hold the duplicate group's WINNER content (never the
+        quarantined loser's) plus the sentinel's hidden_branches payload
+        intact."""
+        fixture = self._make_duplicate_plus_sentinel_fixture(tmp_path)
+
+        result = consolidate_collection_in_place(tmp_path)
+
+        assert result.status != "dedup_gate_rejected", (
+            f"Bug #1747: consolidation wrongly quarantined the collection "
+            f"(status={result.status!r}, detail={result.detail!r})"
+        )
+        assert result.status == "consolidated"
+
+        with ChunkStore(tmp_path / "chunks.db") as store:
+            all_ids = set(store.all_point_ids())
+            assert fixture["sentinel_id"] in all_ids
+
+            surviving_content_ids = all_ids - {fixture["sentinel_id"]}
+            assert len(surviving_content_ids) == 1
+            [surviving_id] = surviving_content_ids
+            winner_record = store.read(surviving_id)
+            assert list(winner_record["vector"]) == [0.1, 0.2, 0.3, 0.4], (
+                "the duplicate group's WINNER content must survive -- "
+                "never the quarantined loser's [0.9, 0.9, 0.9, 0.9]"
+            )
+
+            sentinel_record = store.read(fixture["sentinel_id"])
+            assert sentinel_record["payload"]["hidden_branches"] == ["feature-x"]
+
+
+class TestBug1747GenuineBadRecordStillRejectedWithSentinelPresent:
+    """Bug #1579 regression guard: a REAL content record with a missing
+    unique_key must still trip the whole-collection identity gate, even
+    though a hidden_branches-only sentinel is ALSO present in the same
+    collection -- Bug #1747's sentinel allowance must not accidentally
+    excuse a genuinely bad content record."""
+
+    def test_scenario3_genuinely_bad_content_record_still_rejected(
+        self, tmp_path: Path
+    ) -> None:
+        """Mirrors the real incident shape: a genuine duplicate point_id
+        group (so consolidate_collection_in_place's dedup_gate_rejected
+        branch, which requires duplicate_groups > 0, is actually
+        reachable) PLUS a genuinely bad content record (missing
+        unique_key) PLUS a hidden_branches-only sentinel -- all three in
+        the SAME collection."""
+        _write_collection_meta(tmp_path)
+        winner_path = _write_record(
+            tmp_path,
+            project_id="proj",
+            file_hash="sha256:s3dup1747",
+            index=0,
+            vector=[0.15, 0.25, 0.35, 0.45],
+            line_start=1,
+            line_end=10,
+            shard_suffix="-a",
+        )
+        loser_path = _write_record(
+            tmp_path,
+            project_id="proj",
+            file_hash="sha256:s3dup1747",
+            index=0,
+            vector=[0.85, 0.85, 0.85, 0.85],
+            line_start=1,
+            line_end=10,
+            shard_suffix="-b",
+        )
+        shared_point_id = _point_id("proj", "sha256:s3dup1747", 0)
+        IDIndexManager().save_index(tmp_path, {shared_point_id: winner_path})
+
+        bad_content_path = _write_record(
+            tmp_path,
+            project_id="proj",
+            file_hash="sha256:badcontent1747",
+            index=0,
+            vector=[0.2, 0.2, 0.2, 0.2],
+            line_start=1,
+            line_end=10,
+            omit_unique_key=True,
+        )
+        sentinel_id = hashlib.md5(b"hidden-branches-sentinel-1747-s3").hexdigest()
+        sentinel_path = _write_hidden_branches_sentinel_record(
+            tmp_path,
+            point_id=sentinel_id,
+            vector=[0.6, 0.6, 0.6, 0.6],
+        )
+        before = {
+            winner_path: winner_path.read_bytes(),
+            loser_path: loser_path.read_bytes(),
+            bad_content_path: bad_content_path.read_bytes(),
+            sentinel_path: sentinel_path.read_bytes(),
+        }
+
+        result = repair_duplicate_and_shifted_points(tmp_path)
+
+        assert result.gate_passed is False, (
+            "Bug #1579 protection must survive Bug #1747's fix: a real "
+            "content record with a missing unique_key must still reject "
+            "the whole collection"
+        )
+        assert result.duplicate_groups == 1
+        for path in (winner_path, loser_path, bad_content_path, sentinel_path):
+            assert path.read_bytes() == before[path], (
+                f"whole-collection gate rejection must leave EVERY record "
+                f"untouched, including {path}"
+            )
+
+        consolidation_result = consolidate_collection_in_place(tmp_path)
+        assert consolidation_result.status == "dedup_gate_rejected"
+
+
+class TestBug1747NearMissShapesStillRejected:
+    """Discriminator precision: shapes that only PARTIALLY resemble the
+    confirmed hidden_branches-only sentinel must still fail the
+    whole-collection identity gate -- proving Bug #1747's fix is
+    narrowly scoped to the exact confirmed production shape, not a
+    general "no unique_key is now OK" loosening."""
+
+    def _write_near_miss_record(
+        self,
+        collection_dir: Path,
+        *,
+        point_id: str,
+        payload: Dict[str, Any],
+        chunk_text: str,
+        vector: List[float],
+    ) -> Path:
+        record = {
+            "id": point_id,
+            "vector": vector,
+            "payload": payload,
+            "chunk_text": chunk_text,
+        }
+        shard_dir = collection_dir / point_id[:2] / point_id[2:4]
+        shard_dir.mkdir(parents=True, exist_ok=True)
+        file_path = shard_dir / f"vector_{point_id}.json"
+        file_path.write_text(json.dumps(record))
+        return file_path
+
+    def test_scenario4a_hidden_branches_with_real_path_field_still_rejected(
+        self, tmp_path: Path
+    ) -> None:
+        """A record carrying hidden_branches AND a real `path` field but
+        no unique_key is genuine (mis-tagged) content, not the pure
+        bookkeeping shape."""
+        _write_collection_meta(tmp_path)
+        near_miss_id = hashlib.md5(b"near-miss-path-1747").hexdigest()
+        self._write_near_miss_record(
+            tmp_path,
+            point_id=near_miss_id,
+            payload={"hidden_branches": ["feature-x"], "path": "src/real.py"},
+            chunk_text="",
+            vector=[0.3, 0.3, 0.3, 0.3],
+        )
+
+        result = repair_duplicate_and_shifted_points(tmp_path)
+
+        assert result.gate_passed is False, (
+            "a record with hidden_branches AND a real path field but no "
+            "unique_key is genuine content, not the pure bookkeeping "
+            "shape -- must still reject the whole collection"
+        )
+
+    def test_scenario4b_hidden_branches_shape_with_nonempty_chunk_text_still_rejected(
+        self, tmp_path: Path
+    ) -> None:
+        """The bookkeeping payload shape with a NON-EMPTY chunk_text is
+        not the confirmed sentinel shape -- the allowance is narrowly
+        scoped to chunk_text==""."""
+        _write_collection_meta(tmp_path)
+        near_miss_id = hashlib.md5(b"near-miss-chunktext-1747").hexdigest()
+        self._write_near_miss_record(
+            tmp_path,
+            point_id=near_miss_id,
+            payload={"hidden_branches": ["feature-x"]},
+            chunk_text="some real content leaked here",
+            vector=[0.4, 0.4, 0.4, 0.4],
+        )
+
+        result = repair_duplicate_and_shifted_points(tmp_path)
+
+        assert result.gate_passed is False, (
+            "bookkeeping payload shape with non-empty chunk_text is not "
+            "the confirmed sentinel shape -- must still reject the "
+            "whole collection"
+        )
