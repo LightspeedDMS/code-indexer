@@ -153,6 +153,12 @@ class QueryMetadata:
     # continue to compile.  query_user_repositories always populates them.
     effective_search_mode: Optional[str] = None
     effective_query_strategy: Optional[str] = None
+    # Bug #1767: aliases of repos that hard-failed during a multi-repo
+    # fan-out while at least one OTHER repo in the same request succeeded
+    # (a partial failure). None/empty whenever every queried repo
+    # succeeded -- purely additive, so a healthy multi-repo response never
+    # gains this key.
+    degraded_repos: Optional[List[str]] = None
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for API response."""
@@ -166,6 +172,8 @@ class QueryMetadata:
             result["effective_search_mode"] = self.effective_search_mode
         if self.effective_query_strategy is not None:
             result["effective_query_strategy"] = self.effective_query_strategy
+        if self.degraded_repos:
+            result["degraded_repos"] = self.degraded_repos
         return result
 
 
@@ -847,6 +855,10 @@ class SemanticQueryManager:
         # _perform_search -> _search_single_repository -> _execute_temporal_query
         # call chain instead of being re-derived generically below.
         _temporal_warning_out: List[str] = []
+        # Bug #1767: per-request out-param collecting the aliases of repos
+        # that hard-failed during a partial multi-repo fan-out failure, so
+        # it can be surfaced in query_metadata below.
+        _degraded_repos_out: List[str] = []
         try:
             # AC7 (Bug #1202): _perform_search returns (results, effective_strategy).
             # Routing decision is per-request; no singleton state.
@@ -893,6 +905,9 @@ class SemanticQueryManager:
                 temporal_embedder=temporal_embedder,
                 # Bug #1298: collect the embedder-specific warning, if any
                 _temporal_warning_out=_temporal_warning_out,
+                # Bug #1767: collect degraded repo aliases from a partial
+                # multi-repo fan-out failure, if any
+                _degraded_repos_out=_degraded_repos_out,
             )
             # Unpack (results, effective_strategy) tuple; fall back gracefully if
             # a test patches _perform_search to return a plain list.
@@ -926,6 +941,8 @@ class SemanticQueryManager:
             timeout_occurred=timeout_occurred,
             effective_search_mode=search_mode,
             effective_query_strategy=effective_strategy,
+            # Bug #1767: surface partial multi-repo failures, if any.
+            degraded_repos=_degraded_repos_out or None,
         )
 
         # Handle case where mocked _perform_search returns dict instead of QueryResult list
@@ -1137,6 +1154,14 @@ class SemanticQueryManager:
         # Bug #1298: out-param for the embedder-specific temporal "no
         # indexed collections" warning. Per-request, no shared state.
         _temporal_warning_out: Optional[List[str]] = None,
+        # Bug #1767: out-param collecting the aliases of repos that
+        # hard-failed during this multi-repo fan-out but did NOT cause a
+        # total-failure raise (i.e. at least one other repo produced real
+        # results). Lets the caller surface a partial-failure indicator
+        # instead of silently returning success:true with no signal a
+        # repo was skipped due to a real error. Per-request, no shared
+        # state.
+        _degraded_repos_out: Optional[List[str]] = None,
     ) -> "Tuple[List[QueryResult], str]":
         """
         Perform the actual search across user repositories.
@@ -1188,6 +1213,11 @@ class SemanticQueryManager:
 
         all_results: List[QueryResult] = []
         repo_errors: List[str] = []
+        # Bug #1767: repo aliases whose search failed, paired 1:1 with
+        # repo_errors -- used to surface a partial-failure indicator
+        # (which repo(s), not just the raw error text) to the caller
+        # instead of the failure being silently dropped.
+        failed_repo_aliases: List[str] = []
         # AC7 (Bug #1202): track the effective routing decision from the first
         # successfully-searched repo (all repos in one request share the same
         # search_mode and query_strategy parameters so the resolved value is
@@ -1376,12 +1406,34 @@ class SemanticQueryManager:
                     extra=get_log_extra("QUERY-MIGRATE-006"),
                 )
                 repo_errors.append(str(e))
+                failed_repo_aliases.append(repo_info["user_alias"])
                 continue
 
         # If ALL repos failed and we got zero results, propagate the error
         # instead of silently returning empty results
         if not all_results and repo_errors:
             raise Exception(repo_errors[-1])
+
+        # Bug #1767: a PARTIAL failure (some repos succeeded, at least one
+        # hard-failed) must NOT raise -- existing graceful degradation for
+        # genuine multi-repo queries is preserved -- but it must not be
+        # silently invisible either. Surface it as a dedicated aggregate
+        # WARNING (distinct from the per-repo QUERY-MIGRATE-006 log above)
+        # and, via the out-param, to the caller's response.
+        if all_results and repo_errors:
+            logger.warning(
+                format_error_log(
+                    "QUERY-MIGRATE-013",
+                    "Partial multi-repo search failure: some repos returned "
+                    "results while others failed",
+                    failed_repo_count=len(failed_repo_aliases),
+                    total_repo_count=len(user_repos),
+                    failed_repos=",".join(failed_repo_aliases),
+                ),
+                extra=get_log_extra("QUERY-MIGRATE-013"),
+            )
+            if _degraded_repos_out is not None:
+                _degraded_repos_out.extend(failed_repo_aliases)
 
         # Sort by similarity score (descending) and limit results
         all_results.sort(key=lambda r: r.similarity_score, reverse=True)
