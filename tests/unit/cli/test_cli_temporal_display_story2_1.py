@@ -234,7 +234,9 @@ class TestCLITemporalDisplayStory21(unittest.TestCase):
         verified live to hold regardless of file count. Repurposed to test
         genuinely distinct current behavior: no truncation of long messages.
         """
-        long_message = "\n".join(f"Change {i}: refactored module {i}" for i in range(15))
+        long_message = "\n".join(
+            f"Change {i}: refactored module {i}" for i in range(15)
+        )
         result = self._make_result(
             metadata={
                 "type": "commit_message",
@@ -259,7 +261,10 @@ class TestCLITemporalDisplayStory21(unittest.TestCase):
             # Full message should be shown, no truncation for any line
             for i in range(15):
                 self.assertTrue(
-                    any(f"Change {i}: refactored module {i}" in str(call) for call in calls)
+                    any(
+                        f"Change {i}: refactored module {i}" in str(call)
+                        for call in calls
+                    )
                 )
             self.assertTrue(
                 any(

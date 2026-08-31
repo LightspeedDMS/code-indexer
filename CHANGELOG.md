@@ -7,6 +7,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [12.29.0] - 2026-08-31
+
+### Fixed
+
+- **Bug #1760 (CRITICAL)**: semantic search was completely non-functional on the clustered
+  staging environment for both embedding providers (`attempt to write a readonly database`),
+  while silently reporting `success: true, total_results: 0` -- masking a total outage as a
+  legitimate empty result. Root cause: the hydration read path opened SQLite chunk stores in
+  `immutable=1` mode on genuinely mutable (actively-indexed) repos, which also silently risks
+  serving stale/dropped data on WAL-mode databases. Replaced with a genuinely read-only
+  (`mode=ro`) connection that never attempts a write and correctly observes concurrent writes
+  and uncheckpointed WAL content. Also closed the case where every configured embedding
+  provider was pre-skipped as unhealthy (health-monitor sin-binned) before dispatch, which
+  bypassed the total-failure guard and silently returned an empty success.
+- **Bug #1763 / #1764**: bug #1761's FTS-duplicate-results fix only took effect on indexes
+  already rebuilt with the new schema -- every pre-existing on-disk index kept accumulating
+  duplicates indefinitely, and `delete_document()`'s legacy fallback query could silently
+  destroy unrelated FTS entries for sibling file paths (3 live production callers). Existing
+  indexes now self-heal to the new schema on their next index run (one-time, verified
+  non-repeating), with the FTS wipe-then-rebuild now atomic (an ordinary indexing run with
+  some changed files no longer permanently loses untouched files' FTS entries) and safe on
+  `cidx watch` (previously had no repopulation path at all).
+- **Bug #1758 / #1766**: `DataRetentionScheduler` and related auth-table writers
+  (`TokenBlacklist`, `ElevatedSessionManager`, `StateManager`, `TOTPService`) opened raw
+  SQLite connections with no lock-contention tolerance, causing `database is locked` failures
+  -- including silent JWT-blacklist and TOTP write failures -- during the brief window where
+  the auto-updater restarts the server process. Fixed via a connection-level 30s timeout
+  matching this project's established convention, covering both the background prune path and
+  the previously-unprotected user-facing write paths.
+- **Bug #1767**: multi-repo search silently dropped a hard failure on one repo while another
+  repo returned real results, reporting `success: true` with no indication one repo was
+  degraded. The response now surfaces a `degraded_repos` field (additive, absent on the
+  healthy-query path) plus a dedicated aggregate warning log.
+- **Bug #1757**: `cidx query` crashed with `TypeError: query() got an unexpected keyword
+  argument 'standalone'` when falling back from daemon mode to standalone mode -- a stray
+  duplicate kwarg assignment collided with `ctx.invoke()`'s argument binding.
+- **Bug #1752 (follow-up)**: three residual `AsyncMock`-on-synchronous-method / missing
+  mode-gate-mock sites (the exact bug class #1752's sweep targeted) left three test files
+  passing vacuously without exercising their documented scenarios; fixed and re-verified.
+- Resolved a repo-wide mypy blocker (`**dict[str, object]` spread losing per-field type
+  information in two test helper constructors) that had been silently failing `./lint.sh`'s
+  full-repo run since an earlier commit this cycle.
+
 ## [12.28.0] - 2026-08-31
 
 ### Fixed

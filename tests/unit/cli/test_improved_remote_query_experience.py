@@ -73,7 +73,9 @@ class TestImprovedRemoteQueryExperience:
                     assert (
                         "requires git repository context" in output_lower
                         or "repository linking" in output_lower
-                    ), f"Should show clear git-repository-required error: {result.output}"
+                    ), (
+                        f"Should show clear git-repository-required error: {result.output}"
+                    )
 
                     # Should provide helpful guidance (technical details may also be present)
                     # The important thing is that users get clear resolution steps
