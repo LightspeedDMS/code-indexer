@@ -5,7 +5,8 @@ and browsing CLI commands as defined in Story 4.
 """
 
 import pytest
-from unittest.mock import Mock, patch, AsyncMock
+from pathlib import Path
+from unittest.mock import Mock, patch
 from click.testing import CliRunner
 
 from code_indexer.cli import cli
@@ -20,6 +21,34 @@ from code_indexer.api_clients.repos_client import (
     RecentActivity,
 )
 from code_indexer.api_clients.base_client import APIClientError, AuthenticationError
+
+
+@pytest.fixture(autouse=True)
+def mock_remote_setup():
+    """Auto-mock project root discovery and remote credential loading.
+
+    The repos_group commands (list/available/discover/status) each call
+    find_project_root/_load_remote_configuration/_load_and_decrypt_credentials
+    for real before ever touching ReposAPIClient. Without this fixture, tests
+    run against this repo's actual local-mode .code-indexer config and fail
+    with "Failed to load credentials: Remote configuration not found" before
+    the mocked repository data in each test is ever used.
+    """
+    with (
+        patch(
+            "code_indexer.mode_detection.command_mode_detector.find_project_root",
+            return_value=Path("/fake/project"),
+        ),
+        patch(
+            "code_indexer.remote.sync_execution._load_remote_configuration",
+            return_value={"server_url": "https://fake-server.example"},
+        ),
+        patch(
+            "code_indexer.remote.sync_execution._load_and_decrypt_credentials",
+            return_value={"username": "fake_user", "password": "fake_password"},
+        ),
+    ):
+        yield
 
 
 class TestReposCommandGroup:
@@ -77,10 +106,10 @@ class TestReposListCommand:
         ) as mock_class:
             mock_client = Mock()
             # Make the async methods async mocks
-            mock_client.list_activated_repositories = AsyncMock()
-            mock_client.list_available_repositories = AsyncMock()
-            mock_client.discover_repositories = AsyncMock()
-            mock_client.get_repository_status_summary = AsyncMock()
+            mock_client.list_activated_repositories = Mock()
+            mock_client.list_available_repositories = Mock()
+            mock_client.discover_repositories = Mock()
+            mock_client.get_repository_status_summary = Mock()
             mock_class.return_value = mock_client
             return mock_client
 
@@ -92,13 +121,12 @@ class TestReposListCommand:
         assert result.exit_code == 0
         assert "list" in result.output
 
-    @patch("code_indexer.cli.CommandModeDetector")
+    @patch("code_indexer.disabled_commands.detect_current_mode", return_value="remote")
     def test_repos_list_command_success_with_repositories(
         self, mock_detector, mock_repos_client
     ):
         """Test successful execution of repos list command with repositories."""
         # Setup mode detection
-        mock_detector.return_value.determine_command_mode.return_value = "remote"
 
         # Mock repository data
         mock_repositories = [
@@ -131,7 +159,7 @@ class TestReposListCommand:
         mock_repos_client.list_activated_repositories.return_value = mock_repositories
 
         with patch(
-            "code_indexer.api_clients.repos_client.ReposAPIClient",
+            "code_indexer.cli.ReposAPIClient",
             return_value=mock_repos_client,
         ):
             runner = CliRunner()
@@ -154,18 +182,17 @@ class TestReposListCommand:
         )
         assert "✗" in result.output or "conflict" in result.output
 
-    @patch("code_indexer.cli.CommandModeDetector")
+    @patch("code_indexer.disabled_commands.detect_current_mode", return_value="remote")
     def test_repos_list_command_empty_repositories(
         self, mock_detector, mock_repos_client
     ):
         """Test repos list command with no repositories."""
         # Setup mode detection
-        mock_detector.return_value.determine_command_mode.return_value = "remote"
 
         mock_repos_client.list_activated_repositories.return_value = []
 
         with patch(
-            "code_indexer.api_clients.repos_client.ReposAPIClient",
+            "code_indexer.cli.ReposAPIClient",
             return_value=mock_repos_client,
         ):
             runner = CliRunner()
@@ -175,11 +202,10 @@ class TestReposListCommand:
         assert "No repositories activated" in result.output
         assert "activate" in result.output.lower()  # Should provide guidance
 
-    @patch("code_indexer.cli.CommandModeDetector")
+    @patch("code_indexer.disabled_commands.detect_current_mode", return_value="remote")
     def test_repos_list_command_with_filter(self, mock_detector, mock_repos_client):
         """Test repos list command with filter option."""
         # Setup mode detection
-        mock_detector.return_value.determine_command_mode.return_value = "remote"
 
         mock_repositories = [
             ActivatedRepository(
@@ -195,7 +221,7 @@ class TestReposListCommand:
         mock_repos_client.list_activated_repositories.return_value = mock_repositories
 
         with patch(
-            "code_indexer.api_clients.repos_client.ReposAPIClient",
+            "code_indexer.cli.ReposAPIClient",
             return_value=mock_repos_client,
         ):
             runner = CliRunner()
@@ -208,20 +234,19 @@ class TestReposListCommand:
         )
         assert "web-app" in result.output
 
-    @patch("code_indexer.cli.CommandModeDetector")
+    @patch("code_indexer.disabled_commands.detect_current_mode", return_value="remote")
     def test_repos_list_command_authentication_error(
         self, mock_detector, mock_repos_client
     ):
         """Test repos list command handling authentication errors."""
         # Setup mode detection
-        mock_detector.return_value.determine_command_mode.return_value = "remote"
 
         mock_repos_client.list_activated_repositories.side_effect = AuthenticationError(
             "Token expired"
         )
 
         with patch(
-            "code_indexer.api_clients.repos_client.ReposAPIClient",
+            "code_indexer.cli.ReposAPIClient",
             return_value=mock_repos_client,
         ):
             runner = CliRunner()
@@ -233,18 +258,17 @@ class TestReposListCommand:
             or "token" in result.output.lower()
         )
 
-    @patch("code_indexer.cli.CommandModeDetector")
+    @patch("code_indexer.disabled_commands.detect_current_mode", return_value="remote")
     def test_repos_list_command_network_error(self, mock_detector, mock_repos_client):
         """Test repos list command handling network errors."""
         # Setup mode detection
-        mock_detector.return_value.determine_command_mode.return_value = "remote"
 
         mock_repos_client.list_activated_repositories.side_effect = APIClientError(
             "Connection failed"
         )
 
         with patch(
-            "code_indexer.api_clients.repos_client.ReposAPIClient",
+            "code_indexer.cli.ReposAPIClient",
             return_value=mock_repos_client,
         ):
             runner = CliRunner()
@@ -265,18 +289,17 @@ class TestReposAvailableCommand:
         ) as mock_class:
             mock_client = Mock()
             # Make the async methods async mocks
-            mock_client.list_activated_repositories = AsyncMock()
-            mock_client.list_available_repositories = AsyncMock()
-            mock_client.discover_repositories = AsyncMock()
-            mock_client.get_repository_status_summary = AsyncMock()
+            mock_client.list_activated_repositories = Mock()
+            mock_client.list_available_repositories = Mock()
+            mock_client.discover_repositories = Mock()
+            mock_client.get_repository_status_summary = Mock()
             mock_class.return_value = mock_client
             return mock_client
 
-    @patch("code_indexer.cli.CommandModeDetector")
+    @patch("code_indexer.disabled_commands.detect_current_mode", return_value="remote")
     def test_repos_available_command_success(self, mock_detector, mock_repos_client):
         """Test successful execution of repos available command."""
         # Setup mode detection
-        mock_detector.return_value.determine_command_mode.return_value = "remote"
 
         # Mock repository data
         mock_repositories = [
@@ -301,7 +324,7 @@ class TestReposAvailableCommand:
         mock_repos_client.list_available_repositories.return_value = mock_repositories
 
         with patch(
-            "code_indexer.api_clients.repos_client.ReposAPIClient",
+            "code_indexer.cli.ReposAPIClient",
             return_value=mock_repos_client,
         ):
             runner = CliRunner()
@@ -318,13 +341,12 @@ class TestReposAvailableCommand:
         # Check activation status indicators
         assert "Already activated" in result.output or "activated" in result.output
 
-    @patch("code_indexer.cli.CommandModeDetector")
+    @patch("code_indexer.disabled_commands.detect_current_mode", return_value="remote")
     def test_repos_available_command_with_search(
         self, mock_detector, mock_repos_client
     ):
         """Test repos available command with search option."""
         # Setup mode detection
-        mock_detector.return_value.determine_command_mode.return_value = "remote"
 
         mock_repositories = [
             GoldenRepository(
@@ -340,7 +362,7 @@ class TestReposAvailableCommand:
         mock_repos_client.list_available_repositories.return_value = mock_repositories
 
         with patch(
-            "code_indexer.api_clients.repos_client.ReposAPIClient",
+            "code_indexer.cli.ReposAPIClient",
             return_value=mock_repos_client,
         ):
             runner = CliRunner()
@@ -353,18 +375,17 @@ class TestReposAvailableCommand:
         )
         assert "web-framework" in result.output
 
-    @patch("code_indexer.cli.CommandModeDetector")
+    @patch("code_indexer.disabled_commands.detect_current_mode", return_value="remote")
     def test_repos_available_command_empty_repositories(
         self, mock_detector, mock_repos_client
     ):
         """Test repos available command with no repositories."""
         # Setup mode detection
-        mock_detector.return_value.determine_command_mode.return_value = "remote"
 
         mock_repos_client.list_available_repositories.return_value = []
 
         with patch(
-            "code_indexer.api_clients.repos_client.ReposAPIClient",
+            "code_indexer.cli.ReposAPIClient",
             return_value=mock_repos_client,
         ):
             runner = CliRunner()
@@ -385,18 +406,17 @@ class TestReposDiscoverCommand:
         ) as mock_class:
             mock_client = Mock()
             # Make the async methods async mocks
-            mock_client.list_activated_repositories = AsyncMock()
-            mock_client.list_available_repositories = AsyncMock()
-            mock_client.discover_repositories = AsyncMock()
-            mock_client.get_repository_status_summary = AsyncMock()
+            mock_client.list_activated_repositories = Mock()
+            mock_client.list_available_repositories = Mock()
+            mock_client.discover_repositories = Mock()
+            mock_client.get_repository_status_summary = Mock()
             mock_class.return_value = mock_client
             return mock_client
 
-    @patch("code_indexer.cli.CommandModeDetector")
+    @patch("code_indexer.disabled_commands.detect_current_mode", return_value="remote")
     def test_repos_discover_command_success(self, mock_detector, mock_repos_client):
         """Test successful execution of repos discover command."""
         # Setup mode detection
-        mock_detector.return_value.determine_command_mode.return_value = "remote"
 
         # Mock discovery result
         mock_result = RepositoryDiscoveryResult(
@@ -428,7 +448,7 @@ class TestReposDiscoverCommand:
         mock_repos_client.discover_repositories.return_value = mock_result
 
         with patch(
-            "code_indexer.api_clients.repos_client.ReposAPIClient",
+            "code_indexer.cli.ReposAPIClient",
             return_value=mock_repos_client,
         ):
             runner = CliRunner()
@@ -446,13 +466,12 @@ class TestReposDiscoverCommand:
             "github.com/myorg"
         )
 
-    @patch("code_indexer.cli.CommandModeDetector")
+    @patch("code_indexer.disabled_commands.detect_current_mode", return_value="remote")
     def test_repos_discover_command_with_access_errors(
         self, mock_detector, mock_repos_client
     ):
         """Test repos discover command with access errors."""
         # Setup mode detection
-        mock_detector.return_value.determine_command_mode.return_value = "remote"
 
         # Mock discovery result with access errors
         mock_result = RepositoryDiscoveryResult(
@@ -478,7 +497,7 @@ class TestReposDiscoverCommand:
         mock_repos_client.discover_repositories.return_value = mock_result
 
         with patch(
-            "code_indexer.api_clients.repos_client.ReposAPIClient",
+            "code_indexer.cli.ReposAPIClient",
             return_value=mock_repos_client,
         ):
             runner = CliRunner()
@@ -491,11 +510,10 @@ class TestReposDiscoverCommand:
         assert "requires authentication" in result.output
         assert "archived" in result.output
 
-    @patch("code_indexer.cli.CommandModeDetector")
+    @patch("code_indexer.disabled_commands.detect_current_mode", return_value="remote")
     def test_repos_discover_command_missing_source(self, mock_detector):
         """Test repos discover command without required source parameter."""
         # Setup mode detection
-        mock_detector.return_value.determine_command_mode.return_value = "remote"
 
         runner = CliRunner()
         result = runner.invoke(cli, ["repos", "discover"])
@@ -503,20 +521,19 @@ class TestReposDiscoverCommand:
         assert result.exit_code != 0
         assert "source" in result.output.lower()
 
-    @patch("code_indexer.cli.CommandModeDetector")
+    @patch("code_indexer.disabled_commands.detect_current_mode", return_value="remote")
     def test_repos_discover_command_invalid_source(
         self, mock_detector, mock_repos_client
     ):
         """Test repos discover command with invalid source."""
         # Setup mode detection
-        mock_detector.return_value.determine_command_mode.return_value = "remote"
 
         mock_repos_client.discover_repositories.side_effect = APIClientError(
             "Invalid source format"
         )
 
         with patch(
-            "code_indexer.api_clients.repos_client.ReposAPIClient",
+            "code_indexer.cli.ReposAPIClient",
             return_value=mock_repos_client,
         ):
             runner = CliRunner()
@@ -539,18 +556,17 @@ class TestReposStatusCommand:
         ) as mock_class:
             mock_client = Mock()
             # Make the async methods async mocks
-            mock_client.list_activated_repositories = AsyncMock()
-            mock_client.list_available_repositories = AsyncMock()
-            mock_client.discover_repositories = AsyncMock()
-            mock_client.get_repository_status_summary = AsyncMock()
+            mock_client.list_activated_repositories = Mock()
+            mock_client.list_available_repositories = Mock()
+            mock_client.discover_repositories = Mock()
+            mock_client.get_repository_status_summary = Mock()
             mock_class.return_value = mock_client
             return mock_client
 
-    @patch("code_indexer.cli.CommandModeDetector")
+    @patch("code_indexer.disabled_commands.detect_current_mode", return_value="remote")
     def test_repos_status_command_success(self, mock_detector, mock_repos_client):
         """Test successful execution of repos status command."""
         # Setup mode detection
-        mock_detector.return_value.determine_command_mode.return_value = "remote"
 
         # Mock status summary
         mock_summary = RepositoryStatusSummary(
@@ -584,7 +600,7 @@ class TestReposStatusCommand:
         mock_repos_client.get_repository_status_summary.return_value = mock_summary
 
         with patch(
-            "code_indexer.api_clients.repos_client.ReposAPIClient",
+            "code_indexer.cli.ReposAPIClient",
             return_value=mock_repos_client,
         ):
             runner = CliRunner()
@@ -600,11 +616,10 @@ class TestReposStatusCommand:
         assert "api-service" in result.output  # recommendations
         assert "mobile-app" in result.output
 
-    @patch("code_indexer.cli.CommandModeDetector")
+    @patch("code_indexer.disabled_commands.detect_current_mode", return_value="remote")
     def test_repos_status_command_empty_state(self, mock_detector, mock_repos_client):
         """Test repos status command with no repositories."""
         # Setup mode detection
-        mock_detector.return_value.determine_command_mode.return_value = "remote"
 
         # Mock empty status summary
         mock_summary = RepositoryStatusSummary(
@@ -627,7 +642,7 @@ class TestReposStatusCommand:
         mock_repos_client.get_repository_status_summary.return_value = mock_summary
 
         with patch(
-            "code_indexer.api_clients.repos_client.ReposAPIClient",
+            "code_indexer.cli.ReposAPIClient",
             return_value=mock_repos_client,
         ):
             runner = CliRunner()
