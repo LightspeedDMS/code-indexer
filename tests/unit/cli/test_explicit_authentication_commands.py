@@ -360,7 +360,12 @@ class TestExplicitAuthenticationCommands:
 
         with self.runner.isolated_filesystem():
             os.chdir(str(project_dir))
-            result = self.runner.invoke(cli, ["auth", "login"])
+            # input= supplies stdin so click.prompt() doesn't block forever
+            # waiting for interactive input under CliRunner (Bug: confirmed
+            # indefinite hang without this, see #1752).
+            result = self.runner.invoke(
+                cli, ["auth", "login"], input="testuser\ntestpass\n"
+            )
 
         # Should fail as command doesn't exist yet
         assert result.exit_code != 0, "Interactive login should fail (TDD - red phase)"
@@ -376,7 +381,12 @@ class TestExplicitAuthenticationCommands:
 
         with self.runner.isolated_filesystem():
             os.chdir(str(project_dir))
-            result = self.runner.invoke(cli, ["auth", "register"])
+            # input= supplies stdin so click.prompt() doesn't block forever
+            # waiting for interactive input under CliRunner (Bug: confirmed
+            # indefinite hang without this, see #1752).
+            result = self.runner.invoke(
+                cli, ["auth", "register"], input="newuser\nnewpass\nuser\n"
+            )
 
         # Should fail as command doesn't exist yet
         assert result.exit_code != 0, (
@@ -393,7 +403,12 @@ class TestExplicitAuthenticationCommands:
         with patch("builtins.input", return_value="testuser"):
             with self.runner.isolated_filesystem():
                 os.chdir(str(project_dir))
-                result = self.runner.invoke(cli, ["auth", "login"])
+                # input= supplies stdin so click.prompt() doesn't block
+                # forever waiting for interactive input under CliRunner
+                # (Bug: confirmed indefinite hang without this, see #1752).
+                result = self.runner.invoke(
+                    cli, ["auth", "login"], input="testuser\ntestpass\n"
+                )
 
         # Should fail as command doesn't exist yet
         assert result.exit_code != 0, (
@@ -404,7 +419,13 @@ class TestExplicitAuthenticationCommands:
         """Test that interactive mode handles empty username and password inputs."""
         project_dir = self.create_temp_project_dir()
 
-        with patch("builtins.input", return_value=""):  # Empty username
+        # click.prompt() is mocked directly (not builtins.input, which it
+        # never calls -- see #1742's wrong-patch-target class). This also
+        # avoids a genuine infinite hang: click.prompt() retries forever on
+        # an empty value once fed stdin is exhausted, so no finite input=
+        # string to CliRunner can terminate it (confirmed by direct repro,
+        # see #1752).
+        with patch("click.prompt", return_value=""):  # Empty username
             with patch("getpass.getpass", return_value=""):  # Empty password
                 with self.runner.isolated_filesystem():
                     os.chdir(str(project_dir))

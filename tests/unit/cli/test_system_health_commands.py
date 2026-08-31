@@ -9,13 +9,29 @@ import tempfile
 import json
 from pathlib import Path
 from click.testing import CliRunner
-from unittest.mock import patch, AsyncMock
+from unittest.mock import patch, Mock
 
 from code_indexer.cli import cli
 
 
 class TestSystemHealthCLICommands:
     """Test CLI system health command functionality."""
+
+    @pytest.fixture(autouse=True)
+    def mock_remote_mode_gate(self):
+        """Auto-mock the require_mode("remote") gate on system_group.
+
+        disabled_commands.py independently binds detect_current_mode via its
+        own module-level import, so it is unaffected by patching
+        find_project_root at code_indexer.mode_detection.command_mode_detector
+        (see #1742). Without this, every system_group invocation raises
+        DisabledCommandError before reaching real command logic.
+        """
+        with patch(
+            "code_indexer.disabled_commands.detect_current_mode",
+            return_value="remote",
+        ):
+            yield
 
     @pytest.fixture
     def runner(self) -> CliRunner:
@@ -52,7 +68,7 @@ class TestSystemHealthCLICommands:
             "code_indexer.api_clients.system_client.create_system_client"
         ) as mock_create_client:
             # Mock system client and health check response
-            mock_client = AsyncMock()
+            mock_client = Mock()
             mock_client.check_basic_health.return_value = {
                 "status": "ok",
                 "timestamp": "2024-01-15T10:30:00Z",
@@ -96,7 +112,7 @@ class TestSystemHealthCLICommands:
             "code_indexer.api_clients.system_client.create_system_client"
         ) as mock_create_client:
             # Mock system client and detailed health response
-            mock_client = AsyncMock()
+            mock_client = Mock()
             mock_client.check_detailed_health.return_value = {
                 "status": "healthy",
                 "timestamp": "2024-01-15T10:30:00Z",
@@ -165,7 +181,7 @@ class TestSystemHealthCLICommands:
             "code_indexer.api_clients.system_client.create_system_client"
         ) as mock_create_client:
             # Mock system client and detailed health response
-            mock_client = AsyncMock()
+            mock_client = Mock()
             mock_client.check_detailed_health.return_value = {
                 "status": "healthy",
                 "timestamp": "2024-01-15T10:30:00Z",
@@ -229,7 +245,7 @@ class TestSystemHealthCLICommands:
             # Mock authentication error
             from code_indexer.api_clients.base_client import AuthenticationError
 
-            mock_client = AsyncMock()
+            mock_client = Mock()
             mock_client.check_basic_health.side_effect = AuthenticationError(
                 "Token expired", status_code=401
             )
@@ -269,7 +285,7 @@ class TestSystemHealthCLICommands:
             # Mock server error
             from code_indexer.api_clients.base_client import APIClientError
 
-            mock_client = AsyncMock()
+            mock_client = Mock()
             mock_client.check_basic_health.side_effect = APIClientError(
                 "Service unavailable", status_code=503
             )
@@ -323,7 +339,7 @@ class TestSystemHealthCLICommands:
             "code_indexer.api_clients.system_client.create_system_client"
         ) as mock_create_client:
             # Mock system client and detailed health response
-            mock_client = AsyncMock()
+            mock_client = Mock()
             mock_client.check_detailed_health.return_value = {
                 "status": "healthy",
                 "timestamp": "2024-01-15T10:30:00Z",

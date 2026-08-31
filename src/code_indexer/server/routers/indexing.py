@@ -5,8 +5,6 @@ Provides REST endpoints for triggering re-indexing and querying index status
 with OAuth authentication and service layer integration.
 """
 
-from code_indexer.server.middleware.correlation import get_correlation_id
-
 import logging
 from datetime import datetime, timezone
 from typing import List, Optional, Dict, Any, cast
@@ -140,7 +138,6 @@ def trigger_reindex(
             format_error_log(
                 "WEB-GENERAL-015",
                 f"Repository not found: {alias}",
-                extra={"correlation_id": get_correlation_id()},
             )
         )
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
@@ -149,7 +146,6 @@ def trigger_reindex(
             format_error_log(
                 "WEB-GENERAL-016",
                 f"Invalid request for {alias}: {e}",
-                extra={"correlation_id": get_correlation_id()},
             )
         )
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
@@ -158,7 +154,6 @@ def trigger_reindex(
             format_error_log(
                 "WEB-GENERAL-017",
                 f"Trigger reindex failed for {alias}: {e}",
-                extra={"correlation_id": get_correlation_id()},
             ),
             exc_info=True,
         )
@@ -275,7 +270,6 @@ def get_index_status(
             format_error_log(
                 "WEB-GENERAL-018",
                 f"Repository not found: {alias}",
-                extra={"correlation_id": get_correlation_id()},
             )
         )
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
@@ -284,7 +278,6 @@ def get_index_status(
             format_error_log(
                 "WEB-GENERAL-019",
                 f"Get index status failed for {alias}: {e}",
-                extra={"correlation_id": get_correlation_id()},
             ),
             exc_info=True,
         )
@@ -332,7 +325,6 @@ def get_temporal_status(
             format_error_log(
                 "WEB-GENERAL-020",
                 f"Repository not found: {alias}",
-                extra={"correlation_id": get_correlation_id()},
             )
         )
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
@@ -341,7 +333,6 @@ def get_temporal_status(
             format_error_log(
                 "WEB-GENERAL-021",
                 f"Get temporal status failed for {alias}: {e}",
-                extra={"correlation_id": get_correlation_id()},
             ),
             exc_info=True,
         )

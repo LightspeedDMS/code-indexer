@@ -17,6 +17,7 @@ Architecture:
 
 import hashlib
 import logging
+import sqlite3
 import time
 from concurrent.futures import ThreadPoolExecutor, Future
 from pathlib import Path
@@ -26,6 +27,10 @@ from dataclasses import dataclass
 from .vector_calculation_manager import VectorCalculationManager
 from ..indexing.fixed_size_chunker import FixedSizeChunker
 from .clean_slot_tracker import CleanSlotTracker, FileData, FileStatus
+from ..storage.sqlite_chunk_store import (
+    ChunkStoreUnavailableError,
+    is_fatal_chunk_store_write_error,
+)
 import threading
 
 # Token counting for large file handling - using embedded tokenizer
@@ -51,6 +56,25 @@ class FileProcessingResult:
     processing_time: float
     error: Optional[str] = None
     vanished: bool = False  # True when file disappeared before stat() (TOCTOU skip)
+
+
+def _vector_storage_failure_result(
+    file_path: Path, error: BaseException, start_time: float
+) -> FileProcessingResult:
+    """Bug #1746 H1/H2: build the ordinary per-file failure result for a
+    NON-fatal vector-storage write error (e.g. transient sqlite lock
+    contention, or any other non-fatal exception). Shared by both the
+    reclassified-non-fatal branch and the generic except-Exception branch
+    in _process_file_clean_lifecycle() so the two stay byte-identical.
+    """
+    logger.error(f"Vector storage write failed for {file_path}: {error}")
+    return FileProcessingResult(
+        success=False,
+        file_path=file_path,
+        chunks_processed=0,
+        processing_time=time.time() - start_time,
+        error=f"Vector storage write failed: {error}",
+    )
 
 
 class FileChunkingManager:
@@ -1029,15 +1053,52 @@ class FileChunkingManager:
                                 )
                                 # Continue with next chunk
 
+                except (
+                    sqlite3.DatabaseError,
+                    OSError,
+                    ChunkStoreUnavailableError,
+                ) as e:
+                    # Bug #1746 Change 1 (H1/H2 code-review refinements):
+                    # a FATAL chunk-store-open/write failure (e.g. a
+                    # root-owned/unwritable chunks.db, a corrupt database,
+                    # or disk-full) must NEVER be silently converted into
+                    # an ordinary per-file failure result -- doing so let
+                    # the batch keep running to the end of the repo,
+                    # burning CPU on every remaining file for hours before
+                    # anyone noticed (production incident, see GitHub
+                    # issue #1746). Re-raise (wrapped, if not already the
+                    # typed error) so HighThroughputProcessor (Change 2)
+                    # and SmartIndexer (Change 3) can distinguish this
+                    # from a normal per-file failure and abort the whole
+                    # run instead of continuing.
+                    #
+                    # H1: sqlite3.DatabaseError/OperationalError caught
+                    # here can ALSO be transient lock contention (the
+                    # CHUNKS_DB write path opens a fresh connection per
+                    # upsert_points() call with no cross-thread
+                    # application lock -- expected under concurrent
+                    # writers, not exceptional). is_fatal_chunk_store_write_error()
+                    # excludes "database is locked"/"database table is
+                    # locked" from the fatal classification so a
+                    # transient lock failure only fails this one file.
+                    if isinstance(e, ChunkStoreUnavailableError):
+                        logger.error(
+                            f"Fatal chunk-store failure writing {file_path}: {e}"
+                        )
+                        raise
+                    if is_fatal_chunk_store_write_error(e):
+                        logger.error(
+                            f"Fatal chunk-store failure writing {file_path}: {e}"
+                        )
+                        raise ChunkStoreUnavailableError(
+                            f"Chunk store unavailable while writing {file_path}: {e}"
+                        ) from e
+                    # Not fatal (H1 transient lock contention) -- fail
+                    # only this file, exactly like the generic
+                    # except-Exception branch below.
+                    return _vector_storage_failure_result(file_path, e, start_time)
                 except Exception as e:
-                    logger.error(f"Vector storage write failed for {file_path}: {e}")
-                    return FileProcessingResult(
-                        success=False,
-                        file_path=file_path,
-                        chunks_processed=0,
-                        processing_time=time.time() - start_time,
-                        error=f"Vector storage write failed: {e}",
-                    )
+                    return _vector_storage_failure_result(file_path, e, start_time)
 
             processing_time = time.time() - start_time
 
@@ -1066,6 +1127,13 @@ class FileChunkingManager:
                 error=None,
             )
 
+        except ChunkStoreUnavailableError:
+            # Bug #1746 Change 1: never let this fatal error be re-caught
+            # here and converted back into a per-file FileProcessingResult
+            # -- it must propagate all the way out of this method. The
+            # `finally` block below still runs (slot release) exactly as
+            # on every other exception path.
+            raise
         except Exception as e:
             processing_time = time.time() - start_time
             error_msg = f"File processing failed: {e}"

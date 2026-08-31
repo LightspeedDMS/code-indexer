@@ -166,7 +166,6 @@ def _start_auto_watch_if_needed(
                         f"refusing an orphan/stale directory that a "
                         f"filesystem-existence check alone cannot detect "
                         f"(Bug #1683 round 3)",
-                        extra={"correlation_id": get_correlation_id()},
                     )
                 )
                 return
@@ -181,7 +180,6 @@ def _start_auto_watch_if_needed(
                     f"path does not exist ({repo_path}) -- refusing to let "
                     f"ConfigManager backtracking fall back to the server "
                     f"CWD (Bug #1683 round 2/3)",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
             return
@@ -203,7 +201,6 @@ def _start_auto_watch_if_needed(
             format_error_log(
                 error_code,
                 f"Failed to start auto-watch for {repository_alias}: {e}",
-                extra={"correlation_id": get_correlation_id()},
             )
         )
 
@@ -765,7 +762,6 @@ def _omni_list_files(params: Dict[str, Any], user: User) -> Dict[str, Any]:
                 format_error_log(
                     "MCP-GENERAL-034",
                     f"Omni-list-files failed for {repo_alias}: {e}",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
 
@@ -1225,7 +1221,6 @@ def _handle_crud_exception(
             format_error_log(
                 error_code,
                 log_msg,
-                extra={"correlation_id": get_correlation_id()},
             )
         )
     else:

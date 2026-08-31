@@ -67,81 +67,82 @@ class TestCreateSpanContextManager:
     def test_create_span_as_context_manager(self):
         """
         create_span() works as context manager.
+
+        Bug #1744 sibling (round 3): this test used to construct a real
+        TelemetryConfig(enabled=True, export_traces=True) via
+        get_telemetry_manager(), whose teardown_method() ->
+        reset_all_singletons() -> reset_telemetry_manager() -> shutdown()
+        forces a real OTLP export attempt against an unreachable
+        localhost:4317 collector -- confirmed 13.34s solo teardown cost.
+        Fixed with active_span_exporter() (real Span, zero network I/O).
+        This class is @pytest.mark.slow (excluded from
+        server-fast-automation.sh's gate), but the fix is applied anyway.
         """
-        from code_indexer.server.telemetry import get_telemetry_manager
         from code_indexer.server.telemetry.spans import create_span
-
-        config = TelemetryConfig(
-            enabled=True,
-            export_traces=True,
-            collector_endpoint="http://localhost:4317",
+        from tests.unit.server.telemetry.otel_test_support import (
+            active_span_exporter,
         )
-        get_telemetry_manager(config)
 
-        with create_span("cidx.test.operation") as span:
+        with active_span_exporter(), create_span("cidx.test.operation") as span:
             # Span should be created
             assert span is not None
 
     def test_create_span_with_attributes(self):
         """
         create_span() can set attributes on span.
+
+        Bug #1744 sibling (round 3): same real-network dependency as
+        test_create_span_as_context_manager above, fixed the same way.
         """
-        from code_indexer.server.telemetry import get_telemetry_manager
         from code_indexer.server.telemetry.spans import create_span
-
-        config = TelemetryConfig(
-            enabled=True,
-            export_traces=True,
-            collector_endpoint="http://localhost:4317",
+        from tests.unit.server.telemetry.otel_test_support import (
+            active_span_exporter,
         )
-        get_telemetry_manager(config)
 
-        with create_span(
-            "cidx.search.semantic",
-            attributes={"query": "test", "limit": 10, "repository": "my-repo"},
-        ) as span:
+        with (
+            active_span_exporter(),
+            create_span(
+                "cidx.search.semantic",
+                attributes={"query": "test", "limit": 10, "repository": "my-repo"},
+            ) as span,
+        ):
             assert span is not None
 
     def test_create_span_records_exception(self):
         """
         create_span() records exceptions in span.
+
+        Bug #1744 sibling (round 3): same real-network dependency as
+        test_create_span_as_context_manager above, fixed the same way.
         """
-        from code_indexer.server.telemetry import get_telemetry_manager
         from code_indexer.server.telemetry.spans import create_span
+        from tests.unit.server.telemetry.otel_test_support import (
+            active_span_exporter,
+        )
         import pytest
 
-        config = TelemetryConfig(
-            enabled=True,
-            export_traces=True,
-            collector_endpoint="http://localhost:4317",
-        )
-        get_telemetry_manager(config)
-
-        with pytest.raises(RuntimeError, match="span error"):
-            with create_span("cidx.test.failing"):
-                raise RuntimeError("span error")
+        with active_span_exporter():
+            with pytest.raises(RuntimeError, match="span error"):
+                with create_span("cidx.test.failing"):
+                    raise RuntimeError("span error")
 
     def test_create_span_adds_correlation_id(self):
         """
         create_span() includes correlation ID when available.
-        """
-        from code_indexer.server.telemetry import (
-            get_telemetry_manager,
-            set_current_correlation_id,
-        )
-        from code_indexer.server.telemetry.spans import create_span
 
-        config = TelemetryConfig(
-            enabled=True,
-            export_traces=True,
-            collector_endpoint="http://localhost:4317",
+        Bug #1744 sibling (round 3): same real-network dependency as
+        test_create_span_as_context_manager above, fixed the same way.
+        """
+        from code_indexer.server.telemetry import set_current_correlation_id
+        from code_indexer.server.telemetry.spans import create_span
+        from tests.unit.server.telemetry.otel_test_support import (
+            active_span_exporter,
         )
-        get_telemetry_manager(config)
 
         # Set correlation ID
         set_current_correlation_id("test-correlation-123")
 
-        with create_span("cidx.test.correlated") as span:
+        with active_span_exporter(), create_span("cidx.test.correlated") as span:
             # Span should have correlation.id attribute
             assert span is not None
 

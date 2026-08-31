@@ -1488,7 +1488,6 @@ def langfuse_sync_trigger(request: Request):
             format_error_log(
                 "LANGFUSE-SYNC-001",
                 f"Failed to trigger Langfuse sync: {e}",
-                extra={"correlation_id": get_correlation_id()},
             ),
             exc_info=True,
         )
@@ -6022,7 +6021,6 @@ def _execute_scip_query(
                 format_error_log(
                     "STORE-GENERAL-037",
                     f"Failed to resolve global repo path for '{user_alias}': {e}",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
 
@@ -8479,7 +8477,6 @@ def discovery_all(
             format_error_log(
                 "STORE-GENERAL-044",
                 f"Unexpected error in {platform} discovery/all: {e}",
-                extra={"correlation_id": get_correlation_id()},
             )
         )
         return JSONResponse(content={"error": str(e)}, status_code=500)
@@ -8668,7 +8665,6 @@ async def discovery_enrich(
             format_error_log(
                 "STORE-GENERAL-045",
                 f"Unexpected error in {platform} discovery/enrich: {e}",
-                extra={"correlation_id": get_correlation_id()},
             )
         )
         return JSONResponse(content={"error": str(e)}, status_code=500)
@@ -8739,7 +8735,6 @@ def gitlab_repos_partial(
             format_error_log(
                 "STORE-GENERAL-042",
                 f"Unexpected error in GitLab discovery: {e}",
-                extra={"correlation_id": get_correlation_id()},
             )
         )
         return _build_gitlab_repos_response(
@@ -8813,7 +8808,6 @@ def github_repos_partial(
             format_error_log(
                 "STORE-GENERAL-043",
                 f"Unexpected error in GitHub discovery: {e}",
-                extra={"correlation_id": get_correlation_id()},
             )
         )
         return _build_github_repos_response(
@@ -9010,7 +9004,6 @@ async def fetch_discovery_branches(request: Request):
                     format_error_log(
                         "STORE-GENERAL-045",
                         f"Branch discovery shed load for {clone_url}: {overloaded}",
-                        extra={"correlation_id": get_correlation_id()},
                     )
                 )
                 return {
@@ -9140,7 +9133,6 @@ async def fetch_discovery_branches(request: Request):
             format_error_log(
                 "STORE-GENERAL-044",
                 f"Error fetching discovery branches: {e}",
-                extra={"correlation_id": get_correlation_id()},
             ),
             exc_info=True,
         )
@@ -9628,7 +9620,6 @@ async def update_config_section(
                     format_error_log(
                         "STORE-GENERAL-047",
                         f"Failed to reload OIDC configuration: {e}",
-                        extra={"correlation_id": get_correlation_id()},
                     ),
                     exc_info=True,
                 )
@@ -10627,7 +10618,6 @@ def ssh_keys_page(request: Request):
             format_error_log(
                 "SVC-GENERAL-017",
                 f"Failed to list SSH keys: {e}",
-                extra={"correlation_id": get_correlation_id()},
             )
         )
 
@@ -10675,7 +10665,6 @@ def _create_ssh_keys_page_response(
             format_error_log(
                 "SVC-GENERAL-018",
                 f"Failed to list SSH keys: {e}",
-                extra={"correlation_id": get_correlation_id()},
             )
         )
 
@@ -10757,7 +10746,6 @@ def create_ssh_key(
             format_error_log(
                 "SVC-GENERAL-019",
                 f"Failed to create SSH key: {e}",
-                extra={"correlation_id": get_correlation_id()},
             )
         )
         return _create_ssh_keys_page_response(
@@ -10816,7 +10804,6 @@ def delete_ssh_key(
             format_error_log(
                 "SVC-GENERAL-020",
                 f"Failed to delete SSH key: {e}",
-                extra={"correlation_id": get_correlation_id()},
             )
         )
         return _create_ssh_keys_page_response(
@@ -10866,7 +10853,6 @@ def assign_host_to_key(
             format_error_log(
                 "SVC-GENERAL-021",
                 f"Failed to assign host to SSH key: {e}",
-                extra={"correlation_id": get_correlation_id()},
             )
         )
         return _create_ssh_keys_page_response(
@@ -11369,7 +11355,6 @@ async def unified_login_sso(
             format_error_log(
                 "SVC-GENERAL-022",
                 f"Failed to initialize OIDC provider: {e}",
-                extra={"correlation_id": get_correlation_id()},
             )
         )
         raise HTTPException(

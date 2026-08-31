@@ -73,7 +73,19 @@ def _parent_context(sampled: bool):
 
 
 class TestSamplerWiringEnabledBranch:
-    """AC4: export_traces=True branch passes an explicit sampler."""
+    """AC4: export_traces=True branch passes an explicit sampler.
+
+    Bug #1744 (round 3): deliberately left real (not ported to
+    export_traces=False). Paired 1:1 with TestSamplerWiringNoOpBranch
+    below at a DIFFERENT trace_sample_rate (0.1 vs 0.25) specifically to
+    independently verify the sampler wiring in BOTH the export_traces
+    True and False branches of manager.py -- collapsing this test's
+    config to match the NoOp branch would make both tests redundant
+    duplicates and silently lose regression coverage for a future
+    True-branch-specific divergence, with no test failure to signal it.
+    Confirmed 6.29s solo cost -- a real, deliberately accepted network
+    dependency.
+    """
 
     def test_tracer_provider_sampler_is_parent_based_trace_id_ratio(self):
         with _telemetry_manager(export_traces=True, trace_sample_rate=0.1) as manager:
@@ -98,7 +110,15 @@ class TestDefaultRateAlwaysSamples:
     for operators who never touch this setting."""
 
     def test_default_rate_samples_a_root_span(self):
-        with _telemetry_manager(export_traces=True) as manager:
+        # Bug #1744: export_traces=False here (not True) is deliberate.
+        # The assertions below test the SAMPLER's decision (sampled /
+        # is_recording), which manager.py wires identically regardless of
+        # this flag (same shared sampler= construction argument in both
+        # branches) -- unlike TestSamplerWiringEnabledBranch above, this
+        # test has no paired False-branch sibling, so nothing is lost by
+        # removing the real, unreachable-network exporter (confirmed
+        # 7.88s solo cost before this fix).
+        with _telemetry_manager(export_traces=False) as manager:
             tracer = manager.tracer_provider.get_tracer("test")  # type: ignore[attr-defined]
             span = tracer.start_span("root")
             try:

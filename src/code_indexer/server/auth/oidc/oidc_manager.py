@@ -57,7 +57,6 @@ class OIDCManager:
                     format_error_log(
                         "AUTH-GENERAL-004",
                         f"Failed to initialize SSO provider: {e}",
-                        extra={"correlation_id": get_correlation_id()},
                     ),
                     exc_info=True,
                 )
@@ -95,7 +94,6 @@ class OIDCManager:
                 format_error_log(
                     "AUTH-GENERAL-005",
                     f"Group manager not available, skipping SSO provisioning for {username}",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
             return
@@ -121,7 +119,6 @@ class OIDCManager:
                     format_error_log(
                         "AUTH-GENERAL-006",
                         f"SSO provisioning returned False for user {username}",
-                        extra={"correlation_id": get_correlation_id()},
                     )
                 )
         except Exception as e:
@@ -131,7 +128,6 @@ class OIDCManager:
                     "AUTH-GENERAL-007",
                     f"SSO provisioning failed for user {username}: {e}. "
                     f"User will have fallback cidx-meta-only access.",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
 
@@ -220,7 +216,6 @@ class OIDCManager:
             format_error_log(
                 "AUTH-GENERAL-008",
                 f"Stale OIDC link found for subject={subject}, deleting",
-                extra={"correlation_id": get_correlation_id()},
             )
         )
         return None
@@ -307,7 +302,6 @@ class OIDCManager:
                     format_error_log(
                         "AUTH-GENERAL-009",
                         f"Username claim '{self.config.username_claim}' not found in OIDC userinfo. Available claims: {list(user_info.__dict__.keys())}",
-                        extra={"correlation_id": get_correlation_id()},
                     )
                 )
                 return None
@@ -326,7 +320,6 @@ class OIDCManager:
                         f"JIT provisioning failed: Username '{base_username}' already exists. "
                         f"OIDC subject={user_info.subject}, email={user_info.email}. "
                         f"Admin must manually link accounts or resolve username conflict.",
-                        extra={"correlation_id": get_correlation_id()},
                     )
                 )
                 return None

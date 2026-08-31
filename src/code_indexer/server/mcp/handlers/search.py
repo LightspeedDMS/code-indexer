@@ -189,7 +189,6 @@ def _load_category_map(caller_label: str) -> dict:
             format_error_log(
                 "MCP-GENERAL-036",
                 f"Failed to load category map in {caller_label}: {e}",
-                extra={"correlation_id": get_correlation_id()},
             )
         )
     return category_map
@@ -495,7 +494,6 @@ def _omni_search_code(params: Dict[str, Any], user: User) -> Dict[str, Any]:
             format_error_log(
                 "MCP-GENERAL-031",
                 f"MultiSearchService failed: {e}",
-                extra={"correlation_id": get_correlation_id()},
             )
         )
         return _empty_omni_response(errors={"service_error": str(e)})
@@ -1788,7 +1786,6 @@ async def _omni_regex_search(args: Dict[str, Any], user: User) -> Dict[str, Any]
                 format_error_log(
                     "MCP-GENERAL-039",
                     f"Omni-regex failed for {repo_alias}: {e}",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
 
@@ -2185,7 +2182,6 @@ async def handle_regex_search(args: Dict[str, Any], user: User) -> Dict[str, Any
             format_error_log(
                 "MCP-GENERAL-040",
                 f"Search timeout in regex_search: {e}",
-                extra={"correlation_id": get_correlation_id()},
             )
         )
         error_formatter = SearchErrorFormatter()
@@ -2281,7 +2277,6 @@ def handle_get_cached_content(args: Dict[str, Any], user: User) -> Dict[str, Any
             format_error_log(
                 "MCP-GENERAL-117",
                 f"Cache handle not found or expired: {handle}",
-                extra={"correlation_id": get_correlation_id()},
             )
         )
         return _mcp_response(

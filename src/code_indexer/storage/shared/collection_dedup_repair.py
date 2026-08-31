@@ -350,6 +350,16 @@ def _extract_lightweight_identity_fields(
     survivor's full record fresh from disk at write time instead of
     reusing a value from this lightweight view, so no information is
     lost -- only its *lifetime* is shortened.
+
+    Bug #1747: also captures PRESENCE-ONLY booleans (``has_path``,
+    ``has_content``, ``has_hidden_branches_key`` on the payload view,
+    plus a top-level ``chunk_text_is_empty_string``) -- true KEY-PRESENCE
+    checks, never value truthiness, and never the actual (possibly
+    large) field values -- just enough for
+    :func:`_is_hidden_branches_only_bookkeeping_record` to recognize the
+    confirmed non-content bookkeeping sentinel shape written by Story
+    #339's branch-visibility-hiding path, without re-inflating this
+    function's bounded-memory guarantee.
     """
     payload = data.get("payload")
     lightweight_payload: Optional[Dict[str, Any]] = None
@@ -358,8 +368,15 @@ def _extract_lightweight_identity_fields(
             "unique_key": payload.get("unique_key"),
             "line_start": payload.get("line_start"),
             "line_end": payload.get("line_end"),
+            "has_path": "path" in payload,
+            "has_content": "content" in payload,
+            "has_hidden_branches_key": "hidden_branches" in payload,
         }
-    return {"id": point_id, "payload": lightweight_payload}
+    return {
+        "id": point_id,
+        "payload": lightweight_payload,
+        "chunk_text_is_empty_string": data.get("chunk_text") == "",
+    }
 
 
 def _read_full_json_record(json_path: Path) -> Dict[str, Any]:
@@ -459,6 +476,52 @@ def _record_has_self_consistent_identity(record: Dict[str, Any]) -> bool:
     return hashlib.md5(unique_key.encode()).hexdigest() == point_id
 
 
+def _is_hidden_branches_only_bookkeeping_record(record: Dict[str, Any]) -> bool:
+    """Bug #1747: True iff `record` -- a LIGHTWEIGHT identity view
+    produced by :func:`_extract_lightweight_identity_fields` (never the
+    raw parsed JSON) -- matches the EXACT confirmed production shape of
+    the non-content bookkeeping sentinel written/touched by Story #339's
+    branch-visibility-hiding path (``FilesystemVectorStore.
+    _batch_update_payload_only`` / ``_batch_update_points``): its
+    payload carries a ``hidden_branches`` key and NOTHING else identity/
+    content-relevant (no ``path``, no ``content``, no real
+    ``unique_key``), and the record's top-level ``chunk_text`` was the
+    empty string. Confirmed live on 4 production repos (65 affected
+    records): payload=={"hidden_branches": [...]}, chunk_text=="".
+
+    `_extract_lightweight_identity_fields` never retains the raw
+    ``path``/``content``/``chunk_text`` values (Bug #1558's bounded-
+    memory contract) -- this predicate therefore reads its PRESENCE-only
+    substitutes (``has_path``, ``has_content``, ``has_hidden_branches_
+    key`` on the payload sub-dict, ``chunk_text_is_empty_string`` at the
+    top level) rather than the original field names. Note the
+    ``unique_key`` check below is deliberately a VALUE check
+    (``not in (None, "")``), not a key-membership check: the lightweight
+    payload view unconditionally sets ``payload["unique_key"]`` for
+    every dict payload (None when the original had none), so a
+    membership check would always be True and this predicate would
+    never match anything.
+
+    Deliberately narrow -- every condition must hold, so a record that
+    merely lacks a ``unique_key`` (genuine Bug #1579 territory) is never
+    misclassified as this bookkeeping shape. False for anything that
+    isn't an exact match, including a record carrying ``hidden_branches``
+    ALONGSIDE a real ``path``/``content`` field (mis-tagged real content,
+    not pure bookkeeping) or non-empty ``chunk_text``."""
+    payload = record.get("payload")
+    if not isinstance(payload, dict):
+        return False
+    if not payload.get("has_hidden_branches_key"):
+        return False
+    if payload.get("has_path"):
+        return False
+    if payload.get("has_content"):
+        return False
+    if payload.get("unique_key") not in (None, ""):
+        return False
+    return record.get("chunk_text_is_empty_string") is True
+
+
 def _whole_collection_identity_gate_passes(
     id_to_paths: Dict[str, List[Path]], identity_by_path: Dict[Path, Dict[str, Any]]
 ) -> bool:
@@ -466,10 +529,22 @@ def _whole_collection_identity_gate_passes(
     (including every copy of a duplicated point_id) -- a single failure
     anywhere means the whole collection does not use this repair's
     identity scheme, and the whole collection must pass through
-    untouched."""
+    untouched.
+
+    Bug #1747: a record matching the confirmed hidden_branches-only
+    bookkeeping sentinel shape (see
+    :func:`_is_hidden_branches_only_bookkeeping_record`) is SKIPPED here
+    -- its missing unique_key is never counted as a gate-failure trigger
+    -- rather than rejecting the whole collection over a non-content
+    record this repair was never meant to act on. A genuinely bad
+    CONTENT record (missing/foreign/self-inconsistent unique_key) still
+    fails the gate exactly as before (Bug #1579, unweakened)."""
     for paths in id_to_paths.values():
         for path in paths:
-            if not _record_has_self_consistent_identity(identity_by_path[path]):
+            record = identity_by_path[path]
+            if _is_hidden_branches_only_bookkeeping_record(record):
+                continue
+            if not _record_has_self_consistent_identity(record):
                 return False
     return True
 
@@ -1388,6 +1463,14 @@ def repair_duplicate_and_shifted_points(
     records_deleted = 0
     for point_id, paths in id_to_paths.items():
         if point_id not in duplicated:
+            # Bug #1747: a hidden_branches-only bookkeeping sentinel
+            # passed the whole-collection identity gate above (it was
+            # deliberately SKIPPED there, not identity-checked) -- it
+            # carries no unique_key/line info to renumber by, so it must
+            # never become a _plan_renumber survivor (which requires a
+            # parseable unique_key for every entry). Left untouched.
+            if _is_hidden_branches_only_bookkeeping_record(identity_by_path[paths[0]]):
+                continue
             survivors[point_id] = paths[0]
             continue
         winner_path = winners[point_id]
@@ -1400,6 +1483,12 @@ def repair_duplicate_and_shifted_points(
         # Story #1560 AC1: winner resolved -- every OTHER copy deleted.
         winner_kept_groups += 1
         records_deleted += len(paths) - 1
+        # Bug #1747 (defense-in-depth): same exclusion as above, for the
+        # edge case of a duplicated point_id whose winner copy is itself
+        # a bookkeeping sentinel -- deletion of losers below is
+        # independent of `survivors` and proceeds normally either way.
+        if _is_hidden_branches_only_bookkeeping_record(identity_by_path[winner_path]):
+            continue
         survivors[point_id] = winner_path
 
     renumber_plan, skipped_groups = _plan_renumber(

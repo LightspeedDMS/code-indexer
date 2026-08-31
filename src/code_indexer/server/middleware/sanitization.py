@@ -5,8 +5,6 @@ Sanitizes sensitive information from error messages and logs following
 CLAUDE.md Foundation #1: No mocks - real sanitization with actual pattern matching.
 """
 
-from code_indexer.server.middleware.correlation import get_correlation_id
-
 import re
 import logging
 from typing import Dict, Any, Optional
@@ -47,7 +45,6 @@ class SensitiveDataSanitizer:
                     format_error_log(
                         "REPO-GENERAL-021",
                         f"Invalid sanitization regex pattern '{rule.pattern}': {e}",
-                        extra={"correlation_id": get_correlation_id()},
                     )
                 )
 
@@ -192,7 +189,6 @@ class SensitiveDataSanitizer:
                 format_error_log(
                     "REPO-GENERAL-022",
                     f"Error sanitizing request info: {e}",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
             return {"method": "UNKNOWN", "path": "UNKNOWN"}

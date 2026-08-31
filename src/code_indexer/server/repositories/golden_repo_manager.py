@@ -5,7 +5,6 @@ Manages golden repositories that can be activated by users for semantic search.
 Golden repositories are stored in ~/.cidx-server/data/golden-repos/ with metadata tracking.
 """
 
-from code_indexer.server.middleware.correlation import get_correlation_id
 from code_indexer.server.utils.cow_utils import _safe_makedirs_cow
 
 import errno
@@ -3324,7 +3323,6 @@ class GoldenRepoManager:
                                 "REPO-GENERAL-040",
                                 f"Skipping malformed version directory: {v_dir} "
                                 f"(expected format: v_TIMESTAMP, error: {e})",
-                                extra={"correlation_id": get_correlation_id()},
                             )
                         )
                         continue

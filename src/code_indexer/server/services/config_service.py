@@ -127,6 +127,29 @@ def _temporal_legacy_migration_settings(config: ServerConfig) -> Dict[str, Any]:
     }
 
 
+def _content_limits_settings(config: ServerConfig) -> Dict[str, Any]:
+    """Return content_limits settings dict from ServerConfig (Story #32,
+    Issue #1750).
+
+    Surfaces all 6 fields of ContentLimitsConfig for the Web UI Config
+    screen. Was previously defined nowhere and never wired into
+    get_all_settings(), so the admin Config page's Content Limits section
+    always displayed compiled-in defaults regardless of the real persisted
+    state (routes.py's _get_current_config() silently fell back to
+    asdict(ContentLimitsConfig()) on every read).
+    """
+    cl = config.content_limits_config
+    assert cl is not None  # Guaranteed by ServerConfig.__post_init__
+    return {
+        "chars_per_token": cl.chars_per_token,
+        "file_content_max_tokens": cl.file_content_max_tokens,
+        "git_diff_max_tokens": cl.git_diff_max_tokens,
+        "git_log_max_tokens": cl.git_log_max_tokens,
+        "search_result_max_tokens": cl.search_result_max_tokens,
+        "cache_ttl_seconds": cl.cache_ttl_seconds,
+    }
+
+
 def _alias_lock_settings(config: ServerConfig) -> Dict[str, Any]:
     """Return alias_lock settings dict from ServerConfig (Issue #1546
     Phase 2).
@@ -843,7 +866,11 @@ class ConfigService:
             # Issue #1530 - Indexing-subprocess activity watchdog configuration
             "indexing_watchdog": _indexing_watchdog_settings(config),
             "fleet_migration": _fleet_migration_settings(config),
+            # Issue #1548 / Issue #1749: Legacy temporal shard relocation
+            # configuration -- was defined but never wired into this dict.
+            "temporal_legacy_migration": _temporal_legacy_migration_settings(config),
             "alias_lock": _alias_lock_settings(config),
+            "content_limits": _content_limits_settings(config),
             # Issue #1398 - Query & search timeouts Web UI configuration
             "search_timeouts": _search_timeouts_settings(config),
             # Story #1418 Phase 3 - Embedding & reranker call tracking config

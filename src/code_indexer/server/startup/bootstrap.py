@@ -337,7 +337,6 @@ def bootstrap_cidx_meta(
                     format_error_log(
                         "APP-GENERAL-004",
                         f"Failed to initialize cidx-meta: {e.stderr if e.stderr else str(e)}",
-                        extra={"correlation_id": get_correlation_id()},
                     )
                 )
                 # Continue with registration even if init fails - don't break server startup
@@ -346,7 +345,6 @@ def bootstrap_cidx_meta(
                     format_error_log(
                         "APP-GENERAL-005",
                         f"Unexpected error during cidx-meta initialization: {e}",
-                        extra={"correlation_id": get_correlation_id()},
                     )
                 )
                 # Continue with registration even if init fails - don't break server startup

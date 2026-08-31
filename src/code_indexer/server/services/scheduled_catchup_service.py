@@ -212,7 +212,6 @@ class ScheduledCatchupService:
                     format_error_log(
                         "MCP-GENERAL-136",
                         f"Scheduled catch-up partially completed: {result.error}",
-                        extra={"correlation_id": get_correlation_id()},
                     )
                 )
             else:
@@ -234,7 +233,6 @@ class ScheduledCatchupService:
                 format_error_log(
                     "MCP-GENERAL-137",
                     f"Scheduled catch-up failed: {e}",
-                    extra={"correlation_id": get_correlation_id()},
                 ),
                 exc_info=True,
             )

@@ -1,12 +1,46 @@
 """Test to verify repos list data model alignment fix."""
 
-from unittest.mock import Mock, patch, AsyncMock
+import pytest
+from unittest.mock import Mock, patch
 from click.testing import CliRunner
 from pathlib import Path
 
 # Import CLI components
 from code_indexer.cli import cli
 from code_indexer.api_clients.repos_client import ActivatedRepository
+
+
+@pytest.fixture(autouse=True)
+def mock_remote_setup():
+    """Auto-mock mode detection, project root discovery, and remote credentials.
+
+    Without this, 'cidx repos list' hits the real require_mode("remote") gate
+    (which uses this repo's actual local-mode .code-indexer config) and fails
+    with DisabledCommandError before the mocked ReposAPIClient below is used.
+    """
+    with (
+        patch(
+            "code_indexer.disabled_commands.detect_current_mode",
+            return_value="remote",
+        ),
+        patch(
+            "code_indexer.mode_detection.command_mode_detector.find_project_root",
+            return_value=Path("/fake/project"),
+        ),
+        patch(
+            "code_indexer.remote.sync_execution._load_remote_configuration",
+            return_value={"server_url": "http://localhost:8000"},
+        ),
+        patch(
+            "code_indexer.remote.sync_execution._load_and_decrypt_credentials",
+            return_value={
+                "username": "test",
+                "password": "fake_password",
+                "access_token": "fake_token",
+            },
+        ),
+    ):
+        yield
 
 
 class TestReposListFix:
@@ -16,37 +50,14 @@ class TestReposListFix:
         """Setup test environment for each test."""
         self.runner = CliRunner()
 
-    @patch("code_indexer.remote.sync_execution._load_remote_configuration")
-    @patch("code_indexer.remote.sync_execution._load_and_decrypt_credentials")
-    @patch("code_indexer.mode_detection.command_mode_detector.find_project_root")
-    @patch("code_indexer.cli.ReposAPIClient")
-    def test_repos_list_data_model_alignment_fix(
-        self,
-        mock_repos_client_class,
-        mock_find_project_root,
-        mock_load_credentials,
-        mock_load_config,
-    ):
+    def test_repos_list_data_model_alignment_fix(self):
         """Test that repos list properly handles server data format after fix.
 
         Verifies that the mapping between ActivatedRepositoryInfo (server)
         and ActivatedRepository (client) works correctly.
         """
-        # Setup mocks for CLI prerequisites
-        mock_find_project_root.return_value = Path("/fake/project")
-        mock_load_config.return_value = {"server_url": "http://localhost:8000"}
-        mock_load_credentials.return_value = {
-            "username": "test",
-            "password": "fake_password",
-            "access_token": "fake_token",
-        }
-
-        # Create mock ReposAPIClient instance
         mock_client = Mock()
-        mock_repos_client_class.return_value = mock_client
-
-        # Mock successful response with correct data mapping
-        mock_client.list_activated_repositories = AsyncMock(
+        mock_client.list_activated_repositories = Mock(
             return_value=[
                 ActivatedRepository(
                     alias="my-project",
@@ -58,10 +69,10 @@ class TestReposListFix:
                 )
             ]
         )
-        mock_client.close = AsyncMock()
+        mock_client.close = Mock()
 
-        # Execute the command
-        result = self.runner.invoke(cli, ["repos", "list"])
+        with patch("code_indexer.cli.ReposAPIClient", return_value=mock_client):
+            result = self.runner.invoke(cli, ["repos", "list"])
 
         # Should succeed after fix
         assert result.exit_code == 0, (

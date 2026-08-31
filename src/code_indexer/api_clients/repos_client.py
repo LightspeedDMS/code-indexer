@@ -152,7 +152,11 @@ class ReposAPIClient(CIDXRemoteAPIClient):
             AuthenticationError: If authentication fails
             APIClientError: If the request fails
         """
-        params = {}
+        # Bug #1743 finding #4: the server gates sync_status computation
+        # behind include_sync_status (it costs real git subprocesses per
+        # repo, worse under cluster NFS) -- the CLI display always wants a
+        # real value, so this client always opts in.
+        params = {"include_sync_status": "true"}
         if filter_pattern:
             params["filter"] = filter_pattern
 
@@ -164,22 +168,27 @@ class ReposAPIClient(CIDXRemoteAPIClient):
                 repositories_data = response_data["repositories"]
 
                 # Map server ActivatedRepositoryInfo format to client ActivatedRepository
-                # format. The list endpoint itself carries no sync_status field (#1740):
-                # resolving a genuine per-repo value would require an extra HTTP round
-                # trip per repo (N+1) to GET /api/repos/{alias}/sync-status, which the
-                # #1740 review found is not worth the cost for this low-traffic display
-                # column (and, as of the review, that endpoint itself still only returns
-                # a hardcoded default -- see #1740 for the follow-up server-side fix).
-                # Report "unknown" honestly rather than a false hardcoded "synced".
+                # format. Bug #1740: the list endpoint now inlines a REAL per-repo
+                # sync_status field, computed server-side (in the SAME request) via
+                # ActivatedRepoManager.compute_sync_status() -- no extra HTTP round
+                # trip needed. Fall back to the honest "unknown" only when a server
+                # predating this fix (or a repo the server could not compute a
+                # status for) omits the field.
                 mapped_repositories = []
                 for repo_data in repositories_data:
                     mapped_repo = ActivatedRepository(
                         alias=repo_data["user_alias"],
                         current_branch=repo_data["current_branch"],
-                        sync_status="unknown",
+                        sync_status=repo_data.get("sync_status") or "unknown",
                         last_sync=repo_data.get("last_accessed", ""),
                         activation_date=repo_data.get("activated_at", ""),
-                        conflict_details=None,  # Server doesn't provide free-text details yet
+                        # The dedicated GET .../sync-status routes (per-repo
+                        # and bulk) DO return real conflict_details text
+                        # (compute_sync_status computes it); this bulk LIST
+                        # endpoint intentionally doesn't inline that extra
+                        # per-repo free-text field to keep the listing light
+                        # -- callers that need it use get_sync_status(_all).
+                        conflict_details=None,
                     )
                     mapped_repositories.append(mapped_repo)
 

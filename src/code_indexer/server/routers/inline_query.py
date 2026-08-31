@@ -646,7 +646,6 @@ def register_query_routes(
                         format_error_log(
                             "APP-GENERAL-032",
                             f"FTS index not available for user {current_user.username}, degrading hybrid to semantic-only",
-                            extra={"correlation_id": get_correlation_id()},
                         )
                     )
                     search_mode_actual = "semantic"
@@ -763,7 +762,6 @@ def register_query_routes(
                                 format_error_log(
                                     "APP-GENERAL-033",
                                     f"FTS search failed: {e}",
-                                    extra={"correlation_id": get_correlation_id()},
                                 )
                             )
                             if request.search_mode == "fts":
@@ -842,7 +840,6 @@ def register_query_routes(
                             format_error_log(
                                 "APP-GENERAL-034",
                                 f"Validation error in query: {e}",
-                                extra={"correlation_id": get_correlation_id()},
                             )
                         )
                         raise HTTPException(
@@ -857,7 +854,6 @@ def register_query_routes(
                             format_error_log(
                                 "APP-GENERAL-035",
                                 f"Semantic search failed: {e}",
-                                extra={"correlation_id": get_correlation_id()},
                             )
                         )
                         if search_mode_actual == "semantic":
@@ -1052,7 +1048,6 @@ def register_query_routes(
                 format_error_log(
                     "APP-GENERAL-036",
                     f"Validation error in query: {e}",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
             raise HTTPException(
@@ -1083,7 +1078,6 @@ def register_query_routes(
                 format_error_log(
                     "APP-GENERAL-037",
                     f"Unexpected error in unified search: {e}",
-                    extra={"correlation_id": get_correlation_id()},
                 ),
                 exc_info=True,
             )

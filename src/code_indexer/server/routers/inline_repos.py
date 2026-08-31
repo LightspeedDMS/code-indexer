@@ -190,6 +190,13 @@ def register_repo_routes(
     @app.get("/api/repos", response_model=RepositoryListResponse)
     def list_repositories(
         filter: Optional[str] = None,
+        include_sync_status: bool = Query(
+            False,
+            description="Bug #1743 perf: computing sync_status costs up to a "
+            "few git subprocesses per repo (worse under cluster NFS "
+            "cow-storage) -- opt in explicitly rather than paying that cost "
+            "on every listing.",
+        ),
         current_user: dependencies.User = Depends(dependencies.get_current_user),
     ):
         """
@@ -197,6 +204,9 @@ def register_repo_routes(
 
         Args:
             filter: Optional filter pattern for repository aliases
+            include_sync_status: When True, compute and inline a real
+                per-repo sync_status (Bug #1740). Defaults to False so the
+                listing stays a cheap metadata read.
             current_user: Current authenticated user
 
         Returns:
@@ -246,8 +256,34 @@ def register_repo_routes(
                 # deact_map remains empty; deactivation_job fields degrade to None
 
             # Annotate each repo with its in-flight deactivation job (or None)
+            # and, when opted in, its REAL sync status (Bug #1740). sync_status
+            # computation is gated behind include_sync_status (Bug #1743 perf
+            # finding #4) since it costs real git subprocesses per repo.
+            # Any failure -- including an unexpected exception, not just
+            # ActivatedRepoError -- degrades that one repo's sync_status to
+            # None rather than failing the whole listing (Bug #1743 finding
+            # #1: an optional display column must never take down GET
+            # /api/repos for every user because one golden repo is
+            # registry-orphaned or one lookup misbehaves).
             for repo in repos:
                 repo["deactivation_job"] = deact_map.get(repo.get("user_alias", ""))
+                if not include_sync_status:
+                    continue
+                alias = repo.get("user_alias", "")
+                try:
+                    status_info = activated_repo_manager.compute_sync_status(
+                        current_user.username, alias
+                    )
+                    repo["sync_status"] = status_info["sync_status"]
+                except Exception as e:
+                    logger.warning(
+                        "Failed to compute sync status for '%s'/'%s' during "
+                        "repo listing: %s",
+                        current_user.username,
+                        alias,
+                        e,
+                    )
+                    repo["sync_status"] = None
 
             # Return wrapped in RepositoryListResponse for consistency
             return RepositoryListResponse(
@@ -1436,6 +1472,61 @@ def register_repo_routes(
                 detail=f"Failed to get repository status: {str(e)}",
             )
 
+    # Bug #1743: bulk sync-status route. MUST be registered BEFORE the
+    # generic /api/repos/{user_alias} route below -- Starlette/FastAPI
+    # match registered routes in order, so a literal "/api/repos/sync-status"
+    # request would otherwise be captured by /api/repos/{user_alias} with
+    # user_alias="sync-status" (that route existed; this one previously did
+    # not, producing a live 404 "Repository 'sync-status' not found or not
+    # activated" for every caller of the "all repositories" branch of
+    # `cidx repos sync-status`).
+    @app.get("/api/repos/sync-status")
+    def get_all_repository_sync_status(
+        current_user: dependencies.User = Depends(dependencies.get_current_user),
+    ):
+        """
+        Return REAL sync status for all of the current user's activated
+        repositories in one call (Bug #1743).
+
+        Reuses ActivatedRepoManager.compute_sync_status() per repo -- the
+        same computation backing GET /api/repos/{user_alias}/sync-status
+        (Bug #1740) -- so there is no duplicated sync-status logic.
+
+        Returns:
+            JSON dict mapping user_alias -> {current_branch, sync_status,
+            last_sync_time, has_conflicts, conflict_details}. A repo whose
+            status cannot be computed (e.g. a race with deactivation, or
+            any other unexpected failure) is omitted rather than failing
+            the whole request.
+        """
+        arm = activated_repo_manager
+        repos = arm.list_activated_repositories(current_user.username)
+
+        result: Dict[str, Any] = {}
+        for repo in repos:
+            alias = repo.get("user_alias")
+            if not alias:
+                continue
+            try:
+                status_info = arm.compute_sync_status(current_user.username, alias)
+            except Exception as e:
+                logger.warning(
+                    "Skipping repo '%s' for user '%s' in bulk sync-status: %s",
+                    alias,
+                    current_user.username,
+                    e,
+                )
+                continue
+            result[alias] = {
+                "current_branch": status_info["current_branch"],
+                "sync_status": status_info["sync_status"],
+                "last_sync_time": status_info["last_sync_time"],
+                "has_conflicts": status_info["has_conflicts"],
+                "conflict_details": status_info["conflict_details"],
+            }
+
+        return result
+
     # Repository Information Endpoint (Story 6) - generic route MUST be last
     @app.get("/api/repos/{user_alias}")
     def get_repository_info(
@@ -1840,30 +1931,48 @@ def register_repo_routes(
         current_user: dependencies.User = Depends(dependencies.get_current_user),
     ):
         """
-        Return sync status for an activated repository.
+        Return REAL sync status for an activated repository (Bug #1740).
+
+        Backed by ActivatedRepoManager.compute_sync_status(), a git-based
+        comparison between the activated repo's HEAD and its golden
+        repository's HEAD on the tracked branch (plus real merge-conflict
+        detection). Previously this read metadata.get("sync_status"), a
+        key nothing in the codebase ever wrote, so it always fell through
+        to a hardcoded "synced" default regardless of actual state.
 
         Returns:
-            JSON dict with current_branch, sync_status, last_sync_time, has_conflicts.
+            JSON dict with current_branch, sync_status, last_sync_time,
+            has_conflicts, conflict_details.
 
         Raises:
             HTTPException 404: alias not activated or not found
+            HTTPException 500: sync status could not be computed for any
+                other reason
         """
         arm = activated_repo_manager
-        metadata = arm._load_metadata(current_user.username, user_alias)
-        if metadata is None:
+        try:
+            result = arm.compute_sync_status(current_user.username, user_alias)
+        except ActivatedRepoError:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"Repository '{user_alias}' not found or not activated",
             )
-
-        sync_status = metadata.get("sync_status") or "synced"
-        conflict_details = metadata.get("conflict_details")
-        has_conflicts = bool(conflict_details)
-        last_sync_time = metadata.get("last_accessed")
+        except Exception as e:
+            logger.warning(
+                "Failed to compute sync status for '%s'/'%s': %s",
+                current_user.username,
+                user_alias,
+                e,
+            )
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Failed to compute sync status: {str(e)}",
+            )
 
         return {
-            "current_branch": metadata.get("current_branch"),
-            "sync_status": sync_status,
-            "last_sync_time": last_sync_time,
-            "has_conflicts": has_conflicts,
+            "current_branch": result["current_branch"],
+            "sync_status": result["sync_status"],
+            "last_sync_time": result["last_sync_time"],
+            "has_conflicts": result["has_conflicts"],
+            "conflict_details": result["conflict_details"],
         }

@@ -89,29 +89,6 @@ def _wired_app_module(tmp_path, logs_backend: Optional[Any]) -> Iterator[None]:
         yield
 
 
-def _enable_real_telemetry() -> None:
-    from code_indexer.server.telemetry import get_telemetry_manager
-    from code_indexer.server.utils.config_manager import TelemetryConfig
-
-    get_telemetry_manager(TelemetryConfig(enabled=True, export_traces=True))
-
-
-def _reset_spans() -> None:
-    """Reset both span state and the telemetry manager singleton.
-
-    #1676 AC2 round 2 code review REQUIRED FIX 2: _enable_real_telemetry()
-    installs a process-wide TelemetryManager singleton (real OTLP gRPC
-    exporter). Resetting only reset_spans_state() left that singleton alive
-    for every subsequent test in the same pytest process, causing exporter
-    retry noise against a dead localhost:4317 to leak into unrelated tests.
-    """
-    from code_indexer.server.telemetry import reset_telemetry_manager
-    from code_indexer.server.telemetry.spans import reset_spans_state
-
-    reset_spans_state()
-    reset_telemetry_manager()
-
-
 class TestAdminLogsQueryLocalPathTraceSpan:
     def test_no_active_span_returns_zero_values(self, tmp_path):
         from code_indexer.server.mcp.handlers.admin import handle_admin_logs_query
@@ -158,19 +135,28 @@ class TestAdminLogsQueryClusterPathTraceSpan:
         assert entry["span_id"] == "0" * 16
 
     def test_cluster_backend_record_includes_real_trace_span(self, tmp_path):
+        """Bug #1744 (round 5): this test used to enable a real
+        TelemetryConfig(enabled=True, export_traces=True) via
+        get_telemetry_manager() (_enable_real_telemetry(), now removed),
+        whose teardown forced a real OTLP export attempt against an
+        unreachable localhost:4317 collector -- confirmed 15.48s solo
+        runtime. Fixed with active_span_exporter() (otel_test_support.py):
+        real Span, zero network I/O -- same mechanism applied throughout
+        #1744.
+        """
         from code_indexer.server.mcp.handlers.admin import handle_admin_logs_query
+        from tests.unit.server.telemetry.otel_test_support import (
+            active_span_exporter,
+        )
 
-        _enable_real_telemetry()
         cluster_backend = _FakeClusterBackend(db_path=str(tmp_path / "cluster.db"))
-        try:
+        with active_span_exporter():
             _write_one_log(
                 tmp_path,
                 "mcp-cluster-active-span-1676",
                 logs_backend=cluster_backend,
                 active_span_name="test.mcp.cluster_active_span",
             )
-        finally:
-            _reset_spans()
 
         with _wired_app_module(tmp_path, logs_backend=cluster_backend):
             result = extract_mcp_data(
@@ -236,19 +222,23 @@ class TestAdminLogsExportTraceSpan:
         assert entry["span_id"] == "0" * 16
 
     def test_cluster_backend_export_includes_real_trace_span(self, tmp_path):
+        """Bug #1744 sibling (round 5): same real-network dependency as
+        test_cluster_backend_record_includes_real_trace_span above, fixed
+        the same way with active_span_exporter().
+        """
         from code_indexer.server.mcp.handlers.admin import admin_logs_export
+        from tests.unit.server.telemetry.otel_test_support import (
+            active_span_exporter,
+        )
 
-        _enable_real_telemetry()
         cluster_backend = _FakeClusterBackend(db_path=str(tmp_path / "cluster.db"))
-        try:
+        with active_span_exporter():
             _write_one_log(
                 tmp_path,
                 "mcp-export-active-span-1676",
                 logs_backend=cluster_backend,
                 active_span_name="test.mcp.export_active_span",
             )
-        finally:
-            _reset_spans()
 
         with _wired_app_module(tmp_path, logs_backend=cluster_backend):
             result = extract_mcp_data(

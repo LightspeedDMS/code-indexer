@@ -7,6 +7,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [12.28.0] - 2026-08-31
+
+### Fixed
+
+- **Bug #1746 (CRITICAL, production incident)**: `activate_repository`/`cidx index` could
+  silently burn 100% CPU for hours (observed: 2h13m) when the target chunk store was
+  unwritable (root-owned file, disk full, corrupt store, lock contention), with zero
+  user-visible error. Now fails fast and loud (~1s) via a typed fatal-error classifier,
+  abort-not-finalize semantics across all indexing entry points, a pre-hash-phase
+  writability preflight, and live subprocess error streaming -- while correctly
+  distinguishing transient lock contention (retryable) from genuinely fatal conditions.
+- **Bug #1747**: fleet-migration's whole-collection dedup identity gate wrongly quarantined
+  entire collections containing legitimate `hidden_branches`-only visibility-tagging
+  bookkeeping records, permanently blocking consolidation for otherwise-healthy repos
+  (confirmed on 4 production repos, 65 affected records). The gate now recognizes and
+  skips this specific non-content record shape while leaving all other identity
+  protections (Bug #1579) intact.
+- **Bug #1751**: `dedup_gate_rejected` quarantines only self-healed on a directory
+  content-signature change, so repos already quarantined before Bug #1747's fix could
+  stay stuck indefinitely even after becoming eligible to pass. The reset path now
+  re-checks the gate itself.
+- **Bug #1740 / #1743**: `cidx repos list` always displayed every activated repository as
+  "Synced" regardless of real state, and `cidx repos sync-status` for all repositories
+  404'd in production. Replaced with real git-based sync-status computation (synced /
+  needs_sync / conflict), exposed via both the per-repo and bulk endpoints.
+- **Bug #1742**: 3 CLI test files failed with `DisabledCommandError` due to stale
+  test-mock patch targets and `AsyncMock` on synchronous client methods -- root-caused
+  and fixed (pre-existing test-infrastructure drift, not a production regression).
+- **Bug #1749**: the admin config screen always displayed "No" for the Temporal Legacy
+  Migration relocation/cleanup settings regardless of true persisted state, creating a
+  risk of silently disabling a working relocation job on an unrelated Save.
+- **Bug #1750**: the admin config screen's Content Limits section always displayed
+  compiled defaults instead of real persisted values, for the same class of bug as #1749.
+- **Bug #1716**: 690 dead `extra=` kwargs to `format_error_log()` across 66 files were
+  polluting production log messages with stringified-dict noise instead of reaching real
+  structured logging; swept and guarded against recurrence with a fail-loud `TypeError`.
+- **Bug #1755**: MCP JSON-RPC request handling lost `correlation_id` across the
+  thread-offload dispatch boundary (missing `contextvars.copy_context()`), leaving every
+  ERROR/WARNING logged during MCP request handling unattributable to its originating
+  request -- fixed at all three `run_in_executor` call sites in the MCP protocol layer.
+- **Bug #1748**: a fast-host test flake and a real mypy typing gap in the HNSW
+  GIL-release test suite, traced to a hand-rolled calibration loop mypy couldn't prove
+  terminates with real values -- extracted into a self-calibrating, fully-typed helper.
+- **Bug #1744**: multiple unit tests depended on real OpenTelemetry span/trace/metric
+  export against an unreachable local OTLP collector, causing load-dependent flakes
+  (observed up to ~20s per test) across the telemetry, logging, and mcp test suites.
+
 ## [12.27.0] - 2026-08-28
 
 ### Fixed

@@ -185,7 +185,6 @@ class SubprocessExecutor:
                 format_error_log(
                     "MCP-GENERAL-183",
                     f"Asyncio timeout exceeded for command: {' '.join(command)}",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
             return SearchExecutionResult(
@@ -201,7 +200,6 @@ class SubprocessExecutor:
                 format_error_log(
                     "MCP-GENERAL-184",
                     f"Unexpected error executing command: {e}",
-                    extra={"correlation_id": get_correlation_id()},
                 ),
                 exc_info=True,
             )
@@ -263,7 +261,6 @@ class SubprocessExecutor:
             format_error_log(
                 warn_log_id,
                 warn_message,
-                extra={"correlation_id": get_correlation_id()},
             )
         )
 
@@ -289,7 +286,6 @@ class SubprocessExecutor:
                 format_error_log(
                     error_log_id,
                     error_message,
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
 
@@ -426,7 +422,6 @@ class SubprocessExecutor:
                 format_error_log(
                     "MCP-GENERAL-187",
                     f"Error running subprocess: {e}",
-                    extra={"correlation_id": get_correlation_id()},
                 ),
                 exc_info=True,
             )

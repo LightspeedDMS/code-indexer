@@ -31,6 +31,7 @@ naturally or `cancel_check()` fires — never both a fixed deadline.
 
 import logging
 import os
+import re
 import signal
 import subprocess
 import threading
@@ -38,6 +39,13 @@ import time
 from typing import Callable, List, Optional
 
 logger = logging.getLogger(__name__)
+
+# Bug #1746 M2 (code review finding): a real-word-boundary match for a
+# genuine "ERROR" log-level token -- e.g. "ERROR:module:message" or
+# " - ERROR - message" -- that will NOT match inside a longer identifier
+# like "ERROR_CODES.py" (a naive substring match did: "_" is a word
+# character, so there is no boundary between "ERROR" and "_").
+_ERROR_TOKEN_PATTERN = re.compile(r"\bERROR\b")
 
 # How often the poll loop checks cancel_check() while waiting for the
 # child to finish. Short enough that a cancel is noticed within a few
@@ -90,15 +98,34 @@ def _terminate_process_group(proc: "subprocess.Popen[str]") -> None:
     proc.wait()
 
 
-def _drain_stream(stream, chunks: List[str]) -> None:
+def _drain_stream(
+    stream, chunks: List[str], stream_label: str, subprocess_args: List[str]
+) -> None:
     """Background-thread reader: drains a pipe line-by-line into chunks.
 
     Runs on its own thread so stdout/stderr are consumed concurrently and
     the child never blocks on a full pipe buffer while the poll loop is
     waiting on proc.wait() (deadlock avoidance).
+
+    Bug #1746 Change 5: an ERROR-level line is also logged via THIS
+    module's own logger AS IT ARRIVES -- not only after the child exits
+    and the buffered chunks are assembled into the final CompletedProcess.
+    This tees the line into the server's existing log-store pipeline
+    (whatever already backs admin_logs_query for this process's own
+    logger.error() calls) while the child is still running, closing the
+    silent-failure window from the original incident (a hung/erroring
+    child logged nothing visible to the parent for over two hours).
     """
     try:
         for line in iter(stream.readline, ""):
+            if _ERROR_TOKEN_PATTERN.search(line):
+                logger.error(
+                    "Subprocess %s emitted an ERROR-level %s line while "
+                    "still running: %s",
+                    subprocess_args,
+                    stream_label,
+                    line.rstrip(),
+                )
             chunks.append(line)
     finally:
         stream.close()
@@ -162,10 +189,14 @@ def run_cancellable_subprocess(
     stdout_chunks: List[str] = []
     stderr_chunks: List[str] = []
     stdout_thread = threading.Thread(
-        target=_drain_stream, args=(proc.stdout, stdout_chunks), daemon=True
+        target=_drain_stream,
+        args=(proc.stdout, stdout_chunks, "stdout", args),
+        daemon=True,
     )
     stderr_thread = threading.Thread(
-        target=_drain_stream, args=(proc.stderr, stderr_chunks), daemon=True
+        target=_drain_stream,
+        args=(proc.stderr, stderr_chunks, "stderr", args),
+        daemon=True,
     )
     stdout_thread.start()
     stderr_thread.start()

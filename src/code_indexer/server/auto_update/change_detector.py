@@ -42,7 +42,6 @@ class ChangeDetector:
                 format_error_log(
                     "CACHE-GENERAL-001",
                     f"Git fetch failed: {result.stderr}",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
             raise subprocess.CalledProcessError(
@@ -78,7 +77,6 @@ class ChangeDetector:
                 format_error_log(
                     "CACHE-GENERAL-002",
                     f"Git rev-parse HEAD failed: {result.stderr}",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
             raise subprocess.CalledProcessError(
@@ -115,7 +113,6 @@ class ChangeDetector:
                 format_error_log(
                     "CACHE-GENERAL-003",
                     f"Git rev-parse origin/{self.branch} failed: {result.stderr}",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
             raise subprocess.CalledProcessError(

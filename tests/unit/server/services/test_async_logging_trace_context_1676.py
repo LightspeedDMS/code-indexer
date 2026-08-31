@@ -64,16 +64,23 @@ class TestIdentityQueueHandlerPrepareInjectsTraceContext:
         assert prepared.span_id == "already-set-span-id"
 
     def test_prepare_injects_real_trace_context_from_active_span(self) -> None:
-        from code_indexer.server.telemetry import (
-            get_telemetry_manager,
-            reset_telemetry_manager,
+        """Bug #1744 sibling: this test used to construct a real
+        TelemetryConfig(enabled=True, export_traces=True) via
+        get_telemetry_manager(), whose teardown (reset_telemetry_manager()
+        -> shutdown()) forces a real OTLP export attempt against an
+        unreachable localhost:4317 collector -- confirmed 14.78s solo
+        runtime, same root cause class as
+        test_logging_utils.py::TestInjectTraceContext::
+        test_sets_real_ids_from_active_span. Fixed with the same
+        active_span_exporter() in-memory mechanism: real Span/Context,
+        zero network I/O.
+        """
+        from code_indexer.server.telemetry.spans import create_span
+        from tests.unit.server.telemetry.otel_test_support import (
+            active_span_exporter,
         )
-        from code_indexer.server.telemetry.spans import create_span, reset_spans_state
-        from code_indexer.server.utils.config_manager import TelemetryConfig
 
-        config = TelemetryConfig(enabled=True, export_traces=True)
-        get_telemetry_manager(config)
-        try:
+        with active_span_exporter():
             q: "queue.Queue" = queue.Queue()
             handler = IdentityQueueHandler(q)
 
@@ -85,30 +92,30 @@ class TestIdentityQueueHandlerPrepareInjectsTraceContext:
                 assert len(prepared.span_id) == 16
                 assert prepared.trace_id != "0" * 32
                 assert prepared.span_id != "0" * 16
-        finally:
-            reset_spans_state()
-            reset_telemetry_manager()
 
     def test_prepare_injects_otel_context(self) -> None:
         """AC3 REQUIRED FIX 2: prepare() must capture the full OTEL Context
         (not just trace_id/span_id strings) via inject_otel_context(), so
         it can be reattached at export time. Fails if that call is removed
         from prepare() -- captured would then be None.
+
+        Bug #1744 sibling: this test used to construct a real
+        TelemetryConfig(enabled=True, export_traces=True) via
+        get_telemetry_manager(), whose teardown forces a real OTLP export
+        attempt against an unreachable localhost:4317 collector. Fixed
+        with active_span_exporter() (real Span/Context, zero network I/O)
+        -- same mechanism as the other tests in this class.
         """
         from opentelemetry import context as otel_context
         from opentelemetry import trace as otel_trace
 
         from code_indexer.server.logging_utils import OTEL_CONTEXT_RECORD_ATTR
-        from code_indexer.server.telemetry import (
-            get_telemetry_manager,
-            reset_telemetry_manager,
+        from code_indexer.server.telemetry.spans import create_span
+        from tests.unit.server.telemetry.otel_test_support import (
+            active_span_exporter,
         )
-        from code_indexer.server.telemetry.spans import create_span, reset_spans_state
-        from code_indexer.server.utils.config_manager import TelemetryConfig
 
-        config = TelemetryConfig(enabled=True, export_traces=True)
-        get_telemetry_manager(config)
-        try:
+        with active_span_exporter():
             q: "queue.Queue" = queue.Queue()
             handler = IdentityQueueHandler(q)
 
@@ -127,9 +134,6 @@ class TestIdentityQueueHandlerPrepareInjectsTraceContext:
                 assert reattached.span_id == span_context.span_id
             finally:
                 otel_context.detach(token)
-        finally:
-            reset_spans_state()
-            reset_telemetry_manager()
 
 
 class TestPlainLogCallPersistsTraceContextViaAsyncQueue:
@@ -183,19 +187,21 @@ class TestPlainLogCallPersistsTraceContextViaAsyncQueue:
     def test_plain_logger_call_with_active_span_persists_real_ids(
         self, tmp_path
     ) -> None:
+        """Bug #1744 sibling: this test used to construct a real
+        TelemetryConfig(enabled=True, export_traces=True) via
+        get_telemetry_manager(), whose teardown forces a real OTLP export
+        attempt against an unreachable localhost:4317 collector. Fixed
+        with active_span_exporter() (real Span/Context, zero network I/O)
+        -- same mechanism as the other tests in this class.
+        """
         import sqlite3
 
         from code_indexer.server.services.async_logging import install_queue_logging
         from code_indexer.server.services.sqlite_log_handler import SQLiteLogHandler
-        from code_indexer.server.telemetry import (
-            get_telemetry_manager,
-            reset_telemetry_manager,
+        from code_indexer.server.telemetry.spans import create_span
+        from tests.unit.server.telemetry.otel_test_support import (
+            active_span_exporter,
         )
-        from code_indexer.server.telemetry.spans import create_span, reset_spans_state
-        from code_indexer.server.utils.config_manager import TelemetryConfig
-
-        config = TelemetryConfig(enabled=True, export_traces=True)
-        get_telemetry_manager(config)
 
         db_path = tmp_path / "logs.db"
         sqlite_handler = SQLiteLogHandler(db_path=db_path)
@@ -208,11 +214,12 @@ class TestPlainLogCallPersistsTraceContextViaAsyncQueue:
             root.setLevel(logging.INFO)
             listener = install_queue_logging([sqlite_handler])
             try:
-                with create_span("test.async_logging.persist_real_ids"):
-                    logging.getLogger("test.async_logging.trace_context").error(
-                        "active span error line"
-                    )
-                listener.flush()
+                with active_span_exporter():
+                    with create_span("test.async_logging.persist_real_ids"):
+                        logging.getLogger("test.async_logging.trace_context").error(
+                            "active span error line"
+                        )
+                    listener.flush()
             finally:
                 listener.stop()
 
@@ -234,8 +241,6 @@ class TestPlainLogCallPersistsTraceContextViaAsyncQueue:
             root.handlers = saved_handlers
             root.setLevel(saved_level)
             sqlite_handler.close()
-            reset_spans_state()
-            reset_telemetry_manager()
 
 
 if __name__ == "__main__":

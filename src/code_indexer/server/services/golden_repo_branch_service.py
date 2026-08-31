@@ -227,7 +227,6 @@ class GoldenRepoBranchService:
                                 format_error_log(
                                     "DEPLOY-GENERAL-024",
                                     f"Failed to parse commit date '{commit_date_str}': {e}",
-                                    extra={"correlation_id": get_correlation_id()},
                                 )
                             )
 
@@ -249,7 +248,6 @@ class GoldenRepoBranchService:
                         format_error_log(
                             "DEPLOY-GENERAL-025",
                             f"Failed to parse git output line '{line}': {e}",
-                            extra={"correlation_id": get_correlation_id()},
                         )
                     )
                     continue
@@ -265,7 +263,6 @@ class GoldenRepoBranchService:
                 format_error_log(
                     "DEPLOY-GENERAL-026",
                     error_msg,
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
             raise GitOperationError(error_msg)
@@ -275,7 +272,6 @@ class GoldenRepoBranchService:
                 format_error_log(
                     "DEPLOY-GENERAL-027",
                     error_msg,
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
             raise GitOperationError(error_msg)
@@ -285,7 +281,6 @@ class GoldenRepoBranchService:
                 format_error_log(
                     "DEPLOY-GENERAL-028",
                     error_msg,
-                    extra={"correlation_id": get_correlation_id()},
                 ),
                 exc_info=True,
             )

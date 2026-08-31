@@ -144,7 +144,6 @@ class GitStateManager:
                 format_error_log(
                     "CACHE-GENERAL-020",
                     error_msg,
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
             raise GitStateError(error_msg)
@@ -164,7 +163,6 @@ class GitStateManager:
                 format_error_log(
                     "CACHE-GENERAL-021",
                     error_msg,
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
             raise GitStateError(error_msg)
@@ -184,7 +182,6 @@ class GitStateManager:
                 format_error_log(
                     "CACHE-GENERAL-022",
                     error_msg,
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
             raise GitStateError(error_msg)
@@ -561,7 +558,6 @@ class GitStateManager:
                 format_error_log(
                     "CACHE-GENERAL-023",
                     f"Failed to return to branch {branch_name}: {e}",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
 
@@ -634,7 +630,6 @@ class TokenAuthenticator:
                 format_error_log(
                     "DEPLOY-GENERAL-022",
                     f"Failed to load token from encrypted storage: {e}",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
 
@@ -643,7 +638,6 @@ class TokenAuthenticator:
             format_error_log(
                 "DEPLOY-GENERAL-023",
                 f"No {platform} token found in environment or file storage",
-                extra={"correlation_id": get_correlation_id()},
             )
         )
         return None

@@ -22,7 +22,6 @@ Follows CLAUDE.md Foundation #1: No mocks - real retry policy logic.
 import logging
 import random
 
-from code_indexer.server.middleware.correlation import get_correlation_id
 from code_indexer.server.logging_utils import format_error_log
 
 from ..models.error_models import (
@@ -111,7 +110,6 @@ def log_retry_attempt(attempt: int, delay: float, error: Exception) -> None:
         format_error_log(
             "REPO-GENERAL-020",
             f"Database operation failed on attempt {attempt}, retrying in {delay:.2f}s: {error}",
-            extra={"correlation_id": get_correlation_id()},
         )
     )
 

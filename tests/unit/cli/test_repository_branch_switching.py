@@ -5,7 +5,8 @@ local/remote branch handling, and container configuration updates.
 Following TDD methodology: Red -> Green -> Refactor
 """
 
-from unittest.mock import Mock, patch, AsyncMock
+import pytest
+from unittest.mock import Mock, patch
 from click.testing import CliRunner
 from pathlib import Path
 
@@ -15,6 +16,22 @@ from code_indexer.api_clients.base_client import APIClientError, AuthenticationE
 
 class TestRepositoryBranchSwitching:
     """TDD tests for cidx repos switch-branch command implementation."""
+
+    @pytest.fixture(autouse=True)
+    def mock_remote_mode_gate(self):
+        """Auto-mock the require_mode("remote") gate on repos_group.
+
+        disabled_commands.py independently binds detect_current_mode via its
+        own module-level import, so it is unaffected by patching
+        find_project_root at code_indexer.mode_detection.command_mode_detector
+        (see #1742). Without this, every repos_group invocation raises
+        DisabledCommandError before the mocked ReposAPIClient is ever reached.
+        """
+        with patch(
+            "code_indexer.disabled_commands.detect_current_mode",
+            return_value="remote",
+        ):
+            yield
 
     def setup_method(self):
         """Set up test environment for each test."""
@@ -53,7 +70,7 @@ class TestRepositoryBranchSwitching:
     @patch("code_indexer.mode_detection.command_mode_detector.find_project_root")
     @patch("code_indexer.remote.sync_execution._load_remote_configuration")
     @patch("code_indexer.remote.sync_execution._load_and_decrypt_credentials")
-    @patch("code_indexer.api_clients.repos_client.ReposAPIClient")
+    @patch("code_indexer.cli.ReposAPIClient")
     def test_repos_switch_branch_successful_local_branch(
         self,
         mock_client_class,
@@ -80,7 +97,7 @@ class TestRepositoryBranchSwitching:
         }
 
         mock_client = Mock()
-        mock_client.switch_repository_branch = AsyncMock(
+        mock_client.switch_repository_branch = Mock(
             return_value=mock_switch_result
         )
         mock_client_class.return_value = mock_client
@@ -105,7 +122,7 @@ class TestRepositoryBranchSwitching:
     @patch("code_indexer.mode_detection.command_mode_detector.find_project_root")
     @patch("code_indexer.remote.sync_execution._load_remote_configuration")
     @patch("code_indexer.remote.sync_execution._load_and_decrypt_credentials")
-    @patch("code_indexer.api_clients.repos_client.ReposAPIClient")
+    @patch("code_indexer.cli.ReposAPIClient")
     def test_repos_switch_branch_with_create_flag(
         self,
         mock_client_class,
@@ -132,7 +149,7 @@ class TestRepositoryBranchSwitching:
         }
 
         mock_client = Mock()
-        mock_client.switch_repository_branch = AsyncMock(
+        mock_client.switch_repository_branch = Mock(
             return_value=mock_switch_result
         )
         mock_client_class.return_value = mock_client
@@ -158,7 +175,7 @@ class TestRepositoryBranchSwitching:
     @patch("code_indexer.mode_detection.command_mode_detector.find_project_root")
     @patch("code_indexer.remote.sync_execution._load_remote_configuration")
     @patch("code_indexer.remote.sync_execution._load_and_decrypt_credentials")
-    @patch("code_indexer.api_clients.repos_client.ReposAPIClient")
+    @patch("code_indexer.cli.ReposAPIClient")
     def test_repos_switch_branch_remote_tracking_branch(
         self,
         mock_client_class,
@@ -185,7 +202,7 @@ class TestRepositoryBranchSwitching:
         }
 
         mock_client = Mock()
-        mock_client.switch_repository_branch = AsyncMock(
+        mock_client.switch_repository_branch = Mock(
             return_value=mock_switch_result
         )
         mock_client_class.return_value = mock_client
@@ -208,7 +225,7 @@ class TestRepositoryBranchSwitching:
     @patch("code_indexer.mode_detection.command_mode_detector.find_project_root")
     @patch("code_indexer.remote.sync_execution._load_remote_configuration")
     @patch("code_indexer.remote.sync_execution._load_and_decrypt_credentials")
-    @patch("code_indexer.api_clients.repos_client.ReposAPIClient")
+    @patch("code_indexer.cli.ReposAPIClient")
     def test_repos_switch_branch_with_uncommitted_changes(
         self,
         mock_client_class,
@@ -235,7 +252,7 @@ class TestRepositoryBranchSwitching:
         }
 
         mock_client = Mock()
-        mock_client.switch_repository_branch = AsyncMock(
+        mock_client.switch_repository_branch = Mock(
             return_value=mock_switch_result
         )
         mock_client_class.return_value = mock_client
@@ -254,7 +271,7 @@ class TestRepositoryBranchSwitching:
     @patch("code_indexer.mode_detection.command_mode_detector.find_project_root")
     @patch("code_indexer.remote.sync_execution._load_remote_configuration")
     @patch("code_indexer.remote.sync_execution._load_and_decrypt_credentials")
-    @patch("code_indexer.api_clients.repos_client.ReposAPIClient")
+    @patch("code_indexer.cli.ReposAPIClient")
     def test_repos_switch_branch_handles_branch_not_found(
         self,
         mock_client_class,
@@ -270,7 +287,7 @@ class TestRepositoryBranchSwitching:
 
         # Mock branch not found error
         mock_client = Mock()
-        mock_client.switch_repository_branch = AsyncMock(
+        mock_client.switch_repository_branch = Mock(
             side_effect=APIClientError("Branch 'nonexistent' not found", 404)
         )
         mock_client_class.return_value = mock_client
@@ -290,7 +307,7 @@ class TestRepositoryBranchSwitching:
     @patch("code_indexer.mode_detection.command_mode_detector.find_project_root")
     @patch("code_indexer.remote.sync_execution._load_remote_configuration")
     @patch("code_indexer.remote.sync_execution._load_and_decrypt_credentials")
-    @patch("code_indexer.api_clients.repos_client.ReposAPIClient")
+    @patch("code_indexer.cli.ReposAPIClient")
     def test_repos_switch_branch_handles_repository_not_found(
         self,
         mock_client_class,
@@ -306,7 +323,7 @@ class TestRepositoryBranchSwitching:
 
         # Mock repository not found error
         mock_client = Mock()
-        mock_client.switch_repository_branch = AsyncMock(
+        mock_client.switch_repository_branch = Mock(
             side_effect=APIClientError("Repository 'nonexistent' not found", 404)
         )
         mock_client_class.return_value = mock_client
@@ -326,7 +343,7 @@ class TestRepositoryBranchSwitching:
     @patch("code_indexer.mode_detection.command_mode_detector.find_project_root")
     @patch("code_indexer.remote.sync_execution._load_remote_configuration")
     @patch("code_indexer.remote.sync_execution._load_and_decrypt_credentials")
-    @patch("code_indexer.api_clients.repos_client.ReposAPIClient")
+    @patch("code_indexer.cli.ReposAPIClient")
     def test_repos_switch_branch_handles_merge_conflicts(
         self,
         mock_client_class,
@@ -342,7 +359,7 @@ class TestRepositoryBranchSwitching:
 
         # Mock merge conflict error
         mock_client = Mock()
-        mock_client.switch_repository_branch = AsyncMock(
+        mock_client.switch_repository_branch = Mock(
             side_effect=APIClientError(
                 "Cannot switch branches due to merge conflicts. Please resolve conflicts first.",
                 409,
@@ -362,7 +379,7 @@ class TestRepositoryBranchSwitching:
     @patch("code_indexer.mode_detection.command_mode_detector.find_project_root")
     @patch("code_indexer.remote.sync_execution._load_remote_configuration")
     @patch("code_indexer.remote.sync_execution._load_and_decrypt_credentials")
-    @patch("code_indexer.api_clients.repos_client.ReposAPIClient")
+    @patch("code_indexer.cli.ReposAPIClient")
     def test_repos_switch_branch_handles_authentication_errors(
         self,
         mock_client_class,
@@ -378,7 +395,7 @@ class TestRepositoryBranchSwitching:
 
         # Mock authentication error
         mock_client = Mock()
-        mock_client.switch_repository_branch = AsyncMock(
+        mock_client.switch_repository_branch = Mock(
             side_effect=AuthenticationError("Invalid credentials")
         )
         mock_client_class.return_value = mock_client
@@ -435,7 +452,7 @@ class TestRepositoryBranchSwitching:
     @patch("code_indexer.mode_detection.command_mode_detector.find_project_root")
     @patch("code_indexer.remote.sync_execution._load_remote_configuration")
     @patch("code_indexer.remote.sync_execution._load_and_decrypt_credentials")
-    @patch("code_indexer.api_clients.repos_client.ReposAPIClient")
+    @patch("code_indexer.cli.ReposAPIClient")
     def test_repos_switch_branch_container_update_notification(
         self,
         mock_client_class,
@@ -460,7 +477,7 @@ class TestRepositoryBranchSwitching:
         }
 
         mock_client = Mock()
-        mock_client.switch_repository_branch = AsyncMock(
+        mock_client.switch_repository_branch = Mock(
             return_value=mock_switch_result
         )
         mock_client_class.return_value = mock_client

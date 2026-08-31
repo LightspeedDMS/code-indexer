@@ -5,8 +5,6 @@ Aggregates data from various internal services for the admin dashboard.
 Following CLAUDE.md Foundation #1: No mocks - uses real service integrations.
 """
 
-from code_indexer.server.middleware.correlation import get_correlation_id
-
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -356,7 +354,6 @@ class DashboardService:
                 format_error_log(
                     "AUTH-GENERAL-019",
                     f"Failed to get health data: {e}",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
             # Return degraded status on error
@@ -425,7 +422,6 @@ class DashboardService:
                 format_error_log(
                     "AUTH-GENERAL-020",
                     f"Failed to get job counts: {e}",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
             return JobCounts()
@@ -455,7 +451,6 @@ class DashboardService:
                 format_error_log(
                     "AUTH-GENERAL-021",
                     f"Failed to get golden repos count: {e}",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
 
@@ -478,7 +473,6 @@ class DashboardService:
                 format_error_log(
                     "AUTH-GENERAL-022",
                     f"Failed to get activated repos count: {e}",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
 
@@ -571,7 +565,6 @@ class DashboardService:
                 format_error_log(
                     "AUTH-GENERAL-023",
                     f"Failed to get recent jobs: {e}",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
             return []
@@ -626,7 +619,6 @@ class DashboardService:
                 format_error_log(
                     "DASHBOARD-ACTIVATED-REPO-001",
                     f"Failed to resolve activated_repo_manager: {exc}",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
             return None
@@ -733,7 +725,6 @@ class DashboardService:
                 format_error_log(
                     "DASHBOARD-LANGFUSE-001",
                     f"Failed to get Langfuse metrics: {e}",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
             return {

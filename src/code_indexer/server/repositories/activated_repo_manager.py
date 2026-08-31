@@ -28,13 +28,13 @@ import uuid
 # yaml import removed - using json for config files
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING, Dict, List, Optional, Any, Callable, Union
+from typing import TYPE_CHECKING, Dict, List, Optional, Any, Callable, Tuple, Union
 
 if TYPE_CHECKING:
     from code_indexer.server.storage.shared.clone_backend import CloneBackend
 from pydantic import BaseModel
 
-from .golden_repo_manager import GoldenRepoManager
+from .golden_repo_manager import GoldenRepoManager, GoldenRepoError
 from .background_jobs import BackgroundJobManager
 from ..services.committer_resolution_service import CommitterResolutionService
 from ..services.deactivation_query_drain import wait_for_activated_repo_query_drain
@@ -72,6 +72,19 @@ class GitOperationError(ActivatedRepoError):
     """Exception raised when git operations fail."""
 
     pass
+
+
+# Timeout (seconds) for the lightweight git subprocess calls
+# compute_sync_status runs (diff/rev-parse). Matches the pre-existing 30s
+# convention already used throughout this module for comparable
+# single-command git calls (get_current_branch, sync_with_golden_repository's
+# diff step) -- not made independently configurable, consistent with this
+# project's "no settings to gate a fix" convention (CLAUDE.md).
+_SYNC_STATUS_GIT_TIMEOUT_SECONDS = 30
+
+# Cap on how many conflicted paths are named in conflict_details, mirroring
+# sync_with_golden_repository's existing "first 10 for response size" cap.
+_MAX_REPORTED_CONFLICT_PATHS = 10
 
 
 class ActivatedRepoCloneNotStartedError(ActivatedRepoError):
@@ -1513,6 +1526,301 @@ class ActivatedRepoManager:
                 return "main"
             except Exception:
                 raise GitOperationError(f"Failed to get current branch: {str(e)}")
+
+    def _detect_conflict_paths(
+        self, repo_dir: str, username: str, user_alias: str
+    ) -> Tuple[Optional[bool], Optional[str]]:
+        """Detect real git merge conflicts (unmerged paths) in *repo_dir*.
+
+        Uses `git diff --name-only --diff-filter=U` instead of a full
+        `git status --porcelain` worktree scan -- it skips enumerating
+        untracked-file directories (git diff still lstats tracked files),
+        measured ~2x faster locally, and the gap widens on `hard` NFSv3
+        cow-storage, where directory enumeration is far more exposed to a
+        wedged mount than a targeted tracked-file check.
+
+        Returns:
+            (has_conflicts, conflict_details):
+            - (True, details): confirmed real unmerged paths -- details
+              names them (capped at _MAX_REPORTED_CONFLICT_PATHS).
+            - (False, None): confirmed no unmerged paths.
+            - (None, None): could NOT be determined -- the probe itself
+              failed (subprocess timeout/OSError, or git exited
+              non-zero). Callers MUST treat this as "unknown", NEVER as
+              "confirmed clean": on a `hard` NFSv3 mount this path fires
+              on a wedged mount (CLAUDE.md documents it as able to block
+              FOREVER), exactly when a fabricated "synced" would be most
+              misleading.
+        """
+        try:
+            diff_result = subprocess.run(
+                ["git", "diff", "--name-only", "--diff-filter=U"],
+                cwd=repo_dir,
+                capture_output=True,
+                text=True,
+                timeout=_SYNC_STATUS_GIT_TIMEOUT_SECONDS,
+            )
+        except (subprocess.TimeoutExpired, OSError) as e:
+            self.logger.warning(
+                "Failed to check for unmerged paths for '%s'/'%s': %s",
+                username,
+                user_alias,
+                e,
+            )
+            return None, None
+
+        if diff_result.returncode != 0:
+            self.logger.warning(
+                "git diff --diff-filter=U failed for '%s'/'%s' (exit %s): %s",
+                username,
+                user_alias,
+                diff_result.returncode,
+                diff_result.stderr.strip(),
+            )
+            return None, None
+
+        unmerged_paths = [line for line in diff_result.stdout.splitlines() if line]
+        if not unmerged_paths:
+            return False, None
+
+        details = "Unmerged paths: " + ", ".join(
+            unmerged_paths[:_MAX_REPORTED_CONFLICT_PATHS]
+        )
+        return True, details
+
+    def _rev_parse_ref(
+        self, repo_path: str, ref: str, username: str, user_alias: str
+    ) -> Optional[str]:
+        """Resolve *ref* to a commit SHA in *repo_path*, or None on a miss.
+
+        Only logs on a genuine infrastructure failure (timeout/OSError) --
+        a plain non-zero returncode is an expected "miss" when a caller is
+        probing multiple candidate refs (e.g. refs/heads then
+        refs/remotes/origin fallback); the caller logs once if ALL
+        candidates miss.
+        """
+        try:
+            result = subprocess.run(
+                ["git", "rev-parse", ref],
+                cwd=repo_path,
+                capture_output=True,
+                text=True,
+                timeout=_SYNC_STATUS_GIT_TIMEOUT_SECONDS,
+            )
+        except (subprocess.TimeoutExpired, OSError) as e:
+            self.logger.warning(
+                "Failed to rev-parse '%s' in '%s' for '%s'/'%s': %s",
+                ref,
+                repo_path,
+                username,
+                user_alias,
+                e,
+            )
+            return None
+        if result.returncode != 0:
+            return None
+        return result.stdout.strip()
+
+    def _resolve_golden_repo_path_or_warn(
+        self, golden_repo_alias: str, username: str, user_alias: str
+    ) -> Optional[str]:
+        """Resolve the golden repo's actual clone path, WARNING on any miss.
+
+        Two failure modes handled: (1) get_golden_repo() returns None
+        (repo unregistered) -- it always reads the shared storage backend
+        directly (SQLite solo / PostgreSQL cluster), never the per-worker
+        golden_repos in-memory cache Bug #1314 guards against, so this is
+        already cluster-safe without a separate cache-aware resolver; (2)
+        get_actual_repo_path() raises GoldenRepoNotFoundError (a
+        GoldenRepoError) when the DB row exists but the on-disk clone is
+        missing (Bug #1317 registry-orphan state) -- NEVER let this
+        escape uncaught.
+        """
+        golden_repo = self.golden_repo_manager.get_golden_repo(golden_repo_alias)
+        if golden_repo is None:
+            self.logger.warning(
+                "Golden repo '%s' not found while computing sync status for '%s'/'%s'",
+                golden_repo_alias,
+                username,
+                user_alias,
+            )
+            return None
+        try:
+            return self.golden_repo_manager.get_actual_repo_path(golden_repo_alias)
+        except (GoldenRepoError, ValueError) as e:
+            self.logger.warning(
+                "Could not resolve golden repo path for '%s' while "
+                "computing sync status for '%s'/'%s': %s",
+                golden_repo_alias,
+                username,
+                user_alias,
+                e,
+            )
+            return None
+
+    def _resolve_golden_head_commit(
+        self,
+        golden_repo_alias: Optional[str],
+        current_branch: str,
+        username: str,
+        user_alias: str,
+    ) -> Optional[str]:
+        """Resolve the golden repository's HEAD commit for *current_branch*.
+
+        Golden repos are plain clones exposing exactly ONE local head
+        (their default branch, e.g. master/main -- verified live: 17 of
+        18 golden repos on the dev server have a single local head);
+        every OTHER tracked branch lives only under refs/remotes/origin/*.
+        Tries refs/heads/{branch} first, falls back to
+        refs/remotes/origin/{branch} -- without the fallback, every
+        activated repo on a non-default branch (a first-class supported
+        flow, see CLAUDE.md's Bug #1203 section) could never resolve a
+        golden commit. Reads the commit directly via `git rev-parse`
+        rather than `git fetch` -- cheaper and non-mutating.
+
+        Returns:
+            The commit SHA, or None (WARNING logged on every degrade
+            path) when the golden repo/path/branch cannot be resolved.
+            Callers MUST treat None as "cannot verify" -- never fabricate
+            "synced".
+        """
+        if not golden_repo_alias:
+            self.logger.warning(
+                "No single golden_repo_alias for '%s'/'%s' (composite repo?); "
+                "sync status cannot be computed",
+                username,
+                user_alias,
+            )
+            return None
+
+        golden_repo_path = self._resolve_golden_repo_path_or_warn(
+            golden_repo_alias, username, user_alias
+        )
+        if golden_repo_path is None:
+            return None
+
+        for ref in (
+            f"refs/heads/{current_branch}",
+            f"refs/remotes/origin/{current_branch}",
+        ):
+            commit = self._rev_parse_ref(golden_repo_path, ref, username, user_alias)
+            if commit is not None:
+                return commit
+
+        self.logger.warning(
+            "Could not resolve golden branch '%s' (tried refs/heads and "
+            "refs/remotes/origin) for '%s'/'%s'",
+            current_branch,
+            username,
+            user_alias,
+        )
+        return None
+
+    @staticmethod
+    def _sync_result(
+        current_branch: str,
+        sync_status: Optional[str],
+        has_conflicts: bool,
+        conflict_details: Optional[str],
+        last_sync_time: Optional[str],
+    ) -> Dict[str, Any]:
+        return {
+            "current_branch": current_branch,
+            "sync_status": sync_status,
+            "has_conflicts": has_conflicts,
+            "conflict_details": conflict_details,
+            "last_sync_time": last_sync_time,
+        }
+
+    def compute_sync_status(self, username: str, user_alias: str) -> Dict[str, Any]:
+        """
+        Compute REAL sync status for an activated repository (Bug #1740 /
+        Bug #1743), replacing the previous facade that read
+        ``metadata.get("sync_status")`` -- a key nothing ever wrote.
+
+        Classification: "conflict" (real git unmerged paths, see
+        _detect_conflict_paths), "needs_sync" (activated HEAD != golden
+        branch HEAD), "synced" (HEAD commits match), or None ("unknown"
+        -- sync status could not be verified: unresolvable activated
+        HEAD, golden repo, or golden branch commit). A WARNING is logged
+        on every unverifiable path. This NEVER falls back to "synced" --
+        fabricating a claim the server cannot substantiate would
+        reproduce #1740's exact original symptom. Read-only inspection
+        must never crash, but "never crash" means "report unknown", not
+        "report good".
+
+        Args:
+            username: Username
+            user_alias: User's alias for the repository
+
+        Returns:
+            Dict with keys: current_branch, sync_status, has_conflicts,
+            conflict_details, last_sync_time. Note: has_conflicts is
+            False whenever sync_status is None -- that combination means
+            "not confirmed conflicted" (the probe couldn't determine
+            anything), not "confirmed clean".
+
+        Raises:
+            ActivatedRepoError: If the activated repository is not found
+        """
+        metadata = self._load_metadata(username, user_alias)
+        repo_dir = os.path.join(self.activated_repos_dir, username, user_alias)
+        # Defense-in-depth: username/user_alias ultimately come from
+        # authenticated request context and Pydantic-validated request
+        # models, but a realpath-containment check costs nothing and
+        # guards against any future caller that skips that validation.
+        if os.path.realpath(repo_dir) != repo_dir or not os.path.realpath(
+            repo_dir
+        ).startswith(self.activated_repos_dir + os.sep):
+            raise ActivatedRepoError(
+                f"Invalid repository alias '{user_alias}' for user '{username}'"
+            )
+        if metadata is None or not os.path.exists(repo_dir):
+            raise ActivatedRepoError(
+                f"Activated repository '{user_alias}' not found for user '{username}'"
+            )
+
+        current_branch = metadata.get("current_branch") or "main"
+        last_sync_time = metadata.get("last_accessed")
+
+        has_conflicts, conflict_details = self._detect_conflict_paths(
+            repo_dir, username, user_alias
+        )
+        if has_conflicts is None:
+            # The probe itself could not determine anything (timeout,
+            # OSError, or non-zero exit -- already WARNING-logged inside
+            # _detect_conflict_paths). NEVER treat this as "confirmed no
+            # conflicts" -- report unknown, don't fabricate synced/needs_sync.
+            return self._sync_result(current_branch, None, False, None, last_sync_time)
+        if has_conflicts:
+            return self._sync_result(
+                current_branch, "conflict", True, conflict_details, last_sync_time
+            )
+
+        activated_head = self._rev_parse_ref(repo_dir, "HEAD", username, user_alias)
+        if activated_head is None:
+            self.logger.warning(
+                "Could not resolve activated HEAD for '%s'/'%s'; sync status "
+                "cannot be verified",
+                username,
+                user_alias,
+            )
+            return self._sync_result(current_branch, None, False, None, last_sync_time)
+
+        golden_head = self._resolve_golden_head_commit(
+            metadata.get("golden_repo_alias"),
+            current_branch,
+            username,
+            user_alias,
+        )
+        sync_status = (
+            None
+            if golden_head is None
+            else ("synced" if activated_head == golden_head else "needs_sync")
+        )
+        return self._sync_result(
+            current_branch, sync_status, False, None, last_sync_time
+        )
 
     def sync_with_golden_repository(
         self, username: str, user_alias: str
