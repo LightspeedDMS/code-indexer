@@ -58,26 +58,29 @@ class TestLogAggregatorServiceLocalPathTraceSpan:
     def test_query_returns_real_trace_span_when_span_active(
         self, tmp_path: Path
     ) -> None:
+        """Bug #1744 sibling: this test used to construct a real
+        TelemetryConfig(enabled=True, export_traces=True) via
+        get_telemetry_manager(), whose teardown (reset_telemetry_manager()
+        -> shutdown()) forces a real OTLP export attempt against an
+        unreachable localhost:4317 collector -- confirmed 13.56s solo
+        runtime, same root cause class as
+        test_logging_utils.py::TestInjectTraceContext::
+        test_sets_real_ids_from_active_span. Fixed with the same
+        active_span_exporter() in-memory mechanism: real Span/Context,
+        zero network I/O.
+        """
         from code_indexer.server.services.log_aggregator_service import (
             LogAggregatorService,
         )
-        from code_indexer.server.telemetry import (
-            get_telemetry_manager,
-            reset_telemetry_manager,
+        from code_indexer.server.telemetry.spans import create_span
+        from tests.unit.server.telemetry.otel_test_support import (
+            active_span_exporter,
         )
-        from code_indexer.server.telemetry.spans import create_span, reset_spans_state
-        from code_indexer.server.utils.config_manager import TelemetryConfig
-
-        config = TelemetryConfig(enabled=True, export_traces=True)
-        get_telemetry_manager(config)
 
         db_path = tmp_path / "logs.db"
-        try:
+        with active_span_exporter():
             with create_span("test.log_aggregator.active_span"):
                 _write_one_log_row(db_path, "aggregator active-span line")
-        finally:
-            reset_spans_state()
-            reset_telemetry_manager()
 
         service = LogAggregatorService(db_path)
         result = service.query(search="aggregator active-span line")

@@ -202,17 +202,37 @@ class TestInjectTraceContext:
         assert record.span_id == "explicit-span-id"
 
     def test_sets_real_ids_from_active_span(self):
-        from code_indexer.server.logging_utils import inject_trace_context
-        from code_indexer.server.telemetry import (
-            get_telemetry_manager,
-            reset_telemetry_manager,
-        )
-        from code_indexer.server.telemetry.spans import create_span, reset_spans_state
-        from code_indexer.server.utils.config_manager import TelemetryConfig
+        """Bug #1744: this test used to construct a real TelemetryConfig
+        (enabled=True, export_traces=True) via get_telemetry_manager(),
+        which builds a real BatchSpanProcessor backed by an OTLP gRPC
+        exporter pointed at localhost:4317. In any environment without a
+        local OTEL collector listening there, tearing that manager down
+        (reset_telemetry_manager() -> shutdown()) forces a real export
+        attempt that retries against the unreachable endpoint before
+        giving up -- adding ~14-16s of wall-clock blocking to what should
+        be a sub-second unit test, and making the test's outcome sensitive
+        to whatever timing pressure a full-suite run applies (confirmed:
+        15.31s solo runtime with "Failed to export traces to
+        localhost:4317, error code: StatusCode.UNAVAILABLE" logged).
 
-        config = TelemetryConfig(enabled=True, export_traces=True)
-        get_telemetry_manager(config)
-        try:
+        Fixed by using active_span_exporter() (Story #1586 AC5 pattern,
+        already established in tests/unit/server/telemetry/
+        otel_test_support.py and reused by test_trace_sampling_1676_ac4.py)
+        instead: a real, locally-owned TracerProvider backed by a real
+        InMemorySpanExporter, installed directly into spans.py's tracer
+        cache. This exercises the exact same real create_span()/
+        inject_trace_context()/get_trace_context() production code path
+        against a real OTEL Span and Context -- no mocking of the code
+        under test -- with zero network I/O, so no collector dependency
+        and no wall-clock sensitivity.
+        """
+        from code_indexer.server.logging_utils import inject_trace_context
+        from code_indexer.server.telemetry.spans import create_span
+        from tests.unit.server.telemetry.otel_test_support import (
+            active_span_exporter,
+        )
+
+        with active_span_exporter():
             with create_span("test.inject_trace_context"):
                 record = _make_log_record()
                 inject_trace_context(record)
@@ -225,9 +245,6 @@ class TestInjectTraceContext:
                 assert record.span_id != "0" * 16
                 int(record.trace_id, 16)
                 int(record.span_id, 16)
-        finally:
-            reset_spans_state()
-            reset_telemetry_manager()
 
 
 class TestInjectOtelContext:
@@ -295,6 +312,14 @@ class TestInjectOtelContextReflectsActiveSpan:
     calling thread."""
 
     def test_captured_context_carries_the_real_active_span_by_identity(self):
+        """Bug #1744 sibling: same fix as
+        TestInjectTraceContext.test_sets_real_ids_from_active_span above --
+        this test shared the identical real-TelemetryConfig/
+        get_telemetry_manager() setup (confirmed 15.55s solo runtime with
+        the same unreachable-localhost:4317 OTLP export on teardown).
+        Replaced with active_span_exporter() for the same reason: real
+        Span/Context objects, zero network I/O.
+        """
         from opentelemetry import context as otel_context
         from opentelemetry import trace as otel_trace
 
@@ -302,16 +327,12 @@ class TestInjectOtelContextReflectsActiveSpan:
             OTEL_CONTEXT_RECORD_ATTR,
             inject_otel_context,
         )
-        from code_indexer.server.telemetry import (
-            get_telemetry_manager,
-            reset_telemetry_manager,
+        from code_indexer.server.telemetry.spans import create_span
+        from tests.unit.server.telemetry.otel_test_support import (
+            active_span_exporter,
         )
-        from code_indexer.server.telemetry.spans import create_span, reset_spans_state
-        from code_indexer.server.utils.config_manager import TelemetryConfig
 
-        config = TelemetryConfig(enabled=True, export_traces=True)
-        get_telemetry_manager(config)
-        try:
+        with active_span_exporter():
             record_without_span = _make_log_record()
             inject_otel_context(record_without_span)
             context_without_span = getattr(
@@ -334,6 +355,3 @@ class TestInjectOtelContextReflectsActiveSpan:
 
             assert not span_without.get_span_context().is_valid
             assert span_with.get_span_context().is_valid
-        finally:
-            reset_spans_state()
-            reset_telemetry_manager()
