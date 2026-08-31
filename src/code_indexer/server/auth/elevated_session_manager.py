@@ -24,6 +24,15 @@ logger = logging.getLogger(__name__)
 _DEFAULT_IDLE_TIMEOUT = 300  # 5 minutes
 _DEFAULT_MAX_AGE = 1800  # 30 minutes
 
+# Bug #1758: explicit busy-wait timeout (seconds) for every raw sqlite3.connect()
+# in this module. Matches the 30s convention DatabaseConnectionManager sets via
+# `PRAGMA busy_timeout = 30000` (storage/database_manager.py:1854), so a brief
+# lock held by a concurrent process (e.g. an auto-updater-triggered server
+# restart briefly overlapping a TOTP elevation request) is absorbed by
+# SQLite's own internal wait instead of raising 'database is locked' after
+# Python's own 5.0s sqlite3.connect() default.
+_SQLITE_LOCK_TIMEOUT_SECONDS = 30.0
+
 _VALID_SCOPES = frozenset({"full", "totp_repair"})
 
 _SCHEMA_SQL = """
@@ -353,7 +362,8 @@ class ElevatedSessionManager:
     # ------------------------------------------------------------------
 
     def _get_conn(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self._db_path)
+        # Bug #1758: explicit busy-wait timeout, see module-level constant comment.
+        conn = sqlite3.connect(self._db_path, timeout=_SQLITE_LOCK_TIMEOUT_SECONDS)
         conn.row_factory = sqlite3.Row
         return conn
 

@@ -300,8 +300,13 @@ def _query_standalone(
         cli_kwargs.setdefault("snippet_lines", 5)
         cli_kwargs.setdefault("regex", False)
 
-        # CRITICAL: Add standalone flag to prevent recursive daemon delegation
-        cli_kwargs["standalone"] = True
+        # NOTE (Bug #1757): standalone must NOT be re-added to cli_kwargs here.
+        # query() has no "standalone" parameter -- it only reads
+        # ctx.obj["standalone"], which is set correctly below. Re-adding it to
+        # cli_kwargs made ctx.invoke(cli_query, **cli_kwargs) pass
+        # standalone=True as an unexpected keyword argument, crashing every
+        # real daemon-unreachable fallback with:
+        #   TypeError: query() got an unexpected keyword argument 'standalone'
 
         # Setup context object with mode detection (required by query command)
         project_root = find_project_root(Path.cwd())

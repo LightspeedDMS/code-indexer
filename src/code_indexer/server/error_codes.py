@@ -5201,6 +5201,12 @@ ERROR_REGISTRY: Dict[str, ErrorDefinition] = {
         severity=Severity.ERROR,
         action="Check FTS index",
     ),
+    "QUERY-MIGRATE-013": ErrorDefinition(
+        code="QUERY-MIGRATE-013",
+        description="Partial multi-repo search failure (some repos degraded)",
+        severity=Severity.WARNING,
+        action="Check the named repos' index health; results are incomplete",
+    ),
     # Story #86: Migrated logger statements - REPO subsystem (repository management)
     "REPO-MIGRATE-001": ErrorDefinition(
         code="REPO-MIGRATE-001",

@@ -32,6 +32,25 @@ _BOOL_OPS: frozenset = frozenset({"OR", "AND", "NOT"})
 # falling back to Python-level regex scanning across broad candidate sets).
 _REGEX_VERBATIM_FIELD = "content_raw_verbatim"
 
+# Bug #1761: field name for verbatim (untokenized) exact path matching.
+#
+# delete_document()/update_document() need to remove ALL prior FTS
+# documents for a given file path before/while a file is (re)indexed, so
+# that reprocessing an already-indexed, unchanged file (e.g. two separate
+# `cidx index` runs against the same on-disk Tantivy index, or an
+# activation branch-delta reindex) never leaves stale duplicate chunk
+# documents behind. The existing "path" field uses the "default"
+# tokenizer, so a delete built via `index.parse_query(file_path, ["path"])`
+# is a TOKEN match, not an exact-path match -- verified empirically that a
+# path whose tokens are a contiguous prefix of another path's tokens (e.g.
+# deleting "src/foo/bar.py" while "src/foo/bar.py.bak" also exists) gets
+# BOTH documents deleted, a real over-deletion risk once delete-by-path is
+# used on every indexed file rather than only in the low-traffic watch-mode
+# path. This field stores each document's path as ONE untokenized term
+# (tokenizer_name="raw", same technique as _REGEX_VERBATIM_FIELD), so a
+# Query.term_query() against it matches only the exact path.
+_PATH_EXACT_FIELD = "path_exact_raw"
+
 # Bug #1497 (follow-up, ReDoS-immunity + accurate highlighting): sentinel for
 # "no precise match position available". Tantivy's DFA-based regex engine
 # already confirms the ACCEPT/REJECT decision for a regex query against the
@@ -256,6 +275,17 @@ class TantivyIndexManager:
         # doesn't have panics at the Rust FFI boundary. None = not yet checked.
         self._verbatim_field_available: Optional[bool] = None
 
+        # Bug #1761: lazily-computed, cached flag for whether the PHYSICAL
+        # on-disk index actually has _PATH_EXACT_FIELD. Legacy indexes built
+        # before this fix lack it; querying a field the physical index
+        # doesn't have panics at the Rust FFI boundary. None = not yet
+        # checked. Named distinctly from the _path_exact_field_available()
+        # METHOD below (mirrors the existing _verbatim_field_available
+        # attribute / _regex_verbatim_field_available() method split) --
+        # an identically-named attribute would shadow the method on this
+        # instance.
+        self._exact_path_field_available: Optional[bool] = None
+
         # Try to import tantivy
         try:
             import tantivy
@@ -320,6 +350,14 @@ class TantivyIndexManager:
         # _regex_verbatim_field_available()).
         schema_builder.add_text_field(
             _REGEX_VERBATIM_FIELD, stored=False, tokenizer_name="raw"
+        )
+
+        # Bug #1761: verbatim (untokenized) field for exact path-based
+        # delete/lookup. MUST be added LAST (after _REGEX_VERBATIM_FIELD) so
+        # existing field IDs are unchanged for indexes built before this fix
+        # (backward compatibility -- see _path_exact_field_available()).
+        schema_builder.add_text_field(
+            _PATH_EXACT_FIELD, stored=False, tokenizer_name="raw"
         )
 
         self._schema = schema_builder.build()
@@ -522,6 +560,13 @@ class TantivyIndexManager:
             tantivy_doc.add_text("path", doc["path"])
             tantivy_doc.add_text("content", doc["content"])
             tantivy_doc.add_text("content_raw", doc["content_raw"])
+
+            # Bug #1761: mirror path into the untokenized exact-match field
+            # used for precise delete-by-path (supersession on reindex).
+            # Safe no-op on a legacy (pre-fix) physical index that lacks
+            # this field -- tantivy silently ignores add_text() calls for
+            # unknown fields.
+            tantivy_doc.add_text(_PATH_EXACT_FIELD, doc["path"])
 
             # Bug #1497: mirror content_raw into the untokenized verbatim
             # field used for regex substring matching. Safe no-op on a
@@ -831,6 +876,139 @@ class TantivyIndexManager:
             self._verbatim_field_available = False
 
         return self._verbatim_field_available
+
+    def _path_exact_field_available(self) -> bool:
+        """
+        Bug #1761: check whether the PHYSICAL on-disk index actually has
+        _PATH_EXACT_FIELD in its schema (module constant defined at top of
+        file; self._exact_path_field_available is the cache attribute,
+        already initialized in __init__).
+
+        Legacy indexes built before this fix lack this field. Querying a
+        field the physical index doesn't have panics at the Rust FFI
+        boundary (see _regex_verbatim_field_available() immediately above
+        for the identical, already-proven Bug #1497 precedent this method
+        mirrors). This check reads meta.json directly (pure JSON parsing,
+        no tantivy API calls, using the `json` module already imported at
+        the top of this file), so detection itself can never panic.
+
+        Cached (in self._exact_path_field_available) after the first call
+        since an open index's on-disk schema is fixed for the lifetime of
+        this manager instance.
+
+        Returns:
+            True if delete/update may safely target _PATH_EXACT_FIELD for
+            an exact-match query.
+        """
+        if self._exact_path_field_available is not None:
+            return self._exact_path_field_available
+
+        meta_path = self.index_dir / "meta.json"
+        try:
+            with open(meta_path, "r") as f:
+                meta = json.load(f)
+            field_names = {field.get("name") for field in meta.get("schema", [])}
+            self._exact_path_field_available = _PATH_EXACT_FIELD in field_names
+        except Exception as e:
+            logger.warning(
+                "Could not determine exact path field availability "
+                "from %s (falling back to legacy tokenized path matching): %s",
+                meta_path,
+                e,
+            )
+            self._exact_path_field_available = False
+
+        return self._exact_path_field_available
+
+    def schema_needs_rebuild(self) -> bool:
+        """
+        Bug #1763: True if an EXISTING on-disk index at self.index_dir has
+        a stale (pre-#1761) physical schema and must be rebuilt via
+        initialize_index(create_new=True) before reuse -- otherwise
+        #1761's dedup fix (delete_document_deferred(), gated on
+        _path_exact_field_available()) stays a permanent no-op on this
+        index and duplicate FTS rows keep accumulating forever.
+
+        Pure meta.json read (no tantivy API calls, so it can never
+        panic), safely callable BEFORE initialize_index(). Deliberately
+        uncached and independent of self._exact_path_field_available:
+        a caller that finds the schema stale is about to trigger a real
+        rebuild on this same instance, and caching "legacy" here would
+        leave a stale answer baked in for this instance's lifetime even
+        after the rebuild adds the field.
+
+        Returns:
+            True when meta.json exists and can be parsed but the schema
+            lacks _PATH_EXACT_FIELD.
+            False when no physical index exists yet (callers already
+            have their own "doesn't exist" branch), the schema is
+            already current, OR meta.json exists but can't be read/
+            parsed (MEDIUM-3, #1763 code review: fail toward the
+            CONSERVATIVE answer -- same fail-safe direction as the
+            sibling _path_exact_field_available() method above -- so a
+            transient read glitch (OSError, PermissionError, a partial
+            read mid-write) can never trigger a destructive rmtree. A
+            genuinely legacy index that happens to hit a transient read
+            error here simply gets re-detected as stale on the NEXT
+            call once the transient condition clears; the reverse
+            (fail toward True) risked deleting a perfectly healthy
+            index on a one-off filesystem hiccup).
+        """
+        meta_path = self.index_dir / "meta.json"
+        if not meta_path.exists():
+            return False
+
+        try:
+            with open(meta_path, "r") as f:
+                meta = json.load(f)
+            field_names = {field.get("name") for field in meta.get("schema", [])}
+        except Exception as e:
+            logger.warning(
+                "Could not determine FTS schema compatibility from %s "
+                "(assuming current schema -- conservative, never "
+                "triggers a destructive rebuild from a transient read "
+                "error): %s",
+                meta_path,
+                e,
+            )
+            return False
+
+        return _PATH_EXACT_FIELD not in field_names
+
+    def _build_path_delete_query(self, file_path: str) -> Any:
+        """
+        Bug #1761: build a Tantivy Query (return type Any -- Query is not
+        importable at module scope here per this file's established lazy
+        `from tantivy import Query as TantivyQuery` convention, used
+        identically elsewhere in this same file) that matches ALL FTS
+        documents for exactly `file_path`, for use with
+        delete_documents_by_query() in delete_document()/update_document().
+
+        Prefers an EXACT term_query against the untokenized
+        _PATH_EXACT_FIELD when the physical index has it. Falls back to the
+        legacy tokenized `index.parse_query(file_path, ["path"])` for
+        indexes built before this fix -- preserves pre-fix behavior exactly
+        rather than crashing on a missing field.
+
+        Note: the legacy fallback is a TOKEN match on the "path" field's
+        "default" tokenizer, not an exact match -- it can over-match a
+        different file whose path tokens are a contiguous prefix of another
+        file's path tokens (verified empirically, e.g. deleting
+        "src/foo/bar.py" while "src/foo/bar.py.bak" also exists deletes
+        both). This is accepted only as a legacy-index compatibility path;
+        every index built after this fix uses the exact match above.
+        """
+        assert self._index is not None, (
+            "Index must be initialized when writer is initialized"
+        )
+        assert self._schema is not None, "Schema must be initialized"
+
+        if self._path_exact_field_available():
+            from tantivy import Query as TantivyQuery
+
+            return TantivyQuery.term_query(self._schema, _PATH_EXACT_FIELD, file_path)
+
+        return self._index.parse_query(file_path, ["path"])
 
     def _wrap_regex_for_verbatim_match(self, pattern: str, case_sensitive: bool) -> str:
         """
@@ -1621,7 +1799,7 @@ class TantivyIndexManager:
                 assert self._index is not None, (
                     "Index must be initialized when writer is initialized"
                 )
-                delete_query = self._index.parse_query(file_path, ["path"])
+                delete_query = self._build_path_delete_query(file_path)
                 self._writer.delete_documents_by_query(delete_query)
 
             # Add updated version (has its own lock)
@@ -1656,13 +1834,26 @@ class TantivyIndexManager:
                 "Index writer not initialized. Call initialize_index() first."
             )
 
+        # Bug #1764: on a legacy physical index, the fallback path query
+        # is TOKENIZED, not exact, and can over-match a sibling document.
+        # Skip rather than over-match, mirroring
+        # delete_document_deferred()'s existing safety behavior.
+        if not self._path_exact_field_available():
+            logger.debug(
+                "Skipping FTS delete for %s: physical index lacks %s "
+                "(legacy pre-#1761 schema)",
+                file_path,
+                _PATH_EXACT_FIELD,
+            )
+            return
+
         try:
             with self._lock:
                 # Delete document using query-based deletion (idempotent)
                 assert self._index is not None, (
                     "Index must be initialized when writer is initialized"
                 )
-                delete_query = self._index.parse_query(file_path, ["path"])
+                delete_query = self._build_path_delete_query(file_path)
                 self._writer.delete_documents_by_query(delete_query)
 
                 # Commit atomically (5-50ms target): use _commit_inner() so that
@@ -1673,6 +1864,47 @@ class TantivyIndexManager:
 
         except Exception as e:
             logger.error(f"Failed to delete document {file_path}: {e}")
+            raise
+
+    def delete_document_deferred(self, file_path: str) -> None:
+        """Bug #1761 CRITICAL 1/2 fix: queue a delete-by-path on the
+        writer WITHOUT committing (no _commit_inner()), and skip entirely
+        on a legacy on-disk index lacking _PATH_EXACT_FIELD (see the
+        module-level _PATH_EXACT_FIELD comment and delete_document()'s
+        docstring for the full commit-cost and over-deletion rationale).
+
+        Raises:
+            RuntimeError: If writer is not initialized (propagates --
+                a genuine wiring/lifecycle bug, not swallowed here).
+            ValueError: If file_path is empty/None.
+        """
+        if not file_path:
+            raise ValueError("file_path must be a non-empty string")
+
+        if self._writer is None:
+            raise RuntimeError(
+                "Index writer not initialized. Call initialize_index() first."
+            )
+
+        if not self._path_exact_field_available():
+            logger.debug(
+                "Skipping deferred FTS delete for %s: physical index lacks "
+                "%s (legacy pre-#1761 schema)",
+                file_path,
+                _PATH_EXACT_FIELD,
+            )
+            return
+
+        try:
+            with self._lock:
+                assert self._index is not None, (
+                    "Index must be initialized when writer is initialized"
+                )
+                delete_query = self._build_path_delete_query(file_path)
+                self._writer.delete_documents_by_query(delete_query)
+            logger.debug(f"Deferred delete queued (uncommitted) for: {file_path}")
+        except Exception as e:
+            logger.error(f"Failed to queue deferred delete for {file_path}: {e}")
             raise
 
     def rebuild_from_documents_background(

@@ -482,6 +482,13 @@ class DataRetentionScheduler:
         Mirrors the Bug #1068 safe-wrapper pattern: catches and logs any
         exception, appends 'token_blacklist' to failed_tables on error, and
         returns 0 so the rest of the cleanup cycle is never aborted.
+
+        Bug #1758: transient SQLite lock contention during a restart window
+        is absorbed at the connection level (TokenBlacklist._sqlite_prune's
+        raw sqlite3.connect() now sets an explicit busy-wait timeout, see
+        server/app.py's _SQLITE_LOCK_TIMEOUT_SECONDS), so no retry is needed
+        here -- a genuine, unrecovered exception is still caught and
+        recorded as a per-table failure.
         """
         try:
             from code_indexer.server.app import get_token_blacklist
@@ -510,6 +517,12 @@ class DataRetentionScheduler:
         Mirrors the Bug #1068 safe-wrapper pattern: catches and logs any
         exception, appends 'elevated_sessions' to failed_tables on error, and
         returns 0 so the rest of the cleanup cycle is never aborted.
+
+        Bug #1758: transient SQLite lock contention during a restart window
+        is absorbed at the connection level (ElevatedSessionManager._get_conn's
+        raw sqlite3.connect() now sets an explicit busy-wait timeout), so no
+        retry is needed here -- a genuine, unrecovered exception is still
+        caught and recorded as a per-table failure.
         """
         try:
             from code_indexer.server.auth.elevated_session_manager import (
@@ -545,6 +558,12 @@ class DataRetentionScheduler:
         Mirrors the Bug #1068 safe-wrapper pattern: catches and logs any
         exception, appends 'oidc_state_tokens' to failed_tables on error, and
         returns 0 so the rest of the cleanup cycle is never aborted.
+
+        Bug #1758: transient SQLite lock contention during a restart window
+        is absorbed at the connection level (StateManager._get_conn's raw
+        sqlite3.connect() now sets an explicit busy-wait timeout), so no
+        retry is needed here -- a genuine, unrecovered exception is still
+        caught and recorded as a per-table failure.
         """
         try:
             from code_indexer.server.auth.oidc import routes as oidc_routes

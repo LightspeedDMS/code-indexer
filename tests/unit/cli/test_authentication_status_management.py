@@ -17,6 +17,7 @@ Tests are organized by acceptance criteria:
 - AC5: Token Lifecycle Management
 """
 
+import dataclasses
 import json
 import os
 import tempfile
@@ -76,7 +77,13 @@ class TestAuthenticationStatusCommands:
         overridable per test."""
         from code_indexer.api_clients.auth_client import AuthStatus
 
-        defaults = dict(
+        # Explicit, correctly-typed base construction (not a **dict spread
+        # of a heterogeneous-value dict(), which mypy widens to
+        # dict[str, object] and can't verify field-by-field against the
+        # dataclass constructor). Per-test overrides are then applied via
+        # dataclasses.replace(), preserving the exact overridable-per-test
+        # behavior every call site relies on.
+        base = AuthStatus(
             authenticated=True,
             username="test_user",
             role="user",
@@ -88,8 +95,7 @@ class TestAuthenticationStatusCommands:
             permissions=["read"],
             server_reachable=True,
         )
-        defaults.update(overrides)
-        return AuthStatus(**defaults)
+        return dataclasses.replace(base, **overrides)
 
     def _invoke_status_with_mocked_auth(self, project_dir, status, args):
         """Invoke the CLI with create_auth_client mocked to return a client
@@ -123,7 +129,10 @@ class TestAuthenticationStatusCommands:
         per test."""
         from code_indexer.api_clients.auth_client import CredentialHealth
 
-        defaults = dict(
+        # Same pattern as _make_auth_status above: explicit, correctly-typed
+        # base construction, then dataclasses.replace() applies overrides --
+        # avoids the dict[str, object]-widened **spread mypy can't verify.
+        base = CredentialHealth(
             healthy=True,
             issues=[],
             encryption_valid=True,
@@ -132,8 +141,7 @@ class TestAuthenticationStatusCommands:
             file_permissions_correct=True,
             recovery_suggestions=[],
         )
-        defaults.update(overrides)
-        return CredentialHealth(**defaults)
+        return dataclasses.replace(base, **overrides)
 
     def _invoke_health_with_mocked_auth(self, project_dir, health, args):
         """Invoke the CLI with create_auth_client mocked to return a client
@@ -509,9 +517,7 @@ class TestAuthenticationStatusCommands:
     def test_auth_status_verbose_displays_token_timestamps(self):
         """Test that verbose mode displays token issuance and refresh timestamps."""
         project_dir = self.create_temp_project_dir()
-        status = self._make_auth_status(
-            last_refreshed=datetime(2024, 1, 15, 10, 30, 0)
-        )
+        status = self._make_auth_status(last_refreshed=datetime(2024, 1, 15, 10, 30, 0))
         result = self._invoke_status_with_mocked_auth(
             project_dir, status, ["auth", "status", "--verbose"]
         )

@@ -41,9 +41,7 @@ class TestAdminPasswordChangeCommand:
     def test_admin_change_password_command_exists(self):
         """Test that change-password command is registered correctly."""
         runner = CliRunner()
-        result = _invoke_remote(
-            runner, ["admin", "users", "change-password", "--help"]
-        )
+        result = _invoke_remote(runner, ["admin", "users", "change-password", "--help"])
 
         # Should show help without error
         assert result.exit_code == 0
@@ -195,9 +193,7 @@ class TestAdminPasswordChangeCommand:
     def test_admin_change_password_help_contains_examples(self):
         """Test that help text contains usage examples."""
         runner = CliRunner()
-        result = _invoke_remote(
-            runner, ["admin", "users", "change-password", "--help"]
-        )
+        result = _invoke_remote(runner, ["admin", "users", "change-password", "--help"])
 
         assert result.exit_code == 0
         assert "Examples:" in result.output

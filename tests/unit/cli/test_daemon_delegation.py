@@ -915,3 +915,72 @@ class TestWatchDelegation:
 
                         assert result == 0
                         assert mock_standalone.call_count == 1
+
+
+class TestQueryStandaloneKwargCollisionBug1757:
+    """Regression test for Bug #1757.
+
+    cli_daemon_delegation.py's _query_standalone() stripped "standalone" out
+    of cli_kwargs (correctly, since the real query() CLI command has no
+    "standalone" parameter -- it only reads ctx.obj["standalone"]), but then
+    immediately re-added cli_kwargs["standalone"] = True right back into the
+    same dict that gets splatted into ctx.invoke(cli_query, **cli_kwargs).
+    Every real daemon-unreachable fallback therefore crashed with:
+        TypeError: query() got an unexpected keyword argument 'standalone'
+    instead of the intended graceful standalone fallback.
+
+    All the existing tests in this module mock out _query_standalone itself
+    (or _query_via_daemon calling into a mocked _query_standalone), so none
+    of them ever exercise the real ctx.invoke(cli_query, ...) call where the
+    kwarg collision actually happens. This test calls the REAL, unmocked
+    _query_standalone() to reproduce the crash exactly.
+    """
+
+    def test_query_standalone_does_not_raise_standalone_kwarg_type_error(
+        self, tmp_path, monkeypatch
+    ):
+        """Real regression reproduction of Bug #1757.
+
+        Sets up a minimal real local-mode project (a fresh tmp_path with a
+        bare .code-indexer/config.json) so mode detection resolves to
+        "local" -- matching the real-world scenario this bug affects: a
+        configured local-mode project whose daemon becomes unreachable.
+        Global CLI config and reranker sin-bin persistence are redirected
+        into tmp_path via their documented test-isolation env vars
+        (CIDX_GLOBAL_CONFIG_PATH, XDG_CONFIG_HOME) so nothing is written
+        outside the test's own temp directory, and no embedding provider
+        API keys are present so the real call stays fully offline.
+
+        Whatever happens further down the real query() command body (e.g.
+        "no index found") is an acceptable real outcome once the
+        standalone-kwarg collision is fixed -- including a clean SystemExit.
+        The only thing this test forbids is the specific
+        TypeError: query() got an unexpected keyword argument 'standalone'.
+        """
+        from code_indexer.cli_daemon_delegation import _query_standalone
+
+        project_dir = tmp_path / "project"
+        code_indexer_dir = project_dir / ".code-indexer"
+        code_indexer_dir.mkdir(parents=True)
+        (code_indexer_dir / "config.json").write_text("{}")
+
+        monkeypatch.chdir(project_dir)
+        monkeypatch.setenv(
+            "CIDX_GLOBAL_CONFIG_PATH", str(tmp_path / "global_config.json")
+        )
+        monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg_config"))
+        monkeypatch.delenv("VOYAGE_API_KEY", raising=False)
+        monkeypatch.delenv("CO_API_KEY", raising=False)
+
+        with patch("rich.console.Console.print") as mock_print:
+            try:
+                _query_standalone("test query", fts=False, semantic=True, limit=10)
+            except SystemExit:
+                # A clean CLI exit (e.g. "no index found") is an acceptable
+                # real outcome once the standalone-kwarg collision is fixed.
+                pass
+
+        printed_text = " ".join(
+            str(call_args) for call_args in mock_print.call_args_list
+        )
+        assert "unexpected keyword argument 'standalone'" not in printed_text

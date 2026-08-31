@@ -83,7 +83,7 @@ class ChunkStoreThreadCache:
         self._max_entries = max_entries_per_thread
         self._local = threading.local()
 
-    def _entries(self) -> "OrderedDict[str, _CacheEntry]":
+    def _entries(self) -> "OrderedDict[Tuple[str, bool], _CacheEntry]":
         entries = getattr(self._local, "entries", None)
         if entries is None:
             entries = OrderedDict()
@@ -91,7 +91,11 @@ class ChunkStoreThreadCache:
         return entries
 
     def get_or_open(
-        self, db_path: Union[str, Path], collection_path: str
+        self,
+        db_path: Union[str, Path],
+        collection_path: str,
+        *,
+        read_only: bool = False,
     ) -> ChunkStore:
         """Return this THREAD's cached :class:`ChunkStore` for ``db_path``,
         opening (or reopening, on a genuine mtime change) as needed.
@@ -101,9 +105,13 @@ class ChunkStoreThreadCache:
             collection_path: The collection directory path, forwarded to
                 ``open_chunk_store_for_path()`` for its mutable-vs-immutable
                 decision -- unchanged from the pre-cache call site.
+            read_only: Bug #1760 -- forwarded to ``open_chunk_store_for_path
+                (..., read_only=read_only)``; also part of the cache key so
+                a mutable and a read-only handle for the same db_path are
+                never confused. Read-only callers MUST pass True.
         """
         entries = self._entries()
-        key = str(db_path)
+        key = (str(db_path), read_only)
 
         try:
             current_mtime: Optional[int] = os.stat(db_path).st_mtime_ns
@@ -127,7 +135,7 @@ class ChunkStoreThreadCache:
             _safe_close(store)
             del entries[key]
 
-        store = open_chunk_store_for_path(db_path, collection_path)
+        store = open_chunk_store_for_path(db_path, collection_path, read_only=read_only)
         try:
             fresh_mtime: Optional[int] = os.stat(db_path).st_mtime_ns
         except OSError:

@@ -8,7 +8,8 @@ Reproduces and fixes identified CLI command failures:
 Following TDD methodology: Red-Green-Refactor cycles.
 """
 
-from unittest.mock import Mock, patch, AsyncMock
+import pytest
+from unittest.mock import Mock, patch
 from click.testing import CliRunner
 from pathlib import Path
 import sys
@@ -21,6 +22,22 @@ from code_indexer.api_clients.base_client import APIClientError
 
 class TestCLIIssuesFix:
     """Test class for reproducing and fixing critical CLI issues."""
+
+    @pytest.fixture(autouse=True)
+    def mock_remote_mode_gate(self):
+        """Auto-mock the require_mode("remote") gate on repos_group/admin_group.
+
+        disabled_commands.py independently binds detect_current_mode via its
+        own module-level import, so it is unaffected by patching
+        find_project_root at code_indexer.mode_detection.command_mode_detector
+        (see #1742). Without this, every gated group invocation raises
+        DisabledCommandError before the mocked API clients are ever reached.
+        """
+        with patch(
+            "code_indexer.disabled_commands.detect_current_mode",
+            return_value="remote",
+        ):
+            yield
 
     def setup_method(self):
         """Setup test environment for each test."""
@@ -35,7 +52,7 @@ class TestCLIIssuesFix:
     @patch("code_indexer.remote.sync_execution._load_remote_configuration")
     @patch("code_indexer.remote.sync_execution._load_and_decrypt_credentials")
     @patch("code_indexer.mode_detection.command_mode_detector.find_project_root")
-    @patch("code_indexer.api_clients.repos_client.ReposAPIClient")
+    @patch("code_indexer.cli.ReposAPIClient")
     def test_repos_list_pydantic_validation_error_reproduction(
         self,
         mock_repos_client_class,
@@ -92,7 +109,7 @@ class TestCLIIssuesFix:
                 # Convert to the actual error pattern we see in production
                 raise APIClientError(f"Invalid response format: {e}")
 
-        mock_client.list_activated_repositories = AsyncMock(
+        mock_client.list_activated_repositories = Mock(
             side_effect=simulate_pydantic_error
         )
 
@@ -116,10 +133,8 @@ class TestCLIIssuesFix:
     @patch("code_indexer.remote.credential_manager.ProjectCredentialManager")
     @patch("code_indexer.remote.credential_manager.load_encrypted_credentials")
     @patch("code_indexer.api_clients.admin_client.AdminAPIClient")
-    @patch("code_indexer.utils.async_helper.run_async")
     def test_admin_repos_list_credential_manager_type_error_reproduction(
         self,
-        mock_run_async,
         mock_admin_client_class,
         mock_load_credentials,
         mock_credential_manager_class,
@@ -133,7 +148,10 @@ class TestCLIIssuesFix:
         """
         # Setup basic mocks
         mock_find_project_root.return_value = Path("/fake/project")
-        mock_load_config.return_value = {"server_url": "http://localhost:8000"}
+        mock_load_config.return_value = {
+            "server_url": "http://localhost:8000",
+            "username": "admin",
+        }
 
         # ISSUE: Create scenario where ProjectCredentialManager object is incorrectly used
         mock_credential_manager = Mock()
@@ -147,24 +165,15 @@ class TestCLIIssuesFix:
         mock_admin_client = Mock()
         mock_admin_client_class.return_value = mock_admin_client
 
-        # Simulate the type error - this happens when credential_manager object
-        # is used in a path operation instead of a string path
+        # Simulate the type error that occurs in production when a
+        # ProjectCredentialManager object is used with the / operator
+        # (path division) instead of a proper string path.
         def simulate_type_error(*args, **kwargs):
-            # Simulate the error that occurs when ProjectCredentialManager object
-            # is used with / operator (path division) instead of proper string path
-            credential_manager = mock_credential_manager  # This is the object
-            try:
-                # This line would cause the type error in real code
-                _ = credential_manager / "some_path"  # TypeError!
-                return {"golden_repositories": [], "total": 0}
-            except TypeError as e:
-                if "unsupported operand type" in str(
-                    e
-                ) and "ProjectCredentialManager" in str(e):
-                    raise e
-                return {"golden_repositories": [], "total": 0}
+            raise TypeError(
+                "unsupported operand type(s) for /: 'ProjectCredentialManager' and 'str'"
+            )
 
-        mock_run_async.side_effect = simulate_type_error
+        mock_admin_client.list_golden_repositories.side_effect = simulate_type_error
 
         # Execute the command and expect it to fail with TypeError
         result = self.runner.invoke(cli, ["admin", "repos", "list"])
@@ -180,21 +189,21 @@ class TestCLIIssuesFix:
         # Verify the credential manager was instantiated
         mock_credential_manager_class.assert_called_once()
 
-    @patch("code_indexer.cli.CommandModeDetector")
-    @patch("code_indexer.cli.find_project_root")
-    @patch("code_indexer.cli._load_remote_configuration")
-    @patch("code_indexer.cli._load_and_decrypt_credentials")
+    @patch("code_indexer.mode_detection.command_mode_detector.find_project_root")
+    @patch("code_indexer.remote.sync_execution._load_remote_configuration")
+    @patch("code_indexer.remote.sync_execution._load_and_decrypt_credentials")
     def test_api_client_resource_cleanup_warnings_reproduction(
         self,
         mock_load_credentials,
         mock_load_config,
         mock_find_project_root,
-        mock_detector,
     ):
-        """Test that reproduces API client resource cleanup warnings.
+        """Regression test for API client resource cleanup.
 
-        ISSUE: "CIDXRemoteAPIClient was not properly closed" warnings appear
-        after successful CLI operations due to missing async context management.
+        ORIGINAL ISSUE: "CIDXRemoteAPIClient was not properly closed" warnings
+        used to appear after successful CLI operations due to missing cleanup.
+        list_repos() now correctly calls client.close() in a finally block --
+        this test guards against that regressing.
         """
         # Setup mocks for CLI prerequisites
         mock_find_project_root.return_value = Path("/fake/project")
@@ -203,7 +212,6 @@ class TestCLIIssuesFix:
             "username": "test",
             "access_token": "fake",
         }
-        mock_detector.return_value.determine_command_mode.return_value = "remote"
 
         # Capture warnings to detect resource cleanup issues
         import warnings
@@ -213,44 +221,31 @@ class TestCLIIssuesFix:
 
             # Create a real client instance to test resource management
             # This will help us detect actual resource cleanup warnings
-            with patch(
-                "code_indexer.api_clients.repos_client.ReposAPIClient"
-            ) as mock_client_class:
+            with patch("code_indexer.cli.ReposAPIClient") as mock_client_class:
                 mock_client = Mock()
-
-                # Simulate a client that has resources that need cleanup
-                async def mock_list_repos(*args, **kwargs):
-                    return []
-
-                mock_client.list_activated_repositories = AsyncMock(return_value=[])
-                mock_client.close = AsyncMock()  # Client should have close method
+                mock_client.list_activated_repositories = Mock(return_value=[])
+                mock_client.close = Mock()  # Client should have close method
                 mock_client_class.return_value = mock_client
 
                 # Execute command
                 result = self.runner.invoke(cli, ["repos", "list"])
 
-                # The command might succeed but we expect resource warnings
-                # Check if close() was called for proper cleanup
-                if result.exit_code == 0:
-                    # If command succeeded, check for missing cleanup
-                    mock_client.close.assert_not_called()  # This indicates the problem
+                assert result.exit_code == 0, (
+                    f"Command should succeed, got: {result.output}"
+                )
 
-                # Check for resource-related warnings in captured warnings
+                # Client should always be closed for proper resource cleanup
+                mock_client.close.assert_called_once()
+
+                # No resource-cleanup warnings should be emitted
                 resource_warnings = [
                     w
                     for w in warning_list
                     if "not properly closed" in str(w.message)
                     or "ResourceWarning" in str(type(w.message))
                 ]
-
-                # Test should detect resource cleanup issues
-                # Either warnings are captured OR close() method not called
-                cleanup_issue_detected = (
-                    len(resource_warnings) > 0 or not mock_client.close.called
-                )
-
-                assert cleanup_issue_detected, (
-                    "Should detect API client resource cleanup issues"
+                assert not resource_warnings, (
+                    f"Unexpected resource cleanup warnings: {resource_warnings}"
                 )
 
     def test_integration_repos_list_should_work_after_fix(self):
@@ -272,9 +267,7 @@ class TestCLIIssuesFix:
             patch(
                 "code_indexer.remote.sync_execution._load_and_decrypt_credentials"
             ) as mock_creds,
-            patch(
-                "code_indexer.api_clients.repos_client.ReposAPIClient"
-            ) as mock_client_class,
+            patch("code_indexer.cli.ReposAPIClient") as mock_client_class,
         ):
             # Setup mocks
             mock_find_root.return_value = Path("/fake/project")
@@ -286,7 +279,7 @@ class TestCLIIssuesFix:
             mock_client_class.return_value = mock_client
 
             # After fix: Server should return properly formatted ActivatedRepository objects
-            mock_client.list_activated_repositories = AsyncMock(
+            mock_client.list_activated_repositories = Mock(
                 return_value=[
                     ActivatedRepository(
                         alias="my-project",
@@ -332,11 +325,13 @@ class TestCLIIssuesFix:
             patch(
                 "code_indexer.api_clients.admin_client.AdminAPIClient"
             ) as mock_admin_class,
-            patch("code_indexer.utils.async_helper.run_async") as mock_run_async,
         ):
             # Setup mocks
             mock_find_root.return_value = Path("/fake/project")
-            mock_config.return_value = {"server_url": "http://localhost:8000"}
+            mock_config.return_value = {
+                "server_url": "http://localhost:8000",
+                "username": "admin",
+            }
             mock_creds.return_value = {
                 "username": "admin",
                 "access_token": "fake-admin-token",
@@ -350,7 +345,7 @@ class TestCLIIssuesFix:
             mock_admin_class.return_value = mock_admin_client
 
             # After fix: No type errors, proper response
-            mock_run_async.return_value = {
+            mock_admin_client.list_golden_repositories.return_value = {
                 "golden_repositories": [
                     {
                         "alias": "test-repo",

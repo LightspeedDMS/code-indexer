@@ -404,10 +404,84 @@ class SmartIndexer(HighThroughputProcessor):
                     # FTS uses meta.json as the marker file for existing indexes
                     fts_index_exists = (fts_index_dir / "meta.json").exists()
 
-                    # Only force full rebuild if forcing full reindex or index doesn't exist
-                    create_new_fts = force_full or not fts_index_exists
+                    # Bug #1763: an existing index built before Bug #1761
+                    # introduced _PATH_EXACT_FIELD lacks that field forever
+                    # unless forced through a one-time rebuild -- #1761's
+                    # dedup fix is a safe no-op on such a stale-schema
+                    # index, so duplicates would silently keep
+                    # accumulating on every already-indexed repo. Detect +
+                    # self-heal automatically (no new setting).
+                    fts_schema_stale = fts_index_exists and (
+                        fts_manager.schema_needs_rebuild()
+                    )
+                    if fts_schema_stale:
+                        # Tantivy refuses to build the new schema in place
+                        # over an on-disk index whose physical schema
+                        # differs ("Schema error: An index exists but the
+                        # schema does not match.") -- the directory must
+                        # be cleared first, same pattern already used by
+                        # cli.py's rebuild-fts command and the daemon's
+                        # exposed_rebuild_fts_index() before any
+                        # create_new=True call.
+                        import shutil
+
+                        logger.info(
+                            f"FTS index at {fts_index_dir} has a stale "
+                            f"pre-#1761 schema -- clearing for a one-time "
+                            f"rebuild so the dedup fix takes effect"
+                        )
+
+                        try:
+                            shutil.rmtree(fts_index_dir)
+                        except OSError as e:
+                            # MEDIUM-4 (#1763 code review): a partial
+                            # rmtree (disk full, EACCES mid-delete) can
+                            # leave the index directory in a half-deleted
+                            # state. Log this distinctly and loudly
+                            # (ERROR, with the specific "rebuild step
+                            # itself failed" framing) before re-raising,
+                            # so this is distinguishable in logs from an
+                            # unrelated FTS setup failure caught by the
+                            # generic handler below -- that handler still
+                            # degrades gracefully (fts_manager=None), this
+                            # just makes the half-deleted-state risk loud.
+                            logger.error(
+                                f"FTS stale-schema rebuild failed while "
+                                f"clearing {fts_index_dir} -- the index "
+                                f"directory may be left in a "
+                                f"partially-deleted state: {e}"
+                            )
+                            raise
+
+                    # Only force full rebuild if forcing full reindex,
+                    # index doesn't exist, or the existing index's
+                    # physical schema is stale (Bug #1763).
+                    create_new_fts = (
+                        force_full or not fts_index_exists or fts_schema_stale
+                    )
 
                     fts_manager.initialize_index(create_new=create_new_fts)
+
+                    # CRITICAL-1 (#1763 code review): a stale-schema or
+                    # brand-new FTS index was just wiped/created empty
+                    # above. _do_incremental_index()/_do_resume_interrupted()
+                    # (the paths a normal `cidx index` run with a
+                    # non-empty changed-files set takes) only re-add the
+                    # CHANGED subset of files to fts_manager -- so without
+                    # this, every untouched file's FTS entries would be
+                    # gone forever, not just re-added later. Repopulate
+                    # eagerly, right here, from every file on disk,
+                    # BEFORE any changed-files-only processing runs;
+                    # per-file supersession (delete_document_deferred()
+                    # then add_document(), file_chunking_manager.py) makes
+                    # re-adding the same changed files afterward safe --
+                    # no duplicate rows. Skipped for force_full: that path
+                    # already walks every file itself via _do_full_index()
+                    # and would otherwise pay this cost twice.
+                    if create_new_fts and not force_full:
+                        self._populate_fts_from_all_files(
+                            fts_manager, progress_callback
+                        )
 
                     if progress_callback:
                         if create_new_fts:
@@ -648,7 +722,6 @@ class SmartIndexer(HighThroughputProcessor):
                 quiet,
                 vector_thread_count,
                 fts_manager,
-                create_new_fts,
             )
 
         except KeyboardInterrupt:
@@ -1039,7 +1112,6 @@ class SmartIndexer(HighThroughputProcessor):
         quiet: bool = False,
         vector_thread_count: Optional[int] = None,
         fts_manager=None,
-        create_new_fts: bool = False,
     ) -> ProcessingStats:
         """Perform incremental indexing."""
 
@@ -1222,10 +1294,17 @@ class SmartIndexer(HighThroughputProcessor):
                 self.progressive_metadata.update_commit_watermark(
                     current_branch, current_commit
                 )
-            # FTS bootstrap: if brand-new FTS index requested but nothing to embed,
-            # still build FTS from all files on disk.
-            if fts_manager is not None and create_new_fts:
-                self._populate_fts_from_all_files(fts_manager, progress_callback)
+            # FTS bootstrap: NOTE, #1763 code review (CRITICAL-1) -- the
+            # full-from-disk repopulation for a brand-new/rebuilt FTS
+            # index now happens EAGERLY and UNCONDITIONALLY in
+            # smart_index() itself, immediately after
+            # fts_manager.initialize_index(create_new=create_new_fts),
+            # rather than only here in the zero-changed-files branch.
+            # Calling _populate_fts_from_all_files() a second time here
+            # would double-add every file's FTS document (this call site
+            # has no delete-before-add supersession, unlike the per-file
+            # processing path) -- so this is deliberately NOT called
+            # again.
             # CRITICAL: Don't call complete_indexing() here as no indexing session was started
             # This preserves existing metadata when system is already up-to-date
             return ProcessingStats()

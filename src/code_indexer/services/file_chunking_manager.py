@@ -1023,35 +1023,81 @@ class FileChunkingManager:
 
                     # Add FTS documents if FTS manager is available
                     if self.fts_manager:
-                        for i, point in enumerate(file_points):
-                            try:
-                                # Extract identifiers from chunk text (simple whitespace split)
-                                chunk_text = point.get("text", "")
-                                identifiers = chunk_text.split()
+                        # Bug #1761: delete any pre-existing FTS documents for
+                        # this file BEFORE adding the fresh chunks below (see
+                        # TantivyIndexManager.delete_document_deferred()'s
+                        # docstring for the commit-cost/legacy-index
+                        # rationale for using the deferred variant here
+                        # rather than delete_document()). Unlike the vector
+                        # store (deterministic point_id -> upsert naturally
+                        # dedups), Tantivy's add_document() has no
+                        # document-id concept -- every call appends a new
+                        # document. Idempotent no-op the first time a file
+                        # is indexed (nothing to delete yet).
+                        relative_path_for_fts = str(
+                            file_path.relative_to(self.codebase_dir)
+                        )
+                        fts_pre_delete_succeeded = True
+                        try:
+                            self.fts_manager.delete_document_deferred(
+                                relative_path_for_fts
+                            )
+                        except RuntimeError:
+                            # Code-review CRITICAL 3: a RuntimeError here
+                            # means the writer isn't initialized -- a
+                            # genuine wiring/lifecycle bug, not a transient
+                            # per-file issue. Swallowing it would silently
+                            # reproduce Bug #1761's duplicate-row defect for
+                            # every file processed this run.
+                            raise
+                        except Exception as e:
+                            # Code-review CRITICAL 3: any other (transient)
+                            # pre-delete failure must not fall through into
+                            # the add loop below -- doing so would add
+                            # fresh chunks on top of undeleted stale ones,
+                            # reproducing Bug #1761's exact symptom. Skip
+                            # re-indexing this file's FTS documents this
+                            # pass instead (stale-but-unique beats
+                            # duplicated); ERROR (not WARNING) so it's
+                            # visible to an operator.
+                            fts_pre_delete_succeeded = False
+                            logger.error(
+                                f"FTS pre-delete failed for {file_path}; "
+                                f"skipping FTS re-indexing for this file "
+                                f"this pass to avoid duplicate rows: {e}"
+                            )
 
-                                # Create FTS document
-                                fts_doc = {
-                                    "path": str(
-                                        file_path.relative_to(self.codebase_dir)
-                                    ),
-                                    "content": chunk_text,
-                                    "content_raw": chunk_text,
-                                    "identifiers": identifiers,
-                                    "line_start": point["metadata"].get(
-                                        "line_start", 0
-                                    ),
-                                    "line_end": point["metadata"].get("line_end", 0),
-                                    "language": file_path.suffix.lstrip(".") or "txt",
-                                }
+                        if fts_pre_delete_succeeded:
+                            for i, point in enumerate(file_points):
+                                try:
+                                    # Extract identifiers from chunk text (simple whitespace split)
+                                    chunk_text = point.get("text", "")
+                                    identifiers = chunk_text.split()
 
-                                # Add to FTS index
-                                self.fts_manager.add_document(fts_doc)
-                            except Exception as e:
-                                # Log FTS errors but don't fail semantic indexing
-                                logger.warning(
-                                    f"FTS indexing failed for chunk {i} of {file_path}: {e}"
-                                )
-                                # Continue with next chunk
+                                    # Create FTS document
+                                    fts_doc = {
+                                        "path": relative_path_for_fts,
+                                        "content": chunk_text,
+                                        "content_raw": chunk_text,
+                                        "identifiers": identifiers,
+                                        "line_start": point["metadata"].get(
+                                            "line_start", 0
+                                        ),
+                                        "line_end": point["metadata"].get(
+                                            "line_end", 0
+                                        ),
+                                        "language": file_path.suffix.lstrip(".")
+                                        or "txt",
+                                    }
+
+                                    # Add to FTS index
+                                    self.fts_manager.add_document(fts_doc)
+                                except Exception as e:
+                                    # Log FTS errors but don't fail semantic indexing
+                                    logger.warning(
+                                        f"FTS indexing failed for chunk {i} of {file_path}: {e}"
+                                    )
+                                    # Continue with next chunk
 
                 except (
                     sqlite3.DatabaseError,

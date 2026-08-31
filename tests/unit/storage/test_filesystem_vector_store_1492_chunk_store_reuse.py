@@ -53,8 +53,8 @@ class _SpyingChunkStoreThreadCache(ChunkStoreThreadCache):
         super().__init__()
         self.opened_stores: list = []
 
-    def get_or_open(self, db_path, collection_path):  # type: ignore[override]
-        store_obj = super().get_or_open(db_path, collection_path)
+    def get_or_open(self, db_path, collection_path, *, read_only=False):  # type: ignore[override]
+        store_obj = super().get_or_open(db_path, collection_path, read_only=read_only)
         self.opened_stores.append(store_obj)
         return store_obj
 

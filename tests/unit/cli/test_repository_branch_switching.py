@@ -97,9 +97,7 @@ class TestRepositoryBranchSwitching:
         }
 
         mock_client = Mock()
-        mock_client.switch_repository_branch = Mock(
-            return_value=mock_switch_result
-        )
+        mock_client.switch_repository_branch = Mock(return_value=mock_switch_result)
         mock_client_class.return_value = mock_client
 
         # Execute command
@@ -149,9 +147,7 @@ class TestRepositoryBranchSwitching:
         }
 
         mock_client = Mock()
-        mock_client.switch_repository_branch = Mock(
-            return_value=mock_switch_result
-        )
+        mock_client.switch_repository_branch = Mock(return_value=mock_switch_result)
         mock_client_class.return_value = mock_client
 
         # Execute command with --create flag
@@ -202,9 +198,7 @@ class TestRepositoryBranchSwitching:
         }
 
         mock_client = Mock()
-        mock_client.switch_repository_branch = Mock(
-            return_value=mock_switch_result
-        )
+        mock_client.switch_repository_branch = Mock(return_value=mock_switch_result)
         mock_client_class.return_value = mock_client
 
         # Execute command
@@ -252,9 +246,7 @@ class TestRepositoryBranchSwitching:
         }
 
         mock_client = Mock()
-        mock_client.switch_repository_branch = Mock(
-            return_value=mock_switch_result
-        )
+        mock_client.switch_repository_branch = Mock(return_value=mock_switch_result)
         mock_client_class.return_value = mock_client
 
         # Execute command
@@ -477,9 +469,7 @@ class TestRepositoryBranchSwitching:
         }
 
         mock_client = Mock()
-        mock_client.switch_repository_branch = Mock(
-            return_value=mock_switch_result
-        )
+        mock_client.switch_repository_branch = Mock(return_value=mock_switch_result)
         mock_client_class.return_value = mock_client
 
         # Execute command

@@ -141,7 +141,9 @@ class TestResourceCleanupFix:
         assert "test-repo" in result.output
 
         # CRITICAL: Verify that client.close() was called for proper resource cleanup.
-        # Note: cli.py's admin_repos_list genuinely calls close() twice (inner
-        # finally in fetch_admin_data() + outer finally) -- idempotent in the
-        # real client, so we assert it was called rather than an exact count.
-        mock_admin_client.close.assert_called()
+        # cli.py's admin_repos_list genuinely double-closes on this success
+        # path: cli.py:17362's inner finally in fetch_admin_data() PLUS
+        # cli.py:17433's outer finally, both unconditionally reached here
+        # (no early return, no exception) -- assert the exact count so a
+        # regression to 1 or 3+ calls is caught.
+        assert mock_admin_client.close.call_count == 2
