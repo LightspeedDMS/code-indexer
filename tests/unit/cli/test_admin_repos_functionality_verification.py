@@ -6,6 +6,7 @@ structure without requiring actual server connectivity.
 """
 
 import pytest
+from unittest.mock import patch
 from click.testing import CliRunner
 
 from code_indexer.cli import cli
@@ -13,6 +14,22 @@ from code_indexer.cli import cli
 
 class TestAdminReposFunctionalityVerification:
     """Test admin repos functionality verification."""
+
+    @pytest.fixture(autouse=True)
+    def mock_remote_mode_gate(self):
+        """Auto-mock the require_mode("remote") gate on admin_group.
+
+        disabled_commands.py independently binds detect_current_mode via its
+        own module-level import (see #1742), so every admin_group invocation
+        otherwise raises DisabledCommandError before reaching real command
+        logic (--help output, or the actual connection/config-loading error
+        paths these tests assert on).
+        """
+        with patch(
+            "code_indexer.disabled_commands.detect_current_mode",
+            return_value="remote",
+        ):
+            yield
 
     @pytest.fixture
     def runner(self):
@@ -92,6 +109,7 @@ class TestAdminReposFunctionalityVerification:
             "connection",
             "network",
             "failed to list golden repositories",
+            "remote configuration not found",
         ]
 
         # Should fail with one of the expected error types
@@ -113,6 +131,7 @@ class TestAdminReposFunctionalityVerification:
             "connection",
             "network",
             "failed to show repository details",
+            "remote configuration not found",
         ]
 
         # Should fail with one of the expected error types
@@ -134,6 +153,7 @@ class TestAdminReposFunctionalityVerification:
             "connection",
             "network",
             "failed to refresh repository",
+            "remote configuration not found",
         ]
 
         # Should fail with one of the expected error types
