@@ -66,12 +66,14 @@ class TestImprovedRemoteQueryExperience:
 
                     output_lower = result.output.lower()
 
-                    # Actual behavior: Detects remote mode and attempts query, then fails with path filter error
-                    # This is because the test sets up remote config but no git repository context
+                    # Actual current behavior: the CLI already detects the
+                    # missing git repository and shows a clear, educational
+                    # error message with numbered resolution steps -- the
+                    # exact improvement this test's docstring asks for.
                     assert (
-                        "remote query failed" in output_lower
-                        or "path filter cannot be empty" in output_lower
-                    ), f"Should show remote query error: {result.output}"
+                        "requires git repository context" in output_lower
+                        or "repository linking" in output_lower
+                    ), f"Should show clear git-repository-required error: {result.output}"
 
                     # Should provide helpful guidance (technical details may also be present)
                     # The important thing is that users get clear resolution steps
