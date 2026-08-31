@@ -71,7 +71,10 @@ class TestCliErrorPropagation:
             ) as mock_create:
                 mock_client = AsyncMock()
                 # This simulates the error: returning string instead of AuthStatus
-                mock_client.get_auth_status = AsyncMock(
+                # get_auth_status is a synchronous method (auth_client.py:473),
+                # called without await -- Mock (not AsyncMock) is required so
+                # the string return value actually reaches the display layer.
+                mock_client.get_auth_status = Mock(
                     return_value="Error: Connection failed"
                 )
                 mock_create.return_value = mock_client
@@ -147,9 +150,10 @@ class TestCliErrorPropagation:
             ) as mock_create:
                 mock_client = AsyncMock()
                 # This simulates the error: returning string instead of dict
-                mock_client.check_basic_health = AsyncMock(
-                    return_value="Connection timeout"
-                )
+                # check_basic_health is a synchronous method (system_client.py:45),
+                # called without await -- Mock (not AsyncMock) is required so
+                # the string return value actually reaches the display layer.
+                mock_client.check_basic_health = Mock(return_value="Connection timeout")
                 mock_create.return_value = mock_client
 
                 import os
@@ -235,7 +239,11 @@ class TestCliErrorPropagation:
             ) as mock_create:
                 mock_client = AsyncMock()
                 # Simulate string return instead of CredentialHealth
-                mock_client.check_credential_health = AsyncMock(
+                # check_credential_health is a synchronous method
+                # (auth_client.py:680), called without await -- Mock (not
+                # AsyncMock) is required so the string return value actually
+                # reaches the display layer.
+                mock_client.check_credential_health = Mock(
                     return_value="Credential check failed"
                 )
                 mock_create.return_value = mock_client

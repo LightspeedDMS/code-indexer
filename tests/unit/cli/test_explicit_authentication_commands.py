@@ -349,71 +349,109 @@ class TestExplicitAuthenticationCommands:
 
     # AC4: Interactive Authentication Flow Tests
 
-    @patch("getpass.getpass")
-    @patch("builtins.input")
-    def test_auth_login_interactive_prompts(self, mock_input, mock_getpass):
-        """Test that login command prompts for credentials when not provided."""
-        mock_input.return_value = "testuser"  # Username prompt
-        mock_getpass.return_value = "testpass"  # Password prompt (hidden)
+    def test_auth_login_interactive_prompts(self):
+        """Test that login command prompts for credentials when not provided.
 
+        auth_login (cli.py) uses click.prompt() for the username and
+        getpass.getpass() for the password -- it never calls builtins.input,
+        which production never invokes either.
+        """
         project_dir = self.create_temp_project_dir()
 
-        with self.runner.isolated_filesystem():
-            os.chdir(str(project_dir))
-            # input= supplies stdin so click.prompt() doesn't block forever
-            # waiting for interactive input under CliRunner (Bug: confirmed
-            # indefinite hang without this, see #1752).
-            result = self.runner.invoke(
-                cli, ["auth", "login"], input="testuser\ntestpass\n"
-            )
+        with (
+            patch("click.prompt", return_value="testuser") as mock_prompt,
+            patch("getpass.getpass", return_value="testpass") as mock_getpass,
+            patch(
+                "code_indexer.api_clients.auth_client.AuthAPIClient"
+            ) as mock_client_class,
+        ):
+            mock_client = Mock()
+            mock_client_class.return_value = mock_client
+            mock_client.login.return_value = {
+                "access_token": "test_token",
+                "token_type": "bearer",
+                "user_id": None,
+            }
 
-        # Should fail as command doesn't exist yet
-        assert result.exit_code != 0, "Interactive login should fail (TDD - red phase)"
-
-    @patch("getpass.getpass")
-    @patch("builtins.input")
-    def test_auth_register_interactive_prompts(self, mock_input, mock_getpass):
-        """Test that register command prompts for credentials when not provided."""
-        mock_input.side_effect = ["newuser", "user"]  # Username and role prompts
-        mock_getpass.return_value = "newpass"  # Password prompt (hidden)
-
-        project_dir = self.create_temp_project_dir()
-
-        with self.runner.isolated_filesystem():
-            os.chdir(str(project_dir))
-            # input= supplies stdin so click.prompt() doesn't block forever
-            # waiting for interactive input under CliRunner (Bug: confirmed
-            # indefinite hang without this, see #1752).
-            result = self.runner.invoke(
-                cli, ["auth", "register"], input="newuser\nnewpass\nuser\n"
-            )
-
-        # Should fail as command doesn't exist yet
-        assert result.exit_code != 0, (
-            "Interactive register should fail (TDD - red phase)"
-        )
-
-    @patch("getpass.getpass")
-    def test_interactive_password_uses_getpass(self, mock_getpass):
-        """Test that interactive password input uses getpass for security (no echo)."""
-        mock_getpass.return_value = "securepass"
-
-        project_dir = self.create_temp_project_dir()
-
-        with patch("builtins.input", return_value="testuser"):
             with self.runner.isolated_filesystem():
                 os.chdir(str(project_dir))
-                # input= supplies stdin so click.prompt() doesn't block
-                # forever waiting for interactive input under CliRunner
-                # (Bug: confirmed indefinite hang without this, see #1752).
-                result = self.runner.invoke(
-                    cli, ["auth", "login"], input="testuser\ntestpass\n"
-                )
+                result = self.runner.invoke(cli, ["auth", "login"])
 
-        # Should fail as command doesn't exist yet
-        assert result.exit_code != 0, (
-            "Interactive password with getpass should fail (TDD - red phase)"
+        assert result.exit_code == 0, (
+            f"Interactive login should succeed, got: {result.output}"
         )
+        mock_prompt.assert_called_once()
+        mock_getpass.assert_called_once()
+        mock_client.login.assert_called_once_with("testuser", "testpass")
+        assert "Successfully logged in as testuser" in result.output
+
+    def test_auth_register_interactive_prompts(self):
+        """Test that register command prompts for credentials when not provided.
+
+        auth_register (cli.py) only prompts for username (click.prompt) and
+        password (getpass.getpass) -- role is a --role option with a default
+        of "user" and is never interactively prompted.
+        """
+        project_dir = self.create_temp_project_dir()
+
+        with (
+            patch("click.prompt", return_value="newuser") as mock_prompt,
+            patch("getpass.getpass", return_value="newpass") as mock_getpass,
+            patch(
+                "code_indexer.api_clients.auth_client.AuthAPIClient"
+            ) as mock_client_class,
+        ):
+            mock_client = Mock()
+            mock_client_class.return_value = mock_client
+            mock_client.register.return_value = {
+                "access_token": "test_token",
+                "token_type": "bearer",
+                "user_id": None,
+            }
+
+            with self.runner.isolated_filesystem():
+                os.chdir(str(project_dir))
+                result = self.runner.invoke(cli, ["auth", "register"])
+
+        assert result.exit_code == 0, (
+            f"Interactive register should succeed, got: {result.output}"
+        )
+        mock_prompt.assert_called_once()
+        mock_getpass.assert_called_once()
+        mock_client.register.assert_called_once_with("newuser", "newpass", "user")
+        assert "Successfully registered and logged in as newuser" in result.output
+
+    def test_interactive_password_uses_getpass(self):
+        """Test that interactive password input uses getpass for security (no echo)."""
+        project_dir = self.create_temp_project_dir()
+
+        with (
+            patch("click.prompt", return_value="testuser"),
+            patch("getpass.getpass", return_value="securepass") as mock_getpass,
+            patch(
+                "code_indexer.api_clients.auth_client.AuthAPIClient"
+            ) as mock_client_class,
+        ):
+            mock_client = Mock()
+            mock_client_class.return_value = mock_client
+            mock_client.login.return_value = {
+                "access_token": "test_token",
+                "token_type": "bearer",
+                "user_id": None,
+            }
+
+            with self.runner.isolated_filesystem():
+                os.chdir(str(project_dir))
+                result = self.runner.invoke(cli, ["auth", "login"])
+
+        assert result.exit_code == 0, (
+            f"Interactive login with getpass should succeed, got: {result.output}"
+        )
+        # getpass is used for the password prompt (no-echo); the plaintext
+        # password must never appear in the captured CLI output.
+        mock_getpass.assert_called_once_with("Password: ")
+        assert "securepass" not in result.output
+        mock_client.login.assert_called_once_with("testuser", "securepass")
 
     def test_interactive_handles_empty_inputs(self):
         """Test that interactive mode handles empty username and password inputs."""
@@ -431,10 +469,13 @@ class TestExplicitAuthenticationCommands:
                     os.chdir(str(project_dir))
                     result = self.runner.invoke(cli, ["auth", "login"])
 
-        # Should fail as command doesn't exist yet
-        assert result.exit_code != 0, (
-            "Interactive empty input handling should fail (TDD - red phase)"
+        # cli.py's auth_login validates the username first: an empty
+        # username exits 1 with "Username cannot be empty" before any
+        # AuthAPIClient is ever created (verified live).
+        assert result.exit_code == 1, (
+            f"Empty username should exit 1, got: {result.output}"
         )
+        assert "Username cannot be empty" in result.output
 
     # AC5: Authentication Error Handling Tests
 
