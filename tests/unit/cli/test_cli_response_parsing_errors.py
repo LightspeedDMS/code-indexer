@@ -35,6 +35,7 @@ class TestCLIResponseParsingErrors:
             mock_find_root.return_value = "/test/project"
             mock_load_config.return_value = {
                 "server_url": "http://localhost:8096",
+                "username": "testuser",
                 "encrypted_credentials": {"username": "testuser"},
             }
             yield mock_find_root, mock_load_config
@@ -70,13 +71,17 @@ class TestCLIResponseParsingErrors:
             # Note: This test will fail initially (TDD red phase) because the bug exists
             # The error message varies but will contain string-related attribute errors
 
-    def test_system_health_fails_with_response_parsing_error(
+    def test_system_health_succeeds_with_real_client_response_parsing(
         self, cli_runner, mock_project_setup
     ):
-        """Test reproducing system health response parsing errors.
+        """Regression test for system health response parsing.
 
-        This test shows the bug where system health endpoint tries to use httpx.Response
-        as a dictionary, causing TypeError when setting response["response_time_ms"].
+        ORIGINAL ISSUE: system health used to treat the raw httpx.Response as
+        a dict (response["response_time_ms"] = ...), causing a TypeError.
+        check_basic_health() now correctly calls response.json() first and
+        assigns to the resulting dict -- this test exercises a real
+        SystemAPIClient instance (only the HTTP layer is mocked) to guard
+        against that regressing.
         """
         mock_find_root, mock_load_config = mock_project_setup
 
@@ -109,21 +114,14 @@ class TestCLIResponseParsingErrors:
             mock_response = Mock(spec=httpx.Response)
             mock_response.json.return_value = {"status": "ok", "message": "Healthy"}
             mock_response.status_code = 200
-
-            # This will cause the bug: check_basic_health tries to do response["response_time_ms"]
-            # but response is an httpx.Response object, not a dict
             mock_auth_request.return_value = mock_response
 
             result = cli_runner.invoke(cli, ["system", "health"])
 
-            # Should fail because code tries to access response["response_time_ms"]
-            # on an httpx.Response object instead of a dictionary
-            assert result.exit_code != 0
-            assert (
-                "'MockType' object does not support item assignment" in result.output
-                or "'Response' object does not support item assignment" in result.output
-                or "TypeError" in result.output
+            assert result.exit_code == 0, (
+                f"Command should succeed, got: {result.output}"
             )
+            assert "System Health: OK" in result.output
             # This reproduces the actual bug in the system client
 
     def test_auth_validate_fails_with_response_type_error(
@@ -175,6 +173,7 @@ class TestCorrectResponseParsing:
             mock_find_root.return_value = "/test/project"
             mock_load_config.return_value = {
                 "server_url": "http://localhost:8096",
+                "username": "testuser",
                 "encrypted_credentials": {"username": "testuser"},
             }
             yield mock_find_root, mock_load_config
@@ -188,10 +187,16 @@ class TestCorrectResponseParsing:
         """
         mock_find_root, mock_load_config = mock_project_setup
 
-        with patch(
-            "code_indexer.api_clients.auth_client.create_auth_client"
-        ) as mock_create_client:
-            mock_client = AsyncMock()
+        with (
+            patch(
+                "code_indexer.api_clients.auth_client.create_auth_client"
+            ) as mock_create_client,
+            patch(
+                "code_indexer.disabled_commands.detect_current_mode"
+            ) as mock_detect_mode,
+        ):
+            mock_detect_mode.return_value = "remote"
+            mock_client = Mock()
             mock_create_client.return_value = mock_client
 
             # Mock proper AuthStatus object (correct behavior)
@@ -238,7 +243,7 @@ class TestCorrectResponseParsing:
             # Mock mode detection to return remote mode
             mock_detect_mode.return_value = "remote"
 
-            mock_client = AsyncMock()
+            mock_client = Mock()
             mock_create_client.return_value = mock_client
 
             # Mock proper dictionary response (correct behavior)
@@ -280,7 +285,7 @@ class TestCorrectResponseParsing:
             # Mock mode detection to return remote mode
             mock_detect_mode.return_value = "remote"
 
-            mock_client = AsyncMock()
+            mock_client = Mock()
             mock_create_client.return_value = mock_client
 
             # Mock proper boolean response (correct behavior)
@@ -315,6 +320,7 @@ class TestEdgeCaseResponseParsing:
             mock_find_root.return_value = "/test/project"
             mock_load_config.return_value = {
                 "server_url": "http://localhost:8096",
+                "username": "testuser",
                 "encrypted_credentials": {"username": "testuser"},
             }
             yield mock_find_root, mock_load_config
