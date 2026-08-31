@@ -88,7 +88,6 @@ def trigger_catchup_on_api_key_save(api_key: Optional[str]) -> bool:
             format_error_log(
                 "STORE-GENERAL-012",
                 "Cannot trigger catch-up: ClaudeCliManager not initialized",
-                extra={"correlation_id": get_correlation_id()},
             )
         )
         return False
@@ -133,7 +132,6 @@ def trigger_catchup_on_api_key_save(api_key: Optional[str]) -> bool:
                     format_error_log(
                         "STORE-GENERAL-013",
                         f"Catch-up partially completed: {result.error}",
-                        extra={"correlation_id": _get_cid()},
                     )
                 )
             else:
@@ -155,7 +153,6 @@ def trigger_catchup_on_api_key_save(api_key: Optional[str]) -> bool:
                 format_error_log(
                     "STORE-GENERAL-014",
                     f"Catch-up processing failed: {e}",
-                    extra={"correlation_id": _get_cid()},
                 ),
                 exc_info=True,
             )

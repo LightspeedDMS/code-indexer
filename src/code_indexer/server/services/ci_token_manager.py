@@ -312,7 +312,6 @@ class CITokenManager:
                     "APP-GENERAL-061",
                     f"Failed to decrypt {platform} token, treating as unconfigured "
                     f"(token preserved in DB for recovery): {e}",
-                    extra={"correlation_id": get_correlation_id()},
                 )
                 if _is_new:
                     logger.warning(_msg)
@@ -352,7 +351,6 @@ class CITokenManager:
                     format_error_log(
                         "APP-GENERAL-062",
                         f"Failed to decrypt {platform} token, treating as unconfigured: {e}",
-                        extra={"correlation_id": get_correlation_id()},
                     )
                 )
                 # Delete the corrupted token from storage

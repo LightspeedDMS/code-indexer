@@ -555,7 +555,6 @@ def handle_start_trace(
             format_error_log(
                 "TRACE-001",
                 f"Error in handle_start_trace: {e}",
-                extra={"correlation_id": get_correlation_id()},
             )
         )
         return _mcp_response({"status": "error", "message": str(e)})
@@ -635,7 +634,6 @@ def handle_end_trace(
             format_error_log(
                 "TRACE-002",
                 f"Error in handle_end_trace: {e}",
-                extra={"correlation_id": get_correlation_id()},
             )
         )
         return _mcp_response({"status": "error", "message": str(e)})
@@ -729,7 +727,6 @@ def handle_wiki_article_analytics(params: Dict[str, Any], user: User) -> Dict[st
             format_error_log(
                 "WIKI-ANALYTICS-001",
                 f"Error in handle_wiki_article_analytics: {e}",
-                extra={"correlation_id": get_correlation_id()},
             )
         )
         return _mcp_response({"success": False, "error": str(e)})

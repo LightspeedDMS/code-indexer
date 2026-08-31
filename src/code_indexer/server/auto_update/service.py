@@ -144,7 +144,6 @@ class AutoUpdateService:
                     format_error_log(
                         "AUTO-UPDATE-014",
                         "Failed to apply launch config before restart; skipping restart",
-                        extra={"correlation_id": get_correlation_id()},
                     )
                 )
                 return
@@ -155,7 +154,6 @@ class AutoUpdateService:
                         "AUTO-UPDATE-013",
                         "Restart signal handler: server restart FAILED "
                         "(signal already deleted, no retry)",
-                        extra={"correlation_id": get_correlation_id()},
                     )
                 )
                 return
@@ -168,7 +166,6 @@ class AutoUpdateService:
                     format_error_log(
                         "AUTO-UPDATE-015",
                         f"Failed to write applied_launch.json: {e}",
-                        extra={"correlation_id": get_correlation_id()},
                     )
                 )
             return
@@ -219,7 +216,6 @@ class AutoUpdateService:
                             format_error_log(
                                 "AUTO-UPDATE-010",
                                 "Forced deployment succeeded but server restart FAILED",
-                                extra={"correlation_id": get_correlation_id()},
                             )
                         )
                 else:
@@ -227,7 +223,6 @@ class AutoUpdateService:
                         format_error_log(
                             "AUTO-UPDATE-011",
                             "Forced redeployment failed",
-                            extra={"correlation_id": get_correlation_id()},
                         )
                     )
                     self.deployment_executor._write_status_file(
@@ -290,7 +285,6 @@ class AutoUpdateService:
                     format_error_log(
                         "GIT-GENERAL-005",
                         "Another deployment in progress, skipping",
-                        extra={"correlation_id": get_correlation_id()},
                     )
                 )
                 self.transition_to(ServiceState.IDLE)
@@ -321,7 +315,6 @@ class AutoUpdateService:
                             format_error_log(
                                 "AUTO-UPDATE-012",
                                 "Deployment succeeded but server restart FAILED",
-                                extra={"correlation_id": get_correlation_id()},
                             )
                         )
                 else:
@@ -329,7 +322,6 @@ class AutoUpdateService:
                         format_error_log(
                             "GIT-GENERAL-006",
                             "Deployment failed",
-                            extra={"correlation_id": get_correlation_id()},
                         )
                     )
                     self.deployment_executor._write_status_file(

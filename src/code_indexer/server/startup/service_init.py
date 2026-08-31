@@ -447,7 +447,6 @@ def initialize_services() -> Dict[str, Any]:
             format_error_log(
                 "APP-GENERAL-028",
                 "SCIP audit database initialization failed (non-blocking)",
-                extra={"correlation_id": get_correlation_id()},
             )
         )
 
@@ -616,7 +615,6 @@ def initialize_services() -> Dict[str, Any]:
                 format_error_log(
                     "APP-GENERAL-011",
                     f"Failed to migrate/bootstrap cidx-meta on startup: {e}",
-                    extra={"correlation_id": get_correlation_id()},
                 ),
                 exc_info=True,
             )

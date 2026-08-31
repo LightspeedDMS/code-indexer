@@ -388,7 +388,6 @@ def trigger_reindex(params: Dict[str, Any], user: User) -> Dict[str, Any]:
             format_error_log(
                 "MCP-GENERAL-060",
                 f"trigger_reindex validation error in {elapsed_ms}ms: {e}",
-                extra={"correlation_id": get_correlation_id()},
             )
         )
         return _mcp_response(  # type: ignore[no-any-return]
@@ -403,7 +402,6 @@ def trigger_reindex(params: Dict[str, Any], user: User) -> Dict[str, Any]:
             format_error_log(
                 "MCP-GENERAL-061",
                 f"trigger_reindex repo not found in {elapsed_ms}ms: {e}",
-                extra={"correlation_id": get_correlation_id()},
             )
         )
         return _mcp_response(  # type: ignore[no-any-return]
@@ -500,7 +498,6 @@ def get_index_status(params: Dict[str, Any], user: User) -> Dict[str, Any]:
             format_error_log(
                 "MCP-GENERAL-062",
                 f"get_index_status repo not found in {elapsed_ms}ms: {e}",
-                extra={"correlation_id": get_correlation_id()},
             )
         )
         return _mcp_response(  # type: ignore[no-any-return]
@@ -847,7 +844,6 @@ def handle_set_session_impersonation(
             format_error_log(
                 "MCP-GENERAL-118",
                 f"Error in set_session_impersonation: {e}",
-                extra={"correlation_id": get_correlation_id()},
             )
         )
         return _mcp_response(  # type: ignore[no-any-return]
@@ -931,7 +927,6 @@ def handle_list_groups(args: Dict[str, Any], user: User) -> Dict[str, Any]:
             format_error_log(
                 "MCP-GENERAL-129",
                 f"Error in handle_list_groups: {e}",
-                extra={"correlation_id": get_correlation_id()},
             )
         )
         return _mcp_response({"success": False, "error": str(e)})  # type: ignore[no-any-return]
@@ -974,7 +969,6 @@ def handle_create_group(args: Dict[str, Any], user: User) -> Dict[str, Any]:
             format_error_log(
                 "MCP-GENERAL-130",
                 f"Error in handle_create_group: {e}",
-                extra={"correlation_id": get_correlation_id()},
             )
         )
         return _mcp_response({"success": False, "error": str(e)})  # type: ignore[no-any-return]
@@ -1010,7 +1004,6 @@ def handle_get_group(args: Dict[str, Any], user: User) -> Dict[str, Any]:
             format_error_log(
                 "MCP-GENERAL-131",
                 f"Error in handle_get_group: {e}",
-                extra={"correlation_id": get_correlation_id()},
             )
         )
         return _mcp_response({"success": False, "error": str(e)})  # type: ignore[no-any-return]
@@ -1055,7 +1048,6 @@ def handle_update_group(args: Dict[str, Any], user: User) -> Dict[str, Any]:
             format_error_log(
                 "MCP-GENERAL-132",
                 f"Error in handle_update_group: {e}",
-                extra={"correlation_id": get_correlation_id()},
             )
         )
         return _mcp_response({"success": False, "error": str(e)})  # type: ignore[no-any-return]
@@ -1102,7 +1094,6 @@ def handle_delete_group(args: Dict[str, Any], user: User) -> Dict[str, Any]:
             format_error_log(
                 "MCP-GENERAL-133",
                 f"Error in handle_delete_group: {e}",
-                extra={"correlation_id": get_correlation_id()},
             )
         )
         return _mcp_response({"success": False, "error": str(e)})  # type: ignore[no-any-return]
@@ -1144,7 +1135,6 @@ def _add_member(args: Dict[str, Any], user: User, **kwargs: Any) -> Dict[str, An
             format_error_log(
                 "MCP-GENERAL-134",
                 f"Error in handle_add_member_to_group: {e}",
-                extra={"correlation_id": get_correlation_id()},
             )
         )
         return _mcp_response({"success": False, "error": str(e)})  # type: ignore[no-any-return]
@@ -1184,7 +1174,6 @@ def _remove_member(args: Dict[str, Any], user: User, **kwargs: Any) -> Dict[str,
             format_error_log(
                 "MCP-GENERAL-135",
                 f"Error in handle_remove_member_from_group: {e}",
-                extra={"correlation_id": get_correlation_id()},
             )
         )
         return _mcp_response({"success": False, "error": str(e)})  # type: ignore[no-any-return]
@@ -1229,7 +1218,6 @@ def _add_repos(args: Dict[str, Any], user: User, **kwargs: Any) -> Dict[str, Any
             format_error_log(
                 "MCP-TOOL-042",
                 f"Error in handle_add_repos_to_group: {e}",
-                extra={"correlation_id": get_correlation_id()},
             )
         )
         return _mcp_response({"success": False, "error": str(e)})  # type: ignore[no-any-return]
@@ -1287,7 +1275,6 @@ def _remove_repo(args: Dict[str, Any], user: User, **kwargs: Any) -> Dict[str, A
             format_error_log(
                 "QUERY-GENERAL-001",
                 f"Error in handle_remove_repo_from_group: {e}",
-                extra={"correlation_id": get_correlation_id()},
             )
         )
         return _mcp_response({"success": False, "error": str(e)})  # type: ignore[no-any-return]
@@ -1342,7 +1329,6 @@ def _bulk_remove_repos(
             format_error_log(
                 "QUERY-GENERAL-002",
                 f"Error in handle_bulk_remove_repos_from_group: {e}",
-                extra={"correlation_id": get_correlation_id()},
             )
         )
         return _mcp_response({"success": False, "error": str(e)})  # type: ignore[no-any-return]
@@ -1377,7 +1363,6 @@ def handle_list_api_keys(args: Dict[str, Any], user: User) -> Dict[str, Any]:
             format_error_log(
                 "QUERY-GENERAL-003",
                 f"Error in handle_list_api_keys: {e}",
-                extra={"correlation_id": get_correlation_id()},
             )
         )
         return _mcp_response({"success": False, "error": str(e)})  # type: ignore[no-any-return]
@@ -1405,7 +1390,6 @@ def handle_create_api_key(args: Dict[str, Any], user: User) -> Dict[str, Any]:
             format_error_log(
                 "QUERY-GENERAL-004",
                 f"Error in handle_create_api_key: {e}",
-                extra={"correlation_id": get_correlation_id()},
             )
         )
         return _mcp_response({"success": False, "error": str(e)})  # type: ignore[no-any-return]
@@ -1431,7 +1415,6 @@ def handle_delete_api_key(args: Dict[str, Any], user: User) -> Dict[str, Any]:
             format_error_log(
                 "QUERY-GENERAL-005",
                 f"Error in handle_delete_api_key: {e}",
-                extra={"correlation_id": get_correlation_id()},
             )
         )
         return _mcp_response({"success": False, "error": str(e)})  # type: ignore[no-any-return]
@@ -1585,7 +1568,6 @@ def handle_query_audit_logs(args: Dict[str, Any], user: User) -> Dict[str, Any]:
             format_error_log(
                 "REPO-GENERAL-006",
                 f"Error in handle_query_audit_logs: {e}",
-                extra={"correlation_id": get_correlation_id()},
             )
         )
         return _mcp_response({"success": False, "error": str(e)})  # type: ignore[no-any-return]
@@ -1616,7 +1598,6 @@ def handle_enter_maintenance_mode(args: Dict[str, Any], user: User) -> Dict[str,
             format_error_log(
                 "REPO-GENERAL-007",
                 f"Error in handle_enter_maintenance_mode: {e}",
-                extra={"correlation_id": get_correlation_id()},
             )
         )
         return _mcp_response({"success": False, "error": str(e)})  # type: ignore[no-any-return]
@@ -1645,7 +1626,6 @@ def handle_exit_maintenance_mode(args: Dict[str, Any], user: User) -> Dict[str, 
             format_error_log(
                 "REPO-GENERAL-008",
                 f"Error in handle_exit_maintenance_mode: {e}",
-                extra={"correlation_id": get_correlation_id()},
             )
         )
         return _mcp_response({"success": False, "error": str(e)})  # type: ignore[no-any-return]
@@ -1676,7 +1656,6 @@ def handle_get_maintenance_status(args: Dict[str, Any], user: User) -> Dict[str,
             format_error_log(
                 "REPO-GENERAL-009",
                 f"Error in handle_get_maintenance_status: {e}",
-                extra={"correlation_id": get_correlation_id()},
             )
         )
         return _mcp_response({"success": False, "error": str(e)})  # type: ignore[no-any-return]
@@ -1876,10 +1855,6 @@ def handle_trigger_dependency_analysis(
                     format_error_log(
                         "DEPMAP-TRIGGER-001",
                         f"Background dependency map analysis failed: {e}",
-                        extra={
-                            "correlation_id": get_correlation_id(),
-                            "job_id": job_id,
-                        },
                     )
                 )
 
@@ -1909,7 +1884,6 @@ def handle_trigger_dependency_analysis(
             format_error_log(
                 "DEPMAP-TRIGGER-002",
                 f"Error triggering dependency map analysis: {e}",
-                extra={"correlation_id": get_correlation_id()},
             )
         )
         return _mcp_response({"success": False, "error": str(e), "job_id": None})  # type: ignore[no-any-return]

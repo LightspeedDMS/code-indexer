@@ -267,7 +267,6 @@ def _omni_git_log(args: Dict[str, Any], user: User) -> Dict[str, Any]:
                 format_error_log(
                     "MCP-GENERAL-058",
                     f"Omni-git-log failed for {repo_alias}: {e}",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
 
@@ -827,7 +826,6 @@ def _omni_git_search_commits(args: Dict[str, Any], user: User) -> Dict[str, Any]
                 format_error_log(
                     "MCP-GENERAL-059",
                     f"Omni-git-search failed for {repo_alias}: {e}",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
 
@@ -1186,7 +1184,6 @@ def git_status(args: Dict[str, Any], user: User) -> Dict[str, Any]:
             format_error_log(
                 "MCP-GENERAL-063",
                 f"git_status failed: {e}",
-                extra={"correlation_id": get_correlation_id()},
             )
         )
         return _mcp_response(
@@ -1250,7 +1247,6 @@ def git_fetch(args: Dict[str, Any], user: User) -> Dict[str, Any]:
             format_error_log(
                 "MCP-GENERAL-069",
                 f"git_fetch failed: {e}",
-                extra={"correlation_id": get_correlation_id()},
             )
         )
         return _mcp_response(
@@ -1319,7 +1315,6 @@ def git_branch_list(args: Dict[str, Any], user: User) -> Dict[str, Any]:
             format_error_log(
                 "MCP-GENERAL-074",
                 f"git_branch_list failed: {e}",
-                extra={"correlation_id": get_correlation_id()},
             )
         )
         return _mcp_response(
@@ -1387,7 +1382,6 @@ def git_conflict_status(args: Dict[str, Any], user: User) -> Dict[str, Any]:
             format_error_log(
                 "MCP-GENERAL-217",
                 f"git_conflict_status failed: {e}",
-                extra={"correlation_id": get_correlation_id()},
             )
         )
         return _mcp_response(
@@ -1498,7 +1492,6 @@ def git_diff(args: Dict[str, Any], user: User) -> Dict[str, Any]:
             format_error_log(
                 "MCP-GENERAL-078",
                 f"git_diff failed: {e}",
-                extra={"correlation_id": get_correlation_id()},
             )
         )
         return _mcp_response(
@@ -1618,7 +1611,6 @@ def git_log(args: Dict[str, Any], user: User) -> Dict[str, Any]:
             format_error_log(
                 "MCP-GENERAL-079",
                 f"git_log failed: {e}",
-                extra={"correlation_id": get_correlation_id()},
             )
         )
         return _mcp_response(

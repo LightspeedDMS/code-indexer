@@ -5,8 +5,6 @@ Provides real repository statistics following CLAUDE.md Foundation #1: No mocks.
 All operations use real file system, database, and Filesystem operations.
 """
 
-from code_indexer.server.middleware.correlation import get_correlation_id
-
 import os
 import threading
 from pathlib import Path
@@ -236,7 +234,6 @@ class RepositoryStatsService:
                 format_error_log(
                     "MCP-GENERAL-176",
                     f"Failed to initialize real dependencies: {e}",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
             raise RuntimeError(f"Cannot initialize repository stats service: {e}")
@@ -370,7 +367,6 @@ class RepositoryStatsService:
                 format_error_log(
                     "MCP-GENERAL-177",
                     f"Failed to get repository path for {repo_id}: {e}",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
             if isinstance(e, FileNotFoundError):
@@ -413,7 +409,6 @@ class RepositoryStatsService:
                             format_error_log(
                                 "MCP-GENERAL-178",
                                 f"Cannot access file {file_path}: {e}",
-                                extra={"correlation_id": get_correlation_id()},
                             )
                         )
                         continue
@@ -423,7 +418,6 @@ class RepositoryStatsService:
                 format_error_log(
                     "MCP-GENERAL-179",
                     f"Cannot access repository directory {repo_path}: {e}",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
             raise
@@ -471,7 +465,6 @@ class RepositoryStatsService:
                 format_error_log(
                     "MCP-GENERAL-180",
                     f"Cannot check indexing status for {file_path}: {e}",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
             # Fall back to extension check only as last resort
@@ -664,7 +657,6 @@ class RepositoryStatsService:
                 format_error_log(
                     "MCP-GENERAL-181",
                     f"Failed to get embedding count for {repo_id}: {e}",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
             raise RuntimeError(
@@ -746,7 +738,6 @@ class RepositoryStatsService:
                 format_error_log(
                     "MCP-GENERAL-182",
                     f"Failed to get repository metadata for {repo_id}: {e}",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
             raise RuntimeError(f"Unable to access repository metadata: {e}")

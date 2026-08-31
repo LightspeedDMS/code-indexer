@@ -189,7 +189,6 @@ class HealthCheckService:
                 format_error_log(
                     "DEPLOY-GENERAL-040",
                     f"Failed to initialize real dependencies: {e}",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
             raise RuntimeError(f"Cannot initialize health check service: {e}")
@@ -288,7 +287,6 @@ class HealthCheckService:
                 format_error_log(
                     "DEPLOY-GENERAL-041",
                     f"Database health check failed: {e}",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
 
@@ -900,7 +898,6 @@ class HealthCheckService:
                 format_error_log(
                     "GIT-GENERAL-043",
                     f"Storage health check failed: {e}",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
 
@@ -1531,7 +1528,6 @@ class HealthCheckService:
                 format_error_log(
                     "GIT-GENERAL-044",
                     f"Failed to get mounted volumes: {e}",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
 
@@ -1601,7 +1597,6 @@ class HealthCheckService:
                 format_error_log(
                     "GIT-GENERAL-045",
                     f"Failed to get active job count: {e}",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
 

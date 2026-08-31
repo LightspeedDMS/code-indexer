@@ -5,8 +5,6 @@ Provides branch listing functionality using real GitPython operations
 without mocking, following CLAUDE.md Foundation #1 (Anti-Mock).
 """
 
-from code_indexer.server.middleware.correlation import get_correlation_id
-
 import logging
 import threading
 import time
@@ -185,7 +183,6 @@ class BranchService:
                 format_error_log(
                     "APP-GENERAL-053",
                     "Git operation failed listing branches",
-                    extra={"correlation_id": get_correlation_id()},
                 ),
                 exc_info=True,
             )
@@ -195,7 +192,6 @@ class BranchService:
                 format_error_log(
                     "APP-GENERAL-054",
                     "Unexpected error listing branches",
-                    extra={"correlation_id": get_correlation_id()},
                 ),
                 exc_info=True,
             )
@@ -229,7 +225,6 @@ class BranchService:
                 format_error_log(
                     "APP-GENERAL-055",
                     f"Git operation failed getting branch '{branch_name}'",
-                    extra={"correlation_id": get_correlation_id()},
                 ),
                 exc_info=True,
             )
@@ -239,7 +234,6 @@ class BranchService:
                 format_error_log(
                     "APP-GENERAL-056",
                     f"Unexpected error getting branch '{branch_name}'",
-                    extra={"correlation_id": get_correlation_id()},
                 ),
                 exc_info=True,
             )
@@ -337,7 +331,6 @@ class BranchService:
                     format_error_log(
                         "APP-GENERAL-057",
                         f"Failed to get index status for branch '{branch_name}': {e}",
-                        extra={"correlation_id": get_correlation_id()},
                     )
                 )
 
@@ -383,7 +376,6 @@ class BranchService:
                     format_error_log(
                         "APP-GENERAL-058",
                         f"Failed to calculate ahead/behind for branch '{branch.name}': {e}",
-                        extra={"correlation_id": get_correlation_id()},
                     )
                 )
                 behind = ahead = 0
@@ -397,7 +389,6 @@ class BranchService:
                 format_error_log(
                     "APP-GENERAL-059",
                     f"Failed to get remote tracking info for branch '{branch.name}': {e}",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
             return None
@@ -416,7 +407,6 @@ class BranchService:
                     format_error_log(
                         "APP-GENERAL-060",
                         f"Error closing git repository: {e}",
-                        extra={"correlation_id": get_correlation_id()},
                     )
                 )
             finally:

@@ -96,7 +96,6 @@ def run_ssh_migration_on_startup(
                         "MCP-GENERAL-171",
                         f"SSH key migration: {len(result.failed_hosts)} hosts failed "
                         f"during key testing (timeouts or connection failures)",
-                        extra={"correlation_id": get_correlation_id()},
                     )
                 )
         else:
@@ -104,7 +103,6 @@ def run_ssh_migration_on_startup(
                 format_error_log(
                     "MCP-GENERAL-172",
                     f"SSH key migration: Completed with issues - {result.reason}",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
 
@@ -115,7 +113,6 @@ def run_ssh_migration_on_startup(
             format_error_log(
                 "MCP-GENERAL-173",
                 f"SSH key migration: Failed with error - {e}",
-                extra={"correlation_id": get_correlation_id()},
             )
         )
         # Return a failed result but don't crash server startup

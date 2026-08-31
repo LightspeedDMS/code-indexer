@@ -178,7 +178,6 @@ class AutoWatchManager:
                             f"Refusing to start watch for {repo_path}: no "
                             f".code-indexer/config.json found for this path "
                             f"or any parent directory (Bug #1683 round 3)",
-                            extra={"correlation_id": get_correlation_id()},
                         )
                     )
                     return {
@@ -228,7 +227,6 @@ class AutoWatchManager:
                             f"({resolved_codebase_dir}) does not exactly "
                             f"match the requested repo path "
                             f"(Bug #1683 round 4)",
-                            extra={"correlation_id": get_correlation_id()},
                         )
                     )
                     return {
@@ -257,7 +255,6 @@ class AutoWatchManager:
                         format_error_log(
                             "APP-GENERAL-049",
                             f"Failed to start watch for {repo_path}: {result}",
-                            extra={"correlation_id": get_correlation_id()},
                         )
                     )
                     return result
@@ -308,7 +305,6 @@ class AutoWatchManager:
                     format_error_log(
                         "APP-GENERAL-050",
                         f"No watch running for {repo_path}",
-                        extra={"correlation_id": get_correlation_id()},
                     )
                 )
                 return {
@@ -362,7 +358,6 @@ class AutoWatchManager:
                     format_error_log(
                         "APP-GENERAL-051",
                         f"No watch running for {repo_path}, cannot reset timeout",
-                        extra={"correlation_id": get_correlation_id()},
                     )
                 )
                 return {
@@ -478,7 +473,6 @@ class AutoWatchManager:
                         "APP-GENERAL-052",
                         f"Timeout checker thread did not stop within "
                         f"{self.SHUTDOWN_THREAD_JOIN_TIMEOUT_SECONDS} seconds",
-                        extra={"correlation_id": get_correlation_id()},
                     )
                 )
             else:

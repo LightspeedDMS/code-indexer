@@ -17,7 +17,6 @@ from pydantic import BaseModel, Field
 from code_indexer.server.auth.dependencies import get_current_user
 from code_indexer.server.auth.user_manager import User
 from code_indexer.server.logging_utils import format_error_log
-from code_indexer.server.middleware.correlation import get_correlation_id
 from code_indexer.server.services.memory_schema import MemorySchemaValidationError
 from code_indexer.server.services.memory_store_service import (
     ConflictError,
@@ -155,7 +154,6 @@ def create_memory(
             format_error_log(
                 "MEM-GENERAL-001",
                 f"create_memory failed: {exc}",
-                extra={"correlation_id": get_correlation_id()},
             ),
             exc_info=True,
         )
@@ -241,7 +239,6 @@ def edit_memory(
             format_error_log(
                 "MEM-GENERAL-002",
                 f"edit_memory failed for {memory_id!r}: {exc}",
-                extra={"correlation_id": get_correlation_id()},
             ),
             exc_info=True,
         )
@@ -316,7 +313,6 @@ def delete_memory(
             format_error_log(
                 "MEM-GENERAL-003",
                 f"delete_memory failed for {memory_id!r}: {exc}",
-                extra={"correlation_id": get_correlation_id()},
             ),
             exc_info=True,
         )

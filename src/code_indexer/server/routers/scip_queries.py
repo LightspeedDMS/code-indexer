@@ -9,8 +9,6 @@ Users can only see SCIP results from repositories their group has access to.
 Story #41: All routes delegate to SCIPQueryService for unified query execution and access control.
 """
 
-from code_indexer.server.middleware.correlation import get_correlation_id
-
 import logging
 from fastapi import APIRouter, Query, Depends, Request
 from typing import List, Optional, Dict, Any
@@ -183,7 +181,6 @@ def get_definition(
             format_error_log(
                 "WEB-GENERAL-022",
                 f"Definition query failed: {e}",
-                extra={"correlation_id": get_correlation_id()},
             )
         )
         return {"success": False, "error": str(e)}
@@ -243,7 +240,6 @@ def get_references(
             format_error_log(
                 "WEB-GENERAL-023",
                 f"References query failed: {e}",
-                extra={"correlation_id": get_correlation_id()},
             )
         )
         return {"success": False, "error": str(e)}
@@ -303,7 +299,6 @@ def get_dependencies(
             format_error_log(
                 "WEB-GENERAL-024",
                 f"Dependencies query failed: {e}",
-                extra={"correlation_id": get_correlation_id()},
             )
         )
         return {"success": False, "error": str(e)}
@@ -363,7 +358,6 @@ def get_dependents(
             format_error_log(
                 "WEB-GENERAL-025",
                 f"Dependents query failed: {e}",
-                extra={"correlation_id": get_correlation_id()},
             )
         )
         return {"success": False, "error": str(e)}
@@ -414,7 +408,6 @@ def get_impact(
             format_error_log(
                 "WEB-GENERAL-026",
                 f"Impact analysis failed: {e}",
-                extra={"correlation_id": get_correlation_id()},
             )
         )
         return {"success": False, "error": str(e)}
@@ -465,7 +458,6 @@ def get_callchain(
                     "WEB-GENERAL-027",
                     f"Call chain tracing timeout for {from_symbol!r} -> "
                     f"{to_symbol!r}: {timeout_errors}",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
             return {
@@ -491,7 +483,6 @@ def get_callchain(
             format_error_log(
                 "WEB-GENERAL-027",
                 f"Call chain tracing failed: {e}",
-                extra={"correlation_id": get_correlation_id()},
             )
         )
         return {"success": False, "error": str(e)}
@@ -550,7 +541,6 @@ def get_context(
             format_error_log(
                 "WEB-GENERAL-028",
                 f"Smart context query failed: {e}",
-                extra={"correlation_id": get_correlation_id()},
             )
         )
         return {"success": False, "error": str(e)}

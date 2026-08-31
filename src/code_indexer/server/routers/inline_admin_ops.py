@@ -50,7 +50,6 @@ from ..repositories.golden_repo_manager import GoldenRepoError, GitOperationErro
 from ..repositories.activated_repo_manager import ActivatedRepoError
 from ..repositories.background_jobs import DuplicateJobError
 from ..logging_utils import format_error_log
-from ..middleware.correlation import get_correlation_id
 
 # Constants used by route handlers
 GOLDEN_REPO_ADD_OPERATION = "add_golden_repo"
@@ -145,7 +144,6 @@ def register_admin_ops_routes(
                 format_error_log(
                     "APP-GENERAL-030",
                     f"SCIP workspace cleanup failed: {e}",
-                    extra={"correlation_id": get_correlation_id()},
                 ),
                 exc_info=True,
             )
@@ -183,7 +181,6 @@ def register_admin_ops_routes(
                 format_error_log(
                     "APP-GENERAL-031",
                     f"Failed to get SCIP cleanup status: {e}",
-                    extra={"correlation_id": get_correlation_id()},
                 ),
                 exc_info=True,
             )
@@ -1169,7 +1166,6 @@ def register_admin_ops_routes(
                 format_error_log(
                     "APP-SEL-001",
                     f"Failed to query search event log: {e}",
-                    extra={"correlation_id": get_correlation_id()},
                 ),
                 exc_info=True,
             )
