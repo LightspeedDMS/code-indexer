@@ -25,10 +25,13 @@ from code_indexer.cli import (
 class MockResult:
     """Mock search result object."""
 
-    def __init__(self, score, content, metadata):
+    def __init__(self, score, content, metadata, temporal_context=None):
         self.score = score
         self.content = content
         self.metadata = metadata
+        # Story 2 (no SQLite): commit metadata is read from
+        # result.temporal_context, not fetched via temporal_service.
+        self.temporal_context = temporal_context or {}
 
 
 class MockSearchResults:
@@ -67,33 +70,24 @@ class TestCLITemporalDisplayComprehensive(TestCase):
                 "blob_hash": "abc123",
                 "line_start": 1,
                 "line_end": 4,
+                "author_email": "test@example.com",
+            },
+            temporal_context={
+                "commit_date": "2024-01-15 14:30:00",
+                "author_name": "Test User",
+                "commit_message": "Fix JWT validation bug",
             },
         )
 
-        # Mock temporal service
+        # temporal_service is a required positional arg on the function
+        # signature but is not read by the current implementation (Story 2:
+        # commit metadata comes from result.temporal_context, diffs are
+        # pre-computed and stored directly in result.content).
         mock_service = MagicMock()
-        mock_service._fetch_commit_details.return_value = {
-            "hash": "fa6d59d1234567890abcdef1234567890abcdef",
-            "date": "2024-01-15 14:30:00",
-            "author_name": "Test User",
-            "author_email": "test@example.com",
-            "message": "Fix JWT validation bug",
-        }
-
-        # Story 2: _generate_chunk_diff removed - diffs are pre-computed and stored in payloads
-        # No longer need to mock diff generation
 
         # Patch console.print to capture output
         with patch("code_indexer.cli.console.print") as mock_print:
             _display_file_chunk_match(result, 1, mock_service)
-
-            # Verify commit details were fetched
-            mock_service._fetch_commit_details.assert_called_once_with(
-                "fa6d59d1234567890abcdef1234567890abcdef"
-            )
-
-            # Story 2: _generate_chunk_diff removed - no diff generation anymore
-            # Diffs are pre-computed and stored in payloads
 
             # Verify content was printed (Story 2: pre-computed diffs in content)
             print_calls = [str(call) for call in mock_print.call_args_list]
@@ -149,29 +143,22 @@ class TestCLITemporalDisplayComprehensive(TestCase):
             metadata={
                 "type": "commit_message",
                 "commit_hash": "fa6d59d1234567890abcdef1234567890abcdef",
+                "author_email": "test@example.com",
+            },
+            temporal_context={
+                "commit_date": "2024-01-15 14:30:00",
+                "author_name": "Test User",
             },
         )
 
+        # temporal_service is a required positional arg on the function
+        # signature but is not read by the current implementation (Story 2:
+        # commit metadata comes from result.temporal_context; per-file
+        # "modified files" listing was removed entirely).
         mock_service = MagicMock()
-        mock_service._fetch_commit_details.return_value = {
-            "hash": "fa6d59d1234567890abcdef1234567890abcdef",
-            "date": "2024-01-15 14:30:00",
-            "author_name": "Test User",
-            "author_email": "test@example.com",
-            "message": "Fix JWT validation bug\\n\\nNow properly logs warnings and raises TokenExpiredError\\ninstead of silently returning False.",
-        }
-
-        mock_service._fetch_commit_file_changes.return_value = [
-            {"file_path": "auth.py", "blob_hash": "abc123"},
-            {"file_path": "tests/test_auth.py", "blob_hash": "def456"},
-        ]
 
         with patch("code_indexer.cli.console.print") as mock_print:
             _display_commit_message_match(result, 1, mock_service)
-
-            # Verify commit details were fetched
-            mock_service._fetch_commit_details.assert_called_once()
-            mock_service._fetch_commit_file_changes.assert_called_once()
 
             # Verify output contains commit message marker
             print_calls = [str(call) for call in mock_print.call_args_list]
@@ -179,10 +166,11 @@ class TestCLITemporalDisplayComprehensive(TestCase):
                 "Commit message marker should be displayed"
             )
 
-            # Verify files modified list
-            assert any("auth.py" in str(call) for call in print_calls), (
-                "Modified file should be listed"
-            )
+            # Story 2: no per-file listing -- fixed note shown instead
+            assert any(
+                "File changes tracked in diff-based index" in str(call)
+                for call in print_calls
+            ), "Fixed diff-based-index note should be displayed"
 
     def test_display_ordering_commit_messages_first(self):
         """Test that display_temporal_results shows commit messages before file chunks."""
