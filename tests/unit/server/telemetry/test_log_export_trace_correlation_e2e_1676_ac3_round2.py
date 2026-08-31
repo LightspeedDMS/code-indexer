@@ -122,8 +122,18 @@ class TestOtelContextPropagatesToRealExportedLogRecordAcrossThreads:
                 # is reset_telemetry_manager() -> LoggerProvider.shutdown()
                 # flushing the REAL BatchLogRecordProcessor(OTLPLogExporter)
                 # that _setup_log_exporter() constructs whenever
-                # export_logs=True, once this test has actually enqueued a
-                # real log record into it. That dependency is INHERENT to
+                # export_logs=True. That processor's queue already has a
+                # real pending record by shutdown time regardless of this
+                # test's own marker call: _register_log_bridge_handler()
+                # runs (inside _initialize_otel()) BEFORE the
+                # "OpenTelemetry initialized: ..." logger.info() line a
+                # few statements later in manager.py -- and
+                # install_queue_logging() is already active at that point
+                # (required by this test to run first, see above) -- so
+                # that startup log line itself is captured and forwarded
+                # through the real bridge handler into the OTLP log
+                # exporter's queue before this test ever emits its own
+                # marker message. That dependency is INHERENT to
                 # this test's actual subject -- the real
                 # _register_log_bridge_handler()/LoggerProvider wiring that
                 # Story #1676 AC3 round 2 exists specifically to cover end

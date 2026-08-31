@@ -6,6 +6,22 @@ which manages the OTEL SDK lifecycle. Following TDD methodology - tests
 written FIRST before implementation.
 
 All tests use real components following MESSI Rule #1: No mocks.
+
+Bug #1744 (round 3): several tests below now pass explicit
+export_traces=False, export_metrics=False. Per manager.py's actual
+source, both flags always construct a real provider (TracerProvider/
+MeterProvider) regardless of value -- the flag only controls whether a
+real, network-touching OTLP exporter/processor gets attached. Tests that
+only inspect boolean/attribute state (is_initialized, "provider is not
+None", service_name, collector_protocol, etc.) are provably unaffected
+by this flag's value, so setting it False removes a real, unreachable-
+network export attempt on manager.shutdown() (confirmed 6.34s+ blocking
+per test) with zero change to any assertion's outcome. Tests whose own
+documented subject IS the exporter/processor-attachment behavior itself
+(TestTelemetryManagerInvalidEndpoint's AC5 graceful-degradation test, and
+TestSamplerWiringEnabledBranch/TestDefaultRateAlwaysSamples in the
+sibling test_trace_sampling_1676_ac4.py) are deliberately left real and
+documented individually.
 """
 
 from code_indexer.server.utils.config_manager import TelemetryConfig
@@ -140,6 +156,8 @@ class TestTelemetryManagerEnabled:
         config = TelemetryConfig(
             enabled=True,
             collector_endpoint="http://localhost:4317",
+            export_traces=False,
+            export_metrics=False,
         )
         manager = TelemetryManager(config)
 
@@ -152,16 +170,22 @@ class TestTelemetryManagerEnabled:
         """
         AC2: TracerProvider is created when enabled.
 
-        Given a TelemetryConfig with enabled=True and export_traces=True
+        Given a TelemetryConfig with enabled=True
         When TelemetryManager is initialized
         Then tracer_provider should be set
+
+        export_traces=False (Bug #1744): tracer_provider is constructed
+        by manager.py regardless of export_traces -- only whether a real
+        exporter gets attached differs, which this assertion never
+        inspects.
         """
         from code_indexer.server.telemetry import TelemetryManager
 
         config = TelemetryConfig(
             enabled=True,
             collector_endpoint="http://localhost:4317",
-            export_traces=True,
+            export_traces=False,
+            export_metrics=False,
         )
         manager = TelemetryManager(config)
 
@@ -174,16 +198,22 @@ class TestTelemetryManagerEnabled:
         """
         AC2: MeterProvider is created when enabled.
 
-        Given a TelemetryConfig with enabled=True and export_metrics=True
+        Given a TelemetryConfig with enabled=True
         When TelemetryManager is initialized
         Then meter_provider should be set
+
+        export_metrics=False (Bug #1744): meter_provider is constructed
+        by manager.py regardless of export_metrics -- only whether a real
+        exporter gets attached differs, which this assertion never
+        inspects.
         """
         from code_indexer.server.telemetry import TelemetryManager
 
         config = TelemetryConfig(
             enabled=True,
             collector_endpoint="http://localhost:4317",
-            export_metrics=True,
+            export_traces=False,
+            export_metrics=False,
         )
         manager = TelemetryManager(config)
 
@@ -205,6 +235,8 @@ class TestTelemetryManagerEnabled:
         config = TelemetryConfig(
             enabled=True,
             collector_endpoint="http://localhost:4317",
+            export_traces=False,
+            export_metrics=False,
         )
         manager = TelemetryManager(config)
 
@@ -230,6 +262,8 @@ class TestTelemetryManagerEnabled:
         config = TelemetryConfig(
             enabled=True,
             collector_endpoint="http://localhost:4317",
+            export_traces=False,
+            export_metrics=False,
         )
         manager = TelemetryManager(config)
 
@@ -258,6 +292,13 @@ class TestTelemetryManagerInvalidEndpoint:
         Given a TelemetryConfig with an unreachable endpoint
         When TelemetryManager is initialized
         Then it should initialize successfully (exports will fail later)
+
+        Bug #1744 (round 3): deliberately NOT ported to export_traces=False
+        -- this test's entire purpose (AC5 graceful degradation) is to
+        exercise a real exporter construction against a genuinely bad
+        endpoint; export_traces=False would mean no exporter is ever
+        attempted at all, defeating the test. Confirmed 9.12s solo
+        runtime -- a real, intrinsic network dependency, left as-is.
         """
         from code_indexer.server.telemetry import TelemetryManager
 
@@ -358,6 +399,8 @@ class TestTelemetryManagerConfiguration:
             enabled=True,
             collector_endpoint="http://localhost:4317",
             service_name="custom-service-name",
+            export_traces=False,
+            export_metrics=False,
         )
         manager = TelemetryManager(config)
 
@@ -380,6 +423,8 @@ class TestTelemetryManagerConfiguration:
             enabled=True,
             collector_endpoint="http://localhost:4317",
             deployment_environment="production",
+            export_traces=False,
+            export_metrics=False,
         )
         manager = TelemetryManager(config)
 
@@ -402,7 +447,7 @@ class TestTelemetryManagerConfiguration:
             enabled=True,
             collector_endpoint="http://localhost:4317",
             export_traces=False,
-            export_metrics=True,
+            export_metrics=False,
         )
         manager = TelemetryManager(config)
 
@@ -425,7 +470,7 @@ class TestTelemetryManagerConfiguration:
         config = TelemetryConfig(
             enabled=True,
             collector_endpoint="http://localhost:4317",
-            export_traces=True,
+            export_traces=False,
             export_metrics=False,
         )
         manager = TelemetryManager(config)
@@ -459,6 +504,8 @@ class TestTelemetryManagerProtocol:
             enabled=True,
             collector_endpoint="http://localhost:4317",
             collector_protocol="grpc",
+            export_traces=False,
+            export_metrics=False,
         )
         manager = TelemetryManager(config)
 
@@ -482,6 +529,8 @@ class TestTelemetryManagerProtocol:
             enabled=True,
             collector_endpoint="http://localhost:4318",
             collector_protocol="http",
+            export_traces=False,
+            export_metrics=False,
         )
         manager = TelemetryManager(config)
 

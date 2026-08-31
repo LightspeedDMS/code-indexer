@@ -50,12 +50,29 @@ def _meter_provider_resource(meter_provider):
 def _telemetry_manager(**config_kwargs):
     """Construct a real TelemetryManager (enabled, real OTEL SDK) and
     guarantee shutdown(), splitting out cluster_node_id (a TelemetryManager
-    constructor kwarg, not a TelemetryConfig field)."""
+    constructor kwarg, not a TelemetryConfig field).
+
+    Bug #1744 (round 3): export_traces/export_metrics default to False
+    here. Every test in this file only ever inspects resource attributes
+    (tracer_provider.resource / meter_provider._sdk_config.resource),
+    which TelemetryManager._initialize_otel() builds ONCE and shares
+    across both the True and False branches of each flag -- so these
+    flags are structurally irrelevant to what this file asserts. Left
+    True (via a real TelemetryConfig(enabled=True, export_traces=True)
+    default), every real-manager construction here unconditionally
+    attached a real OTLP exporter against an unreachable collector,
+    whose shutdown() flush blocked ~7-10s (confirmed live) -- same root
+    cause as the rest of #1744. A caller can still explicitly pass
+    export_traces=True/export_metrics=True (setdefault only fills gaps),
+    but none of this file's current call sites need to.
+    """
     from code_indexer.server.telemetry import TelemetryManager
 
     cluster_node_id = config_kwargs.pop("cluster_node_id", None)
     config_kwargs.setdefault("enabled", True)
     config_kwargs.setdefault("collector_endpoint", _TEST_COLLECTOR_ENDPOINT)
+    config_kwargs.setdefault("export_traces", False)
+    config_kwargs.setdefault("export_metrics", False)
     config = TelemetryConfig(**config_kwargs)
     manager = TelemetryManager(config, cluster_node_id=cluster_node_id)
     try:
@@ -77,7 +94,7 @@ class TestTelemetryManagerServiceVersionAttribute:
     def test_meter_provider_resource_also_includes_service_version(self):
         from code_indexer import __version__
 
-        with _telemetry_manager(export_metrics=True) as manager:
+        with _telemetry_manager() as manager:
             resource = _meter_provider_resource(manager.meter_provider)
             assert resource.attributes.get("service.version") == __version__
 
@@ -136,8 +153,6 @@ class TestTelemetryManagerResourceSharedAcrossSignals:
 
     def test_tracer_and_meter_resources_carry_identical_new_attributes(self):
         with _telemetry_manager(
-            export_traces=True,
-            export_metrics=True,
             cluster_node_id="shared-node-cidx",
         ) as manager:
             tracer_resource = manager.tracer_provider.resource  # type: ignore[attr-defined]
@@ -167,6 +182,8 @@ class TestGetTelemetryManagerThreadsClusterNodeId:
         config = TelemetryConfig(
             enabled=True,
             collector_endpoint=_TEST_COLLECTOR_ENDPOINT,
+            export_traces=False,
+            export_metrics=False,
         )
         manager = get_telemetry_manager(config, cluster_node_id="factory-node-cidx")
 

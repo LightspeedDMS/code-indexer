@@ -18,7 +18,6 @@ import threading
 from unittest.mock import patch
 
 import pytest
-from code_indexer.server.utils.config_manager import TelemetryConfig
 
 
 def reset_all_singletons():
@@ -137,21 +136,29 @@ class TestLogCorrelationIntegration:
     def test_trace_context_from_active_span(self):
         """
         get_trace_context() returns real trace/span IDs from active span.
+
+        Bug #1744 sibling (round 3): this test used to construct a real
+        TelemetryConfig(enabled=True, export_traces=True) via
+        get_telemetry_manager(), whose teardown (this class's
+        teardown_method() -> reset_all_singletons() ->
+        reset_telemetry_manager() -> shutdown()) forces a real OTLP
+        export attempt against an unreachable localhost:4317 collector --
+        confirmed 13.66s solo teardown cost. Fixed with
+        active_span_exporter() (real Span/Context, zero network I/O) --
+        same mechanism used throughout #1744. This class is currently
+        @pytest.mark.slow (excluded from server-fast-automation.sh's
+        gate), but the fix is applied anyway since it removes real
+        network dependency for any other invocation path.
         """
-        from code_indexer.server.telemetry import get_telemetry_manager
         from code_indexer.server.telemetry.spans import create_span
         from code_indexer.server.telemetry.log_handler import (
             get_trace_context,
         )
-
-        config = TelemetryConfig(
-            enabled=True,
-            export_traces=True,
-            collector_endpoint="http://localhost:4317",
+        from tests.unit.server.telemetry.otel_test_support import (
+            active_span_exporter,
         )
-        get_telemetry_manager(config)
 
-        with create_span("test.operation"):
+        with active_span_exporter(), create_span("test.operation"):
             context = get_trace_context()
 
             # Should have non-zero trace_id when span is active
