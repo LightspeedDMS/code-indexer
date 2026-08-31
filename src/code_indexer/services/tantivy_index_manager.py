@@ -920,6 +920,61 @@ class TantivyIndexManager:
 
         return self._exact_path_field_available
 
+    def schema_needs_rebuild(self) -> bool:
+        """
+        Bug #1763: True if an EXISTING on-disk index at self.index_dir has
+        a stale (pre-#1761) physical schema and must be rebuilt via
+        initialize_index(create_new=True) before reuse -- otherwise
+        #1761's dedup fix (delete_document_deferred(), gated on
+        _path_exact_field_available()) stays a permanent no-op on this
+        index and duplicate FTS rows keep accumulating forever.
+
+        Pure meta.json read (no tantivy API calls, so it can never
+        panic), safely callable BEFORE initialize_index(). Deliberately
+        uncached and independent of self._exact_path_field_available:
+        a caller that finds the schema stale is about to trigger a real
+        rebuild on this same instance, and caching "legacy" here would
+        leave a stale answer baked in for this instance's lifetime even
+        after the rebuild adds the field.
+
+        Returns:
+            True when meta.json exists and can be parsed but the schema
+            lacks _PATH_EXACT_FIELD.
+            False when no physical index exists yet (callers already
+            have their own "doesn't exist" branch), the schema is
+            already current, OR meta.json exists but can't be read/
+            parsed (MEDIUM-3, #1763 code review: fail toward the
+            CONSERVATIVE answer -- same fail-safe direction as the
+            sibling _path_exact_field_available() method above -- so a
+            transient read glitch (OSError, PermissionError, a partial
+            read mid-write) can never trigger a destructive rmtree. A
+            genuinely legacy index that happens to hit a transient read
+            error here simply gets re-detected as stale on the NEXT
+            call once the transient condition clears; the reverse
+            (fail toward True) risked deleting a perfectly healthy
+            index on a one-off filesystem hiccup).
+        """
+        meta_path = self.index_dir / "meta.json"
+        if not meta_path.exists():
+            return False
+
+        try:
+            with open(meta_path, "r") as f:
+                meta = json.load(f)
+            field_names = {field.get("name") for field in meta.get("schema", [])}
+        except Exception as e:
+            logger.warning(
+                "Could not determine FTS schema compatibility from %s "
+                "(assuming current schema -- conservative, never "
+                "triggers a destructive rebuild from a transient read "
+                "error): %s",
+                meta_path,
+                e,
+            )
+            return False
+
+        return _PATH_EXACT_FIELD not in field_names
+
     def _build_path_delete_query(self, file_path: str) -> Any:
         """
         Bug #1761: build a Tantivy Query (return type Any -- Query is not
@@ -1778,6 +1833,19 @@ class TantivyIndexManager:
             raise RuntimeError(
                 "Index writer not initialized. Call initialize_index() first."
             )
+
+        # Bug #1764: on a legacy physical index, the fallback path query
+        # is TOKENIZED, not exact, and can over-match a sibling document.
+        # Skip rather than over-match, mirroring
+        # delete_document_deferred()'s existing safety behavior.
+        if not self._path_exact_field_available():
+            logger.debug(
+                "Skipping FTS delete for %s: physical index lacks %s "
+                "(legacy pre-#1761 schema)",
+                file_path,
+                _PATH_EXACT_FIELD,
+            )
+            return
 
         try:
             with self._lock:

@@ -2,6 +2,7 @@
 
 import subprocess
 from pathlib import Path
+from typing import Optional
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -39,6 +40,53 @@ def _create_git_repo(path: Path) -> str:
         text=True,
     )
     return result.stdout.strip()
+
+
+# Tantivy IndexWriter heap size used by the raw-tantivy legacy-index test
+# helper below -- mirrors the identical named constant already used by
+# test_fts_schema_rebuild_1763.py's _build_legacy_index() helper.
+_TEST_WRITER_HEAP_BYTES = 50_000_000
+
+
+def _build_legacy_fts_index(index_dir: Path, documents: list) -> None:
+    """Build a real on-disk Tantivy index using the PRE-#1761 schema shape
+    (no path_exact_raw / content_raw_verbatim fields), pre-populated with
+    `documents`. Mirrors the identical, already-proven helper in
+    test_fts_schema_rebuild_1763.py -- kept as a small local test-only
+    duplicate rather than a cross-test-module import.
+    """
+    import tantivy
+    from tantivy import Facet
+
+    index_dir.mkdir(parents=True, exist_ok=True)
+
+    schema_builder = tantivy.SchemaBuilder()
+    schema_builder.add_text_field("path", stored=True)
+    schema_builder.add_text_field("content", stored=False)
+    schema_builder.add_text_field("content_raw", stored=True)
+    schema_builder.add_text_field("identifiers", stored=True)
+    schema_builder.add_unsigned_field("line_start", indexed=True, stored=True)
+    schema_builder.add_unsigned_field("line_end", indexed=True, stored=True)
+    schema_builder.add_text_field("language", stored=True)
+    schema_builder.add_facet_field("language_facet")
+    schema = schema_builder.build()
+
+    index = tantivy.Index(schema, str(index_dir))
+    writer = index.writer(_TEST_WRITER_HEAP_BYTES)
+
+    for doc_dict in documents:
+        doc = tantivy.Document()
+        doc.add_text("path", doc_dict["path"])
+        doc.add_text("content", doc_dict["content"])
+        doc.add_text("content_raw", doc_dict["content_raw"])
+        doc.add_text("identifiers", " ".join(doc_dict["identifiers"]))
+        doc.add_unsigned("line_start", doc_dict["line_start"])
+        doc.add_unsigned("line_end", doc_dict["line_end"])
+        doc.add_text("language", doc_dict["language"])
+        doc.add_facet("language_facet", Facet.from_string(f"/{doc_dict['language']}"))
+        writer.add_document(doc)
+    writer.commit()
+    writer.wait_merging_threads()
 
 
 def _make_indexer(repo: Path, tmp_path: Path, store: MagicMock) -> SmartIndexer:
@@ -100,13 +148,38 @@ class TestFtsBootstrap:
     # find_modified_files() returns an empty list.
     _INDEX_TIMESTAMP_FUTURE_OFFSET_SECONDS = 120
 
-    def _seed_completed_metadata(self, indexer: SmartIndexer, git_repo: Path) -> None:
+    # Used only by test_untouched_files_survive_stale_schema_rebuild_with_
+    # nonzero_diff below to seed a genuinely PAST untouched-file mtime
+    # (via os.utime) and a last_index_timestamp shortly after it, so the
+    # REAL (unstubbed) find_modified_files() naturally excludes that file
+    # while a freshly-created "changed" file (current mtime) is naturally
+    # included -- a real, deterministic filesystem-driven diff rather than
+    # a monkeypatched one.
+    _PAST_FILE_OFFSET_SECONDS = 10_000
+    _LAST_INDEX_TIMESTAMP_BUFFER_SECONDS = 200
+
+    def _seed_completed_metadata(
+        self,
+        indexer: SmartIndexer,
+        git_repo: Path,
+        last_index_timestamp: Optional[float] = None,
+    ) -> None:
         """Seed progressive metadata to look like a prior completed index.
 
         project_id for a no-remote git repo falls back to the directory name.
         The fixture creates the repo at tmp_path/'repo', so project_id='repo'.
         The commit watermark is seeded to the repo's current HEAD so incremental
         indexing finds no new commits and hits the 'nothing to do' early exit.
+
+        last_index_timestamp: when omitted, defaults to slightly in the
+        FUTURE so timestamp - safety_buffer is still ahead of current file
+        mtimes, making find_modified_files() return [] (the zero-diff
+        early-return branch every test in this class other than
+        test_untouched_files_survive_stale_schema_rebuild_with_nonzero_diff
+        relies on). Passing an explicit PAST value instead lets that one
+        test seed a genuinely non-empty, timestamp-discriminated diff via
+        real filesystem mtimes -- no monkeypatching of find_modified_files
+        needed.
         """
         import time
 
@@ -126,10 +199,10 @@ class TestFtsBootstrap:
 
         meta = indexer.progressive_metadata.metadata
         meta["status"] = "completed"
-        # Set slightly in the future so timestamp - safety_buffer is still
-        # ahead of current file mtimes, making find_modified_files return [].
         meta["last_index_timestamp"] = (
-            time.time() + self._INDEX_TIMESTAMP_FUTURE_OFFSET_SECONDS
+            last_index_timestamp
+            if last_index_timestamp is not None
+            else time.time() + self._INDEX_TIMESTAMP_FUTURE_OFFSET_SECONDS
         )
         meta["files_processed"] = 5
         meta["embedding_provider"] = "voyage"
@@ -182,11 +255,13 @@ class TestFtsBootstrap:
         self._seed_completed_metadata(indexer, git_repo)
 
         # Create meta.json so the FTS index appears to already exist.
-        fts_index_dir = git_repo / ".code-indexer" / "tantivy_index"
-        fts_index_dir.mkdir(parents=True, exist_ok=True)
-        (fts_index_dir / "meta.json").write_text("{}")
+        self._seed_stub_fts_meta_json(git_repo)
 
         mock_fts = MagicMock()
+        # Bug #1763: smart_index() now also consults schema_needs_rebuild()
+        # -- False represents a genuinely current-schema existing index,
+        # matching this test's "already exists, no bootstrap" intent.
+        mock_fts.schema_needs_rebuild.return_value = False
 
         with patch(
             "code_indexer.services.tantivy_index_manager.TantivyIndexManager",
@@ -194,8 +269,53 @@ class TestFtsBootstrap:
         ):
             indexer.smart_index(enable_fts=True)
 
-        # FTS index already existed -> create_new_fts=False -> no bootstrap.
+        # FTS index already existed with a current schema ->
+        # create_new_fts=False -> no bootstrap.
         assert mock_fts.add_document.call_count == 0
+
+    def _seed_stub_fts_meta_json(self, git_repo: Path) -> Path:
+        """Create a stub meta.json so an FTS index appears to already
+        exist at git_repo's default FTS index path. Shared setup for
+        tests that need "index exists" without caring about its real
+        Tantivy schema content (the mock TantivyIndexManager's
+        schema_needs_rebuild() is configured separately per test)."""
+        fts_index_dir = git_repo / ".code-indexer" / "tantivy_index"
+        fts_index_dir.mkdir(parents=True, exist_ok=True)
+        (fts_index_dir / "meta.json").write_text("{}")
+        return fts_index_dir
+
+    def test_populate_fts_called_when_existing_index_has_stale_schema(
+        self, tmp_path: Path, git_repo: Path, mock_vector_store: MagicMock
+    ) -> None:
+        """Bug #1763: even when meta.json already exists, a STALE schema
+        (schema_needs_rebuild() == True) must still drive
+        create_new_fts=True -- proving smart_index()'s real production
+        code actually calls TantivyIndexManager.schema_needs_rebuild(),
+        not just checks existence."""
+        mock_vector_store.count_points.return_value = 10
+        indexer = _make_indexer(git_repo, tmp_path, mock_vector_store)
+        indexer.embedding_provider.get_provider_name.return_value = "voyage"
+        indexer.embedding_provider.get_current_model.return_value = "voyage-code-3"
+        self._seed_completed_metadata(indexer, git_repo)
+
+        # meta.json exists (pre-#1763 code would treat this as
+        # create_new_fts=False) but represents a stale schema.
+        self._seed_stub_fts_meta_json(git_repo)
+
+        mock_fts = MagicMock()
+        mock_fts.schema_needs_rebuild.return_value = True
+
+        with patch(
+            "code_indexer.services.tantivy_index_manager.TantivyIndexManager",
+            return_value=mock_fts,
+        ):
+            indexer.smart_index(enable_fts=True)
+
+        # schema_needs_rebuild() must actually have been consulted, and
+        # its True answer must have driven create_new_fts=True.
+        mock_fts.schema_needs_rebuild.assert_called()
+        mock_fts.initialize_index.assert_called_with(create_new=True)
+        assert mock_fts.add_document.call_count >= 1
 
     def test_populate_fts_from_all_files_reads_files_and_adds_documents(
         self, tmp_path: Path, mock_vector_store: MagicMock
@@ -246,6 +366,126 @@ class TestFtsBootstrap:
             assert isinstance(doc["line_end"], int)
             assert doc["line_start"] >= 1
             assert doc["line_end"] >= doc["line_start"]
+
+    def _configure_real_processing_collaborators(
+        self, indexer: SmartIndexer, mock_vector_store: MagicMock
+    ) -> None:
+        """Configure the genuinely EXTERNAL collaborators (embedding
+        provider, vector store) so the REAL, unstubbed production
+        processing pipeline can run end-to-end against tiny test files --
+        no SmartIndexer/HighThroughputProcessor method is replaced."""
+        indexer.embedding_provider.get_provider_name.return_value = "voyage"
+        indexer.embedding_provider.get_current_model.return_value = "voyage-code-3"
+        indexer.embedding_provider.get_embeddings_batch.side_effect = lambda texts: [
+            [0.1, 0.2] for _ in texts
+        ]
+        # Real hide_files_not_in_branch_thread_safe() runs unstubbed: an
+        # empty distinct-paths set means nothing is reported as hidden.
+        mock_vector_store.distinct_content_paths.return_value = set()
+
+    def _seed_timestamp_discriminating_files(self, git_repo: Path) -> tuple:
+        """Create untouched.py with an mtime OLDER than the seeded
+        last_index_timestamp (a real os.utime() call, so the real
+        find_modified_files() naturally excludes it) and changed.py with
+        the current, naturally-newer mtime (naturally included) -- a
+        genuinely deterministic filesystem setup, no monkeypatching of
+        any collaborator.
+
+        Returns (untouched_file, changed_file, past_mtime).
+        """
+        import os
+        import time
+
+        past_mtime = time.time() - self._PAST_FILE_OFFSET_SECONDS
+        untouched_file = git_repo / "untouched.py"
+        untouched_file.write_text("UNTOUCHED_MARKER_1763 = 1\n")
+        os.utime(untouched_file, (past_mtime, past_mtime))
+
+        changed_file = git_repo / "changed.py"
+        changed_file.write_text("CHANGED_MARKER_1763 = 1\n")
+        return untouched_file, changed_file, past_mtime
+
+    def _seed_legacy_index_with_untouched_doc(self, git_repo: Path) -> Path:
+        """A REAL legacy-schema (pre-#1761) on-disk Tantivy index at the
+        exact path smart_index() will open, seeded with ONE document for
+        untouched.py -- as if a prior `cidx index --fts` run, before
+        either fix existed, had indexed it."""
+        fts_index_dir = git_repo / ".code-indexer" / "tantivy_index"
+        _build_legacy_fts_index(
+            fts_index_dir,
+            [
+                {
+                    "path": "untouched.py",
+                    "content": "UNTOUCHED_MARKER_1763",
+                    "content_raw": "UNTOUCHED_MARKER_1763",
+                    "identifiers": ["UNTOUCHED_MARKER_1763"],
+                    "line_start": 1,
+                    "line_end": 1,
+                    "language": "py",
+                }
+            ],
+        )
+        return fts_index_dir
+
+    def _assert_untouched_and_changed_docs_present(self, fts_index_dir: Path) -> None:
+        """Verify the real, on-disk FTS index now contains BOTH the
+        untouched file's original document (proving CRITICAL-1's wipe did
+        not silently lose it) AND the changed file's fresh document."""
+        from code_indexer.services.tantivy_index_manager import (
+            TantivyIndexManager as RealTantivyIndexManager,
+        )
+
+        verify_manager = RealTantivyIndexManager(fts_index_dir)
+        verify_manager.open_for_search()
+        untouched_results = verify_manager.search("UNTOUCHED_MARKER_1763", limit=5)
+        changed_results = verify_manager.search("CHANGED_MARKER_1763", limit=5)
+
+        assert len(untouched_results) == 1, (
+            "CRITICAL-1: the untouched file's FTS entry was lost by the "
+            f"stale-schema rebuild despite a non-empty changed-files set. "
+            f"Got: {untouched_results}"
+        )
+        assert untouched_results[0]["path"] == "untouched.py"
+        assert len(changed_results) >= 1, (
+            f"Expected the changed file to also be present: {changed_results}"
+        )
+        assert any(r["path"] == "changed.py" for r in changed_results)
+
+    def test_untouched_files_survive_stale_schema_rebuild_with_nonzero_diff(
+        self,
+        tmp_path: Path,
+        git_repo: Path,
+        mock_vector_store: MagicMock,
+    ) -> None:
+        """CRITICAL-1 (#1763 code review): a stale-schema FTS index must
+        NOT silently lose the FTS entries of every file NOT in this run's
+        changed-files set. Every OTHER test in this class only exercises
+        the zero-changed-files early-return branch (a seeded FUTURE
+        timestamp makes find_modified_files() always return []) -- the
+        one case that already worked correctly even before this fix. This
+        test drives the REAL smart_index() entry point through the REAL,
+        unstubbed production processing pipeline with a NON-EMPTY
+        files_to_index (the ordinary `cidx index` case), against a REAL
+        on-disk legacy-schema Tantivy index seeded with a pre-existing
+        document for an UNTOUCHED file, and asserts that document
+        survives the run.
+        """
+        indexer = _make_indexer(git_repo, tmp_path, mock_vector_store)
+        self._configure_real_processing_collaborators(indexer, mock_vector_store)
+
+        _untouched_file, _changed_file, past_mtime = (
+            self._seed_timestamp_discriminating_files(git_repo)
+        )
+        self._seed_completed_metadata(
+            indexer,
+            git_repo,
+            last_index_timestamp=past_mtime + self._LAST_INDEX_TIMESTAMP_BUFFER_SECONDS,
+        )
+        fts_index_dir = self._seed_legacy_index_with_untouched_doc(git_repo)
+
+        indexer.smart_index(enable_fts=True)
+
+        self._assert_untouched_and_changed_docs_present(fts_index_dir)
 
 
 class TestResumePathReanchoring:
