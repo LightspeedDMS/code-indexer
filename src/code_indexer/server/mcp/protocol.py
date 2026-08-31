@@ -19,6 +19,7 @@ from code_indexer.server.auth.user_manager import User
 from code_indexer.server.services.config_service import get_config_service
 from sse_starlette.sse import EventSourceResponse
 import asyncio
+import contextvars
 import functools
 import time
 import uuid
@@ -431,6 +432,15 @@ async def _invoke_handler(
             )
         loop = asyncio.get_running_loop()
         bound = functools.partial(handler, *call_args, **extra_kwargs)
+        # Bug #1755: loop.run_in_executor() does NOT propagate ContextVars
+        # into the executor thread on its own (unlike asyncio.create_task(),
+        # which copies context automatically for coroutines) -- the
+        # correlation_id ContextVar set by CorrelationBridgeMiddleware would
+        # otherwise be invisible to every sync MCP handler. Snapshot the
+        # calling coroutine's context once and run `bound` inside it on the
+        # worker thread, mirroring the identical pattern already used at
+        # semantic_query_manager.py:1942 and multi_search_service.py:236.
+        ctx = contextvars.copy_context()
         if tool_name in _ASYNC_DISPATCH_TIMEOUT_EXEMPT_TOOLS:
             # Story #1491 AC2: the exemption is a property of the TOOL, not of
             # the dispatch branch. regex_search became sync-dispatched so its
@@ -442,10 +452,10 @@ async def _invoke_handler(
             # timeout, Issue #1398 Group A). Note an outer wait_for could not
             # have cancelled the executor's thread anyway -- it would only have
             # abandoned it while returning a timeout error.
-            return await loop.run_in_executor(None, bound)
+            return await loop.run_in_executor(None, ctx.run, bound)
         try:
             return await asyncio.wait_for(
-                loop.run_in_executor(None, bound),
+                loop.run_in_executor(None, ctx.run, bound),
                 timeout=timeout_seconds,
             )
         except asyncio.TimeoutError:
