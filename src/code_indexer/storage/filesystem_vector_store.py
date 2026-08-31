@@ -6629,8 +6629,12 @@ class FilesystemVectorStore:
         # (threading.local semantics) -- see chunk_store_cache.py.
         chunk_store_for_hydration: Optional[Any] = None
         if _hydration_chunk_layout == ChunkLayout.CHUNKS_DB:
+            # Bug #1760: this hydration path only ever READS
+            # (chunk_store.read() inside _hydrate_from_chunk_store below)
+            # -- read_only=True forces the genuinely read-only SQLite open
+            # mode, so a non-writable chunks.db never fails a pure query.
             chunk_store_for_hydration = self._chunk_store_cache.get_or_open(
-                collection_path / "chunks.db", str(collection_path)
+                collection_path / "chunks.db", str(collection_path), read_only=True
             )
 
         # Calculate actual parallel execution time (wall clock)
@@ -6925,9 +6929,13 @@ class FilesystemVectorStore:
                 raise
             if chunk_store_for_hydration is None:
                 # Story #1492 AC3: routed through the per-thread cache
-                # (see the entry-point comment above).
+                # (see the entry-point comment above). Bug #1760: read-only
+                # -- this re-hydrate retry is a pure read, same as the
+                # primary hydration path above.
                 chunk_store_for_hydration = self._chunk_store_cache.get_or_open(
-                    collection_path / "chunks.db", str(collection_path)
+                    collection_path / "chunks.db",
+                    str(collection_path),
+                    read_only=True,
                 )
             results = _hydrate_from_chunk_store(chunk_store_for_hydration)
         else:
@@ -6962,9 +6970,13 @@ class FilesystemVectorStore:
                     # open -- connection lifecycle now belongs to
                     # ChunkStoreThreadCache, never closed at the end of
                     # every search() call (see the removed `finally`
-                    # block below).
+                    # block below). Bug #1760: read-only -- this re-hydrate
+                    # retry is a pure read, same as the primary hydration
+                    # path above.
                     chunk_store_for_hydration = self._chunk_store_cache.get_or_open(
-                        collection_path / "chunks.db", str(collection_path)
+                        collection_path / "chunks.db",
+                        str(collection_path),
+                        read_only=True,
                     )
                 results = _hydrate_from_chunk_store(chunk_store_for_hydration)
 

@@ -232,6 +232,7 @@ class ChunkStore:
         db_path: Union[str, Path],
         *,
         immutable: bool = False,
+        read_only: bool = False,
         expected_dim: Optional[int] = None,
         durable_synchronous: bool = False,
     ) -> None:
@@ -241,8 +242,35 @@ class ChunkStore:
             db_path: Path to the ``chunks.db``-equivalent SQLite file.
             immutable: When True, opens a FRESH connection with the SQLite
                 ``immutable=1`` URI parameter (read-only; all writes raise
-                ``ImmutableChunkStoreError``). Callers should determine this
+                ``ImmutableChunkStoreError``). This is a PROMISE to SQLite
+                that the file will NEVER change on disk for the lifetime
+                of this connection -- it may silently miss rows written by
+                a concurrent mutable writer, and it never consults a
+                database's ``-wal`` file at all. Reserved EXCLUSIVELY for
+                paths proven immutable via ``is_immutable_versioned_
+                snapshot()`` (published, never-again-written
+                ``.versioned/`` snapshots). Callers should determine this
                 via :func:`open_chunk_store_for_path`, not by guessing.
+                Opening a mutating path with ``immutable=1`` is a
+                correctness/corruption bug, not a perf nit -- never widen
+                this flag's usage to cover ``read_only`` below.
+            read_only: Bug #1760 code review Finding 1 -- when True, opens
+                a FRESH connection with the SQLite ``mode=ro`` URI
+                parameter: genuinely read-only (all writes raise
+                ``ImmutableChunkStoreError``, matching ``immutable``'s
+                write-rejection contract) but, unlike ``immutable=1``,
+                fully participates in SQLite's normal per-statement
+                read-transaction semantics -- it correctly observes rows
+                committed by a concurrent mutable writer AFTER this
+                connection was opened, and correctly consults the
+                database's ``-wal`` file for content committed to WAL but
+                not yet checkpointed into the main file. This is the
+                correct mode for a pure-read caller against a collection
+                that IS actively being written by another process (e.g.
+                indexing/refresh/branch-delta-reindex on an activated repo
+                or golden base clone) -- exactly the scenario
+                ``immutable=1`` must never be used for. Mutually exclusive
+                with ``immutable`` (raises ``ValueError`` if both True).
             expected_dim: Optional known vector dimension. When omitted, the
                 dimension is inferred from the first vector ever written and
                 persisted so it is enforced across sessions too.
@@ -261,15 +289,30 @@ class ChunkStore:
                 per-chunk indexing ``ChunkStore`` path (this parameter
                 left at its default False) is completely unaffected --
                 a per-write NFS fsync would cripple indexing throughput.
+
+        Raises:
+            ValueError: If both ``immutable`` and ``read_only`` are True --
+                these are two distinct, mutually exclusive read-only modes
+                with different correctness guarantees; a caller must pick
+                exactly one, never both.
         """
+        if immutable and read_only:
+            raise ValueError(
+                "ChunkStore: immutable and read_only are mutually "
+                "exclusive -- immutable=1 is reserved for proven-immutable "
+                ".versioned/ snapshots, read_only (mode=ro) is for "
+                "pure-read access to an actively-mutated collection. "
+                "Pick exactly one."
+            )
         self.db_path = Path(db_path)
         self._immutable = immutable
+        self._read_only = read_only
         self._durable_synchronous = durable_synchronous
         self._compressor = zstandard.ZstdCompressor()
         self._decompressor = zstandard.ZstdDecompressor()
         self._conn = self._open_connection()
         self._expected_dim = expected_dim
-        if not immutable:
+        if not immutable and not read_only:
             try:
                 if durable_synchronous:
                     self._configure_durable_synchronous()
@@ -323,6 +366,18 @@ class ChunkStore:
             # Path.resolve().as_uri() produces a correctly percent-encoded
             # file:// URI, matching chunk_store_has_real_data's fix.
             uri = f"{Path(self.db_path).resolve().as_uri()}?immutable=1"
+            conn = sqlite3.connect(uri, uri=True)
+        elif self._read_only:
+            # Bug #1760 code review Finding 1: genuinely read-only, NOT
+            # immutable -- mode=ro never promises the engine the file is
+            # unchanging, so it correctly observes concurrent writers and
+            # correctly consults the -wal file (see __init__'s docstring
+            # for the full correctness rationale). Same percent-encoding
+            # rationale as the immutable=1 branch above applies here too.
+            # Deliberately never touches journal_mode -- attempting to
+            # write journal_mode is the ORIGINAL "attempt to write a
+            # readonly database" root cause this mode exists to avoid.
+            uri = f"{Path(self.db_path).resolve().as_uri()}?mode=ro"
             conn = sqlite3.connect(uri, uri=True)
         else:
             conn = sqlite3.connect(str(self.db_path))
@@ -597,6 +652,11 @@ class ChunkStore:
                 f"Chunk store at {self.db_path} was opened immutable=1 -- "
                 f"writes are rejected. Opening a mutating path with "
                 f"immutable=1 is a correctness bug, not a perf nit."
+            )
+        if self._read_only:
+            raise ImmutableChunkStoreError(
+                f"Chunk store at {self.db_path} was opened read_only=True "
+                f"(mode=ro) -- writes are rejected."
             )
 
     def write_batch(self, records: list) -> None:
@@ -1306,10 +1366,22 @@ def open_chunk_store_for_path(
         collection_path: The collection directory path to test against the
             predicate (e.g. the base-clone collection path, or a
             ``.versioned/{alias}/v_<ts>/{collection}`` snapshot path).
+        read_only: Bug #1760 code review Finding 1 -- a pure-read caller's
+            request for a read-only handle. A path PROVEN immutable by the
+            predicate always opens ``immutable=1`` regardless of this flag
+            (that gate is unchanged). A path NOT proven immutable opens the
+            NEW ``read_only`` (``mode=ro``) mode when this is True -- never
+            ``immutable=1``, which would falsely promise SQLite the file
+            (an actively-mutated activated repo or golden base clone) will
+            never change, risking silently stale/dropped query results.
     """
     predicate = _resolve_immutable_predicate()
-    immutable = read_only or predicate(collection_path)
-    return ChunkStore(db_path, immutable=immutable)
+    is_versioned_immutable = predicate(collection_path)
+    if is_versioned_immutable:
+        return ChunkStore(db_path, immutable=True)
+    if read_only:
+        return ChunkStore(db_path, read_only=True)
+    return ChunkStore(db_path)
 
 
 # ---------------------------------------------------------------------------

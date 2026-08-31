@@ -1895,6 +1895,19 @@ class SemanticQueryManager:
 
             provider_tasks: Dict[str, Any] = {}
             _degraded_in_query: List[str] = []
+            # Bug #1760 Finding 2: count providers skipped SPECIFICALLY
+            # because the health monitor marked them down/sin-binned,
+            # distinct from a hypothetical "zero providers configured"
+            # case. _all_providers is today always a static 2-entry list
+            # (both genuinely configured -- this whole "parallel" branch
+            # is only reached when _both_providers_configured() is True,
+            # or a caller explicitly forced query_strategy="parallel");
+            # if a future change ever makes it dynamically built from
+            # configured providers and genuinely empty, the guard below
+            # (which requires _all_providers to be non-empty) stays
+            # inert, preserving that "nothing to dispatch, silently no-op"
+            # behavior unchanged.
+            _unhealthy_pre_skip_count = 0
             for _pname, _kwargs in _all_providers:
                 _health_info = _health_monitor.get_health(_pname)
                 _pstatus = _health_info.get(_pname)
@@ -1905,6 +1918,7 @@ class SemanticQueryManager:
                         extra=get_log_extra("QUERY-STRATEGY-003"),
                     )
                     _degraded_in_query.append(_pname)
+                    _unhealthy_pre_skip_count += 1
                     continue
                 # Bug #678: skip sin-binned providers
                 if _health_monitor.is_sinbinned(_pname):
@@ -1914,16 +1928,54 @@ class SemanticQueryManager:
                         extra=get_log_extra("QUERY-STRATEGY-005"),
                     )
                     _degraded_in_query.append(_pname)
+                    _unhealthy_pre_skip_count += 1
                     continue
                 _captured_kwargs = _kwargs
                 provider_tasks[_pname] = lambda _kw=_captured_kwargs: (
                     self._search_with_provider(**_kw)
                 )
 
+            # Bug #1760 Finding 2: every eligible provider was pre-skipped
+            # as down/sin-binned -- distinct from the all-dispatched-
+            # hard-failed guard below (which only fires when at least one
+            # future was actually DISPATCHED). With the health monitor's
+            # default failure_threshold=5, a short burst of the SAME
+            # local storage error (e.g. Finding 1's readonly-db SQLite
+            # error) on both providers sin-bins both; for the entire
+            # cooldown window afterward, provider_tasks/futures end up
+            # empty here and the all-dispatched-hard-failed guard's `if
+            # futures and ...` short-circuits False, falling through to
+            # the OLD silent `return []` -- reproducing the exact
+            # reported success:true/total_results:0 symptom. Must raise
+            # here instead of falling through silently.
+            if _all_providers and _unhealthy_pre_skip_count == len(_all_providers):
+                _skip_summary = ", ".join(_degraded_in_query)
+                raise SemanticQueryError(
+                    f"Semantic search failed for repository "
+                    f"'{repository_alias}' -- every configured embedding "
+                    f"provider is currently unavailable (down/sinbinned): "
+                    f"{_skip_summary}"
+                )
+
             primary_results: List[QueryResult] = []
             secondary_results: List[QueryResult] = []
             # Bug #678: track per-future start times for failure latency recording
             _future_start: Dict[Any, float] = {}
+            # Bug #1760: track which dispatched providers actually SUCCEEDED
+            # (either real/empty results, or a legitimate LocalIndexNotFoundError
+            # -- Bug #1236's established "no index built yet, provider itself
+            # is fine" signal) versus which raised a HARD failure (anything
+            # else: HTTP errors, rate limits, timeouts, or a genuine local
+            # storage error like SQLite's "attempt to write a readonly
+            # database"). Used below, once dispatch settles, to distinguish
+            # "every provider we actually tried came back with a legitimate
+            # answer (possibly zero matches)" from "every provider we tried
+            # structurally failed to search at all" -- the latter must never
+            # be reported as a silent zero-result success (confirmed live
+            # incident: SQLite "attempt to write a readonly database" on
+            # both providers).
+            _provider_succeeded: "set[str]" = set()
+            _hard_failures: Dict[str, BaseException] = {}
             # Issue #1516: use the shared, process-wide executor singleton so
             # worker threads (and Story #1492's ChunkStoreThreadCache entries
             # keyed on them) are reused across requests, instead of a fresh
@@ -1976,6 +2028,25 @@ class SemanticQueryManager:
                             primary_results = batch
                         else:
                             secondary_results = batch
+                        # Bug #1760: this provider genuinely completed --
+                        # even an empty batch is a real "no matches" answer,
+                        # never a hard failure.
+                        _provider_succeeded.add(provider_name)
+                    except LocalIndexNotFoundError as _e:
+                        # Bug #1236: LocalIndexNotFoundError is a local storage
+                        # problem — the embedding provider completed successfully
+                        # and must NOT be sin-binned. Bug #1760: for the SAME
+                        # reason, this is a legitimate completion (no index
+                        # built yet), never a hard failure -- counted as
+                        # succeeded so a sibling provider's genuine hard
+                        # failure is never masked as a false "total failure".
+                        logger.warning(
+                            "Parallel query provider '%s' failed: %s",
+                            provider_name,
+                            _e,
+                            extra=get_log_extra("QUERY-STRATEGY-002"),
+                        )
+                        _provider_succeeded.add(provider_name)
                     except Exception as _e:
                         logger.warning(
                             "Parallel query provider '%s' failed: %s",
@@ -1983,18 +2054,17 @@ class SemanticQueryManager:
                             _e,
                             extra=get_log_extra("QUERY-STRATEGY-002"),
                         )
-                        # Bug #1236: LocalIndexNotFoundError is a local storage
-                        # problem — the embedding provider completed successfully
-                        # and must NOT be sin-binned.  Only genuine provider
-                        # failures (HTTP errors, rate limits, timeouts, etc.)
-                        # should record a failure against the provider health.
-                        if not isinstance(_e, LocalIndexNotFoundError):
-                            # Bug #678: record failure so health monitor can sinbin the provider
-                            _health_monitor.record_call(
-                                provider_name,
-                                latency_ms=_latency_ms,
-                                success=False,
-                            )
+                        # Bug #678: record failure so health monitor can sinbin the provider
+                        _health_monitor.record_call(
+                            provider_name,
+                            latency_ms=_latency_ms,
+                            success=False,
+                        )
+                        # Bug #1760: record the hard failure itself so a
+                        # TOTAL failure (every dispatched provider hard-
+                        # failed) can be surfaced as a real error below,
+                        # instead of silently returning an empty result.
+                        _hard_failures[provider_name] = _e
             except concurrent.futures.TimeoutError:
                 # Bug #678: capture unfinished futures BEFORE cancel() so the
                 # done() check below correctly identifies them — cancel() marks
@@ -2020,6 +2090,36 @@ class SemanticQueryManager:
                         latency_ms=_latency_ms,
                         success=False,
                     )
+                    # Bug #1760: a timeout is ambiguous but still means this
+                    # provider never delivered a result -- count it as a
+                    # hard failure for the total-failure check below.
+                    _hard_failures[provider_name] = concurrent.futures.TimeoutError(
+                        f"provider '{provider_name}' timed out after "
+                        f"{_parallel_timeout}s"
+                    )
+
+            # Bug #1760: if every DISPATCHED provider ended up hard-failing
+            # and NONE of them produced a legitimate completion (real
+            # results, empty results, or a LocalIndexNotFoundError "no index
+            # yet" signal), this is not a genuine zero-match query -- it is
+            # a total dispatch failure. Surfacing it silently as
+            # success:true/total_results:0 (the confirmed live incident)
+            # violates the anti-silent-failure principle. A single
+            # surviving/legitimate provider outcome is sufficient to keep
+            # this path silent.
+            if (
+                futures
+                and not _provider_succeeded
+                and len(_hard_failures) == len(futures)
+            ):
+                _failure_summary = "; ".join(
+                    f"{name}: {exc}" for name, exc in _hard_failures.items()
+                )
+                raise SemanticQueryError(
+                    f"Semantic search failed for repository "
+                    f"'{repository_alias}' -- every dispatched embedding "
+                    f"provider failed: {_failure_summary}"
+                )
 
             # Story #638: Symmetric score-gated filtering — cull weak provider
             # results before fusion to prevent low-quality candidates from diluting
