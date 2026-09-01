@@ -44,7 +44,6 @@ class AuthStatus:
     role: Optional[str]
     token_valid: bool
     token_expires: Optional[datetime]
-    refresh_expires: Optional[datetime]
     server_url: str
     last_refreshed: Optional[datetime]
     permissions: List[str]
@@ -494,7 +493,6 @@ class AuthAPIClient(CIDXRemoteAPIClient):
                 role=None,
                 token_valid=False,
                 token_expires=None,
-                refresh_expires=None,
                 server_url=server_url,
                 last_refreshed=None,
                 permissions=[],

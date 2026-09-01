@@ -89,7 +89,6 @@ class TestAuthenticationStatusCommands:
             role="user",
             token_valid=True,
             token_expires=None,
-            refresh_expires=None,
             server_url="http://localhost:8000",
             last_refreshed=None,
             permissions=["read"],
@@ -219,7 +218,6 @@ class TestAuthenticationStatusCommands:
                 role="user",
                 token_valid=True,
                 token_expires=None,
-                refresh_expires=None,
                 server_url="http://localhost:8000",
                 last_refreshed=None,
                 permissions=["read"],
@@ -273,7 +271,6 @@ class TestAuthenticationStatusCommands:
                 role=None,
                 token_valid=False,
                 token_expires=None,
-                refresh_expires=None,
                 server_url="http://localhost:8000",
                 last_refreshed=None,
                 permissions=[],
@@ -527,13 +524,30 @@ class TestAuthenticationStatusCommands:
         )
         assert "Last refreshed:" in result.output
 
-    def test_auth_status_verbose_handles_unset_refresh_token_expiration(self):
-        """Verbose mode works when refresh_expires is unset.
+    def test_auth_status_has_no_refresh_expires_field(self):
+        """Bug #1756: AuthStatus.refresh_expires was a dead field -- the only
+        real producer (AuthAPIClient.get_auth_status()) hardcoded it to None,
+        and _display_auth_status() never read it. Investigation confirmed the
+        CLI's encrypted credential storage (ProjectCredentialManager /
+        DecryptedCredentials) persists only username+password, and the real
+        token-refresh path (_get_valid_token() -> _authenticate()) re-POSTs
+        /auth/login with those credentials rather than using a server-issued
+        refresh token -- so no real refresh-token-expiry data is ever
+        reachable at get_auth_status() call time. The field is removed per
+        Messi Rule #12 (Anti-Orphan-Code): wire it or don't write it."""
+        from code_indexer.api_clients.auth_client import AuthStatus
 
-        refresh_expires is never populated/displayed in production (dead
-        field, filed as a follow-up issue -- not fixed here)."""
+        field_names = {f.name for f in dataclasses.fields(AuthStatus)}
+        assert "refresh_expires" not in field_names, (
+            "AuthStatus.refresh_expires should have been removed as a dead "
+            "field (bug #1756) -- it is still present on the dataclass"
+        )
+
+    def test_auth_status_verbose_still_works_without_refresh_expires_field(self):
+        """Verbose mode continues to work correctly now that the dead
+        refresh_expires field has been removed from AuthStatus (bug #1756)."""
         project_dir = self.create_temp_project_dir()
-        status = self._make_auth_status(refresh_expires=None)
+        status = self._make_auth_status()
         result = self._invoke_status_with_mocked_auth(
             project_dir, status, ["auth", "status", "--verbose"]
         )
@@ -997,7 +1011,6 @@ class TestAuthStatusDataModels:
             role="user",
             token_valid=True,
             token_expires=None,
-            refresh_expires=None,
             server_url="http://localhost:8000",
             last_refreshed=None,
             permissions=["read", "write"],
