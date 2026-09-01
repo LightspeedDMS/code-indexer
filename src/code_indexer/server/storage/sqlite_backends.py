@@ -2072,6 +2072,32 @@ class GoldenRepoMetadataSqliteBackend:
             """
             )
 
+            # Bug #1769: per-golden-alias local-repo `cidx init` repair
+            # failure quarantine tracking (see
+            # record_local_repo_repair_failure() below). Structurally
+            # identical to refresh_integrity_quarantine_state above --
+            # RefreshScheduler._repair_uninitialized_local_repo() retries
+            # the SAME repair every scheduled cycle, alternating
+            # try/reset, so a bare consecutive counter is sufficient.
+            # Before this table existed there was NO persisted failure
+            # state at all for this repair path -- a permanently-broken
+            # local repo re-ran `cidx init --force` and logged an ERROR
+            # on every single scheduled cycle forever (observed: 1,151
+            # occurrences over 3+ days on staging for a stuck
+            # langfuse_Claude_Code_*-global repo).
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS local_repo_repair_quarantine_state (
+                    golden_alias TEXT PRIMARY KEY NOT NULL,
+                    consecutive_failure_count INTEGER NOT NULL DEFAULT 0,
+                    last_detail TEXT,
+                    first_failed_at TEXT,
+                    last_failed_at TEXT,
+                    updated_at TEXT
+                )
+            """
+            )
+
             # Bug #1539: per-golden-alias cidx-meta backup conflict-
             # resolution failure quarantine tracking (see
             # record_cidx_meta_conflict_failure() below). This table
@@ -2224,6 +2250,107 @@ class GoldenRepoMetadataSqliteBackend:
             "SELECT golden_alias, consecutive_failure_count, last_detail, "
             "first_failed_at, last_failed_at "
             "FROM refresh_integrity_quarantine_state WHERE golden_alias = ?",
+            (golden_alias,),
+        ).fetchone()
+        if row is None:
+            return None
+        return {
+            "golden_alias": row[0],
+            "consecutive_failure_count": row[1],
+            "last_detail": row[2],
+            "first_failed_at": row[3],
+            "last_failed_at": row[4],
+        }
+
+    def record_local_repo_repair_failure(self, golden_alias: str, detail: str) -> int:
+        """
+        Record one local-repo `cidx init` repair failure for a golden repo
+        (Bug #1769). ``detail`` (the repair subprocess's stderr/exception
+        text) is ALWAYS overwritten to the value supplied for THIS
+        failure.
+
+        Returns:
+            The consecutive-failure count after recording this one.
+
+        Raises:
+            ValueError: golden_alias or detail is empty/blank (matches
+                record_refresh_integrity_failure's validation exactly).
+        """
+        if not golden_alias:
+            raise ValueError("golden_alias must be a non-empty string")
+        if not detail:
+            raise ValueError("detail must be a non-empty string")
+
+        now = datetime.now(timezone.utc).isoformat()
+
+        def operation(conn):
+            row = conn.execute(
+                "SELECT consecutive_failure_count "
+                "FROM local_repo_repair_quarantine_state WHERE golden_alias = ?",
+                (golden_alias,),
+            ).fetchone()
+            if row is None:
+                conn.execute(
+                    "INSERT INTO local_repo_repair_quarantine_state "
+                    "(golden_alias, consecutive_failure_count, last_detail, "
+                    "first_failed_at, last_failed_at, updated_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    (golden_alias, 1, detail, now, now, now),
+                )
+                return 1
+
+            new_count = row[0] + 1
+            conn.execute(
+                "UPDATE local_repo_repair_quarantine_state "
+                "SET consecutive_failure_count = ?, last_detail = ?, "
+                "last_failed_at = ?, updated_at = ? "
+                "WHERE golden_alias = ?",
+                (new_count, detail, now, now, golden_alias),
+            )
+            return new_count
+
+        return self._conn_manager.execute_atomic(operation)  # type: ignore[no-any-return]
+
+    def reset_local_repo_repair_failure(self, golden_alias: str) -> None:
+        """
+        Clear any persisted local-repo repair failure/quarantine state for
+        a golden repo (Bug #1769) -- called on a successful `cidx init`
+        repair. A no-op (never raises FOR AN UNKNOWN ALIAS) when no row
+        exists for ``golden_alias``.
+
+        Raises:
+            ValueError: golden_alias is empty/blank.
+        """
+        if not golden_alias:
+            raise ValueError("golden_alias must be a non-empty string")
+
+        def operation(conn):
+            conn.execute(
+                "DELETE FROM local_repo_repair_quarantine_state WHERE golden_alias = ?",
+                (golden_alias,),
+            )
+
+        self._conn_manager.execute_atomic(operation)
+
+    def get_local_repo_repair_failure_state(
+        self, golden_alias: str
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Return the currently persisted local-repo repair failure state for
+        a golden repo, or None if it has never failed (or was reset
+        since).
+
+        Raises:
+            ValueError: golden_alias is empty/blank.
+        """
+        if not golden_alias:
+            raise ValueError("golden_alias must be a non-empty string")
+
+        conn = self._conn_manager.get_connection()
+        row = conn.execute(
+            "SELECT golden_alias, consecutive_failure_count, last_detail, "
+            "first_failed_at, last_failed_at "
+            "FROM local_repo_repair_quarantine_state WHERE golden_alias = ?",
             (golden_alias,),
         ).fetchone()
         if row is None:
