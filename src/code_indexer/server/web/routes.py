@@ -1513,12 +1513,20 @@ _USERS_PAGE_ERROR_MESSAGES = {
     "cannot_demote_self": "Cannot demote your own admin account",
     "sso_password_change_denied": "Cannot change password for SSO users. Authentication is managed by the identity provider.",
     "user_not_found": "User not found",
-    "operation_failed": "Operation failed. Check input and try again.",
+    "user_already_exists": "A user with that username already exists.",
+    "password_too_weak": "Password does not meet security requirements: {detail}",
+    "role_update_failed": "Failed to update role: {detail}",
+    "password_change_failed": "Failed to change password: {detail}",
+    "email_update_failed": "Failed to update email: {detail}",
+    "operation_failed": "Operation failed: {detail}",
 }
 
 
 def _resolve_users_page_messages(
-    success: Optional[str], error: Optional[str], u: Optional[str]
+    success: Optional[str],
+    error: Optional[str],
+    u: Optional[str],
+    detail: Optional[str] = None,
 ) -> tuple[Optional[str], Optional[str]]:
     """Whitelist-map PRG query params to user-facing success/error messages."""
     success_message: Optional[str] = None
@@ -1526,7 +1534,9 @@ def _resolve_users_page_messages(
     if success and success in _USERS_PAGE_SUCCESS_MESSAGES:
         success_message = _USERS_PAGE_SUCCESS_MESSAGES[success].format(u=u or "")
     if error and error in _USERS_PAGE_ERROR_MESSAGES:
-        error_message = _USERS_PAGE_ERROR_MESSAGES[error]
+        # Escape detail to prevent XSS via query params
+        safe_detail = html.escape(detail) if detail else "Check input and try again."
+        error_message = _USERS_PAGE_ERROR_MESSAGES[error].format(detail=safe_detail)
     return success_message, error_message
 
 
@@ -1536,13 +1546,16 @@ def users_page(
     success: Optional[str] = Query(None),
     error: Optional[str] = Query(None),
     u: Optional[str] = Query(None),
+    detail: Optional[str] = Query(None),
 ):
     """Users management page - list all users with CRUD operations."""
     session = _require_admin_session(request)
     if not session:
         return _create_login_redirect(request)
 
-    success_message, error_message = _resolve_users_page_messages(success, error, u)
+    success_message, error_message = _resolve_users_page_messages(
+        success, error, u, detail
+    )
     return _create_users_page_response(
         request, session, success_message=success_message, error_message=error_message
     )
@@ -1630,9 +1643,24 @@ def create_user(
             url=f"/admin/users?success=user_created&u={quote(new_username, safe='')}",
             status_code=303,
         )
-    except ValueError:
+    except ValueError as e:
+        error_msg = str(e)
+        logger.warning(
+            format_error_log(
+                "SCIP-GENERAL-041",
+                f"Failed to create user '{new_username}': {error_msg}",
+            )
+        )
+        if "already exists" in error_msg.lower():
+            return RedirectResponse(
+                url="/admin/users?error=user_already_exists", status_code=303
+            )
+        # Password validation or other ValueError — include the detail
+        # Extract just the issue lines for a concise message
+        detail_text = quote(error_msg, safe="")
         return RedirectResponse(
-            url="/admin/users?error=operation_failed", status_code=303
+            url=f"/admin/users?error=password_too_weak&detail={detail_text}",
+            status_code=303,
         )
 
 
@@ -1683,9 +1711,18 @@ def update_user_role(
             url=f"/admin/users?success=role_updated&u={quote(username, safe='')}",
             status_code=303,
         )
-    except ValueError:
+    except ValueError as e:
+        error_msg = str(e)
+        logger.warning(
+            format_error_log(
+                "SCIP-GENERAL-041",
+                f"Failed to update role for '{username}': {error_msg}",
+            )
+        )
+        detail_text = quote(error_msg, safe="")
         return RedirectResponse(
-            url="/admin/users?error=operation_failed", status_code=303
+            url=f"/admin/users?error=role_update_failed&detail={detail_text}",
+            status_code=303,
         )
 
 
@@ -1737,9 +1774,18 @@ def change_user_password(
             url="/admin/users?error=sso_password_change_denied",
             status_code=303,
         )
-    except ValueError:
+    except ValueError as e:
+        error_msg = str(e)
+        logger.warning(
+            format_error_log(
+                "SCIP-GENERAL-041",
+                f"Failed to change password for '{username}': {error_msg}",
+            )
+        )
+        detail_text = quote(error_msg, safe="")
         return RedirectResponse(
-            url="/admin/users?error=operation_failed", status_code=303
+            url=f"/admin/users?error=password_change_failed&detail={detail_text}",
+            status_code=303,
         )
 
 
@@ -1783,9 +1829,18 @@ def update_user_email(
             url=f"/admin/users?success=email_updated&u={quote(username, safe='')}",
             status_code=303,
         )
-    except ValueError:
+    except ValueError as e:
+        error_msg = str(e)
+        logger.warning(
+            format_error_log(
+                "SCIP-GENERAL-041",
+                f"Failed to update email for '{username}': {error_msg}",
+            )
+        )
+        detail_text = quote(error_msg, safe="")
         return RedirectResponse(
-            url="/admin/users?error=operation_failed", status_code=303
+            url=f"/admin/users?error=email_update_failed&detail={detail_text}",
+            status_code=303,
         )
 
 
