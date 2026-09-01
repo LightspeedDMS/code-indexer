@@ -1534,8 +1534,10 @@ def _resolve_users_page_messages(
     if success and success in _USERS_PAGE_SUCCESS_MESSAGES:
         success_message = _USERS_PAGE_SUCCESS_MESSAGES[success].format(u=u or "")
     if error and error in _USERS_PAGE_ERROR_MESSAGES:
-        # Escape detail to prevent XSS via query params
-        safe_detail = html.escape(detail) if detail else "Check input and try again."
+        # Jinja2Templates uses autoescape=True and the template renders
+        # {{ error_message }} without |safe, so Jinja handles escaping.
+        # Do NOT html.escape() here — that would double-escape.
+        safe_detail = detail if detail else "Check input and try again."
         error_message = _USERS_PAGE_ERROR_MESSAGES[error].format(detail=safe_detail)
     return success_message, error_message
 
@@ -1706,7 +1708,12 @@ def update_user_role(
         )
 
     try:
-        user_manager.update_user_role(username, role_enum)
+        result = user_manager.update_user_role(username, role_enum)
+        if not result:
+            return RedirectResponse(
+                url=f"/admin/users?error=role_update_failed&detail={quote('User not found', safe='')}",
+                status_code=303,
+            )
         return RedirectResponse(
             url=f"/admin/users?success=role_updated&u={quote(username, safe='')}",
             status_code=303,
