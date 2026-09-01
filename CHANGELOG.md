@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [12.31.0] - 2026-09-01
+
+### Fixed
+
+- **Bug #1753**: the admin config screen's Content Limits section correctly displayed
+  real persisted values, but clicking Save always failed with `Unknown category:
+  content_limits` -- the write path was never wired even though the read path was.
+  Now saves correctly, verified with a real round trip through the on-disk SQLite
+  runtime store. Also removed `omni_search`, a genuinely dead config section (zero
+  template consumers -- its settings were already migrated into `multi_search` back
+  in Story #29) that shared the same unwired-save symptom for an unrelated reason.
+- **Bug #1756**: `AuthStatus.refresh_expires` was a dead field, never populated or
+  displayed. Investigation confirmed the server has a real TTL-based refresh-token
+  concept, but the CLI never stores or uses it anywhere in its real auth flow --
+  wiring the field would have meant building a new feature, not fixing a bug.
+  Removed per this project's anti-orphan-code rule.
+
 ## [12.30.0] - 2026-08-31
 
 ### Fixed
