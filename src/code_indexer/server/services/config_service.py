@@ -1169,6 +1169,8 @@ class ConfigService:
         # Story #1404 - Global temporal indexing floor date configuration
         elif category == "temporal_indexing":
             self._update_temporal_indexing_setting(config, key, value)
+        elif category == "content_limits":
+            self._update_content_limits_setting(config, key, value)
         else:
             raise ValueError(f"Unknown category: {category}")
         return True
@@ -2720,6 +2722,33 @@ class ConfigService:
             es.retention_days = int(value)
         else:
             raise ValueError(f"Unknown embedding_stats setting: {key}")
+
+    def _update_content_limits_setting(
+        self, config: ServerConfig, key: str, value: Any
+    ) -> None:
+        """Update a content_limits setting (Story #32, Issue #1753).
+
+        All 6 fields are plain integers. Range validation happens later in
+        config_manager.validate_config(), called by update_setting()/
+        update_settings_atomic() after this method returns (unless
+        skip_validation=True for batch updates).
+        """
+        cl = config.content_limits_config
+        assert cl is not None  # Guaranteed by ServerConfig.__post_init__
+        if key == "chars_per_token":
+            cl.chars_per_token = int(value)
+        elif key == "file_content_max_tokens":
+            cl.file_content_max_tokens = int(value)
+        elif key == "git_diff_max_tokens":
+            cl.git_diff_max_tokens = int(value)
+        elif key == "git_log_max_tokens":
+            cl.git_log_max_tokens = int(value)
+        elif key == "search_result_max_tokens":
+            cl.search_result_max_tokens = int(value)
+        elif key == "cache_ttl_seconds":
+            cl.cache_ttl_seconds = int(value)
+        else:
+            raise ValueError(f"Unknown content_limits setting: {key}")
 
     def _update_temporal_indexing_setting(
         self, config: ServerConfig, key: str, value: Any
