@@ -252,7 +252,6 @@ class TestCorrectResponseParsing:
                 role="user",
                 token_valid=True,
                 token_expires=None,
-                refresh_expires=None,
                 server_url="http://localhost:8096",
                 last_refreshed=None,
                 permissions=["read"],

@@ -116,7 +116,6 @@ class TestCliErrorPropagation:
                         role=None,
                         token_valid=False,
                         token_expires=None,
-                        refresh_expires=None,
                         server_url="http://localhost:8000",
                         last_refreshed=None,
                         permissions=[],
