@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [12.30.0] - 2026-08-31
+
+### Fixed
+
+- **Bug #1770**: `regex_search` failed with "Repository not found" for a valid, listed
+  activated-repo alias that `search_code`/`list_repositories` both resolved successfully --
+  its path-resolution step unconditionally used a golden-repo-only resolver with zero
+  activated-repo awareness. Now reuses the established `ActivatedRepoManager` resolution
+  path already used elsewhere in the same handler; a bare alias naming both an activated and
+  a golden repo now correctly prefers the activated one (matching Story #1039's
+  "activated-repo takes precedence" convention).
+- **Bug #1769**: a local repo stuck in a broken/uninitialized state retried its `cidx init`
+  repair unconditionally on every scheduled cycle forever, with no circuit-breaker --
+  confirmed 1,151 occurrences over 3+ days on staging. Added a quarantine mechanism
+  (mirroring the existing Bug #1506 pattern) that stops retrying after 3 consecutive
+  failures, genuinely resets on any subsequent healthy cycle (not just a successful repair),
+  and now surfaces the real subprocess failure detail instead of a placeholder string. Note:
+  this bounds the retry storm but does not by itself clear a stuck repo's degraded health
+  status -- that still requires an operator to fix or remove the underlying broken repo.
+- Fixed a real GitHub Actions `lint` job failure (blocking `create-tag`) caused by a missing
+  mypy field on a test-only model construction; confirmed via a real CI run, not just local
+  reproduction.
+
 ## [12.29.0] - 2026-08-31
 
 ### Fixed

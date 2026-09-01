@@ -21,6 +21,7 @@ from typing import (
     List,
     NoReturn,
     Optional,
+    Tuple,
     Union,
     TYPE_CHECKING,
     cast,
@@ -124,6 +125,18 @@ _GIT_URL_PREFIXES = ("https://", "http://", "git@", "ssh://", "git://")
 # PROMPT_FAILURE_QUARANTINE_THRESHOLD and Issue #1477's
 # FLEET_MIGRATION_FAILURE_QUARANTINE_THRESHOLD (both 3).
 _REFRESH_INTEGRITY_QUARANTINE_THRESHOLD = 3
+
+# Bug #1769: N consecutive local-repo `cidx init` repair failures for the
+# same golden_alias are QUARANTINED (loudly logged for operator
+# attention) instead of retrying identically forever. Structurally
+# identical domain to _REFRESH_INTEGRITY_QUARANTINE_THRESHOLD above --
+# RefreshScheduler._repair_uninitialized_local_repo() previously had NO
+# circuit breaker at all: a permanently-broken local repo (e.g. an
+# auto-discovery-created langfuse_Claude_Code_*-global repo) re-ran
+# `cidx init --force` and logged an ERROR on every single scheduled
+# cycle, forever (observed: 1,151 recurring occurrences over 3+ days on
+# staging, zero progress).
+_LOCAL_REPO_REPAIR_QUARANTINE_THRESHOLD = 3
 
 # Bug #1539's cidx-meta-conflict quarantine mechanism (a per-repo
 # consecutive-failure counter keyed on the upstream target SHA) is
@@ -2147,15 +2160,41 @@ class RefreshScheduler:
                         # instead of failing identically forever.
                         config_json_path = code_indexer_dir / "config.json"
                         if not self._is_local_config_valid(config_json_path):
+                            # Bug #1769: a repo already confirmed QUARANTINED
+                            # (N consecutive repair failures) must not
+                            # re-attempt the repair subprocess this cycle --
+                            # see _local_repo_repair_quarantine_skip_result's
+                            # docstring for the full incident history.
+                            _local_repair_skip = (
+                                self._local_repo_repair_quarantine_skip_result(
+                                    alias_name
+                                )
+                            )
+                            if _local_repair_skip is not None:
+                                return _local_repair_skip
+
                             logger.warning(
                                 f"Local repo {alias_name} has .code-indexer/ but no valid "
                                 f"config.json at {config_json_path} (likely a partial "
                                 f"'cidx init' during registration -- Bug #1253). "
                                 f"Attempting self-heal via 'cidx init' before indexing."
                             )
-                            if not self._repair_uninitialized_local_repo(
+                            (
+                                repair_succeeded,
+                                repair_error_detail,
+                            ) = self._repair_uninitialized_local_repo(
                                 source_path, alias_name
-                            ):
+                            )
+                            if not repair_succeeded:
+                                self._record_local_repo_repair_failure(
+                                    alias_name,
+                                    repair_error_detail
+                                    or (
+                                        "cidx init --force repair failed; see "
+                                        "preceding ERROR log for the subprocess "
+                                        "stderr detail"
+                                    ),
+                                )
                                 return {
                                     "success": False,
                                     "alias": alias_name,
@@ -2164,10 +2203,28 @@ class RefreshScheduler:
                                         "cidx init failed"
                                     ),
                                 }
+                            self._reset_local_repo_repair_quarantine(alias_name)
                             logger.info(
                                 f"Self-healed .code-indexer/ config for local repo "
                                 f"{alias_name}; proceeding with refresh"
                             )
+                        else:
+                            # Bug #1769 code-review HIGH fix: reset on ANY
+                            # healthy cycle, not only after a successful
+                            # repair. Config already valid is the ordinary
+                            # healthy outcome (the vast majority of cycles)
+                            # -- without this, a repo that failed once (e.g.
+                            # months ago) and has been healthy ever since
+                            # keeps carrying that stale count toward a
+                            # future unrelated failure, and once
+                            # quarantined there is no reachable code path
+                            # left to ever clear it (the skip-check above
+                            # returns before this branch runs again).
+                            # Mirrors Bug #1506's
+                            # _run_refresh_integrity_gate, which calls its
+                            # own _reset_integrity_gate_quarantine
+                            # unconditionally on every passing cycle.
+                            self._reset_local_repo_repair_quarantine(alias_name)
 
                         # Story #227: Skip CoW clone if an external writer holds the write lock.
                         # Writers (DependencyMapService, LangfuseTraceSyncService) acquire the lock
@@ -3885,7 +3942,7 @@ class RefreshScheduler:
 
     def _repair_uninitialized_local_repo(
         self, source_path: str, alias_name: str
-    ) -> bool:
+    ) -> Tuple[bool, Optional[str]]:
         """
         Self-heal a local repo whose .code-indexer/ directory exists but has
         no valid config.json (Bug #1253), by re-running the same `cidx init`
@@ -3904,7 +3961,11 @@ class RefreshScheduler:
             alias_name: Global alias name, for logging only
 
         Returns:
-            True if the repair subprocess succeeded, False otherwise.
+            Tuple of (success, error_detail). ``error_detail`` is ``None``
+            on success. On failure it is the REAL captured stderr/error
+            text (Bug #1769 code-review MEDIUM-2 fix) -- the caller
+            persists this into the quarantine bookkeeping's
+            ``last_detail`` field instead of a generic placeholder.
         """
         try:
             subprocess.run(
@@ -3916,7 +3977,7 @@ class RefreshScheduler:
                 env=build_cidx_subprocess_env(),
                 timeout=60,
             )
-            return True
+            return True, None
         except (
             subprocess.CalledProcessError,
             subprocess.TimeoutExpired,
@@ -3927,7 +3988,124 @@ class RefreshScheduler:
                 f"Failed to repair uninitialized local repo {alias_name} via "
                 f"'cidx init' at {source_path}: {stderr}"
             )
-            return False
+            return False, stderr
+
+    def _get_local_repo_repair_quarantine_state_if_active(
+        self, alias_name: str
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Bug #1769: read persisted local-repo `cidx init` repair quarantine
+        state for *alias_name* and return it ONLY when the
+        consecutive-failure count has reached
+        ``_LOCAL_REPO_REPAIR_QUARANTINE_THRESHOLD`` -- ``None`` otherwise.
+
+        Mirrors ``_get_refresh_integrity_quarantine_state_if_active``
+        (Bug #1506) exactly.
+        """
+        state: Optional[Dict[str, Any]] = (
+            self.golden_repo_metadata.get_local_repo_repair_failure_state(alias_name)
+        )
+        if (
+            state is not None
+            and state.get("consecutive_failure_count", 0)
+            >= _LOCAL_REPO_REPAIR_QUARANTINE_THRESHOLD
+        ):
+            return state
+        return None
+
+    def _local_repo_repair_quarantine_check_failed_result(
+        self, alias_name: str, read_exc: Exception
+    ) -> Dict[str, Any]:
+        """Fail-closed skip result for a quarantine-state READ failure --
+        extracted from ``_local_repo_repair_quarantine_skip_result`` to
+        keep that method short. A transient read failure must never make
+        a possibly-quarantined repo look clean and get its repair
+        re-attempted."""
+        logger.error(
+            f"Bug #1769: failed to read local-repo repair quarantine "
+            f"state for {alias_name} -- failing this refresh cycle "
+            f"CLOSED (skipping repair attempt) rather than silently "
+            f"treating a possibly-quarantined repo as healthy: "
+            f"{type(read_exc).__name__}: {read_exc}"
+        )
+        return {
+            "success": False,
+            "alias": alias_name,
+            "message": (
+                "Local-repo repair quarantine state could not be "
+                "read; skipping repair attempt this cycle to fail closed"
+            ),
+            "skipped": "local_repo_repair_quarantine_check_failed",
+        }
+
+    def _local_repo_repair_quarantine_skip_result(
+        self, alias_name: str
+    ) -> Optional[Dict[str, Any]]:
+        """Returns a skip-result dict if *alias_name*'s local-repo `cidx
+        init` repair must NOT be re-attempted this cycle, else ``None``
+        (proceed with the repair attempt). Mirrors
+        ``_refresh_integrity_quarantine_skip_result`` (Bug #1506)."""
+        try:
+            quarantine_state = self._get_local_repo_repair_quarantine_state_if_active(
+                alias_name
+            )
+        except Exception as read_exc:
+            return self._local_repo_repair_quarantine_check_failed_result(
+                alias_name, read_exc
+            )
+        if quarantine_state is None:
+            return None
+        logger.error(
+            f"Bug #1769: {alias_name} is QUARANTINED after "
+            f"{quarantine_state['consecutive_failure_count']} consecutive "
+            f"local-repo 'cidx init' repair failures -- skipping repair "
+            f"attempt this cycle. Manual operator intervention is "
+            f"required to resume scheduled refresh for this repo."
+        )
+        return {
+            "success": False,
+            "alias": alias_name,
+            "message": ("Local-repo repair quarantine active; repair attempt skipped"),
+            "skipped": "local_repo_repair_quarantined",
+            "consecutive_failure_count": quarantine_state["consecutive_failure_count"],
+        }
+
+    def _record_local_repo_repair_failure(self, alias_name: str, detail: str) -> None:
+        """Persist one Bug #1769 local-repo repair failure (quarantine
+        bookkeeping). Mirrors ``_record_integrity_gate_failure`` (Bug
+        #1506): logs an additional ERROR once the confirmation threshold
+        is reached, and never lets a bookkeeping-write failure escape
+        (the repair-failed result is already being returned regardless)."""
+        try:
+            failure_count = self.golden_repo_metadata.record_local_repo_repair_failure(
+                alias_name, detail
+            )
+            if failure_count >= _LOCAL_REPO_REPAIR_QUARANTINE_THRESHOLD:
+                logger.error(
+                    f"Bug #1769: {alias_name} has failed local-repo 'cidx "
+                    f"init' repair {failure_count} consecutive times -- "
+                    f"QUARANTINED. Operator attention is required to "
+                    f"investigate why the automated self-heal cannot fix "
+                    f"this repo."
+                )
+        except Exception as quarantine_exc:
+            logger.error(
+                f"Bug #1769: failed to record local-repo repair "
+                f"quarantine state for {alias_name} (non-fatal): "
+                f"{type(quarantine_exc).__name__}: {quarantine_exc}"
+            )
+
+    def _reset_local_repo_repair_quarantine(self, alias_name: str) -> None:
+        """Clear any prior Bug #1769 quarantine state on a successful
+        repair. Mirrors ``_reset_integrity_gate_quarantine`` (Bug #1506)."""
+        try:
+            self.golden_repo_metadata.reset_local_repo_repair_failure(alias_name)
+        except Exception as reset_exc:
+            logger.error(
+                f"Bug #1769: failed to reset local-repo repair quarantine "
+                f"state for {alias_name} (non-fatal): "
+                f"{type(reset_exc).__name__}: {reset_exc}"
+            )
 
     def _has_local_changes(self, source_path: str, alias_name: str) -> bool:
         """

@@ -539,6 +539,19 @@ class GoldenRepoMetadataBackend(Protocol):
         self, golden_alias: str
     ) -> Optional[Dict[str, Any]]: ...
 
+    # Bug #1769: local-repo `cidx init` repair per-repo failure
+    # quarantine state (see global_repos/refresh_scheduler.py's
+    # _repair_uninitialized_local_repo()).
+    def record_local_repo_repair_failure(
+        self, golden_alias: str, detail: str
+    ) -> int: ...
+
+    def reset_local_repo_repair_failure(self, golden_alias: str) -> None: ...
+
+    def get_local_repo_repair_failure_state(
+        self, golden_alias: str
+    ) -> Optional[Dict[str, Any]]: ...
+
     # Story #1560: per-golden-alias duplicate-point-id auto-resolution
     # outcome state (see server/services/fleet_migration/dedup_state.py).
     # A NEW table, distinct from fleet_migration_quarantine_state above --
