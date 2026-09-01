@@ -118,6 +118,9 @@ def _fake_search_repository_path(broken_alias):
                     line_start=1,
                     line_end=1,
                     content="def main():\n    pass",
+                    language=None,
+                    file_last_modified=None,
+                    indexed_timestamp=None,
                 )
             ],
         )
