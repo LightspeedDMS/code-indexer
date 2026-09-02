@@ -1743,6 +1743,20 @@ def _post_provider_index_snapshot(
             )
             return
 
+        # Bug #1775: evict stale HNSW + chunk-store cache entries for
+        # the old versioned path -- this publish path previously
+        # invalidated NEITHER cache. Shared helper -- never reimplement
+        # the two-cache invalidation inline here.
+        from code_indexer.server.cache.snapshot_cache_invalidation import (
+            invalidate_snapshot_caches,
+        )
+
+        invalidate_snapshot_caches(
+            old_snapshot_path,
+            log_context=f"[provider-index-{repo_alias}]",
+            is_versioned_snapshot_check=scheduler._is_versioned_snapshot,
+        )
+
         cleanup_manager = getattr(scheduler, "cleanup_manager", None)
         if cleanup_manager is not None:
             cleanup_manager.schedule_cleanup(old_snapshot_path)

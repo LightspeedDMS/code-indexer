@@ -3774,24 +3774,19 @@ class GoldenRepoManager:
         current_target = alias_manager.read_alias(global_alias)
         alias_manager.create_alias(global_alias, new_snapshot_path, repo_name=alias)
 
-        # Evict stale HNSW cache entries for the old versioned path (Bug #994 AC11)
-        try:
-            from code_indexer.server.cache import get_global_cache
+        # Evict stale HNSW + chunk-store cache entries for the old
+        # versioned path (Bug #994 AC11, Bug #1775). Shared helper --
+        # never reimplement the two-cache invalidation inline here again
+        # (see snapshot_cache_invalidation.py's module docstring for why).
+        from code_indexer.server.cache.snapshot_cache_invalidation import (
+            invalidate_snapshot_caches,
+        )
 
-            _cache = get_global_cache()
-            if _cache is not None and current_target:
-                _evicted = _cache.invalidate_prefix(current_target)
-                logger.info(
-                    "[change_branch] Evicted %d HNSW cache entries for old snapshot %s",
-                    _evicted,
-                    current_target,
-                )
-        except Exception as _cache_evict_err:
-            logger.warning(
-                "[change_branch] Failed to evict HNSW cache for old snapshot %s: %s",
-                current_target,
-                _cache_evict_err,
-            )
+        invalidate_snapshot_caches(
+            current_target,
+            log_context="[change_branch]",
+            is_versioned_snapshot_check=self._is_versioned_snapshot,
+        )
 
         # Bug #1084 Phase A4: schedule cleanup only for versioned snapshots, never
         # the master base clone (golden-repos/{alias}/). Canonical predicate
@@ -4602,6 +4597,24 @@ class GoldenRepoManager:
                         new_target=new_snapshot,
                         old_target=current_target,
                     )
+
+                    # Bug #1775: evict stale HNSW + chunk-store cache
+                    # entries for the old versioned path -- this publish
+                    # sequence previously invalidated NEITHER cache (a
+                    # third real alias-swap site, distinct from
+                    # _cb_swap_alias() and RefreshScheduler's periodic
+                    # refresh). Shared helper -- never reimplement the
+                    # two-cache invalidation inline here.
+                    from code_indexer.server.cache.snapshot_cache_invalidation import (
+                        invalidate_snapshot_caches,
+                    )
+
+                    invalidate_snapshot_caches(
+                        current_target,
+                        log_context="[add_index]",
+                        is_versioned_snapshot_check=self._is_versioned_snapshot,
+                    )
+
                     # Bug #1084 Phase A4: schedule cleanup only for versioned
                     # snapshots, never the master clone. Canonical predicate
                     # recognizes local + cow-daemon (canonical + legacy) shapes;
