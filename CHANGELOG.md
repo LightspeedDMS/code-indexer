@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [12.32.0] - 2026-09-02
+
+### Fixed
+
+- **Bug #1775**: `ChunkStoreThreadCache` (a per-thread cache of open SQLite
+  chunk-store handles) was keyed on the chunk-store's file path with
+  mtime-only invalidation, but golden-repo refresh never replaces that file
+  in place -- every refresh creates a brand-new versioned-snapshot path and
+  swaps an alias pointer, so the OLD snapshot's cache entry never
+  invalidated and its handle (and file descriptor) leaked forever, bounded
+  only by a 32-entry-per-thread LRU cap multiplied by thread count
+  (production incident: ~1260 leaked file descriptors). Fixed by wiring
+  proactive cache invalidation into all 5 real alias-swap/publish sites
+  (previously wired at only 1, which does not even run on the normal
+  hourly refresh path) via a new shared helper, combined with a bounded,
+  per-thread sweep so cache entries the caller never explicitly
+  re-requests still get proactively evicted. Also fixes a related
+  permanent-cache-disablement bug on a golden repo's first-ever refresh,
+  and a mount-point bug that silently skipped invalidation for legacy
+  CoW-daemon/ONTAP-backed snapshot paths.
+- **Bug #1774**: golden-repo refresh jobs could hang indefinitely mid-index
+  when the server process's open file descriptor count climbed past 1024
+  (driven by the #1775 leak above) -- `select.select()`'s hard
+  `FD_SETSIZE=1024` ceiling raised an exception type the reader thread's
+  exception handler did not catch, silently killing the thread and leaving
+  the main loop to fall into an unconditional, timeout-free wait against a
+  still-alive but permanently abandoned subprocess. Fixed by replacing
+  `select.select()` with `selectors.DefaultSelector()` (no such ceiling),
+  hardening the reader threads to fail loudly and visibly instead of
+  silently, and closing two file-descriptor lifecycle races introduced
+  while fixing the above.
+
 ## [12.31.0] - 2026-09-01
 
 ### Fixed

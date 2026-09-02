@@ -70,6 +70,21 @@ def trigger_post_consolidation_snapshot(
             new_target=new_target,
             old_target=current_target,
         )
+
+        # Bug #1775: evict stale HNSW + chunk-store cache entries for
+        # the old versioned path -- this fleet-migration re-publish
+        # previously invalidated NEITHER cache (a fifth real alias-swap
+        # site). Shared helper -- never reimplement the two-cache
+        # invalidation inline here.
+        from code_indexer.server.cache.snapshot_cache_invalidation import (
+            invalidate_snapshot_caches,
+        )
+
+        invalidate_snapshot_caches(
+            current_target,
+            log_context=f"[fleet-migration-{alias_name}]",
+            is_versioned_snapshot_check=refresh_scheduler._is_versioned_snapshot,
+        )
     else:
         refresh_scheduler.alias_manager.create_alias(alias_name, new_target)
 
