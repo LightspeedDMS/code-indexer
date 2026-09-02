@@ -32,6 +32,18 @@ itself has already succeeded by the time this runs, and a stale entry
 still self-heals eventually (HNSW: TTL; chunk-store: LRU eviction), so a
 logged WARNING is the correct severity here, not a raised exception.
 
+Round-5 addition: the chunk-store cache's LOCAL invalidation only ever
+reaches the CALLING process's own ChunkStoreThreadCache singleton -- live
+staging validation found a multi-worker deployment where a DIFFERENT
+worker's independently-cached handle for the SAME superseded snapshot
+leaked forever, because the stale-prefix signal never crossed the OS
+process boundary. ``_evict_chunk_store_cache()`` now ALSO publishes
+``old_target`` to a shared, PayloadCache-backed cross-process registry
+(see ``storage/shared/chunk_store_cache_cross_process.py``) so every
+OTHER worker/node's background poller can discover and apply it -- this
+publish step is its own separately non-fatal try/except, isolated from
+the local invalidation above.
+
 Round-2 code review remediation (HIGH #2, both an independent Claude
 review and an independent Codex review): a golden repo's FIRST refresh
 has ``old_target`` equal to the MASTER base clone path
@@ -105,9 +117,61 @@ def _evict_hnsw_cache(
         )
 
 
+def _publish_chunk_store_stale_prefix_cross_process(
+    old_target: str, log_context: str
+) -> None:
+    """Round 5: publish ``old_target`` to the shared cross-process
+    registry, so every OTHER worker/node's ChunkStoreCrossProcessPoller
+    can discover and apply it. Non-fatal -- a failure here must never
+    undo or block the (already-succeeded) LOCAL invalidation. A no-op
+    (no warning) when no ``PayloadCache`` is registered (CLI/solo-import
+    or pre-startup contexts).
+    """
+    try:
+        from code_indexer.storage.shared.chunk_store_cache_cross_process import (
+            get_registered_payload_cache,
+            publish_stale_prefix,
+            record_registry_publish_failure,
+            record_registry_publish_success,
+        )
+
+        payload_cache = get_registered_payload_cache()
+        if payload_cache is not None:
+            # Round 6 (Codex): check the real outcome -- publish_stale_
+            # prefix() already logs its own WARNING on failure; logging
+            # "Published..." here unconditionally would silently lie
+            # about whether propagation actually happened.
+            published = publish_stale_prefix(payload_cache, old_target)
+            if published:
+                record_registry_publish_success()
+                logger.info(
+                    "%s Published chunk store cache stale prefix to "
+                    "cross-process registry for old snapshot %s",
+                    log_context,
+                    old_target,
+                )
+            else:
+                # Round 8 (Claude): publish_stale_prefix() correctly
+                # returns False on a genuine write-verification failure
+                # (round-7 fix), but until now that produced ZERO log
+                # output at any level -- streak-tracked so a sustained
+                # outage gets exactly one WARNING at start/recovery, not
+                # one per refresh.
+                record_registry_publish_failure(old_target)
+    except Exception as _publish_err:
+        logger.warning(
+            "%s Failed to publish chunk store cache stale prefix for "
+            "old snapshot %s: %s",
+            log_context,
+            old_target,
+            _publish_err,
+        )
+
+
 def _evict_chunk_store_cache(old_target: str, log_context: str) -> None:
-    """Register ``old_target`` as a stale chunk-store prefix. Non-fatal --
-    logs a WARNING and returns on any failure, never raises.
+    """Register ``old_target`` as a stale chunk-store prefix, LOCALLY and
+    cross-process. Non-fatal -- logs a WARNING and returns on any
+    failure, never raises.
     """
     try:
         from code_indexer.storage.shared.chunk_store_cache import (
@@ -134,6 +198,8 @@ def _evict_chunk_store_cache(old_target: str, log_context: str) -> None:
             old_target,
             _chunk_err,
         )
+
+    _publish_chunk_store_stale_prefix_cross_process(old_target, log_context)
 
 
 def invalidate_snapshot_caches(

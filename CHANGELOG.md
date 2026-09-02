@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [12.33.0] - 2026-09-02
+
+### Fixed
+
+- **Bug #1775 (follow-up)**: the fd-leak fix shipped in v12.32.0 closed the leak within a
+  single server process, but live validation on clustered staging (multiple uvicorn
+  workers per node) found it didn't propagate across worker processes -- a refresh
+  handled by one worker never informed sibling workers holding their own cached handle
+  to the same superseded snapshot, so those handles leaked forever. Solo/single-worker
+  staging passed only because it's the degenerate case where this doesn't apply. Added
+  cross-process propagation via `PayloadCache` (this project's existing cluster-aware
+  mechanism), verified with a genuine multi-OS-process reproduction.
+
 ## [12.32.0] - 2026-09-02
 
 ### Fixed
