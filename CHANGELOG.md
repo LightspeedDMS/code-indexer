@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [12.38.0] - 2026-09-03
+
+### Fixed
+
+- **Bug #1782**: the auto-updater's `_resolve_server_url()` resolved its maintenance-mode-API
+  host/port via `config.json`, a source this project's own Story #1196 architecture
+  deliberately deprecated for this exact purpose (risk of silently rewriting a configured
+  `--host 0.0.0.0` to `127.0.0.1`, "a confirmed production-outage path"). Confirmed live on
+  staging: a solo server running on `0.0.0.0:8080` had its maintenance-mode connection
+  silently misresolved to `127.0.0.1:8000` because `config.json` had no host/port keys, and
+  `ServerConfig`'s dataclass defaults silently filled in the wrong values with no exception.
+  Now resolves via the same authoritative launch-config mechanism (`applied_launch.json`,
+  falling back to the live systemd `ExecStart` flags) already used elsewhere in the auto-update
+  package for the ExecStart-rewrite path, raising loud instead of silently defaulting when
+  neither source is available.
+
 ## [12.37.0] - 2026-09-03
 
 ### Fixed

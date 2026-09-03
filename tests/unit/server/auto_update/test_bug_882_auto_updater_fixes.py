@@ -1,4 +1,4 @@
-"""Unit tests for Bug #882 auto-updater fixes (v9.21.1).
+"""Unit tests for Bug #882 auto-updater fixes (v9.21.1), superseded in part by Bug #1782.
 
 Bug #882 had two independent defects:
 
@@ -13,12 +13,25 @@ Bug #882 had two independent defects:
     also fails), blowing through the 120s systemd TimeoutStartSec budget
     on cidx-auto-update.service and killing the entire upgrade cycle.
 
-The fixes:
+The original Fix 1 — run_once.py loaded ServerConfigManager().load_config()
+and passed `server_url` explicitly into DeploymentExecutor. This was ITSELF
+buggy (Bug #1782): Story #1196 deprecated config.json as a source of
+host/port — nothing writes those keys there on an ongoing basis, and
+ServerConfig's dataclass defaults silently fill in host="127.0.0.1"/
+port=8000 when the keys are absent, so a real server bound to a non-default
+host/port (e.g. 0.0.0.0:8080) silently resolved to the wrong URL with no
+exception (confirmed live on staging).
 
-  Fix 1 — run_once.py now loads ServerConfigManager().load_config() and
-    passes `server_url` explicitly into DeploymentExecutor. When config.json
-    is missing, run_once raises RuntimeError so systemd records an
-    actionable failure instead of silently pointing at the wrong URL.
+  Fix 1 (Bug #1782 correction) — run_once._resolve_server_url() now resolves
+    host/port via the SAME authoritative launch-config mechanism
+    DeploymentExecutor already uses for its ExecStart-rewrite path (Story
+    #1199): applied_launch.json (the confirmed-applied config from the most
+    recent successful deploy), falling back to the live systemd ExecStart
+    flags when applied_launch.json is missing/corrupt/incomplete. See
+    TestResolveServerUrlBug1782LaunchConfigMechanism below. When NEITHER
+    source can supply a host/port, run_once still raises RuntimeError so
+    systemd records an actionable failure instead of silently pointing at
+    the wrong URL.
 
   Fix 2 — _wait_for_drain() tracks STRICTLY CONSECUTIVE ConnectionErrors.
     After three in a row (~30s at the default 10s poll interval) it
@@ -29,6 +42,7 @@ The fixes:
 """
 
 import contextlib
+import json
 import tempfile
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -42,21 +56,34 @@ import requests
 # ---------------------------------------------------------------------------
 
 
-def _patch_config_manager(cfg):
-    """Patch run_once.ServerConfigManager() so load_config() returns `cfg`."""
-    from code_indexer.server.auto_update import run_once
-
-    manager = MagicMock()
-    manager.load_config.return_value = cfg
-    return patch.object(run_once, "ServerConfigManager", return_value=manager)
-
-
-def _make_config(host, port):
-    """Build a ServerConfig-shaped stub with only the attrs _resolve_server_url reads."""
-    cfg = MagicMock()
-    cfg.host = host
-    cfg.port = port
-    return cfg
+@contextlib.contextmanager
+def _patched_launch_paths(applied_path, launch_path, unit_dir):
+    """Patch the module-level path constants DeploymentExecutor's launch-config
+    mechanism reads (Story #1199 / Bug #1782), mirroring the pattern used in
+    test_deploy_mode_1199.py's run_deploy() helper.
+    """
+    with contextlib.ExitStack() as stack:
+        stack.enter_context(
+            patch(
+                "code_indexer.server.auto_update.deployment_executor"
+                ".APPLIED_LAUNCH_CONFIG_PATH",
+                applied_path,
+            )
+        )
+        stack.enter_context(
+            patch(
+                "code_indexer.server.auto_update.deployment_executor"
+                ".LAUNCH_CONFIG_PATH",
+                launch_path,
+            )
+        )
+        stack.enter_context(
+            patch(
+                "code_indexer.server.auto_update.deployment_executor.SYSTEMD_UNIT_DIR",
+                unit_dir,
+            )
+        )
+        yield
 
 
 def _drain_status_response(drained):
@@ -112,83 +139,139 @@ def _patched_drain(executor, auth="fake-token", drain_timeout=60):
 # ---------------------------------------------------------------------------
 
 
-class TestResolveServerUrlHonorsCidxDataDir:
-    """Bug #882 follow-up (v9.21.2) — constructor arg must honour CIDX_DATA_DIR.
+_MAIN_PY_UNIT_TEMPLATE = """\
+[Unit]
+Description=CIDX Server
 
-    v9.21.1 shipped _resolve_server_url() calling ServerConfigManager() with no
-    args.  Under the auto-updater service (User=root on production) the env var
-    injected by _ensure_data_dir_env_var is CIDX_DATA_DIR, but
-    ServerConfigManager.__init__ looks for CIDX_SERVER_DATA_DIR.  When neither
-    is set and home()=/root, load_config() returns None and the process
-    crash-loops.
+[Service]
+ExecStart=/usr/bin/python3 -m code_indexer.server.main --host {host} --port {port}
 
-    The fix: read CIDX_DATA_DIR explicitly and pass it to the constructor so the
-    correct data directory is used regardless of what the internal default-lookup
-    env var is named.
+[Install]
+WantedBy=multi-user.target
+"""
+
+
+@pytest.fixture
+def executor(tmp_path):
+    """Real DeploymentExecutor rooted at tmp_path (no server_url needed here)."""
+    from code_indexer.server.auto_update.deployment_executor import (
+        DeploymentExecutor,
+    )
+
+    return DeploymentExecutor(repo_path=tmp_path, service_name="cidx-server")
+
+
+@pytest.fixture
+def launch_paths(tmp_path):
+    """Real temp-file (applied_launch.json, launch.json, systemd unit dir) triple.
+
+    Neither applied_launch.json nor launch.json is created here — individual
+    tests write whichever file(s) their scenario requires. unit_dir always
+    exists (empty by default) so SYSTEMD_UNIT_DIR patching is always valid.
+    """
+    applied = tmp_path / "applied_launch.json"
+    launch = tmp_path / "launch.json"
+    unit_dir = tmp_path / "systemd"
+    unit_dir.mkdir()
+    return applied, launch, unit_dir
+
+
+class TestResolveServerUrlBug1782LaunchConfigMechanism:
+    """Bug #1782 — _resolve_server_url() must resolve host/port via the SAME
+    authoritative launch-config mechanism DeploymentExecutor already uses for
+    its ExecStart-rewrite path (_read_launch_source/_fill_from_live_execstart),
+    never via config.json/ServerConfigManager.
+
+    Story #1196 deprecated config.json as a source of host/port: nothing
+    writes those keys there on an ongoing basis, and ServerConfig's dataclass
+    defaults silently fill in host="127.0.0.1"/port=8000 when absent — a real
+    server bound to a non-default host/port (e.g. 0.0.0.0:8080) resolved to
+    the wrong URL with no exception (confirmed live on staging).
     """
 
-    def test_passes_cidx_data_dir_to_constructor_when_env_var_is_set(self, monkeypatch):
-        """Test A — env var set: constructor receives the exact path string."""
+    def test_returns_url_from_applied_launch_json_real_host_port(
+        self, executor, launch_paths
+    ):
+        """AC1: a real, non-default host/port in applied_launch.json flows through."""
         from code_indexer.server.auto_update import run_once
 
-        monkeypatch.setenv("CIDX_DATA_DIR", "/tmp/cidx-test-8234")
-        mock_class = MagicMock()
-        mock_class.return_value.load_config.return_value = _make_config(
-            "127.0.0.1", 8000
+        applied, launch, unit_dir = launch_paths
+        applied.write_text(json.dumps({"host": "0.0.0.0", "port": 8080, "workers": 4}))
+
+        with _patched_launch_paths(applied, launch, unit_dir):
+            url = run_once._resolve_server_url(executor)
+
+        assert url == "http://0.0.0.0:8080"
+
+    def test_old_bug_scenario_config_json_missing_host_port_launch_config_wins(
+        self, executor, launch_paths, tmp_path
+    ):
+        """AC2: reproduces the real staging bug — config.json present but missing
+        host/port keys (ServerConfig dataclass would default to 127.0.0.1:8000),
+        applied_launch.json present with the correct real values. The function
+        must return the applied_launch.json-derived URL, never the config.json/
+        dataclass-default URL.
+        """
+        from code_indexer.server.auto_update import run_once
+
+        applied, launch, unit_dir = launch_paths
+        # config.json present, but WITHOUT host/port keys — mirrors the real
+        # staging file that triggered Bug #1782. It must never be consulted.
+        (tmp_path / "config.json").write_text(json.dumps({"server_dir": str(tmp_path)}))
+        applied.write_text(json.dumps({"host": "0.0.0.0", "port": 8080, "workers": 2}))
+
+        with _patched_launch_paths(applied, launch, unit_dir):
+            url = run_once._resolve_server_url(executor)
+
+        assert url == "http://0.0.0.0:8080", (
+            f"Expected the applied_launch.json-derived URL, got {url!r} — this is "
+            "the exact Bug #1782 regression (silently falling back to the "
+            "ServerConfig/config.json default of 127.0.0.1:8000)."
+        )
+        assert url != "http://127.0.0.1:8000"
+
+    def test_falls_back_to_live_execstart_when_applied_launch_json_missing(
+        self, executor, launch_paths
+    ):
+        """AC1/mechanism: applied_launch.json missing → live systemd ExecStart
+        (the confirmed running state) supplies host/port, matching the same
+        fallback DeploymentExecutor._ensure_launch_config('DEPLOY') relies on.
+        """
+        from code_indexer.server.auto_update import run_once
+
+        applied, launch, unit_dir = launch_paths  # applied deliberately unwritten
+        (unit_dir / "cidx-server.service").write_text(
+            _MAIN_PY_UNIT_TEMPLATE.format(host="10.0.0.42", port=9090)
         )
 
-        with patch.object(run_once, "ServerConfigManager", mock_class):
-            run_once._resolve_server_url()
+        with _patched_launch_paths(applied, launch, unit_dir):
+            url = run_once._resolve_server_url(executor)
 
-        mock_class.assert_called_once_with("/tmp/cidx-test-8234")
+        assert url == "http://10.0.0.42:9090"
 
-    def test_passes_none_to_constructor_when_env_var_is_not_set(self, monkeypatch):
-        """Test B — env var unset: constructor receives None (falls back internally)."""
+
+class TestResolveServerUrlBug1782FailLoud:
+    """Bug #1782 — genuine total-unresolvability must still fail loud."""
+
+    def test_raises_runtime_error_when_neither_source_available(
+        self, executor, launch_paths
+    ):
+        """AC3: Messi #2 Anti-Fallback — fail loud with an actionable message when
+        NEITHER applied_launch.json NOR a live systemd ExecStart can supply a
+        host/port. This is the genuine-total-unresolvability case; no hardcoded
+        default URL may be silently returned.
+        """
         from code_indexer.server.auto_update import run_once
 
-        monkeypatch.delenv("CIDX_DATA_DIR", raising=False)
-        mock_class = MagicMock()
-        mock_class.return_value.load_config.return_value = _make_config(
-            "127.0.0.1", 8000
-        )
+        applied, launch, unit_dir = launch_paths
+        # applied is missing and unit_dir has no cidx-server.service unit file.
 
-        with patch.object(run_once, "ServerConfigManager", mock_class):
-            run_once._resolve_server_url()
-
-        mock_class.assert_called_once_with(None)
-
-
-class TestResolveServerUrl:
-    """Bug #882 defect #1 — resolve server URL from config.json."""
-
-    @pytest.mark.parametrize(
-        "host,port,expected",
-        [
-            ("0.0.0.0", 8080, "http://0.0.0.0:8080"),
-            ("127.0.0.1", 8000, "http://127.0.0.1:8000"),
-            ("10.0.0.42", 9000, "http://10.0.0.42:9000"),
-        ],
-    )
-    def test_returns_url_built_from_config(self, host, port, expected):
-        """Config host/port flow through verbatim — no rewriting or normalization."""
-        from code_indexer.server.auto_update import run_once
-
-        with _patch_config_manager(_make_config(host, port)):
-            assert run_once._resolve_server_url() == expected
-
-    def test_raises_runtime_error_with_actionable_message_when_config_missing(self):
-        """Messi #2 Anti-Fallback: fail loud, with operator remediation guidance."""
-        from code_indexer.server.auto_update import run_once
-
-        with _patch_config_manager(None):
+        with _patched_launch_paths(applied, launch, unit_dir):
             with pytest.raises(RuntimeError) as exc_info:
-                run_once._resolve_server_url()
+                run_once._resolve_server_url(executor)
 
         message = str(exc_info.value)
-        # Actionable remediation text must be present — proves the error tells
-        # the operator what to do, not just that something went wrong.
-        assert "Run the CIDX installer" in message
-        assert "config.json" in message
+        assert "1782" in message
         # Anti-regression guard: no hardcoded fallback URL may leak into the
         # error message. If someone later re-introduces a default literal,
         # this assertion fails.
