@@ -64,9 +64,23 @@ class PasswordChangeAuditLogger:
         if log_file_path:
             self.log_file_path = log_file_path
         else:
-            # Default audit log location
-            server_dir = Path.home() / ".cidx-server"
-            server_dir.mkdir(exist_ok=True)
+            # Default audit log location. Bug #1778: honor
+            # CIDX_SERVER_DATA_DIR so an isolated/test server instance
+            # never leaks audit log lines into the real ~/.cidx-server/
+            # directory. Falls back to Path.home()/.cidx-server, matching
+            # the established pattern used across ~10+ other server-mode
+            # modules (Bug #1776).
+            import os
+
+            server_dir = Path(
+                os.environ.get(
+                    "CIDX_SERVER_DATA_DIR", str(Path.home() / ".cidx-server")
+                )
+            )
+            # parents=True: CIDX_SERVER_DATA_DIR may point at a nested path
+            # with missing intermediate directories, unlike Path.home()
+            # which always exists.
+            server_dir.mkdir(parents=True, exist_ok=True)
             self.log_file_path = str(server_dir / "password_audit.log")
 
         # Configure audit logger with unique name based on file path

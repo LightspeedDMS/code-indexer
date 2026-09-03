@@ -45,7 +45,18 @@ class JWTSecretManager:
         if server_dir_path:
             self.server_dir = Path(server_dir_path)
         else:
-            self.server_dir = Path.home() / ".cidx-server"
+            # Bug #1778: honor CIDX_SERVER_DATA_DIR so an isolated/test
+            # server instance never leaks/adopts the JWT signing secret via
+            # the real ~/.cidx-server/ directory. Falls back to
+            # Path.home()/.cidx-server, matching the established pattern
+            # used across ~10+ other server-mode modules (Bug #1776).
+            import os
+
+            self.server_dir = Path(
+                os.environ.get(
+                    "CIDX_SERVER_DATA_DIR", str(Path.home() / ".cidx-server")
+                )
+            )
 
         self.secret_file_path = self.server_dir / ".jwt_secret"
         self._ensure_server_directory_exists()
@@ -59,7 +70,10 @@ class JWTSecretManager:
 
     def _ensure_server_directory_exists(self):
         """Ensure server directory exists."""
-        self.server_dir.mkdir(exist_ok=True)
+        # parents=True: CIDX_SERVER_DATA_DIR (Bug #1778) may point at a
+        # nested path with missing intermediate directories, unlike
+        # Path.home() which always exists.
+        self.server_dir.mkdir(parents=True, exist_ok=True)
 
     # ------------------------------------------------------------------
     # PostgreSQL helpers
