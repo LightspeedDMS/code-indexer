@@ -235,7 +235,7 @@ class DeploymentExecutor:
             from code_indexer.server.utils.jwt_secret_manager import JWTSecretManager
             from code_indexer.server.auth.jwt_manager import JWTManager
 
-            secret_manager = JWTSecretManager()
+            secret_manager = JWTSecretManager(str(_cidx_data_dir))
             secret_key = secret_manager.get_or_create_secret()
 
             jwt_manager = JWTManager(secret_key=secret_key, token_expiration_minutes=10)

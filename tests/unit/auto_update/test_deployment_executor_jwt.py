@@ -13,7 +13,10 @@ from unittest.mock import patch
 
 import pytest
 
-from code_indexer.server.auto_update.deployment_executor import DeploymentExecutor
+from code_indexer.server.auto_update.deployment_executor import (
+    DeploymentExecutor,
+    _cidx_data_dir,
+)
 
 
 @pytest.fixture
@@ -106,4 +109,58 @@ class TestGetAuthTokenNoCaching:
         assert result is None, (
             "When JWT secret file is missing (FileNotFoundError), "
             "_get_auth_token() must return None, not raise."
+        )
+
+
+class TestGetAuthTokenUsesCidxDataDir:
+    """Bug #1779: JWTSecretManager must be constructed with the auto-updater's
+    own resolved data-directory constant (_cidx_data_dir), not its own
+    independent default resolution, so IPC paths stay consistent with
+    LAUNCH_CONFIG_PATH / PENDING_REDEPLOY_MARKER etc.
+    """
+
+    def test_get_auth_token_constructs_jwt_secret_manager_with_cidx_data_dir(
+        self, executor
+    ):
+        """
+        JWTSecretManager() must be called with server_dir_path=str(_cidx_data_dir)
+        explicitly, instead of relying on JWTSecretManager's own independent
+        default resolution (which could diverge if CIDX_SERVER_DATA_DIR and
+        CIDX_DATA_DIR are ever set differently).
+        """
+        captured_args = {}
+
+        class FakeSecretManager:
+            def __init__(self, server_dir_path=None, pg_dsn=None):
+                captured_args["server_dir_path"] = server_dir_path
+
+            def get_or_create_secret(self):
+                return "fake-secret-key"
+
+        with (
+            patch(
+                "code_indexer.server.utils.jwt_secret_manager.JWTSecretManager",
+                side_effect=FakeSecretManager,
+            ),
+            patch(
+                "code_indexer.server.auth.jwt_manager.JWTManager",
+            ) as MockJWTManager,
+        ):
+            MockJWTManager.return_value.create_token.return_value = "fake-token"
+            token = executor._get_auth_token()
+
+        assert token == "fake-token", (
+            "_get_auth_token() must return the token produced by the mocked "
+            "JWTManager.create_token() call. A mismatch (or None) here means "
+            "the broad `except Exception: return None` in _get_auth_token() "
+            "silently swallowed a downstream failure after the JWTSecretManager "
+            f"constructor call, but got {token!r}."
+        )
+
+        assert captured_args.get("server_dir_path") == str(_cidx_data_dir), (
+            "JWTSecretManager must be constructed with server_dir_path="
+            f"str(_cidx_data_dir) (= {str(_cidx_data_dir)!r}), but got "
+            f"{captured_args.get('server_dir_path')!r}. This makes the "
+            "auto-updater's JWT secret resolution consistent with its own "
+            "other IPC paths."
         )
