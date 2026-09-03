@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [12.35.0] - 2026-09-02
+
+### Fixed
+
+- **Bug #1778**: three more server-mode classes (`JWTSecretManager`, `PasswordChangeAuditLogger`,
+  `PasswordChangeConcurrencyProtection`) hardcoded `~/.cidx-server` as their default data
+  directory, the same leak pattern fixed for logging in Bug #1776. Discovered live during
+  #1776's own staging verification -- an isolated test server leaked a JWT secret file, a
+  password-audit log, and a lock directory into the real directory. The JWT secret case was
+  security-relevant: an isolated instance could silently adopt the real server's signing key,
+  or write one the real server later picked up. All three now honor `CIDX_SERVER_DATA_DIR`.
+  Also fixes a related crash risk: two of the three used `mkdir()` without `parents=True`, so a
+  nested, not-yet-created data directory would raise instead of being created.
+
 ## [12.34.0] - 2026-09-02
 
 ### Fixed
