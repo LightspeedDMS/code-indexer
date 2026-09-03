@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [12.36.0] - 2026-09-03
+
+### Fixed
+
+- **Bug #1779**: the auto-updater's `DeploymentExecutor._get_auth_token` constructed
+  `JWTSecretManager()` with no explicit directory, so it resolved the JWT secret path via
+  `CIDX_SERVER_DATA_DIR`-or-default while the rest of the same class's data-path resolution
+  (e.g. `ServerConfigManager`) already used the auto-updater's own `_cidx_data_dir`
+  (`CIDX_DATA_DIR`-or-default) -- an inconsistency between two path-resolution variables
+  within the same file. Now passes `str(_cidx_data_dir)` explicitly, matching the existing
+  pattern used elsewhere in `deployment_executor.py`, so the auto-updater's JWT secret
+  lookup stays aligned with its own IPC path resolution in cross-user deployments
+  (Bug #879's original CIDX_DATA_DIR alignment scenario).
+- **Bug #1780**: `ElevatedSessionManager.__init__`'s fallback branch resolved its SQLite
+  database directory via the legacy `CIDX_DATA_DIR` variable instead of
+  `CIDX_SERVER_DATA_DIR`, the variable Bug #1778 established as the standard for isolating
+  server-mode data directories. An isolated/test server instance could silently read or
+  write `elevated_sessions.db` against the real `~/.cidx-server/` directory. Now honors
+  `CIDX_SERVER_DATA_DIR`, consistent with the other ~10+ server-mode modules using this
+  pattern.
+
 ## [12.35.0] - 2026-09-02
 
 ### Fixed
