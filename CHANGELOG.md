@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [12.37.0] - 2026-09-03
+
+### Fixed
+
+- **Bug #1781**: in cluster (PostgreSQL) mode, the auto-updater's `_get_auth_token`
+  always signed maintenance-mode tokens with a file-based JWT secret, even though
+  the server validates against a secret shared via the `cluster_secrets` PostgreSQL
+  table in cluster mode. This caused every cluster-mode auto-update deploy's
+  maintenance-mode-entry call to fail with HTTP 401 (confirmed live on staging:
+  identical 401 recurring across 5 consecutive deploys). Degraded gracefully (the
+  deploy proceeded anyway), so no outage resulted, but maintenance mode never
+  actually engaged during a cluster auto-update. Now resolves cluster mode via the
+  same bootstrap-config pattern the server itself uses, and fails loud (denies the
+  token) rather than silently falling back to file-based signing when the
+  bootstrap config is genuinely unresolvable -- the prior behavior of "assume
+  solo mode" would have silently recreated the same defect.
+
 ## [12.36.0] - 2026-09-03
 
 ### Fixed
