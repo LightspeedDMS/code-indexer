@@ -272,7 +272,7 @@ class ElevatedSessionManager:
                 os.makedirs(parent, exist_ok=True)
         else:
             data_dir = os.environ.get(
-                "CIDX_DATA_DIR", os.path.expanduser("~/.cidx-server")
+                "CIDX_SERVER_DATA_DIR", os.path.expanduser("~/.cidx-server")
             )
             os.makedirs(data_dir, exist_ok=True)
             self._db_path = os.path.join(data_dir, "elevated_sessions.db")
