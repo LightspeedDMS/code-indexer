@@ -1052,6 +1052,7 @@ def test_ac2_pg_api_metrics_drain_on_shutdown(
     env = dict(os.environ)
     env["PYTHONPATH"] = str(src_dir)
     env["CIDX_SERVER_DATA_DIR"] = str(data_dir)
+    env["CIDX_DATA_DIR"] = str(data_dir)
     voyage = os.environ.get("E2E_VOYAGE_API_KEY") or os.environ.get(
         "VOYAGE_API_KEY", ""
     )

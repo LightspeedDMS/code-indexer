@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [12.34.0] - 2026-09-02
+
+### Fixed
+
+- **Bug #1776**: `ExceptionLogger` hardcoded `~/.cidx-server/logs` in server mode with no
+  environment-variable override, so an isolated/test server instance leaked its log files
+  into (and, via a separate unrelated mechanism discovered live during testing, could
+  overwrite files in) the real directory on the host. Now honors `CIDX_SERVER_DATA_DIR`,
+  matching the pattern already used consistently across the rest of the server codebase.
+  A companion attempt to fix `deployment_executor.py`'s own IPC-path resolution the same
+  way was reverted after review found it broke a mandatory CI gate and introduced a
+  production two-process coordination risk; equivalent test-server isolation is instead
+  achieved by setting the pre-existing `CIDX_DATA_DIR` variable alongside
+  `CIDX_SERVER_DATA_DIR` at the relevant isolated-server launch sites.
+
 ## [12.33.0] - 2026-09-02
 
 ### Fixed
