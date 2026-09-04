@@ -345,10 +345,16 @@ def _resolve_global_repo_target(
             error_envelope.update(extra_error_fields)
         return None, _mcp_response(error_envelope)
 
-    from code_indexer.global_repos.alias_manager import AliasManager
+    from code_indexer.global_repos.alias_manager import (
+        AliasManager,
+        resolve_alias_or_index_path,
+    )
 
     alias_manager = AliasManager(str(Path(golden_repos_dir) / "aliases"))
-    target_path = alias_manager.read_alias(repository_alias)
+    # Bug #1315: fall back to registry index_path when alias pointer missing
+    target_path = resolve_alias_or_index_path(
+        alias_manager, alias_name=repository_alias, repo_entry=repo_entry
+    )
 
     if not target_path:
         available_repos = _get_available_repos(user)

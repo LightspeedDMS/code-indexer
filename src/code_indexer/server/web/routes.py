@@ -3717,7 +3717,10 @@ def toggle_wiki_enabled(
             from pathlib import Path
             from ..wiki.wiki_cache import WikiCache
             from ..wiki.wiki_service import WikiService
-            from ...global_repos.alias_manager import AliasManager
+            from ...global_repos.alias_manager import (
+                AliasManager,
+                resolve_alias_or_index_path,
+            )
             from ..utils.registry_factory import resolve_backend_registry_attr
 
             # Bug #1665: resolve the shared PostgreSQL wiki_cache backend in
@@ -3729,7 +3732,19 @@ def toggle_wiki_enabled(
             cache = WikiCache(manager.db_path, storage_backend=wiki_backend)
             cache.ensure_tables()
             aliases_dir = str(Path(manager.golden_repos_dir) / "aliases")
-            actual_path = AliasManager(aliases_dir).read_alias(f"{alias}-global")
+            # Bug #1315: get repo_entry for index_path fallback
+            repo_entry = None
+            backend_registry = getattr(request.app.state, "backend_registry", None)
+            if backend_registry:
+                repos_dict = backend_registry.global_repos.list_repos()
+                repo_entry = next(
+                    (r for r in repos_dict.values()
+                     if r.get("alias_name") == f"{alias}-global"),
+                    None,
+                )
+            actual_path = resolve_alias_or_index_path(
+                AliasManager(aliases_dir), f"{alias}-global", repo_entry
+            )
             if actual_path:
                 svc = WikiService()
                 # Fetch wiki_config so enable_views_seeding toggle is respected (Story #323)
@@ -5817,7 +5832,10 @@ def query_submit(
             elif target_repo.get("is_global"):
                 # Handle global repository query
                 import os
-                from code_indexer.global_repos.alias_manager import AliasManager
+                from code_indexer.global_repos.alias_manager import (
+                    AliasManager,
+                    resolve_alias_or_index_path,
+                )
                 from ..services.search_service import (
                     SemanticSearchService,
                     SemanticSearchRequest,
@@ -5832,8 +5850,10 @@ def query_submit(
                 )
                 alias_manager = AliasManager(str(aliases_dir))
 
-                # Resolve alias to target path
-                target_path = alias_manager.read_alias(user_alias)
+                # Bug #1315: fall back to registry index_path when alias pointer missing
+                target_path = resolve_alias_or_index_path(
+                    alias_manager, alias_name=user_alias, repo_entry=target_repo
+                )
                 if not target_path:
                     error_message = f"Global repository '{user_alias}' alias not found"
                 else:
@@ -6314,7 +6334,10 @@ def query_results_partial_post(
             elif target_repo.get("is_global"):
                 # Handle global repository query
                 import os
-                from code_indexer.global_repos.alias_manager import AliasManager
+                from code_indexer.global_repos.alias_manager import (
+                    AliasManager,
+                    resolve_alias_or_index_path,
+                )
                 from ..services.search_service import (
                     SemanticSearchService,
                     SemanticSearchRequest,
@@ -6329,8 +6352,10 @@ def query_results_partial_post(
                 )
                 alias_manager = AliasManager(str(aliases_dir))
 
-                # Resolve alias to target path
-                target_path = alias_manager.read_alias(user_alias)
+                # Bug #1315: fall back to registry index_path when alias pointer missing
+                target_path = resolve_alias_or_index_path(
+                    alias_manager, alias_name=user_alias, repo_entry=target_repo
+                )
                 if not target_path:
                     error_message = f"Global repository '{user_alias}' alias not found"
                 else:

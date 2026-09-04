@@ -29,7 +29,7 @@ from code_indexer.server.repositories.activated_repo_manager import (
     ActivatedRepoManager,
 )
 from code_indexer.server.services.config_service import get_config_service  # noqa: F401
-from code_indexer.global_repos.alias_manager import AliasManager
+from code_indexer.global_repos.alias_manager import AliasManager, resolve_alias_or_index_path
 
 # Shared utilities extracted to _utils.py (Story #496 refactoring)
 from . import _utils  # noqa: F401 — tests patch _legacy._utils
@@ -201,13 +201,20 @@ def _resolve_repo_path(repo_identifier: str, golden_repos_dir: str) -> Optional[
     aliases_path = Path(golden_repos_dir) / "aliases"
     if aliases_path.is_dir():
         alias_manager = AliasManager(str(aliases_path))
+        # Bug #1315: use resolve_alias_or_index_path for index_path fallback
+        repo_entry_fb = _get_global_repo(repo_identifier)
         # Try the identifier directly (e.g. "cidx-meta-global")
-        alias_path = alias_manager.read_alias(repo_identifier)
+        alias_path = resolve_alias_or_index_path(
+            alias_manager, repo_identifier, repo_entry_fb
+        )
         if alias_path and Path(alias_path).is_dir():
             return str(alias_path)
         # If not -global, try with -global suffix
         if not repo_identifier.endswith("-global"):
-            alias_path = alias_manager.read_alias(f"{repo_identifier}-global")
+            global_entry = _get_global_repo(f"{repo_identifier}-global")
+            alias_path = resolve_alias_or_index_path(
+                alias_manager, f"{repo_identifier}-global", global_entry
+            )
             if alias_path and Path(alias_path).is_dir():
                 return str(alias_path)
 

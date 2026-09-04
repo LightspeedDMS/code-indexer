@@ -255,17 +255,41 @@ class SCIPQueryService:
         ``None`` (filesystem scan).
         """
         try:
-            from code_indexer.global_repos.alias_manager import AliasManager
+            from code_indexer.global_repos.alias_manager import (
+                AliasManager,
+                resolve_alias_or_index_path,
+            )
 
             aliases_dir = self._golden_repos_dir / "aliases"
             if not aliases_dir.is_dir():
                 return None
             alias_manager = AliasManager(str(aliases_dir))
 
+            # Bug #1315: get repo_entry for index_path fallback
+            repo_entry = None
+            try:
+                from .. import app as app_module
+                backend_registry = getattr(
+                    app_module.app.state, "backend_registry", None
+                )
+                if backend_registry:
+                    repos_dict = backend_registry.global_repos.list_repos()
+                    repo_entry = next(
+                        (r for r in repos_dict.values()
+                         if r.get("alias_name") == f"{repo_name}-global"),
+                        None,
+                    )
+            except Exception:
+                pass  # Defensive: registry unavailable is non-fatal here
+
             # Prefer the -global alias (the form semantic resolves), then bare.
-            target = alias_manager.read_alias(f"{repo_name}-global")
+            target = resolve_alias_or_index_path(
+                alias_manager, f"{repo_name}-global", repo_entry
+            )
             if not target:
-                target = alias_manager.read_alias(repo_name)
+                target = resolve_alias_or_index_path(
+                    alias_manager, repo_name, repo_entry
+                )
             if target and Path(target).is_dir():
                 return Path(target)
         except Exception as exc:  # pragma: no cover - defensive, never fatal
