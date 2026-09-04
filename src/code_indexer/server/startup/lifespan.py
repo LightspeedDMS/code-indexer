@@ -2549,8 +2549,14 @@ def make_lifespan(
                         reconcile_golden_repo_registry,
                     )
 
+                    _reconcile_refresh_scheduler = (
+                        global_lifecycle_manager.refresh_scheduler
+                        if global_lifecycle_manager is not None
+                        else None
+                    )
                     _reconcile_result = reconcile_golden_repo_registry(
-                        golden_repo_manager
+                        golden_repo_manager,
+                        refresh_scheduler=_reconcile_refresh_scheduler,
                     )
                     if _reconcile_result.orphans_found:
                         logger.info(
@@ -2561,6 +2567,15 @@ def make_lifespan(
                             len(_reconcile_result.orphans_removed),
                             len(_reconcile_result.orphans_failed),
                             _reconcile_result.orphans_found,
+                        )
+                    if _reconcile_result.stale_indexes_found:
+                        logger.info(
+                            "Startup: GAP-4 reconcile found %d stale golden-repo "
+                            "index(es) (%d refresh(es) triggered, %d failed): %s",
+                            len(_reconcile_result.stale_indexes_found),
+                            len(_reconcile_result.stale_indexes_refreshed),
+                            len(_reconcile_result.stale_indexes_failed),
+                            _reconcile_result.stale_indexes_found,
                         )
                 except Exception as _gre:
                     logger.warning(

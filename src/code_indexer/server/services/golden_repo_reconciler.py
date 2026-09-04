@@ -103,6 +103,7 @@ worker already removed (raises, caught here as `orphans_failed`).
 
 import logging
 import os
+import subprocess
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -113,6 +114,7 @@ from code_indexer.server.repositories.golden_repo_manager import (
     GoldenRepoNotFoundError,
 )
 from code_indexer.server.services.job_tracker import DuplicateJobError
+from code_indexer.server.services.metadata_reader import read_current_commit
 
 logger = logging.getLogger(__name__)
 
@@ -163,6 +165,12 @@ class ReconcileResult:
     # to the actual on-disk clone path (and those whose repair failed).
     index_paths_repaired: List[str] = field(default_factory=list)
     index_paths_repair_failed: List[str] = field(default_factory=list)
+    # GAP-4: healthy repos whose on-disk git HEAD has advanced past the
+    # commit SHA recorded in their index metadata -- a stale index invisible
+    # to the scheduler's normal change-detection cycle.
+    stale_indexes_found: List[str] = field(default_factory=list)
+    stale_indexes_refreshed: List[str] = field(default_factory=list)
+    stale_indexes_failed: List[str] = field(default_factory=list)
     healthy_count: int = 0
     aborted: bool = False
     abort_reason: Optional[str] = None
@@ -401,20 +409,28 @@ def _claim_sweep_single_flight(job_tracker: Any, submitter_username: str) -> str
 def reconcile_golden_repo_registry(
     golden_repo_manager: GoldenRepoManager,
     submitter_username: str = DEFAULT_RECONCILE_SUBMITTER,
+    refresh_scheduler: Optional[Any] = None,
 ) -> ReconcileResult:
     """
     Scan the golden_repos registry for rows with no on-disk clone and
     submit their removal; repair healthy global repos with a missing alias
-    pointer. See module docstring for the full safety contract.
+    pointer; detect stale indexes and trigger refreshes. See module
+    docstring for the full safety contract.
 
     Args:
         golden_repo_manager: The shared GoldenRepoManager instance.
         submitter_username: Username recorded on the submitted removal jobs
             and the single-flight coordination job.
+        refresh_scheduler: Optional RefreshScheduler instance. When provided,
+            Pass 4 (GAP-4 index staleness detection) compares each healthy
+            repo's git HEAD against its indexed commit SHA and triggers a
+            refresh for any repo whose index has fallen behind. When None
+            (the default, matching all existing callers), Pass 4 is skipped.
 
     Returns:
         ReconcileResult summarizing orphans found/removed/failed, pointer
-        repairs, the healthy count, and whether the sweep aborted early.
+        repairs, stale indexes detected/refreshed, the healthy count, and
+        whether the sweep aborted early.
     """
     result = ReconcileResult()
 
@@ -433,7 +449,7 @@ def reconcile_golden_repo_registry(
             return result
 
     try:
-        _run_sweep(golden_repo_manager, submitter_username, result)
+        _run_sweep(golden_repo_manager, submitter_username, result, refresh_scheduler)
     except Exception as sweep_error:  # noqa: BLE001 -- sidecar discipline
         logger.error("Bug #1317 reconcile: sweep failed unexpectedly: %s", sweep_error)
         result.aborted = True
@@ -453,6 +469,7 @@ def reconcile_golden_repo_registry(
                     "orphans_removed": len(result.orphans_removed),
                     "pointers_repaired": len(result.pointers_repaired),
                     "index_paths_repaired": len(result.index_paths_repaired),
+                    "stale_indexes_refreshed": len(result.stale_indexes_refreshed),
                 },
             )
         except Exception as complete_error:  # noqa: BLE001
@@ -468,9 +485,11 @@ def _run_sweep(
     golden_repo_manager: GoldenRepoManager,
     submitter_username: str,
     result: ReconcileResult,
+    refresh_scheduler: Optional[Any] = None,
 ) -> None:
     """Core sweep logic: health check -> classify -> circuit-breaker ->
-    remove orphans -> repair missing pointers on healthy repos."""
+    remove orphans -> repair missing pointers on healthy repos ->
+    detect stale indexes (GAP-4)."""
     breaker_backend = _get_breaker_backend(golden_repo_manager)
 
     if not _golden_repos_dir_is_healthy(golden_repo_manager.golden_repos_dir):
@@ -693,3 +712,137 @@ def _run_sweep(
                 ip_error,
             )
             result.index_paths_repair_failed.append(alias)
+
+    # ------------------------------------------------------------------ #
+    # Pass 4 (GAP-4): detect repos whose on-disk git HEAD has advanced   #
+    # past the commit SHA recorded in the index metadata. A stale index  #
+    # in this state is invisible to the refresh scheduler's normal       #
+    # has_changes() cycle (local HEAD == upstream HEAD after a successful #
+    # pull, so no new changes are detected -- but the index was never    #
+    # rebuilt for that HEAD).                                            #
+    # ------------------------------------------------------------------ #
+    if refresh_scheduler is not None:
+        _reconcile_stale_indexes(
+            refresh_scheduler, healthy_rows, submitter_username, result
+        )
+
+
+def _get_clone_git_head(clone_path: str) -> Optional[str]:
+    """Return the full git HEAD SHA for an on-disk clone, or None on failure.
+
+    Uses the same subprocess pattern as RefreshScheduler's
+    _check_stale_index_metadata -- a plain ``git rev-parse HEAD`` with a
+    short timeout. Returns None (never raises) on any error so a single
+    unreadable clone never aborts the entire staleness sweep.
+    """
+    try:
+        head_result = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=clone_path,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except Exception:  # noqa: BLE001 -- best-effort staleness check
+        return None
+    if head_result.returncode != 0:
+        return None
+    sha = head_result.stdout.strip()
+    return sha if sha else None
+
+
+def _index_commit_matches_head(recorded_commit: str, actual_head: str) -> bool:
+    """True when the recorded index commit matches the clone's git HEAD.
+
+    Mirrors the prefix-tolerant comparison in RefreshScheduler's
+    _check_stale_index_metadata (Bug #1591): a recorded value that is a
+    valid hex prefix (>= 7 chars) of the actual HEAD is considered the
+    SAME commit. The literal ``"unknown"`` (written by config_fixer /
+    git_detection / file_identifier on a git-state detection failure) is
+    always treated as NOT matching so a reconcile pass records a real SHA.
+    """
+    recorded_lower = recorded_commit.strip().lower()
+
+    if recorded_lower == "unknown":
+        return False
+
+    # Prefix-tolerant: a shorter valid-hex recorded value that is a genuine
+    # prefix of the actual HEAD is the same commit, but only when it meets
+    # git's minimum abbreviation length of 7 characters.
+    is_hex_fragment = len(recorded_lower) >= 7 and all(
+        c in "0123456789abcdef" for c in recorded_lower
+    )
+    if is_hex_fragment and actual_head.lower().startswith(recorded_lower):
+        return True
+
+    return recorded_lower == actual_head.lower()
+
+
+def _reconcile_stale_indexes(
+    refresh_scheduler: Any,
+    healthy_rows: List[Any],
+    submitter_username: str,
+    result: ReconcileResult,
+) -> None:
+    """Pass 4 (GAP-4): detect repos whose index is stale relative to git HEAD.
+
+    For each healthy repo (clone exists, survived Pass 1 classification),
+    compare the git HEAD of the on-disk clone against the ``current_commit``
+    SHA stored in the index metadata (``.code-indexer/metadata-voyage-ai.json``
+    or legacy ``metadata.json``). If they diverge, trigger a refresh via
+    ``RefreshScheduler.trigger_refresh_for_repo(alias)``.
+
+    Guards:
+    - Skipped entirely when ``refresh_scheduler`` is None (caller did not
+      provide one -- e.g. tests, solo CLI paths).
+    - A repo with no metadata file (never indexed) is silently skipped --
+      an uninitialized repo is handled by the scheduler's own repair path.
+    - A repo whose git HEAD cannot be read is silently skipped.
+    - Each repo is wrapped in its own try/except so an unexpected error for
+      one alias never propagates to the rest.
+
+    This is a READ-ONLY staleness detection pass: it mutates nothing in the
+    registry or on disk. The only side effect is triggering refresh jobs.
+    """
+    for repo_row, actual_path in healthy_rows:
+        alias = repo_row["alias"]
+        try:
+            recorded_commit = read_current_commit(actual_path)
+            if not recorded_commit:
+                continue
+
+            actual_head = _get_clone_git_head(actual_path)
+            if not actual_head:
+                continue
+
+            if _index_commit_matches_head(recorded_commit, actual_head):
+                continue
+
+            result.stale_indexes_found.append(alias)
+            logger.info(
+                "GAP-4 reconcile: golden repo '%s' index is stale "
+                "(indexed=%s, HEAD=%s) -- triggering refresh.",
+                alias,
+                recorded_commit[:12],
+                actual_head[:12],
+            )
+            try:
+                refresh_scheduler.trigger_refresh_for_repo(
+                    alias, submitter_username=submitter_username
+                )
+                result.stale_indexes_refreshed.append(alias)
+            except Exception as refresh_error:  # noqa: BLE001
+                logger.error(
+                    "GAP-4 reconcile: failed to trigger refresh for "
+                    "stale index on '%s': %s",
+                    alias,
+                    refresh_error,
+                )
+                result.stale_indexes_failed.append(alias)
+        except Exception as staleness_error:  # noqa: BLE001 -- reconcile safety
+            logger.error(
+                "GAP-4 reconcile: unexpected error checking index "
+                "staleness for '%s': %s",
+                alias,
+                staleness_error,
+            )
