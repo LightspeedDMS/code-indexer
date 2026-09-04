@@ -3640,12 +3640,34 @@ def toggle_wiki_enabled(
             from pathlib import Path
             from ..wiki.wiki_cache import WikiCache
             from ..wiki.wiki_service import WikiService
-            from ...global_repos.alias_manager import AliasManager
+            from ...global_repos.alias_manager import (
+                AliasManager,
+                resolve_alias_or_index_path,
+            )
 
             cache = WikiCache(manager.db_path)
             cache.ensure_tables()
             aliases_dir = str(Path(manager.golden_repos_dir) / "aliases")
-            actual_path = AliasManager(aliases_dir).read_alias(f"{alias}-global")
+            # Bug #1315: fall back to registry index_path when alias pointer
+            # is missing/unreadable.
+            wiki_repo_entry = None
+            wiki_backend_registry = getattr(
+                request.app.state, "backend_registry", None
+            )
+            if wiki_backend_registry:
+                try:
+                    wiki_repo_entry = (
+                        wiki_backend_registry.global_repos.get_repo(
+                            f"{alias}-global"
+                        )
+                    )
+                except Exception:
+                    pass
+            actual_path = resolve_alias_or_index_path(
+                AliasManager(aliases_dir),
+                alias_name=f"{alias}-global",
+                repo_entry=wiki_repo_entry,
+            )
             if actual_path:
                 svc = WikiService()
                 # Fetch wiki_config so enable_views_seeding toggle is respected (Story #323)
@@ -5679,7 +5701,10 @@ def query_submit(
             elif target_repo.get("is_global"):
                 # Handle global repository query
                 import os
-                from code_indexer.global_repos.alias_manager import AliasManager
+                from code_indexer.global_repos.alias_manager import (
+                    AliasManager,
+                    resolve_alias_or_index_path,
+                )
                 from ..services.search_service import (
                     SemanticSearchService,
                     SemanticSearchRequest,
@@ -5694,8 +5719,13 @@ def query_submit(
                 )
                 alias_manager = AliasManager(str(aliases_dir))
 
-                # Resolve alias to target path
-                target_path = alias_manager.read_alias(user_alias)
+                # Bug #1315: fall back to registry index_path
+                rest_repo_entry = {"index_path": target_repo.get("path")}
+                target_path = resolve_alias_or_index_path(
+                    alias_manager,
+                    alias_name=user_alias,
+                    repo_entry=rest_repo_entry,
+                )
                 if not target_path:
                     error_message = f"Global repository '{user_alias}' alias not found"
                 else:
@@ -6150,7 +6180,10 @@ def query_results_partial_post(
             elif target_repo.get("is_global"):
                 # Handle global repository query
                 import os
-                from code_indexer.global_repos.alias_manager import AliasManager
+                from code_indexer.global_repos.alias_manager import (
+                    AliasManager,
+                    resolve_alias_or_index_path,
+                )
                 from ..services.search_service import (
                     SemanticSearchService,
                     SemanticSearchRequest,
@@ -6165,8 +6198,13 @@ def query_results_partial_post(
                 )
                 alias_manager = AliasManager(str(aliases_dir))
 
-                # Resolve alias to target path
-                target_path = alias_manager.read_alias(user_alias)
+                # Bug #1315: fall back to registry index_path
+                rest_repo_entry = {"index_path": target_repo.get("path")}
+                target_path = resolve_alias_or_index_path(
+                    alias_manager,
+                    alias_name=user_alias,
+                    repo_entry=rest_repo_entry,
+                )
                 if not target_path:
                     error_message = f"Global repository '{user_alias}' alias not found"
                 else:

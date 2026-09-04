@@ -85,7 +85,10 @@ def _resolve_temporal_repo_path_rest(
     from pathlib import Path as PathLib
 
     if repository_alias.endswith("-global"):
-        from code_indexer.global_repos.alias_manager import AliasManager
+        from code_indexer.global_repos.alias_manager import (
+            AliasManager,
+            resolve_alias_or_index_path,
+        )
 
         golden_repos_dir = getattr(app.state, "golden_repos_dir", None)
         if not golden_repos_dir:
@@ -96,8 +99,20 @@ def _resolve_temporal_repo_path_rest(
                     "error": "golden_repos_dir not configured",
                 },
             )
+        # Bug #1315: look up repo_entry for index_path fallback
+        repo_entry = None
+        backend_registry = getattr(app.state, "backend_registry", None)
+        if backend_registry:
+            try:
+                repo_entry = backend_registry.global_repos.get_repo(
+                    repository_alias
+                )
+            except Exception:
+                pass
         alias_manager = AliasManager(str(PathLib(golden_repos_dir) / "aliases"))
-        resolved_path = alias_manager.read_alias(repository_alias)
+        resolved_path = resolve_alias_or_index_path(
+            alias_manager, alias_name=repository_alias, repo_entry=repo_entry
+        )
         if not resolved_path:
             return None, JSONResponse(
                 status_code=status.HTTP_404_NOT_FOUND,
@@ -484,7 +499,10 @@ def register_query_routes(
                     # Construct path - different for global vs user repos
                     if repo.get("is_global"):
                         # Global repos: use AliasManager to resolve versioned snapshot path
-                        from code_indexer.global_repos.alias_manager import AliasManager
+                        from code_indexer.global_repos.alias_manager import (
+                            AliasManager,
+                            resolve_alias_or_index_path,
+                        )
 
                         golden_repos_dir = getattr(app.state, "golden_repos_dir", None)
                         if not golden_repos_dir:
@@ -492,10 +510,28 @@ def register_query_routes(
                                 f"golden_repos_dir not configured, skipping global repo {repo['user_alias']}"
                             )
                             continue
+                        # Bug #1315: look up repo_entry for index_path fallback
+                        omni_repo_entry = None
+                        omni_backend_registry = getattr(
+                            app.state, "backend_registry", None
+                        )
+                        if omni_backend_registry:
+                            try:
+                                omni_repo_entry = (
+                                    omni_backend_registry.global_repos.get_repo(
+                                        repo["user_alias"]
+                                    )
+                                )
+                            except Exception:
+                                pass
                         alias_manager = AliasManager(
                             str(PathLib(golden_repos_dir) / "aliases")
                         )
-                        resolved_path = alias_manager.read_alias(repo["user_alias"])
+                        resolved_path = resolve_alias_or_index_path(
+                            alias_manager,
+                            alias_name=repo["user_alias"],
+                            repo_entry=omni_repo_entry,
+                        )
                         if not resolved_path:
                             logger.warning(
                                 f"Failed to resolve alias path for {repo['user_alias']}, skipping"

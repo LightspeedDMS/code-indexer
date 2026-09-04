@@ -198,16 +198,29 @@ def _resolve_repo_path(repo_identifier: str, golden_repos_dir: str) -> Optional[
     """
     # Step 0: Try alias JSON target_path (authoritative for read operations)
     # AliasManager.read_alias() returns the versioned snapshot path
+    from code_indexer.global_repos.alias_manager import resolve_alias_or_index_path
+
     aliases_path = Path(golden_repos_dir) / "aliases"
     if aliases_path.is_dir():
         alias_manager = AliasManager(str(aliases_path))
+        # Bug #1315: look up repo_entry for index_path fallback
+        legacy_repo_entry = _get_global_repo(repo_identifier)
         # Try the identifier directly (e.g. "cidx-meta-global")
-        alias_path = alias_manager.read_alias(repo_identifier)
+        alias_path = resolve_alias_or_index_path(
+            alias_manager, alias_name=repo_identifier, repo_entry=legacy_repo_entry
+        )
         if alias_path and Path(alias_path).is_dir():
             return str(alias_path)
         # If not -global, try with -global suffix
         if not repo_identifier.endswith("-global"):
-            alias_path = alias_manager.read_alias(f"{repo_identifier}-global")
+            legacy_repo_entry_global = _get_global_repo(
+                f"{repo_identifier}-global"
+            )
+            alias_path = resolve_alias_or_index_path(
+                alias_manager,
+                alias_name=f"{repo_identifier}-global",
+                repo_entry=legacy_repo_entry_global,
+            )
             if alias_path and Path(alias_path).is_dir():
                 return str(alias_path)
 

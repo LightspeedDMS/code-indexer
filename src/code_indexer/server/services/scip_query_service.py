@@ -221,17 +221,49 @@ class SCIPQueryService:
         ``None`` (filesystem scan).
         """
         try:
-            from code_indexer.global_repos.alias_manager import AliasManager
+            from code_indexer.global_repos.alias_manager import (
+                AliasManager,
+                resolve_alias_or_index_path,
+            )
 
             aliases_dir = self._golden_repos_dir / "aliases"
             if not aliases_dir.is_dir():
                 return None
             alias_manager = AliasManager(str(aliases_dir))
 
+            # Bug #1315: look up repo_entry for index_path fallback.
+            # The BackendRegistry may not be available in all contexts
+            # (CLI vs server), so we try but degrade gracefully.
+            scip_repo_entry = None
+            try:
+                from code_indexer.server import app as app_module
+
+                backend_registry = getattr(
+                    app_module.app.state, "backend_registry", None
+                )
+                if backend_registry:
+                    scip_repo_entry = backend_registry.global_repos.get_repo(
+                        f"{repo_name}-global"
+                    )
+                    if not scip_repo_entry:
+                        scip_repo_entry = backend_registry.global_repos.get_repo(
+                            repo_name
+                        )
+            except Exception:
+                pass
+
             # Prefer the -global alias (the form semantic resolves), then bare.
-            target = alias_manager.read_alias(f"{repo_name}-global")
+            target = resolve_alias_or_index_path(
+                alias_manager,
+                alias_name=f"{repo_name}-global",
+                repo_entry=scip_repo_entry,
+            )
             if not target:
-                target = alias_manager.read_alias(repo_name)
+                target = resolve_alias_or_index_path(
+                    alias_manager,
+                    alias_name=repo_name,
+                    repo_entry=scip_repo_entry,
+                )
             if target and Path(target).is_dir():
                 return Path(target)
         except Exception as exc:  # pragma: no cover - defensive, never fatal
