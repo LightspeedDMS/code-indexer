@@ -31,6 +31,7 @@ from code_indexer.server.services.golden_repo_reconciler import (
     _get_clone_git_head,
     _index_commit_matches_head,
 )
+from code_indexer.server.storage.sqlite_backends import GlobalReposSqliteBackend
 
 
 # ---------------------------------------------------------------------------
@@ -147,9 +148,19 @@ class TestGoldenRepoReconcilerGAP4:
         return scheduler
 
     def _register_repo(
-        self, manager: GoldenRepoManager, alias: str, *, create_clone: bool = True
+        self,
+        manager: GoldenRepoManager,
+        alias: str,
+        *,
+        create_clone: bool = True,
+        globally_active: bool = True,
     ) -> str:
-        """Register a repo and optionally init a real git clone. Returns clone_path."""
+        """Register a repo and optionally init a real git clone. Returns clone_path.
+
+        When *globally_active* is True (the default), also registers the repo
+        in the global registry so ``is_globally_active(alias)`` returns True --
+        required for Pass 4 staleness detection to consider the repo.
+        """
         clone_path = os.path.join(manager.golden_repos_dir, alias)
         if create_clone:
             _init_git_repo(clone_path)
@@ -172,7 +183,21 @@ class TestGoldenRepoReconcilerGAP4:
             enable_temporal=repo.enable_temporal,
             temporal_options=repo.temporal_options,
         )
+        if globally_active:
+            self._make_globally_active(manager, alias, clone_path)
         return clone_path
+
+    def _make_globally_active(
+        self, manager: GoldenRepoManager, alias: str, index_path: str
+    ) -> None:
+        """Register a ``{alias}-global`` row so ``is_globally_active()`` returns True."""
+        golden_repo = manager.golden_repos[alias]
+        GlobalReposSqliteBackend(manager.db_path).register_repo(
+            alias_name=f"{alias}-global",
+            repo_name=alias,
+            repo_url=golden_repo.repo_url,
+            index_path=index_path,
+        )
 
     def test_stale_index_triggers_refresh(self, manager, mock_refresh_scheduler):
         """A repo whose metadata commit is behind git HEAD triggers a refresh."""
@@ -340,6 +365,42 @@ class TestGoldenRepoReconcilerGAP4:
         assert "repo-b" not in result.stale_indexes_found
         assert "repo-c" not in result.stale_indexes_found
         assert mock_refresh_scheduler.trigger_refresh_for_repo.call_count == 1
+
+    def test_stale_but_not_globally_active_skipped(
+        self, manager, mock_refresh_scheduler
+    ):
+        """A stale repo that is NOT globally active must NOT trigger a refresh.
+
+        ``trigger_refresh_for_repo`` resolves the alias via
+        ``_resolve_global_alias()`` which raises ``ValueError`` for any alias
+        not registered in the global registry. Pass 4 must gate on
+        ``is_globally_active()`` -- the same way Pass 3 does -- to avoid
+        hitting that error on every startup for every non-global repo.
+        """
+        clone_path = self._register_repo(
+            manager, "repo-local-only", globally_active=False
+        )
+        old_sha = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=clone_path,
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+        # Write stale metadata, then advance HEAD -- genuinely stale
+        _write_metadata(clone_path, old_sha)
+        _add_commit(clone_path)
+
+        result = reconcile_golden_repo_registry(
+            manager, refresh_scheduler=mock_refresh_scheduler
+        )
+
+        # The repo should be healthy (clone exists) but Pass 4 must skip it
+        assert result.healthy_count == 1
+        assert result.stale_indexes_found == []
+        assert result.stale_indexes_refreshed == []
+        assert result.stale_indexes_failed == []
+        mock_refresh_scheduler.trigger_refresh_for_repo.assert_not_called()
 
 
 # ---------------------------------------------------------------------------

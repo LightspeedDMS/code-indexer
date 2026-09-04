@@ -723,17 +723,20 @@ def _run_sweep(
     # ------------------------------------------------------------------ #
     if refresh_scheduler is not None:
         _reconcile_stale_indexes(
-            refresh_scheduler, healthy_rows, submitter_username, result
+            refresh_scheduler,
+            golden_repo_manager,
+            healthy_rows,
+            submitter_username,
+            result,
         )
 
 
 def _get_clone_git_head(clone_path: str) -> Optional[str]:
     """Return the full git HEAD SHA for an on-disk clone, or None on failure.
 
-    Uses the same subprocess pattern as RefreshScheduler's
-    _check_stale_index_metadata -- a plain ``git rev-parse HEAD`` with a
-    short timeout. Returns None (never raises) on any error so a single
-    unreadable clone never aborts the entire staleness sweep.
+    Runs a plain ``git rev-parse HEAD`` with a short timeout. Returns None
+    (never raises) on any error so a single unreadable clone never aborts
+    the entire staleness sweep.
     """
     try:
         head_result = subprocess.run(
@@ -754,12 +757,11 @@ def _get_clone_git_head(clone_path: str) -> Optional[str]:
 def _index_commit_matches_head(recorded_commit: str, actual_head: str) -> bool:
     """True when the recorded index commit matches the clone's git HEAD.
 
-    Mirrors the prefix-tolerant comparison in RefreshScheduler's
-    _check_stale_index_metadata (Bug #1591): a recorded value that is a
-    valid hex prefix (>= 7 chars) of the actual HEAD is considered the
-    SAME commit. The literal ``"unknown"`` (written by config_fixer /
-    git_detection / file_identifier on a git-state detection failure) is
-    always treated as NOT matching so a reconcile pass records a real SHA.
+    Prefix-tolerant comparison: a recorded value that is a valid hex prefix
+    (>= 7 chars) of the actual HEAD is considered the SAME commit. The
+    literal ``"unknown"`` (written by config_fixer / git_detection /
+    file_identifier on a git-state detection failure) is always treated as
+    NOT matching so a reconcile pass records a real SHA.
     """
     recorded_lower = recorded_commit.strip().lower()
 
@@ -780,21 +782,27 @@ def _index_commit_matches_head(recorded_commit: str, actual_head: str) -> bool:
 
 def _reconcile_stale_indexes(
     refresh_scheduler: Any,
+    golden_repo_manager: GoldenRepoManager,
     healthy_rows: List[Any],
     submitter_username: str,
     result: ReconcileResult,
 ) -> None:
     """Pass 4 (GAP-4): detect repos whose index is stale relative to git HEAD.
 
-    For each healthy repo (clone exists, survived Pass 1 classification),
-    compare the git HEAD of the on-disk clone against the ``current_commit``
-    SHA stored in the index metadata (``.code-indexer/metadata-voyage-ai.json``
-    or legacy ``metadata.json``). If they diverge, trigger a refresh via
+    For each healthy, globally-active repo (clone exists, survived Pass 1
+    classification, registered in the global registry), compare the git HEAD
+    of the on-disk clone against the ``current_commit`` SHA stored in the
+    index metadata (``.code-indexer/metadata-voyage-ai.json`` or legacy
+    ``metadata.json``). If they diverge, trigger a refresh via
     ``RefreshScheduler.trigger_refresh_for_repo(alias)``.
 
     Guards:
     - Skipped entirely when ``refresh_scheduler`` is None (caller did not
       provide one -- e.g. tests, solo CLI paths).
+    - Only globally-active repos are checked -- ``trigger_refresh_for_repo``
+      resolves the alias via ``_resolve_global_alias()``, which raises
+      ``ValueError`` for any alias not in the global registry. This gate
+      mirrors Pass 3's ``is_globally_active()`` check.
     - A repo with no metadata file (never indexed) is silently skipped --
       an uninitialized repo is handled by the scheduler's own repair path.
     - A repo whose git HEAD cannot be read is silently skipped.
@@ -807,6 +815,24 @@ def _reconcile_stale_indexes(
     for repo_row, actual_path in healthy_rows:
         alias = repo_row["alias"]
         try:
+            # Gate: only globally-active repos can be refreshed.
+            # trigger_refresh_for_repo() resolves the alias via
+            # _resolve_global_alias() which raises ValueError for repos
+            # not in the global registry. Mirror Pass 3's gate.
+            try:
+                globally_active = golden_repo_manager.is_globally_active(alias)
+            except Exception as active_error:  # noqa: BLE001 -- reconcile safety
+                logger.error(
+                    "GAP-4 reconcile: failed to check global-active state "
+                    "for '%s': %s -- skipping its staleness check.",
+                    alias,
+                    active_error,
+                )
+                result.stale_indexes_failed.append(alias)
+                continue
+            if not globally_active:
+                continue
+
             recorded_commit = read_current_commit(actual_path)
             if not recorded_commit:
                 continue
