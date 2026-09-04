@@ -529,6 +529,47 @@ class GoldenRepoManager:
         if self._resolve_golden_repo(alias) is not None:
             raise GoldenRepoError(f"Golden repository alias '{alias}' already exists")
 
+        # GAP-5: Also check the global registry -- a prior removal that failed
+        # mid-way could have left a global registry entry (and alias pointer)
+        # even though the golden_repos row is gone. Re-adding without cleaning
+        # these ghosts produces a wedged state (the AICC incident).
+        try:
+            from code_indexer.global_repos.global_activation import GlobalActivator
+
+            activator = GlobalActivator(self.golden_repos_dir)
+            if activator.registry.get_global_repo(f"{alias}-global") is not None:
+                raise GoldenRepoError(
+                    f"Golden repository alias '{alias}' has a stale global registry "
+                    f"entry ('{alias}-global'). Remove it first or use the admin UI "
+                    f"to clean up the orphaned registration."
+                )
+        except GoldenRepoError:
+            raise
+        except Exception as registry_check_err:
+            # Non-fatal: if the global registry is unavailable, proceed with
+            # the add and let activation fail later (existing behavior).
+            logging.warning(
+                "GAP-5: global registry pre-check for '%s' failed: %s",
+                alias,
+                registry_check_err,
+            )
+
+        # GAP-5: Check for an orphaned on-disk clone directory. A prior removal
+        # that crashed after deleting the DB row but before cleaning the
+        # filesystem would leave a directory that blocks _clone_repository with
+        # "destination path already exists". _remove_orphan_clone_for_retry
+        # handles this inside the background worker, but surfacing it here
+        # gives the caller a clear early error instead of a delayed job failure.
+        clone_dir = os.path.join(self.golden_repos_dir, alias)
+        if os.path.exists(clone_dir) and not repo_url.startswith("local://"):
+            logging.warning(
+                "GAP-5: on-disk clone directory '%s' exists without a golden_repos "
+                "row -- an orphaned clone from a prior incomplete removal. The "
+                "background worker will attempt cleanup via "
+                "_remove_orphan_clone_for_retry.",
+                clone_dir,
+            )
+
         # EVO-64616: strip any embedded credential up front (when git-mcp owns
         # auth) so the pre-flight probe AND the background-job metadata carry a
         # clean URL; the persistence point strips again as defense-in-depth.
@@ -1611,6 +1652,12 @@ class GoldenRepoManager:
         This method submits a background job and returns immediately with a job_id.
         Use BackgroundJobManager to track progress and results.
 
+        Pre-flight cleanup: cancels any active background jobs (add, refresh,
+        global_repo_refresh) for this alias before submitting the removal job,
+        preventing race conditions where a concurrent refresh interferes with
+        removal. This logic lives here (not in the REST/MCP handlers) so every
+        API surface gets the same pre-flight cleanup automatically (GAP-5 fix).
+
         Args:
             alias: Alias of the repository to remove
             submitter_username: Username of the user submitting the job (default: "admin")
@@ -1636,6 +1683,46 @@ class GoldenRepoManager:
         # worker/node can still be removed from this worker)
         if self._resolve_golden_repo(alias) is None:
             raise GoldenRepoError(f"Golden repository '{alias}' not found")
+
+        # GAP-5: Cancel any active background jobs for this repository BEFORE
+        # submitting the removal job. A concurrent refresh or add that is still
+        # running can interfere with removal, leaving stale entries. This was
+        # previously only done in the REST handler (inline_admin_ops.py) but
+        # not in the MCP handler -- moving it here makes both surfaces safe.
+        try:
+            active_jobs = self.background_job_manager.get_jobs_by_operation_and_params(
+                operation_types=[
+                    "add_golden_repo",
+                    "refresh_golden_repo",
+                    "global_repo_refresh",
+                ],
+                params_filter={"alias": alias},
+            )
+            for job in active_jobs:
+                if job.get("status") in ["pending", "running"]:
+                    cancel_result = self.background_job_manager.cancel_job(
+                        job["job_id"], submitter_username, is_admin=True
+                    )
+                    if cancel_result["success"]:
+                        logging.info(
+                            "GAP-5: cancelled background job %s for repository %s",
+                            job["job_id"],
+                            alias,
+                        )
+                    else:
+                        logging.warning(
+                            "GAP-5: failed to cancel job %s for repository %s: %s",
+                            job["job_id"],
+                            alias,
+                            cancel_result.get("message", "unknown"),
+                        )
+        except Exception as job_cancel_error:
+            # Job cancellation failure should not prevent deletion, but log it
+            logging.warning(
+                "GAP-5: job cancellation failed during removal of '%s': %s",
+                alias,
+                job_cancel_error,
+            )
 
         # Create no-args wrapper for background execution
         def background_worker() -> Dict[str, Any]:

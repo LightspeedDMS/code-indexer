@@ -56,12 +56,6 @@ from ..repositories.background_jobs import DuplicateJobError
 from ..logging_utils import format_error_log
 from ..middleware.correlation import get_correlation_id
 
-# Constants used by route handlers
-GOLDEN_REPO_ADD_OPERATION = "add_golden_repo"
-GOLDEN_REPO_REFRESH_OPERATION = "refresh_golden_repo"
-JOB_STATUS_PENDING = "pending"
-JOB_STATUS_RUNNING = "running"
-
 # Issue #1160: Default export file retention when config is unavailable.
 _DEFAULT_EXPORT_RETENTION_DAYS: int = 30
 
@@ -851,46 +845,12 @@ def register_admin_ops_routes(
             HTTPException: 404 if repository not found, 503 if services unavailable, 500 for other errors
         """
         try:
-            # Cancel any active background jobs for this repository
-            try:
-                if background_job_manager:
-                    # Get jobs related to this golden repository
-                    active_jobs = (
-                        background_job_manager.get_jobs_by_operation_and_params(
-                            operation_types=[
-                                GOLDEN_REPO_ADD_OPERATION,
-                                GOLDEN_REPO_REFRESH_OPERATION,
-                                "global_repo_refresh",
-                            ],
-                            params_filter={"alias": alias},
-                        )
-                    )
-
-                    # Cancel active jobs gracefully
-                    for job in active_jobs:
-                        if job.get("status") in [
-                            JOB_STATUS_PENDING,
-                            JOB_STATUS_RUNNING,
-                        ]:
-                            cancel_result = background_job_manager.cancel_job(
-                                job["job_id"], current_user.username, is_admin=True
-                            )
-                            if cancel_result["success"]:
-                                logging.info(
-                                    f"Cancelled background job {job['job_id']} for repository {alias}"
-                                )
-                            else:
-                                logging.warning(
-                                    f"Failed to cancel job {job['job_id']}: {cancel_result['message']}"
-                                )
-            except Exception as job_error:
-                # Job cancellation failure shouldn't prevent deletion, but log it
-                logging.warning(
-                    f"Job cancellation failed during repository deletion: {job_error}"
-                )
-
-            # Perform repository deletion with proper error handling
-            golden_repo_manager.remove_golden_repo(alias)
+            # GAP-5: Job cancellation is now handled inside
+            # GoldenRepoManager.remove_golden_repo() so both REST and MCP
+            # surfaces get the same pre-flight cleanup automatically.
+            golden_repo_manager.remove_golden_repo(
+                alias, submitter_username=current_user.username
+            )
 
             logging.info(
                 f"Successfully removed golden repository '{alias}' by user '{current_user.username}'"

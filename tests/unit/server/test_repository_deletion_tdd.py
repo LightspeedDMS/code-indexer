@@ -146,41 +146,29 @@ class TestRepositoryDeletionTDD:
         """
         Test that active jobs are cancelled gracefully during deletion.
 
-        This test will FAIL until job cancellation logic is implemented
-        in the deletion workflow.
+        GAP-5: Job cancellation is now handled inside
+        GoldenRepoManager.remove_golden_repo() so both REST and MCP surfaces
+        get the same pre-flight cleanup. The REST handler simply delegates
+        to the manager, passing the submitter_username for audit trail.
         """
         mock_manager = MagicMock()
-        mock_job_manager = MagicMock()
 
-        # Mock background jobs for the repository
-        mock_job_manager.get_jobs_by_operation_and_params.return_value = [
-            {"job_id": "active-job-123", "status": "running"}
-        ]
-        mock_job_manager.cancel_job.return_value = {
-            "success": True,
-            "message": "Job cancelled",
-        }
-
-        mock_manager.remove_golden_repo.return_value = {
-            "success": True,
-            "message": "Repository removed after job cancellation",
-        }
+        mock_manager.remove_golden_repo.return_value = "removal-job-id"
 
         monkeypatch.setattr(
             "src.code_indexer.server.app.golden_repo_manager", mock_manager
-        )
-        monkeypatch.setattr(
-            "src.code_indexer.server.app.background_job_manager", mock_job_manager
         )
 
         response = client.delete(
             "/api/admin/golden-repos/active-job-repo", headers=auth_headers
         )
 
-        # FAILING TEST: Should cancel jobs and then delete successfully
+        # Should succeed with 204 -- job cancellation happens inside the manager
         assert response.status_code == 204
-        # Verify job cancellation was attempted
-        mock_job_manager.get_jobs_by_operation_and_params.assert_called()
+        # Verify the manager was called with the alias and submitter_username
+        mock_manager.remove_golden_repo.assert_called_once_with(
+            "active-job-repo", submitter_username="admin"
+        )
 
     def test_partial_deletion_failure_rollback(self, client, auth_headers, monkeypatch):
         """
