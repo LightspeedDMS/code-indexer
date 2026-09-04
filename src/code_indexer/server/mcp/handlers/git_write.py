@@ -85,7 +85,6 @@ def _handle_git_file_operation(
             format_error_log(
                 error_code,
                 f"{operation_name} failed: {e}",
-                extra={"correlation_id": get_correlation_id()},
             )
         )
         result: Dict[str, Any] = {
@@ -279,7 +278,6 @@ def git_commit(args: Dict[str, Any], user: User) -> Dict[str, Any]:
             format_error_log(
                 _ERR_COMMIT,
                 f"git_commit failed: {e}",
-                extra={"correlation_id": get_correlation_id()},
             )
         )
         result_err: Dict[str, Any] = {
@@ -318,7 +316,6 @@ def _handle_write_error(
             format_error_log(
                 error_code,
                 f"{operation} failed: {exc}",
-                extra={"correlation_id": get_correlation_id()},
             )
         )
         result: Dict[str, Any] = {
@@ -1135,7 +1132,6 @@ def git_stash(args: Dict[str, Any], user: User) -> Dict[str, Any]:
             format_error_log(
                 _ERR_STASH,
                 f"git_stash ({action}) failed: {e}",
-                extra={"correlation_id": get_correlation_id()},
             )
         )
         return _mcp_response(

@@ -3,6 +3,7 @@ Tests for ElevatedSessionManager - SQLite (solo) backend (Story #923 AC1).
 Also covers cluster-mode wiring: set_connection_pool(), data-dir path, PG backend.
 """
 
+import os
 import sqlite3
 import time
 from typing import Optional
@@ -637,17 +638,42 @@ def test_set_connection_pool_exists_and_stores_pool(manager, pg_pool):
 # ---------------------------------------------------------------------------
 
 
-def test_db_path_uses_cidx_data_dir_env_var(tmp_path, monkeypatch):
-    """When CIDX_DATA_DIR is set, the SQLite DB must be placed inside it."""
-    monkeypatch.setenv("CIDX_DATA_DIR", str(tmp_path))
+def test_db_path_ignores_cidx_data_dir_env_var_alone(tmp_path, monkeypatch):
+    """Bug #1780 regression guard: CIDX_DATA_DIR alone (with CIDX_SERVER_DATA_DIR
+    unset) must NOT redirect the SQLite DB path. CIDX_SERVER_DATA_DIR is the
+    correct env var here, consistent with jwt_secret_manager.py, audit_logger.py,
+    concurrency_protection.py, and ~20+ other sibling modules. Falls through to
+    the ~/.cidx-server default instead.
+
+    HOME is redirected to an isolated tmp_path subdirectory so the fallback
+    branch's os.path.expanduser("~/.cidx-server") resolution (and the
+    makedirs()/_ensure_schema() calls that follow it) never touch the real
+    local developer machine's ~/.cidx-server directory.
+    """
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.delenv("CIDX_SERVER_DATA_DIR", raising=False)
+    monkeypatch.setenv("CIDX_DATA_DIR", str(tmp_path / "wrong"))
+    mgr = ElevatedSessionManager()
+    assert not mgr._db_path.startswith(str(tmp_path / "wrong")), (
+        "CIDX_DATA_DIR alone must not redirect _db_path after Bug #1780 fix; "
+        "only CIDX_SERVER_DATA_DIR should."
+    )
+    assert mgr._db_path.startswith(os.path.expanduser("~/.cidx-server"))
+
+
+def test_db_path_uses_cidx_server_data_dir_env_var(tmp_path, monkeypatch):
+    """Bug #1780: When CIDX_SERVER_DATA_DIR is set, the SQLite DB must be
+    placed inside it."""
+    monkeypatch.delenv("CIDX_DATA_DIR", raising=False)
+    monkeypatch.setenv("CIDX_SERVER_DATA_DIR", str(tmp_path))
     mgr = ElevatedSessionManager()
     assert mgr._db_path.startswith(str(tmp_path))
     assert "elevated_sessions" in mgr._db_path
 
 
 def test_db_path_constructor_override_wins_over_env_var(tmp_path, monkeypatch):
-    """Constructor db_path must win even when CIDX_DATA_DIR is also set."""
-    monkeypatch.setenv("CIDX_DATA_DIR", str(tmp_path / "from_env"))
+    """Constructor db_path must win even when CIDX_SERVER_DATA_DIR is also set."""
+    monkeypatch.setenv("CIDX_SERVER_DATA_DIR", str(tmp_path / "from_env"))
     custom_path = str(tmp_path / "custom.db")
     mgr = ElevatedSessionManager(db_path=custom_path)
     assert mgr._db_path == custom_path

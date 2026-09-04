@@ -1018,7 +1018,6 @@ class HNSWIndexCache:
                 format_error_log(
                     "GIT-GENERAL-012",
                     "Background cleanup thread already running",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
             return
@@ -1035,7 +1034,6 @@ class HNSWIndexCache:
                         format_error_log(
                             "GIT-GENERAL-013",
                             f"Error in background cleanup: {e}",
-                            extra={"correlation_id": get_correlation_id()},
                         )
                     )
 

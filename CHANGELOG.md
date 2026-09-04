@@ -7,6 +7,264 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [12.38.0] - 2026-09-03
+
+### Fixed
+
+- **Bug #1782**: the auto-updater's `_resolve_server_url()` resolved its maintenance-mode-API
+  host/port via `config.json`, a source this project's own Story #1196 architecture
+  deliberately deprecated for this exact purpose (risk of silently rewriting a configured
+  `--host 0.0.0.0` to `127.0.0.1`, "a confirmed production-outage path"). Confirmed live on
+  staging: a solo server running on `0.0.0.0:8080` had its maintenance-mode connection
+  silently misresolved to `127.0.0.1:8000` because `config.json` had no host/port keys, and
+  `ServerConfig`'s dataclass defaults silently filled in the wrong values with no exception.
+  Now resolves via the same authoritative launch-config mechanism (`applied_launch.json`,
+  falling back to the live systemd `ExecStart` flags) already used elsewhere in the auto-update
+  package for the ExecStart-rewrite path, raising loud instead of silently defaulting when
+  neither source is available.
+
+## [12.37.0] - 2026-09-03
+
+### Fixed
+
+- **Bug #1781**: in cluster (PostgreSQL) mode, the auto-updater's `_get_auth_token`
+  always signed maintenance-mode tokens with a file-based JWT secret, even though
+  the server validates against a secret shared via the `cluster_secrets` PostgreSQL
+  table in cluster mode. This caused every cluster-mode auto-update deploy's
+  maintenance-mode-entry call to fail with HTTP 401 (confirmed live on staging:
+  identical 401 recurring across 5 consecutive deploys). Degraded gracefully (the
+  deploy proceeded anyway), so no outage resulted, but maintenance mode never
+  actually engaged during a cluster auto-update. Now resolves cluster mode via the
+  same bootstrap-config pattern the server itself uses, and fails loud (denies the
+  token) rather than silently falling back to file-based signing when the
+  bootstrap config is genuinely unresolvable -- the prior behavior of "assume
+  solo mode" would have silently recreated the same defect.
+
+## [12.36.0] - 2026-09-03
+
+### Fixed
+
+- **Bug #1779**: the auto-updater's `DeploymentExecutor._get_auth_token` constructed
+  `JWTSecretManager()` with no explicit directory, so it resolved the JWT secret path via
+  `CIDX_SERVER_DATA_DIR`-or-default while the rest of the same class's data-path resolution
+  (e.g. `ServerConfigManager`) already used the auto-updater's own `_cidx_data_dir`
+  (`CIDX_DATA_DIR`-or-default) -- an inconsistency between two path-resolution variables
+  within the same file. Now passes `str(_cidx_data_dir)` explicitly, matching the existing
+  pattern used elsewhere in `deployment_executor.py`, so the auto-updater's JWT secret
+  lookup stays aligned with its own IPC path resolution in cross-user deployments
+  (Bug #879's original CIDX_DATA_DIR alignment scenario).
+- **Bug #1780**: `ElevatedSessionManager.__init__`'s fallback branch resolved its SQLite
+  database directory via the legacy `CIDX_DATA_DIR` variable instead of
+  `CIDX_SERVER_DATA_DIR`, the variable Bug #1778 established as the standard for isolating
+  server-mode data directories. An isolated/test server instance could silently read or
+  write `elevated_sessions.db` against the real `~/.cidx-server/` directory. Now honors
+  `CIDX_SERVER_DATA_DIR`, consistent with the other ~10+ server-mode modules using this
+  pattern.
+
+## [12.35.0] - 2026-09-02
+
+### Fixed
+
+- **Bug #1778**: three more server-mode classes (`JWTSecretManager`, `PasswordChangeAuditLogger`,
+  `PasswordChangeConcurrencyProtection`) hardcoded `~/.cidx-server` as their default data
+  directory, the same leak pattern fixed for logging in Bug #1776. Discovered live during
+  #1776's own staging verification -- an isolated test server leaked a JWT secret file, a
+  password-audit log, and a lock directory into the real directory. The JWT secret case was
+  security-relevant: an isolated instance could silently adopt the real server's signing key,
+  or write one the real server later picked up. All three now honor `CIDX_SERVER_DATA_DIR`.
+  Also fixes a related crash risk: two of the three used `mkdir()` without `parents=True`, so a
+  nested, not-yet-created data directory would raise instead of being created.
+
+## [12.34.0] - 2026-09-02
+
+### Fixed
+
+- **Bug #1776**: `ExceptionLogger` hardcoded `~/.cidx-server/logs` in server mode with no
+  environment-variable override, so an isolated/test server instance leaked its log files
+  into (and, via a separate unrelated mechanism discovered live during testing, could
+  overwrite files in) the real directory on the host. Now honors `CIDX_SERVER_DATA_DIR`,
+  matching the pattern already used consistently across the rest of the server codebase.
+  A companion attempt to fix `deployment_executor.py`'s own IPC-path resolution the same
+  way was reverted after review found it broke a mandatory CI gate and introduced a
+  production two-process coordination risk; equivalent test-server isolation is instead
+  achieved by setting the pre-existing `CIDX_DATA_DIR` variable alongside
+  `CIDX_SERVER_DATA_DIR` at the relevant isolated-server launch sites.
+
+## [12.33.0] - 2026-09-02
+
+### Fixed
+
+- **Bug #1775 (follow-up)**: the fd-leak fix shipped in v12.32.0 closed the leak within a
+  single server process, but live validation on clustered staging (multiple uvicorn
+  workers per node) found it didn't propagate across worker processes -- a refresh
+  handled by one worker never informed sibling workers holding their own cached handle
+  to the same superseded snapshot, so those handles leaked forever. Solo/single-worker
+  staging passed only because it's the degenerate case where this doesn't apply. Added
+  cross-process propagation via `PayloadCache` (this project's existing cluster-aware
+  mechanism), verified with a genuine multi-OS-process reproduction.
+
+## [12.32.0] - 2026-09-02
+
+### Fixed
+
+- **Bug #1775**: `ChunkStoreThreadCache` (a per-thread cache of open SQLite
+  chunk-store handles) was keyed on the chunk-store's file path with
+  mtime-only invalidation, but golden-repo refresh never replaces that file
+  in place -- every refresh creates a brand-new versioned-snapshot path and
+  swaps an alias pointer, so the OLD snapshot's cache entry never
+  invalidated and its handle (and file descriptor) leaked forever, bounded
+  only by a 32-entry-per-thread LRU cap multiplied by thread count
+  (production incident: ~1260 leaked file descriptors). Fixed by wiring
+  proactive cache invalidation into all 5 real alias-swap/publish sites
+  (previously wired at only 1, which does not even run on the normal
+  hourly refresh path) via a new shared helper, combined with a bounded,
+  per-thread sweep so cache entries the caller never explicitly
+  re-requests still get proactively evicted. Also fixes a related
+  permanent-cache-disablement bug on a golden repo's first-ever refresh,
+  and a mount-point bug that silently skipped invalidation for legacy
+  CoW-daemon/ONTAP-backed snapshot paths.
+- **Bug #1774**: golden-repo refresh jobs could hang indefinitely mid-index
+  when the server process's open file descriptor count climbed past 1024
+  (driven by the #1775 leak above) -- `select.select()`'s hard
+  `FD_SETSIZE=1024` ceiling raised an exception type the reader thread's
+  exception handler did not catch, silently killing the thread and leaving
+  the main loop to fall into an unconditional, timeout-free wait against a
+  still-alive but permanently abandoned subprocess. Fixed by replacing
+  `select.select()` with `selectors.DefaultSelector()` (no such ceiling),
+  hardening the reader threads to fail loudly and visibly instead of
+  silently, and closing two file-descriptor lifecycle races introduced
+  while fixing the above.
+
+## [12.31.0] - 2026-09-01
+
+### Fixed
+
+- **Bug #1753**: the admin config screen's Content Limits section correctly displayed
+  real persisted values, but clicking Save always failed with `Unknown category:
+  content_limits` -- the write path was never wired even though the read path was.
+  Now saves correctly, verified with a real round trip through the on-disk SQLite
+  runtime store. Also removed `omni_search`, a genuinely dead config section (zero
+  template consumers -- its settings were already migrated into `multi_search` back
+  in Story #29) that shared the same unwired-save symptom for an unrelated reason.
+- **Bug #1756**: `AuthStatus.refresh_expires` was a dead field, never populated or
+  displayed. Investigation confirmed the server has a real TTL-based refresh-token
+  concept, but the CLI never stores or uses it anywhere in its real auth flow --
+  wiring the field would have meant building a new feature, not fixing a bug.
+  Removed per this project's anti-orphan-code rule.
+
+## [12.30.0] - 2026-08-31
+
+### Fixed
+
+- **Bug #1770**: `regex_search` failed with "Repository not found" for a valid, listed
+  activated-repo alias that `search_code`/`list_repositories` both resolved successfully --
+  its path-resolution step unconditionally used a golden-repo-only resolver with zero
+  activated-repo awareness. Now reuses the established `ActivatedRepoManager` resolution
+  path already used elsewhere in the same handler; a bare alias naming both an activated and
+  a golden repo now correctly prefers the activated one (matching Story #1039's
+  "activated-repo takes precedence" convention).
+- **Bug #1769**: a local repo stuck in a broken/uninitialized state retried its `cidx init`
+  repair unconditionally on every scheduled cycle forever, with no circuit-breaker --
+  confirmed 1,151 occurrences over 3+ days on staging. Added a quarantine mechanism
+  (mirroring the existing Bug #1506 pattern) that stops retrying after 3 consecutive
+  failures, genuinely resets on any subsequent healthy cycle (not just a successful repair),
+  and now surfaces the real subprocess failure detail instead of a placeholder string. Note:
+  this bounds the retry storm but does not by itself clear a stuck repo's degraded health
+  status -- that still requires an operator to fix or remove the underlying broken repo.
+- Fixed a real GitHub Actions `lint` job failure (blocking `create-tag`) caused by a missing
+  mypy field on a test-only model construction; confirmed via a real CI run, not just local
+  reproduction.
+
+## [12.29.0] - 2026-08-31
+
+### Fixed
+
+- **Bug #1760 (CRITICAL)**: semantic search was completely non-functional on the clustered
+  staging environment for both embedding providers (`attempt to write a readonly database`),
+  while silently reporting `success: true, total_results: 0` -- masking a total outage as a
+  legitimate empty result. Root cause: the hydration read path opened SQLite chunk stores in
+  `immutable=1` mode on genuinely mutable (actively-indexed) repos, which also silently risks
+  serving stale/dropped data on WAL-mode databases. Replaced with a genuinely read-only
+  (`mode=ro`) connection that never attempts a write and correctly observes concurrent writes
+  and uncheckpointed WAL content. Also closed the case where every configured embedding
+  provider was pre-skipped as unhealthy (health-monitor sin-binned) before dispatch, which
+  bypassed the total-failure guard and silently returned an empty success.
+- **Bug #1763 / #1764**: bug #1761's FTS-duplicate-results fix only took effect on indexes
+  already rebuilt with the new schema -- every pre-existing on-disk index kept accumulating
+  duplicates indefinitely, and `delete_document()`'s legacy fallback query could silently
+  destroy unrelated FTS entries for sibling file paths (3 live production callers). Existing
+  indexes now self-heal to the new schema on their next index run (one-time, verified
+  non-repeating), with the FTS wipe-then-rebuild now atomic (an ordinary indexing run with
+  some changed files no longer permanently loses untouched files' FTS entries) and safe on
+  `cidx watch` (previously had no repopulation path at all).
+- **Bug #1758 / #1766**: `DataRetentionScheduler` and related auth-table writers
+  (`TokenBlacklist`, `ElevatedSessionManager`, `StateManager`, `TOTPService`) opened raw
+  SQLite connections with no lock-contention tolerance, causing `database is locked` failures
+  -- including silent JWT-blacklist and TOTP write failures -- during the brief window where
+  the auto-updater restarts the server process. Fixed via a connection-level 30s timeout
+  matching this project's established convention, covering both the background prune path and
+  the previously-unprotected user-facing write paths.
+- **Bug #1767**: multi-repo search silently dropped a hard failure on one repo while another
+  repo returned real results, reporting `success: true` with no indication one repo was
+  degraded. The response now surfaces a `degraded_repos` field (additive, absent on the
+  healthy-query path) plus a dedicated aggregate warning log.
+- **Bug #1757**: `cidx query` crashed with `TypeError: query() got an unexpected keyword
+  argument 'standalone'` when falling back from daemon mode to standalone mode -- a stray
+  duplicate kwarg assignment collided with `ctx.invoke()`'s argument binding.
+- **Bug #1752 (follow-up)**: three residual `AsyncMock`-on-synchronous-method / missing
+  mode-gate-mock sites (the exact bug class #1752's sweep targeted) left three test files
+  passing vacuously without exercising their documented scenarios; fixed and re-verified.
+- Resolved a repo-wide mypy blocker (`**dict[str, object]` spread losing per-field type
+  information in two test helper constructors) that had been silently failing `./lint.sh`'s
+  full-repo run since an earlier commit this cycle.
+
+## [12.28.0] - 2026-08-31
+
+### Fixed
+
+- **Bug #1746 (CRITICAL, production incident)**: `activate_repository`/`cidx index` could
+  silently burn 100% CPU for hours (observed: 2h13m) when the target chunk store was
+  unwritable (root-owned file, disk full, corrupt store, lock contention), with zero
+  user-visible error. Now fails fast and loud (~1s) via a typed fatal-error classifier,
+  abort-not-finalize semantics across all indexing entry points, a pre-hash-phase
+  writability preflight, and live subprocess error streaming -- while correctly
+  distinguishing transient lock contention (retryable) from genuinely fatal conditions.
+- **Bug #1747**: fleet-migration's whole-collection dedup identity gate wrongly quarantined
+  entire collections containing legitimate `hidden_branches`-only visibility-tagging
+  bookkeeping records, permanently blocking consolidation for otherwise-healthy repos
+  (confirmed on 4 production repos, 65 affected records). The gate now recognizes and
+  skips this specific non-content record shape while leaving all other identity
+  protections (Bug #1579) intact.
+- **Bug #1751**: `dedup_gate_rejected` quarantines only self-healed on a directory
+  content-signature change, so repos already quarantined before Bug #1747's fix could
+  stay stuck indefinitely even after becoming eligible to pass. The reset path now
+  re-checks the gate itself.
+- **Bug #1740 / #1743**: `cidx repos list` always displayed every activated repository as
+  "Synced" regardless of real state, and `cidx repos sync-status` for all repositories
+  404'd in production. Replaced with real git-based sync-status computation (synced /
+  needs_sync / conflict), exposed via both the per-repo and bulk endpoints.
+- **Bug #1742**: 3 CLI test files failed with `DisabledCommandError` due to stale
+  test-mock patch targets and `AsyncMock` on synchronous client methods -- root-caused
+  and fixed (pre-existing test-infrastructure drift, not a production regression).
+- **Bug #1749**: the admin config screen always displayed "No" for the Temporal Legacy
+  Migration relocation/cleanup settings regardless of true persisted state, creating a
+  risk of silently disabling a working relocation job on an unrelated Save.
+- **Bug #1750**: the admin config screen's Content Limits section always displayed
+  compiled defaults instead of real persisted values, for the same class of bug as #1749.
+- **Bug #1716**: 690 dead `extra=` kwargs to `format_error_log()` across 66 files were
+  polluting production log messages with stringified-dict noise instead of reaching real
+  structured logging; swept and guarded against recurrence with a fail-loud `TypeError`.
+- **Bug #1755**: MCP JSON-RPC request handling lost `correlation_id` across the
+  thread-offload dispatch boundary (missing `contextvars.copy_context()`), leaving every
+  ERROR/WARNING logged during MCP request handling unattributable to its originating
+  request -- fixed at all three `run_in_executor` call sites in the MCP protocol layer.
+- **Bug #1748**: a fast-host test flake and a real mypy typing gap in the HNSW
+  GIL-release test suite, traced to a hand-rolled calibration loop mypy couldn't prove
+  terminates with real values -- extracted into a self-calibrating, fully-typed helper.
+- **Bug #1744**: multiple unit tests depended on real OpenTelemetry span/trace/metric
+  export against an unreachable local OTLP collector, causing load-dependent flakes
+  (observed up to ~20s per test) across the telemetry, logging, and mcp test suites.
+
 ## [12.27.0] - 2026-08-28
 
 ### Fixed

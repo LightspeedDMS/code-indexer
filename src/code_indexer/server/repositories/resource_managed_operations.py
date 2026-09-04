@@ -144,7 +144,6 @@ class ResourceManagedGoldenRepoOperations:
                     format_error_log(
                         "REPO-GENERAL-041",
                         f"Golden repo addition failed for {alias}: {e}",
-                        extra={"correlation_id": get_correlation_id()},
                     )
                 )
                 raise GitOperationError(
@@ -262,7 +261,6 @@ class ResourceManagedActivatedRepoOperations:
                     format_error_log(
                         "SCIP-GENERAL-001",
                         f"Resource-managed sync failed for {username}/{user_alias}: {e}",
-                        extra={"correlation_id": get_correlation_id()},
                     )
                 )
                 raise
@@ -367,7 +365,6 @@ class ResourceManagedBackgroundJobOperations:
                     format_error_log(
                         "SCIP-GENERAL-002",
                         f"Resource-managed job {job_id} failed: {e}",
-                        extra={"correlation_id": get_correlation_id()},
                     )
                 )
                 raise
@@ -413,7 +410,6 @@ async def resource_managed_repository_operation(operation_name: str):
                 format_error_log(
                     "SCIP-GENERAL-003",
                     f"Resource-managed operation {operation_name} failed: {e}",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
             raise

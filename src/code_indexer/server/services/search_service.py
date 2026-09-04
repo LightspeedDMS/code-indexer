@@ -5,8 +5,6 @@ Provides real semantic search operations following CLAUDE.md Foundation #1: No m
 All operations use real vector embeddings and vector store searches.
 """
 
-from code_indexer.server.middleware.correlation import get_correlation_id
-
 import os
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, cast
@@ -666,7 +664,6 @@ class SemanticSearchService:
                 format_error_log(
                     "MCP-GENERAL-170",
                     f"Semantic search failed for repo {repo_path}: {e}",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
             raise RuntimeError(f"Semantic search failed: {e}")
@@ -822,7 +819,6 @@ class SemanticSearchService:
                 format_error_log(
                     "MCP-GENERAL-170",
                     f"Multimodal-only search failed for repo {repo_path}: {e}",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
             raise RuntimeError(f"Multimodal-only search failed: {e}")

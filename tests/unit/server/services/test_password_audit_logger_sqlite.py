@@ -49,6 +49,60 @@ class TestPasswordChangeAuditLoggerSQLiteInit:
         assert len(log_files) == 0
 
 
+class TestPasswordChangeAuditLoggerLegacyFilePathDataDir:
+    """Bug #1778: legacy flat-file default location must honor
+    CIDX_SERVER_DATA_DIR.
+
+    An isolated/test server instance sets CIDX_SERVER_DATA_DIR to a
+    throwaway directory. Without honoring it, PasswordChangeAuditLogger's
+    legacy (no log_file_path, no audit_service) branch hardcodes
+    Path.home() / ".cidx-server" for its default audit-log location,
+    leaking audit log lines into the real server's directory. Path.home()
+    is mocked to a temp "fake home" so this test never touches the real
+    ~/.cidx-server directory either way.
+    """
+
+    def test_uses_cidx_server_data_dir_env_var_when_no_explicit_path(
+        self, tmp_path, monkeypatch
+    ):
+        from unittest.mock import patch
+        from code_indexer.server.auth.audit_logger import PasswordChangeAuditLogger
+
+        fake_home = tmp_path / "fake-home"
+        fake_home.mkdir()
+        isolated_data_dir = tmp_path / "isolated-server-instance"
+        monkeypatch.setenv("CIDX_SERVER_DATA_DIR", str(isolated_data_dir))
+
+        with patch("pathlib.Path.home", return_value=fake_home):
+            logger = PasswordChangeAuditLogger()
+
+        expected_path = str(isolated_data_dir / "password_audit.log")
+        real_default_path = str(fake_home / ".cidx-server" / "password_audit.log")
+
+        assert logger.log_file_path == expected_path
+        assert logger.log_file_path != real_default_path
+
+    def test_creates_nested_missing_directories_when_data_dir_has_no_parent(
+        self, tmp_path, monkeypatch
+    ):
+        """Bug #1778 remediation: CIDX_SERVER_DATA_DIR may point at a nested
+        path whose intermediate directories don't exist yet (operator/harness
+        supplied, unlike Path.home() which always exists). mkdir() must use
+        parents=True or this crashes with FileNotFoundError -- at import time
+        for the module-level password_audit_logger singleton.
+        """
+        from code_indexer.server.auth.audit_logger import PasswordChangeAuditLogger
+
+        nested_dir = tmp_path / "missing" / "intermediate" / "server-data"
+        monkeypatch.setenv("CIDX_SERVER_DATA_DIR", str(nested_dir))
+
+        logger = PasswordChangeAuditLogger()
+
+        expected_path = str(nested_dir / "password_audit.log")
+        assert logger.log_file_path == expected_path
+        assert nested_dir.exists()
+
+
 class TestPasswordChangeSuccessMapping:
     """Tests for log_password_change_success() SQLite field mapping."""
 

@@ -35,6 +35,16 @@ _TOTP_DIGITS = 6
 _TOTP_PERIOD = 30
 _TOTP_ISSUER = "CIDX"
 
+# Bug #1766 (follow-up to Bug #1758): explicit busy-wait timeout (seconds) for
+# the raw sqlite3.connect() in _get_conn below. Matches the 30s convention
+# DatabaseConnectionManager sets via `PRAGMA busy_timeout = 30000`
+# (storage/database_manager.py:1854), so a brief lock held by a concurrent
+# process (e.g. an auto-updater-triggered server restart briefly overlapping
+# a TOTP setup or verification request) is absorbed by SQLite's own internal
+# wait instead of raising 'database is locked' after Python's own 5.0s
+# sqlite3.connect() default.
+_SQLITE_LOCK_TIMEOUT_SECONDS = 30.0
+
 
 class TOTPService:
     """Core TOTP MFA engine.
@@ -83,7 +93,8 @@ class TOTPService:
         self._ensure_tables()
 
     def _get_conn(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self._db_path)
+        # Bug #1766: explicit busy-wait timeout, see module-level constant comment.
+        conn = sqlite3.connect(self._db_path, timeout=_SQLITE_LOCK_TIMEOUT_SECONDS)
         conn.row_factory = sqlite3.Row
         return conn
 

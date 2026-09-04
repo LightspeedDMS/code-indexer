@@ -117,18 +117,29 @@ class TestContextAwareLogBridgeHandlerReattachesCapturedContext:
     def test_reattach_produces_the_correct_span_context_at_export_time(
         self,
     ) -> None:
+        """Bug #1744 sibling (round 3): this test used to construct a real
+        TelemetryConfig(enabled=True, export_traces=True) via
+        get_telemetry_manager(), whose teardown (via the module's autouse
+        _reset_telemetry_state fixture -> reset_telemetry_manager() ->
+        shutdown()) forces a real OTLP export attempt against an
+        unreachable localhost:4317 collector -- confirmed 13.50s solo
+        teardown cost. Fixed with active_span_exporter() (real Span/
+        Context, zero network I/O) -- same mechanism used throughout
+        #1744.
+        """
         from opentelemetry import trace as otel_trace
 
-        from code_indexer.server.telemetry import get_telemetry_manager
         from code_indexer.server.telemetry.spans import create_span
-        from code_indexer.server.utils.config_manager import TelemetryConfig
-
-        config = TelemetryConfig(enabled=True, export_traces=True)
-        get_telemetry_manager(config)
+        from tests.unit.server.telemetry.otel_test_support import (
+            active_span_exporter,
+        )
 
         from opentelemetry import context as otel_context
 
-        with create_span("test.context_aware_handler.span_a") as span_a:
+        with (
+            active_span_exporter(),
+            create_span("test.context_aware_handler.span_a") as span_a,
+        ):
             span_a_context = span_a.get_span_context()
             captured = otel_context.get_current()
 
@@ -150,17 +161,21 @@ class TestContextAwareLogBridgeHandlerReattachesCapturedContext:
         assert not otel_trace.get_current_span().get_span_context().is_valid
 
     def test_context_is_detached_even_when_wrapped_emit_raises(self) -> None:
+        """Bug #1744 sibling (round 3): same real-TelemetryConfig/
+        get_telemetry_manager() network dependency as its sibling above,
+        fixed the same way with active_span_exporter(). otel_trace stays
+        imported here -- it is used later in this function's unmodified
+        assertions (not shown in this replaced range).
+        """
         from opentelemetry import context as otel_context
         from opentelemetry import trace as otel_trace
 
-        from code_indexer.server.telemetry import get_telemetry_manager
         from code_indexer.server.telemetry.spans import create_span
-        from code_indexer.server.utils.config_manager import TelemetryConfig
+        from tests.unit.server.telemetry.otel_test_support import (
+            active_span_exporter,
+        )
 
-        config = TelemetryConfig(enabled=True, export_traces=True)
-        get_telemetry_manager(config)
-
-        with create_span("test.context_aware_handler.raising"):
+        with active_span_exporter(), create_span("test.context_aware_handler.raising"):
             captured = otel_context.get_current()
 
         assert not otel_trace.get_current_span().get_span_context().is_valid

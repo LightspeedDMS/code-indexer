@@ -6,9 +6,28 @@ error scenarios are properly handled with real network/authentication failures.
 Follows Foundation #1 compliance with minimal mocking.
 """
 
+from unittest.mock import patch
+
 from click.testing import CliRunner
 
 from code_indexer.cli import cli
+
+
+def _invoke_remote(runner: CliRunner, args):
+    """Invoke the CLI with the require_mode("remote") gate on admin_group
+    mocked to pass.
+
+    disabled_commands.py independently binds detect_current_mode via its own
+    module-level import, so it is unaffected by patching find_project_root at
+    code_indexer.mode_detection.command_mode_detector (see #1742). Without
+    this, every admin_group invocation raises DisabledCommandError before
+    reaching the command's own real validation/help logic.
+    """
+    with patch(
+        "code_indexer.disabled_commands.detect_current_mode",
+        return_value="remote",
+    ):
+        return runner.invoke(cli, args)
 
 
 class TestAdminReposIntegrationValidation:
@@ -59,7 +78,7 @@ class TestAdminReposIntegrationValidation:
         runner = CliRunner()
 
         # Test with invalid flags
-        result = runner.invoke(cli, ["admin", "repos", "list", "--invalid-flag"])
+        result = _invoke_remote(runner, ["admin", "repos", "list", "--invalid-flag"])
 
         # Should fail with usage error, not reach remote API logic
         assert result.exit_code != 0
@@ -74,15 +93,15 @@ class TestAdminReposIntegrationValidation:
         runner = CliRunner()
 
         # Test without required alias argument
-        result = runner.invoke(cli, ["admin", "repos", "show"])
+        result = _invoke_remote(runner, ["admin", "repos", "show"])
 
         # Should fail with missing argument error
         assert result.exit_code != 0
         assert "Missing argument" in result.output or "Usage:" in result.output
 
         # Test with invalid flags
-        result = runner.invoke(
-            cli, ["admin", "repos", "show", "--invalid-flag", "test"]
+        result = _invoke_remote(
+            runner, ["admin", "repos", "show", "--invalid-flag", "test"]
         )
 
         # Should fail with usage error, not reach remote API logic
@@ -98,15 +117,15 @@ class TestAdminReposIntegrationValidation:
         runner = CliRunner()
 
         # Test without required alias argument
-        result = runner.invoke(cli, ["admin", "repos", "refresh"])
+        result = _invoke_remote(runner, ["admin", "repos", "refresh"])
 
         # Should fail with missing argument error
         assert result.exit_code != 0
         assert "Missing argument" in result.output or "Usage:" in result.output
 
         # Test with invalid flags
-        result = runner.invoke(
-            cli, ["admin", "repos", "refresh", "--invalid-flag", "test"]
+        result = _invoke_remote(
+            runner, ["admin", "repos", "refresh", "--invalid-flag", "test"]
         )
 
         # Should fail with usage error, not reach remote API logic
@@ -139,6 +158,7 @@ class TestAdminReposIntegrationValidation:
                     "cidx remote init" in result.output
                     or "No project configuration found" in result.output
                     or "No remote configuration found" in result.output
+                    or "requires: 'remote' mode" in result.output
                 ), f"Command {' '.join(cmd)} should provide actionable error message"
 
                 # Should not leave users without guidance
@@ -153,7 +173,7 @@ class TestAdminReposIntegrationValidation:
         commands = ["list", "show", "refresh"]
 
         for cmd in commands:
-            result = runner.invoke(cli, ["admin", "repos", cmd, "--help"])
+            result = _invoke_remote(runner, ["admin", "repos", cmd, "--help"])
 
             # Should show help successfully
             assert result.exit_code == 0, f"Help for {cmd} should work"
@@ -181,7 +201,7 @@ class TestAdminReposIntegrationValidation:
         assert "repos" in admin_result.output
 
         # Test that repos subgroup exists
-        repos_result = runner.invoke(cli, ["admin", "repos", "--help"])
+        repos_result = _invoke_remote(runner, ["admin", "repos", "--help"])
         assert repos_result.exit_code == 0
 
         # Test that all expected commands exist
@@ -193,7 +213,7 @@ class TestAdminReposIntegrationValidation:
 
         # Test that each command can show help
         for cmd in expected_commands:
-            help_result = runner.invoke(cli, ["admin", "repos", cmd, "--help"])
+            help_result = _invoke_remote(runner, ["admin", "repos", cmd, "--help"])
             assert help_result.exit_code == 0, f"Command {cmd} should provide help"
 
     def test_admin_repos_error_message_quality(self):
@@ -204,11 +224,15 @@ class TestAdminReposIntegrationValidation:
             # Test list command error quality
             list_result = runner.invoke(cli, ["admin", "repos", "list"])
 
-            # Should have professional error messages
+            # Should have professional error messages. Note: "error:" is
+            # intentionally excluded from the forbidden-word list -- Click's
+            # ClickException.show() (DisabledCommandError's base class)
+            # unconditionally prefixes every such message with "Error: ",
+            # which is standard, correct Click behavior, not a quality defect.
             assert list_result.exit_code == 1
             assert not any(
                 word in list_result.output.lower()
-                for word in ["error:", "exception:", "traceback", "failed", "crash"]
+                for word in ["exception:", "traceback", "failed", "crash"]
             ), "Error messages should be professional, not technical"
 
             # Should provide actionable guidance
@@ -218,6 +242,7 @@ class TestAdminReposIntegrationValidation:
                 "setup",
                 "No project configuration found",
                 "No remote configuration found",
+                "requires: 'remote' mode",
             ]
 
             assert any(
@@ -238,7 +263,7 @@ class TestAdminReposIntegrationValidation:
         ]
 
         for cmd in commands:
-            result = runner.invoke(cli, cmd)
+            result = _invoke_remote(runner, cmd)
             assert result.exit_code == 0, (
                 f"Command {' '.join(cmd)} should complete successfully"
             )
@@ -271,7 +296,7 @@ class TestAdminReposCommandStructure:
         runner = CliRunner()
 
         # Test command hierarchy exists
-        result = runner.invoke(cli, ["admin", "repos", "--help"])
+        result = _invoke_remote(runner, ["admin", "repos", "--help"])
         assert result.exit_code == 0
         assert "Repository management commands" in result.output
 
@@ -288,7 +313,7 @@ class TestAdminReposCommandStructure:
             assert subcmd in result.output, f"Subcommand {subcmd} should be registered"
 
             # Command should have help
-            help_result = runner.invoke(cli, ["admin", "repos", subcmd, "--help"])
+            help_result = _invoke_remote(runner, ["admin", "repos", subcmd, "--help"])
             assert help_result.exit_code == 0, (
                 f"Subcommand {subcmd} should provide help"
             )
@@ -304,7 +329,7 @@ class TestAdminReposCommandStructure:
 
         for cmd in commands:
             # Each command should have help
-            help_result = runner.invoke(cli, ["admin", "repos", cmd, "--help"])
+            help_result = _invoke_remote(runner, ["admin", "repos", cmd, "--help"])
             assert help_result.exit_code == 0
 
             # Each command should mention admin privileges

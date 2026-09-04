@@ -206,7 +206,6 @@ class GitSyncExecutor:
                     format_error_log(
                         "GIT-GENERAL-025",
                         f"Pre-pull clearing failed (non-blocking): {e}",
-                        extra={"correlation_id": get_correlation_id()},
                     ),
                     exc_info=True,
                 )
@@ -411,7 +410,6 @@ class GitSyncExecutor:
                 format_error_log(
                     "GIT-GENERAL-026",
                     f"Repository validation failed: {e}",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
             validation_errors.append(f"Validation error: {str(e)}")
@@ -481,7 +479,6 @@ class GitSyncExecutor:
                 format_error_log(
                     "GIT-GENERAL-027",
                     f"Backup creation failed: {e}",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
             return BackupResult(
@@ -543,7 +540,6 @@ class GitSyncExecutor:
                     format_error_log(
                         "GIT-GENERAL-028",
                         "SSH passphrase support requires proper credential management",
-                        extra={"correlation_id": get_correlation_id()},
                     )
                 )
 
@@ -568,7 +564,6 @@ class GitSyncExecutor:
                 format_error_log(
                     "GIT-GENERAL-029",
                     f"Git pull failed: {e}",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
             raise
@@ -626,7 +621,6 @@ class GitSyncExecutor:
                 format_error_log(
                     "GIT-GENERAL-030",
                     f"Could not get changed files: {e}",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
             return []
@@ -647,7 +641,6 @@ class GitSyncExecutor:
                 format_error_log(
                     "GIT-GENERAL-031",
                     f"Could not count commits: {e}",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
             return 0
@@ -712,7 +705,6 @@ class GitSyncExecutor:
                     format_error_log(
                         "GIT-GENERAL-032",
                         "Embedding provider health check failed",
-                        extra={"correlation_id": get_correlation_id()},
                     )
                 )
                 return False
@@ -722,7 +714,6 @@ class GitSyncExecutor:
                     format_error_log(
                         "GIT-GENERAL-033",
                         "Vector store client health check failed",
-                        extra={"correlation_id": get_correlation_id()},
                     )
                 )
                 return False
@@ -761,7 +752,6 @@ class GitSyncExecutor:
                     format_error_log(
                         "GIT-GENERAL-034",
                         "Internal CIDX indexing was cancelled or failed",
-                        extra={"correlation_id": get_correlation_id()},
                     )
                 )
                 return False
@@ -771,7 +761,6 @@ class GitSyncExecutor:
                 format_error_log(
                     "GIT-GENERAL-035",
                     f"Internal CIDX indexing failed: {e}",
-                    extra={"correlation_id": get_correlation_id()},
                 ),
                 exc_info=True,
             )
@@ -794,7 +783,6 @@ class GitSyncExecutor:
                     format_error_log(
                         "GIT-GENERAL-036",
                         f"Backup path does not exist: {backup_path}",
-                        extra={"correlation_id": get_correlation_id()},
                     )
                 )
                 return False
@@ -840,7 +828,6 @@ class GitSyncExecutor:
                 format_error_log(
                     "GIT-GENERAL-037",
                     f"Backup restoration failed: {e}",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
             return False

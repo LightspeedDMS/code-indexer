@@ -16,7 +16,6 @@ import sqlite3
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from code_indexer.server.middleware.correlation import get_correlation_id
 from code_indexer.server.logging_utils import format_error_log
 from code_indexer.server.storage.database_manager import DatabaseConnectionManager
 
@@ -257,7 +256,6 @@ class LogAggregatorService:
                 format_error_log(
                     "GIT-GENERAL-046",
                     f"Database error querying logs: {e}",
-                    extra={"correlation_id": get_correlation_id()},
                 ),
                 exc_info=True,
             )
@@ -317,7 +315,6 @@ class LogAggregatorService:
                 format_error_log(
                     "GIT-GENERAL-047",
                     f"Database error querying all logs: {e}",
-                    extra={"correlation_id": get_correlation_id()},
                 ),
                 exc_info=True,
             )
@@ -346,7 +343,6 @@ class LogAggregatorService:
                 format_error_log(
                     "GIT-GENERAL-048",
                     f"Database error counting logs: {e}",
-                    extra={"correlation_id": get_correlation_id()},
                 ),
                 exc_info=True,
             )

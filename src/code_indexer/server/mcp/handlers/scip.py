@@ -1152,7 +1152,6 @@ def get_scip_audit_log(params: Dict[str, Any], user: User) -> Dict[str, Any]:
             format_error_log(
                 "MCP-GENERAL-080",
                 f"Error retrieving SCIP audit log: {e}",
-                extra={"correlation_id": get_correlation_id()},
             )
         )
         return _mcp_response({"success": False, "error": str(e)})
@@ -1210,7 +1209,6 @@ def handle_scip_pr_history(args: Dict[str, Any], user: User) -> Dict[str, Any]:
             format_error_log(
                 "REPO-GENERAL-010",
                 f"Error in handle_scip_pr_history: {e}",
-                extra={"correlation_id": get_correlation_id()},
             )
         )
         return _mcp_response({"success": False, "error": str(e)})
@@ -1256,7 +1254,6 @@ def handle_scip_cleanup_history(args: Dict[str, Any], user: User) -> Dict[str, A
             format_error_log(
                 "REPO-GENERAL-011",
                 f"Error in handle_scip_cleanup_history: {e}",
-                extra={"correlation_id": get_correlation_id()},
             )
         )
         return _mcp_response({"success": False, "error": str(e)})
@@ -1303,7 +1300,6 @@ def handle_scip_cleanup_workspaces(args: Dict[str, Any], user: User) -> Dict[str
                 format_error_log(
                     "REPO-GENERAL-012",
                     f"Workspace cleanup failed: {cleanup_error}",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
             _cleanup_job_state["progress"] = f"failed: {str(cleanup_error)}"
@@ -1323,7 +1319,6 @@ def handle_scip_cleanup_workspaces(args: Dict[str, Any], user: User) -> Dict[str
             format_error_log(
                 "REPO-GENERAL-013",
                 f"Error in handle_scip_cleanup_workspaces: {e}",
-                extra={"correlation_id": get_correlation_id()},
             )
         )
         return _mcp_response({"success": False, "error": str(e)})
@@ -1373,7 +1368,6 @@ def handle_scip_cleanup_status(args: Dict[str, Any], user: User) -> Dict[str, An
             format_error_log(
                 "REPO-GENERAL-014",
                 f"Error in handle_scip_cleanup_status: {e}",
-                extra={"correlation_id": get_correlation_id()},
             )
         )
         return _mcp_response({"success": False, "error": str(e)})

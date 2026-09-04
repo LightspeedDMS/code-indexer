@@ -172,7 +172,6 @@ class ResourceTracker:
                         format_error_log(
                             "SCIP-GENERAL-005",
                             error_msg,
-                            extra={"correlation_id": get_correlation_id()},
                         )
                     )
 
@@ -200,7 +199,6 @@ class ResourceTracker:
                         format_error_log(
                             "SCIP-GENERAL-006",
                             error_msg,
-                            extra={"correlation_id": get_correlation_id()},
                         )
                     )
 
@@ -235,7 +233,6 @@ class ResourceTracker:
                         format_error_log(
                             "SCIP-GENERAL-007",
                             error_msg,
-                            extra={"correlation_id": get_correlation_id()},
                         )
                     )
 
@@ -262,7 +259,6 @@ class ResourceTracker:
                             format_error_log(
                                 "SCIP-GENERAL-008",
                                 f"Task {task_name} did not cancel within timeout",
-                                extra={"correlation_id": get_correlation_id()},
                             )
                         )
                     except asyncio.CancelledError:
@@ -279,7 +275,6 @@ class ResourceTracker:
                     format_error_log(
                         "SCIP-GENERAL-009",
                         error_msg,
-                        extra={"correlation_id": get_correlation_id()},
                     )
                 )
 
@@ -322,7 +317,6 @@ class MemoryMonitor:
                 format_error_log(
                     "SCIP-GENERAL-010",
                     f"Failed to capture memory usage: {e}",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
             return 0.0
@@ -346,7 +340,6 @@ class MemoryMonitor:
                 format_error_log(
                     "SCIP-GENERAL-011",
                     f"Failed to get memory percentage: {e}",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
             return 0.0
@@ -371,7 +364,6 @@ class MemoryMonitor:
                 format_error_log(
                     "SCIP-GENERAL-012",
                     str(warning),
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
 
@@ -391,7 +383,6 @@ class MemoryMonitor:
                 format_error_log(
                     "SCIP-GENERAL-013",
                     f"Garbage collection failed: {e}",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
             return 0
@@ -509,7 +500,6 @@ class GracefulShutdownHandler:
                     format_error_log(
                         "SCIP-GENERAL-014",
                         f"Cleanup timeout ({self.shutdown_timeout}s) exceeded after {elapsed:.2f}s, skipping remaining callbacks",
-                        extra={"correlation_id": get_correlation_id()},
                     )
                 )
                 break
@@ -530,7 +520,6 @@ class GracefulShutdownHandler:
                             format_error_log(
                                 "SCIP-GENERAL-015",
                                 f"Cleanup callback {callback.__name__} exceeded timeout of {remaining_time:.2f}s, continuing to next callback",
-                                extra={"correlation_id": get_correlation_id()},
                             )
                         )
                         return
@@ -566,7 +555,6 @@ class GracefulShutdownHandler:
                     format_error_log(
                         "SCIP-GENERAL-016",
                         f"Cleanup callback {callback.__name__} failed: {e}",
-                        extra={"correlation_id": get_correlation_id()},
                     )
                 )
 
@@ -590,7 +578,6 @@ class GracefulShutdownHandler:
                     format_error_log(
                         "SCIP-GENERAL-017",
                         "Cannot run async cleanup in existing event loop, scheduling for thread",
-                        extra={"correlation_id": get_correlation_id()},
                     )
                 )
                 # Schedule async cleanup in the current event loop
@@ -611,7 +598,6 @@ class GracefulShutdownHandler:
                                     format_error_log(
                                         "SCIP-GENERAL-018",
                                         f"Failed to schedule async cleanup callback {callback.__name__}: {e}",
-                                        extra={"correlation_id": get_correlation_id()},
                                     )
                                 )
                     except Exception as e:
@@ -619,7 +605,6 @@ class GracefulShutdownHandler:
                             format_error_log(
                                 "SCIP-GENERAL-019",
                                 f"Failed to schedule async cleanup: {e}",
-                                extra={"correlation_id": get_correlation_id()},
                             )
                         )
 
@@ -647,7 +632,6 @@ class GracefulShutdownHandler:
                                 format_error_log(
                                     "SCIP-GENERAL-020",
                                     f"Failed to create async cleanup task for {callback.__name__}: {e}",
-                                    extra={"correlation_id": get_correlation_id()},
                                 )
                             )
 
@@ -662,7 +646,6 @@ class GracefulShutdownHandler:
                                 format_error_log(
                                     "SCIP-GENERAL-021",
                                     "Async cleanup timeout exceeded",
-                                    extra={"correlation_id": get_correlation_id()},
                                 )
                             )
                             for task in tasks:
@@ -678,7 +661,6 @@ class GracefulShutdownHandler:
                 format_error_log(
                     "SCIP-GENERAL-022",
                     f"Async cleanup execution failed: {e}",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
 
@@ -766,7 +748,6 @@ class ResourceManager:
                 format_error_log(
                     "STORE-GENERAL-001",
                     f"ResourceManager cleanup failed: {e}",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
             # Don't suppress exceptions from the context
@@ -874,7 +855,6 @@ class ResourceManager:
                 format_error_log(
                     "STORE-GENERAL-002",
                     error_msg,
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
 
@@ -893,7 +873,6 @@ class ResourceManager:
                 format_error_log(
                     "STORE-GENERAL-003",
                     error_msg,
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
 
@@ -912,7 +891,6 @@ class ResourceManager:
                 format_error_log(
                     "STORE-GENERAL-004",
                     error_msg,
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
 
@@ -931,7 +909,6 @@ class ResourceManager:
                 format_error_log(
                     "STORE-GENERAL-005",
                     error_msg,
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
 
@@ -950,7 +927,6 @@ class ResourceManager:
                     format_error_log(
                         "STORE-GENERAL-006",
                         error_msg,
-                        extra={"correlation_id": get_correlation_id()},
                     )
                 )
 
@@ -966,7 +942,6 @@ class ResourceManager:
                 format_error_log(
                     "STORE-GENERAL-007",
                     f"Resource cleanup completed with {total_errors} errors",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
             for error in cleanup_errors:
@@ -974,7 +949,6 @@ class ResourceManager:
                     format_error_log(
                         "STORE-GENERAL-008",
                         f"  - {error}",
-                        extra={"correlation_id": get_correlation_id()},
                     )
                 )
 
@@ -988,7 +962,6 @@ class ResourceManager:
                             format_error_log(
                                 "STORE-GENERAL-009",
                                 f"Memory leak detected after cleanup: {warning}",
-                                extra={"correlation_id": get_correlation_id()},
                             )
                         )
             except Exception as e:
@@ -996,7 +969,6 @@ class ResourceManager:
                     format_error_log(
                         "STORE-GENERAL-010",
                         f"Memory leak check failed: {e}",
-                        extra={"correlation_id": get_correlation_id()},
                     )
                 )
 
@@ -1051,7 +1023,6 @@ def setup_graceful_shutdown(
                 format_error_log(
                     "STORE-GENERAL-011",
                     f"Resource cleanup during shutdown failed: {e}",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
 

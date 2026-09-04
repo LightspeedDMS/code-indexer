@@ -32,6 +32,8 @@ from ..services.git_aware_processor import GitAwareDocumentProcessor
 from .vector_calculation_manager import VectorCalculationManager
 from .clean_slot_tracker import CleanSlotTracker, FileStatus, FileData
 from .file_chunking_manager import FileChunkingManager, FileProcessingResult
+from ..storage.sqlite_chunk_store import ChunkStoreUnavailableError
+from ..storage.filesystem_vector_store import FilesystemVectorStore
 
 # SURGICAL FIX: Remove RealTimeFeedbackManager import - causes individual callback spam
 
@@ -326,6 +328,38 @@ class HighThroughputProcessor(GitAwareDocumentProcessor):
                 fts_manager=fts_manager,
                 multimodal_client=multimodal_client,
             ) as file_manager:
+                # Bug #1746 Change 4 (M1 fix): preflight the target chunk
+                # store's writability BEFORE any file is hashed, chunked,
+                # or embedded -- this genuinely runs first now, ahead of
+                # the parallel hash phase below (previously this check
+                # ran AFTER hashing, contradicting its own comment: a real
+                # repro showed every file hash before the abort fired).
+                # Only needs the embedding model name, no dependency on
+                # hash results.
+                #
+                # Bug #1746 M3 (code review finding): for the REAL
+                # production vector_store_client type
+                # (FilesystemVectorStore), the isinstance check below is
+                # always True, so short-circuit "or" evaluation calls the
+                # method UNCONDITIONALLY -- a future rename of
+                # preflight_chunk_store_writable fails LOUD
+                # (AttributeError) instead of this safety net silently
+                # vanishing. The hasattr() half of the condition (matching
+                # this module's established duck-typing convention, e.g.
+                # set_hnsw_branch_context below) only matters for
+                # lightweight test doubles that duck-type a different
+                # (non-FilesystemVectorStore) object.
+                _raw_model = self.embedding_provider.get_current_model()
+                collection_name = _raw_model.replace("/", "_").replace(":", "_")
+                if isinstance(
+                    self.vector_store_client, FilesystemVectorStore
+                ) or hasattr(
+                    self.vector_store_client, "preflight_chunk_store_writable"
+                ):
+                    self.vector_store_client.preflight_chunk_store_writable(
+                        collection_name
+                    )
+
                 # PARALLEL HASH CALCULATION - eliminate serial bottleneck
                 file_futures = []
 
@@ -608,14 +642,10 @@ class HighThroughputProcessor(GitAwareDocumentProcessor):
                     )
 
                 # FAST FILE SUBMISSION - No more I/O delays
-                # CRITICAL FIX: Get collection name for regular indexing
-                # When temporal collection exists, regular indexing needs explicit collection_name
-                # Compute directly from embedding_provider (same logic as
-                # FilesystemVectorStore.resolve_collection_name) so callers that use a
-                # lightweight vector-store client (e.g. test doubles) do not need to
-                # implement resolve_collection_name.
-                _raw_model = self.embedding_provider.get_current_model()
-                collection_name = _raw_model.replace("/", "_").replace(":", "_")
+                # collection_name was already computed (and the Bug #1746
+                # Change 4 preflight check already run) right after
+                # entering the FileChunkingManager context above, before
+                # the hash phase -- both stay in scope here.
 
                 for file_path in files:
                     if self.cancelled:
@@ -654,6 +684,12 @@ class HighThroughputProcessor(GitAwareDocumentProcessor):
 
                 # Collect file-level results
                 completed_files = 0
+                # Bug #1746 Change 2: set when a fatal ChunkStoreUnavailableError
+                # is observed from any in-flight file's future -- once set, the
+                # batch stops (not-yet-started futures cancelled) and this is
+                # re-raised to the caller instead of the run completing with a
+                # large failed_files count.
+                fatal_chunk_store_error: Optional[BaseException] = None
 
                 for file_future in as_completed(file_futures):
                     # SIMPLE BETWEEN-FILES-ONLY CANCELLATION:
@@ -748,10 +784,32 @@ class HighThroughputProcessor(GitAwareDocumentProcessor):
                             stats.failed_files += 1
                             logger.error(f"File processing failed: {file_result.error}")
 
+                    except ChunkStoreUnavailableError as e:
+                        # Bug #1746 Change 2: a fatal chunk-store failure
+                        # must abort the WHOLE batch, not just this one
+                        # file. Cancel every not-yet-started future so the
+                        # thread pool doesn't keep burning CPU processing
+                        # files that would just hit the same fatal error,
+                        # then stop iterating and propagate to the caller.
+                        logger.error(
+                            f"Fatal chunk-store failure observed -- "
+                            f"aborting batch, cancelling not-yet-started "
+                            f"futures: {e}"
+                        )
+                        fatal_chunk_store_error = e
+                        for not_started_future in file_futures:
+                            not_started_future.cancel()
+                        break
                     except Exception as e:
                         logger.error(f"Failed to get file result: {e}")
                         stats.failed_files += 1
                         continue
+
+        if fatal_chunk_store_error is not None:
+            # Bug #1746 Change 2: propagate to the caller (SmartIndexer)
+            # instead of letting the run complete with success semantics
+            # and a large failed_files count.
+            raise fatal_chunk_store_error
 
         stats.end_time = time.time()
         # stats.files_processed already updated during processing
@@ -923,6 +981,11 @@ class HighThroughputProcessor(GitAwareDocumentProcessor):
 
         start_time = time.time()
         result = BranchIndexingResult()
+        # Bug #1746 Change 3 (extended): set when the fatal
+        # ChunkStoreUnavailableError propagates from
+        # process_files_high_throughput() below, so the finally block
+        # aborts instead of finalizing.
+        fatal_chunk_store_error: Optional[BaseException] = None
 
         logger.info(
             f"Starting high-throughput branch processing: {old_branch} -> {new_branch}"
@@ -1044,6 +1107,10 @@ class HighThroughputProcessor(GitAwareDocumentProcessor):
         except Exception as e:
             logger.error(f"High-throughput branch processing failed: {e}")
             result.processing_time = time.time() - start_time
+            if isinstance(e, ChunkStoreUnavailableError):
+                # Bug #1746 Change 3 (extended): record the fatal error so
+                # the finally block below aborts instead of finalizing.
+                fatal_chunk_store_error = e
             raise
         finally:
             # Bug #1575 Part C Defect 1 (dual-review corroborated): when
@@ -1062,7 +1129,29 @@ class HighThroughputProcessor(GitAwareDocumentProcessor):
                     progress_callback=progress_callback,
                     slot_tracker=slot_tracker,
                     watch_mode=watch_mode,
+                    fatal_chunk_store_error=fatal_chunk_store_error,
                 )
+
+    def _abort_indexing_session(
+        self, collection_name: str, fatal_chunk_store_error: BaseException
+    ) -> None:
+        """Bug #1746 Change 3 (extended): abort_indexing() the primary and
+        any existing multimodal collection instead of finalizing -- no
+        watermark advance, no "indexing complete" state persisted for a
+        run that hit a fatal chunk-store failure."""
+        from ..config import VOYAGE_MULTIMODAL_MODEL, COHERE_MULTIMODAL_MODEL
+
+        logger.error(
+            f"Fatal chunk-store failure -- aborting indexing session "
+            f"instead of finalizing: {fatal_chunk_store_error}"
+        )
+        self.vector_store_client.abort_indexing(collection_name)
+        for multimodal_collection in [
+            VOYAGE_MULTIMODAL_MODEL,
+            COHERE_MULTIMODAL_MODEL,
+        ]:
+            if self.vector_store_client.collection_exists(multimodal_collection):
+                self.vector_store_client.abort_indexing(multimodal_collection)
 
     def _finalize_indexing_session(
         self,
@@ -1070,6 +1159,7 @@ class HighThroughputProcessor(GitAwareDocumentProcessor):
         progress_callback: Optional[Callable] = None,
         slot_tracker: Optional[CleanSlotTracker] = None,
         watch_mode: bool = False,
+        fatal_chunk_store_error: Optional[BaseException] = None,
     ) -> None:
         """Bug #1575 Part C Defect 1: finalize (``end_indexing()``) the
         indexing session for ``collection_name``, plus any active
@@ -1082,7 +1172,16 @@ class HighThroughputProcessor(GitAwareDocumentProcessor):
         finalization pass that closes the session also consumes that
         session's branch context: never orphaned in a session nothing will
         finalize, never leaked into a later, unrelated cycle.
+
+        Bug #1746 Change 3 (extended): dispatches to
+        ``_abort_indexing_session()`` instead when ``fatal_chunk_store_error``
+        is not None. None (the default) preserves the finalize behavior
+        below, byte-identical to before this parameter existed.
         """
+        if fatal_chunk_store_error is not None:
+            self._abort_indexing_session(collection_name, fatal_chunk_store_error)
+            return
+
         # CRITICAL: Always finalize indexes, even on exception
         # This ensures FilesystemVectorStore rebuilds HNSW/ID indexes
         if progress_callback:

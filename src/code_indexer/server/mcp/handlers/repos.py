@@ -236,7 +236,6 @@ def list_repo_categories(params: Dict[str, Any], user: User) -> Dict[str, Any]:
             format_error_log(
                 "MCP-GENERAL-035",
                 f"Failed to list repository categories: {e}",
-                extra={"correlation_id": get_correlation_id()},
             ),
             exc_info=True,
         )
@@ -391,7 +390,6 @@ def _load_category_map() -> dict:
             format_error_log(
                 "MCP-GENERAL-034",
                 f"Failed to load category map: {e}",
-                extra={"correlation_id": get_correlation_id()},
             )
         )
     return {}
@@ -619,7 +617,6 @@ def _append_global_repos_to_status(status_summary: list, user: User) -> None:
                     format_error_log(
                         "MCP-GENERAL-035",
                         f"Skipping malformed global repo entry: {repo}",
-                        extra={"correlation_id": get_correlation_id()},
                     )
                 )
                 continue
@@ -640,7 +637,6 @@ def _append_global_repos_to_status(status_summary: list, user: User) -> None:
             format_error_log(
                 "MCP-GENERAL-036",
                 f"Failed to load global repos status: {e}",
-                extra={"correlation_id": get_correlation_id()},
             ),
             exc_info=True,
         )
@@ -718,7 +714,6 @@ def _load_global_repos_normalized() -> list:
                     format_error_log(
                         "MCP-GENERAL-032",
                         f"Skipping malformed global repo entry: {repo}",
-                        extra={"correlation_id": get_correlation_id()},
                     )
                 )
                 continue
@@ -737,7 +732,6 @@ def _load_global_repos_normalized() -> list:
             format_error_log(
                 "MCP-GENERAL-033",
                 f"Failed to load global repos from storage backend: {e}",
-                extra={"correlation_id": get_correlation_id()},
             ),
             exc_info=True,
         )
@@ -1185,7 +1179,6 @@ def handle_add_golden_repo_index(args: Dict[str, Any], user: User) -> Dict[str, 
             format_error_log(
                 "MCP-GENERAL-037",
                 f"Error adding index to golden repo: {e}",
-                extra={"correlation_id": get_correlation_id()},
             )
         )
         return _mcp_response(
@@ -1218,7 +1211,6 @@ def handle_get_golden_repo_indexes(args: Dict[str, Any], user: User) -> Dict[str
             format_error_log(
                 "MCP-GENERAL-038",
                 f"Error getting golden repo indexes: {e}",
-                extra={"correlation_id": get_correlation_id()},
             )
         )
         return _mcp_response(
@@ -1750,6 +1742,20 @@ def _post_provider_index_snapshot(
                 new_snapshot,
             )
             return
+
+        # Bug #1775: evict stale HNSW + chunk-store cache entries for
+        # the old versioned path -- this publish path previously
+        # invalidated NEITHER cache. Shared helper -- never reimplement
+        # the two-cache invalidation inline here.
+        from code_indexer.server.cache.snapshot_cache_invalidation import (
+            invalidate_snapshot_caches,
+        )
+
+        invalidate_snapshot_caches(
+            old_snapshot_path,
+            log_context=f"[provider-index-{repo_alias}]",
+            is_versioned_snapshot_check=scheduler._is_versioned_snapshot,
+        )
 
         cleanup_manager = getattr(scheduler, "cleanup_manager", None)
         if cleanup_manager is not None:

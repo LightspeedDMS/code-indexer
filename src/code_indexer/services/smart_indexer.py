@@ -29,6 +29,7 @@ from .indexing_lock import IndexingLockError, create_indexing_lock
 from .high_throughput_processor import HighThroughputProcessor
 from .git_hook_manager import GitHookManager
 from ..utils.enhanced_messaging import OperationType, create_enhanced_callback
+from ..storage.sqlite_chunk_store import ChunkStoreUnavailableError
 
 # CRITICAL: Lazy import for FTS - only load when --fts flag used
 # This prevents Tantivy from loading on every cidx command (including --help)
@@ -403,10 +404,84 @@ class SmartIndexer(HighThroughputProcessor):
                     # FTS uses meta.json as the marker file for existing indexes
                     fts_index_exists = (fts_index_dir / "meta.json").exists()
 
-                    # Only force full rebuild if forcing full reindex or index doesn't exist
-                    create_new_fts = force_full or not fts_index_exists
+                    # Bug #1763: an existing index built before Bug #1761
+                    # introduced _PATH_EXACT_FIELD lacks that field forever
+                    # unless forced through a one-time rebuild -- #1761's
+                    # dedup fix is a safe no-op on such a stale-schema
+                    # index, so duplicates would silently keep
+                    # accumulating on every already-indexed repo. Detect +
+                    # self-heal automatically (no new setting).
+                    fts_schema_stale = fts_index_exists and (
+                        fts_manager.schema_needs_rebuild()
+                    )
+                    if fts_schema_stale:
+                        # Tantivy refuses to build the new schema in place
+                        # over an on-disk index whose physical schema
+                        # differs ("Schema error: An index exists but the
+                        # schema does not match.") -- the directory must
+                        # be cleared first, same pattern already used by
+                        # cli.py's rebuild-fts command and the daemon's
+                        # exposed_rebuild_fts_index() before any
+                        # create_new=True call.
+                        import shutil
+
+                        logger.info(
+                            f"FTS index at {fts_index_dir} has a stale "
+                            f"pre-#1761 schema -- clearing for a one-time "
+                            f"rebuild so the dedup fix takes effect"
+                        )
+
+                        try:
+                            shutil.rmtree(fts_index_dir)
+                        except OSError as e:
+                            # MEDIUM-4 (#1763 code review): a partial
+                            # rmtree (disk full, EACCES mid-delete) can
+                            # leave the index directory in a half-deleted
+                            # state. Log this distinctly and loudly
+                            # (ERROR, with the specific "rebuild step
+                            # itself failed" framing) before re-raising,
+                            # so this is distinguishable in logs from an
+                            # unrelated FTS setup failure caught by the
+                            # generic handler below -- that handler still
+                            # degrades gracefully (fts_manager=None), this
+                            # just makes the half-deleted-state risk loud.
+                            logger.error(
+                                f"FTS stale-schema rebuild failed while "
+                                f"clearing {fts_index_dir} -- the index "
+                                f"directory may be left in a "
+                                f"partially-deleted state: {e}"
+                            )
+                            raise
+
+                    # Only force full rebuild if forcing full reindex,
+                    # index doesn't exist, or the existing index's
+                    # physical schema is stale (Bug #1763).
+                    create_new_fts = (
+                        force_full or not fts_index_exists or fts_schema_stale
+                    )
 
                     fts_manager.initialize_index(create_new=create_new_fts)
+
+                    # CRITICAL-1 (#1763 code review): a stale-schema or
+                    # brand-new FTS index was just wiped/created empty
+                    # above. _do_incremental_index()/_do_resume_interrupted()
+                    # (the paths a normal `cidx index` run with a
+                    # non-empty changed-files set takes) only re-add the
+                    # CHANGED subset of files to fts_manager -- so without
+                    # this, every untouched file's FTS entries would be
+                    # gone forever, not just re-added later. Repopulate
+                    # eagerly, right here, from every file on disk,
+                    # BEFORE any changed-files-only processing runs;
+                    # per-file supersession (delete_document_deferred()
+                    # then add_document(), file_chunking_manager.py) makes
+                    # re-adding the same changed files afterward safe --
+                    # no duplicate rows. Skipped for force_full: that path
+                    # already walks every file itself via _do_full_index()
+                    # and would otherwise pay this cost twice.
+                    if create_new_fts and not force_full:
+                        self._populate_fts_from_all_files(
+                            fts_manager, progress_callback
+                        )
 
                     if progress_callback:
                         if create_new_fts:
@@ -647,7 +722,6 @@ class SmartIndexer(HighThroughputProcessor):
                 quiet,
                 vector_thread_count,
                 fts_manager,
-                create_new_fts,
             )
 
         except KeyboardInterrupt:
@@ -690,6 +764,64 @@ class SmartIndexer(HighThroughputProcessor):
 
             # Always release the lock, even on exception
             indexing_lock.release()
+
+    def _abort_multimodal_collections(self) -> None:
+        """Bug #1746 Change 3: abort_indexing() for every existing
+        multimodal collection (discard, mirrors the finalize-side loop)."""
+        for multimodal_collection in [
+            VOYAGE_MULTIMODAL_MODEL,
+            COHERE_MULTIMODAL_MODEL,
+        ]:
+            if self.vector_store_client.collection_exists(multimodal_collection):
+                self.vector_store_client.abort_indexing(multimodal_collection)
+
+    def _finalize_multimodal_collections(
+        self, progress_callback: Optional[Callable]
+    ) -> None:
+        """Pre-existing multimodal end_indexing loop, extracted unchanged."""
+        for multimodal_collection in [
+            VOYAGE_MULTIMODAL_MODEL,
+            COHERE_MULTIMODAL_MODEL,
+        ]:
+            if self.vector_store_client.collection_exists(multimodal_collection):
+                multimodal_result = self.vector_store_client.end_indexing(
+                    multimodal_collection, progress_callback
+                )
+                logger.info(
+                    f"Multimodal index finalization complete "
+                    f"({multimodal_collection}): "
+                    f"{multimodal_result.get('vectors_indexed', 0)} vectors indexed"
+                )
+
+    def _finalize_or_abort_indexing_session(
+        self,
+        collection_name: str,
+        fatal_chunk_store_error: Optional[BaseException],
+        progress_callback: Optional[Callable],
+        log_prefix: str = "Index",
+    ) -> None:
+        """Bug #1746 Change 3: abort_indexing() on a fatal chunk-store
+        failure instead of end_indexing() -- no watermark advance for a
+        run that never actually indexed the repository."""
+        if fatal_chunk_store_error is not None:
+            logger.error(
+                f"{log_prefix}: fatal chunk-store failure -- aborting "
+                f"instead of finalizing: {fatal_chunk_store_error}"
+            )
+            self.vector_store_client.abort_indexing(collection_name)
+            self._abort_multimodal_collections()
+            return
+
+        if progress_callback:
+            progress_callback(0, 0, Path(""), info="Finalizing indexing session...")
+        end_result = self.vector_store_client.end_indexing(
+            collection_name, progress_callback
+        )
+        logger.info(
+            f"{log_prefix} finalization complete: "
+            f"{end_result.get('vectors_indexed', 0)} vectors indexed"
+        )
+        self._finalize_multimodal_collections(progress_callback)
 
     def _do_full_index(
         self,
@@ -821,6 +953,7 @@ class SmartIndexer(HighThroughputProcessor):
         self.vector_store_client.begin_indexing(collection_name)
 
         # Use BranchAwareIndexer for git-aware processing with parallel embeddings
+        fatal_chunk_store_error: Optional[BaseException] = None
         try:
             # Convert absolute paths to relative paths for BranchAwareIndexer
             relative_files = []
@@ -907,38 +1040,28 @@ class SmartIndexer(HighThroughputProcessor):
 
         except Exception as e:
             logger.error(f"High-throughput processor failed during full index: {e}")
+            if isinstance(e, ChunkStoreUnavailableError):
+                # Bug #1746 Change 3: propagate the fatal error UNWRAPPED
+                # (not folded into the generic RuntimeError below) so the
+                # finally block aborts instead of finalizing.
+                fatal_chunk_store_error = e
+                raise
             # NO FALLBACK - fail fast in git projects
             raise RuntimeError(
                 f"Git-aware indexing failed and fallbacks are disabled. "
                 f"Original error: {e}"
             ) from e
         finally:
-            # CRITICAL: Always finalize indexes, even on exception
-            # This ensures FilesystemVectorStore rebuilds HNSW/ID indexes
-            if progress_callback:
-                progress_callback(0, 0, Path(""), info="Finalizing indexing session...")
-            end_result = self.vector_store_client.end_indexing(
-                collection_name, progress_callback
+            # CRITICAL: Always finalize (or abort) the session, even on
+            # exception -- this ensures FilesystemVectorStore rebuilds
+            # HNSW/ID indexes on success, or discards the in-memory
+            # session on a fatal chunk-store failure (Bug #1746 Change 3).
+            self._finalize_or_abort_indexing_session(
+                collection_name,
+                fatal_chunk_store_error,
+                progress_callback,
+                log_prefix="Index",
             )
-            logger.info(
-                f"Index finalization complete: {end_result.get('vectors_indexed', 0)} vectors indexed"
-            )
-
-            # CRITICAL: Also finalize multimodal collection if it exists
-            # Multimodal embeddings may be in voyage-multimodal-3 or embed-v4.0-multimodal
-            # Without this, multimodal HNSW index is never built and queries fail
-            for multimodal_collection in [
-                VOYAGE_MULTIMODAL_MODEL,
-                COHERE_MULTIMODAL_MODEL,
-            ]:
-                if self.vector_store_client.collection_exists(multimodal_collection):
-                    multimodal_result = self.vector_store_client.end_indexing(
-                        multimodal_collection, progress_callback
-                    )
-                    logger.info(
-                        f"Multimodal index finalization complete ({multimodal_collection}): "
-                        f"{multimodal_result.get('vectors_indexed', 0)} vectors indexed"
-                    )
 
         # Update metadata with actual processing results
         if progress_callback:
@@ -989,7 +1112,6 @@ class SmartIndexer(HighThroughputProcessor):
         quiet: bool = False,
         vector_thread_count: Optional[int] = None,
         fts_manager=None,
-        create_new_fts: bool = False,
     ) -> ProcessingStats:
         """Perform incremental indexing."""
 
@@ -1172,10 +1294,17 @@ class SmartIndexer(HighThroughputProcessor):
                 self.progressive_metadata.update_commit_watermark(
                     current_branch, current_commit
                 )
-            # FTS bootstrap: if brand-new FTS index requested but nothing to embed,
-            # still build FTS from all files on disk.
-            if fts_manager is not None and create_new_fts:
-                self._populate_fts_from_all_files(fts_manager, progress_callback)
+            # FTS bootstrap: NOTE, #1763 code review (CRITICAL-1) -- the
+            # full-from-disk repopulation for a brand-new/rebuilt FTS
+            # index now happens EAGERLY and UNCONDITIONALLY in
+            # smart_index() itself, immediately after
+            # fts_manager.initialize_index(create_new=create_new_fts),
+            # rather than only here in the zero-changed-files branch.
+            # Calling _populate_fts_from_all_files() a second time here
+            # would double-add every file's FTS document (this call site
+            # has no delete-before-add supersession, unlike the per-file
+            # processing path) -- so this is deliberately NOT called
+            # again.
             # CRITICAL: Don't call complete_indexing() here as no indexing session was started
             # This preserves existing metadata when system is already up-to-date
             return ProcessingStats()
@@ -1214,6 +1343,7 @@ class SmartIndexer(HighThroughputProcessor):
         self.progressive_metadata.set_files_to_index(files_to_index)
 
         # Use HighThroughputProcessor directly for git-aware processing (STORY 3 MIGRATION)
+        fatal_chunk_store_error: Optional[BaseException] = None
         try:
             # Get current branch for indexing
             current_branch = self.git_topology_service.get_current_branch() or "master"
@@ -1277,38 +1407,25 @@ class SmartIndexer(HighThroughputProcessor):
             logger.error(
                 f"HighThroughputProcessor failed during incremental indexing in git project: {e}"
             )
+            if isinstance(e, ChunkStoreUnavailableError):
+                # Bug #1746 Change 3: propagate unwrapped so finally aborts
+                # instead of finalizing.
+                fatal_chunk_store_error = e
+                raise
             # NO FALLBACK - fail fast in git projects
             raise RuntimeError(
                 f"Git-aware incremental indexing failed and fallbacks are disabled. "
                 f"Original error: {e}"
             ) from e
         finally:
-            # CRITICAL: Always finalize indexes, even on exception
-            # This ensures FilesystemVectorStore rebuilds HNSW/ID indexes
-            if progress_callback:
-                progress_callback(0, 0, Path(""), info="Finalizing indexing session...")
-            end_result = self.vector_store_client.end_indexing(
-                collection_name, progress_callback
+            # CRITICAL: Always finalize (or abort) the session, even on
+            # exception (Bug #1746 Change 3).
+            self._finalize_or_abort_indexing_session(
+                collection_name,
+                fatal_chunk_store_error,
+                progress_callback,
+                log_prefix="Incremental index",
             )
-            logger.info(
-                f"Incremental index finalization complete: {end_result.get('vectors_indexed', 0)} vectors indexed"
-            )
-
-            # CRITICAL: Also finalize multimodal collection if it exists
-            # Multimodal embeddings may be in voyage-multimodal-3 or embed-v4.0-multimodal
-            # Without this, multimodal HNSW index is never built and queries fail
-            for multimodal_collection in [
-                VOYAGE_MULTIMODAL_MODEL,
-                COHERE_MULTIMODAL_MODEL,
-            ]:
-                if self.vector_store_client.collection_exists(multimodal_collection):
-                    multimodal_result = self.vector_store_client.end_indexing(
-                        multimodal_collection, progress_callback
-                    )
-                    logger.info(
-                        f"Multimodal index finalization complete ({multimodal_collection}): "
-                        f"{multimodal_result.get('vectors_indexed', 0)} vectors indexed"
-                    )
 
         # Update metadata with actual processing results
         if progress_callback:
@@ -1790,6 +1907,7 @@ class SmartIndexer(HighThroughputProcessor):
             raise
 
         # Use BranchAwareIndexer for git-aware processing with parallel embeddings (SINGLE PROCESSING PATH)
+        fatal_chunk_store_error: Optional[BaseException] = None
         try:
             # Convert absolute paths to relative paths for BranchAwareIndexer
             relative_files = []
@@ -1853,38 +1971,25 @@ class SmartIndexer(HighThroughputProcessor):
             logger.error(
                 f"BranchAwareIndexer failed during reconcile in git project: {e}"
             )
+            if isinstance(e, ChunkStoreUnavailableError):
+                # Bug #1746 Change 3 (extended): propagate unwrapped so
+                # finally aborts instead of finalizing.
+                fatal_chunk_store_error = e
+                raise
             # NO FALLBACK - fail fast in git projects
             raise RuntimeError(
                 f"Git-aware reconcile failed and fallbacks are disabled. "
                 f"Original error: {e}"
             ) from e
         finally:
-            # CRITICAL: Always finalize indexes, even on exception
-            # This ensures FilesystemVectorStore rebuilds HNSW/ID indexes
-            if progress_callback:
-                progress_callback(0, 0, Path(""), info="Finalizing indexing session...")
-            end_result = self.vector_store_client.end_indexing(
-                collection_name, progress_callback
+            # CRITICAL: Always finalize (or abort) the session, even on
+            # exception (Bug #1746 Change 3).
+            self._finalize_or_abort_indexing_session(
+                collection_name,
+                fatal_chunk_store_error,
+                progress_callback,
+                log_prefix="Index",
             )
-            logger.info(
-                f"Index finalization complete: {end_result.get('vectors_indexed', 0)} vectors indexed"
-            )
-
-            # CRITICAL: Also finalize multimodal collection if it exists
-            # Multimodal embeddings may be in voyage-multimodal-3 or embed-v4.0-multimodal
-            # Without this, multimodal HNSW index is never built and queries fail
-            for multimodal_collection in [
-                VOYAGE_MULTIMODAL_MODEL,
-                COHERE_MULTIMODAL_MODEL,
-            ]:
-                if self.vector_store_client.collection_exists(multimodal_collection):
-                    multimodal_result = self.vector_store_client.end_indexing(
-                        multimodal_collection, progress_callback
-                    )
-                    logger.info(
-                        f"Multimodal index finalization complete ({multimodal_collection}): "
-                        f"{multimodal_result.get('vectors_indexed', 0)} vectors indexed"
-                    )
 
         # Update metadata with actual processing results
         if progress_callback:
@@ -2060,6 +2165,7 @@ class SmartIndexer(HighThroughputProcessor):
         self.vector_store_client.begin_indexing(collection_name)
 
         # Use HighThroughputProcessor directly for git-aware processing (STORY 3 MIGRATION)
+        fatal_chunk_store_error: Optional[BaseException] = None
         try:
             # Use direct high-throughput parallel processing for resume (4-8x faster)
             # STORY 3: Use process_files_high_throughput() directly instead of branch wrapper
@@ -2085,38 +2191,25 @@ class SmartIndexer(HighThroughputProcessor):
             logger.error(
                 f"HighThroughputProcessor failed during resume in git project: {e}"
             )
+            if isinstance(e, ChunkStoreUnavailableError):
+                # Bug #1746 Change 3: propagate unwrapped so finally aborts
+                # instead of finalizing.
+                fatal_chunk_store_error = e
+                raise
             # NO FALLBACK - fail fast in git projects
             raise RuntimeError(
                 f"Git-aware resume failed and fallbacks are disabled. "
                 f"Original error: {e}"
             ) from e
         finally:
-            # CRITICAL: Always finalize indexes, even on exception
-            # This ensures FilesystemVectorStore rebuilds HNSW/ID indexes
-            if progress_callback:
-                progress_callback(0, 0, Path(""), info="Finalizing indexing session...")
-            end_result = self.vector_store_client.end_indexing(
-                collection_name, progress_callback
+            # CRITICAL: Always finalize (or abort) the session, even on
+            # exception (Bug #1746 Change 3).
+            self._finalize_or_abort_indexing_session(
+                collection_name,
+                fatal_chunk_store_error,
+                progress_callback,
+                log_prefix="Index",
             )
-            logger.info(
-                f"Index finalization complete: {end_result.get('vectors_indexed', 0)} vectors indexed"
-            )
-
-            # CRITICAL: Also finalize multimodal collection if it exists
-            # Multimodal embeddings may be in voyage-multimodal-3 or embed-v4.0-multimodal
-            # Without this, multimodal HNSW index is never built and queries fail
-            for multimodal_collection in [
-                VOYAGE_MULTIMODAL_MODEL,
-                COHERE_MULTIMODAL_MODEL,
-            ]:
-                if self.vector_store_client.collection_exists(multimodal_collection):
-                    multimodal_result = self.vector_store_client.end_indexing(
-                        multimodal_collection, progress_callback
-                    )
-                    logger.info(
-                        f"Multimodal index finalization complete ({multimodal_collection}): "
-                        f"{multimodal_result.get('vectors_indexed', 0)} vectors indexed"
-                    )
 
         # Update metadata with actual processing results
         if progress_callback:
@@ -2151,7 +2244,27 @@ class SmartIndexer(HighThroughputProcessor):
         resumable: bool = False,
         vector_thread_count: Optional[int] = None,
     ) -> ProcessingStats:
-        """Process files with progressive metadata updates and throughput monitoring."""
+        """Process files with progressive metadata updates and throughput monitoring.
+
+        Bug #1746 Change 3 (extended, code review finding B2): this method
+        is confirmed DEAD/ORPHAN code -- zero production call sites
+        (verified by exhaustive grep across src/), exercised only by a
+        unit test that invokes it directly. It calls
+        process_files_high_throughput() below with NO surrounding
+        try/except and never calls begin_indexing()/end_indexing()/
+        abort_indexing() itself -- unlike every real session-managing
+        entry point (_do_full_index, _do_incremental_index,
+        _do_resume_interrupted, _do_reconcile_with_database,
+        process_files_incrementally), which all own an indexing session
+        lifecycle and were fixed to abort instead of finalize on a fatal
+        ChunkStoreUnavailableError. Because this method never begins a
+        session, there is no incorrect finalize to prevent here: a fatal
+        error already propagates uncaught to whatever future caller
+        invokes it. If this method is ever wired into a real call site,
+        that caller becomes responsible for the same abort-vs-finalize
+        decision the other five entry points make (see
+        _finalize_or_abort_indexing_session()).
+        """
 
         stats = ProcessingStats()
         stats.start_time = time.time()
@@ -2424,6 +2537,13 @@ class SmartIndexer(HighThroughputProcessor):
             if absolute_paths:
                 # Use BranchAwareIndexer for git-aware processing with parallel embeddings (SINGLE PROCESSING PATH)
                 collection_name = None
+                # Bug #1746 Change 3 (extended): set when the fatal
+                # ChunkStoreUnavailableError propagates from
+                # process_branch_changes_high_throughput() below, so the
+                # inner finally aborts instead of finalizing, and the
+                # outer except (further below) re-raises instead of
+                # silently swallowing it into stats.failed_files.
+                fatal_chunk_store_error: Optional[BaseException] = None
                 try:
                     # Get current branch for indexing
                     current_branch = (
@@ -2498,6 +2618,13 @@ class SmartIndexer(HighThroughputProcessor):
                     logger.error(
                         f"BranchAwareIndexer failed during process_files_incrementally in git project: {e}"
                     )
+                    if isinstance(e, ChunkStoreUnavailableError):
+                        # Bug #1746 Change 3 (extended): propagate
+                        # unwrapped so the inner finally aborts instead of
+                        # finalizing, and the outer except (below) does
+                        # NOT swallow this into stats.failed_files.
+                        fatal_chunk_store_error = e
+                        raise
                     # NO FALLBACK - fail fast in git projects
                     raise RuntimeError(
                         f"Git-aware incremental processing failed and fallbacks are disabled. "
@@ -2514,12 +2641,14 @@ class SmartIndexer(HighThroughputProcessor):
                     # begin_indexing() was never called and there is
                     # nothing to finalize. Runs on the exception path too,
                     # matching the pre-fix "always finalize indexes, even
-                    # on exception" contract.
+                    # on exception" contract. Bug #1746 Change 3 (extended):
+                    # aborts instead when fatal_chunk_store_error is set.
                     if collection_name is not None:
                         self._finalize_indexing_session(
                             collection_name,
                             progress_callback=None,
                             watch_mode=watch_mode,
+                            fatal_chunk_store_error=fatal_chunk_store_error,
                         )
 
                 if not quiet:
@@ -2527,6 +2656,12 @@ class SmartIndexer(HighThroughputProcessor):
                         f"Processed {stats.files_processed} files incrementally"
                     )
 
+        except ChunkStoreUnavailableError:
+            # Bug #1746 Change 3 (extended): never swallow a fatal
+            # chunk-store failure into an ordinary failed_files count and
+            # return normally -- that reproduces the exact silent-failure
+            # shape #1746 exists to kill. Propagate to the caller.
+            raise
         except Exception as e:
             logger.error(f"Incremental processing failed: {e}")
             stats.failed_files = len(file_paths)

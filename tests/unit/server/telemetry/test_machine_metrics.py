@@ -84,6 +84,8 @@ class TestMachineMetricsExporterCreation:
             enabled=True,
             machine_metrics_enabled=True,
             collector_endpoint="http://localhost:4317",
+            export_traces=False,
+            export_metrics=False,
         )
         telemetry_manager = get_telemetry_manager(config)
 
@@ -105,6 +107,8 @@ class TestMachineMetricsExporterCreation:
             enabled=True,
             machine_metrics_enabled=False,
             collector_endpoint="http://localhost:4317",
+            export_traces=False,
+            export_metrics=False,
         )
         telemetry_manager = get_telemetry_manager(config)
 
@@ -144,6 +148,8 @@ class TestMachineMetricsGaugeRegistration:
             enabled=True,
             machine_metrics_enabled=True,
             collector_endpoint="http://localhost:4317",
+            export_traces=False,
+            export_metrics=False,
         )
         telemetry_manager = get_telemetry_manager(config)
         exporter = MachineMetricsExporter(telemetry_manager)
@@ -162,6 +168,8 @@ class TestMachineMetricsGaugeRegistration:
             enabled=True,
             machine_metrics_enabled=True,
             collector_endpoint="http://localhost:4317",
+            export_traces=False,
+            export_metrics=False,
         )
         telemetry_manager = get_telemetry_manager(config)
         exporter = MachineMetricsExporter(telemetry_manager)
@@ -179,6 +187,8 @@ class TestMachineMetricsGaugeRegistration:
             enabled=True,
             machine_metrics_enabled=True,
             collector_endpoint="http://localhost:4317",
+            export_traces=False,
+            export_metrics=False,
         )
         telemetry_manager = get_telemetry_manager(config)
         exporter = MachineMetricsExporter(telemetry_manager)
@@ -196,6 +206,8 @@ class TestMachineMetricsGaugeRegistration:
             enabled=True,
             machine_metrics_enabled=True,
             collector_endpoint="http://localhost:4317",
+            export_traces=False,
+            export_metrics=False,
         )
         telemetry_manager = get_telemetry_manager(config)
         exporter = MachineMetricsExporter(telemetry_manager)
@@ -231,6 +243,8 @@ class TestMachineMetricsHostIdentification:
             enabled=True,
             machine_metrics_enabled=True,
             collector_endpoint="http://localhost:4317",
+            export_traces=False,
+            export_metrics=False,
             service_name="test-service",
         )
         telemetry_manager = get_telemetry_manager(config)
@@ -253,6 +267,8 @@ class TestMachineMetricsHostIdentification:
             enabled=True,
             machine_metrics_enabled=True,
             collector_endpoint="http://localhost:4317",
+            export_traces=False,
+            export_metrics=False,
             service_name="test-cidx-server",
         )
         telemetry_manager = get_telemetry_manager(config)
@@ -288,6 +304,8 @@ class TestMachineMetricsCallbacks:
             enabled=True,
             machine_metrics_enabled=True,
             collector_endpoint="http://localhost:4317",
+            export_traces=False,
+            export_metrics=False,
         )
         telemetry_manager = get_telemetry_manager(config)
         exporter = MachineMetricsExporter(telemetry_manager)
@@ -308,6 +326,8 @@ class TestMachineMetricsCallbacks:
             enabled=True,
             machine_metrics_enabled=True,
             collector_endpoint="http://localhost:4317",
+            export_traces=False,
+            export_metrics=False,
         )
         telemetry_manager = get_telemetry_manager(config)
         exporter = MachineMetricsExporter(telemetry_manager)
@@ -327,6 +347,8 @@ class TestMachineMetricsCallbacks:
             enabled=True,
             machine_metrics_enabled=True,
             collector_endpoint="http://localhost:4317",
+            export_traces=False,
+            export_metrics=False,
             service_name="test-service",
         )
         telemetry_manager = get_telemetry_manager(config)

@@ -137,7 +137,6 @@ def _load_hnsw_config() -> "HNSWIndexCacheConfig":
                 format_error_log(
                     "GIT-GENERAL-007",
                     f"Failed to load cache config from {config_file}: {e}. Using defaults.",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
             config = HNSWIndexCacheConfig.from_env()
@@ -184,7 +183,6 @@ def _load_fts_config() -> "FTSIndexCacheConfig":
                 format_error_log(
                     "GIT-GENERAL-008",
                     f"Failed to load FTS cache config from {config_file}: {e}. Using defaults.",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
             config = FTSIndexCacheConfig.from_env()

@@ -346,7 +346,6 @@ class GitOperationsService:
                     format_error_log(
                         "CACHE-GENERAL-016",
                         f"Cannot trigger migration: metadata file not found for {username}/{repo_alias}",
-                        extra={"correlation_id": get_correlation_id()},
                     )
                 )
                 return
@@ -360,7 +359,6 @@ class GitOperationsService:
                     format_error_log(
                         "CACHE-GENERAL-017",
                         f"Cannot trigger migration: golden_repo_alias not found in metadata for {username}/{repo_alias}",
-                        extra={"correlation_id": get_correlation_id()},
                     )
                 )
                 return
@@ -376,7 +374,6 @@ class GitOperationsService:
                     format_error_log(
                         "CACHE-GENERAL-018",
                         f"Cannot trigger migration: golden repo '{golden_repo_alias}' not found for {username}/{repo_alias}",
-                        extra={"correlation_id": get_correlation_id()},
                     )
                 )
                 return
@@ -405,7 +402,6 @@ class GitOperationsService:
                 format_error_log(
                     "CACHE-GENERAL-019",
                     f"Failed to check/trigger migration for {username}/{repo_alias}: {str(e)}",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
 

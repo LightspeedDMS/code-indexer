@@ -10,7 +10,7 @@ aren't met, and error handling returns strings instead of raising exceptions pro
 
 import json
 import pytest
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 from click.testing import CliRunner
 from datetime import datetime, timezone
 
@@ -53,6 +53,7 @@ class TestCliErrorPropagation:
                 {
                     "mode": "remote",
                     "server_url": "http://localhost:8000",
+                    "username": "testuser",
                     "encrypted_credentials": {"username": "testuser"},
                 }
             )
@@ -70,7 +71,10 @@ class TestCliErrorPropagation:
             ) as mock_create:
                 mock_client = AsyncMock()
                 # This simulates the error: returning string instead of AuthStatus
-                mock_client.get_auth_status = AsyncMock(
+                # get_auth_status is a synchronous method (auth_client.py:473),
+                # called without await -- Mock (not AsyncMock) is required so
+                # the string return value actually reaches the display layer.
+                mock_client.get_auth_status = Mock(
                     return_value="Error: Connection failed"
                 )
                 mock_create.return_value = mock_client
@@ -105,14 +109,13 @@ class TestCliErrorPropagation:
             ) as mock_create:
                 mock_client = AsyncMock()
                 # Proper response: return AuthStatus object even on error
-                mock_client.get_auth_status = AsyncMock(
+                mock_client.get_auth_status = Mock(
                     return_value=AuthStatus(
                         authenticated=False,
                         username=None,
                         role=None,
                         token_valid=False,
                         token_expires=None,
-                        refresh_expires=None,
                         server_url="http://localhost:8000",
                         last_refreshed=None,
                         permissions=[],
@@ -146,9 +149,10 @@ class TestCliErrorPropagation:
             ) as mock_create:
                 mock_client = AsyncMock()
                 # This simulates the error: returning string instead of dict
-                mock_client.check_basic_health = AsyncMock(
-                    return_value="Connection timeout"
-                )
+                # check_basic_health is a synchronous method (system_client.py:45),
+                # called without await -- Mock (not AsyncMock) is required so
+                # the string return value actually reaches the display layer.
+                mock_client.check_basic_health = Mock(return_value="Connection timeout")
                 mock_create.return_value = mock_client
 
                 import os
@@ -176,7 +180,7 @@ class TestCliErrorPropagation:
             ) as mock_create:
                 mock_client = AsyncMock()
                 # Proper response: return dict
-                mock_client.check_basic_health = AsyncMock(
+                mock_client.check_basic_health = Mock(
                     return_value={
                         "status": "ok",
                         "message": "System is healthy",
@@ -203,7 +207,7 @@ class TestCliErrorPropagation:
             ) as mock_create:
                 mock_client = AsyncMock()
                 # Test with exception raising
-                mock_client.validate_token = AsyncMock(
+                mock_client.validate_credentials = Mock(
                     side_effect=APIClientError("Token validation failed")
                 )
                 mock_create.return_value = mock_client
@@ -234,7 +238,11 @@ class TestCliErrorPropagation:
             ) as mock_create:
                 mock_client = AsyncMock()
                 # Simulate string return instead of CredentialHealth
-                mock_client.check_credential_health = AsyncMock(
+                # check_credential_health is a synchronous method
+                # (auth_client.py:680), called without await -- Mock (not
+                # AsyncMock) is required so the string return value actually
+                # reaches the display layer.
+                mock_client.check_credential_health = Mock(
                     return_value="Credential check failed"
                 )
                 mock_create.return_value = mock_client
@@ -306,7 +314,7 @@ class TestCliErrorPropagation:
                 "code_indexer.api_clients.auth_client.create_auth_client"
             ) as mock_create:
                 mock_client = AsyncMock()
-                mock_client.get_auth_status = AsyncMock(
+                mock_client.get_auth_status = Mock(
                     side_effect=ConnectionError("Network unreachable")
                 )
                 mock_create.return_value = mock_client
@@ -323,7 +331,7 @@ class TestCliErrorPropagation:
                 "code_indexer.api_clients.system_client.create_system_client"
             ) as mock_create:
                 mock_client = AsyncMock()
-                mock_client.check_basic_health = AsyncMock(
+                mock_client.check_basic_health = Mock(
                     side_effect=AuthenticationError("Invalid token")
                 )
                 mock_create.return_value = mock_client

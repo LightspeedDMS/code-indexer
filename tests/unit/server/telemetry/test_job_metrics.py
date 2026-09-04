@@ -81,23 +81,27 @@ class TestJobMetricsCreation:
     def test_metrics_created_when_telemetry_enabled(self):
         """
         JobMetrics is created when telemetry is enabled.
+
+        Bug #1744 (round 4): this test used to construct a real
+        TelemetryConfig(enabled=True, export_metrics=True) via
+        get_telemetry_manager(), whose teardown forces a real OTLP
+        metrics export attempt against an unreachable localhost:4317
+        collector -- confirmed 6.92s solo teardown cost. Fixed with
+        active_job_metrics() (otel_test_support.py, sibling of
+        active_application_metrics()): a real, locally-owned
+        MeterProvider + InMemoryMetricReader, zero network I/O.
+        JobMetrics.is_active genuinely requires
+        telemetry_manager._config.export_metrics truthy (job_metrics.py,
+        identical pattern to ApplicationMetrics), so a raw
+        export_metrics=False flip would have broken this assertion.
         """
-        from code_indexer.server.telemetry import get_telemetry_manager
-        from code_indexer.server.telemetry.job_metrics import (
-            JobMetrics,
+        from tests.unit.server.telemetry.otel_test_support import (
+            active_job_metrics,
         )
 
-        config = TelemetryConfig(
-            enabled=True,
-            export_metrics=True,
-            collector_endpoint="http://localhost:4317",
-        )
-        telemetry_manager = get_telemetry_manager(config)
-
-        metrics = JobMetrics(telemetry_manager)
-
-        assert metrics is not None
-        assert metrics.is_active
+        with active_job_metrics() as (metrics, _reader):
+            assert metrics is not None
+            assert metrics.is_active
 
     def test_metrics_not_active_when_disabled(self):
         """
@@ -150,81 +154,65 @@ class TestJobCounterMetrics:
     def test_record_job_completed_increments_counter(self):
         """
         record_job_completed() increments the completed jobs counter.
+
+        Bug #1744 sibling (round 4): real-network dependency fixed with
+        active_job_metrics(), same mechanism used throughout this file.
         """
-        from code_indexer.server.telemetry import get_telemetry_manager
-        from code_indexer.server.telemetry.job_metrics import (
-            JobMetrics,
+        from tests.unit.server.telemetry.otel_test_support import (
+            active_job_metrics,
         )
 
-        config = TelemetryConfig(
-            enabled=True,
-            export_metrics=True,
-            collector_endpoint="http://localhost:4317",
-        )
-        telemetry_manager = get_telemetry_manager(config)
-        metrics = JobMetrics(telemetry_manager)
+        with active_job_metrics() as (metrics, _reader):
+            # Record job completion - should not raise
+            metrics.record_job_completed(
+                job_type="repository_sync",
+                duration_seconds=120.5,
+            )
 
-        # Record job completion - should not raise
-        metrics.record_job_completed(
-            job_type="repository_sync",
-            duration_seconds=120.5,
-        )
-
-        # Verify counter exists
-        assert metrics._jobs_completed_counter is not None
+            # Verify counter exists
+            assert metrics._jobs_completed_counter is not None
 
     def test_record_job_failed_increments_counter(self):
         """
         record_job_failed() increments the failed jobs counter with error_type.
+
+        Bug #1744 sibling (round 4): same fix as the sibling test above.
         """
-        from code_indexer.server.telemetry import get_telemetry_manager
-        from code_indexer.server.telemetry.job_metrics import (
-            JobMetrics,
+        from tests.unit.server.telemetry.otel_test_support import (
+            active_job_metrics,
         )
 
-        config = TelemetryConfig(
-            enabled=True,
-            export_metrics=True,
-            collector_endpoint="http://localhost:4317",
-        )
-        telemetry_manager = get_telemetry_manager(config)
-        metrics = JobMetrics(telemetry_manager)
+        with active_job_metrics() as (metrics, _reader):
+            # Record job failure - should not raise
+            metrics.record_job_failed(
+                job_type="repository_sync",
+                error_type="git_clone_failed",
+                duration_seconds=30.0,
+            )
 
-        # Record job failure - should not raise
-        metrics.record_job_failed(
-            job_type="repository_sync",
-            error_type="git_clone_failed",
-            duration_seconds=30.0,
-        )
-
-        # Verify counter exists
-        assert metrics._jobs_failed_counter is not None
+            # Verify counter exists
+            assert metrics._jobs_failed_counter is not None
 
     def test_record_job_duration_histogram(self):
         """
         record_job_completed() records duration in histogram.
+
+        Bug #1744 sibling (round 4): same fix as the other tests in this
+        class.
         """
-        from code_indexer.server.telemetry import get_telemetry_manager
-        from code_indexer.server.telemetry.job_metrics import (
-            JobMetrics,
+        from tests.unit.server.telemetry.otel_test_support import (
+            active_job_metrics,
         )
 
-        config = TelemetryConfig(
-            enabled=True,
-            export_metrics=True,
-            collector_endpoint="http://localhost:4317",
-        )
-        telemetry_manager = get_telemetry_manager(config)
-        metrics = JobMetrics(telemetry_manager)
+        with active_job_metrics() as (metrics, _reader):
+            # Record a job completion with duration
+            metrics.record_job_completed(
+                job_type="repository_activation",
+                duration_seconds=45.5,
+            )
 
-        # Record a job completion with duration
-        metrics.record_job_completed(
-            job_type="repository_activation",
-            duration_seconds=45.5,
-        )
-
-        # Verify histogram exists
-        assert metrics._jobs_duration_histogram is not None
+            # Verify histogram exists
+            assert metrics._jobs_duration_histogram is not None
 
 
 # =============================================================================
@@ -257,49 +245,38 @@ class TestJobGaugeMetrics:
     def test_set_job_counts_callback(self):
         """
         set_job_counts_callback() registers callback for active/queued gauges.
+
+        Bug #1744 sibling (round 4): real-network dependency fixed with
+        active_job_metrics(), same mechanism used throughout this file.
         """
-        from code_indexer.server.telemetry import get_telemetry_manager
-        from code_indexer.server.telemetry.job_metrics import (
-            JobMetrics,
+        from tests.unit.server.telemetry.otel_test_support import (
+            active_job_metrics,
         )
 
-        config = TelemetryConfig(
-            enabled=True,
-            export_metrics=True,
-            collector_endpoint="http://localhost:4317",
-        )
-        telemetry_manager = get_telemetry_manager(config)
-        metrics = JobMetrics(telemetry_manager)
+        with active_job_metrics() as (metrics, _reader):
+            # Register callback
+            def get_job_counts():
+                return {"active": 3, "queued": 5}
 
-        # Register callback
-        def get_job_counts():
-            return {"active": 3, "queued": 5}
+            metrics.set_job_counts_callback(get_job_counts)
 
-        metrics.set_job_counts_callback(get_job_counts)
-
-        # Verify callback is set
-        assert metrics._job_counts_callback is not None
+            # Verify callback is set
+            assert metrics._job_counts_callback is not None
 
     def test_observable_gauges_registered(self):
         """
         Observable gauges for active and queued jobs are registered.
+
+        Bug #1744 sibling (round 4): same fix as the sibling test above.
         """
-        from code_indexer.server.telemetry import get_telemetry_manager
-        from code_indexer.server.telemetry.job_metrics import (
-            JobMetrics,
+        from tests.unit.server.telemetry.otel_test_support import (
+            active_job_metrics,
         )
 
-        config = TelemetryConfig(
-            enabled=True,
-            export_metrics=True,
-            collector_endpoint="http://localhost:4317",
-        )
-        telemetry_manager = get_telemetry_manager(config)
-        metrics = JobMetrics(telemetry_manager)
-
-        # Verify gauges exist
-        assert metrics._jobs_active_gauge is not None
-        assert metrics._jobs_queued_gauge is not None
+        with active_job_metrics() as (metrics, _reader):
+            # Verify gauges exist
+            assert metrics._jobs_active_gauge is not None
+            assert metrics._jobs_queued_gauge is not None
 
 
 # =============================================================================
@@ -332,76 +309,60 @@ class TestRepositoryMetrics:
     def test_set_repository_counts_callback(self):
         """
         set_repository_counts_callback() registers callback for repo gauges.
+
+        Bug #1744 sibling (round 4): real-network dependency fixed with
+        active_job_metrics(), same mechanism used throughout this file.
         """
-        from code_indexer.server.telemetry import get_telemetry_manager
-        from code_indexer.server.telemetry.job_metrics import (
-            JobMetrics,
+        from tests.unit.server.telemetry.otel_test_support import (
+            active_job_metrics,
         )
 
-        config = TelemetryConfig(
-            enabled=True,
-            export_metrics=True,
-            collector_endpoint="http://localhost:4317",
-        )
-        telemetry_manager = get_telemetry_manager(config)
-        metrics = JobMetrics(telemetry_manager)
+        with active_job_metrics() as (metrics, _reader):
+            # Register callback
+            def get_repo_counts():
+                return {"total": 10, "indexed": 8}
 
-        # Register callback
-        def get_repo_counts():
-            return {"total": 10, "indexed": 8}
+            metrics.set_repository_counts_callback(get_repo_counts)
 
-        metrics.set_repository_counts_callback(get_repo_counts)
-
-        # Verify callback is set
-        assert metrics._repo_counts_callback is not None
+            # Verify callback is set
+            assert metrics._repo_counts_callback is not None
 
     def test_repository_gauges_registered(self):
         """
         Observable gauges for repository counts are registered.
+
+        Bug #1744 sibling (round 4): same fix as the sibling test above.
         """
-        from code_indexer.server.telemetry import get_telemetry_manager
-        from code_indexer.server.telemetry.job_metrics import (
-            JobMetrics,
+        from tests.unit.server.telemetry.otel_test_support import (
+            active_job_metrics,
         )
 
-        config = TelemetryConfig(
-            enabled=True,
-            export_metrics=True,
-            collector_endpoint="http://localhost:4317",
-        )
-        telemetry_manager = get_telemetry_manager(config)
-        metrics = JobMetrics(telemetry_manager)
-
-        # Verify gauges exist
-        assert metrics._repos_total_gauge is not None
-        assert metrics._repos_indexed_gauge is not None
+        with active_job_metrics() as (metrics, _reader):
+            # Verify gauges exist
+            assert metrics._repos_total_gauge is not None
+            assert metrics._repos_indexed_gauge is not None
 
     def test_record_repository_refresh_duration(self):
         """
         record_repository_refresh() records refresh duration histogram.
+
+        Bug #1744 sibling (round 4): same fix as the other tests in this
+        class.
         """
-        from code_indexer.server.telemetry import get_telemetry_manager
-        from code_indexer.server.telemetry.job_metrics import (
-            JobMetrics,
+        from tests.unit.server.telemetry.otel_test_support import (
+            active_job_metrics,
         )
 
-        config = TelemetryConfig(
-            enabled=True,
-            export_metrics=True,
-            collector_endpoint="http://localhost:4317",
-        )
-        telemetry_manager = get_telemetry_manager(config)
-        metrics = JobMetrics(telemetry_manager)
+        with active_job_metrics() as (metrics, _reader):
+            # Record refresh duration - should not raise
+            metrics.record_repository_refresh(
+                repository="test-repo",
+                duration_seconds=15.5,
+                status="success",
+            )
 
-        # Record refresh duration - should not raise
-        metrics.record_repository_refresh(
-            repository="test-repo",
-            duration_seconds=15.5,
-            status="success",
-        )
-
-        # Verify histogram exists
-        assert metrics._repos_refresh_duration_histogram is not None
+            # Verify histogram exists
+            assert metrics._repos_refresh_duration_histogram is not None
 
 
 # =============================================================================

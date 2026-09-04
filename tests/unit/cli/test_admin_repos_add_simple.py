@@ -6,6 +6,7 @@ without mocking the entire authentication and API stack.
 """
 
 import pytest
+from unittest.mock import patch
 from click.testing import CliRunner
 import re
 
@@ -14,6 +15,23 @@ from code_indexer.cli import cli
 
 class TestAdminReposAddSimple:
     """Simple tests for admin repos add command."""
+
+    @pytest.fixture(autouse=True)
+    def mock_remote_mode_gate(self):
+        """Auto-mock the require_mode("remote") gate on admin_group.
+
+        disabled_commands.py independently binds detect_current_mode via its
+        own module-level import, so it is unaffected by patching
+        find_project_root at code_indexer.mode_detection.command_mode_detector
+        (see #1742). Without this, every admin_group invocation raises
+        DisabledCommandError before reaching the command's own argument
+        validation / help output.
+        """
+        with patch(
+            "code_indexer.disabled_commands.detect_current_mode",
+            return_value="remote",
+        ):
+            yield
 
     @pytest.fixture
     def runner(self) -> CliRunner:

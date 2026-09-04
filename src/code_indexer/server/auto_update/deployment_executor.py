@@ -218,12 +218,62 @@ class DeploymentExecutor:
         self.drain_timeout = drain_timeout
         self.drain_poll_interval = drain_poll_interval
 
+    def _resolve_jwt_postgres_dsn(self) -> Optional[str]:
+        """Resolve the postgres_dsn to use for JWT secret storage.
+
+        Bug #1781: in cluster (PostgreSQL) mode, the real server signs and
+        validates JWTs using a secret shared across nodes via the
+        PostgreSQL cluster_secrets table (JWTSecretManager(pg_dsn=...),
+        startup/service_init.py), not the node-local secret file. Returns
+        the config's postgres_dsn only when storage_mode == "postgres".
+
+        Anti-fallback (CLAUDE.md): an unresolvable config or a postgres
+        config missing its dsn are operator/environment failures, not
+        "use file-based JWT storage" signals - degrading silently here
+        would recreate this exact bug, just invisibly. Both RAISE
+        (RuntimeError); the caller _get_auth_token() already catches
+        Exception (DEPLOY-GENERAL-081) and returns None, its pre-existing
+        safe degraded path. Genuine SQLite mode still returns None.
+
+        Returns:
+            The cluster postgres_dsn, or None for standalone/SQLite mode.
+
+        Raises:
+            RuntimeError: config unavailable, or postgres mode without a
+                postgres_dsn.
+        """
+        from code_indexer.server.utils.config_manager import ServerConfigManager
+
+        config = ServerConfigManager(server_dir_path=str(_cidx_data_dir)).load_config()
+        if config is None:
+            raise RuntimeError(
+                f"Server bootstrap config is unavailable at {_cidx_data_dir}"
+            )
+
+        if getattr(config, "storage_mode", "") != "postgres":
+            return None
+
+        dsn: Optional[str] = getattr(config, "postgres_dsn", None)
+        if not dsn:
+            raise RuntimeError(
+                "PostgreSQL mode requires postgres_dsn but none is configured"
+            )
+
+        logger.debug(
+            "JWT secret storage resolved to cluster (postgres) mode",
+            extra={"correlation_id": get_correlation_id()},
+        )
+        return dsn
+
     def _get_auth_token(self) -> Optional[str]:
         """Generate JWT token directly using the server's JWT secret.
 
-        The auto-updater runs as the same OS user as the server, so it can
-        read the JWT secret file directly. This avoids needing to know the
-        admin password or make HTTP calls for authentication.
+        The auto-updater runs as the same OS user as the server, so in
+        standalone (SQLite) mode it can read the JWT secret file directly.
+        In cluster (PostgreSQL) mode, it instead reads the shared secret
+        from the cluster_secrets table via pg_dsn (Bug #1781) - see
+        _resolve_jwt_postgres_dsn(). Either way this avoids needing to know
+        the admin password or make HTTP calls for authentication.
 
         A fresh token is generated per call to avoid expiry during long
         deployments (Bug #243).
@@ -235,7 +285,8 @@ class DeploymentExecutor:
             from code_indexer.server.utils.jwt_secret_manager import JWTSecretManager
             from code_indexer.server.auth.jwt_manager import JWTManager
 
-            secret_manager = JWTSecretManager()
+            pg_dsn = self._resolve_jwt_postgres_dsn()
+            secret_manager = JWTSecretManager(str(_cidx_data_dir), pg_dsn=pg_dsn)
             secret_key = secret_manager.get_or_create_secret()
 
             jwt_manager = JWTManager(secret_key=secret_key, token_expiration_minutes=10)

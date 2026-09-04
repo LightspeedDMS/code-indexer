@@ -189,7 +189,6 @@ def _load_category_map(caller_label: str) -> dict:
             format_error_log(
                 "MCP-GENERAL-036",
                 f"Failed to load category map in {caller_label}: {e}",
-                extra={"correlation_id": get_correlation_id()},
             )
         )
     return category_map
@@ -495,7 +494,6 @@ def _omni_search_code(params: Dict[str, Any], user: User) -> Dict[str, Any]:
             format_error_log(
                 "MCP-GENERAL-031",
                 f"MultiSearchService failed: {e}",
-                extra={"correlation_id": get_correlation_id()},
             )
         )
         return _empty_omni_response(errors={"service_error": str(e)})
@@ -1788,7 +1786,6 @@ async def _omni_regex_search(args: Dict[str, Any], user: User) -> Dict[str, Any]
                 format_error_log(
                     "MCP-GENERAL-039",
                     f"Omni-regex failed for {repo_alias}: {e}",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
 
@@ -2114,11 +2111,29 @@ async def handle_regex_search(args: Dict[str, Any], user: User) -> Dict[str, Any
     api_metrics_service.increment_regex_search(username=user.username)
 
     # Story #1039: bare-to-global alias fallback (read-only handler).
+    # Bug #1770: regex_search's single-repo resolution previously ALWAYS fell
+    # through to the golden-repo-only legacy resolver (_resolve_repo_path),
+    # which has no knowledge of user-activated repositories. search_code
+    # never hits this because it delegates activated-repo resolution to
+    # query_user_repositories (via ActivatedRepoManager) internally. Track
+    # whether the user genuinely has this alias activated here -- reusing the
+    # SAME user_has_activated_repo() check that already gates the fallback --
+    # so the resolution step below can route to ActivatedRepoManager directly
+    # for activated repos, exactly like _resolve_temporal_repo_path already
+    # does, instead of reinventing a third resolution mechanism. This check
+    # depends ONLY on activated_repo_manager being available -- it must not
+    # be skipped merely because golden_repo_manager (needed only for the
+    # global-fallback promotion below) happens to be unavailable.
+    _user_has_activated_repo = False
+    _arm = getattr(_utils.app_module, "activated_repo_manager", None)
     if isinstance(repository_alias, str) and not repository_alias.endswith("-global"):
-        _arm = getattr(_utils.app_module, "activated_repo_manager", None)
-        _grm = getattr(_utils.app_module, "golden_repo_manager", None)
-        if _arm is not None and _grm is not None:
-            if not _arm.user_has_activated_repo(user.username, repository_alias):
+        if _arm is not None:
+            _user_has_activated_repo = _arm.user_has_activated_repo(
+                user.username, repository_alias
+            )
+        if not _user_has_activated_repo:
+            _grm = getattr(_utils.app_module, "golden_repo_manager", None)
+            if _arm is not None and _grm is not None:
                 from ._global_fallback import try_global_fallback
 
                 _promoted = try_global_fallback(repository_alias, _grm)
@@ -2133,8 +2148,20 @@ async def handle_regex_search(args: Dict[str, Any], user: User) -> Dict[str, Any
                     repository_alias = _promoted
 
     try:
-        golden_repos_dir = _get_golden_repos_dir()
-        resolved = _get_legacy()._resolve_repo_path(repository_alias, golden_repos_dir)
+        if (
+            _user_has_activated_repo
+            and isinstance(repository_alias, str)
+            and not repository_alias.endswith("-global")
+            and _arm is not None
+        ):
+            resolved = _arm.get_activated_repo_path(user.username, repository_alias)
+            if resolved and not Path(resolved).exists():
+                resolved = None
+        else:
+            golden_repos_dir = _get_golden_repos_dir()
+            resolved = _get_legacy()._resolve_repo_path(
+                repository_alias, golden_repos_dir
+            )
         if not resolved:
             return _mcp_response(
                 {
@@ -2185,7 +2212,6 @@ async def handle_regex_search(args: Dict[str, Any], user: User) -> Dict[str, Any
             format_error_log(
                 "MCP-GENERAL-040",
                 f"Search timeout in regex_search: {e}",
-                extra={"correlation_id": get_correlation_id()},
             )
         )
         error_formatter = SearchErrorFormatter()
@@ -2281,7 +2307,6 @@ def handle_get_cached_content(args: Dict[str, Any], user: User) -> Dict[str, Any
             format_error_log(
                 "MCP-GENERAL-117",
                 f"Cache handle not found or expired: {handle}",
-                extra={"correlation_id": get_correlation_id()},
             )
         )
         return _mcp_response(

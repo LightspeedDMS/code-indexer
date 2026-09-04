@@ -342,7 +342,6 @@ class FTSIndexCache:
                                     format_error_log(
                                         "GIT-GENERAL-009",
                                         f"FTS index reload failed: {e}",
-                                        extra={"correlation_id": get_correlation_id()},
                                     )
                                 )
 
@@ -575,7 +574,6 @@ class FTSIndexCache:
                 format_error_log(
                     "GIT-GENERAL-010",
                     "FTS background cleanup thread already running",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
             return
@@ -592,7 +590,6 @@ class FTSIndexCache:
                         format_error_log(
                             "GIT-GENERAL-011",
                             f"Error in FTS background cleanup: {e}",
-                            extra={"correlation_id": get_correlation_id()},
                         )
                     )
 

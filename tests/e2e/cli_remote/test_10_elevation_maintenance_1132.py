@@ -679,6 +679,7 @@ class TestAC2MaintenanceLocalhostOnly:
         env["PYTHONPATH"] = str(Path(__file__).resolve().parents[3] / "src")
         env["CIDX_TEST_FAST_SQLITE"] = "1"
         env["CIDX_SERVER_DATA_DIR"] = str(data_dir)
+        env["CIDX_DATA_DIR"] = str(data_dir)
 
         proc = subprocess.Popen(
             [

@@ -54,8 +54,8 @@ def _list_self(args: Dict[str, Any], user: User, **kwargs: Any) -> Dict[str, Any
             format_error_log(
                 "QUERY-GENERAL-006",
                 f"Error in _list_self: {e}",
-                extra={"correlation_id": get_correlation_id()},
-            )
+            ),
+            extra={"correlation_id": get_correlation_id()},
         )
         return _mcp_response({"success": False, "error": str(e)})  # type: ignore[no-any-return]
 
@@ -88,8 +88,8 @@ def _list_user(args: Dict[str, Any], user: User, **kwargs: Any) -> Dict[str, Any
             format_error_log(
                 "REPO-GENERAL-002",
                 f"Error in _list_user: {e}",
-                extra={"correlation_id": get_correlation_id()},
-            )
+            ),
+            extra={"correlation_id": get_correlation_id()},
         )
         return _mcp_response({"success": False, "error": str(e)})  # type: ignore[no-any-return]
 
@@ -119,8 +119,8 @@ def _list_all(args: Dict[str, Any], user: User, **kwargs: Any) -> Dict[str, Any]
             format_error_log(
                 "REPO-GENERAL-005",
                 f"Error in _list_all: {e}",
-                extra={"correlation_id": get_correlation_id()},
-            )
+            ),
+            extra={"correlation_id": get_correlation_id()},
         )
         return _mcp_response({"success": False, "error": str(e)})  # type: ignore[no-any-return]
 
@@ -146,8 +146,8 @@ def _list_system(args: Dict[str, Any], user: User, **kwargs: Any) -> Dict[str, A
             format_error_log(
                 "MCP-CRED-001",
                 f"Error in _list_system: {e}",
-                extra={"correlation_id": get_correlation_id()},
-            )
+            ),
+            extra={"correlation_id": get_correlation_id()},
         )
         return _mcp_response({"success": False, "error": str(e)})  # type: ignore[no-any-return]
 
@@ -175,8 +175,8 @@ def _create_self(args: Dict[str, Any], user: User, **kwargs: Any) -> Dict[str, A
             format_error_log(
                 "QUERY-GENERAL-007",
                 f"Error in _create_self: {e}",
-                extra={"correlation_id": get_correlation_id()},
-            )
+            ),
+            extra={"correlation_id": get_correlation_id()},
         )
         return _mcp_response({"success": False, "error": str(e)})  # type: ignore[no-any-return]
 
@@ -199,8 +199,8 @@ def _delete_self(args: Dict[str, Any], user: User, **kwargs: Any) -> Dict[str, A
             format_error_log(
                 "REPO-GENERAL-001",
                 f"Error in _delete_self: {e}",
-                extra={"correlation_id": get_correlation_id()},
-            )
+            ),
+            extra={"correlation_id": get_correlation_id()},
         )
         return _mcp_response({"success": False, "error": str(e)})  # type: ignore[no-any-return]
 
@@ -233,8 +233,8 @@ def _create_user(args: Dict[str, Any], user: User, **kwargs: Any) -> Dict[str, A
             format_error_log(
                 "REPO-GENERAL-003",
                 f"Error in _create_user: {e}",
-                extra={"correlation_id": get_correlation_id()},
-            )
+            ),
+            extra={"correlation_id": get_correlation_id()},
         )
         return _mcp_response({"success": False, "error": str(e)})  # type: ignore[no-any-return]
 
@@ -262,8 +262,8 @@ def _delete_user(args: Dict[str, Any], user: User, **kwargs: Any) -> Dict[str, A
             format_error_log(
                 "REPO-GENERAL-004",
                 f"Error in _delete_user: {e}",
-                extra={"correlation_id": get_correlation_id()},
-            )
+            ),
+            extra={"correlation_id": get_correlation_id()},
         )
         return _mcp_response({"success": False, "error": str(e)})  # type: ignore[no-any-return]
 

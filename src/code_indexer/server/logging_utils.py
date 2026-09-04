@@ -63,6 +63,18 @@ def format_error_log(error_code: str, message: str, **context) -> str:
     Returns:
         Formatted log message: "[{ERROR_CODE}] message key1=value1 key2=value2"
 
+    Raises:
+        TypeError: if ``extra`` is passed in ``**context``. This is a
+            plain string-formatting helper, not ``logger.error()``/
+            ``logger.warning()`` -- it has no real ``extra=`` mechanism.
+            A caller intending to reach Python logging's real ``extra=``
+            parameter must pass it to the ``logger.*()`` call itself
+            (see ``get_log_extra()``), never to this function. Bug
+            #1649/#1716: 693 call sites across the codebase previously
+            passed ``extra={...}`` here, silently stringifying the dict
+            verbatim into the log message instead of ever reaching
+            structured logging.
+
     Examples:
         >>> format_error_log("AUTH-OIDC-001", "Connection failed", issuer="https://example.com")
         '[AUTH-OIDC-001] Connection failed issuer=https://example.com'
@@ -70,6 +82,12 @@ def format_error_log(error_code: str, message: str, **context) -> str:
         >>> format_error_log("MCP-TOOL-042", "Tool execution failed")
         '[MCP-TOOL-042] Tool execution failed'
     """
+    if "extra" in context:
+        raise TypeError(
+            "format_error_log() does not accept 'extra'; pass extra= to "
+            "logger.error()/logger.warning() instead (Bug #1649/#1716)"
+        )
+
     parts = [f"[{error_code}]", message]
 
     # Add context if provided

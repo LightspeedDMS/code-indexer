@@ -181,6 +181,10 @@ class ActivatedRepositoryInfo(BaseModel):
     last_accessed: str
     # AC4: In-flight deactivation job info, null when no active deactivation
     deactivation_job: Optional[Dict[str, Any]] = None
+    # Bug #1740: real sync status (synced/needs_sync/conflict), computed via
+    # ActivatedRepoManager.compute_sync_status(). None when it could not be
+    # computed (e.g. a race with deactivation) -- never a fabricated value.
+    sync_status: Optional[str] = None
 
 
 class SwitchBranchRequest(BaseModel):

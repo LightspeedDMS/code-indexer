@@ -703,7 +703,6 @@ def _apply_payload_truncation(
             format_error_log(
                 "MCP-GENERAL-023",
                 f"Failed to batch-store results in payload truncation: {e}",
-                extra={"correlation_id": get_correlation_id()},
             )
         )
         # Keep original content on error
@@ -773,7 +772,6 @@ def _apply_fts_payload_truncation(
                 format_error_log(
                     "MCP-GENERAL-024",
                     f"Failed to batch-store code_snippets in FTS truncation: {e}",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
             for idx in snippet_large_indices:
@@ -812,7 +810,6 @@ def _apply_fts_payload_truncation(
                 format_error_log(
                     "MCP-GENERAL-025",
                     f"Failed to batch-store match_texts in FTS truncation: {e}",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
             for idx in match_large_indices:
@@ -861,7 +858,6 @@ def _truncate_regex_field(
             format_error_log(
                 "MCP-GENERAL-026",
                 f"Failed to truncate {field_name}: {e}",
-                extra={"correlation_id": get_correlation_id()},
             )
         )
         result_dict[f"{field_name}_cache_handle"] = None
@@ -946,7 +942,6 @@ def _truncate_field(
             format_error_log(
                 "MCP-GENERAL-027",
                 f"Failed to truncate {log_context}: {e}",
-                extra={"correlation_id": get_correlation_id()},
             )
         )
         container[f"{field_name}_cache_handle"] = None
@@ -1060,7 +1055,6 @@ def _apply_scip_payload_truncation(
                 format_error_log(
                     "MCP-GENERAL-028",
                     f"Failed to truncate SCIP context: {e}",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
             # Keep original context on error, add metadata
@@ -1283,7 +1277,6 @@ def _enforce_wildcard_cap(
                     "MCP-GENERAL-032",
                     f"Wildcard expansion cap exceeded: pattern={pattern!r} "
                     f"matched={count} cap={cap}",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
             return breach
@@ -1320,7 +1313,6 @@ def _enforce_repo_count_cap(aliases: List[str]) -> "Optional[CapBreach]":
             format_error_log(
                 "MCP-GENERAL-033",
                 f"Total repo count cap exceeded: count={count} cap={cap}",
-                extra={"correlation_id": get_correlation_id()},
             )
         )
         return CapBreach(
@@ -1380,7 +1372,6 @@ def _expand_wildcard_patterns(
             format_error_log(
                 "MCP-GENERAL-029",
                 f"Failed to list global repos for wildcard expansion: {e}",
-                extra={"correlation_id": get_correlation_id()},
             )
         )
         return patterns
@@ -1419,7 +1410,6 @@ def _expand_wildcard_patterns(
                     format_error_log(
                         "MCP-GENERAL-030",
                         f"Wildcard pattern '{pattern}' matched no repositories",
-                        extra={"correlation_id": get_correlation_id()},
                     )
                 )
         else:

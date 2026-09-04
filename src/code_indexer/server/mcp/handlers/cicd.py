@@ -341,7 +341,6 @@ async def handle_gh_actions_list_runs(
             format_error_log(
                 "MCP-GENERAL-081",
                 f"GitHub authentication failed: {e}",
-                extra={"correlation_id": get_correlation_id()},
             )
         )
         return _mcp_response(
@@ -356,7 +355,6 @@ async def handle_gh_actions_list_runs(
             format_error_log(
                 "MCP-GENERAL-082",
                 f"GitHub repository not found: {e}",
-                extra={"correlation_id": get_correlation_id()},
             )
         )
         return _mcp_response(
@@ -439,7 +437,6 @@ async def handle_gh_actions_get_run(args: Dict[str, Any], user: User) -> Dict[st
             format_error_log(
                 "MCP-GENERAL-083",
                 f"GitHub authentication failed: {e}",
-                extra={"correlation_id": get_correlation_id()},
             )
         )
         return _mcp_response(
@@ -454,7 +451,6 @@ async def handle_gh_actions_get_run(args: Dict[str, Any], user: User) -> Dict[st
             format_error_log(
                 "MCP-GENERAL-084",
                 f"GitHub repository not found: {e}",
-                extra={"correlation_id": get_correlation_id()},
             )
         )
         return _mcp_response(
@@ -552,7 +548,6 @@ async def handle_gh_actions_search_logs(
             format_error_log(
                 "MCP-GENERAL-085",
                 f"GitHub authentication failed: {e}",
-                extra={"correlation_id": get_correlation_id()},
             )
         )
         return _mcp_response(
@@ -567,7 +562,6 @@ async def handle_gh_actions_search_logs(
             format_error_log(
                 "MCP-GENERAL-086",
                 f"GitHub repository not found: {e}",
-                extra={"correlation_id": get_correlation_id()},
             )
         )
         return _mcp_response(
@@ -653,7 +647,6 @@ async def handle_gh_actions_get_job_logs(
             format_error_log(
                 "MCP-GENERAL-087",
                 f"GitHub authentication failed: {e}",
-                extra={"correlation_id": get_correlation_id()},
             )
         )
         return _mcp_response(
@@ -668,7 +661,6 @@ async def handle_gh_actions_get_job_logs(
             format_error_log(
                 "MCP-GENERAL-088",
                 f"GitHub repository not found: {e}",
-                extra={"correlation_id": get_correlation_id()},
             )
         )
         return _mcp_response(
@@ -754,7 +746,6 @@ async def handle_gh_actions_retry_run(
             format_error_log(
                 "MCP-GENERAL-089",
                 f"GitHub authentication failed: {e}",
-                extra={"correlation_id": get_correlation_id()},
             )
         )
         return _mcp_response(
@@ -769,7 +760,6 @@ async def handle_gh_actions_retry_run(
             format_error_log(
                 "MCP-GENERAL-090",
                 f"GitHub repository not found: {e}",
-                extra={"correlation_id": get_correlation_id()},
             )
         )
         return _mcp_response(
@@ -855,7 +845,6 @@ async def handle_gh_actions_cancel_run(
             format_error_log(
                 "MCP-GENERAL-091",
                 f"GitHub authentication failed: {e}",
-                extra={"correlation_id": get_correlation_id()},
             )
         )
         return _mcp_response(
@@ -870,7 +859,6 @@ async def handle_gh_actions_cancel_run(
             format_error_log(
                 "MCP-GENERAL-092",
                 f"GitHub repository not found: {e}",
-                extra={"correlation_id": get_correlation_id()},
             )
         )
         return _mcp_response(
@@ -979,7 +967,6 @@ async def handle_gitlab_ci_list_pipelines(
             format_error_log(
                 "MCP-GENERAL-093",
                 f"GitLab authentication failed: {e}",
-                extra={"correlation_id": get_correlation_id()},
             )
         )
         return _mcp_response(
@@ -994,7 +981,6 @@ async def handle_gitlab_ci_list_pipelines(
             format_error_log(
                 "MCP-GENERAL-094",
                 f"GitLab project not found: {e}",
-                extra={"correlation_id": get_correlation_id()},
             )
         )
         return _mcp_response(
@@ -1089,7 +1075,6 @@ async def handle_gitlab_ci_get_pipeline(
             format_error_log(
                 "MCP-GENERAL-095",
                 f"GitLab authentication failed: {e}",
-                extra={"correlation_id": get_correlation_id()},
             )
         )
         return _mcp_response(
@@ -1104,7 +1089,6 @@ async def handle_gitlab_ci_get_pipeline(
             format_error_log(
                 "MCP-GENERAL-096",
                 f"GitLab project not found: {e}",
-                extra={"correlation_id": get_correlation_id()},
             )
         )
         return _mcp_response(
@@ -1212,7 +1196,6 @@ async def handle_gitlab_ci_search_logs(
             format_error_log(
                 "MCP-GENERAL-097",
                 f"GitLab authentication failed: {e}",
-                extra={"correlation_id": get_correlation_id()},
             )
         )
         return _mcp_response(
@@ -1227,7 +1210,6 @@ async def handle_gitlab_ci_search_logs(
             format_error_log(
                 "MCP-GENERAL-098",
                 f"GitLab project not found: {e}",
-                extra={"correlation_id": get_correlation_id()},
             )
         )
         return _mcp_response(
@@ -1320,7 +1302,6 @@ async def handle_gitlab_ci_get_job_logs(
             format_error_log(
                 "MCP-GENERAL-099",
                 f"GitLab authentication failed: {e}",
-                extra={"correlation_id": get_correlation_id()},
             )
         )
         return _mcp_response(
@@ -1335,7 +1316,6 @@ async def handle_gitlab_ci_get_job_logs(
             format_error_log(
                 "MCP-GENERAL-100",
                 f"GitLab project not found: {e}",
-                extra={"correlation_id": get_correlation_id()},
             )
         )
         return _mcp_response(
@@ -1433,7 +1413,6 @@ async def handle_gitlab_ci_retry_pipeline(
             format_error_log(
                 "MCP-GENERAL-101",
                 f"GitLab authentication failed: {e}",
-                extra={"correlation_id": get_correlation_id()},
             )
         )
         return _mcp_response(
@@ -1448,7 +1427,6 @@ async def handle_gitlab_ci_retry_pipeline(
             format_error_log(
                 "MCP-GENERAL-102",
                 f"GitLab project not found: {e}",
-                extra={"correlation_id": get_correlation_id()},
             )
         )
         return _mcp_response(
@@ -1546,7 +1524,6 @@ async def handle_gitlab_ci_cancel_pipeline(
             format_error_log(
                 "MCP-GENERAL-103",
                 f"GitLab authentication failed: {e}",
-                extra={"correlation_id": get_correlation_id()},
             )
         )
         return _mcp_response(
@@ -1561,7 +1538,6 @@ async def handle_gitlab_ci_cancel_pipeline(
             format_error_log(
                 "MCP-GENERAL-104",
                 f"GitLab project not found: {e}",
-                extra={"correlation_id": get_correlation_id()},
             )
         )
         return _mcp_response(
@@ -1753,7 +1729,6 @@ def _handle_cicd_client_error(
             format_error_log(
                 error_code,
                 f"CI/CD authentication failed in {op_name}: {exc}",
-                extra={"correlation_id": get_correlation_id()},
             )
         )
         return _mcp_response(
@@ -1769,7 +1744,6 @@ def _handle_cicd_client_error(
             format_error_log(
                 error_code,
                 f"CI/CD repository not found in {op_name}: {exc}",
-                extra={"correlation_id": get_correlation_id()},
             )
         )
         return _mcp_response(

@@ -105,9 +105,52 @@ class TestOtelContextPropagatesToRealExportedLogRecordAcrossThreads:
             # TelemetryManager's log bridge registration attaches to.
             listener = install_queue_logging([])
             try:
+                # Bug #1744 investigation: export_traces=False here (not
+                # True) is deliberate, not an oversight. It removes ONE of
+                # two real, unreachable-network OTLP exporters this test
+                # used to construct. Per the already-documented Bug #1679
+                # invariant (test_request_tracing.py::
+                # test_instrument_fastapi_no_export_when_traces_disabled),
+                # export_traces=False still gives a real, valid, recording
+                # TracerProvider -- _setup_trace_exporter() is simply never
+                # called, so create_span() below still produces a genuine
+                # span (span_context.is_valid still holds), with zero span
+                # processors attached and nothing to flush on shutdown.
+                #
+                # This alone does NOT make the test fast, and is not meant
+                # to: the dominant remaining cost (~6-9s, confirmed live)
+                # is reset_telemetry_manager() -> LoggerProvider.shutdown()
+                # flushing the REAL BatchLogRecordProcessor(OTLPLogExporter)
+                # that _setup_log_exporter() constructs whenever
+                # export_logs=True. That processor's queue already has a
+                # real pending record by shutdown time regardless of this
+                # test's own marker call: _register_log_bridge_handler()
+                # runs (inside _initialize_otel()) BEFORE the
+                # "OpenTelemetry initialized: ..." logger.info() line a
+                # few statements later in manager.py -- and
+                # install_queue_logging() is already active at that point
+                # (required by this test to run first, see above) -- so
+                # that startup log line itself is captured and forwarded
+                # through the real bridge handler into the OTLP log
+                # exporter's queue before this test ever emits its own
+                # marker message. That dependency is INHERENT to
+                # this test's actual subject -- the real
+                # _register_log_bridge_handler()/LoggerProvider wiring that
+                # Story #1676 AC3 round 2 exists specifically to cover end
+                # to end -- and export_logs=True cannot be dropped without
+                # defeating that purpose. There is currently no config
+                # switch (unlike export_traces) that separates "construct a
+                # real LoggerProvider + register the log bridge handler"
+                # from "also attach a real network OTLP log exporter" --
+                # decoupling those would need a TelemetryManager change,
+                # out of scope for a test-only fix. This test is therefore
+                # judged a genuinely different class of #1744 sibling
+                # (structural network dependency on its own subject, not a
+                # swappable trace-only artifact) and is correctly left with
+                # a real, if now singular, network exporter.
                 config = TelemetryConfig(
                     enabled=True,
-                    export_traces=True,
+                    export_traces=False,
                     export_metrics=False,
                     export_logs=True,
                 )

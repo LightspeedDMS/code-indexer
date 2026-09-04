@@ -558,6 +558,7 @@ start_phase4_server() {
     PYTHONPATH="$SCRIPT_DIR/src" \
     CIDX_TEST_FAST_SQLITE=1 \
     CIDX_SERVER_DATA_DIR="$E2E_SERVER_DATA_DIR" \
+    CIDX_DATA_DIR="$E2E_SERVER_DATA_DIR" \
     VOYAGE_API_KEY="${E2E_VOYAGE_API_KEY:-${VOYAGE_API_KEY:-}}" \
         python3 -m uvicorn code_indexer.server.app:app \
             --host "$E2E_SERVER_HOST" \
@@ -594,6 +595,7 @@ start_fault_server() {
     _yellow "  Starting fault server on ${E2E_FAULT_SERVER_HOST}:${E2E_FAULT_SERVER_PORT}..."
     PYTHONPATH="$SCRIPT_DIR/src" \
     CIDX_SERVER_DATA_DIR="$E2E_FAULT_SERVER_DATA_DIR" \
+    CIDX_DATA_DIR="$E2E_FAULT_SERVER_DATA_DIR" \
     VOYAGE_API_KEY="${E2E_VOYAGE_API_KEY:-${VOYAGE_API_KEY:-}}" \
     CO_API_KEY="${E2E_COHERE_API_KEY:-${CO_API_KEY:-}}" \
         python3 -m uvicorn code_indexer.server.app:app \
@@ -769,6 +771,7 @@ start_pg_server() {
     # correctly falls back to the ServerConfig default of 127.0.0.1 instead.
     PYTHONPATH="$SCRIPT_DIR/src" \
     CIDX_SERVER_DATA_DIR="$E2E_PG_SERVER_DATA_DIR" \
+    CIDX_DATA_DIR="$E2E_PG_SERVER_DATA_DIR" \
     SYSTEMD_UNIT_DIR="$E2E_PG_SERVER_DATA_DIR/no-systemd-units" \
     VOYAGE_API_KEY="${E2E_VOYAGE_API_KEY:-${VOYAGE_API_KEY:-}}" \
         python3 -m uvicorn code_indexer.server.app:app \

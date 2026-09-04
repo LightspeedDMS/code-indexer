@@ -1463,6 +1463,7 @@ def make_lifespan(
 
         # Startup: Initialize PayloadCache for semantic search result truncation (Story #679)
         payload_cache = None
+        chunk_store_cross_process_poller = None
         logger.info(
             "Server startup: Initializing PayloadCache for semantic search",
             extra={"correlation_id": get_correlation_id()},
@@ -1502,6 +1503,33 @@ def make_lifespan(
                 extra={"correlation_id": get_correlation_id()},
             )
 
+            # Bug #1775 round 5: register this process's PayloadCache for
+            # cross-process chunk-store stale-prefix publishing, and start
+            # the background poller that discovers prefixes published by
+            # OTHER workers/nodes -- see chunk_store_cache_cross_process.py
+            # module docstring for the full design rationale.
+            from code_indexer.storage.shared.chunk_store_cache import (
+                get_global_chunk_store_cache,
+            )
+            from code_indexer.storage.shared.chunk_store_cache_cross_process import (
+                ChunkStoreCrossProcessPoller,
+                register_payload_cache,
+            )
+
+            register_payload_cache(payload_cache)
+            chunk_store_cross_process_poller = ChunkStoreCrossProcessPoller(
+                chunk_store_cache=get_global_chunk_store_cache(),
+                payload_cache=payload_cache,
+            )
+            chunk_store_cross_process_poller.start()
+            app.state.chunk_store_cross_process_poller = (
+                chunk_store_cross_process_poller
+            )
+            logger.info(
+                "ChunkStoreCrossProcessPoller started",
+                extra={"correlation_id": get_correlation_id()},
+            )
+
         except Exception as e:
             # Log error but don't block server startup
             logger.error(
@@ -1513,6 +1541,19 @@ def make_lifespan(
             )
             # Set payload_cache to None so handlers know it's unavailable
             app.state.payload_cache = None
+            app.state.chunk_store_cross_process_poller = None
+            # Bug #1775 round 6: if register_payload_cache() succeeded
+            # above but a LATER step in this same try block failed (e.g.
+            # poller construction/start), the module-level registration
+            # would otherwise dangle, pointed at a PayloadCache this
+            # except block just declared unavailable. Always clear it on
+            # this path -- cheap and idempotent even if registration
+            # never happened.
+            from code_indexer.storage.shared.chunk_store_cache_cross_process import (
+                reset_registered_payload_cache,
+            )
+
+            reset_registered_payload_cache()
 
         # Bug fix: Early ConfigService PG pool so scheduler inits read merged runtime config.
         # In postgres/cluster mode, ConfigService.set_connection_pool() triggers
@@ -5272,8 +5313,85 @@ def make_lifespan(
                     exc_info=True,
                 )
 
-        # Shutdown: Stop PayloadCache background cleanup (Story #679)
-        if payload_cache is not None:
+        # Shutdown: Stop ChunkStoreCrossProcessPoller (Bug #1775 round 5).
+        # Stopped BEFORE PayloadCache is closed below -- the poller reads
+        # from it on every tick.
+        poller_stopped_cleanly = True  # No poller -> nothing to worry about.
+        if chunk_store_cross_process_poller is not None:
+            try:
+                poller_stopped_cleanly = chunk_store_cross_process_poller.stop()
+                if poller_stopped_cleanly:
+                    logger.info(
+                        "ChunkStoreCrossProcessPoller stopped successfully",
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                else:
+                    # Round 6 (Codex): stop() itself already logged a
+                    # WARNING with the timeout detail -- this second,
+                    # higher-severity log makes the operational risk
+                    # visible at ERROR too. Round 7: PayloadCache.close()
+                    # below is now SKIPPED in this case (see the guard
+                    # there). Round 8 correction (Claude): this is
+                    # DEFENSIVE/over-cautious given PayloadCache.close()'s
+                    # CURRENT implementation (it only stops a background
+                    # cleanup thread -- it does not tear down the
+                    # connection manager or backend the poller actually
+                    # reads from), NOT a fix for an active use-after-close
+                    # race that exists today. Kept anyway as cheap
+                    # defense-in-depth: the whole process is exiting
+                    # regardless, so skipping the close costs nothing
+                    # (the OS reclaims everything on exit) and guards
+                    # against a FUTURE change to close()'s scope.
+                    logger.error(
+                        format_error_log(
+                            "APP-GENERAL-1775",
+                            "ChunkStoreCrossProcessPoller did not confirm "
+                            "stop -- PayloadCache.close() will be skipped",
+                        )
+                    )
+            except Exception as e:
+                logger.error(
+                    format_error_log(
+                        "APP-GENERAL-1775",
+                        f"Error stopping ChunkStoreCrossProcessPoller: {e}",
+                    ),
+                    exc_info=True,
+                )
+                poller_stopped_cleanly = False
+
+        # Bug #1775 round 6: clear the module-level cross-process
+        # PayloadCache registration on shutdown, regardless of whether a
+        # poller existed -- otherwise it survives into a torn-down
+        # PayloadCache, a real cross-test/cross-lifecycle contamination
+        # risk for in-process E2E suites (Claude code review finding).
+        from code_indexer.storage.shared.chunk_store_cache_cross_process import (
+            reset_registered_payload_cache,
+        )
+
+        reset_registered_payload_cache()
+
+        # Shutdown: Stop PayloadCache background cleanup (Story #679).
+        # Round 7 (Codex): SKIP closing it if the poller above did not
+        # confirm a clean stop. Round 8 correction (Claude): this is
+        # DEFENSIVE/over-cautious given PayloadCache.close()'s CURRENT
+        # implementation (it only stops a background cleanup thread --
+        # it does not tear down the connection manager or backend the
+        # poller actually reads from), NOT a fix for an active
+        # use-after-close race that exists today. Kept anyway as cheap
+        # defense-in-depth: the process is exiting regardless, so
+        # skipping the close costs nothing (the OS reclaims everything
+        # on exit) and guards against a FUTURE change to close()'s
+        # scope.
+        if payload_cache is not None and not poller_stopped_cleanly:
+            logger.warning(
+                "Skipping PayloadCache.close() -- ChunkStoreCrossProcess"
+                "Poller did not confirm stop; the process is exiting "
+                "regardless, so leaving it open (defensive precaution; "
+                "not a fix for an active hazard in close()'s current "
+                "implementation) costs nothing.",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        elif payload_cache is not None:
             try:
                 payload_cache.close()
                 logger.info(

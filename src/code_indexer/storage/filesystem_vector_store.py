@@ -1104,6 +1104,56 @@ class FilesystemVectorStore:
         # the only place the temporal location is decided.
         return self.base_path / collection_name
 
+    def preflight_chunk_store_writable(
+        self, collection_name: str, subdirectory: Optional[str] = None
+    ) -> None:
+        """Bug #1746 Change 4: verify the target collection's chunks.db
+        can be opened for write BEFORE any file is chunked/embedded.
+
+        No-op (healthy path, byte-identical to before this change) when:
+        - the collection does not use the CHUNKS_DB layout, or
+        - chunks.db does not exist yet (normal first-time indexing).
+
+        Raises ChunkStoreUnavailableError -- naming the chunks.db path and
+        the underlying OS error -- when chunks.db exists but cannot be
+        opened for write. Opens via the SAME open_chunk_store_for_path()
+        production writes use (then immediately closes), so this proves
+        real writability rather than guessing from permission bits alone
+        (catches root-owned files, disk-full, and corrupt-file cases
+        uniformly).
+        """
+        collection_path = self._get_collection_path(collection_name, subdirectory)
+        if not self._is_chunks_db_collection(collection_name, collection_path):
+            return
+
+        chunks_db_path = collection_path / "chunks.db"
+        if not chunks_db_path.exists():
+            return
+
+        from code_indexer.storage.sqlite_chunk_store import (
+            ChunkStoreUnavailableError,
+            is_fatal_chunk_store_write_error,
+            open_chunk_store_for_path,
+        )
+
+        try:
+            store = open_chunk_store_for_path(chunks_db_path, str(collection_path))
+            store.close()
+        except Exception as e:
+            # Bug #1746 code review finding B3: route classification
+            # through the SAME is_fatal_chunk_store_write_error()
+            # classifier H1 already built for the per-file write path --
+            # never a second, inconsistent rule. A real lock held by a
+            # separate process/connection (expected under concurrent
+            # CHUNKS_DB writers, since a fresh connection is opened per
+            # upsert_points() call with no cross-thread application lock)
+            # is purely transient: it must NOT abort the whole run here
+            # any more than it does on the per-file write path.
+            if is_fatal_chunk_store_write_error(e):
+                raise ChunkStoreUnavailableError(
+                    f"Chunk store at {chunks_db_path} cannot be opened for write: {e}"
+                ) from e
+
     def create_collection(
         self, collection_name: str, vector_size: int, subdirectory: Optional[str] = None
     ) -> bool:
@@ -6579,8 +6629,12 @@ class FilesystemVectorStore:
         # (threading.local semantics) -- see chunk_store_cache.py.
         chunk_store_for_hydration: Optional[Any] = None
         if _hydration_chunk_layout == ChunkLayout.CHUNKS_DB:
+            # Bug #1760: this hydration path only ever READS
+            # (chunk_store.read() inside _hydrate_from_chunk_store below)
+            # -- read_only=True forces the genuinely read-only SQLite open
+            # mode, so a non-writable chunks.db never fails a pure query.
             chunk_store_for_hydration = self._chunk_store_cache.get_or_open(
-                collection_path / "chunks.db", str(collection_path)
+                collection_path / "chunks.db", str(collection_path), read_only=True
             )
 
         # Calculate actual parallel execution time (wall clock)
@@ -6875,9 +6929,13 @@ class FilesystemVectorStore:
                 raise
             if chunk_store_for_hydration is None:
                 # Story #1492 AC3: routed through the per-thread cache
-                # (see the entry-point comment above).
+                # (see the entry-point comment above). Bug #1760: read-only
+                # -- this re-hydrate retry is a pure read, same as the
+                # primary hydration path above.
                 chunk_store_for_hydration = self._chunk_store_cache.get_or_open(
-                    collection_path / "chunks.db", str(collection_path)
+                    collection_path / "chunks.db",
+                    str(collection_path),
+                    read_only=True,
                 )
             results = _hydrate_from_chunk_store(chunk_store_for_hydration)
         else:
@@ -6912,9 +6970,13 @@ class FilesystemVectorStore:
                     # open -- connection lifecycle now belongs to
                     # ChunkStoreThreadCache, never closed at the end of
                     # every search() call (see the removed `finally`
-                    # block below).
+                    # block below). Bug #1760: read-only -- this re-hydrate
+                    # retry is a pure read, same as the primary hydration
+                    # path above.
                     chunk_store_for_hydration = self._chunk_store_cache.get_or_open(
-                        collection_path / "chunks.db", str(collection_path)
+                        collection_path / "chunks.db",
+                        str(collection_path),
+                        read_only=True,
                     )
                 results = _hydrate_from_chunk_store(chunk_store_for_hydration)
 

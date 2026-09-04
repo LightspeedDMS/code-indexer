@@ -1234,9 +1234,18 @@ class TestAsCompletedTimeout:
 
         ProviderHealthMonitor.reset_instance()
 
-    def test_as_completed_timeout_returns_fast_provider_results(self):
-        """TimeoutError from as_completed must not propagate — returns empty list gracefully."""
+    def test_as_completed_timeout_with_all_providers_unfinished_raises(self):
+        """TimeoutError from as_completed, with every dispatched provider
+        still unfinished, must surface as a real error (Bug #1760) --
+        NOT be silently swallowed into an empty-but-"successful" result.
+        A total dispatch failure (every provider timed out, none produced
+        results) is indistinguishable from a genuine zero-match query
+        unless it raises."""
         import concurrent.futures
+
+        from code_indexer.server.query.semantic_query_manager import (
+            SemanticQueryError,
+        )
 
         manager = _make_manager()
 
@@ -1254,20 +1263,16 @@ class TestAsCompletedTimeout:
                 side_effect=raising_as_completed,
             ),
         ):
-            results = manager._search_single_repository(
-                repo_path=self.repo_path,
-                repository_alias="test-repo",
-                query_text="auth",
-                limit=10,
-                min_score=None,
-                file_extensions=None,
-                query_strategy="parallel",
-            )
-
-        assert isinstance(results, list), (
-            "TimeoutError from as_completed must be handled; result must be a list"
-        )
-        assert len(results) == 0, "With all futures timed out, result must be empty"
+            with pytest.raises(SemanticQueryError):
+                manager._search_single_repository(
+                    repo_path=self.repo_path,
+                    repository_alias="test-repo",
+                    query_text="auth",
+                    limit=10,
+                    min_score=None,
+                    file_extensions=None,
+                    query_strategy="parallel",
+                )
 
 
 # ---------------------------------------------------------------------------
@@ -1339,6 +1344,12 @@ class TestDegradedProviders:
 
         mock_monitor = MagicMock()
         mock_monitor.get_health.side_effect = fake_get_health
+        # Bug #1760 Finding 2 fix follow-up: an unconfigured MagicMock's
+        # is_sinbinned() call defaults to a truthy MagicMock, which would
+        # silently pre-skip voyage-ai too (not just the intentionally-down
+        # cohere this test documents) -- explicitly stub it False so only
+        # cohere is skipped, matching this test's actual documented intent.
+        mock_monitor.is_sinbinned.return_value = False
 
         with (
             patch.object(manager, "_search_with_provider", side_effect=fake_search),

@@ -370,8 +370,10 @@ _VALID_CONFIG_SECTIONS = (
     "multi_search",
     # Story #26 - Background jobs configuration
     "background_jobs",
-    # Story #28 - Omni-search configuration
-    "omni_search",
+    # Issue #1753: "omni_search" removed -- zero template consumers (dead
+    # code confirmed by Issue #1750's investigation and re-verified while
+    # fixing #1753). Omni-search's real, live-consumed settings live under
+    # the "multi_search" section above (Story #29 merged them there).
     # Story #32 - Unified content limits configuration
     "content_limits",
     # Story #190 - Claude CLI configuration
@@ -1488,7 +1490,6 @@ def langfuse_sync_trigger(request: Request):
             format_error_log(
                 "LANGFUSE-SYNC-001",
                 f"Failed to trigger Langfuse sync: {e}",
-                extra={"correlation_id": get_correlation_id()},
             ),
             exc_info=True,
         )
@@ -6022,7 +6023,6 @@ def _execute_scip_query(
                 format_error_log(
                     "STORE-GENERAL-037",
                     f"Failed to resolve global repo path for '{user_alias}': {e}",
-                    extra={"correlation_id": get_correlation_id()},
                 )
             )
 
@@ -6796,8 +6796,8 @@ def _get_current_config() -> dict:
         "multi_search": settings.get("multi_search", {}),
         # Story #26: Background jobs configuration
         "background_jobs": settings.get("background_jobs", {}),
-        # Story #28: Omni-search configuration
-        "omni_search": settings.get("omni_search", {}),
+        # Issue #1753: "omni_search" key removed -- zero template
+        # consumers (dead code confirmed by Issue #1750's investigation).
         # Story #32: Unified content limits configuration
         "content_limits": settings.get("content_limits", asdict(ContentLimitsConfig())),
         # Story #223: Indexing configuration
@@ -7911,86 +7911,10 @@ def _validate_config_section(section: str, data: dict) -> Optional[str]:
             except (ValueError, TypeError):
                 return "X-Ray Worker Threads must be a valid number"
 
-    elif section == "omni_search":
-        # Story #28: Omni-search configuration
-        max_workers = data.get("max_workers")
-        if max_workers is not None:
-            try:
-                val_int = int(max_workers)
-                if val_int < 1 or val_int > 100:
-                    return "Max Workers must be between 1 and 100"
-            except (ValueError, TypeError):
-                return "Max Workers must be a valid number"
-
-        per_repo_timeout = data.get("per_repo_timeout_seconds")
-        if per_repo_timeout is not None:
-            try:
-                val_int = int(per_repo_timeout)
-                if val_int < 1 or val_int > 3600:
-                    return "Per Repo Timeout must be between 1 and 3600 seconds"
-            except (ValueError, TypeError):
-                return "Per Repo Timeout must be a valid number"
-
-        cache_max_entries = data.get("cache_max_entries")
-        if cache_max_entries is not None:
-            try:
-                val_int = int(cache_max_entries)
-                if val_int < 1 or val_int > 10000:
-                    return "Cache Max Entries must be between 1 and 10000"
-            except (ValueError, TypeError):
-                return "Cache Max Entries must be a valid number"
-
-        cache_ttl = data.get("cache_ttl_seconds")
-        if cache_ttl is not None:
-            try:
-                val_int = int(cache_ttl)
-                if val_int < 1 or val_int > 86400:
-                    return "Cache TTL must be between 1 and 86400 seconds"
-            except (ValueError, TypeError):
-                return "Cache TTL must be a valid number"
-
-        default_limit = data.get("default_limit")
-        if default_limit is not None:
-            try:
-                val_int = int(default_limit)
-                if val_int < 1 or val_int > 1000:
-                    return "Default Limit must be between 1 and 1000"
-            except (ValueError, TypeError):
-                return "Default Limit must be a valid number"
-
-        max_limit = data.get("max_limit")
-        if max_limit is not None:
-            try:
-                val_int = int(max_limit)
-                if val_int < 1 or val_int > 10000:
-                    return "Max Limit must be between 1 and 10000"
-            except (ValueError, TypeError):
-                return "Max Limit must be a valid number"
-
-        aggregation_mode = data.get("default_aggregation_mode")
-        if aggregation_mode is not None:
-            if aggregation_mode not in ("global", "per_repo"):
-                return "Default Aggregation Mode must be 'global' or 'per_repo'"
-
-        max_results_per_repo = data.get("max_results_per_repo")
-        if max_results_per_repo is not None:
-            try:
-                val_int = int(max_results_per_repo)
-                if val_int < 1 or val_int > 10000:
-                    return "Max Results Per Repo must be between 1 and 10000"
-            except (ValueError, TypeError):
-                return "Max Results Per Repo must be a valid number"
-
-        max_total_results = data.get("max_total_results_before_aggregation")
-        if max_total_results is not None:
-            try:
-                val_int = int(max_total_results)
-                if val_int < 1 or val_int > 100000:
-                    return "Max Total Results Before Aggregation must be between 1 and 100000"
-            except (ValueError, TypeError):
-                return "Max Total Results Before Aggregation must be a valid number"
-
-        # pattern_metacharacters - no validation (string)
+    # Issue #1753: the "omni_search" elif branch was removed here -- zero
+    # template consumers (dead code confirmed by Issue #1750's
+    # investigation), and "omni_search" is no longer in
+    # _VALID_CONFIG_SECTIONS so this branch was already unreachable.
 
     elif section == "content_limits":
         # Story #32: Unified content limits configuration
@@ -8479,7 +8403,6 @@ def discovery_all(
             format_error_log(
                 "STORE-GENERAL-044",
                 f"Unexpected error in {platform} discovery/all: {e}",
-                extra={"correlation_id": get_correlation_id()},
             )
         )
         return JSONResponse(content={"error": str(e)}, status_code=500)
@@ -8668,7 +8591,6 @@ async def discovery_enrich(
             format_error_log(
                 "STORE-GENERAL-045",
                 f"Unexpected error in {platform} discovery/enrich: {e}",
-                extra={"correlation_id": get_correlation_id()},
             )
         )
         return JSONResponse(content={"error": str(e)}, status_code=500)
@@ -8739,7 +8661,6 @@ def gitlab_repos_partial(
             format_error_log(
                 "STORE-GENERAL-042",
                 f"Unexpected error in GitLab discovery: {e}",
-                extra={"correlation_id": get_correlation_id()},
             )
         )
         return _build_gitlab_repos_response(
@@ -8813,7 +8734,6 @@ def github_repos_partial(
             format_error_log(
                 "STORE-GENERAL-043",
                 f"Unexpected error in GitHub discovery: {e}",
-                extra={"correlation_id": get_correlation_id()},
             )
         )
         return _build_github_repos_response(
@@ -9010,7 +8930,6 @@ async def fetch_discovery_branches(request: Request):
                     format_error_log(
                         "STORE-GENERAL-045",
                         f"Branch discovery shed load for {clone_url}: {overloaded}",
-                        extra={"correlation_id": get_correlation_id()},
                     )
                 )
                 return {
@@ -9140,7 +9059,6 @@ async def fetch_discovery_branches(request: Request):
             format_error_log(
                 "STORE-GENERAL-044",
                 f"Error fetching discovery branches: {e}",
-                extra={"correlation_id": get_correlation_id()},
             ),
             exc_info=True,
         )
@@ -9628,7 +9546,6 @@ async def update_config_section(
                     format_error_log(
                         "STORE-GENERAL-047",
                         f"Failed to reload OIDC configuration: {e}",
-                        extra={"correlation_id": get_correlation_id()},
                     ),
                     exc_info=True,
                 )
@@ -10627,7 +10544,6 @@ def ssh_keys_page(request: Request):
             format_error_log(
                 "SVC-GENERAL-017",
                 f"Failed to list SSH keys: {e}",
-                extra={"correlation_id": get_correlation_id()},
             )
         )
 
@@ -10675,7 +10591,6 @@ def _create_ssh_keys_page_response(
             format_error_log(
                 "SVC-GENERAL-018",
                 f"Failed to list SSH keys: {e}",
-                extra={"correlation_id": get_correlation_id()},
             )
         )
 
@@ -10757,7 +10672,6 @@ def create_ssh_key(
             format_error_log(
                 "SVC-GENERAL-019",
                 f"Failed to create SSH key: {e}",
-                extra={"correlation_id": get_correlation_id()},
             )
         )
         return _create_ssh_keys_page_response(
@@ -10816,7 +10730,6 @@ def delete_ssh_key(
             format_error_log(
                 "SVC-GENERAL-020",
                 f"Failed to delete SSH key: {e}",
-                extra={"correlation_id": get_correlation_id()},
             )
         )
         return _create_ssh_keys_page_response(
@@ -10866,7 +10779,6 @@ def assign_host_to_key(
             format_error_log(
                 "SVC-GENERAL-021",
                 f"Failed to assign host to SSH key: {e}",
-                extra={"correlation_id": get_correlation_id()},
             )
         )
         return _create_ssh_keys_page_response(
@@ -11369,7 +11281,6 @@ async def unified_login_sso(
             format_error_log(
                 "SVC-GENERAL-022",
                 f"Failed to initialize OIDC provider: {e}",
-                extra={"correlation_id": get_correlation_id()},
             )
         )
         raise HTTPException(

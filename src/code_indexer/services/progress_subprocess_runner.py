@@ -36,7 +36,8 @@ import io
 import logging
 import math
 import os
-import select
+import queue
+import selectors
 import subprocess
 import tempfile
 import threading
@@ -63,6 +64,17 @@ _HNSW_ORPHAN_MARKER_PREFIX = HNSW_ORPHAN_REPAIR_MARKER + ":"
 #: used later in this module -- staleness only needs checking every
 #: couple of seconds, not on every poll iteration.
 _WATCHDOG_CHECK_INTERVAL_SECONDS = 2.0
+
+#: Bug #1774: buffer size for the raw os.read() calls in the stdout/
+#: stderr reader loops below. Promoted to module scope (previously a
+#: local inside _run_with_popen_progress_impl) so those loops can be
+#: extracted to module-level, independently unit-testable functions.
+READ_BUFFER_SIZE = 4096
+
+#: Bug #1774: how long the main loop sleeps between poll iterations while
+#: waiting for more output or a watchdog check. Promoted to module scope
+#: alongside READ_BUFFER_SIZE, for the same reason.
+POLL_INTERVAL_SECONDS = 0.05
 
 
 def _forward_hnsw_orphan_events(
@@ -281,6 +293,241 @@ def _terminate_and_delete_heartbeat(
             heartbeat_path,
             exc,
         )
+
+
+def _fd_is_open(fd: int) -> bool:
+    """Return True if `fd` still refers to a genuinely open file
+    description. Bug #1774 (code review finding): epoll silently drops a
+    closed fd from its interest set instead of raising like
+    select.select() used to -- this is how _read_available_bytes detects
+    that a monitored fd was closed out from under it rather than
+    blocking forever waiting on a fd that will never become ready again.
+    """
+    try:
+        os.fstat(fd)
+        return True
+    except OSError:
+        return False
+
+
+# Bug #1774: shared selector-driven read loop used by both
+# _stdout_reader_loop and _stderr_reader_loop below (previously two
+# duplicated closures, each using select.select() with a narrow
+# `except OSError`). select.select() has glibc's hard FD_SETSIZE=1024
+# ceiling: a monitored fd >= 1024 raises ValueError -- NOT OSError --
+# which used to escape that narrow handler entirely and silently kill
+# the reader thread before it ever reached its sentinel/flush code.
+# selectors.DefaultSelector (epoll-backed on Linux) has no such ceiling,
+# closing the hole at its source. The broadened `except Exception` below
+# additionally guarantees any OTHER internal failure is caught, logged
+# with a full traceback, and recorded via `reader_failed` (set only on a
+# genuine internal failure, never on a normal EOF/shutdown finish) so the
+# caller can surface the distinction instead of an abnormal termination
+# looking identical to clean success -- see _stdout_reader_loop/
+# _stderr_reader_loop and the WARNING logged near their join() below.
+#
+# This project targets Linux-only server deployments (systemd units, see
+# docs/server-deployment.md) -- selectors.DefaultSelector resolves to the
+# epoll-backed selector there. It would fall back to a plain
+# SelectSelector (same FD_SETSIZE ceiling this fix exists to remove) only
+# on a platform lacking epoll/kqueue/poll, which this project does not
+# target; not handled here as out of scope.
+#
+# Messi Rule #14 (anti-unbounded-loop) exception, documented per that
+# rule's own "Event / Message Loop" carve-out: this is a blocking I/O
+# consumer loop, not an optimistic/unproven loop. Its termination is NOT
+# a static iteration count but IS a provable bound: `sel.select()` itself
+# is now bounded by POLL_INTERVAL_SECONDS (code review finding -- an
+# unbounded `sel.select()` could block forever if a monitored fd was
+# closed out from under this thread, since epoll -- unlike select.select()
+# -- gives no readiness event for that; the old select.select()-based code
+# instead raised OSError immediately and was caught below), and each
+# timeout tick re-checks two well-defined external signals: natural EOF
+# on `data_fd` (the last write-end holder closed it) or an explicit byte
+# actually OBSERVED as readable on `shutdown_r` (the main thread's
+# shutdown hook writes it once the child has exited -- see the `finally`
+# block in _run_with_popen_progress_impl, which unconditionally writes
+# that byte on every exit path). Only those two OBSERVED events count as
+# clean termination; a fd found closed via the liveness probe below
+# WITHOUT having been observed that way first is treated as abnormal
+# (logged + reader_failed) even though this loop still has to stop
+# either way, because it can no longer prove the shutdown was genuinely
+# intentional versus some fd having gone away for an unrelated reason.
+#
+# C2 fix (preserved): the data fd is checked before the shutdown fd so a
+# same-cycle shutdown never drops trailing bytes.
+def _read_available_bytes(
+    data_fd: int,
+    shutdown_r: int,
+    error_label: str,
+    stream_name: str,
+    reader_failed: threading.Event,
+):
+    """Yield raw byte chunks from `data_fd` until natural EOF or a
+    shutdown signal on `shutdown_r`. On any exception, log it (with a
+    full traceback), set `reader_failed`, and stop -- the caller's
+    post-loop code (sentinel/flush) still always runs, since it lives
+    outside this generator's own try/except.
+    """
+    try:
+        with selectors.DefaultSelector() as sel:
+            sel.register(data_fd, selectors.EVENT_READ)
+            sel.register(shutdown_r, selectors.EVENT_READ)
+            while True:
+                ready_fds = {
+                    key.fd for key, _ in sel.select(timeout=POLL_INTERVAL_SECONDS)
+                }
+                if data_fd in ready_fds:
+                    chunk = os.read(data_fd, READ_BUFFER_SIZE)
+                    if not chunk:
+                        return  # EOF: all write-end holders closed their copy.
+                    yield chunk
+                    continue  # re-select; drain before honouring shutdown
+                if shutdown_r in ready_fds:
+                    return  # Shutdown signalled — data fd not ready, safe to stop.
+                if ready_fds:
+                    continue
+                stale_data_fd = not _fd_is_open(data_fd)
+                stale_shutdown_r = not _fd_is_open(shutdown_r)
+                if stale_data_fd or stale_shutdown_r:
+                    # Bug #1774 (code review finding): a fd closed WITHOUT
+                    # ever being observed as readable first (normal EOF on
+                    # data_fd, or the shutdown byte actually seen on
+                    # shutdown_r) is NOT treated as clean termination --
+                    # it cannot be proven this was the genuine, intentional
+                    # shutdown sequence versus some fd having gone away for
+                    # an unrelated reason. Stopping is still correct
+                    # (polling a fd that will never become ready again is
+                    # pointless), but it is flagged as abnormal so this is
+                    # diagnosable rather than silently indistinguishable
+                    # from success.
+                    logger.warning(
+                        "run_with_popen_progress: %s reader thread for %s "
+                        "observed %s closed without a corresponding "
+                        "EOF/shutdown-readable event -- stopping and "
+                        "flagging as abnormal (fd=%d)",
+                        stream_name,
+                        error_label,
+                        "data_fd" if stale_data_fd else "shutdown_r",
+                        data_fd,
+                    )
+                    reader_failed.set()
+                    return
+    except Exception:  # noqa: BLE001 - Bug #1774: widened from OSError
+        logger.exception(
+            "run_with_popen_progress: %s reader thread failed unexpectedly "
+            "for %s (fd=%d) -- reader exiting; partial data still flushed",
+            stream_name,
+            error_label,
+            data_fd,
+        )
+        reader_failed.set()
+        return
+
+
+# Bug #1774: extracted to module scope (previously a closure nested
+# inside _run_with_popen_progress_impl) so it can be unit-tested
+# directly against a crafted fd. Always puts None as a sentinel when
+# done -- including when _read_available_bytes was interrupted by an
+# unexpected exception, or when PROCESSING a chunk it yielded raises
+# (decode/split/put) -- so the main loop can always detect reader
+# completion without polling thread liveness. Every step of the final
+# flush/sentinel sequence is individually try/except-protected so a
+# failure in one (e.g. the buffer flush) can never suppress an attempt
+# at the other (the sentinel push), and each failure is itself logged
+# and flagged via `reader_failed`.
+def _stdout_reader_loop(
+    stdout_fd: int,
+    shutdown_r: int,
+    line_queue: "queue.Queue[Optional[str]]",
+    error_label: str,
+    reader_failed: threading.Event,
+) -> None:
+    """Read stdout_fd via _read_available_bytes; put decoded lines on
+    line_queue.
+    """
+    buf = b""
+    try:
+        for chunk in _read_available_bytes(
+            stdout_fd, shutdown_r, error_label, "stdout", reader_failed
+        ):
+            buf += chunk
+            while b"\n" in buf:
+                raw, buf = buf.split(b"\n", 1)
+                line_queue.put(raw.decode("utf-8", errors="replace") + "\n")
+    except Exception:  # noqa: BLE001 - Bug #1774: caller-side processing too
+        logger.exception(
+            "run_with_popen_progress: stdout reader thread failed "
+            "unexpectedly for %s while processing captured data",
+            error_label,
+        )
+        reader_failed.set()
+    finally:
+        try:
+            # Flush any partial line remaining in the buffer.
+            if buf:
+                line_queue.put(buf.decode("utf-8", errors="replace"))
+        except Exception:  # noqa: BLE001 - Bug #1774
+            logger.exception(
+                "run_with_popen_progress: stdout reader thread failed "
+                "unexpectedly for %s while flushing the final partial line",
+                error_label,
+            )
+            reader_failed.set()
+        try:
+            # Sentinel: signals main loop that no more lines are coming.
+            # Attempted independently of the flush above -- one failing
+            # must never stop this from being attempted too.
+            line_queue.put(None)
+        except Exception:  # noqa: BLE001 - Bug #1774
+            logger.exception(
+                "run_with_popen_progress: stdout reader thread failed "
+                "unexpectedly for %s while pushing the completion "
+                "sentinel -- the main loop's own reader-thread liveness "
+                "check is the only remaining signal this reader is done",
+                error_label,
+            )
+            reader_failed.set()
+
+
+# Bug #1774: mirrors _stdout_reader_loop, adapted for stderr's simpler
+# "accumulate raw text" contract (no line-splitting, no progress parsing,
+# no sentinel -- stderr completion is detected via thread join, not a
+# queue sentinel).
+def _stderr_reader_loop(
+    stderr_fd: int,
+    shutdown_r: int,
+    stderr_lines: List[str],
+    error_label: str,
+    reader_failed: threading.Event,
+) -> None:
+    """Read stderr_fd via _read_available_bytes; accumulate in stderr_lines."""
+    if stderr_fd < 0:
+        return
+    buf = b""
+    try:
+        for chunk in _read_available_bytes(
+            stderr_fd, shutdown_r, error_label, "stderr", reader_failed
+        ):
+            buf += chunk
+    except Exception:  # noqa: BLE001 - Bug #1774: caller-side processing too
+        logger.exception(
+            "run_with_popen_progress: stderr reader thread failed "
+            "unexpectedly for %s while processing captured data",
+            error_label,
+        )
+        reader_failed.set()
+    finally:
+        try:
+            if buf:
+                stderr_lines.append(buf.decode("utf-8", errors="replace"))
+        except Exception:  # noqa: BLE001 - Bug #1774
+            logger.exception(
+                "run_with_popen_progress: stderr reader thread failed "
+                "unexpectedly for %s while flushing captured stderr",
+                error_label,
+            )
+            reader_failed.set()
 
 
 def run_with_popen_progress(
@@ -527,9 +774,10 @@ def _run_with_popen_progress_impl(
     # Both reader threads select on their respective pipe fd AND shutdown_r.
     # When the child exits, the main loop writes a byte to shutdown_w, which
     # immediately unblocks both select() calls so both threads exit — without
-    # waiting for grandchildren that inherited the pipe write-ends to close them.
-    READ_BUFFER_SIZE = 4096
-    POLL_INTERVAL_SECONDS = 0.05
+    # waiting for grandchildren that inherited the pipe write-ends to close
+    # them. (READ_BUFFER_SIZE / POLL_INTERVAL_SECONDS are module-level
+    # constants -- Bug #1774 promoted them so the reader loops below could be
+    # extracted to module scope and unit-tested directly.)
 
     stderr_fd = _get_fd(process.stderr) if process.stderr else -1
     if stderr_fd is None:
@@ -537,50 +785,36 @@ def _run_with_popen_progress_impl(
     shutdown_r, shutdown_w = os.pipe()
 
     # Thread-safe queue: stdout reader puts decoded lines (str) or None (sentinel).
-    import queue as _queue_mod
-
-    line_queue: "_queue_mod.Queue[Optional[str]]" = _queue_mod.Queue()
+    line_queue: "queue.Queue[Optional[str]]" = queue.Queue()
 
     # Stderr is accumulated in a plain list; the stderr reader thread is the
     # only writer, so no lock is needed (main thread reads only after join).
     stderr_lines: List[str] = []
 
-    def _stderr_reader() -> None:
-        """Read raw bytes from stderr_fd via select; accumulate in stderr_lines.
+    # Bug #1774: set either inside _read_available_bytes'/
+    # _stdout_reader_loop's/_stderr_reader_loop's own except-Exception
+    # branches, or by _join_reader_threads_before_closing_shutdown_pipe
+    # on a timed-out join (round 3) -- never on a clean EOF/shutdown
+    # finish. Checked (and surfaced as a WARNING, then a raised error via
+    # _raise_if_reader_failed) once both readers are confirmed done, so
+    # an abnormal reader termination is never silently indistinguishable
+    # from a clean finish. Deliberately does NOT change what the main
+    # loop does with the child process -- see this module's Bug #1774
+    # comments.
+    reader_failed = threading.Event()
 
-        Exits when shutdown_r is signalled (child exited) or natural EOF.
-        A grandchild holding the stderr write-end is bypassed by the shutdown
-        signal — stderr content written before child exit is still captured.
-
-        C2 fix: check the DATA fd first so that when both stderr_fd and
-        shutdown_r are ready in the same select cycle, we drain the data
-        before honouring the shutdown — preventing dropped final error bytes.
-        """
-        if stderr_fd < 0:
-            return
-        buf = b""
-        try:
-            while True:
-                rlist, _, _ = select.select([stderr_fd, shutdown_r], [], [])
-                if stderr_fd in rlist:
-                    chunk = os.read(stderr_fd, READ_BUFFER_SIZE)
-                    if not chunk:
-                        break  # natural EOF
-                    buf += chunk
-                    continue  # re-select; drain before honouring shutdown
-                if shutdown_r in rlist:
-                    # Shutdown signalled — data fd not ready, safe to stop.
-                    break
-        except OSError as exc:
-            logger.warning(
-                "run_with_popen_progress: stderr reader OSError for %s: %s",
-                error_label,
-                exc,
-            )
-        if buf:
-            stderr_lines.append(buf.decode("utf-8", errors="replace"))
-
-    stderr_thread = threading.Thread(target=_stderr_reader, daemon=True)
+    # Bug #1774: both reader loops are now module-level functions (see
+    # _stdout_reader_loop / _stderr_reader_loop / _read_available_bytes
+    # above) using selectors.DefaultSelector instead of select.select(),
+    # with a broadened `except Exception` so an internal reader failure is
+    # always logged (with a full traceback) and the sentinel/flush is
+    # always still reached -- instead of a fd >= 1024 raising an uncaught
+    # ValueError that used to kill the thread silently.
+    stderr_thread = threading.Thread(
+        target=_stderr_reader_loop,
+        args=(stderr_fd, shutdown_r, stderr_lines, error_label, reader_failed),
+        daemon=True,
+    )
     stderr_thread.start()
 
     # Poll-aware read loop — the core fix for the grandchild fd-wedge problem.
@@ -590,58 +824,20 @@ def _run_with_popen_progress_impl(
     # the fd.  Even after the direct child exits, a grandchild sleeping with
     # the write-end open keeps the pipe alive and the loop blocked.
     #
-    # Fix: both the stdout and stderr reader threads use select.select() on
-    # their respective fd AND a shared shutdown notification pipe.  The main
-    # loop checks process.poll() every POLL_INTERVAL_SECONDS; when the child
-    # has exited it writes a byte to shutdown_w, which immediately unblocks
-    # both reader threads — without waiting for pipe EOF from a grandchild.
+    # Fix: both the stdout and stderr reader threads use selectors on their
+    # respective fd AND a shared shutdown notification pipe.  The main loop
+    # checks process.poll() every POLL_INTERVAL_SECONDS; when the child has
+    # exited it writes a byte to shutdown_w, which immediately unblocks both
+    # reader threads — without waiting for pipe EOF from a grandchild.
     #
     # start_new_session=True on the Popen places the child + grandchildren in a
     # new process group.  It does NOT prevent grandchildren from inheriting pipe
     # fds; the shutdown-pipe signal is what makes termination fast.
-
-    def _stdout_reader() -> None:
-        """Read raw bytes from stdout_fd via select; put lines on line_queue.
-
-        Exits when a shutdown signal arrives on shutdown_r (main thread writes
-        after child exit) or when the stdout fd reaches natural EOF.
-        Always puts None as a sentinel when done so the main loop can detect
-        reader completion without polling thread liveness.
-
-        C2 fix: check the DATA fd first so that when both stdout_fd and
-        shutdown_r are ready in the same select cycle, we drain the data
-        before honouring the shutdown — preventing dropped final progress lines.
-        """
-        buf = b""
-        try:
-            while True:
-                rlist, _, _ = select.select([stdout_fd, shutdown_r], [], [])
-                if stdout_fd in rlist:
-                    chunk = os.read(stdout_fd, READ_BUFFER_SIZE)
-                    if not chunk:
-                        # EOF: all write-end holders have closed their copy.
-                        break
-                    buf += chunk
-                    while b"\n" in buf:
-                        raw, buf = buf.split(b"\n", 1)
-                        line_queue.put(raw.decode("utf-8", errors="replace") + "\n")
-                    continue  # re-select; drain before honouring shutdown
-                if shutdown_r in rlist:
-                    # Shutdown signalled — data fd not ready, safe to stop.
-                    break
-        except OSError as exc:
-            logger.warning(
-                "run_with_popen_progress: stdout reader OSError for %s: %s",
-                error_label,
-                exc,
-            )
-        # Flush any partial line remaining in the buffer.
-        if buf:
-            line_queue.put(buf.decode("utf-8", errors="replace"))
-        # Sentinel: signals main loop that no more lines are coming.
-        line_queue.put(None)
-
-    stdout_reader_thread = threading.Thread(target=_stdout_reader, daemon=True)
+    stdout_reader_thread = threading.Thread(
+        target=_stdout_reader_loop,
+        args=(stdout_fd, shutdown_r, line_queue, error_label, reader_failed),
+        daemon=True,
+    )
     stdout_reader_thread.start()
 
     def _process_stdout_line(raw_line: str) -> None:
@@ -665,7 +861,7 @@ def _run_with_popen_progress_impl(
         while True:
             try:
                 item = line_queue.get_nowait()
-            except _queue_mod.Empty:
+            except queue.Empty:
                 return False
             if item is None:
                 return True  # sentinel: reader thread is done
@@ -765,14 +961,44 @@ def _run_with_popen_progress_impl(
     finally:
         # C1 fix: signal shutdown on EVERY exit path (natural EOF, poll-detected
         # child exit, and exception).  Write the shutdown byte BEFORE closing
-        # the fds so both reader threads' select.select() calls are woken up.
+        # the fds so both reader threads' selector.select() calls are woken up.
         # Idempotent: if the byte was already written by the poll branch above,
-        # this is a no-op (level-triggered select; both readers still wake).
+        # this is a no-op (level-triggered selector; both readers still wake).
         try:
             os.write(shutdown_w, b"x")
-        except OSError:
-            pass  # already closed or already written — both are fine
-        # Close the shutdown pipe fds to avoid fd leaks.
+        except OSError as exc:
+            # Explicit, intentional discard: shutdown_w may already be
+            # closed, or the byte may already have been written by one of
+            # the poll branches above -- both are fine and expected, but
+            # logged (not a bare `pass`) per anti-silent-failure.
+            logger.debug(
+                "run_with_popen_progress: shutdown-pipe write for %s "
+                "skipped (already closed or already written): %s",
+                error_label,
+                exc,
+            )
+
+        # Bug #1774 rounds 2/3/4: the shutdown pipe fds must never be
+        # closed until BOTH reader threads have actually joined (or a
+        # reaper thread takes over that responsibility on a timed-out
+        # join). See _join_reader_threads_before_closing_shutdown_pipe's
+        # docstring/preceding comment for the full, canonical rationale
+        # -- not duplicated here.
+        _join_reader_threads_before_closing_shutdown_pipe(
+            stdout_reader_thread,
+            stderr_thread,
+            reader_failed,
+            error_label,
+            GIT_COMMAND_TIMEOUT_SECONDS,
+            shutdown_r,
+            shutdown_w,
+        )
+
+        # Close the shutdown pipe fds to avoid fd leaks -- only now that
+        # both reader threads are confirmed done. On a timed-out join,
+        # _join_reader_threads_before_closing_shutdown_pipe raises before
+        # this point is ever reached -- ownership of eventually closing
+        # these fds passes to its reaper thread instead.
         for _fd in (shutdown_r, shutdown_w):
             try:
                 os.close(_fd)
@@ -786,16 +1012,31 @@ def _run_with_popen_progress_impl(
                 )
 
     process.wait()
-    # Both reader threads exit promptly when shutdown_w is signalled (on child
-    # exit) — no need for a short timeout workaround here.
-    stderr_thread.join(timeout=GIT_COMMAND_TIMEOUT_SECONDS)
+
+    if reader_failed.is_set():
+        # Bug #1774 (code review finding): surface an abnormal reader
+        # termination distinctly from a clean finish. process.wait()
+        # above already ran unconditionally, exactly as it always has --
+        # this log line, plus the raise below (once the more specific
+        # watchdog-kill / non-zero-exit checks have had first priority),
+        # makes a truncated stdout/stderr capture an explicit, loud
+        # failure instead of being silently indistinguishable from
+        # success. The underlying failure was already logged (with a
+        # full traceback) by whichever reader loop set this flag.
+        logger.warning(
+            "run_with_popen_progress: %s -- one or more reader threads "
+            "terminated abnormally; captured stdout/stderr may be "
+            "truncated (see the prior ERROR/WARNING log entries for the "
+            "underlying cause)",
+            error_label,
+        )
 
     stderr_output = "".join(stderr_lines)
     all_stderr.append(stderr_output)
     _forward_hnsw_orphan_events(stderr_output, orphan_event_callback)
 
     # Heartbeat cleanup is the wrapper's `finally` (Issue #1530): one
-    # owner, covering both raises below and the successful return.
+    # owner, covering all raises below and the successful return.
     if watchdog_verdict is not None:
         raise IndexingWatchdogKillError(
             f"Failed to {error_label}: watchdog killed subprocess "
@@ -823,4 +1064,215 @@ def _run_with_popen_progress_impl(
             )
         raise IndexingSubprocessError(f"Failed to {error_label}: {error_details}")
 
+    # Bug #1774 round 2 (Codex finding): reached only after the
+    # watchdog-kill and non-zero-exit checks above, so a process that
+    # both failed AND had a reader failure still raises the more
+    # specific/definitive error first. See _raise_if_reader_failed's
+    # docstring for the full rationale.
+    _raise_if_reader_failed(reader_failed, error_label)
+
     return high_water
+
+
+def _raise_if_reader_failed(reader_failed: threading.Event, error_label: str) -> None:
+    """Bug #1774 round 2 (Codex finding): a reader thread failing
+    abnormally must not be silently treated as a successful run just
+    because the subprocess itself exited 0 and the watchdog didn't kill
+    it -- captured stdout/stderr may be truncated or incomplete, and a
+    caller (e.g. golden-repo indexing) must not treat that as a
+    complete, trustworthy index. `reader_failed` is set exclusively by
+    `_read_available_bytes`'/`_stdout_reader_loop`'s/`_stderr_reader_loop`'s
+    own except-Exception branches (never on a clean EOF/shutdown finish),
+    so this never fires for a healthy job. No-op when `reader_failed` is
+    clear.
+    """
+    if reader_failed.is_set():
+        raise IndexingSubprocessError(
+            f"Failed to {error_label}: reader thread(s) terminated "
+            f"abnormally -- captured stdout/stderr may be truncated or "
+            f"incomplete even though the subprocess itself exited "
+            f"successfully (see the prior ERROR/WARNING log entries for "
+            f"the underlying cause)"
+        )
+
+
+# Bug #1774 rounds 2/3/4 -- canonical explanation (the finally block
+# above points here rather than duplicating this):
+#
+# Round 2 (Codex and Claude independently converged): the shutdown pipe
+# fds must NEVER be closed until BOTH reader threads have actually
+# joined. stdout_reader_thread was usually already joined by one of the
+# main loop's branches, but stderr_thread was joined only much later --
+# AFTER the finally block had already closed shutdown_r/shutdown_w (and,
+# on the exception exit path, was never joined at all). That let the
+# stderr reader still be alive, with those fds registered in its own
+# selector, at the exact moment they got closed and their numbers freed
+# for reuse: (a) a healthy stderr reader that hadn't yet observed the
+# shutdown byte hit the fd-closed staleness path and got falsely flagged
+# as reader_failed, and (b) once a closed fd number got reused elsewhere
+# in a busy process, `_fd_is_open()` reported "still open" for a
+# completely different file description, so the staleness probe never
+# fired and the reader spun forever, leaking the thread. Joining BOTH
+# threads before either fd is closed closes both holes at once.
+#
+# Round 3 (Codex finding): a join that actually times out must NEVER
+# fall through to closing the shutdown fds anyway -- that would
+# reintroduce the exact hazard round 2 fixed, precisely when it matters
+# most (a reader thread confirmed still running). This join is bounded
+# cleanup synchronization for reader threads the caller itself spawned
+# -- NOT a subprocess/job clock -- so raising on timeout does not
+# reintroduce a Bug #1218 timeout; the CHILD's own runtime remains
+# completely unbounded regardless of this outcome.
+#
+# Round 4 (Codex finding, endorsed over Claude's "acceptable leak" call
+# on this specific project): simply raising and permanently abandoning
+# the fds on a timeout is itself a resource leak -- exactly the failure
+# shape (small leaks compounding over weeks of server uptime) that
+# motivated this whole investigation (see sibling Bug #1775). Fixed with
+# a small, bounded reaper: a fire-and-forget daemon thread
+# (`_reap_stuck_readers_and_close_shutdown_pipe`, spawned by
+# `_spawn_reaper_and_raise`) that finishes joining the still-alive
+# reader(s) with NO timeout, then closes the shutdown fds once that join
+# actually completes. The reaper never blocks the raise -- the job still
+# fails loudly and promptly. If a reader is truly permanently wedged
+# (not just transiently stalled), the reaper also never completes and
+# the fds still leak -- an accepted residual (Python cannot forcibly
+# kill a thread), but this closes the much more likely "transient
+# stall" case a 30s timeout is actually catching.
+def _join_reader_threads_before_closing_shutdown_pipe(
+    stdout_reader_thread: threading.Thread,
+    stderr_thread: threading.Thread,
+    reader_failed: threading.Event,
+    error_label: str,
+    timeout_seconds: float,
+    shutdown_r: int,
+    shutdown_w: int,
+) -> None:
+    """Join both reader threads with `timeout_seconds`. On a timed-out
+    join, hands off to `_spawn_reaper_and_raise` (starts a reaper thread
+    that will eventually close shutdown_r/shutdown_w, then raises
+    IndexingSubprocessError). See the comment block above for the full
+    round 2/3/4 rationale.
+    """
+    timed_out_stream_name = None
+    stuck_threads: List[threading.Thread] = []
+    for reader_thread, stream_name in (
+        (stdout_reader_thread, "stdout"),
+        (stderr_thread, "stderr"),
+    ):
+        reader_thread.join(timeout=timeout_seconds)
+        if reader_thread.is_alive():
+            reader_failed.set()
+            stuck_threads.append(reader_thread)
+            if timed_out_stream_name is None:
+                timed_out_stream_name = stream_name
+            logger.error(
+                "run_with_popen_progress: %s reader thread for %s did "
+                "not join within %.2fs after shutdown was signalled -- "
+                "the shutdown pipe will NOT be closed while this reader "
+                "may still reference it; a reaper thread will close it "
+                "once the reader eventually joins",
+                stream_name,
+                error_label,
+                timeout_seconds,
+            )
+
+    if timed_out_stream_name is not None:
+        _spawn_reaper_and_raise(
+            stuck_threads,
+            shutdown_r,
+            shutdown_w,
+            error_label,
+            timed_out_stream_name,
+            timeout_seconds,
+        )
+
+
+def _spawn_reaper_and_raise(
+    stuck_threads: List[threading.Thread],
+    shutdown_r: int,
+    shutdown_w: int,
+    error_label: str,
+    timed_out_stream_name: str,
+    timeout_seconds: float,
+    start_reaper_thread: Callable[[threading.Thread], None] = threading.Thread.start,
+) -> None:
+    """Start the round-4 reaper thread (fire-and-forget -- does not wait
+    for it), then raise loudly. Never returns normally.
+
+    Bug #1774 round 5 (Codex/Claude finding): `Thread.start()` can itself
+    raise `RuntimeError` under genuine thread/resource exhaustion --
+    precisely the degraded state this whole bug is about. If that
+    happens, no reaper exists to eventually close the fds (a leak in
+    that narrow sub-case -- not a regression versus round 3, which
+    leaked on every timeout, not just this one), but the exception TYPE
+    contract must still hold: callers that catch IndexingSubprocessError
+    specifically (e.g. golden_repo_manager.py, translating it to
+    GitOperationError) must never see a raw RuntimeError escape instead.
+
+    `start_reaper_thread` is a testable seam (defaults to the real
+    `threading.Thread.start`, so production behavior is unchanged) that
+    lets tests inject a genuine start failure without monkeypatching any
+    process-wide thread behavior.
+    """
+    reaper = threading.Thread(
+        target=_reap_stuck_readers_and_close_shutdown_pipe,
+        args=(stuck_threads, shutdown_r, shutdown_w, error_label),
+        daemon=True,
+    )
+    try:
+        start_reaper_thread(reaper)
+    except Exception as exc:  # noqa: BLE001 - Bug #1774 round 5
+        logger.warning(
+            "run_with_popen_progress: could not start reaper thread for "
+            "%s -- the shutdown pipe will leak (thread/resource "
+            "exhaustion likely already in progress): %s",
+            error_label,
+            exc,
+        )
+    raise IndexingSubprocessError(
+        f"Failed to {error_label}: {timed_out_stream_name} reader "
+        f"could not be reaped within {timeout_seconds:.2f}s -- refusing "
+        f"to close the shutdown pipe while it may still be in use "
+        f"(a background reaper will close it once the reader "
+        f"eventually joins)"
+    )
+
+
+def _reap_stuck_readers_and_close_shutdown_pipe(
+    stuck_threads: List[threading.Thread],
+    shutdown_r: int,
+    shutdown_w: int,
+    error_label: str,
+) -> None:
+    """Bug #1774 round 4: fire-and-forget daemon reaper for the
+    timed-out-join case. Finishes joining each still-alive reader thread
+    with NO timeout (unlike the bounded join above, these are expected to
+    eventually finish once whatever transient stall resolves), then
+    closes the shutdown pipe fds once that join actually completes.
+    Runs entirely on its own thread -- never blocks the caller's raise.
+    """
+    # Messi Rule #14 (anti-unbounded-loop) exception, the same carve-out
+    # already documented for _read_available_bytes's selector loop above:
+    # this join is bounded by an external event (the reader thread
+    # eventually finishing its own work), not an iteration count -- a
+    # permanently wedged reader is the sole, explicitly accepted
+    # residual (Python cannot forcibly kill a thread).
+    for reader_thread in stuck_threads:
+        reader_thread.join()
+    for _fd in (shutdown_r, shutdown_w):
+        try:
+            os.close(_fd)
+        except OSError as exc:
+            logger.warning(
+                "run_with_popen_progress: reaper thread could not close "
+                "shutdown pipe fd %d for %s: %s",
+                _fd,
+                error_label,
+                exc,
+            )
+    logger.info(
+        "run_with_popen_progress: reaper thread for %s finished joining "
+        "previously-stuck reader thread(s) and closed the shutdown pipe",
+        error_label,
+    )
