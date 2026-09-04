@@ -2523,8 +2523,10 @@ class SemanticQueryManager:
             if fuzzy and edit_distance == 0:
                 effective_edit_distance = 1
 
-            # Split comma-separated exclude_path into independent patterns (bug #1095)
+            # Split comma-separated patterns into independent lists (bug #1095,
+            # GAP-6: same treatment for path_filter inclusion patterns).
             exclude_paths_list = parse_exclude_patterns(exclude_path) or None
+            path_filters_list = parse_exclude_patterns(path_filter) or None
 
             # Execute FTS query
             fts_raw_results = tantivy_manager.search(
@@ -2534,7 +2536,7 @@ class SemanticQueryManager:
                 snippet_lines=snippet_lines,
                 limit=limit,
                 language_filter=language,
-                path_filter=path_filter,
+                path_filters=path_filters_list,  # GAP-6: list, OR semantics
                 exclude_languages=[exclude_language] if exclude_language else None,
                 exclude_paths=exclude_paths_list,
                 use_regex=regex,

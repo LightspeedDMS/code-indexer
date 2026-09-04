@@ -494,8 +494,12 @@ class MultiSearchService:
             # Convert language filter to list if present
             languages = [request.language] if request.language else None
 
-            # Convert path filter to list if present
-            path_filters = [request.path_filter] if request.path_filter else None
+            # Convert path filter to list if present (GAP-6: comma-separated)
+            from code_indexer.services.path_pattern_matcher import (
+                parse_exclude_patterns,
+            )
+
+            path_filters = parse_exclude_patterns(request.path_filter) or None
 
             # Execute FTS search
             fts_results = tantivy_manager.search(

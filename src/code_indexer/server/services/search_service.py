@@ -314,7 +314,18 @@ class SemanticSearchService:
         must_not = []
 
         if path_filter:
-            must.append({"key": "path", "match": {"text": path_filter}})
+            from code_indexer.services.path_pattern_matcher import (
+                parse_exclude_patterns as _parse_path_patterns,
+            )
+
+            path_patterns = _parse_path_patterns(path_filter)
+            if len(path_patterns) == 1:
+                # Single pattern: use vector-store text filter (backward compat)
+                must.append({"key": "path", "match": {"text": path_patterns[0]}})
+            # Multiple patterns: skip vector-store filter; post-filtered in
+            # _perform_semantic_search via PathPatternMatcher (GAP-6).
+            # The FilesystemVectorStore filter evaluator does not support
+            # should-within-must, so OR semantics must be applied after search.
 
         if language:
             lang_filter = mapper.build_language_filter(language)
@@ -576,6 +587,25 @@ class SemanticSearchService:
                     indexed_timestamp=payload.get("indexed_timestamp"),
                 )
                 formatted_results.append(search_item)
+
+            # GAP-6: post-filter by multiple comma-separated path_filter
+            # patterns.  The vector store filter evaluator does not support
+            # should-within-must, so multi-pattern path_filter is applied
+            # here with OR semantics -- matching the tantivy path.
+            if path_filter:
+                from code_indexer.services.path_pattern_matcher import (
+                    PathPatternMatcher,
+                    parse_exclude_patterns,
+                )
+
+                _path_patterns = parse_exclude_patterns(path_filter)
+                if len(_path_patterns) > 1:
+                    _matcher = PathPatternMatcher()
+                    formatted_results = [
+                        r
+                        for r in formatted_results
+                        if _matcher.matches_any_pattern(r.file_path, _path_patterns)
+                    ]
 
             return formatted_results
 

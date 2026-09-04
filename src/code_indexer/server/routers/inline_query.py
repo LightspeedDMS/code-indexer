@@ -573,6 +573,19 @@ def register_query_routes(
                         if request.fuzzy and edit_dist == 0:
                             edit_dist = 1
 
+                        # GAP-6: split comma-separated path_filter into
+                        # independent patterns for OR-semantics matching.
+                        from code_indexer.services.path_pattern_matcher import (
+                            parse_exclude_patterns,
+                        )
+
+                        _path_filters = (
+                            parse_exclude_patterns(request.path_filter) or None
+                        )
+                        _exclude_paths = (
+                            parse_exclude_patterns(request.exclude_path) or None
+                        )
+
                         # Execute FTS query
                         fts_raw_results = tantivy_manager.search(
                             query_text=request.query_text,
@@ -581,15 +594,13 @@ def register_query_routes(
                             snippet_lines=request.snippet_lines,
                             limit=request.limit,
                             language_filter=request.language,
-                            path_filter=request.path_filter,
+                            path_filters=_path_filters,  # GAP-6: list, OR semantics
                             exclude_languages=(
                                 [request.exclude_language]
                                 if request.exclude_language
                                 else None
                             ),  # Story #503 Phase 1
-                            exclude_paths=(
-                                [request.exclude_path] if request.exclude_path else None
-                            ),  # Story #503 Phase 1
+                            exclude_paths=_exclude_paths,  # Story #503 Phase 1
                             use_regex=request.regex,  # Story #503 Phase 1
                         )
 
