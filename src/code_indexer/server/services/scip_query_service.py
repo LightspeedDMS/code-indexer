@@ -232,9 +232,12 @@ class SCIPQueryService:
             alias_manager = AliasManager(str(aliases_dir))
 
             # Bug #1315: look up repo_entry for index_path fallback.
+            # Each alias variant needs its OWN repo_entry -- the -global and
+            # bare registry rows carry different index_path values.
             # The BackendRegistry may not be available in all contexts
             # (CLI vs server), so we try but degrade gracefully.
-            scip_repo_entry = None
+            repo_entry_global = None
+            repo_entry_bare = None
             try:
                 from code_indexer.server import app as app_module
 
@@ -242,13 +245,12 @@ class SCIPQueryService:
                     app_module.app.state, "backend_registry", None
                 )
                 if backend_registry:
-                    scip_repo_entry = backend_registry.global_repos.get_repo(
+                    repo_entry_global = backend_registry.global_repos.get_repo(
                         f"{repo_name}-global"
                     )
-                    if not scip_repo_entry:
-                        scip_repo_entry = backend_registry.global_repos.get_repo(
-                            repo_name
-                        )
+                    repo_entry_bare = backend_registry.global_repos.get_repo(
+                        repo_name
+                    )
             except Exception:
                 pass
 
@@ -256,13 +258,13 @@ class SCIPQueryService:
             target = resolve_alias_or_index_path(
                 alias_manager,
                 alias_name=f"{repo_name}-global",
-                repo_entry=scip_repo_entry,
+                repo_entry=repo_entry_global,
             )
             if not target:
                 target = resolve_alias_or_index_path(
                     alias_manager,
                     alias_name=repo_name,
-                    repo_entry=scip_repo_entry,
+                    repo_entry=repo_entry_bare,
                 )
             if target and Path(target).is_dir():
                 return Path(target)
