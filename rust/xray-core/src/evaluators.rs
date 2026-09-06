@@ -108,46 +108,18 @@ impl Evaluator for CatchRethrowEvaluator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
     use crate::owned_node::OwnedNode;
 
     fn leaf(kind: &str, text: &str, is_named: bool) -> OwnedNode {
-        let source: Arc<str> = Arc::from(text);
-        OwnedNode {
-            kind: kind.to_string(),
-            start_line: 1,
-            start_byte: 0,
-            end_byte: text.len(),
-            children: vec![],
-            is_named,
-            source,
-        }
+        OwnedNode::new_leaf_for_test(kind, text, 1, is_named)
     }
 
     fn node(kind: &str, children: Vec<OwnedNode>) -> OwnedNode {
-        let source: Arc<str> = Arc::from("");
-        OwnedNode {
-            kind: kind.to_string(),
-            start_line: 1,
-            start_byte: 0,
-            end_byte: 0,
-            children,
-            is_named: true,
-            source,
-        }
+        OwnedNode::new_node_for_test(kind, "", 1, 0, 0, children, true)
     }
 
     fn node_with_text(kind: &str, text: &str, children: Vec<OwnedNode>) -> OwnedNode {
-        let source: Arc<str> = Arc::from(text);
-        OwnedNode {
-            kind: kind.to_string(),
-            start_line: 5,
-            start_byte: 0,
-            end_byte: text.len(),
-            children,
-            is_named: true,
-            source,
-        }
+        OwnedNode::new_node_for_test(kind, text, 5, 0, text.len(), children, true)
     }
 
     // --- AllocationInTryEvaluator tests ---
@@ -222,19 +194,15 @@ mod tests {
             param_name_id,
         ]);
         let thrown_id = leaf("identifier", "e", true);
-        let source: Arc<str> = Arc::from("throw e;");
-        let throw_stmt = OwnedNode {
-            kind: "throw_statement".to_string(),
-            start_line: 10,
-            start_byte: 0,
-            end_byte: 8,
-            children: vec![
-                leaf("throw", "throw", false),
-                thrown_id,
-            ],
-            is_named: true,
-            source,
-        };
+        let throw_stmt = OwnedNode::new_node_for_test(
+            "throw_statement",
+            "throw e;",
+            10,
+            0,
+            8,
+            vec![leaf("throw", "throw", false), thrown_id],
+            true,
+        );
         let body = node("block", vec![throw_stmt]);
         let catch_node = node("catch_clause", vec![catch_param, body]);
         let root = node("program", vec![catch_node]);
@@ -256,16 +224,15 @@ mod tests {
         ]);
         // Throws "ex" but caught "e" — not a plain rethrow
         let thrown_id = leaf("identifier", "ex", true);
-        let source: Arc<str> = Arc::from("throw ex;");
-        let throw_stmt = OwnedNode {
-            kind: "throw_statement".to_string(),
-            start_line: 10,
-            start_byte: 0,
-            end_byte: 9,
-            children: vec![leaf("throw", "throw", false), thrown_id],
-            is_named: true,
-            source,
-        };
+        let throw_stmt = OwnedNode::new_node_for_test(
+            "throw_statement",
+            "throw ex;",
+            10,
+            0,
+            9,
+            vec![leaf("throw", "throw", false), thrown_id],
+            true,
+        );
         let body = node("block", vec![throw_stmt]);
         let catch_node = node("catch_clause", vec![catch_param, body]);
         let root = node("program", vec![catch_node]);
@@ -284,16 +251,15 @@ mod tests {
             param_name_id,
         ]);
         let thrown_id = leaf("identifier", "e", true);
-        let source: Arc<str> = Arc::from("throw e;");
-        let throw_stmt = OwnedNode {
-            kind: "throw_statement".to_string(),
-            start_line: 10,
-            start_byte: 0,
-            end_byte: 8,
-            children: vec![leaf("throw", "throw", false), thrown_id],
-            is_named: true,
-            source,
-        };
+        let throw_stmt = OwnedNode::new_node_for_test(
+            "throw_statement",
+            "throw e;",
+            10,
+            0,
+            8,
+            vec![leaf("throw", "throw", false), thrown_id],
+            true,
+        );
         // Body has 2 statements — not a plain rethrow
         let log_stmt = node("expression_statement", vec![]);
         let body = node("block", vec![log_stmt, throw_stmt]);

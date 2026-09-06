@@ -110,7 +110,6 @@ unsafe impl Sync for DynlibEvaluator {}
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
 
     #[test]
     fn test_load_nonexistent_so_returns_error() {
@@ -203,16 +202,7 @@ fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> {
         assert!(evaluator.is_ok(), "load failed: {:?}", evaluator.err());
         let evaluator = evaluator.unwrap();
 
-        let source: Arc<str> = Arc::from("test");
-        let node = OwnedNode {
-            kind: "test_node".to_string(),
-            start_line: 42,
-            start_byte: 0,
-            end_byte: 4,
-            children: vec![],
-            is_named: true,
-            source,
-        };
+        let node = OwnedNode::new_leaf_for_test("test_node", "test", 42, true);
         let findings = evaluator.evaluate_node(&node);
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].pattern, "dynlib-test");
@@ -240,16 +230,7 @@ fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> {
         let evaluator = DynlibEvaluator::load(&cr.so_path)
             .expect("load must succeed");
 
-        let source: Arc<str> = Arc::from("x");
-        let node = OwnedNode {
-            kind: "some_node".to_string(),
-            start_line: 1,
-            start_byte: 0,
-            end_byte: 1,
-            children: vec![],
-            is_named: true,
-            source,
-        };
+        let node = OwnedNode::new_leaf_for_test("some_node", "x", 1, true);
         evaluator.evaluate_node(&node);
         let messages = evaluator.drain_debug_log();
         assert_eq!(messages.len(), 2, "must have 2 debug messages: {:?}", messages);
@@ -274,16 +255,7 @@ fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> {
         let evaluator = DynlibEvaluator::load(&cr.so_path)
             .expect("load must succeed");
 
-        let source: Arc<str> = Arc::from("");
-        let node = OwnedNode {
-            kind: "root".to_string(),
-            start_line: 1,
-            start_byte: 0,
-            end_byte: 0,
-            children: vec![],
-            is_named: true,
-            source,
-        };
+        let node = OwnedNode::new_leaf_for_test("root", "", 1, true);
         evaluator.evaluate_node(&node);
         let messages = evaluator.drain_debug_log();
         assert!(messages.is_empty(), "must be empty when no debug_log calls: {:?}", messages);
@@ -308,16 +280,7 @@ fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> {
         let evaluator = DynlibEvaluator::load(&cr.so_path)
             .expect("load must succeed");
 
-        let source: Arc<str> = Arc::from("");
-        let node = OwnedNode {
-            kind: "root".to_string(),
-            start_line: 1,
-            start_byte: 0,
-            end_byte: 0,
-            children: vec![],
-            is_named: true,
-            source,
-        };
+        let node = OwnedNode::new_leaf_for_test("root", "", 1, true);
 
         // Call through trait reference — this is how scanner.rs uses evaluators.
         let eval_ref: &dyn Evaluator = &evaluator;
@@ -330,30 +293,26 @@ fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> {
     /// Depth well past the empirically measured 8,000-12,000 SIGABRT cliff
     /// (issue #1795). Builds an iterative (non-recursive) chain of `depth`
     /// "wrapper" nodes around one "needle" leaf, exactly mirroring
-    /// `owned_node.rs`'s own `deep_chain` test helper but using a plain
-    /// struct literal (all `OwnedNode` fields are `pub`) since this module
-    /// cannot reach that helper's `#[cfg(test)]`-only sibling.
+    /// `owned_node.rs`'s own `deep_chain` test helper. Built via
+    /// `OwnedNode::new_leaf_for_test`/`new_node_for_test` (Bug #1791: the
+    /// `source` field is private, so this module -- a sibling of
+    /// `owned_node`, not a descendant -- can no longer construct `OwnedNode`
+    /// via a raw struct literal). Each node gets its own freshly-allocated
+    /// `Arc<str>` holding the same "needle" text the original struct-literal
+    /// version shared via `Arc::clone`; that sharing was an incidental
+    /// optimization, not something this stack-depth test depends on.
     fn deep_ffi_chain(depth: usize) -> OwnedNode {
-        let source: Arc<str> = Arc::from("needle");
-        let mut node = OwnedNode {
-            kind: "needle".to_string(),
-            start_line: depth + 1,
-            start_byte: 0,
-            end_byte: source.len(),
-            children: vec![],
-            is_named: true,
-            source: Arc::clone(&source),
-        };
+        let mut node = OwnedNode::new_leaf_for_test("needle", "needle", depth + 1, true);
         for level in (0..depth).rev() {
-            node = OwnedNode {
-                kind: "wrapper".to_string(),
-                start_line: level + 1,
-                start_byte: 0,
-                end_byte: 0,
-                children: vec![node],
-                is_named: true,
-                source: Arc::clone(&source),
-            };
+            node = OwnedNode::new_node_for_test(
+                "wrapper",
+                "needle",
+                level + 1,
+                0,
+                0,
+                vec![node],
+                true,
+            );
         }
         node
     }

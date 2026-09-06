@@ -890,6 +890,7 @@ dependencies = [
  "tree-sitter-xml",
  "tree-sitter-yaml",
  "walkdir",
+ "xray-core",
 ]
 
 [[package]]

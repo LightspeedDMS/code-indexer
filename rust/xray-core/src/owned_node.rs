@@ -22,7 +22,7 @@ pub struct OwnedNode {
     /// Shared source text for the whole file. All nodes in the same file
     /// hold a clone of this Arc (cheap atomic increment). Not public:
     /// callers use the `text()` method to get their slice.
-    pub source: Arc<str>,
+    source: Arc<str>,
 }
 
 /// Bug #1795, site #3: per-node bookkeeping for `build_recursive`'s
@@ -250,7 +250,14 @@ impl OwnedNode {
 
     /// Test-only constructor: builds a self-contained leaf node where the
     /// text IS the full source (start_byte=0, end_byte=text.len()).
-    #[cfg(test)]
+    ///
+    /// Bug #1791: gated on `test-support` (in addition to plain `test`) so
+    /// that `tests/*.rs` integration-test crates -- which link against a
+    /// normal, non-cfg-test build of this library and therefore cannot
+    /// reach a bare `#[cfg(test)]` item -- can still construct an
+    /// `OwnedNode` now that `source` is a private field. See the
+    /// `test-support` feature doc in Cargo.toml.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn new_leaf_for_test(
         kind: &str,
         text: &str,
@@ -271,7 +278,10 @@ impl OwnedNode {
 
     /// Test-only constructor: builds an interior node whose text() returns
     /// `text` (start_byte=0, end_byte=text.len()).
-    #[cfg(test)]
+    ///
+    /// Bug #1791: see `new_leaf_for_test`'s doc comment above for why this
+    /// is gated on `test-support` in addition to plain `test`.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn new_node_for_test(
         kind: &str,
         text: &str,

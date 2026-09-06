@@ -507,7 +507,6 @@ fn chrono_now_iso() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
     use tempfile::TempDir;
 
     #[test]
@@ -1020,16 +1019,7 @@ fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> {
         let evaluator = DynlibEvaluator::load(&cr.so_path)
             .expect("compiled .so must load successfully");
 
-        let source: Arc<str> = Arc::from("");
-        let node = OwnedNode {
-            kind: "root".to_string(),
-            start_line: 1,
-            start_byte: 0,
-            end_byte: 0,
-            children: vec![],
-            is_named: true,
-            source,
-        };
+        let node = OwnedNode::new_leaf_for_test("root", "", 1, true);
 
         evaluator.evaluate_node(&node);
         let messages = evaluator.drain_debug_log();
@@ -1097,16 +1087,7 @@ fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> {
 
         let evaluator = DynlibEvaluator::load(so_path)
             .unwrap_or_else(|e| panic!("compile #{}: .so must load successfully: {}", index, e));
-        let source: Arc<str> = Arc::from("try { } catch { }");
-        let node = OwnedNode {
-            kind: "try_statement".to_string(),
-            start_line: 1,
-            start_byte: 0,
-            end_byte: 0,
-            children: vec![],
-            is_named: true,
-            source,
-        };
+        let node = OwnedNode::new_leaf_for_test("try_statement", "try { } catch { }", 1, true);
         let findings = evaluator.evaluate_node(&node);
         assert_eq!(
             findings.len(),
@@ -1188,16 +1169,7 @@ fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> {
         let evaluator = DynlibEvaluator::load(&cr.so_path)
             .expect("compiled .so must load successfully");
 
-        let source: Arc<str> = Arc::from("");
-        let node = OwnedNode {
-            kind: "root".to_string(),
-            start_line: 1,
-            start_byte: 0,
-            end_byte: 0,
-            children: vec![],
-            is_named: true,
-            source,
-        };
+        let node = OwnedNode::new_leaf_for_test("root", "", 1, true);
 
         evaluator.evaluate_node(&node);
         let messages = evaluator.drain_debug_log();

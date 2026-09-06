@@ -34,4 +34,18 @@ tree-sitter-c = "0.24.2"
 tree-sitter-cpp = "0.23.4"
 tempfile = "3"
 
+[features]
+# Bug #1791: exposes the `#[cfg(any(test, feature = "test-support"))]`
+# OwnedNode test constructors (new_leaf_for_test / new_node_for_test) to
+# `tests/*.rs` integration-test crates. Plain `#[cfg(test)]` only applies
+# when THIS crate is compiled as its own unit-test binary -- an integration
+# test links against a normal (non-cfg-test) build of the library, so it
+# cannot otherwise reach them. Never enabled for a production/release build:
+# only the self-referencing dev-dependency below turns it on, and per
+# Cargo's resolver = "2" semantics (see workspace Cargo.toml) dev-dependency
+# features never leak into a build of this crate consumed by another crate
+# (e.g. xray-cli).
+test-support = []
+
 [dev-dependencies]
+xray-core = { path = ".", features = ["test-support"] }

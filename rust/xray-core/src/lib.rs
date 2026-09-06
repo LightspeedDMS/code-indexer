@@ -1,4 +1,5 @@
 pub mod owned_node;
+pub mod graph;
 pub mod finding;
 pub mod languages;
 pub mod scanner;
