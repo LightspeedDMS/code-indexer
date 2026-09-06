@@ -38,10 +38,11 @@ use crate::graph::identity::SymbolId;
 use crate::graph::reasons;
 use depth::{BinderDepth, LEVEL_1_ARITY, LEVEL_2_IMPORT_CONTEXT, LEVEL_5_UNIQUE_NAME};
 use name_index::{DeclInfo, RepoNameIndex};
-use resolve::{enclosing_symbol, resolve_reference};
+pub(crate) use resolve::enclosing_symbol;
+use resolve::resolve_reference;
 use scope::build_file_scope;
 
-pub use budget_bind::bind_with_budget;
+pub use budget_bind::{bind_with_budget, bind_with_budget_and_completeness};
 
 /// A method call site. See the two siblings below for the other reference
 /// kinds this binder resolves. Stored verbatim in `csr::Reference.kind`.
@@ -73,6 +74,7 @@ struct PendingReference {
 
 /// Resolves one reference site. Shared by all three per-file reference
 /// loops in `resolve_all_references` below.
+#[allow(clippy::too_many_arguments)]
 fn resolve_site(
     name: &str,
     ref_kind: u8,
@@ -81,8 +83,10 @@ fn resolve_site(
     scope: &scope::FileScope,
     arg_count: Option<usize>,
     name_index: &RepoNameIndex,
+    index_is_complete: bool,
 ) -> PendingReference {
-    let candidates = resolve_reference(name, ref_kind, file.file_id, scope, arg_count, name_index);
+    let candidates =
+        resolve_reference(name, ref_kind, file.file_id, scope, arg_count, name_index, index_is_complete);
     PendingReference {
         from: enclosing_symbol(&file.index, file.file_id, line),
         file: file.file_id,
@@ -121,6 +125,7 @@ fn mark_depth_for_reasons(depth: &mut BinderDepth, reasons_bits: u16) {
 fn resolve_all_references(
     files: &[FileForBind],
     name_index: &RepoNameIndex,
+    index_is_complete: bool,
 ) -> (Vec<PendingReference>, usize) {
     let mut pending = Vec::new();
     let mut total_candidates = 0usize;
@@ -135,19 +140,36 @@ fn resolve_all_references(
                 &scope,
                 site.arg_count,
                 name_index,
+                index_is_complete,
             );
             total_candidates += r.candidates.len();
             pending.push(r);
         }
         for site in &file.index.type_references {
-            let r =
-                resolve_site(&site.type_name, REF_KIND_TYPE_REFERENCE, site.line, file, &scope, None, name_index);
+            let r = resolve_site(
+                &site.type_name,
+                REF_KIND_TYPE_REFERENCE,
+                site.line,
+                file,
+                &scope,
+                None,
+                name_index,
+                index_is_complete,
+            );
             total_candidates += r.candidates.len();
             pending.push(r);
         }
         for site in &file.index.constructions {
-            let r =
-                resolve_site(&site.type_name, REF_KIND_CONSTRUCTION, site.line, file, &scope, None, name_index);
+            let r = resolve_site(
+                &site.type_name,
+                REF_KIND_CONSTRUCTION,
+                site.line,
+                file,
+                &scope,
+                None,
+                name_index,
+                index_is_complete,
+            );
             total_candidates += r.candidates.len();
             pending.push(r);
         }

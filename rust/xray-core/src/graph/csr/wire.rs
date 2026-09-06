@@ -257,6 +257,7 @@ pub fn read_graph_file(path: &Path) -> io::Result<CodeGraph> {
         3 => AnalysisCompleteness::DerivationTruncated,
         4 => AnalysisCompleteness::ResolutionAmbiguous,
         5 => AnalysisCompleteness::ParseErrorsPresent,
+        6 => AnalysisCompleteness::RepoIndexIncomplete,
         other => return Err(invalid(&format!("corrupt completeness byte: {other}"))),
     });
     Ok(builder.build())
@@ -270,6 +271,7 @@ fn completeness_to_byte(c: AnalysisCompleteness) -> u8 {
         AnalysisCompleteness::DerivationTruncated => 3,
         AnalysisCompleteness::ResolutionAmbiguous => 4,
         AnalysisCompleteness::ParseErrorsPresent => 5,
+        AnalysisCompleteness::RepoIndexIncomplete => 6,
     }
 }
 

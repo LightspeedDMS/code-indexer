@@ -159,23 +159,48 @@ impl CodeGraph {
         self.symbols.dense_id_of(symbol)
     }
 
-    /// AC6: "the 'no reference at all' finding tier is SUPPRESSED under
-    /// IndexBudgetExceeded". `Some(false)` ("referenced, not dead") is
-    /// always safe to report regardless of completeness -- positive
-    /// evidence a symbol has an inbound edge is never invalidated by a
-    /// later budget squeeze. `Some(true)` ("definitely dead: no reference
-    /// anywhere", the strongest dead-code tier) is only ever reported when
-    /// this graph is `Complete`; under `IndexBudgetExceeded` the same
-    /// absence of evidence reports `None` (suppressed / unknown) instead
-    /// of a false-positive dead-code verdict.
+    /// AC6 + dual-review defect D1 fix: "the 'no reference at all' finding
+    /// tier is SUPPRESSED whenever this graph is anything other than
+    /// `Complete`". `Some(false)` ("referenced, not dead") is always safe
+    /// to report regardless of completeness -- positive evidence a symbol
+    /// has an inbound edge is never invalidated by a later budget squeeze
+    /// or a repo-level indexing gap. `Some(true)` ("definitely dead: no
+    /// reference anywhere", the strongest dead-code tier) is only ever
+    /// reported when this graph is `Complete`; for EVERY other state
+    /// (`IndexBudgetExceeded`, `RepoIndexIncomplete`, or any future
+    /// variant) the same absence of evidence reports `None` (suppressed /
+    /// unknown) instead of a false-positive dead-code verdict. The guard
+    /// is deliberately an allowlist of the one good state, never a
+    /// denylist of the bad ones -- a denylist silently stops suppressing
+    /// the moment a new degradation variant is introduced and nobody
+    /// remembers to add it here (this is exactly how the pre-fix
+    /// `== IndexBudgetExceeded` guard missed `RepoIndexIncomplete`).
     pub fn is_definitely_dead_code(&self, dense_symbol_id: u32) -> Option<bool> {
         if self.is_symbol_referenced(dense_symbol_id) {
             return Some(false);
         }
-        if self.completeness == AnalysisCompleteness::IndexBudgetExceeded {
+        if self.completeness != AnalysisCompleteness::Complete {
             return None;
         }
         Some(true)
+    }
+
+    /// Dual-review defect D1 fix: records that `repo_index::build_repo_graph`
+    /// (or any other caller ABOVE the binder that knows about a gap the
+    /// binder itself cannot see -- `max_files` truncation, a parse error,
+    /// an extractor panic, an unreadable source file) dropped part of the
+    /// repository from this build. Only takes effect while `completeness`
+    /// is still `Complete`: this never "upgrades" a degraded graph back to
+    /// a healthier-looking state, and never clobbers a MORE specific
+    /// reason (e.g. the binder ladder's own `IndexBudgetExceeded`) with a
+    /// less specific one -- the first-recorded degradation reason wins,
+    /// and `is_definitely_dead_code`'s `!= Complete` guard suppresses the
+    /// strongest dead-code tier the moment ANY reason is recorded either
+    /// way.
+    pub fn downgrade_completeness(&mut self, reason: AnalysisCompleteness) {
+        if self.completeness == AnalysisCompleteness::Complete {
+            self.completeness = reason;
+        }
     }
 }
 
@@ -310,6 +335,53 @@ mod tests {
         // Unreferenced + IndexBudgetExceeded -> suppressed (None), never
         // a false "definitely dead" verdict.
         assert_eq!(graph.is_definitely_dead_code(dead_dense), None);
+    }
+
+    /// Dual-review defect D1 (Critical): the pre-fix guard was an
+    /// allowlist-of-one (`== IndexBudgetExceeded`) where the story's own
+    /// docs demand an allowlist of exactly ONE good state (`!= Complete`
+    /// suppresses everything else). `RepoIndexIncomplete` (repo-level
+    /// indexing gaps: `max_files` truncation, parse errors, extractor
+    /// panics, unreadable source files -- see `repo_index::build_repo_graph`)
+    /// is the DISCRIMINATING case a wrong `== IndexBudgetExceeded` guard
+    /// would miss: it is non-`Complete` but not `IndexBudgetExceeded`,
+    /// so the old guard fell through to `Some(true)` -- a confident
+    /// "definitely dead" verdict from a partially-indexed repository.
+    #[test]
+    fn is_definitely_dead_code_suppresses_the_dead_code_tier_for_every_non_complete_state() {
+        let mut builder = CodeGraphBuilder::with_candidate_capacity(0);
+        let dead_symbol = builder.intern_symbol(make_symbol_id(1, 0));
+        builder.set_completeness(crate::graph::budget::AnalysisCompleteness::RepoIndexIncomplete);
+        let graph = builder.build();
+
+        assert_eq!(
+            graph.is_definitely_dead_code(dead_symbol),
+            None,
+            "an unreferenced symbol in a RepoIndexIncomplete graph must be suppressed (None), \
+             never a confident Some(true) 'definitely dead' verdict"
+        );
+    }
+
+    /// `downgrade_completeness` must set the reason exactly once (from the
+    /// default `Complete`) and never clobber an already-recorded, more
+    /// specific reason with a later, less specific one.
+    #[test]
+    fn downgrade_completeness_sets_reason_once_but_never_clobbers_an_existing_one() {
+        let mut builder = CodeGraphBuilder::with_candidate_capacity(0);
+        builder.intern_symbol(make_symbol_id(1, 0));
+        let mut graph = builder.build();
+        assert_eq!(graph.completeness(), crate::graph::budget::AnalysisCompleteness::Complete);
+
+        graph.downgrade_completeness(crate::graph::budget::AnalysisCompleteness::RepoIndexIncomplete);
+        assert_eq!(graph.completeness(), crate::graph::budget::AnalysisCompleteness::RepoIndexIncomplete);
+
+        // A second, different reason must NOT overwrite the first.
+        graph.downgrade_completeness(crate::graph::budget::AnalysisCompleteness::IndexBudgetExceeded);
+        assert_eq!(
+            graph.completeness(),
+            crate::graph::budget::AnalysisCompleteness::RepoIndexIncomplete,
+            "the first-recorded degradation reason must win"
+        );
     }
 
     /// Defect 2 (ADR-002 GraphHandle FFI fix): `try_resolve_symbol`/

@@ -68,7 +68,7 @@ fn second_query_against_unchanged_snapshot_serves_from_cache_with_zero_reparsing
 
     scanner::reset_parse_count();
     let first = cache.get_or_build(key.clone(), || {
-        build_repo_graph(dir.path(), &files, &options, &NoOpCollector).graph
+        build_repo_graph(dir.path(), &files, &options, &NoOpCollector).expect("no file_id collision").graph
     });
     assert!(!first.was_cache_hit, "first query against a never-seen snapshot must be a miss");
     assert!(scanner::parse_count() > 0, "the first (miss) query must actually parse real files");
@@ -105,7 +105,7 @@ fn an_uncommitted_edit_misses_the_graph_cache() {
     let key_before = GraphCacheKey::new(identity_before.clone());
     scanner::reset_parse_count();
     let first = cache.get_or_build(key_before, || {
-        build_repo_graph(dir.path(), &files, &options, &NoOpCollector).graph
+        build_repo_graph(dir.path(), &files, &options, &NoOpCollector).expect("no file_id collision").graph
     });
     assert!(!first.was_cache_hit);
     assert!(scanner::parse_count() > 0);
@@ -119,7 +119,7 @@ fn an_uncommitted_edit_misses_the_graph_cache() {
     let key_after = GraphCacheKey::new(identity_after);
     scanner::reset_parse_count();
     let second = cache.get_or_build(key_after, || {
-        build_repo_graph(dir.path(), &files, &options, &NoOpCollector).graph
+        build_repo_graph(dir.path(), &files, &options, &NoOpCollector).expect("no file_id collision").graph
     });
     assert!(!second.was_cache_hit, "an uncommitted edit must MISS the graph cache");
     assert!(scanner::parse_count() > 0, "a genuine miss must actually re-parse the edited file");

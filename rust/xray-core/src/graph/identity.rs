@@ -101,6 +101,18 @@ impl Default for FileIdRegistry {
     }
 }
 
+/// Two DISTINCT repo-relative paths independently verified (via a
+/// standalone SHA-256 computation, not this crate) to hash to the SAME
+/// `file_id` (0x7432e22f) under `file_id`'s exact scheme. Shared, crate-
+/// visible fixture (Rule 4, anti-duplication) so every test exercising a
+/// REAL `file_id` collision -- this module's own `FileIdRegistry` test and
+/// `repo_index`'s D4 whole-repo-indexing collision test -- uses the exact
+/// same verified-colliding pair rather than each hoping for/re-deriving one.
+#[cfg(test)]
+pub(crate) const COLLIDING_PATH_A: &str = "src/generated/file_10960.rs";
+#[cfg(test)]
+pub(crate) const COLLIDING_PATH_B: &str = "src/generated/file_24311.rs";
+
 /// Globally-unique symbol identifier: `(file_id << 32) | local_index`.
 pub type SymbolId = u64;
 
@@ -301,23 +313,22 @@ mod tests {
     /// mocking the hash function.
     #[test]
     fn file_id_registry_detects_a_real_collision_between_distinct_paths_loudly() {
-        const PATH_A: &str = "src/generated/file_10960.rs";
-        const PATH_B: &str = "src/generated/file_24311.rs";
+        let (path_a, path_b) = (super::COLLIDING_PATH_A, super::COLLIDING_PATH_B);
         assert_eq!(
-            file_id(PATH_A),
-            file_id(PATH_B),
+            file_id(path_a),
+            file_id(path_b),
             "test fixture assumption broken: these two paths must actually collide"
         );
 
         let mut registry = FileIdRegistry::new();
-        registry.assign(PATH_A).expect("first registration never collides");
+        registry.assign(path_a).expect("first registration never collides");
 
-        let result: Result<u32, FileIdCollisionError> = registry.assign(PATH_B);
+        let result: Result<u32, FileIdCollisionError> = registry.assign(path_b);
         match result {
             Err(collision) => {
-                assert_eq!(collision.file_id, file_id(PATH_A));
-                assert_eq!(collision.existing_path, PATH_A);
-                assert_eq!(collision.new_path, PATH_B);
+                assert_eq!(collision.file_id, file_id(path_a));
+                assert_eq!(collision.existing_path, path_a);
+                assert_eq!(collision.new_path, path_b);
             }
             Ok(_) => panic!(
                 "a real file_id collision between two DISTINCT paths must be reported, \

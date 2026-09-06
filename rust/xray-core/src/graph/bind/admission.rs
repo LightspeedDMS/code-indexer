@@ -50,13 +50,13 @@ pub struct PreparedBind {
 /// `files` and returns exact stats, WITHOUT allocating the CSR candidate
 /// arena. Bounded loop inherited from `resolve_all_references` (one pass
 /// per file's finite invocation/type-reference/construction lists).
-pub fn prepare_bind(files: Vec<FileForBind>) -> (PreparedBind, PreBindStats) {
+pub fn prepare_bind(files: Vec<FileForBind>, index_is_complete: bool) -> (PreparedBind, PreBindStats) {
     let name_index = RepoNameIndex::build(&files);
     let mut depths: HashMap<String, BinderDepth> = HashMap::new();
     for file in &files {
         depths.entry(file.language.clone()).or_insert_with(|| BinderDepth::new(file.language.clone()));
     }
-    let (pending, total_candidates) = resolve_all_references(&files, &name_index);
+    let (pending, total_candidates) = resolve_all_references(&files, &name_index, index_is_complete);
     let declaration_count = files.iter().map(|f| f.index.declarations.len()).sum();
     let call_site_count = pending.len();
 
@@ -125,11 +125,16 @@ pub enum BindOutcome {
 /// is consulted strictly BETWEEN measurement and allocation -- a `false`
 /// return means `finish_bind` (and therefore
 /// `CodeGraphBuilder::with_candidate_capacity`) is never invoked at all.
-pub fn bind_with_admission_gate<F>(files: Vec<FileForBind>, budget: &IndexBudget, gate: F) -> BindOutcome
+pub fn bind_with_admission_gate<F>(
+    files: Vec<FileForBind>,
+    budget: &IndexBudget,
+    index_is_complete: bool,
+    gate: F,
+) -> BindOutcome
 where
     F: FnOnce(&PreBindStats) -> bool,
 {
-    let (prepared, stats) = prepare_bind(files);
+    let (prepared, stats) = prepare_bind(files, index_is_complete);
     if !gate(&stats) {
         return BindOutcome::Denied(stats);
     }
@@ -177,7 +182,7 @@ mod tests {
     /// a subsequent `finish_bind` actually produces.
     #[test]
     fn prepare_bind_reports_exact_counts_matching_a_subsequent_finish_bind() {
-        let (prepared, stats) = prepare_bind(two_file_fixture());
+        let (prepared, stats) = prepare_bind(two_file_fixture(), true);
         assert_eq!(stats.declaration_count, 2);
         assert_eq!(stats.call_site_count, 2);
         assert_eq!(stats.candidate_edge_count, 2);
@@ -198,7 +203,7 @@ mod tests {
     #[test]
     fn bind_with_budget_matches_prepare_then_finish_bind() {
         let via_public_api = super::super::bind_with_budget(two_file_fixture(), &IndexBudget::unlimited());
-        let (prepared, _stats) = prepare_bind(two_file_fixture());
+        let (prepared, _stats) = prepare_bind(two_file_fixture(), true);
         let via_split_api = finish_bind(prepared, &IndexBudget::unlimited());
 
         assert_eq!(via_public_api.completeness(), via_split_api.completeness());
@@ -218,7 +223,7 @@ mod tests {
     fn gate2_denial_never_allocates_the_candidate_arena() {
         reset_candidate_capacity_allocation_count();
 
-        let outcome = bind_with_admission_gate(two_file_fixture(), &IndexBudget::unlimited(), |_stats| false);
+        let outcome = bind_with_admission_gate(two_file_fixture(), &IndexBudget::unlimited(), true, |_stats| false);
 
         assert!(matches!(outcome, BindOutcome::Denied(_)));
         assert_eq!(
@@ -236,7 +241,7 @@ mod tests {
     fn gate2_admission_allocates_the_candidate_arena_exactly_once() {
         reset_candidate_capacity_allocation_count();
 
-        let outcome = bind_with_admission_gate(two_file_fixture(), &IndexBudget::unlimited(), |_stats| true);
+        let outcome = bind_with_admission_gate(two_file_fixture(), &IndexBudget::unlimited(), true, |_stats| true);
 
         assert!(matches!(outcome, BindOutcome::Built(_)));
         assert_eq!(candidate_capacity_allocation_count(), 1);
@@ -247,7 +252,7 @@ mod tests {
     /// counts.
     #[test]
     fn gate_receives_the_real_pre_bind_stats() {
-        let outcome = bind_with_admission_gate(two_file_fixture(), &IndexBudget::unlimited(), |stats| {
+        let outcome = bind_with_admission_gate(two_file_fixture(), &IndexBudget::unlimited(), true, |stats| {
             stats.declaration_count == 2 && stats.call_site_count == 2 && stats.candidate_edge_count == 2
         });
         assert!(matches!(outcome, BindOutcome::Built(_)), "gate must have observed the real, exact PreBindStats");

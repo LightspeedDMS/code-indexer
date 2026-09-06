@@ -70,7 +70,31 @@ pub fn bind_with_budget(files: Vec<FileForBind>, budget: &IndexBudget) -> CodeGr
     // ladder logic. `_stats` is discarded here -- `bind_with_budget`
     // itself never gates on anything; `admission::bind_with_admission_gate`
     // is the entry point an external caller uses when it wants to.
-    let (prepared, _stats) = super::admission::prepare_bind(files);
+    //
+    // `index_is_complete = true`: this convenience entry point has no way
+    // to know whether `files` represents the WHOLE repository (that
+    // knowledge lives one layer up, in whatever assembled `files`) -- it
+    // preserves this function's existing, byte-for-byte-unchanged contract
+    // for its many current callers/tests. `bind_with_budget_and_completeness`
+    // below is the real entry point a caller with that knowledge (e.g.
+    // `repo_index::build_repo_graph`) must use instead (dual-review D3).
+    bind_with_budget_and_completeness(files, budget, true)
+}
+
+/// Dual-review defect D3 fix: the real AC6 entry point for a caller that
+/// KNOWS whether its `files` list represents the entire repository (e.g.
+/// `repo_index::build_repo_graph`, which tracks `max_files` truncation,
+/// extractor panics, and unreadable files). `index_is_complete = false`
+/// disables the binder's `UNIQUE_NAME_IN_REPO` shortcut end-to-end (see
+/// `bind::resolve::resolve_reference`'s doc comment) so a same-named
+/// declaration hiding in a file this run never saw can never be silently
+/// promoted to `Confidence::Exact`.
+pub fn bind_with_budget_and_completeness(
+    files: Vec<FileForBind>,
+    budget: &IndexBudget,
+    index_is_complete: bool,
+) -> CodeGraph {
+    let (prepared, _stats) = super::admission::prepare_bind(files, index_is_complete);
     super::admission::finish_bind(prepared, budget)
 }
 
@@ -264,5 +288,47 @@ mod tests {
         let (dup_a, dup_b) = dup_pair();
         let exceeded = bind_with_budget(vec![file(2, "java", dup_a), file(3, "java", dup_b)], &IndexBudget::new(0, 5));
         assert_eq!(exceeded.completeness(), AnalysisCompleteness::IndexBudgetExceeded);
+    }
+
+    /// Dual-review defect D3: `bind_with_budget_and_completeness` is the
+    /// real public entry point a caller with partial-index knowledge
+    /// (`repo_index::build_repo_graph`) must use. `index_is_complete =
+    /// false` must disable `UNIQUE_NAME_IN_REPO`/`Confidence::Exact`
+    /// end-to-end through the public API, even though `bind_with_budget`
+    /// (the `index_is_complete = true` convenience wrapper) would still
+    /// grant it for the identical input.
+    #[test]
+    fn bind_with_budget_and_completeness_disables_unique_name_shortcut_when_index_is_partial() {
+        use crate::graph::confidence::Confidence;
+
+        let files = || {
+            let mut solo = LocalIndex::new();
+            solo.declarations.push(method_decl("onlyOne", 1, 0, None));
+            let mut caller = LocalIndex::new();
+            caller.invocations.push(invocation("onlyOne", None));
+            vec![file(1, "java", solo), file(2, "java", caller)]
+        };
+
+        let complete_graph = bind_with_budget_and_completeness(files(), &IndexBudget::unlimited(), true);
+        let complete_ref = complete_graph
+            .references()
+            .iter()
+            .find(|r| !r.is_unresolved())
+            .expect("the call must resolve to something");
+        let complete_candidate = &complete_graph.candidates_for(complete_ref)[0];
+        assert_eq!(complete_candidate.confidence(), Confidence::Exact);
+
+        let partial_graph = bind_with_budget_and_completeness(files(), &IndexBudget::unlimited(), false);
+        let partial_ref = partial_graph
+            .references()
+            .iter()
+            .find(|r| !r.is_unresolved())
+            .expect("the call must still resolve to the sole indexed declaration");
+        let partial_candidate = &partial_graph.candidates_for(partial_ref)[0];
+        assert_ne!(
+            partial_candidate.confidence(),
+            Confidence::Exact,
+            "a partial index must never grant Exact confidence through the public bind API"
+        );
     }
 }

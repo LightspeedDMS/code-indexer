@@ -17,10 +17,17 @@
 use crate::graph::extract::local_index::LocalIndex;
 use crate::graph::identity::SymbolId;
 use crate::owned_node::OwnedNode;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::path::Path;
 
-/// One fact produced by a `FactCollector` for one file.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// One fact produced by a `FactCollector` for one file. `Serialize`/
+/// `Deserialize` back the host-only `write_facts_file`/`read_facts_file`
+/// disk format below (dual-review defect H2) -- unrelated to, and never
+/// crossing, the dylib FFI boundary `dynlib::GraphDynlibEvaluator::
+/// call_collect_facts` uses, which passes a real in-memory `Vec<UserFact>`
+/// by value.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UserFact {
     pub kind: String,
     pub line: usize,
@@ -48,7 +55,7 @@ pub type InternedStr = u32;
 /// reserved for genuinely non-symbol values." Closed (no third variant,
 /// no catch-all) so a caller can never smuggle a symbol reference through
 /// as a formatted string -- the exact anti-pattern ADR-001 replaces.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum FactKey {
     Symbol(SymbolId),
     Custom(InternedStr),
@@ -85,6 +92,34 @@ impl FactIndex {
     pub fn get(&self, key: &FactKey) -> &[UserFact] {
         self.facts.get(key).map(|v| v.as_slice()).unwrap_or(&[])
     }
+}
+
+/// Dual-review defect H2: persists `facts` to `path` as a JSON array of
+/// `(FactKey, Vec<UserFact>)` pairs -- a plain array rather than a JSON
+/// object, since `FactKey` is an enum and `serde_json` cannot use a
+/// non-string type as an object key. This is the counterpart
+/// `repo_index::build_repo_graph`'s real, aggregated `FactIndex` needs so
+/// the separate `--analyze-graph` process (`xray-cli`'s `run_analyze_graph`)
+/// can load real facts instead of always constructing an empty one.
+pub fn write_facts_file(facts: &FactIndex, path: &Path) -> std::io::Result<()> {
+    let entries: Vec<(&FactKey, &Vec<UserFact>)> = facts.facts.iter().collect();
+    let json = serde_json::to_vec(&entries)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    std::fs::write(path, json)
+}
+
+/// Reads a `FactIndex` previously written by `write_facts_file` back from
+/// `path`. Fails loud (`io::Error`) on a missing file or malformed JSON --
+/// never silently degrades to an empty `FactIndex`, which would be
+/// indistinguishable from "this build genuinely collected no facts"
+/// (Rule 13, anti-silent-failure). Callers that want to treat a missing/
+/// invalid facts file as optional (e.g. an older graph with no
+/// accompanying facts) decide that at the call site, not here.
+pub fn read_facts_file(path: &Path) -> std::io::Result<FactIndex> {
+    let bytes = std::fs::read(path)?;
+    let entries: Vec<(FactKey, Vec<UserFact>)> = serde_json::from_slice(&bytes)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    Ok(FactIndex { facts: entries.into_iter().collect() })
 }
 
 /// ADR-002 / Story #1787 AC8: the SAME opaque-handle principle
@@ -204,6 +239,41 @@ mod tests {
 
         assert!(index.get(&FactKey::Symbol(make_symbol_id(99, 99))).is_empty());
         assert!(index.get(&FactKey::Custom(unused_key)).is_empty());
+    }
+
+    /// Dual-review defect H2: `main.rs`'s `--analyze-graph` subcommand can
+    /// only ever hand `analyze_graph` a REAL `FactIndex` (rather than the
+    /// pre-fix, permanently-empty `FactIndex::new()`) if the facts
+    /// `repo_index::build_repo_graph` aggregates can be persisted alongside
+    /// the graph and reloaded by the separate `--analyze-graph` process.
+    /// `write_facts_file`/`read_facts_file` must round-trip every fact
+    /// under its EXACT `FactKey` -- both variants (`Symbol` and `Custom`).
+    #[test]
+    fn a_fact_index_written_to_disk_round_trips_through_write_and_read_facts_file() {
+        use crate::graph::identity::make_symbol_id;
+        use crate::graph::string_table::StringTable;
+
+        let mut strings = StringTable::new();
+        let custom_key: InternedStr = strings.intern("db.host");
+
+        let mut original = FactIndex::new();
+        original.insert(
+            FactKey::Symbol(make_symbol_id(1, 0)),
+            UserFact { kind: "deprecated".to_string(), line: 10, message: "old API".to_string() },
+        );
+        original.insert(
+            FactKey::Custom(custom_key),
+            UserFact { kind: "config_key".to_string(), line: 1, message: "db.host".to_string() },
+        );
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("facts.json");
+        write_facts_file(&original, &path).expect("write_facts_file must succeed");
+        let reloaded = read_facts_file(&path).expect("read_facts_file must succeed");
+
+        assert_eq!(reloaded.get(&FactKey::Symbol(make_symbol_id(1, 0))), original.get(&FactKey::Symbol(make_symbol_id(1, 0))));
+        assert_eq!(reloaded.get(&FactKey::Custom(custom_key)), original.get(&FactKey::Custom(custom_key)));
+        assert!(reloaded.get(&FactKey::Symbol(make_symbol_id(9, 9))).is_empty());
     }
 
     /// ADR-002 extension: `FactsHandle` must delegate to the real

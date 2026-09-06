@@ -131,6 +131,18 @@ fn apply_import_context_narrowing(candidates: &mut Vec<(DeclInfo, u16)>) {
 /// all further narrowing) or "several existed but every level of
 /// narrowing this binder applies converged on one"; length > 1 means
 /// ambiguous.
+///
+/// `index_is_complete` (dual-review defect D3): `UNIQUE_NAME_IN_REPO`
+/// asserts "no OTHER declaration anywhere in the repo shares this name" --
+/// a claim `RepoNameIndex` can only back up when it was built from EVERY
+/// file in the repo. When the caller's indexing pass dropped some files
+/// (`max_files` truncation, an extractor panic, an unreadable source
+/// file), `pool.len() == 1` only proves "unique in the files we managed to
+/// index", a strictly weaker claim. Passing `false` disables the
+/// short-circuit so a same-named declaration hiding in a dropped file can
+/// never be silently ignored -- the reference instead flows through the
+/// same context/arity/import narrowing an ambiguous (`pool.len() > 1`)
+/// reference already uses, which can never produce `Confidence::Exact`.
 pub(crate) fn resolve_reference(
     name: &str,
     ref_kind: u8,
@@ -138,12 +150,13 @@ pub(crate) fn resolve_reference(
     ref_scope: &FileScope,
     arg_count: Option<usize>,
     name_index: &RepoNameIndex,
+    index_is_complete: bool,
 ) -> Vec<(DeclInfo, u16)> {
     let pool = name_index.lookup(name, target_kind_for_ref(ref_kind));
     if pool.is_empty() {
         return Vec::new();
     }
-    if pool.len() == 1 {
+    if pool.len() == 1 && index_is_complete {
         return vec![(pool[0].clone(), reasons::UNIQUE_NAME_IN_REPO)];
     }
 
@@ -218,7 +231,7 @@ mod tests {
         let scope = FileScope { package: None, imports: Vec::new() };
 
         let candidates =
-            resolve_reference("neverDeclared", REF_KIND_INVOCATION, 1, &scope, None, &name_index);
+            resolve_reference("neverDeclared", REF_KIND_INVOCATION, 1, &scope, None, &name_index, true);
         assert!(candidates.is_empty());
     }
 
@@ -235,7 +248,7 @@ mod tests {
         let name_index = RepoNameIndex::build(&[file(10, "java", file_a), file(11, "java", file_b)]);
         let scope = FileScope { package: None, imports: Vec::new() };
 
-        let candidates = resolve_reference("getId", REF_KIND_INVOCATION, 1, &scope, None, &name_index);
+        let candidates = resolve_reference("getId", REF_KIND_INVOCATION, 1, &scope, None, &name_index, true);
         assert_eq!(candidates.len(), 2);
     }
 
@@ -250,10 +263,10 @@ mod tests {
         let name_index = RepoNameIndex::build(&[file(10, "java", file_a), file(11, "java", file_b)]);
         let scope = FileScope { package: None, imports: Vec::new() };
 
-        let level0 = resolve_reference("run", REF_KIND_INVOCATION, 1, &scope, None, &name_index);
+        let level0 = resolve_reference("run", REF_KIND_INVOCATION, 1, &scope, None, &name_index, true);
         assert_eq!(level0.len(), 2, "level 0 (no arity known) keeps both");
 
-        let narrowed = resolve_reference("run", REF_KIND_INVOCATION, 1, &scope, Some(2), &name_index);
+        let narrowed = resolve_reference("run", REF_KIND_INVOCATION, 1, &scope, Some(2), &name_index, true);
         assert_eq!(narrowed.len(), 1);
         assert_eq!(narrowed[0].0.file_id, 11);
         assert_ne!(narrowed[0].1 & reasons::ARITY_MATCH, 0);
@@ -281,7 +294,7 @@ mod tests {
 
         let scope_no_import = FileScope { package: Some("pkg.ref".to_string()), imports: Vec::new() };
         let arity_only =
-            resolve_reference("run", REF_KIND_INVOCATION, 1, &scope_no_import, Some(0), &name_index);
+            resolve_reference("run", REF_KIND_INVOCATION, 1, &scope_no_import, Some(0), &name_index, true);
         assert_eq!(arity_only.len(), 3, "arity alone cannot narrow when every candidate matches");
 
         let scope_with_import = FileScope {
@@ -293,13 +306,14 @@ mod tests {
             }],
         };
         let narrowed =
-            resolve_reference("run", REF_KIND_INVOCATION, 1, &scope_with_import, Some(0), &name_index);
+            resolve_reference("run", REF_KIND_INVOCATION, 1, &scope_with_import, Some(0), &name_index, true);
         assert_eq!(narrowed.len(), 1);
         assert_eq!(narrowed[0].0.file_id, 11);
     }
 
     /// AC4 Level 5: a name unique across the whole repo reaches
-    /// `Confidence::Exact` via `UNIQUE_NAME_IN_REPO`.
+    /// `Confidence::Exact` via `UNIQUE_NAME_IN_REPO` -- but ONLY when the
+    /// caller confirms the index is complete.
     #[test]
     fn unique_name_in_repo_resolves_to_a_single_exact_confidence_candidate() {
         use crate::graph::confidence::Confidence;
@@ -310,11 +324,44 @@ mod tests {
         let scope = FileScope { package: None, imports: Vec::new() };
 
         let candidates =
-            resolve_reference("uniqueMethod", REF_KIND_INVOCATION, 1, &scope, None, &name_index);
+            resolve_reference("uniqueMethod", REF_KIND_INVOCATION, 1, &scope, None, &name_index, true);
         assert_eq!(candidates.len(), 1);
         let reasons_bits = candidates[0].1;
         assert_ne!(reasons_bits & reasons::UNIQUE_NAME_IN_REPO, 0);
         assert_eq!(Confidence::derive(reasons_bits), Confidence::Exact);
+    }
+
+    /// Dual-review defect D3 (Critical): `UNIQUE_NAME_IN_REPO` must NEVER
+    /// be claimed when the caller reports the index is PARTIAL (e.g. this
+    /// exact same fixture, but a sibling file elsewhere in the real repo
+    /// was dropped by `max_files` truncation and never made it into
+    /// `RepoNameIndex`). A wrong implementation that ignored
+    /// `index_is_complete` would pass the test right above this one and
+    /// still fail here -- the discriminating input is the SAME single
+    /// declaration, only the completeness flag differs.
+    #[test]
+    fn a_name_unique_only_in_a_partial_index_does_not_get_exact_confidence() {
+        use crate::graph::confidence::Confidence;
+
+        let mut index = LocalIndex::new();
+        index.declarations.push(method_decl("uniqueMethod", 1, 0, None));
+        let name_index = RepoNameIndex::build(&[file(1, "java", index)]);
+        let scope = FileScope { package: None, imports: Vec::new() };
+
+        let candidates =
+            resolve_reference("uniqueMethod", REF_KIND_INVOCATION, 1, &scope, None, &name_index, false);
+        assert_eq!(candidates.len(), 1, "the sole indexed declaration is still a candidate -- never dropped");
+        let reasons_bits = candidates[0].1;
+        assert_eq!(
+            reasons_bits & reasons::UNIQUE_NAME_IN_REPO,
+            0,
+            "UNIQUE_NAME_IN_REPO must not be claimed from a partial index"
+        );
+        assert_ne!(
+            Confidence::derive(reasons_bits),
+            Confidence::Exact,
+            "a partial-index match must never reach Exact confidence"
+        );
     }
 
     /// `enclosing_symbol` only ever receives ONE file's `LocalIndex` (each

@@ -97,20 +97,27 @@ fn format_cache_identity_output(user_code: &str) -> String {
     )
 }
 
-/// Parsed `--graph-in <path>`/`--dylib <path>` arguments for the
-/// `--analyze-graph` subcommand.
+/// Parsed `--graph-in <path>`/`--dylib <path>`/`--facts-in <path>`
+/// arguments for the `--analyze-graph` subcommand.
 struct AnalyzeGraphArgs {
     graph_in: PathBuf,
     dylib: PathBuf,
+    /// Dual-review defect H2: OPTIONAL path to a `write_facts_file` output
+    /// (`repo_index::build_repo_graph`'s aggregated `FactIndex`, persisted
+    /// by whatever caller ran the indexing pass). `None` when absent -- a
+    /// legacy invocation with no facts file must keep working exactly as
+    /// it did before this fix.
+    facts_in: Option<PathBuf>,
 }
 
-/// Parses the `--analyze-graph` subcommand's own two REQUIRED flags,
-/// `--graph-in <path>` and `--dylib <path>`. Order-independent; errors
-/// with a clear message naming which flag is missing, never silently
-/// defaulting either.
+/// Parses the `--analyze-graph` subcommand's two REQUIRED flags
+/// (`--graph-in <path>`, `--dylib <path>`) plus the OPTIONAL `--facts-in
+/// <path>`. Order-independent; errors with a clear message naming which
+/// required flag is missing, never silently defaulting either.
 fn parse_analyze_graph_args(args: &[String]) -> Result<AnalyzeGraphArgs, String> {
     let mut graph_in: Option<PathBuf> = None;
     let mut dylib: Option<PathBuf> = None;
+    let mut facts_in: Option<PathBuf> = None;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
@@ -124,12 +131,18 @@ fn parse_analyze_graph_args(args: &[String]) -> Result<AnalyzeGraphArgs, String>
                 dylib = Some(PathBuf::from(value));
                 i = next_i;
             }
+            "--facts-in" => {
+                let (value, next_i) = parse_value_flag(args, i, "--facts-in requires a path");
+                facts_in = Some(PathBuf::from(value));
+                i = next_i;
+            }
             other => return Err(format!("--analyze-graph: unrecognized argument '{other}'")),
         }
     }
     Ok(AnalyzeGraphArgs {
         graph_in: graph_in.ok_or_else(|| "--analyze-graph requires --graph-in <path>".to_string())?,
         dylib: dylib.ok_or_else(|| "--analyze-graph requires --dylib <path>".to_string())?,
+        facts_in,
     })
 }
 
@@ -149,13 +162,24 @@ fn parse_analyze_graph_args(args: &[String]) -> Result<AnalyzeGraphArgs, String>
 ///   `compiler::GRAPH_EPILOGUE`) -> `Panicked`
 /// - `analyze_graph` returned a real result -> `RanOk`
 ///
-/// Facts are an EMPTY `FactIndex` for this slice -- wiring real per-file
-/// `collect_facts` output into a `FactIndex` here is fused-pipeline
-/// integration, explicitly out of scope for the ABI/process-container work
-/// this subcommand demonstrates.
-fn run_analyze_graph(graph_in: &std::path::Path, dylib: &std::path::Path) -> xray_core::graph::analyze::process::ChildReport {
+/// Dual-review defect H2: `facts_in`, when `Some`, names a
+/// `write_facts_file` output -- `repo_index::build_repo_graph`'s real,
+/// aggregated `FactIndex` -- loaded via `read_facts_file` so
+/// `analyze_graph` finally receives real facts instead of a permanently
+/// empty `FactIndex`. `None` (no facts file supplied, e.g. a legacy
+/// invocation, or an evaluator with no `collect_facts`) keeps the
+/// pre-fix behavior exactly: an empty `FactIndex`. A facts file that
+/// exists but fails to read/parse DEGRADES to empty with a stderr
+/// warning -- facts are auxiliary evidence for `analyze_graph`, never a
+/// hard requirement for it to run at all.
+fn run_analyze_graph(
+    graph_in: &std::path::Path,
+    dylib: &std::path::Path,
+    facts_in: Option<&std::path::Path>,
+) -> xray_core::graph::analyze::process::ChildReport {
     use xray_core::graph::analyze::process::ChildReport;
     use xray_core::graph::analyze::result::AnalyzeStatus;
+    use xray_core::graph::user_facts::{read_facts_file, FactIndex};
 
     let graph = match xray_core::graph::csr::wire::read_graph_file(graph_in) {
         Ok(g) => g,
@@ -166,7 +190,13 @@ fn run_analyze_graph(graph_in: &std::path::Path, dylib: &std::path::Path) -> xra
         Err(_) => return ChildReport { status: AnalyzeStatus::LoadFailed, result: None },
     };
 
-    let facts = xray_core::graph::user_facts::FactIndex::new();
+    let facts = match facts_in {
+        Some(path) => read_facts_file(path).unwrap_or_else(|e| {
+            eprintln!("Warning: failed to read --facts-in {}: {}", path.display(), e);
+            FactIndex::new()
+        }),
+        None => FactIndex::new(),
+    };
     let graph_handle = xray_core::graph::csr::handle::GraphHandle::from_graph(&graph);
     let facts_handle = xray_core::graph::user_facts::FactsHandle::from_facts(&facts);
 
@@ -211,7 +241,7 @@ fn main() {
                 std::process::exit(1);
             }
         };
-        let report = run_analyze_graph(&parsed.graph_in, &parsed.dylib);
+        let report = run_analyze_graph(&parsed.graph_in, &parsed.dylib, parsed.facts_in.as_deref());
         match serde_json::to_string(&report) {
             Ok(json) => println!("{}", json),
             Err(e) => eprintln!("Error: failed to serialize ChildReport: {}", e),
@@ -540,6 +570,21 @@ mod tests {
         assert!(parse_analyze_graph_args(&args).is_err(), "--dylib is required");
     }
 
+    /// Dual-review defect H2: `--facts-in <path>` is OPTIONAL (a legacy
+    /// invocation with no facts file must keep working exactly as before)
+    /// but, when present, must be captured so `run_analyze_graph` can load
+    /// the real `FactIndex` `repo_index::build_repo_graph` aggregated.
+    #[test]
+    fn parse_analyze_graph_args_accepts_an_optional_facts_in_flag() {
+        let without_facts = sv(&["--graph-in", "/tmp/g.bin", "--dylib", "/tmp/e.so"]);
+        let parsed = parse_analyze_graph_args(&without_facts).expect("facts-in must be optional");
+        assert_eq!(parsed.facts_in, None, "no --facts-in flag must leave facts_in as None");
+
+        let with_facts = sv(&["--graph-in", "/tmp/g.bin", "--dylib", "/tmp/e.so", "--facts-in", "/tmp/f.json"]);
+        let parsed = parse_analyze_graph_args(&with_facts).expect("both required flags plus facts-in must parse");
+        assert_eq!(parsed.facts_in, Some(std::path::PathBuf::from("/tmp/f.json")));
+    }
+
     /// Builds a tiny real `CodeGraph` (A -> B), writes it to a real file
     /// via `write_graph_file`, and returns the path -- the AC7 wire
     /// format `run_analyze_graph` reads via `read_graph_file`.
@@ -590,10 +635,58 @@ fn analyze_graph(g: &GraphHandle<'_>, facts: &FactsHandle<'_>) -> GraphResult {
 "#;
         let cr = xray_core::compiler::compile_evaluator(user_code, dir.path()).expect("must compile");
 
-        let report = run_analyze_graph(&graph_path, &cr.so_path);
+        let report = run_analyze_graph(&graph_path, &cr.so_path, None);
         assert_eq!(report.status, AnalyzeStatus::RanOk);
         let result = report.result.expect("RanOk must carry a result");
         assert_eq!(result.refine, vec![b_symbol], "must resolve to B's real SymbolId via a REAL accessor call");
+    }
+
+    /// Dual-review defect H2 (the letter of "aggregate collected facts
+    /// into a real FactIndex and PASS IT THROUGH"): a real evaluator whose
+    /// `analyze_graph` queries `facts.for_symbol(..)` must actually SEE a
+    /// fact once one exists in a real `write_facts_file` output and
+    /// `--facts-in` names it -- proving facts genuinely reach
+    /// `analyze_graph`, never a permanently-empty `FactIndex::new()`.
+    #[test]
+    fn run_analyze_graph_passes_real_facts_from_a_facts_file_to_analyze_graph() {
+        use tempfile::TempDir;
+        use xray_core::graph::analyze::result::AnalyzeStatus;
+        use xray_core::graph::user_facts::{write_facts_file, FactIndex, FactKey, UserFact};
+
+        let dir = TempDir::new().unwrap();
+        let (graph_path, b_symbol) = write_small_graph_file(dir.path());
+
+        let mut facts = FactIndex::new();
+        facts.insert(
+            FactKey::Symbol(b_symbol),
+            UserFact { kind: "deprecated".to_string(), line: 1, message: "old API".to_string() },
+        );
+        let facts_path = dir.path().join("facts.json");
+        write_facts_file(&facts, &facts_path).expect("write_facts_file must succeed");
+
+        let user_code = r#"
+fn collect_facts(node: &OwnedNode, file: &str) -> Vec<UserFact> {
+    Vec::new()
+}
+fn analyze_graph(g: &GraphHandle<'_>, facts: &FactsHandle<'_>) -> GraphResult {
+    let mut result = GraphResult::default();
+    let b_symbol = g.resolve_symbol(1).expect("dense id 1 (B) came from the real fixture graph");
+    if !facts.for_symbol(b_symbol).is_empty() {
+        result.refine.push(b_symbol);
+    }
+    result
+}
+"#;
+        let cr = xray_core::compiler::compile_evaluator(user_code, dir.path()).expect("must compile");
+
+        let report = run_analyze_graph(&graph_path, &cr.so_path, Some(&facts_path));
+        assert_eq!(report.status, AnalyzeStatus::RanOk);
+        let result = report.result.expect("RanOk must carry a result");
+        assert_eq!(
+            result.refine,
+            vec![b_symbol],
+            "analyze_graph must have observed the REAL fact via facts.for_symbol -- it was never empty"
+        );
     }
 
     /// THE central AC7/AC8 invariant: an evaluator that does NOT export
@@ -617,7 +710,7 @@ fn analyze_graph(g: &GraphHandle<'_>, facts: &FactsHandle<'_>) -> GraphResult {
         // Absent: a legacy-mode .so has no analyze_graph to call at all.
         let legacy_code = "fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> { Vec::new() }";
         let legacy_cr = xray_core::compiler::compile_evaluator(legacy_code, dir.path()).expect("must compile");
-        let absent_report = run_analyze_graph(&graph_path, &legacy_cr.so_path);
+        let absent_report = run_analyze_graph(&graph_path, &legacy_cr.so_path, None);
         assert_eq!(absent_report.status, AnalyzeStatus::Absent);
         assert!(absent_report.result.is_none());
 
@@ -632,20 +725,20 @@ fn analyze_graph(g: &GraphHandle<'_>, facts: &FactsHandle<'_>) -> GraphResult {
 }
 "#;
         let empty_cr = xray_core::compiler::compile_evaluator(empty_code, dir.path()).expect("must compile");
-        let empty_report = run_analyze_graph(&graph_path, &empty_cr.so_path);
+        let empty_report = run_analyze_graph(&graph_path, &empty_cr.so_path, None);
         assert_eq!(empty_report.status, AnalyzeStatus::RanOk);
         assert_eq!(empty_report.result, Some(xray_core::graph::analyze::result::GraphResult::default()));
 
         // GraphInvalid: the graph file itself is corrupt/unreadable.
         let corrupt_graph_path = dir.path().join("corrupt.bin");
         std::fs::write(&corrupt_graph_path, b"not a real graph file").unwrap();
-        let invalid_report = run_analyze_graph(&corrupt_graph_path, &empty_cr.so_path);
+        let invalid_report = run_analyze_graph(&corrupt_graph_path, &empty_cr.so_path, None);
         assert_eq!(invalid_report.status, AnalyzeStatus::GraphInvalid);
         assert!(invalid_report.result.is_none());
 
         // LoadFailed: the dylib path does not exist at all.
         let missing_dylib_path = dir.path().join("does_not_exist.so");
-        let load_failed_report = run_analyze_graph(&graph_path, &missing_dylib_path);
+        let load_failed_report = run_analyze_graph(&graph_path, &missing_dylib_path, None);
         assert_eq!(load_failed_report.status, AnalyzeStatus::LoadFailed);
         assert!(load_failed_report.result.is_none());
 
