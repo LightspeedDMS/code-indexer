@@ -25,6 +25,15 @@ use syn::{Fields, File, ImplItem, ImplItemFn, Item, ItemStruct, Type, Visibility
 const OWNED_NODE_SRC: &str = include_str!("owned_node.rs");
 const FINDING_SRC: &str = include_str!("finding.rs");
 
+/// Story #1787 AC8: the real source files whose graph-mode types
+/// (`GraphHandle`, `FactsHandle`/`UserFact`, `GraphResult`/`ReduceFinding`)
+/// must stay structurally identical to their `GRAPH_PREAMBLE_EXTRA_*`
+/// mirrors in `compiler.rs`, extending the exact AC18 mechanism already
+/// proven for `OwnedNode`/`EvalFinding` above.
+const CSR_MOD_SRC: &str = include_str!("graph/csr/mod.rs");
+const USER_FACTS_SRC: &str = include_str!("graph/user_facts.rs");
+const ANALYZE_RESULT_SRC: &str = include_str!("graph/analyze/result.rs");
+
 /// Parses `src` as a sequence of top-level Rust items. Panics naming `label`
 /// on a parse failure -- this helper is only ever fed known-good Rust source
 /// (real crate files, or the PREAMBLE text, both of which must already be
@@ -35,13 +44,35 @@ fn parse_items(src: &str, label: &str) -> File {
     syn::parse_str(src).unwrap_or_else(|e| panic!("failed to parse {label} as Rust items: {e}"))
 }
 
-/// Finds a top-level `struct <name> { ... }` item in `file`. Panics naming
-/// `name`/`label` when absent -- an absent struct is itself a fatal
-/// divergence (the mirror or the real type was renamed or removed on one
-/// side only).
+/// Recursively collects every item in `items`, descending into nested `mod`
+/// blocks (`Item::Mod`'s inline `{ .. }` content) -- needed because
+/// `GraphHandle` (Story #1787 AC8, ADR-002) is declared inside `pub mod
+/// handle { ... }` within `graph/csr/mod.rs`, not at that file's top level.
+/// An `Item::Mod` with no inline content (`mod foo;`, pointing at a separate
+/// file) contributes nothing here -- this function only ever sees text
+/// already `include_str!`-ed as one flat string, so an out-of-line module
+/// would need its own separate `include_str!`/`find_struct` call, exactly
+/// like `owned_node.rs`/`finding.rs` already are.
+fn flatten_items(items: &[Item]) -> Vec<&Item> {
+    let mut out = Vec::new();
+    for item in items {
+        out.push(item);
+        if let Item::Mod(item_mod) = item {
+            if let Some((_, inner_items)) = &item_mod.content {
+                out.extend(flatten_items(inner_items));
+            }
+        }
+    }
+    out
+}
+
+/// Finds a `struct <name> { ... }` item anywhere in `file`, including nested
+/// inside a `mod` block (see `flatten_items`). Panics naming `name`/`label`
+/// when absent -- an absent struct is itself a fatal divergence (the mirror
+/// or the real type was renamed or removed on one side only).
 fn find_struct<'a>(file: &'a File, name: &str, label: &str) -> &'a ItemStruct {
-    file.items
-        .iter()
+    flatten_items(&file.items)
+        .into_iter()
         .find_map(|item| match item {
             Item::Struct(s) if s.ident == name => Some(s),
             _ => None,
@@ -140,8 +171,9 @@ fn impl_self_type_name(item_impl: &syn::ItemImpl) -> Option<String> {
 }
 
 /// Finds the INHERENT (non-trait) method named `method` on `impl <self_ty>`
-/// in `file`. Panics naming `self_ty`/`method`/`label` when absent -- a
-/// missing method is itself a fatal divergence (one side lost or renamed a
+/// anywhere in `file`, including inside a nested `mod` block (see
+/// `flatten_items`). Panics naming `self_ty`/`method`/`label` when absent --
+/// a missing method is itself a fatal divergence (one side lost or renamed a
 /// method the other still exposes to evaluator code).
 fn find_impl_method<'a>(
     file: &'a File,
@@ -149,8 +181,8 @@ fn find_impl_method<'a>(
     method: &str,
     label: &str,
 ) -> &'a ImplItemFn {
-    file.items
-        .iter()
+    flatten_items(&file.items)
+        .into_iter()
         .filter_map(|item| match item {
             Item::Impl(item_impl) if item_impl.trait_.is_none() => Some(item_impl),
             _ => None,
@@ -290,9 +322,128 @@ fn collect_ac18_divergences(
     divergences
 }
 
+/// Method names on `GraphHandle` that are mirrored into
+/// `GRAPH_PREAMBLE_EXTRA_*` and must stay structurally identical to the
+/// real implementation. `from_graph` is deliberately EXCLUDED: it is a
+/// HOST-ONLY constructor taking `&'graph CodeGraph`, a type the mirror
+/// never sees per ADR-002 -- the evaluator only ever RECEIVES an
+/// already-built handle by reference, it never constructs one.
+const MIRRORED_GRAPH_HANDLE_METHODS: &[&str] = &[
+    "callees_of",
+    "callers_of",
+    "reachable_from",
+    "shortest_path_to_any",
+    "strongly_connected_components",
+    "resolve_symbol",
+    "resolve_string",
+];
+
+/// Compares struct `name` between `real_file` (labeled `real_label` in any
+/// divergence message) and `mirror_file` (always the assembled
+/// `GRAPH_PREAMBLE_EXTRA_*` text) -- the AC8 counterpart of the repeated
+/// `find_struct`+`diff_struct_fields` pairing `collect_ac18_divergences`
+/// above performs inline for `OwnedNode`/`EvalFinding`, factored out here
+/// since AC8 repeats the same pairing across 5 different struct names.
+fn diff_mirrored_struct(real_file: &File, real_label: &str, mirror_file: &File, name: &str) -> Option<String> {
+    let real = find_struct(real_file, name, real_label);
+    let mirror = find_struct(mirror_file, name, "GRAPH_PREAMBLE_EXTRA");
+    diff_struct_fields(real, mirror, name)
+}
+
+/// Compares inherent method `method` on `impl <self_ty>` the same way
+/// `diff_mirrored_struct` compares a struct's fields -- factored out for
+/// the same reason (AC8 repeats this pairing across 8 different methods
+/// spanning 2 struct types).
+fn diff_mirrored_method(
+    real_file: &File,
+    real_label: &str,
+    mirror_file: &File,
+    self_ty: &str,
+    method: &str,
+) -> Option<String> {
+    let real = find_impl_method(real_file, self_ty, method, real_label);
+    let mirror = find_impl_method(mirror_file, self_ty, method, "GRAPH_PREAMBLE_EXTRA");
+    diff_method(real, mirror, &format!("{self_ty}::{method}"))
+}
+
+/// Story #1787 AC8: the same structural-comparison mechanism
+/// `collect_ac18_divergences` proved for `OwnedNode`/`EvalFinding`,
+/// extended to the graph-mode ABI surface ADR-002 introduces:
+/// `GraphHandle` (`graph::csr::handle`), `FactsHandle`/`UserFact`
+/// (`graph::user_facts`), and `GraphResult`/`ReduceFinding`
+/// (`graph::analyze::result`). Unlike `OwnedNode`, neither `GraphHandle`
+/// nor `FactsHandle` has an intentional Drop-impl asymmetry to check --
+/// both are plain `Copy` dispatch tables with no owned/heap fields, so
+/// there is nothing analogous to Bug #1795's fix to guard.
+fn collect_ac8_graph_mirror_divergences(
+    csr_mod_file: &File,
+    user_facts_file: &File,
+    analyze_result_file: &File,
+    graph_preamble_file: &File,
+) -> Vec<String> {
+    let mut divergences: Vec<String> = Vec::new();
+
+    divergences.extend(diff_mirrored_struct(csr_mod_file, "graph/csr/mod.rs", graph_preamble_file, "GraphHandle"));
+    for method in MIRRORED_GRAPH_HANDLE_METHODS {
+        divergences.extend(diff_mirrored_method(
+            csr_mod_file,
+            "graph/csr/mod.rs",
+            graph_preamble_file,
+            "GraphHandle",
+            method,
+        ));
+    }
+
+    divergences.extend(diff_mirrored_struct(user_facts_file, "user_facts.rs", graph_preamble_file, "FactsHandle"));
+    divergences.extend(diff_mirrored_method(
+        user_facts_file,
+        "user_facts.rs",
+        graph_preamble_file,
+        "FactsHandle",
+        "for_symbol",
+    ));
+    divergences.extend(diff_mirrored_struct(user_facts_file, "user_facts.rs", graph_preamble_file, "UserFact"));
+
+    divergences.extend(diff_mirrored_struct(
+        analyze_result_file,
+        "analyze/result.rs",
+        graph_preamble_file,
+        "GraphResult",
+    ));
+    divergences.extend(diff_mirrored_struct(
+        analyze_result_file,
+        "analyze/result.rs",
+        graph_preamble_file,
+        "ReduceFinding",
+    ));
+
+    divergences
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// AC8 extension: `GraphHandle` (Story #1787 AC8, ADR-002) is declared
+    /// nested inside `pub mod handle { ... }` within `graph/csr/mod.rs`,
+    /// not at the file's top level -- `find_struct` and `find_impl_method`
+    /// must be able to locate items nested inside a `mod` block via
+    /// `flatten_items`'s recursive descent.
+    #[test]
+    fn find_struct_finds_a_struct_nested_inside_a_mod_block() {
+        let src = "mod outer { pub struct Inner { pub a: usize } }";
+        let file = parse_items(src, "nested-mod fixture");
+        let found = find_struct(&file, "Inner", "nested-mod fixture");
+        assert_eq!(found.ident, "Inner");
+    }
+
+    #[test]
+    fn find_impl_method_finds_a_method_nested_inside_a_mod_block() {
+        let src = "mod outer { pub struct Inner; impl Inner { pub fn greet(&self) -> i32 { 42 } } }";
+        let file = parse_items(src, "nested-mod fixture");
+        let found = find_impl_method(&file, "Inner", "greet", "nested-mod fixture");
+        assert_eq!(found.sig.ident, "greet");
+    }
 
     #[test]
     fn detects_a_field_type_divergence_between_two_synthetic_structs() {
@@ -422,6 +573,43 @@ impl Foo {
         assert!(
             divergences.is_empty(),
             "AC18: PREAMBLE mirror diverged from the real OwnedNode/EvalFinding types:\n\n{}",
+            divergences.join("\n\n")
+        );
+    }
+
+    /// THE AC8 GATE (Story #1787, ADR-002): parses the REAL
+    /// `graph/csr/mod.rs`, `graph/user_facts.rs`, `graph/analyze/result.rs`
+    /// and the ACTUAL assembled `compiler::GRAPH_PREAMBLE_EXTRA_1..4` text
+    /// compiled into every graph-mode evaluator artifact, and asserts
+    /// field-for-field / method-for-method structural parity via
+    /// `collect_ac8_graph_mirror_divergences`. Mirrored surface: `GraphHandle`'s
+    /// fields plus its 7 accessor methods, `FactsHandle`'s fields plus its
+    /// 1 accessor method, `UserFact`'s fields, and `GraphResult`/
+    /// `ReduceFinding`'s fields.
+    #[test]
+    fn graph_mode_mirror_matches_real_types_structurally() {
+        let csr_mod_file = parse_items(CSR_MOD_SRC, "graph/csr/mod.rs");
+        let user_facts_file = parse_items(USER_FACTS_SRC, "graph/user_facts.rs");
+        let analyze_result_file = parse_items(ANALYZE_RESULT_SRC, "graph/analyze/result.rs");
+        let graph_preamble_text = format!(
+            "{}\n{}\n{}\n{}",
+            crate::compiler::GRAPH_PREAMBLE_EXTRA_1,
+            crate::compiler::GRAPH_PREAMBLE_EXTRA_2,
+            crate::compiler::GRAPH_PREAMBLE_EXTRA_3,
+            crate::compiler::GRAPH_PREAMBLE_EXTRA_4,
+        );
+        let graph_preamble_file = parse_items(&graph_preamble_text, "compiler::GRAPH_PREAMBLE_EXTRA_*");
+
+        let divergences = collect_ac8_graph_mirror_divergences(
+            &csr_mod_file,
+            &user_facts_file,
+            &analyze_result_file,
+            &graph_preamble_file,
+        );
+
+        assert!(
+            divergences.is_empty(),
+            "AC8: graph-mode PREAMBLE mirror diverged from the real types:\n\n{}",
             divergences.join("\n\n")
         );
     }

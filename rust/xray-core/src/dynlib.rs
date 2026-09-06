@@ -107,9 +107,240 @@ impl Evaluator for DynlibEvaluator {
 unsafe impl Send for DynlibEvaluator {}
 unsafe impl Sync for DynlibEvaluator {}
 
+type CollectFactsFn = fn(&OwnedNode, &str) -> Vec<crate::graph::user_facts::UserFact>;
+/// Returns `Option<GraphResult>` -- `None` means the dylib's OWN
+/// `catch_unwind` (see `GRAPH_EPILOGUE` in `compiler.rs`) caught a panic
+/// inside `analyze_graph` before it could ever try to cross this dylib
+/// boundary. This loader never needs its own `catch_unwind` around the
+/// call: by the time control returns here, the dylib has already reduced
+/// "succeeded" vs "panicked" to a plain, already-safe value.
+type AnalyzeGraphFn =
+    fn(&crate::graph::csr::handle::GraphHandle, &crate::graph::user_facts::FactsHandle) -> Option<crate::graph::analyze::result::GraphResult>;
+
+/// Story #1787 AC8: loads a GRAPH-MODE compiled evaluator, distinct from
+/// `DynlibEvaluator` (legacy-only). Mirrors `DynlibEvaluator::load`'s ABI
+/// verification exactly, then resolves `xray_collect_facts`/
+/// `xray_analyze_graph` the SAME optional-symbol way
+/// `xray_drain_debug_log` already is -- a missing symbol is a legitimate
+/// outcome (a legacy-mode `.so` loaded here has neither), reported via
+/// `has_collect_facts`/`has_analyze_graph`, never a load failure.
+pub struct GraphDynlibEvaluator {
+    _lib: Library,
+    collect_facts_fn: Option<CollectFactsFn>,
+    analyze_graph_fn: Option<AnalyzeGraphFn>,
+}
+
+impl std::fmt::Debug for GraphDynlibEvaluator {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GraphDynlibEvaluator").finish()
+    }
+}
+
+impl GraphDynlibEvaluator {
+    pub fn load(so_path: &Path) -> Result<Self, String> {
+        let lib = unsafe {
+            Library::new(so_path).map_err(|e| format!("Failed to load {}: {}", so_path.display(), e))?
+        };
+
+        let abi_version: u64 = unsafe {
+            let sym: Symbol<AbiVersionFn> = lib
+                .get(b"xray_abi_version")
+                .map_err(|e| format!("Symbol xray_abi_version not found: {}", e))?;
+            sym()
+        };
+        if abi_version != crate::compiler::XRAY_ABI_VERSION {
+            return Err(format!(
+                "ABI version mismatch: evaluator has version {} but loader expects {}. \
+                 Recompile your evaluator.",
+                abi_version,
+                crate::compiler::XRAY_ABI_VERSION
+            ));
+        }
+
+        let collect_facts_fn: Option<CollectFactsFn> =
+            unsafe { lib.get::<CollectFactsFn>(b"xray_collect_facts").ok().map(|sym| *sym) };
+        let analyze_graph_fn: Option<AnalyzeGraphFn> =
+            unsafe { lib.get::<AnalyzeGraphFn>(b"xray_analyze_graph").ok().map(|sym| *sym) };
+
+        Ok(Self { _lib: lib, collect_facts_fn, analyze_graph_fn })
+    }
+
+    /// AC7/AC8: distinguishes "the loaded artifact exports analyze_graph"
+    /// from "not requested" (the caller's own concern, upstream of this
+    /// loader) and from "not exported" (`false` here) -- never inferred
+    /// from a failed call.
+    pub fn has_analyze_graph(&self) -> bool {
+        self.analyze_graph_fn.is_some()
+    }
+
+    pub fn has_collect_facts(&self) -> bool {
+        self.collect_facts_fn.is_some()
+    }
+
+    /// Calls the loaded evaluator's `analyze_graph`, if exported. The
+    /// OUTER `Option` distinguishes "not exported" (`None`, AC7's
+    /// `Absent` case) from "exported" (`Some(..)`); the INNER `Option`
+    /// (only meaningful when outer is `Some`) distinguishes "panicked"
+    /// (`None`, caught by the dylib's own `catch_unwind` in
+    /// `GRAPH_EPILOGUE`) from "succeeded" (`Some(result)`). No
+    /// `catch_unwind` is needed HERE: the panic never crosses this
+    /// dylib boundary at all.
+    pub fn call_analyze_graph(
+        &self,
+        g: &crate::graph::csr::handle::GraphHandle,
+        facts: &crate::graph::user_facts::FactsHandle,
+    ) -> Option<Option<crate::graph::analyze::result::GraphResult>> {
+        self.analyze_graph_fn.map(|f| f(g, facts))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// RED phase (AC8): `GraphDynlibEvaluator` does not exist yet. This
+    /// proves what its GREEN implementation must do -- load a LEGACY-mode
+    /// compiled evaluator and report `has_analyze_graph() == false` /
+    /// `has_collect_facts() == false` (the "not exported" case, distinct
+    /// from "not requested"), and load a GRAPH-mode compiled evaluator and
+    /// report both `true`.
+    #[test]
+    fn graph_dynlib_evaluator_detects_presence_of_graph_mode_exports() {
+        use crate::compiler;
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let legacy_code = r#"
+fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> {
+    Vec::new()
+}
+"#;
+        let legacy_cr = compiler::compile_evaluator(legacy_code, dir.path()).expect("legacy must compile");
+        let legacy_evaluator = GraphDynlibEvaluator::load(&legacy_cr.so_path).expect("legacy .so must load");
+        assert!(!legacy_evaluator.has_analyze_graph(), "legacy .so must not export xray_analyze_graph");
+        assert!(!legacy_evaluator.has_collect_facts(), "legacy .so must not export xray_collect_facts");
+
+        let graph_code = r#"
+fn collect_facts(node: &OwnedNode, file: &str) -> Vec<UserFact> {
+    Vec::new()
+}
+fn analyze_graph(g: &GraphHandle<'_>, facts: &FactsHandle<'_>) -> GraphResult {
+    GraphResult::default()
+}
+"#;
+        let graph_cr = compiler::compile_evaluator(graph_code, dir.path()).expect("graph mode must compile");
+        let graph_evaluator = GraphDynlibEvaluator::load(&graph_cr.so_path).expect("graph .so must load");
+        assert!(graph_evaluator.has_analyze_graph(), "graph .so must export xray_analyze_graph");
+        assert!(graph_evaluator.has_collect_facts(), "graph .so must export xray_collect_facts");
+    }
+
+    /// Builds a tiny real `CodeGraph` (A -> B) and an empty `FactIndex` for
+    /// exercising `call_analyze_graph` against a REAL compiled dylib.
+    fn small_graph_and_facts() -> (crate::graph::csr::CodeGraph, crate::graph::user_facts::FactIndex) {
+        use crate::graph::csr::builder::CodeGraphBuilder;
+        use crate::graph::csr::candidate::Candidate;
+        use crate::graph::identity::make_symbol_id;
+        use crate::graph::reasons;
+
+        let mut builder = CodeGraphBuilder::with_candidate_capacity(1);
+        let a = builder.intern_symbol(make_symbol_id(1, 0));
+        let b = builder.intern_symbol(make_symbol_id(1, 1));
+        builder.add_reference(a, 1, 1, 0, &[Candidate::new(b, reasons::SAME_FILE)]);
+        (builder.build(), crate::graph::user_facts::FactIndex::new())
+    }
+
+    /// Compiles `user_code` into `dir` and loads it as a
+    /// `GraphDynlibEvaluator` -- shared setup for the three
+    /// `call_analyze_graph` discrimination tests below.
+    fn compile_and_load_graph(user_code: &str, dir: &std::path::Path) -> GraphDynlibEvaluator {
+        let cr = crate::compiler::compile_evaluator(user_code, dir).expect("must compile");
+        GraphDynlibEvaluator::load(&cr.so_path).expect("must load")
+    }
+
+    /// AC8's central invariant, case 1 of 3: a real graph-mode evaluator
+    /// calling a REAL `GraphHandle` accessor must succeed with the CORRECT
+    /// `GraphResult` -- proves the `Some(Some(result))` arm of
+    /// `call_analyze_graph`'s `Option<Option<GraphResult>>` contract.
+    #[test]
+    fn call_analyze_graph_succeeds_with_a_real_accessor_call() {
+        use tempfile::TempDir;
+        let dir = TempDir::new().unwrap();
+        let (graph, facts) = small_graph_and_facts();
+        let graph_handle = crate::graph::csr::handle::GraphHandle::from_graph(&graph);
+        let facts_handle = crate::graph::user_facts::FactsHandle::from_facts(&facts);
+
+        let success_code = r#"
+fn collect_facts(node: &OwnedNode, file: &str) -> Vec<UserFact> {
+    Vec::new()
+}
+fn analyze_graph(g: &GraphHandle<'_>, facts: &FactsHandle<'_>) -> GraphResult {
+    let mut result = GraphResult::default();
+    for callee in g.callees_of(0) {
+        result.refine.push(g.resolve_symbol(callee));
+    }
+    result
+}
+"#;
+        let evaluator = compile_and_load_graph(success_code, dir.path());
+        let result = evaluator
+            .call_analyze_graph(&graph_handle, &facts_handle)
+            .expect("analyze_graph IS exported -- outer must be Some(..)")
+            .expect("a real graph-mode evaluator calling a real accessor must not panic");
+        assert_eq!(result.refine.len(), 1, "callees_of(0) must find exactly the A->B edge");
+        assert_eq!(result.refine[0], graph.resolve_symbol(1), "must resolve to B's real SymbolId");
+    }
+
+    /// Case 2 of 3: a legacy-mode evaluator has no `analyze_graph` to call
+    /// at all -- proves the OUTER `None` arm, distinct from a successful
+    /// empty result (`Some(Some(empty))`).
+    #[test]
+    fn call_analyze_graph_is_outer_none_when_not_exported() {
+        use tempfile::TempDir;
+        let dir = TempDir::new().unwrap();
+        let (graph, facts) = small_graph_and_facts();
+        let graph_handle = crate::graph::csr::handle::GraphHandle::from_graph(&graph);
+        let facts_handle = crate::graph::user_facts::FactsHandle::from_facts(&facts);
+
+        let legacy_code = "fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> { Vec::new() }";
+        let evaluator = compile_and_load_graph(legacy_code, dir.path());
+        assert!(
+            evaluator.call_analyze_graph(&graph_handle, &facts_handle).is_none(),
+            "calling analyze_graph on a legacy-mode evaluator (no export) must be the outer \
+             None, never a successful Some(Some(empty)) result"
+        );
+    }
+
+    /// Case 3 of 3: a genuinely panicking `analyze_graph` (triggered via
+    /// `.unwrap()` on `None` -- `panic!` itself is banned by
+    /// `validator.rs`) must be caught INSIDE the dylib and reported as the
+    /// inner `Some(None)`, never crashing the test process.
+    #[test]
+    fn call_analyze_graph_catches_a_genuine_panic_inside_the_dylib() {
+        use tempfile::TempDir;
+        let dir = TempDir::new().unwrap();
+        let (graph, facts) = small_graph_and_facts();
+        let graph_handle = crate::graph::csr::handle::GraphHandle::from_graph(&graph);
+        let facts_handle = crate::graph::user_facts::FactsHandle::from_facts(&facts);
+
+        let panic_code = r#"
+fn collect_facts(node: &OwnedNode, file: &str) -> Vec<UserFact> {
+    Vec::new()
+}
+fn analyze_graph(g: &GraphHandle<'_>, facts: &FactsHandle<'_>) -> GraphResult {
+    let boom: Option<i32> = None;
+    boom.unwrap();
+    GraphResult::default()
+}
+"#;
+        let evaluator = compile_and_load_graph(panic_code, dir.path());
+        let outer = evaluator
+            .call_analyze_graph(&graph_handle, &facts_handle)
+            .expect("must be the outer Some(..) -- analyze_graph IS exported, the panic is caught inside");
+        assert!(
+            outer.is_none(),
+            "a panic inside analyze_graph must be caught inside the dylib, reported as Some(None), never a crash"
+        );
+    }
 
     #[test]
     fn test_load_nonexistent_so_returns_error() {

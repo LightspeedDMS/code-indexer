@@ -87,6 +87,54 @@ impl FactIndex {
     }
 }
 
+/// ADR-002 / Story #1787 AC8: the SAME opaque-handle principle
+/// `graph::csr::handle::GraphHandle` applies to `CodeGraph` extended to
+/// `FactIndex`. `FactIndex`'s real field is a `HashMap<FactKey,
+/// Vec<UserFact>>` -- mirroring that layout into the evaluator PREAMBLE
+/// would reopen exactly the memory-layout-mismatch risk ADR-002 rejected
+/// for `CodeGraph`, for the same underlying reason (a private std-collection
+/// field, not a small/stable public shape). `FactsHandle` instead carries an
+/// opaque context pointer plus one accessor function pointer, scoped to the
+/// one query graph-mode evaluators need: symbol-keyed facts. `Custom`-keyed
+/// (non-symbol) facts are not exposed through this narrow accessor; that is
+/// a deliberate scope decision for this slice, not an oversight, and can be
+/// added as a second accessor later without touching this one's shape.
+#[derive(Clone, Copy)]
+pub struct FactsHandle<'facts> {
+    ctx: *const (),
+    for_symbol_fn: fn(*const (), u64) -> Vec<UserFact>,
+    _facts: std::marker::PhantomData<&'facts ()>,
+}
+
+fn facts_from_ctx<'a>(ctx: *const ()) -> &'a FactIndex {
+    unsafe { &*(ctx as *const FactIndex) }
+}
+
+fn thunk_facts_for_symbol(ctx: *const (), symbol: SymbolId) -> Vec<UserFact> {
+    facts_from_ctx(ctx).get(&FactKey::Symbol(symbol)).to_vec()
+}
+
+impl<'facts> FactsHandle<'facts> {
+    /// Builds a handle bound to `facts`. Mirrors `GraphHandle::from_graph`'s
+    /// lifetime contract exactly: the `'facts` parameter is enforced by the
+    /// borrow checker via the `PhantomData` marker, so the returned handle
+    /// cannot outlive `facts`.
+    pub fn from_facts(facts: &'facts FactIndex) -> FactsHandle<'facts> {
+        FactsHandle {
+            ctx: facts as *const FactIndex as *const (),
+            for_symbol_fn: thunk_facts_for_symbol,
+            _facts: std::marker::PhantomData,
+        }
+    }
+
+    /// Every fact recorded under `FactKey::Symbol(symbol)`, or an empty
+    /// `Vec` if none were -- mirrors `FactIndex::get`'s own "absent key"
+    /// contract exactly.
+    pub fn for_symbol(&self, symbol: SymbolId) -> Vec<UserFact> {
+        (self.for_symbol_fn)(self.ctx, symbol)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -156,5 +204,29 @@ mod tests {
 
         assert!(index.get(&FactKey::Symbol(make_symbol_id(99, 99))).is_empty());
         assert!(index.get(&FactKey::Custom(unused_key)).is_empty());
+    }
+
+    /// ADR-002 extension: `FactsHandle` must delegate to the real
+    /// `FactIndex` rather than reimplementing lookup logic -- proven by
+    /// comparing against `FactIndex::get` directly, for both a populated
+    /// key and one nobody ever inserted under.
+    #[test]
+    fn facts_handle_for_symbol_delegates_to_the_real_fact_index() {
+        use crate::graph::identity::make_symbol_id;
+
+        let symbol = make_symbol_id(1, 0);
+        let absent_symbol = make_symbol_id(9, 9);
+        let mut index = FactIndex::new();
+        index.insert(
+            FactKey::Symbol(symbol),
+            UserFact { kind: "deprecated".to_string(), line: 10, message: "old API".to_string() },
+        );
+
+        let handle = FactsHandle::from_facts(&index);
+
+        assert_eq!(handle.for_symbol(symbol), index.get(&FactKey::Symbol(symbol)).to_vec());
+        assert_eq!(handle.for_symbol(symbol).len(), 1);
+        assert_eq!(handle.for_symbol(symbol)[0].message, "old API");
+        assert!(handle.for_symbol(absent_symbol).is_empty());
     }
 }

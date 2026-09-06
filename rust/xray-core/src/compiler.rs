@@ -19,19 +19,30 @@ const MAX_CACHE_ENTRIES: usize = 100;
 /// here also lets the cache identity (Bug #1784) depend on the ABI version
 /// as an explicit, independent component.
 ///
-/// AC8 (Story #1787 S2) bumps this 2 -> 4, per ADR-001's export table:
-/// ABI 4 is "the final two-mode contract" -- required exports are
-/// `xray_abi_version` plus exactly one complete callback family, either
-/// `xray_evaluate_node` (legacy) or `xray_collect_facts` + `xray_analyze_
-/// graph` (graph mode); `xray_drain_debug_log`/`xray_refine` remain
-/// optional. ABI 3 ("#1785 interim protocol": `xray_drain_facts` /
-/// `xray_reduce_facts`) is DELIBERATELY skipped -- no such artifact was
-/// ever compiled by this codebase (there is no `xray_reduce_facts`/
-/// `xray_drain_facts` export anywhere in `xray-core`/`xray-cli`), so
-/// there is no rolling-deployment population to stay compatible with;
-/// modeling that transitional state here would document a migration step
-/// this codebase never actually took.
-pub const XRAY_ABI_VERSION: u64 = 4;
+/// S2.5 (a prior slice of Story #1787) bumped this 2 -> 4, per ADR-001's
+/// export table: ABI 4 is "the final two-mode contract" -- required
+/// exports are `xray_abi_version` plus exactly one complete callback
+/// family, either `xray_evaluate_node` (legacy) or `xray_collect_facts` +
+/// `xray_analyze_graph` (graph mode); `xray_drain_debug_log`/`xray_refine`
+/// remain optional. ABI 3 ("#1785 interim protocol": `xray_drain_facts` /
+/// `xray_reduce_facts`) was DELIBERATELY skipped -- no such artifact was
+/// ever compiled by this codebase, so there is no rolling-deployment
+/// population to stay compatible with.
+///
+/// AC8 (this slice, per ADR-002) bumps this AGAIN, 4 -> 5: introducing the
+/// `GraphHandle`/`FactsHandle` opaque accessor ABI changes what a graph-mode
+/// artifact's exports actually mean -- `xray_analyze_graph` now receives
+/// its graph through a handle-plus-accessor-functions dispatch table
+/// instead of any prior shape -- so an ABI-4 graph artifact (compiled
+/// before this accessor surface existed) must never be loaded as if it
+/// matched. ADR-002 calls this out explicitly: "Introducing the handle and
+/// accessors changes the ABI contract again and requires its own bump,
+/// which the existing single-source-of-truth mechanism and the #1784
+/// assembled-source cache identity handle automatically." Legacy
+/// (`xray_evaluate_node`) artifacts are unaffected in shape, but still get
+/// a fresh ABI/cache identity like every prior bump, since the ABI version
+/// is a whole-artifact sentinel, not a per-mode one.
+pub const XRAY_ABI_VERSION: u64 = 5;
 
 /// Placeholder token embedded in PREAMBLE in place of a hardcoded ABI
 /// version literal. Substituted with the real `XRAY_ABI_VERSION` value by
@@ -194,6 +205,178 @@ pub fn xray_drain_debug_log() -> Vec<String> {
 }
 "#;
 
+/// Story #1787 AC8 / ADR-002: mirrors the REAL `GraphHandle`
+/// (`graph::csr::handle`) type for a graph-mode evaluator's compiled
+/// source. Appended to the COMMON `PREAMBLE` above (which still supplies
+/// `OwnedNode`/`EvalFinding`/`debug_log`, shared by both modes) -- never a
+/// standalone replacement for it. Structurally parity-checked against the
+/// real type by `preamble_ac18_parity.rs`, exactly like `PREAMBLE`'s
+/// `OwnedNode`/`EvalFinding` mirror. Per ADR-002, `CodeGraph`'s own
+/// evolving CSR/StringTable/SymbolTable internals are NEVER mirrored here
+/// -- `GraphHandle` carries only an opaque context pointer plus fixed
+/// accessor function pointers, bound by the HOST at construction time and
+/// passed by reference; each accessor method BODY below must stay
+/// byte-identical to `graph::csr::handle::GraphHandle`'s real one (it just
+/// invokes the stored fn pointer, nothing more).
+///
+/// Built up incrementally across several constants (this one holds the
+/// struct plus its first 3 accessor methods; `GRAPH_PREAMBLE_EXTRA_2`/`_3`
+/// hold the rest) purely to keep each source edit's method count small;
+/// `assemble_graph_evaluator_source` concatenates all of them in order.
+pub(crate) const GRAPH_PREAMBLE_EXTRA_1: &str = r#"
+pub type SymbolId = u64;
+
+use std::marker::PhantomData;
+
+type CtxPtr = *const ();
+
+#[derive(Clone, Copy)]
+pub struct GraphHandle<'graph> {
+    ctx: CtxPtr,
+    callees_of_fn: fn(*const (), u32) -> Vec<u32>,
+    callers_of_fn: fn(*const (), u32) -> Vec<u32>,
+    reachable_from_fn: fn(*const (), &[u32], usize) -> Vec<u32>,
+    shortest_path_to_any_fn: fn(*const (), u32, &[u32], usize) -> Option<Vec<u32>>,
+    strongly_connected_components_fn: fn(*const ()) -> Vec<Vec<u32>>,
+    resolve_symbol_fn: fn(*const (), u32) -> u64,
+    resolve_string_raw_fn: fn(*const (), u32) -> (*const u8, usize),
+    _graph: PhantomData<&'graph ()>,
+}
+
+impl<'graph> GraphHandle<'graph> {
+    pub fn callees_of(&self, symbol: u32) -> Vec<u32> {
+        (self.callees_of_fn)(self.ctx, symbol)
+    }
+
+    pub fn callers_of(&self, symbol: u32) -> Vec<u32> {
+        (self.callers_of_fn)(self.ctx, symbol)
+    }
+
+    pub fn reachable_from(&self, roots: &[u32], max_depth: usize) -> Vec<u32> {
+        (self.reachable_from_fn)(self.ctx, roots, max_depth)
+    }
+"#;
+
+/// Continues `GRAPH_PREAMBLE_EXTRA_1` -- see its doc comment. Holds
+/// `GraphHandle`'s next 3 accessor methods.
+pub(crate) const GRAPH_PREAMBLE_EXTRA_2: &str = r#"
+    pub fn shortest_path_to_any(&self, from: u32, targets: &[u32], max_depth: usize) -> Option<Vec<u32>> {
+        (self.shortest_path_to_any_fn)(self.ctx, from, targets, max_depth)
+    }
+
+    pub fn strongly_connected_components(&self) -> Vec<Vec<u32>> {
+        (self.strongly_connected_components_fn)(self.ctx)
+    }
+
+    pub fn resolve_symbol(&self, dense_id: u32) -> u64 {
+        (self.resolve_symbol_fn)(self.ctx, dense_id)
+    }
+"#;
+
+/// Continues `GRAPH_PREAMBLE_EXTRA_1`/`_2` -- see the first's doc comment.
+/// Closes `GraphHandle`'s impl block with its final accessor
+/// (`resolve_string`), then mirrors the REAL `UserFact` and `FactsHandle`
+/// types (`graph::user_facts`) the same way: `FactsHandle` carries only an
+/// opaque context pointer plus one accessor function pointer, never
+/// `FactIndex`'s internal `HashMap` layout (the same ADR-002 principle
+/// extended from `CodeGraph` to `FactIndex`).
+pub(crate) const GRAPH_PREAMBLE_EXTRA_3: &str = r#"
+    pub fn resolve_string(&self, string_id: u32) -> &str {
+        let (ptr, len) = (self.resolve_string_raw_fn)(self.ctx, string_id);
+        unsafe { std::str::from_utf8_unchecked(std::slice::from_raw_parts(ptr, len)) }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UserFact {
+    pub kind: String,
+    pub line: usize,
+    pub message: String,
+}
+
+#[derive(Clone, Copy)]
+pub struct FactsHandle<'facts> {
+    ctx: *const (),
+    for_symbol_fn: fn(*const (), u64) -> Vec<UserFact>,
+    _facts: std::marker::PhantomData<&'facts ()>,
+}
+
+impl<'facts> FactsHandle<'facts> {
+    pub fn for_symbol(&self, symbol: SymbolId) -> Vec<UserFact> {
+        (self.for_symbol_fn)(self.ctx, symbol)
+    }
+}
+"#;
+
+/// Concludes `GRAPH_PREAMBLE_EXTRA_1`/`_2`/`_3` (see the first's doc
+/// comment): mirrors the REAL `ReduceFinding`/`GraphResult` types
+/// (`graph::analyze::result`) that `analyze_graph` constructs and returns
+/// -- plain data structs, no accessor methods, since evaluator code
+/// constructs these values directly rather than querying them through a
+/// handle.
+pub(crate) const GRAPH_PREAMBLE_EXTRA_4: &str = r#"
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ReduceFinding {
+    pub pattern: String,
+    pub message: String,
+    pub involved: Vec<SymbolId>,
+    pub signatures: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct GraphResult {
+    pub findings: Vec<ReduceFinding>,
+    pub refine: Vec<SymbolId>,
+}
+"#;
+
+/// Story #1787 AC8: dylib exports for a graph-mode evaluator --
+/// `xray_collect_facts` + `xray_analyze_graph`, NEVER `xray_evaluate_node`
+/// (ADR-001: "graph artifacts do not export xray_reduce_facts or
+/// xray_drain_facts" and, symmetrically, never the legacy export either).
+/// `xray_abi_version`/`xray_drain_debug_log` are duplicated from `EPILOGUE`
+/// rather than factored into a shared tail constant -- both epilogues are
+/// short, static text with no parameters to thread through, and a shared
+/// helper would buy no real deduplication for two 6-line blocks while
+/// adding a level of indirection to trace when reading either mode's
+/// assembled source.
+///
+/// `xray_analyze_graph` wraps the call in `catch_unwind` INSIDE this same
+/// compiled unit (the assembled evaluator source, panic and catch both
+/// live in the SAME .so) and returns `Option<GraphResult>` -- `None` on a
+/// caught panic, `Some` on success -- rather than letting a panic try to
+/// unwind across the dylib boundary itself. `#[no_mangle] pub fn` (no
+/// `extern "C"`) uses Rust's own calling convention, under which unwinding
+/// across a dlopen'd .so is not a guarantee this codebase should depend
+/// on; catching the panic before it ever crosses the boundary sidesteps
+/// that question entirely -- only an already-safe plain value (`Option<
+/// GraphResult>`) needs to cross, exactly like every other return value
+/// here (`Vec<EvalFinding>`, `Vec<UserFact>`).
+const GRAPH_EPILOGUE: &str = r#"
+#[no_mangle]
+pub fn xray_collect_facts(node: &OwnedNode, file: &str) -> Vec<UserFact> {
+    collect_facts(node, file)
+}
+
+#[no_mangle]
+pub fn xray_analyze_graph(g: &GraphHandle<'_>, facts: &FactsHandle<'_>) -> Option<GraphResult> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| analyze_graph(g, facts))).ok()
+}
+
+#[no_mangle]
+pub fn xray_abi_version() -> u64 {
+    XRAY_ABI_VERSION
+}
+
+#[no_mangle]
+pub fn xray_drain_debug_log() -> Vec<String> {
+    DEBUG_LOG.with(|log| {
+        let mut log = log.borrow_mut();
+        std::mem::take(&mut *log)
+    })
+}
+"#;
+
 /// Assemble a complete compilable .rs source from user evaluator code.
 pub fn assemble_evaluator_source(user_code: &str) -> String {
     assemble_evaluator_source_with_preamble(PREAMBLE, user_code)
@@ -214,8 +397,30 @@ pub fn assemble_evaluator_source(user_code: &str) -> String {
 /// Production code always goes through the public assemble_evaluator_source
 /// above, which always passes the real PREAMBLE.
 fn assemble_evaluator_source_with_preamble(preamble: &str, user_code: &str) -> String {
+    assemble_with_epilogue(preamble, user_code, EPILOGUE)
+}
+
+/// Shared assembly primitive both `assemble_evaluator_source_with_preamble`
+/// (legacy) and `assemble_graph_evaluator_source` (AC8) build on: resolves
+/// `ABI_VERSION_PLACEHOLDER` in `preamble`, then wraps `user_code` between
+/// `preamble` and the caller-selected `epilogue`.
+fn assemble_with_epilogue(preamble: &str, user_code: &str, epilogue: &str) -> String {
     let resolved_preamble = preamble.replace(ABI_VERSION_PLACEHOLDER, &XRAY_ABI_VERSION.to_string());
-    format!("{}\n// ---- USER CODE ----\n{}\n// ---- END USER CODE ----\n{}", resolved_preamble, user_code, EPILOGUE)
+    format!("{}\n// ---- USER CODE ----\n{}\n// ---- END USER CODE ----\n{}", resolved_preamble, user_code, epilogue)
+}
+
+/// Story #1787 AC8: assembles a graph-mode evaluator's complete compilable
+/// source -- the COMMON `PREAMBLE` (OwnedNode/EvalFinding/debug_log, shared
+/// with legacy mode) plus all 4 `GRAPH_PREAMBLE_EXTRA_*` slices (GraphHandle/
+/// FactsHandle/UserFact/GraphResult/ReduceFinding), followed by user code,
+/// followed by `GRAPH_EPILOGUE` (xray_collect_facts + xray_analyze_graph,
+/// never xray_evaluate_node).
+fn assemble_graph_evaluator_source(user_code: &str) -> String {
+    let preamble = format!(
+        "{}\n{}\n{}\n{}\n{}",
+        PREAMBLE, GRAPH_PREAMBLE_EXTRA_1, GRAPH_PREAMBLE_EXTRA_2, GRAPH_PREAMBLE_EXTRA_3, GRAPH_PREAMBLE_EXTRA_4
+    );
+    assemble_with_epilogue(&preamble, user_code, GRAPH_EPILOGUE)
 }
 
 /// Number of lines in the preamble (for adjusting rustc error line numbers).
@@ -258,20 +463,26 @@ fn compile_evaluator_impl(user_code: &str, cache_dir: &Path, preamble: &str) -> 
         });
     }
 
-    // Step 2: Check that evaluate_node function exists (AST-level, not substring)
-    if !has_evaluate_node_fn(user_code) {
-        return Err(CompileError {
-            message: "Evaluator must define: fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding>".to_string(),
-            details: vec![],
-        });
-    }
+    // Step 2: AC8 -- classify the evaluator's mode SYNCHRONOUSLY, before
+    // any compilation is attempted. `detect_evaluator_mode` subsumes the
+    // old "must define evaluate_node" check: it IS that check for the
+    // Legacy case, plus the symmetric Graph-mode check ADR-001 requires,
+    // with mixed/incomplete callback families rejected as errors rather
+    // than silently guessed at.
+    let mode = detect_evaluator_mode(user_code)?;
 
     // Step 3: Compute the ONE shared cache identity (Bug #1784) — sensitive
     // to the full assembled source (PREAMBLE + user code + EPILOGUE), the
     // ABI version, and the rustc toolchain. Computed from the assembled
     // source ONCE here and reused below for the actual compile (Step 5b),
-    // so PREAMBLE/EPILOGUE text is never re-derived redundantly.
-    let assembled_source = assemble_evaluator_source_with_preamble(preamble, user_code);
+    // so PREAMBLE/EPILOGUE text is never re-derived redundantly. The
+    // assembler itself is mode-correct: Legacy uses the caller-supplied
+    // `preamble` + legacy EPILOGUE; Graph always uses the full
+    // GRAPH_PREAMBLE_EXTRA_* mirror + GRAPH_EPILOGUE (AC8).
+    let assembled_source = match mode {
+        EvaluatorMode::Legacy => assemble_evaluator_source_with_preamble(preamble, user_code),
+        EvaluatorMode::Graph => assemble_graph_evaluator_source(user_code),
+    };
     let identity_info = cache_identity_info_from_source(&assembled_source);
     let so_path = cache_dir.join(format!("{}.so", identity_info.identity));
     let meta_path = cache_dir.join(format!("{}.meta", identity_info.identity));
@@ -459,12 +670,6 @@ pub fn detect_evaluator_mode(source: &str) -> Result<EvaluatorMode, CompileError
     }
 }
 
-/// Returns true only if `source` contains an actual `fn evaluate_node` function
-/// definition at the top level — not just the text in a comment or string literal.
-fn has_evaluate_node_fn(source: &str) -> bool {
-    has_top_level_fn(source, "evaluate_node")
-}
-
 fn sha256_hex(input: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(input.as_bytes());
@@ -570,6 +775,25 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
+    /// RED phase: `assemble_graph_evaluator_source` does not exist yet.
+    /// This proves what its GREEN implementation must do -- assemble
+    /// graph-mode source using the GRAPH_PREAMBLE_EXTRA_* mirror text and
+    /// GRAPH_EPILOGUE, NEVER the legacy `xray_evaluate_node` export.
+    #[test]
+    fn assemble_graph_evaluator_source_uses_graph_preamble_and_epilogue_not_legacy() {
+        let user_code = r#"
+fn collect_facts(node: &OwnedNode, file: &str) -> Vec<UserFact> { Vec::new() }
+fn analyze_graph(g: &GraphHandle<'_>, facts: &FactsHandle<'_>) -> GraphResult { GraphResult::default() }
+"#;
+        let assembled = assemble_graph_evaluator_source(user_code);
+        assert!(assembled.contains("pub struct GraphHandle"), "must contain GraphHandle mirror");
+        assert!(assembled.contains("pub struct FactsHandle"), "must contain FactsHandle mirror");
+        assert!(assembled.contains("xray_collect_facts"), "must export xray_collect_facts");
+        assert!(assembled.contains("xray_analyze_graph"), "must export xray_analyze_graph");
+        assert!(assembled.contains(user_code), "must contain user code verbatim");
+        assert!(!assembled.contains("xray_evaluate_node"), "graph mode must NEVER export xray_evaluate_node");
+    }
+
     #[test]
     fn test_assemble_contains_preamble_and_epilogue() {
         let user_code = "fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> { vec![] }";
@@ -591,6 +815,48 @@ mod tests {
 
         let c = sha256_hex("different input");
         assert_ne!(a, c, "different inputs must produce different hashes");
+    }
+
+    /// AC8: `compile_evaluator_impl`'s mode-aware branching must accept a
+    /// genuine graph-mode evaluator (one `detect_evaluator_mode` classifies
+    /// as `EvaluatorMode::Graph`), assemble it with `GRAPH_PREAMBLE_EXTRA_*`
+    /// and `GRAPH_EPILOGUE`, compile it to a real `.so`, and that `.so`
+    /// must actually EXPORT the graph-mode symbols -- never `xray_evaluate_node`.
+    #[test]
+    fn compile_evaluator_compiles_a_valid_graph_mode_evaluator() {
+        let dir = TempDir::new().unwrap();
+        let user_code = r#"
+fn collect_facts(node: &OwnedNode, file: &str) -> Vec<UserFact> {
+    Vec::new()
+}
+fn analyze_graph(g: &GraphHandle<'_>, facts: &FactsHandle<'_>) -> GraphResult {
+    let mut result = GraphResult::default();
+    for symbol in g.reachable_from(&[0], 5) {
+        result.refine.push(g.resolve_symbol(symbol));
+    }
+    result
+}
+"#;
+        assert_eq!(
+            detect_evaluator_mode(user_code).unwrap(),
+            EvaluatorMode::Graph,
+            "test fixture assumption broken: this source must classify as Graph mode"
+        );
+
+        let result = compile_evaluator(user_code, dir.path())
+            .expect("a genuine graph-mode evaluator must compile successfully");
+        assert!(result.so_path.exists(), ".so file must exist on disk");
+
+        let lib = unsafe { libloading::Library::new(&result.so_path) }
+            .expect("compiled graph-mode .so must load successfully");
+        unsafe {
+            let has_collect_facts: bool = lib.get::<extern "Rust" fn()>(b"xray_collect_facts\0").is_ok();
+            let has_analyze_graph: bool = lib.get::<extern "Rust" fn()>(b"xray_analyze_graph\0").is_ok();
+            let has_legacy: bool = lib.get::<extern "Rust" fn()>(b"xray_evaluate_node\0").is_ok();
+            assert!(has_collect_facts, "graph-mode .so must export xray_collect_facts");
+            assert!(has_analyze_graph, "graph-mode .so must export xray_analyze_graph");
+            assert!(!has_legacy, "graph-mode .so must NEVER export xray_evaluate_node");
+        }
     }
 
     #[test]

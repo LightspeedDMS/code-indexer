@@ -97,6 +97,86 @@ fn format_cache_identity_output(user_code: &str) -> String {
     )
 }
 
+/// Parsed `--graph-in <path>`/`--dylib <path>` arguments for the
+/// `--analyze-graph` subcommand.
+struct AnalyzeGraphArgs {
+    graph_in: PathBuf,
+    dylib: PathBuf,
+}
+
+/// Parses the `--analyze-graph` subcommand's own two REQUIRED flags,
+/// `--graph-in <path>` and `--dylib <path>`. Order-independent; errors
+/// with a clear message naming which flag is missing, never silently
+/// defaulting either.
+fn parse_analyze_graph_args(args: &[String]) -> Result<AnalyzeGraphArgs, String> {
+    let mut graph_in: Option<PathBuf> = None;
+    let mut dylib: Option<PathBuf> = None;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--graph-in" => {
+                let (value, next_i) = parse_value_flag(args, i, "--graph-in requires a path");
+                graph_in = Some(PathBuf::from(value));
+                i = next_i;
+            }
+            "--dylib" => {
+                let (value, next_i) = parse_value_flag(args, i, "--dylib requires a path");
+                dylib = Some(PathBuf::from(value));
+                i = next_i;
+            }
+            other => return Err(format!("--analyze-graph: unrecognized argument '{other}'")),
+        }
+    }
+    Ok(AnalyzeGraphArgs {
+        graph_in: graph_in.ok_or_else(|| "--analyze-graph requires --graph-in <path>".to_string())?,
+        dylib: dylib.ok_or_else(|| "--analyze-graph requires --dylib <path>".to_string())?,
+    })
+}
+
+/// Story #1787 AC7+AC8: the core of the `--analyze-graph` subcommand,
+/// factored out from argv/exit-code plumbing so it is directly unit
+/// testable. Reads `graph_in` (the AC7 mmap wire format), loads `dylib` as
+/// a graph-mode evaluator, and maps the outcome onto a `ChildReport` --
+/// every terminal status is DISTINCT and explicit (Rule 13,
+/// anti-silent-failure), never inferred from an empty result:
+///
+/// - graph file fails to read/parse -> `GraphInvalid`
+/// - dylib fails to load (ABI mismatch, missing `xray_abi_version`, etc.)
+///   -> `LoadFailed`
+/// - dylib loads but does not export `analyze_graph` (a legacy-mode `.so`
+///   handed to this subcommand) -> `Absent`
+/// - `analyze_graph` panicked (caught INSIDE the dylib, see
+///   `compiler::GRAPH_EPILOGUE`) -> `Panicked`
+/// - `analyze_graph` returned a real result -> `RanOk`
+///
+/// Facts are an EMPTY `FactIndex` for this slice -- wiring real per-file
+/// `collect_facts` output into a `FactIndex` here is fused-pipeline
+/// integration, explicitly out of scope for the ABI/process-container work
+/// this subcommand demonstrates.
+fn run_analyze_graph(graph_in: &std::path::Path, dylib: &std::path::Path) -> xray_core::graph::analyze::process::ChildReport {
+    use xray_core::graph::analyze::process::ChildReport;
+    use xray_core::graph::analyze::result::AnalyzeStatus;
+
+    let graph = match xray_core::graph::csr::wire::read_graph_file(graph_in) {
+        Ok(g) => g,
+        Err(_) => return ChildReport { status: AnalyzeStatus::GraphInvalid, result: None },
+    };
+    let evaluator = match xray_core::dynlib::GraphDynlibEvaluator::load(dylib) {
+        Ok(e) => e,
+        Err(_) => return ChildReport { status: AnalyzeStatus::LoadFailed, result: None },
+    };
+
+    let facts = xray_core::graph::user_facts::FactIndex::new();
+    let graph_handle = xray_core::graph::csr::handle::GraphHandle::from_graph(&graph);
+    let facts_handle = xray_core::graph::user_facts::FactsHandle::from_facts(&facts);
+
+    match evaluator.call_analyze_graph(&graph_handle, &facts_handle) {
+        None => ChildReport { status: AnalyzeStatus::Absent, result: None },
+        Some(None) => ChildReport { status: AnalyzeStatus::Panicked, result: None },
+        Some(Some(result)) => ChildReport { status: AnalyzeStatus::RanOk, result: Some(result) },
+    }
+}
+
 fn main() {
     let wall_start = Instant::now();
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -112,6 +192,30 @@ fn main() {
             std::process::exit(1);
         }
         print!("{}", format_cache_identity_output(&user_code));
+        std::process::exit(0);
+    }
+
+    // Story #1787 AC7+AC8: `--analyze-graph --graph-in <path> --dylib
+    // <path>` -- the child-process side of `run_analyze_child`'s handoff.
+    // ALWAYS exits 0 (a legitimate terminal AnalyzeStatus, including
+    // GraphInvalid/LoadFailed/Absent/Panicked, is reported via the JSON
+    // ChildReport on stdout, never via a nonzero exit code) -- exiting 1
+    // here is reserved for a malformed invocation (missing required
+    // flags), which the parent's run_analyze_child already maps to
+    // Panicked via its own nonzero-exit fallback.
+    if args.first().map(|s| s.as_str()) == Some("--analyze-graph") {
+        let parsed = match parse_analyze_graph_args(&args[1..]) {
+            Ok(p) => p,
+            Err(msg) => {
+                eprintln!("Error: {}", msg);
+                std::process::exit(1);
+            }
+        };
+        let report = run_analyze_graph(&parsed.graph_in, &parsed.dylib);
+        match serde_json::to_string(&report) {
+            Ok(json) => println!("{}", json),
+            Err(e) => eprintln!("Error: failed to serialize ChildReport: {}", e),
+        }
         std::process::exit(0);
     }
 
@@ -419,6 +523,146 @@ mod tests {
 
     fn sv(v: &[&str]) -> Vec<String> {
         v.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// RED phase: `parse_analyze_graph_args` does not exist yet.
+    #[test]
+    fn parse_analyze_graph_args_extracts_graph_in_and_dylib() {
+        let args = sv(&["--graph-in", "/tmp/g.bin", "--dylib", "/tmp/e.so"]);
+        let parsed = parse_analyze_graph_args(&args).expect("both required flags present must parse");
+        assert_eq!(parsed.graph_in, std::path::PathBuf::from("/tmp/g.bin"));
+        assert_eq!(parsed.dylib, std::path::PathBuf::from("/tmp/e.so"));
+    }
+
+    #[test]
+    fn parse_analyze_graph_args_errors_when_dylib_missing() {
+        let args = sv(&["--graph-in", "/tmp/g.bin"]);
+        assert!(parse_analyze_graph_args(&args).is_err(), "--dylib is required");
+    }
+
+    /// Builds a tiny real `CodeGraph` (A -> B), writes it to a real file
+    /// via `write_graph_file`, and returns the path -- the AC7 wire
+    /// format `run_analyze_graph` reads via `read_graph_file`.
+    fn write_small_graph_file(dir: &std::path::Path) -> (std::path::PathBuf, u64) {
+        use xray_core::graph::csr::builder::CodeGraphBuilder;
+        use xray_core::graph::csr::candidate::Candidate;
+        use xray_core::graph::csr::wire::write_graph_file;
+        use xray_core::graph::identity::make_symbol_id;
+        use xray_core::graph::reasons;
+
+        let mut builder = CodeGraphBuilder::with_candidate_capacity(1);
+        let a = builder.intern_symbol(make_symbol_id(1, 0));
+        let b_symbol = make_symbol_id(1, 1);
+        let b = builder.intern_symbol(b_symbol);
+        builder.add_reference(a, 1, 1, 0, &[Candidate::new(b, reasons::SAME_FILE)]);
+        let graph = builder.build();
+
+        let path = dir.join("graph.bin");
+        write_graph_file(&graph, &path).expect("write_graph_file must succeed");
+        (path, b_symbol)
+    }
+
+    /// RED phase: `run_analyze_graph` does not exist yet. Proves the
+    /// AC7+AC8 end-to-end path: a REAL graph file (mmap-readable via the
+    /// AC7 wire format) plus a REAL compiled graph-mode evaluator dylib
+    /// (using the real `GraphHandle` accessor ABI) produces a
+    /// `ChildReport { status: RanOk, result: Some(..) }` with the CORRECT
+    /// data -- never a stub.
+    #[test]
+    fn run_analyze_graph_produces_ran_ok_with_a_real_graph_and_dylib() {
+        use tempfile::TempDir;
+        use xray_core::graph::analyze::result::AnalyzeStatus;
+
+        let dir = TempDir::new().unwrap();
+        let (graph_path, b_symbol) = write_small_graph_file(dir.path());
+
+        let user_code = r#"
+fn collect_facts(node: &OwnedNode, file: &str) -> Vec<UserFact> {
+    Vec::new()
+}
+fn analyze_graph(g: &GraphHandle<'_>, facts: &FactsHandle<'_>) -> GraphResult {
+    let mut result = GraphResult::default();
+    for callee in g.callees_of(0) {
+        result.refine.push(g.resolve_symbol(callee));
+    }
+    result
+}
+"#;
+        let cr = xray_core::compiler::compile_evaluator(user_code, dir.path()).expect("must compile");
+
+        let report = run_analyze_graph(&graph_path, &cr.so_path);
+        assert_eq!(report.status, AnalyzeStatus::RanOk);
+        let result = report.result.expect("RanOk must carry a result");
+        assert_eq!(result.refine, vec![b_symbol], "must resolve to B's real SymbolId via a REAL accessor call");
+    }
+
+    /// THE central AC7/AC8 invariant: an evaluator that does NOT export
+    /// `analyze_graph` is reported as `Absent` -- DISTINCT from a
+    /// successful empty analysis (`RanOk` with `refine: vec![]`) -- and
+    /// DISTINCT again from `GraphInvalid`/`LoadFailed` (four statuses
+    /// total; `Panicked` is proven separately at the `GraphDynlibEvaluator`
+    /// layer in `xray-core`, and `NotRequested`/`SkippedBudget`/`TimedOut`
+    /// are decided by callers upstream of this function, not produced by
+    /// it). A wrong implementation that collapsed "not exported" into
+    /// "ran, found nothing" would pass a naive "no findings" check but
+    /// fail this test's explicit status comparison.
+    #[test]
+    fn run_analyze_graph_distinguishes_absent_empty_success_and_load_failures() {
+        use tempfile::TempDir;
+        use xray_core::graph::analyze::result::AnalyzeStatus;
+
+        let dir = TempDir::new().unwrap();
+        let (graph_path, _b_symbol) = write_small_graph_file(dir.path());
+
+        // Absent: a legacy-mode .so has no analyze_graph to call at all.
+        let legacy_code = "fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> { Vec::new() }";
+        let legacy_cr = xray_core::compiler::compile_evaluator(legacy_code, dir.path()).expect("must compile");
+        let absent_report = run_analyze_graph(&graph_path, &legacy_cr.so_path);
+        assert_eq!(absent_report.status, AnalyzeStatus::Absent);
+        assert!(absent_report.result.is_none());
+
+        // RanOk with an empty result: a REAL graph-mode evaluator that
+        // legitimately finds nothing -- must NOT be confused with Absent.
+        let empty_code = r#"
+fn collect_facts(node: &OwnedNode, file: &str) -> Vec<UserFact> {
+    Vec::new()
+}
+fn analyze_graph(g: &GraphHandle<'_>, facts: &FactsHandle<'_>) -> GraphResult {
+    GraphResult::default()
+}
+"#;
+        let empty_cr = xray_core::compiler::compile_evaluator(empty_code, dir.path()).expect("must compile");
+        let empty_report = run_analyze_graph(&graph_path, &empty_cr.so_path);
+        assert_eq!(empty_report.status, AnalyzeStatus::RanOk);
+        assert_eq!(empty_report.result, Some(xray_core::graph::analyze::result::GraphResult::default()));
+
+        // GraphInvalid: the graph file itself is corrupt/unreadable.
+        let corrupt_graph_path = dir.path().join("corrupt.bin");
+        std::fs::write(&corrupt_graph_path, b"not a real graph file").unwrap();
+        let invalid_report = run_analyze_graph(&corrupt_graph_path, &empty_cr.so_path);
+        assert_eq!(invalid_report.status, AnalyzeStatus::GraphInvalid);
+        assert!(invalid_report.result.is_none());
+
+        // LoadFailed: the dylib path does not exist at all.
+        let missing_dylib_path = dir.path().join("does_not_exist.so");
+        let load_failed_report = run_analyze_graph(&graph_path, &missing_dylib_path);
+        assert_eq!(load_failed_report.status, AnalyzeStatus::LoadFailed);
+        assert!(load_failed_report.result.is_none());
+
+        // All four observed statuses must be pairwise distinct (AnalyzeStatus
+        // does not derive Hash, so this is a plain pairwise comparison
+        // rather than a HashSet-based dedup).
+        let statuses = [
+            AnalyzeStatus::Absent,
+            AnalyzeStatus::RanOk,
+            AnalyzeStatus::GraphInvalid,
+            AnalyzeStatus::LoadFailed,
+        ];
+        for i in 0..statuses.len() {
+            for j in (i + 1)..statuses.len() {
+                assert_ne!(statuses[i], statuses[j], "status at index {i} must differ from index {j}");
+            }
+        }
     }
 
     // --- Bug #1784: --print-cache-identity bridges Python to the ONE
