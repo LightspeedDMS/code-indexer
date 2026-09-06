@@ -9,6 +9,7 @@
 use super::candidate::Candidate;
 use super::reference::Reference;
 use super::symbol_table::SymbolTable;
+use crate::graph::bind::depth::BinderDepth;
 use crate::graph::string_table::StringTable;
 
 /// Assembles a `CodeGraph`'s CSR arena. See module docs for the
@@ -18,6 +19,7 @@ pub struct CodeGraphBuilder {
     references: Vec<Reference>,
     strings: StringTable,
     symbols: SymbolTable,
+    binder_depths: Vec<BinderDepth>,
 }
 
 impl CodeGraphBuilder {
@@ -30,7 +32,15 @@ impl CodeGraphBuilder {
             references: Vec::new(),
             strings: StringTable::new(),
             symbols: SymbolTable::new(),
+            binder_depths: Vec::new(),
         }
+    }
+
+    /// Records the AC4 narrowing-depth report for every language the
+    /// binder saw. There is exactly one authoritative depth list per
+    /// graph, set once by `super::super::bind::bind` before `build()`.
+    pub fn set_binder_depths(&mut self, binder_depths: Vec<BinderDepth>) {
+        self.binder_depths = binder_depths;
     }
 
     /// Interns a symbol NAME string, returning its dense id in the shared
@@ -71,6 +81,7 @@ impl CodeGraphBuilder {
             self.candidates,
             self.strings,
             self.symbols,
+            self.binder_depths,
         )
     }
 }

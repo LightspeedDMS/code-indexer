@@ -27,6 +27,12 @@ pub struct Declaration {
     pub name: String,
     pub line: usize,
     pub symbol: SymbolId,
+    /// The declared parameter count, for a `Method` declaration only
+    /// (`Some`); `None` for every other `DeclarationKind`. Captured
+    /// structurally (not just baked into the `signatures` string) so
+    /// AC4's Level-1 "+arity" binder narrowing can compare it against a
+    /// call site's `InvocationSite::arg_count` without re-parsing text.
+    pub param_count: Option<usize>,
 }
 
 /// AC2: "imports (ordinary, static, wildcard)".
@@ -72,6 +78,13 @@ pub struct AnnotationRecord {
 pub struct InvocationSite {
     pub callee_name: String,
     pub line: usize,
+    /// The real number of arguments passed at this call site: `Some(0)`
+    /// for a genuine no-argument call, `None` only if the parsed node had
+    /// no `argument_list` child at all (e.g. malformed/incomplete source
+    /// under parse-error recovery) -- never fabricated as `Some(0)` in
+    /// that case. See `Declaration::param_count` -- the AC4 binder
+    /// compares the two structurally.
+    pub arg_count: Option<usize>,
 }
 
 /// AC2: "type references".
@@ -144,6 +157,7 @@ mod tests {
             name: "Foo".to_string(),
             line: 1,
             symbol: make_symbol_id(1, 0),
+            param_count: None,
         });
         assert_eq!(index.declaration_named("Foo").unwrap().name, "Foo");
     }

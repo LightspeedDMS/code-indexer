@@ -91,7 +91,13 @@ fn extract_package(root: &OwnedNode, file_id: u32, next_local: &mut u32, index: 
     let name = name_node.text().to_string();
     let symbol = next_symbol(file_id, next_local);
     index.signatures.insert(symbol, format!("package {name}"));
-    index.declarations.push(Declaration { kind: DeclarationKind::Package, name, line: decl.start_line, symbol });
+    index.declarations.push(Declaration {
+        kind: DeclarationKind::Package,
+        name,
+        line: decl.start_line,
+        symbol,
+        param_count: None,
+    });
 }
 
 fn extract_imports(root: &OwnedNode, index: &mut LocalIndex) {
@@ -144,7 +150,13 @@ fn extract_type_declaration(
 
     let signature = format!("{} {}", type_keyword(&node.kind), name);
     index.signatures.insert(symbol, signature);
-    index.declarations.push(Declaration { kind: DeclarationKind::Type, name, line: node.start_line, symbol });
+    index.declarations.push(Declaration {
+        kind: DeclarationKind::Type,
+        name,
+        line: node.start_line,
+        symbol,
+        param_count: None,
+    });
 }
 
 /// Collects the type names out of a `type_list` node (the shared grammar
@@ -246,7 +258,13 @@ fn extract_method_declaration(
         node.child_by_kind("formal_parameters").map(|p| p.named_children().len()).unwrap_or(0);
     index.signatures.insert(symbol, format!("{name}({param_count} params)"));
 
-    index.declarations.push(Declaration { kind: DeclarationKind::Method, name, line: node.start_line, symbol });
+    index.declarations.push(Declaration {
+        kind: DeclarationKind::Method,
+        name,
+        line: node.start_line,
+        symbol,
+        param_count: Some(param_count),
+    });
 }
 
 fn has_modifier(modifiers: &OwnedNode, keyword: &str) -> bool {
@@ -280,7 +298,7 @@ fn extract_field_declaration(
         let name = name_node.text().to_string();
         let symbol = next_symbol(file_id, next_local);
         index.signatures.insert(symbol, format!("{keyword} {name}"));
-        index.declarations.push(Declaration { kind, name, line: node.start_line, symbol });
+        index.declarations.push(Declaration { kind, name, line: node.start_line, symbol, param_count: None });
     }
 }
 
@@ -289,7 +307,18 @@ fn extract_invocation(node: &OwnedNode, index: &mut LocalIndex) {
     else {
         return;
     };
-    index.invocations.push(InvocationSite { callee_name: callee.text().to_string(), line: node.start_line });
+    // Verified real grammar output: `method_invocation`'s call arguments are
+    // its own direct `argument_list` child (the same shape
+    // `formal_parameters` has for a declaration's parameters above) --
+    // still part of the ONE existing walk over this node, no new
+    // traversal. `None` (never a fabricated `Some(0)`) if that child is
+    // genuinely absent, e.g. under parse-error recovery on malformed source.
+    let arg_count = node.child_by_kind("argument_list").map(|a| a.named_children().len());
+    index.invocations.push(InvocationSite {
+        callee_name: callee.text().to_string(),
+        line: node.start_line,
+        arg_count,
+    });
 }
 
 fn extract_construction(node: &OwnedNode, index: &mut LocalIndex) {
@@ -430,6 +459,34 @@ mod tests {
         let decl = index.declaration_named("run").unwrap();
         let signature = index.signatures.get(&decl.symbol).unwrap();
         assert_eq!(signature, "run(0 params)");
+    }
+
+    /// AC4 (Story #1787, S2) Level-1 "+arity" narrowing needs a genuine
+    /// call-site argument count and a genuine declared parameter count --
+    /// neither existed on `InvocationSite`/`Declaration` before this slice
+    /// (the declared count was previously only baked into the opaque
+    /// `signatures` string, unusable for a structural comparison). Both are
+    /// captured during the SAME single walk `extract` already performs
+    /// (`method_invocation`'s `argument_list`, `method_declaration`'s
+    /// `formal_parameters`) -- no second tree walk is introduced.
+    #[test]
+    fn extracts_argument_count_at_call_sites_and_param_count_on_method_declarations() {
+        let index = extract_source(
+            "class First {\n    void run(int a, int b) {}\n    void go() {\n        run(1, 2);\n        bare();\n    }\n}\n",
+        );
+        let call = index.invocations.iter().find(|i| i.callee_name == "run").unwrap();
+        assert_eq!(call.arg_count, Some(2));
+        let bare_call = index.invocations.iter().find(|i| i.callee_name == "bare").unwrap();
+        assert_eq!(bare_call.arg_count, Some(0));
+
+        let run_decl = index.declaration_named("run").unwrap();
+        assert_eq!(run_decl.param_count, Some(2));
+        let go_decl = index.declaration_named("go").unwrap();
+        assert_eq!(go_decl.param_count, Some(0));
+
+        // Non-method declarations never carry a param_count.
+        let type_decl = index.declaration_named("First").unwrap();
+        assert_eq!(type_decl.param_count, None);
     }
 
     #[test]

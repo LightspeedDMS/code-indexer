@@ -9,6 +9,7 @@
 use super::candidate::Candidate;
 use super::reference::Reference;
 use super::symbol_table::SymbolTable;
+use crate::graph::bind::depth::BinderDepth;
 use crate::graph::identity::SymbolId;
 use crate::graph::string_table::StringTable;
 
@@ -22,19 +23,27 @@ pub struct CodeGraph {
     candidates: Vec<Candidate>,
     strings: StringTable,
     symbols: SymbolTable,
+    binder_depths: Vec<BinderDepth>,
 }
 
 impl CodeGraph {
     /// Crate-internal: called only by `CodeGraphBuilder::build`, which is
-    /// the sole place that produces these four parts together and keeps
+    /// the sole place that produces these five parts together and keeps
     /// them consistent.
     pub(super) fn from_parts(
         references: Vec<Reference>,
         candidates: Vec<Candidate>,
         strings: StringTable,
         symbols: SymbolTable,
+        binder_depths: Vec<BinderDepth>,
     ) -> Self {
-        CodeGraph { references, candidates, strings, symbols }
+        CodeGraph { references, candidates, strings, symbols, binder_depths }
+    }
+
+    /// AC4: "`BinderDepth` exposed per language on the graph". One entry
+    /// per distinct language the binder saw when this graph was built.
+    pub fn binder_depths(&self) -> &[BinderDepth] {
+        &self.binder_depths
     }
 
     /// All references in the repository, in build order. Borrowed slice --
@@ -85,6 +94,7 @@ impl CodeGraph {
 mod tests {
     use super::super::builder::CodeGraphBuilder;
     use super::super::candidate::Candidate;
+    use crate::graph::bind::depth::BinderDepth;
     use crate::graph::identity::make_symbol_id;
     use crate::graph::reasons;
 
@@ -119,9 +129,12 @@ mod tests {
         // Reference 2: out-of-repo call, empty candidate set.
         builder.add_reference(12, 1, 7, 0, &[]);
 
+        builder.set_binder_depths(vec![BinderDepth::new("java")]);
+
         let graph = builder.build();
 
         assert_eq!(graph.references().len(), 3);
+        assert_eq!(graph.binder_depths(), &[BinderDepth::new("java")]);
 
         let ref0 = graph.references()[0];
         assert!(ref0.is_ambiguous());
