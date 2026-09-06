@@ -86,8 +86,8 @@ pub mod handle {
         reachable_from_fn: fn(*const (), &[u32], usize) -> Vec<u32>,
         shortest_path_to_any_fn: fn(*const (), u32, &[u32], usize) -> Option<Vec<u32>>,
         strongly_connected_components_fn: fn(*const ()) -> Vec<Vec<u32>>,
-        resolve_symbol_fn: fn(*const (), u32) -> u64,
-        resolve_string_raw_fn: fn(*const (), u32) -> (*const u8, usize),
+        resolve_symbol_fn: fn(*const (), u32) -> Option<u64>,
+        resolve_string_raw_fn: fn(*const (), u32) -> Option<(*const u8, usize)>,
         _graph: PhantomData<&'graph ()>,
     }
 
@@ -120,13 +120,12 @@ pub mod handle {
         graph_from_ctx(ctx).strongly_connected_components()
     }
 
-    fn thunk_resolve_symbol(ctx: CtxPtr, dense_id: u32) -> u64 {
-        graph_from_ctx(ctx).resolve_symbol(dense_id)
+    fn thunk_resolve_symbol(ctx: CtxPtr, dense_id: u32) -> Option<u64> {
+        graph_from_ctx(ctx).try_resolve_symbol(dense_id)
     }
 
-    fn thunk_resolve_string_raw(ctx: CtxPtr, string_id: u32) -> RawStr {
-        let s = graph_from_ctx(ctx).resolve_string(string_id);
-        (s.as_ptr(), s.len())
+    fn thunk_resolve_string_raw(ctx: CtxPtr, string_id: u32) -> Option<RawStr> {
+        graph_from_ctx(ctx).try_resolve_string(string_id).map(|s| (s.as_ptr(), s.len()))
     }
 
     impl<'graph> GraphHandle<'graph> {
@@ -168,20 +167,21 @@ pub mod handle {
             (self.strongly_connected_components_fn)(self.ctx)
         }
 
-        pub fn resolve_symbol(&self, dense_id: u32) -> u64 {
+        pub fn resolve_symbol(&self, dense_id: u32) -> Option<u64> {
             (self.resolve_symbol_fn)(self.ctx, dense_id)
         }
 
         /// Returns a `&str` borrowed from the graph's shared string table,
         /// with a lifetime tied to `&self` -- never an owned `String`
-        /// (AC5/ADR-002).
-        pub fn resolve_string(&self, string_id: u32) -> &str {
-            let (ptr, len) = (self.resolve_string_raw_fn)(self.ctx, string_id);
-            // SAFETY: `ptr`/`len` come from `CodeGraph::resolve_string`'s
+        /// (AC5/ADR-002). `None` on an out-of-range `string_id` (ADR-002
+        /// Defect 2 fix) rather than panicking.
+        pub fn resolve_string(&self, string_id: u32) -> Option<&str> {
+            let (ptr, len) = (self.resolve_string_raw_fn)(self.ctx, string_id)?;
+            // SAFETY: `ptr`/`len` come from `CodeGraph::try_resolve_string`'s
             // own `&str` (via `thunk_resolve_string_raw`), guaranteed valid
             // UTF-8 and alive for at least `'graph` -- which, per this
             // struct's borrow-checked lifetime contract, outlives `&self`.
-            unsafe { std::str::from_utf8_unchecked(std::slice::from_raw_parts(ptr, len)) }
+            Some(unsafe { std::str::from_utf8_unchecked(std::slice::from_raw_parts(ptr, len)) })
         }
     }
 
@@ -269,9 +269,27 @@ pub mod handle {
             let graph = builder.build();
             let handle = GraphHandle::from_graph(&graph);
 
-            assert_eq!(handle.resolve_symbol(a), graph.resolve_symbol(a));
-            assert_eq!(handle.resolve_string(foo), "Foo");
-            assert_eq!(handle.resolve_string(foo), graph.resolve_string(foo));
+            assert_eq!(handle.resolve_symbol(a), Some(graph.resolve_symbol(a)));
+            assert_eq!(handle.resolve_string(foo), Some("Foo"));
+            assert_eq!(handle.resolve_string(foo), Some(graph.resolve_string(foo)));
+        }
+
+        /// Defect 2 (ADR-002 GraphHandle FFI fix): `resolve_symbol`/
+        /// `resolve_string` must return `None` for an out-of-range id
+        /// instead of panicking -- a panic here happens inside a HOST
+        /// thunk called back FROM the dylib, which is UB (crosses the
+        /// dylib boundary a second time before the dylib's own
+        /// catch_unwind around analyze_graph could ever intercept it).
+        #[test]
+        fn resolve_symbol_and_resolve_string_return_none_for_out_of_range_ids_never_panic() {
+            let mut builder = CodeGraphBuilder::with_candidate_capacity(0);
+            builder.intern_symbol(make_symbol_id(1, 0));
+            builder.intern_string("Foo");
+            let graph = builder.build();
+            let handle = GraphHandle::from_graph(&graph);
+
+            assert_eq!(handle.resolve_symbol(u32::MAX), None, "out-of-range dense id must return None, never panic");
+            assert_eq!(handle.resolve_string(u32::MAX), None, "out-of-range string id must return None, never panic");
         }
     }
 }

@@ -67,6 +67,20 @@ impl StringTable {
         &self.buffer[start as usize..(start + len) as usize]
     }
 
+    /// Checked counterpart to `resolve` (ADR-002 Defect 2 fix): returns
+    /// `None` instead of panicking when `id` was never interned in this
+    /// table. Used by the `GraphHandle` FFI accessor thunks, which must
+    /// never let a panic cross the dylib boundary on caller-supplied
+    /// (potentially out-of-range) input. Like `resolve`, this never
+    /// allocates -- it slices the same shared buffer on the `Some` path.
+    /// `resolve`'s own panic contract is unchanged and stays in place for
+    /// the many internal call sites that pass only internally-known-good
+    /// ids.
+    pub fn try_resolve(&self, id: u32) -> Option<&str> {
+        let (start, len) = *self.spans.get(id as usize)?;
+        Some(&self.buffer[start as usize..(start + len) as usize])
+    }
+
     /// Number of DISTINCT strings interned so far.
     pub fn len(&self) -> usize {
         self.spans.len()
@@ -147,5 +161,21 @@ mod tests {
         table.intern("Foo");
         table.intern("Foo");
         assert_eq!(table.len(), 1);
+    }
+
+    /// Defect 2 (ADR-002 GraphHandle FFI fix): `try_resolve` is the checked
+    /// counterpart to `resolve` -- it must discriminate a genuinely
+    /// interned id (`Some`) from an out-of-range one (`None`) without
+    /// panicking, so the GraphHandle accessor thunks built on top of it
+    /// never let a panic cross the dylib boundary. `resolve`'s own panic
+    /// contract is UNCHANGED and still covered by
+    /// `resolve_returns_the_exact_interned_text` above.
+    #[test]
+    fn try_resolve_returns_some_for_interned_id_and_none_for_out_of_range_id() {
+        let mut table = StringTable::new();
+        let id = table.intern("com.example.Foo");
+
+        assert_eq!(table.try_resolve(id), Some("com.example.Foo"));
+        assert_eq!(table.try_resolve(u32::MAX), None, "an id never interned in this table must return None, never panic");
     }
 }

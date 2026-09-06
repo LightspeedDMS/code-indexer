@@ -51,6 +51,17 @@ impl SymbolTable {
             .unwrap_or_else(|| panic!("SymbolTable::resolve: id {id} was not interned in this table"))
     }
 
+    /// Checked counterpart to `resolve` (ADR-002 Defect 2 fix): returns
+    /// `None` instead of panicking when `id` was never interned in this
+    /// table. Used by the `GraphHandle` FFI accessor thunks, which must
+    /// never let a panic cross the dylib boundary on caller-supplied
+    /// (potentially out-of-range) input. `resolve`'s own panic contract is
+    /// unchanged and stays in place for the many internal call sites that
+    /// pass only internally-known-good ids.
+    pub fn try_resolve(&self, id: u32) -> Option<SymbolId> {
+        self.entries.get(id as usize).copied()
+    }
+
     /// Reverse lookup: the dense id `symbol` was interned under, if any.
     /// AC6: `CodeGraph::dense_id_for` needs this to let a caller holding a
     /// real 64-bit `SymbolId` (e.g. from `FileForBind`) query
@@ -110,5 +121,22 @@ mod tests {
         table.intern(42);
         table.intern(42);
         assert_eq!(table.len(), 1);
+    }
+
+    /// Defect 2 (ADR-002 GraphHandle FFI fix): `try_resolve` is the checked
+    /// counterpart to `resolve` -- it must discriminate a genuinely
+    /// interned id (`Some`) from an out-of-range one (`None`) without
+    /// panicking, so the GraphHandle accessor thunks built on top of it
+    /// never let a panic cross the dylib boundary. `resolve`'s own panic
+    /// contract is UNCHANGED and still covered by
+    /// `resolve_returns_the_exact_symbol_id_that_was_interned` above.
+    #[test]
+    fn try_resolve_returns_some_for_interned_id_and_none_for_out_of_range_id() {
+        let mut table = SymbolTable::new();
+        let real_symbol: SymbolId = 0x0000_0007_0000_002A;
+        let dense_id = table.intern(real_symbol);
+
+        assert_eq!(table.try_resolve(dense_id), Some(real_symbol));
+        assert_eq!(table.try_resolve(u32::MAX), None, "an id never interned in this table must return None, never panic");
     }
 }

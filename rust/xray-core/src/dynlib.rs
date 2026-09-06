@@ -107,7 +107,12 @@ impl Evaluator for DynlibEvaluator {
 unsafe impl Send for DynlibEvaluator {}
 unsafe impl Sync for DynlibEvaluator {}
 
-type CollectFactsFn = fn(&OwnedNode, &str) -> Vec<crate::graph::user_facts::UserFact>;
+/// ADR-002 Defect 1 fix: returns `Option<Vec<UserFact>>` -- `None` means
+/// the dylib's OWN `catch_unwind` (see `GRAPH_EPILOGUE` in `compiler.rs`)
+/// caught a panic inside `collect_facts` before it could ever try to cross
+/// this dylib boundary, mirroring `AnalyzeGraphFn`'s doc comment below
+/// exactly (both epilogue exports now follow the identical shape).
+type CollectFactsFn = fn(&OwnedNode, &str) -> Option<Vec<crate::graph::user_facts::UserFact>>;
 /// Returns `Option<GraphResult>` -- `None` means the dylib's OWN
 /// `catch_unwind` (see `GRAPH_EPILOGUE` in `compiler.rs`) caught a panic
 /// inside `analyze_graph` before it could ever try to cross this dylib
@@ -191,6 +196,18 @@ impl GraphDynlibEvaluator {
         facts: &crate::graph::user_facts::FactsHandle,
     ) -> Option<Option<crate::graph::analyze::result::GraphResult>> {
         self.analyze_graph_fn.map(|f| f(g, facts))
+    }
+
+    /// Mirrors `call_analyze_graph`'s two-level Option contract exactly:
+    /// outer `None` = not exported, outer `Some(inner)` = exported, where
+    /// inner `None` = the dylib's own catch_unwind (GRAPH_EPILOGUE) caught
+    /// a panic, inner `Some(facts)` = succeeded.
+    pub fn call_collect_facts(
+        &self,
+        node: &OwnedNode,
+        file: &str,
+    ) -> Option<Option<Vec<crate::graph::user_facts::UserFact>>> {
+        self.collect_facts_fn.map(|f| f(node, file))
     }
 }
 
@@ -276,7 +293,7 @@ fn collect_facts(node: &OwnedNode, file: &str) -> Vec<UserFact> {
 fn analyze_graph(g: &GraphHandle<'_>, facts: &FactsHandle<'_>) -> GraphResult {
     let mut result = GraphResult::default();
     for callee in g.callees_of(0) {
-        result.refine.push(g.resolve_symbol(callee));
+        result.refine.push(g.resolve_symbol(callee).expect("callee came from g.callees_of, always valid"));
     }
     result
 }
@@ -339,6 +356,138 @@ fn analyze_graph(g: &GraphHandle<'_>, facts: &FactsHandle<'_>) -> GraphResult {
         assert!(
             outer.is_none(),
             "a panic inside analyze_graph must be caught inside the dylib, reported as Some(None), never a crash"
+        );
+    }
+
+    /// Defect 1 (ADR-002 fix): mirrors `call_analyze_graph_is_outer_none_when_not_exported`'s
+    /// exact shape for `call_collect_facts` -- a legacy-mode evaluator has
+    /// no `collect_facts` at all, which must be the OUTER `None`, distinct
+    /// from a successful empty result (`Some(Some(vec![]))`).
+    #[test]
+    fn call_collect_facts_is_outer_none_when_not_exported() {
+        use tempfile::TempDir;
+        let dir = TempDir::new().unwrap();
+        let legacy_code = "fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> { Vec::new() }";
+        let evaluator = compile_and_load_graph(legacy_code, dir.path());
+        let node = OwnedNode::new_leaf_for_test("root", "", 1, true);
+        assert!(
+            evaluator.call_collect_facts(&node, "file.rs").is_none(),
+            "calling collect_facts on a legacy-mode evaluator (no export) must be the outer \
+             None, never a successful Some(Some(empty)) result"
+        );
+    }
+
+    /// Defect 1 (ADR-002 fix), the discriminating companion to the panic
+    /// test below: a REAL, non-panicking `collect_facts` that legitimately
+    /// finds nothing must report `Some(Some(vec![]))` -- never confused
+    /// with the panic case's `Some(None)`. Without this test, a buggy
+    /// implementation that always returns the inner `None` regardless of
+    /// whether a panic occurred could still pass the panic test alone.
+    #[test]
+    fn call_collect_facts_succeeds_with_a_real_non_panicking_call() {
+        use tempfile::TempDir;
+        let dir = TempDir::new().unwrap();
+        let success_code = r#"
+fn collect_facts(node: &OwnedNode, file: &str) -> Vec<UserFact> {
+    Vec::new()
+}
+fn analyze_graph(g: &GraphHandle<'_>, facts: &FactsHandle<'_>) -> GraphResult {
+    GraphResult::default()
+}
+"#;
+        let evaluator = compile_and_load_graph(success_code, dir.path());
+        let node = OwnedNode::new_leaf_for_test("root", "", 1, true);
+        let outer = evaluator
+            .call_collect_facts(&node, "file.rs")
+            .expect("collect_facts IS exported -- outer must be Some(..)");
+        assert_eq!(
+            outer,
+            Some(Vec::new()),
+            "a real, non-panicking collect_facts finding nothing must report Some(Some(vec![])), \
+             never confused with the panic case's Some(None)"
+        );
+    }
+
+    /// Defect 1 (ADR-002 fix): a genuinely panicking `collect_facts` (no
+    /// `catch_unwind` today -- this is the UB the fix eliminates) must be
+    /// caught INSIDE the dylib and reported as the inner `Some(None)`,
+    /// never crashing the process and never confused with the empty-success
+    /// case proven above.
+    #[test]
+    fn call_collect_facts_catches_a_genuine_panic_inside_the_dylib() {
+        use tempfile::TempDir;
+        let dir = TempDir::new().unwrap();
+        let panic_code = r#"
+fn collect_facts(node: &OwnedNode, file: &str) -> Vec<UserFact> {
+    let boom: Option<i32> = None;
+    boom.unwrap();
+    Vec::new()
+}
+fn analyze_graph(g: &GraphHandle<'_>, facts: &FactsHandle<'_>) -> GraphResult {
+    GraphResult::default()
+}
+"#;
+        let evaluator = compile_and_load_graph(panic_code, dir.path());
+        let node = OwnedNode::new_leaf_for_test("root", "", 1, true);
+        let outer = evaluator
+            .call_collect_facts(&node, "file.rs")
+            .expect("must be the outer Some(..) -- collect_facts IS exported, the panic is caught inside");
+        assert!(
+            outer.is_none(),
+            "a panic inside collect_facts must be caught inside the dylib, reported as Some(None), never a crash"
+        );
+    }
+
+    /// Defect 2 (ADR-002 fix), full-surface proof: ALL 7 `GraphHandle`
+    /// accessors, called with out-of-range/extreme input from inside a
+    /// REAL compiled `analyze_graph`, must never panic -- proving the whole
+    /// accessor surface is safe under adversarial input, not just the two
+    /// (`resolve_symbol`/`resolve_string`) that were changed. `resolve_symbol`/
+    /// `resolve_string` now return `Option`, so the evaluator uses
+    /// `.is_none()`/`.unwrap_or(...)` rather than `.unwrap()` -- unwrapping
+    /// `None` inside the evaluator would itself panic (caught by the
+    /// dylib's own catch_unwind), which would make this test pass for the
+    /// WRONG reason.
+    #[test]
+    fn all_seven_graph_handle_accessors_survive_adversarial_input_without_panicking() {
+        use tempfile::TempDir;
+        let dir = TempDir::new().unwrap();
+        let (graph, facts) = small_graph_and_facts();
+        let graph_handle = crate::graph::csr::handle::GraphHandle::from_graph(&graph);
+        let facts_handle = crate::graph::user_facts::FactsHandle::from_facts(&facts);
+
+        let adversarial_code = r#"
+fn collect_facts(node: &OwnedNode, file: &str) -> Vec<UserFact> {
+    Vec::new()
+}
+fn analyze_graph(g: &GraphHandle<'_>, facts: &FactsHandle<'_>) -> GraphResult {
+    let mut result = GraphResult::default();
+    let _callees = g.callees_of(u32::MAX);
+    let _callers = g.callers_of(u32::MAX);
+    let _reachable = g.reachable_from(&[u32::MAX], 10);
+    let _shortest = g.shortest_path_to_any(u32::MAX, &[u32::MAX], 10);
+    let _scc = g.strongly_connected_components();
+    let symbol_was_none = g.resolve_symbol(u32::MAX).is_none();
+    let string_was_none = g.resolve_string(u32::MAX).is_none();
+    if symbol_was_none && string_was_none {
+        result.findings.push(ReduceFinding::default());
+    }
+    result
+}
+"#;
+        let evaluator = compile_and_load_graph(adversarial_code, dir.path());
+        let outer = evaluator
+            .call_analyze_graph(&graph_handle, &facts_handle)
+            .expect("analyze_graph IS exported -- outer must be Some(..)");
+        let result = outer.expect(
+            "the whole GraphHandle accessor surface must survive adversarial (out-of-range) \
+             input without panicking -- Some(None) here would mean something still panicked",
+        );
+        assert_eq!(
+            result.findings.len(),
+            1,
+            "resolve_symbol/resolve_string must both have returned None for the out-of-range id, \
+             proving they discriminate gracefully rather than panicking"
         );
     }
 

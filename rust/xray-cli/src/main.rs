@@ -583,7 +583,7 @@ fn collect_facts(node: &OwnedNode, file: &str) -> Vec<UserFact> {
 fn analyze_graph(g: &GraphHandle<'_>, facts: &FactsHandle<'_>) -> GraphResult {
     let mut result = GraphResult::default();
     for callee in g.callees_of(0) {
-        result.refine.push(g.resolve_symbol(callee));
+        result.refine.push(g.resolve_symbol(callee).expect("callee came from g.callees_of, always valid"));
     }
     result
 }

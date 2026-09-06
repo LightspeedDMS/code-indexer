@@ -42,7 +42,25 @@ const MAX_CACHE_ENTRIES: usize = 100;
 /// (`xray_evaluate_node`) artifacts are unaffected in shape, but still get
 /// a fresh ABI/cache identity like every prior bump, since the ABI version
 /// is a whole-artifact sentinel, not a per-mode one.
-pub const XRAY_ABI_VERSION: u64 = 5;
+///
+/// This slice (ADR-002 review follow-up) bumps this AGAIN, 5 -> 6: fixing
+/// two UB defects found in the ABI-5 graph-mode surface changes its shape
+/// again. (1) `xray_collect_facts` previously exported `Vec<UserFact>` with
+/// no `catch_unwind` -- a panic inside a user's `collect_facts` unwound
+/// across the dylib boundary uncaught, empirically confirmed (via a
+/// disposable scratch-copy repro) to abort the process. It now exports
+/// `Option<Vec<UserFact>>`, wrapped in `catch_unwind` exactly like
+/// `xray_analyze_graph` already was. (2) `GraphHandle::resolve_symbol`/
+/// `resolve_string` were HOST callback thunks that panicked on an
+/// out-of-range id -- since these are called FROM INSIDE the dylib via a
+/// stored function pointer, a panic there must unwind from host code back
+/// into the calling dylib frame, which is a SECOND dylib-boundary crossing
+/// that happens BEFORE the dylib's own `catch_unwind` around
+/// `analyze_graph()` could ever intercept it (also empirically confirmed:
+/// SIGABRT, "Rust cannot catch foreign exceptions"). Both accessors now
+/// return `Option` instead of panicking. An ABI-5 graph artifact (compiled
+/// before either fix) must never be loaded as if it matched ABI 6.
+pub const XRAY_ABI_VERSION: u64 = 6;
 
 /// Placeholder token embedded in PREAMBLE in place of a hardcoded ABI
 /// version literal. Substituted with the real `XRAY_ABI_VERSION` value by
@@ -238,8 +256,8 @@ pub struct GraphHandle<'graph> {
     reachable_from_fn: fn(*const (), &[u32], usize) -> Vec<u32>,
     shortest_path_to_any_fn: fn(*const (), u32, &[u32], usize) -> Option<Vec<u32>>,
     strongly_connected_components_fn: fn(*const ()) -> Vec<Vec<u32>>,
-    resolve_symbol_fn: fn(*const (), u32) -> u64,
-    resolve_string_raw_fn: fn(*const (), u32) -> (*const u8, usize),
+    resolve_symbol_fn: fn(*const (), u32) -> Option<u64>,
+    resolve_string_raw_fn: fn(*const (), u32) -> Option<(*const u8, usize)>,
     _graph: PhantomData<&'graph ()>,
 }
 
@@ -268,7 +286,7 @@ pub(crate) const GRAPH_PREAMBLE_EXTRA_2: &str = r#"
         (self.strongly_connected_components_fn)(self.ctx)
     }
 
-    pub fn resolve_symbol(&self, dense_id: u32) -> u64 {
+    pub fn resolve_symbol(&self, dense_id: u32) -> Option<u64> {
         (self.resolve_symbol_fn)(self.ctx, dense_id)
     }
 "#;
@@ -281,9 +299,9 @@ pub(crate) const GRAPH_PREAMBLE_EXTRA_2: &str = r#"
 /// `FactIndex`'s internal `HashMap` layout (the same ADR-002 principle
 /// extended from `CodeGraph` to `FactIndex`).
 pub(crate) const GRAPH_PREAMBLE_EXTRA_3: &str = r#"
-    pub fn resolve_string(&self, string_id: u32) -> &str {
-        let (ptr, len) = (self.resolve_string_raw_fn)(self.ctx, string_id);
-        unsafe { std::str::from_utf8_unchecked(std::slice::from_raw_parts(ptr, len)) }
+    pub fn resolve_string(&self, string_id: u32) -> Option<&str> {
+        let (ptr, len) = (self.resolve_string_raw_fn)(self.ctx, string_id)?;
+        Some(unsafe { std::str::from_utf8_unchecked(std::slice::from_raw_parts(ptr, len)) })
     }
 }
 
@@ -352,10 +370,20 @@ pub struct GraphResult {
 /// that question entirely -- only an already-safe plain value (`Option<
 /// GraphResult>`) needs to cross, exactly like every other return value
 /// here (`Vec<EvalFinding>`, `Vec<UserFact>`).
+///
+/// `xray_collect_facts` follows the IDENTICAL pattern (ADR-002 Defect 1
+/// fix): it used to export `Vec<UserFact>` with no `catch_unwind` at all,
+/// which meant a panic inside a user's `collect_facts` would unwind across
+/// this dylib boundary uncaught -- empirically confirmed (via a disposable
+/// scratch-copy repro) to abort the process with "Rust cannot catch
+/// foreign exceptions", not merely a theoretical UB concern. It now
+/// returns `Option<Vec<UserFact>>` -- `None` on a caught panic, `Some` on
+/// success -- for exactly the same reason `xray_analyze_graph` already
+/// does.
 const GRAPH_EPILOGUE: &str = r#"
 #[no_mangle]
-pub fn xray_collect_facts(node: &OwnedNode, file: &str) -> Vec<UserFact> {
-    collect_facts(node, file)
+pub fn xray_collect_facts(node: &OwnedNode, file: &str) -> Option<Vec<UserFact>> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| collect_facts(node, file))).ok()
 }
 
 #[no_mangle]
@@ -832,7 +860,7 @@ fn collect_facts(node: &OwnedNode, file: &str) -> Vec<UserFact> {
 fn analyze_graph(g: &GraphHandle<'_>, facts: &FactsHandle<'_>) -> GraphResult {
     let mut result = GraphResult::default();
     for symbol in g.reachable_from(&[0], 5) {
-        result.refine.push(g.resolve_symbol(symbol));
+        result.refine.push(g.resolve_symbol(symbol).expect("symbol came from g.reachable_from, always valid"));
     }
     result
 }

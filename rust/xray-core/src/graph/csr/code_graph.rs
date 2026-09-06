@@ -121,6 +121,22 @@ impl CodeGraph {
         self.strings.resolve(string_id)
     }
 
+    /// Checked counterpart to `resolve_symbol` (ADR-002 Defect 2 fix):
+    /// `None` instead of a panic on an out-of-range `dense_id`. Used by the
+    /// `GraphHandle` FFI accessor thunk, which must never let a panic cross
+    /// the dylib boundary on caller-supplied input.
+    pub fn try_resolve_symbol(&self, dense_id: u32) -> Option<SymbolId> {
+        self.symbols.try_resolve(dense_id)
+    }
+
+    /// Checked counterpart to `resolve_string` (ADR-002 Defect 2 fix):
+    /// `None` instead of a panic on an out-of-range `string_id`. Used by
+    /// the `GraphHandle` FFI accessor thunk, which must never let a panic
+    /// cross the dylib boundary on caller-supplied input.
+    pub fn try_resolve_string(&self, string_id: u32) -> Option<&str> {
+        self.strings.try_resolve(string_id)
+    }
+
     /// AC7: total number of DISTINCT symbols interned in this graph --
     /// dense ids are contiguous `0..symbol_count()`, so this is what lets
     /// `super::ops::strongly_connected_components` enumerate every node
@@ -294,5 +310,27 @@ mod tests {
         // Unreferenced + IndexBudgetExceeded -> suppressed (None), never
         // a false "definitely dead" verdict.
         assert_eq!(graph.is_definitely_dead_code(dead_dense), None);
+    }
+
+    /// Defect 2 (ADR-002 GraphHandle FFI fix): `try_resolve_symbol`/
+    /// `try_resolve_string` are the checked counterparts to
+    /// `resolve_symbol`/`resolve_string` -- they must delegate to
+    /// `SymbolTable::try_resolve`/`StringTable::try_resolve` and return
+    /// `None` on an out-of-range id, never panic. The panicking
+    /// `resolve_symbol`/`resolve_string` are unchanged and still covered by
+    /// `graph_round_trips_references_candidates_symbols_and_strings` above.
+    #[test]
+    fn try_resolve_symbol_and_try_resolve_string_are_checked_never_panicking_counterparts() {
+        let mut builder = CodeGraphBuilder::with_candidate_capacity(0);
+        let foo_symbol = make_symbol_id(1, 0);
+        let foo_dense = builder.intern_symbol(foo_symbol);
+        let foo_name_id = builder.intern_string("Foo");
+        let graph = builder.build();
+
+        assert_eq!(graph.try_resolve_symbol(foo_dense), Some(foo_symbol));
+        assert_eq!(graph.try_resolve_symbol(u32::MAX), None, "an out-of-range dense id must return None, never panic");
+
+        assert_eq!(graph.try_resolve_string(foo_name_id), Some("Foo"));
+        assert_eq!(graph.try_resolve_string(u32::MAX), None, "an out-of-range string id must return None, never panic");
     }
 }

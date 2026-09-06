@@ -115,16 +115,19 @@ Security-sensitive changes (permission-model edits, prompt-template edits for ca
 
 ## Testing
 
-### Three Suites -- All Must Pass Before Work Is Done
+### Test Suites -- All Must Pass Before Work Is Done
 
 | Suite | Scope | When Required | Time |
 |-------|-------|---------------|------|
 | `fast-automation.sh` | CLI, core logic, chunking, storage | ALL changes | ~21 min (measured: 1272s / 14,558 tests as of 2026-08-10; was 760s / 12,697 tests on 2026-07-13 -- runtime grew 67% while test count grew 15%, so it grows FASTER than the suite; re-measure before trusting this number) |
 | `server-fast-automation.sh` | Server (MCP/REST/services/auth/storage) | Touching `src/code_indexer/server/` | ~10-15 min |
 | `slow-automation.sh` | `@pytest.mark.slow` unit tests (Bug #1798) | Not yet part of the required gate sequence -- see note below | unmeasured at full scale (2,083 tests collected across both phases as of 2026-09-06; only ever run bounded/subset so far) |
+| `rust-automation.sh` | Rust X-Ray engine (`rust/xray-core`, `rust/xray-cli`) -- `cargo test --workspace` (447 tests, incl. the AC18 PREAMBLE parity check) + `cargo clippy --workspace --all-targets -- -D warnings` | Touching `rust/` | seconds (warm build); longer on a cold `cargo build` |
 | `e2e-automation.sh` | 5-phase E2E: CLI standalone, CLI daemon, server in-process, CLI remote, fault-injection resiliency | Final regression gate -- ALL completed work | ~45-90 min |
 
 `fast-automation.sh` does NOT run server tests -- it ignores `tests/unit/server/` entirely. Touching server code without running `server-fast-automation.sh` = untested changes.
+
+`fast-automation.sh`, `server-fast-automation.sh`, and `slow-automation.sh` do NOT run the Rust suite -- all three are pytest-based and ignore `rust/` entirely. Before `rust-automation.sh` existed, no gate anywhere (local or CI) ran `cargo test`/`cargo clippy`, so the entire Rust suite, including the AC18 structural-parity check (`rust/xray-core/src/preamble_ac18_parity.rs`) that guards against a repeat of Bug #1795's memory-unsafe PREAMBLE/type divergence, was executed only by a human running cargo manually -- the same defect class as Bug #1798. Touching `rust/` without running `rust-automation.sh` = untested changes. It is also wired into CI as the `rust` job (see "What CI actually runs" below), which gates tag/release creation -- unlike the Python suites above, for Rust the CI job IS the full gate, not a smoke subset.
 
 `e2e-automation.sh` (Epic #700) is the final regression gate. No mocks -- real CLI subprocess, FastAPI server, VoyageAI, golden-repo registration. Non-negotiable for epic/story completion. Pure doc/config edits may waive with explicit user approval.
 
@@ -134,7 +137,8 @@ Security-sensitive changes (permission-model edits, prompt-template edits for ca
 2. Manual testing
 3. `fast-automation.sh` (zero failures; a timeout hit here is NOT automatically a hang -- check the actual duration against the current baseline above before assuming one). At the current ~21 min baseline the suite NO LONGER FITS a single foreground run: the Bash tool caps at 600000ms, so a foreground `timeout 900` is silently truncated to 10 min and kills a healthy run. Launch it in the BACKGROUND and poll at bounded intervals instead. When polling, do not use `pgrep -c -f fast-automation` as the liveness test -- the polling shell matches its own pattern and reports the suite alive forever; confirm completion from the log's `EXIT=` line.
 4. `server-fast-automation.sh` when server code touched
-5. `e2e-automation.sh` (final gate)
+5. `rust-automation.sh` when `rust/` touched
+6. `e2e-automation.sh` (final gate)
 
 ### fast-automation.sh Remediation
 
@@ -192,9 +196,10 @@ What CI actually runs (`.github/workflows/main.yml`, the only workflow -- Bug #1
 |-----|--------------|--------------------|
 | `lint` | full `./lint.sh` (ruff check + ruff format check + mypy across `src/` AND `tests/`, plus the AC15 anti-orphan check), Python 3.9 | YES |
 | `test` | a deliberate SMOKE test only -- 3 files (`test_factory.py`, `test_protocol.py`, `test_database_health_cluster.py`) across a 4-version Python matrix | NO -- it is NOT the suite |
-| `create-tag` / `create-release` | gated on `[check-version, lint, test]` | tag/release cannot be cut from a red tree |
+| `rust` | the FULL Rust workspace gate: `cargo test --workspace` (447 tests, incl. the AC18 PREAMBLE parity check) + `cargo clippy --workspace --all-targets -- -D warnings`, for `rust/xray-core` and `rust/xray-cli`, cached via `Swatinem/rust-cache` | YES -- unlike `test`, this is the complete suite, not a smoke subset |
+| `create-tag` / `create-release` | gated on `[check-version, lint, test, rust]` | tag/release cannot be cut from a red tree |
 
-**A green CI badge does NOT mean the test suite passed** -- it means lint passed and 3 smoke files passed. The real test gates are and remain LOCAL: `fast-automation.sh`, `server-fast-automation.sh`, `e2e-automation.sh`. Anything that skips them reaches `staging` unchecked no matter how green CI looks.
+**A green CI badge does NOT mean the Python test suite passed** -- for Python it means lint passed and 3 smoke files passed; the real Python test gates are and remain LOCAL: `fast-automation.sh`, `server-fast-automation.sh`, `e2e-automation.sh`. Anything that skips them reaches `staging` unchecked no matter how green CI looks. Rust is the exception: CI's `rust` job runs the complete 447-test suite plus clippy on every push, so for `rust/` a green CI badge DOES mean the real gate passed -- `rust-automation.sh` exists as the local mirror of that same job for pre-push verification, not because CI is insufficient for Rust.
 
 Two sync constraints on the `lint` job, both learned by breaking them:
 
