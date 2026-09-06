@@ -27,3 +27,5 @@ pub mod fused_cache;
 pub mod bind;
 pub mod budget;
 pub mod analyze;
+pub mod repo_index;
+pub mod graph_cache;

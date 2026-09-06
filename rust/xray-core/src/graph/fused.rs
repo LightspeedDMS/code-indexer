@@ -54,6 +54,14 @@ pub struct FusedFileResult {
     pub extraction_status: ExtractionStatus,
     pub facts: Vec<UserFact>,
     pub collect_facts_status: CollectFactsStatus,
+    /// Story #1787 AC10: true when tree-sitter's root node carried a
+    /// syntax error (`has_error`) for this file. Always `false` when the
+    /// file could not be parsed at all (`process_file_fused` returns
+    /// `None` in that case, never a `FusedFileResult`) -- this field
+    /// exists to distinguish "parsed, but with a syntax error inside" from
+    /// that unreadable/unsupported case, which a repo-wide orchestrator
+    /// must count separately.
+    pub has_syntax_error: bool,
 }
 
 fn run_extraction(
@@ -82,12 +90,14 @@ fn run_collect_facts(
 /// Runs extraction then `collect_facts`, in that mandatory order, on
 /// `root` -- AC2's two-sequential-walks sequencing. `root` is taken BY
 /// VALUE so it is guaranteed dropped when this function returns.
+#[allow(clippy::too_many_arguments)]
 pub fn process_parsed_file(
     root: OwnedNode,
     file: &str,
     file_id: u32,
     ext: &str,
     fact_collector: &dyn FactCollector,
+    has_syntax_error: bool,
 ) -> FusedFileResult {
     let (index, extraction_status) = match extractor_for_language(ext) {
         ExtractorLookup::Supported(extractor) => run_extraction(&root, file_id, extractor.as_ref()),
@@ -105,26 +115,29 @@ pub fn process_parsed_file(
         extraction_status,
         facts,
         collect_facts_status,
+        has_syntax_error,
     }
     // `root` is dropped here -- never retained past this call.
 }
 
-/// Parses `path` exactly ONCE (via `crate::scanner::parse_file`, the SAME
-/// primitive every other scan path uses -- Rule 4, anti-duplication) and
-/// runs the fused pipeline on the result. Returns `None` if the file
-/// cannot be parsed at all (unsupported extension, unreadable, or a
-/// tree-sitter parse failure) -- mirrors `scanner::parse_file`'s own
-/// `Option` convention for that case, which is a DIFFERENT, upstream
-/// failure from `ExtractionStatus`/`CollectFactsStatus` above.
+/// Parses `path` exactly ONCE (via `crate::scanner::parse_file_with_error_flag`,
+/// the SAME primitive every other scan path's error-tolerant parsing shares
+/// -- Rule 4, anti-duplication) and runs the fused pipeline on the result.
+/// Returns `None` if the file cannot be parsed at all (unsupported
+/// extension, unreadable, or a tree-sitter parse failure) -- mirrors
+/// `scanner::parse_file`'s own `Option` convention for that case, which is
+/// a DIFFERENT, upstream failure from `ExtractionStatus`/`CollectFactsStatus`
+/// above, and from AC10's `has_syntax_error` (a file that DID parse but
+/// whose tree contains a real ERROR node).
 pub fn process_file_fused(
     path: &Path,
     repo_relative_path: &str,
     fact_collector: &dyn FactCollector,
 ) -> Option<FusedFileResult> {
     let ext = path.extension()?.to_str()?.to_string();
-    let root = scanner::parse_file(path)?;
+    let (root, has_syntax_error) = scanner::parse_file_with_error_flag(path)?;
     let file_id = crate::graph::identity::file_id(repo_relative_path);
-    Some(process_parsed_file(root, repo_relative_path, file_id, &ext, fact_collector))
+    Some(process_parsed_file(root, repo_relative_path, file_id, &ext, fact_collector, has_syntax_error))
 }
 
 #[cfg(test)]
@@ -174,6 +187,20 @@ mod tests {
         assert_eq!(result.extraction_status, ExtractionStatus::LanguageNotSupported);
         assert!(result.index.is_none());
         assert_eq!(result.collect_facts_status, CollectFactsStatus::SkippedNoIndex);
+    }
+
+    /// Story #1787 AC10: a whole-repo orchestrator needs to count "files
+    /// with parse errors" separately from unreadable files. This is the
+    /// signal it will read: `has_syntax_error` must be false for
+    /// well-formed source and true for a real tree-sitter ERROR node,
+    /// surfaced right on the per-file fused result.
+    #[test]
+    fn has_syntax_error_is_true_for_malformed_source_and_false_for_valid_source() {
+        let valid = write_and_process("class Foo { void run() {} }\n", "java", &NoOpCollector).unwrap();
+        assert!(!valid.has_syntax_error, "well-formed Java must not report a syntax error");
+
+        let malformed = write_and_process("class Broken { void run( {\n", "java", &NoOpCollector).unwrap();
+        assert!(malformed.has_syntax_error, "malformed Java must report a syntax error");
     }
 
     #[test]

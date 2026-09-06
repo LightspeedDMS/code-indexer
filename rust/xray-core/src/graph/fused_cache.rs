@@ -78,6 +78,7 @@ mod tests {
             extraction_status: ExtractionStatus::LanguageNotSupported,
             facts: Vec::new(),
             collect_facts_status: CollectFactsStatus::SkippedNoIndex,
+            has_syntax_error: false,
         }
     }
 
