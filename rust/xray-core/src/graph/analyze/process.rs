@@ -118,33 +118,88 @@ fn spawn_stdout_reader(child: &mut Child) -> Receiver<Vec<u8>> {
 /// existed, including the rare `try_wait` OS-error path, treated as
 /// `Panicked` (an abnormal termination this process could not cleanly
 /// observe) rather than misreported as a spawn failure.
-pub fn run_analyze_child(mut command: Command, timeout: Duration) -> (AnalyzeStatus, Option<GraphResult>) {
+pub fn run_analyze_child(command: Command, timeout: Duration) -> (AnalyzeStatus, Option<GraphResult>) {
+    run_analyze_child_with_memory_limit(command, timeout, None, &super::memory_ceiling::NoopMemoryCeiling)
+}
+
+/// Story #1787 AC15, step 1: creates the containment boundary when a
+/// limit was admitted. Returns whether containment is genuinely active --
+/// a `create` failure DEGRADES to `false` (never aborts the job).
+fn activate_memory_ceiling(memory_limit_bytes: Option<u64>, ceiling: &dyn super::memory_ceiling::MemoryCeiling) -> bool {
+    match memory_limit_bytes {
+        Some(limit_bytes) => ceiling.create(limit_bytes).is_ok(),
+        None => false,
+    }
+}
+
+/// Story #1787 AC15, step 2: overrides `outcome` to
+/// `AnalyzeStatus::AbortedMemoryLimit` only when containment was
+/// genuinely active AND the kernel actually OOM-killed something inside
+/// it -- never inferred from a bare exit code. Always tears down the
+/// containment boundary, on every path.
+fn finalize_with_memory_ceiling(
+    containment_active: bool,
+    ceiling: &dyn super::memory_ceiling::MemoryCeiling,
+    outcome: (AnalyzeStatus, Option<GraphResult>),
+) -> (AnalyzeStatus, Option<GraphResult>) {
+    let final_outcome =
+        if containment_active && ceiling.oom_killed() { (AnalyzeStatus::AbortedMemoryLimit, None) } else { outcome };
+    ceiling.cleanup();
+    final_outcome
+}
+
+/// Story #1787 AC15: identical to `run_analyze_child`, plus an OS-level
+/// memory ceiling derived from the admitted estimate.
+/// `ceiling.add_pid(pid)` is attempted ONLY when `ceiling.create`
+/// already succeeded -- if `create` failed there is no containment
+/// boundary to add the pid into, so `add_pid` is deliberately skipped
+/// rather than called against a nonexistent boundary. Either step
+/// failing degrades containment to inactive for this run rather than
+/// aborting the job -- see `activate_memory_ceiling` and
+/// `finalize_with_memory_ceiling` for the two containment-specific steps
+/// this wraps around the unchanged spawn/poll/timeout/reap loop.
+pub fn run_analyze_child_with_memory_limit(
+    mut command: Command,
+    timeout: Duration,
+    memory_limit_bytes: Option<u64>,
+    ceiling: &dyn super::memory_ceiling::MemoryCeiling,
+) -> (AnalyzeStatus, Option<GraphResult>) {
+    let mut containment_active = activate_memory_ceiling(memory_limit_bytes, ceiling);
+
     command.process_group(0);
     command.stdout(Stdio::piped());
     let mut child = match command.spawn() {
         Ok(c) => c,
-        Err(_) => return (AnalyzeStatus::LoadFailed, None),
+        Err(_) => {
+            ceiling.cleanup();
+            return (AnalyzeStatus::LoadFailed, None);
+        }
     };
     let pid = child.id() as i32;
+    if containment_active {
+        containment_active = ceiling.add_pid(pid).is_ok();
+    }
     let stdout_rx = spawn_stdout_reader(&mut child);
     let start = Instant::now();
 
-    loop {
+    let outcome = loop {
         match child.try_wait() {
-            Ok(Some(exit_status)) => return finish(exit_status.success(), &stdout_rx),
+            Ok(Some(exit_status)) => break finish(exit_status.success(), &stdout_rx),
             Ok(None) => {
                 if start.elapsed() >= timeout {
                     reap_after_kill(&mut child, pid);
-                    return (AnalyzeStatus::TimedOut, None);
+                    break (AnalyzeStatus::TimedOut, None);
                 }
                 std::thread::sleep(POLL_INTERVAL);
             }
             Err(_) => {
                 reap_after_kill(&mut child, pid);
-                return (AnalyzeStatus::Panicked, None);
+                break (AnalyzeStatus::Panicked, None);
             }
         }
-    }
+    };
+
+    finalize_with_memory_ceiling(containment_active, ceiling, outcome)
 }
 
 /// Drains the stdout-reader thread's collected bytes (bounded wait) and
@@ -246,5 +301,99 @@ mod tests {
 
         assert_eq!(status, AnalyzeStatus::LoadFailed);
         assert!(result.is_none());
+    }
+
+    use super::super::memory_ceiling::FakeMemoryCeiling;
+
+    /// Shared scaffolding for the AC15 memory-limit tests below: a child
+    /// that always self-reports a real, successful `ran_ok` with an
+    /// empty result. Deduplicates the identical JSON/shell-command setup
+    /// every memory-limit test otherwise needs.
+    fn ran_ok_command() -> Command {
+        let json = r#"{"status":"ran_ok","result":{"findings":[],"refine":[]}}"#;
+        shell_command(&format!("printf '%s' '{json}'"))
+    }
+
+    fn ran_ok_result() -> Option<GraphResult> {
+        Some(GraphResult { findings: vec![], refine: vec![] })
+    }
+
+    /// A successful, non-OOM run under an active memory limit must
+    /// report its REAL status unchanged (never overridden), and must
+    /// have exercised the full containment lifecycle: create, add_pid
+    /// (with the real child pid), and cleanup.
+    #[test]
+    fn memory_limit_run_that_completes_normally_reports_real_status_and_exercises_full_containment_lifecycle() {
+        let ceiling = FakeMemoryCeiling::default();
+
+        let (status, result) = run_analyze_child_with_memory_limit(
+            ran_ok_command(),
+            Duration::from_secs(5),
+            Some(256 * 1024 * 1024),
+            &ceiling,
+        );
+
+        assert_eq!(status, AnalyzeStatus::RanOk);
+        assert_eq!(result, ran_ok_result());
+        assert!(ceiling.create_called.get());
+        assert!(ceiling.add_pid_called_with.get().is_some(), "the real child pid must have been added to containment");
+        assert!(ceiling.oom_killed_called.get());
+        assert!(ceiling.cleanup_called.get(), "cleanup must run on the normal-completion path");
+    }
+
+    /// THE central AC15 discriminating test: when containment was active
+    /// and the fake ceiling reports a genuine OOM-kill, the final status
+    /// must be the DISTINCT `AbortedMemoryLimit` -- even though the child
+    /// itself exited with a self-reported `ran_ok` (simulating a kernel
+    /// SIGKILL racing with a child that had already begun writing its
+    /// report; the containment signal must win).
+    #[test]
+    fn memory_limit_run_that_was_oom_killed_is_reported_as_aborted_memory_limit() {
+        let ceiling = FakeMemoryCeiling { simulate_oom: true, ..FakeMemoryCeiling::default() };
+
+        let (status, result) =
+            run_analyze_child_with_memory_limit(ran_ok_command(), Duration::from_secs(5), Some(1024), &ceiling);
+
+        assert_eq!(status, AnalyzeStatus::AbortedMemoryLimit);
+        assert!(result.is_none());
+        assert!(ceiling.cleanup_called.get(), "cleanup must run on the OOM-override path");
+    }
+
+    /// AC15 degrade contract: when `ceiling.create` fails (no cgroup
+    /// delegation), containment must be treated as INACTIVE -- `add_pid`
+    /// must never be called against a boundary that was never created,
+    /// `oom_killed` must never be consulted to override the outcome
+    /// (even if the fake were configured to claim one), and the job's
+    /// REAL status must be reported unchanged.
+    #[test]
+    fn memory_limit_create_failure_degrades_to_no_containment_and_never_calls_add_pid_or_overrides_status() {
+        let ceiling = FakeMemoryCeiling { create_fails: true, simulate_oom: true, ..FakeMemoryCeiling::default() };
+
+        let (status, result) =
+            run_analyze_child_with_memory_limit(ran_ok_command(), Duration::from_secs(5), Some(1024), &ceiling);
+
+        assert_eq!(status, AnalyzeStatus::RanOk, "create() failing must degrade to the real, unoverridden status");
+        assert_eq!(result, ran_ok_result());
+        assert!(ceiling.create_called.get());
+        assert!(ceiling.add_pid_called_with.get().is_none(), "add_pid must never be called when create() failed");
+        assert!(ceiling.cleanup_called.get(), "cleanup must run on the create-failure degrade path");
+    }
+
+    /// AC15 degrade contract, second half: `create` succeeds but
+    /// `add_pid` fails (e.g. the child raced ahead of the write) --
+    /// containment must ALSO degrade to inactive, so a later
+    /// `simulate_oom` is never consulted to override the real status.
+    #[test]
+    fn memory_limit_add_pid_failure_also_degrades_to_no_containment_and_never_overrides_status() {
+        let ceiling = FakeMemoryCeiling { add_pid_fails: true, simulate_oom: true, ..FakeMemoryCeiling::default() };
+
+        let (status, result) =
+            run_analyze_child_with_memory_limit(ran_ok_command(), Duration::from_secs(5), Some(1024), &ceiling);
+
+        assert_eq!(status, AnalyzeStatus::RanOk, "add_pid() failing must ALSO degrade to the real, unoverridden status");
+        assert_eq!(result, ran_ok_result());
+        assert!(ceiling.create_called.get());
+        assert!(ceiling.add_pid_called_with.get().is_some(), "add_pid must have been attempted since create() succeeded");
+        assert!(ceiling.cleanup_called.get(), "cleanup must run on the add_pid-failure degrade path");
     }
 }

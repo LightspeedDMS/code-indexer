@@ -9,12 +9,9 @@
 //! `AnalysisCompleteness`) and their own unit tests; this module is where
 //! they are actually composed against a real multi-file bind.
 
-use super::depth::{BinderDepth, LEVEL_0_BARE_NAME};
-use super::name_index::RepoNameIndex;
-use super::{mark_depth_for_reasons, resolve_all_references, FileForBind, PendingReference};
-use crate::graph::budget::{ladder::cap_top_n_by_confidence, AnalysisCompleteness, IndexBudget};
-use crate::graph::csr::{Candidate, CodeGraph, CodeGraphBuilder};
-use std::collections::HashMap;
+use super::{FileForBind, PendingReference};
+use crate::graph::budget::IndexBudget;
+use crate::graph::csr::{CodeGraph, CodeGraphBuilder};
 
 /// AC6: the exact final CSR candidate-arena size once the ladder's step-2
 /// cap is (or is not) applied -- must be computed BEFORE
@@ -23,7 +20,7 @@ use std::collections::HashMap;
 /// one entry per reference `resolve_all_references` produced, itself
 /// bounded by the finite invocation/type-reference/construction counts
 /// extracted per file).
-fn capped_candidate_total(pending: &[PendingReference], exceeded: bool, max_per_reference: usize) -> usize {
+pub(super) fn capped_candidate_total(pending: &[PendingReference], exceeded: bool, max_per_reference: usize) -> usize {
     if !exceeded {
         return pending.iter().map(|r| r.candidates.len()).sum();
     }
@@ -38,7 +35,7 @@ fn capped_candidate_total(pending: &[PendingReference], exceeded: bool, max_per_
 /// symbol nobody ever calls (the exact case `is_definitely_dead_code`
 /// exists to report on) would otherwise never be interned at all, making
 /// it unqueryable rather than correctly "unreferenced".
-fn intern_declarations_and_attach_signatures(files: &[FileForBind], builder: &mut CodeGraphBuilder, exceeded: bool) {
+pub(super) fn intern_declarations_and_attach_signatures(files: &[FileForBind], builder: &mut CodeGraphBuilder, exceeded: bool) {
     for file in files {
         for declaration in &file.index.declarations {
             let dense = builder.intern_symbol(declaration.symbol);
@@ -68,56 +65,19 @@ fn intern_declarations_and_attach_signatures(files: &[FileForBind], builder: &mu
 /// `CodeGraph::is_definitely_dead_code` suppress the strongest dead-code
 /// tier.
 pub fn bind_with_budget(files: Vec<FileForBind>, budget: &IndexBudget) -> CodeGraph {
-    let name_index = RepoNameIndex::build(&files);
-    let mut depths: HashMap<String, BinderDepth> = HashMap::new();
-    for file in &files {
-        depths.entry(file.language.clone()).or_insert_with(|| BinderDepth::new(file.language.clone()));
-    }
-
-    let (pending, total_candidates) = resolve_all_references(&files, &name_index);
-    let exceeded = budget.is_exceeded_by(total_candidates);
-    let max_per_reference = budget.max_candidates_per_reference();
-    let capacity = capped_candidate_total(&pending, exceeded, max_per_reference);
-
-    let mut builder = CodeGraphBuilder::with_candidate_capacity(capacity);
-    intern_declarations_and_attach_signatures(&files, &mut builder, exceeded);
-
-    for reference in pending {
-        let depth = depths.get_mut(&reference.language).expect("language registered above");
-        if !reference.candidates.is_empty() {
-            depth.mark(LEVEL_0_BARE_NAME);
-        }
-        let from_dense = builder.intern_symbol(reference.from);
-        let mut interned: Vec<(u32, u16)> = reference
-            .candidates
-            .iter()
-            .map(|(decl, bits)| {
-                mark_depth_for_reasons(depth, *bits);
-                let dense = builder.intern_symbol(decl.symbol);
-                builder.mark_referenced(dense);
-                (dense, *bits)
-            })
-            .collect();
-        if exceeded {
-            cap_top_n_by_confidence(&mut interned, max_per_reference);
-        }
-        let built_candidates: Vec<Candidate> =
-            interned.iter().map(|(sym, bits)| Candidate::new(*sym, *bits)).collect();
-        builder.add_reference(from_dense, reference.file, reference.line, reference.kind, &built_candidates);
-    }
-
-    builder.set_binder_depths(depths.into_values().collect());
-    builder.set_completeness(if exceeded {
-        AnalysisCompleteness::IndexBudgetExceeded
-    } else {
-        AnalysisCompleteness::Complete
-    });
-    builder.build()
+    // Story #1787 AC12: re-expressed in terms of the two-step admission
+    // split (`super::admission`) so there is exactly ONE copy of the
+    // ladder logic. `_stats` is discarded here -- `bind_with_budget`
+    // itself never gates on anything; `admission::bind_with_admission_gate`
+    // is the entry point an external caller uses when it wants to.
+    let (prepared, _stats) = super::admission::prepare_bind(files);
+    super::admission::finish_bind(prepared, budget)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::graph::budget::AnalysisCompleteness;
     use crate::graph::extract::local_index::{Declaration, DeclarationKind, InvocationSite, LocalIndex};
     use crate::graph::identity::{make_symbol_id, SymbolId};
 

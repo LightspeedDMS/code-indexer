@@ -38,11 +38,46 @@ pub struct CodeGraphBuilder {
     signatures: HashMap<u32, String>,
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Story #1787 AC12 test seam (mirrors the `#[cfg(test)]`-only
+    /// `compile_evaluator_with_preamble` seam used for Bug #1784): counts
+    /// how many times the ONE CSR-arena allocation point below has
+    /// actually run, so a Gate-2 admission test can assert the expensive
+    /// allocation was genuinely skipped on denial rather than merely
+    /// discarded afterward.
+    ///
+    /// THREAD-LOCAL, deliberately -- `cargo test` runs many `#[test]`
+    /// fns concurrently across the whole crate, and plenty of OTHER
+    /// tests (`csr::mod::handle::tests`, `bind::budget_bind::tests`,
+    /// etc.) also construct a `CodeGraphBuilder`. A single
+    /// process-global counter would let those unrelated,
+    /// concurrently-running tests pollute the count a Gate-2 test
+    /// observes on its own thread. Since each `#[test]` body runs to
+    /// completion on one thread, a thread-local counter isolates every
+    /// test's measurement from every other test's, regardless of
+    /// scheduling. Compiled out entirely in non-test builds -- zero
+    /// production cost.
+    pub(crate) static CANDIDATE_CAPACITY_ALLOCATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn reset_candidate_capacity_allocation_count() {
+    CANDIDATE_CAPACITY_ALLOCATIONS.with(|count| count.set(0));
+}
+
+#[cfg(test)]
+pub(crate) fn candidate_capacity_allocation_count() -> usize {
+    CANDIDATE_CAPACITY_ALLOCATIONS.with(|count| count.get())
+}
+
 impl CodeGraphBuilder {
     /// `total_candidates` MUST be the exact final candidate count for the
     /// whole repository -- reserved once, here, so no later
     /// `add_reference` call ever triggers a reallocation.
     pub fn with_candidate_capacity(total_candidates: usize) -> Self {
+        #[cfg(test)]
+        CANDIDATE_CAPACITY_ALLOCATIONS.with(|count| count.set(count.get() + 1));
         CodeGraphBuilder {
             candidates: Vec::with_capacity(total_candidates),
             references: Vec::new(),

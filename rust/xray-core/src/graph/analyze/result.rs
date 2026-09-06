@@ -39,6 +39,14 @@ pub enum AnalyzeStatus {
     /// The mmap'd `--graph-in` file failed structural validation before
     /// `analyze_graph` was ever called.
     GraphInvalid,
+    /// Story #1787 AC15: the analyze child was killed by the KERNEL cgroup
+    /// v2 OOM killer under a per-process `memory.max` ceiling this parent
+    /// itself set (derived from the admitted estimate) -- confirmed via
+    /// `memory.events`'s `oom_kill` counter, never inferred from a bare
+    /// SIGKILL exit alone (a cancellation kill also uses SIGKILL and must
+    /// not be misreported as this). Distinct from `TimedOut` (wall-clock)
+    /// and `Panicked` (an uncaught abort with no known cause).
+    AbortedMemoryLimit,
 }
 
 /// One path-shaped finding, produced ENTIRELY inside `analyze_graph`
@@ -68,19 +76,20 @@ pub struct GraphResult {
 
 #[cfg(test)]
 mod tests {
-    /// AC7: "Status enum extending #1785's:
+    /// AC7 + AC15 (amendment): "Status enum extending #1785's:
     /// not_requested | absent | load_failed | skipped_budget | ran_ok |
-    /// panicked | timed_out | graph_invalid. Every one must be DISTINCT
-    /// and reported explicitly -- never inferred from an empty result."
-    /// This test proves the enum exists with exactly these eight variants,
-    /// and that each serializes to its own distinct snake_case JSON token
-    /// (the actual wire format the child process writes and the parent
-    /// reads) -- a wrong implementation that collapsed two states onto
-    /// the same serialized string (e.g. `panicked` and `timed_out` both
-    /// serializing as `"failed"`) would fail this even though the Rust
-    /// enum itself has 8 variants.
+    /// panicked | timed_out | graph_invalid | aborted_memory_limit. Every
+    /// one must be DISTINCT and reported explicitly -- never inferred
+    /// from an empty result." This test proves the enum exists with
+    /// exactly these nine variants, and that each serializes to its own
+    /// distinct snake_case JSON token (the actual wire format the child
+    /// process writes and the parent reads) -- a wrong implementation
+    /// that collapsed two states onto the same serialized string (e.g.
+    /// `panicked` and `aborted_memory_limit` both serializing as
+    /// `"failed"`) would fail this even though the Rust enum itself has
+    /// 9 variants.
     #[test]
-    fn analyze_status_serializes_to_the_exact_eight_named_states() {
+    fn analyze_status_serializes_to_the_exact_nine_named_states() {
         use super::AnalyzeStatus;
 
         let cases = [
@@ -92,6 +101,7 @@ mod tests {
             (AnalyzeStatus::Panicked, "\"panicked\""),
             (AnalyzeStatus::TimedOut, "\"timed_out\""),
             (AnalyzeStatus::GraphInvalid, "\"graph_invalid\""),
+            (AnalyzeStatus::AbortedMemoryLimit, "\"aborted_memory_limit\""),
         ];
 
         let mut serialized: Vec<String> = Vec::new();
@@ -102,7 +112,7 @@ mod tests {
         }
 
         let distinct: std::collections::HashSet<&String> = serialized.iter().collect();
-        assert_eq!(distinct.len(), 8, "all eight statuses must serialize to DISTINCT strings");
+        assert_eq!(distinct.len(), 9, "all nine statuses must serialize to DISTINCT strings");
     }
 
     /// AC7: "Path-shaped findings are produced ENTIRELY in analyze_graph
