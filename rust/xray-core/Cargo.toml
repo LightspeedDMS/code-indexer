@@ -63,3 +63,13 @@ test-support = []
 
 [dev-dependencies]
 xray-core = { path = ".", features = ["test-support"] }
+# AC18 (#1787): the PREAMBLE/real-type parity check (preamble_ac18_parity.rs)
+# needs real Debug/PartialEq/Eq on syn's AST node types (ItemStruct, Type,
+# Signature, Block, ...) to compare the PREAMBLE mirror against the real
+# owned_node.rs/finding.rs types STRUCTURALLY -- not via substring matching,
+# which cannot catch a body-shape divergence like Bug #1795's `.rev()`
+# placement swap. Declared ONLY here (not in [dependencies] above), so a
+# production `cargo build --release` never compiles the extra-traits
+# expansion -- it applies only when the dev-dependency graph is unified in,
+# i.e. for `cargo test`.
+syn = { version = "2", features = ["extra-traits"] }

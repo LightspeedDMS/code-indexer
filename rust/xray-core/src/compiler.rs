@@ -73,7 +73,7 @@ impl std::fmt::Display for CompileError {
 ///
 /// `XRAY_ABI_VERSION` is exported so the loader can verify the compiled .so
 /// was built with a compatible type layout before calling the evaluate function.
-const PREAMBLE: &str = r#"
+pub(crate) const PREAMBLE: &str = r#"
 /// ABI version sentinel — substituted from the single source of truth
 /// (compiler::XRAY_ABI_VERSION) by assemble_evaluator_source_with_preamble
 /// before every compile (Bug #1784 review MAJOR-3).
