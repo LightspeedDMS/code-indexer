@@ -10,8 +10,10 @@ use super::candidate::Candidate;
 use super::reference::Reference;
 use super::symbol_table::SymbolTable;
 use crate::graph::bind::depth::BinderDepth;
+use crate::graph::budget::{AnalysisCompleteness, ReferencedBits};
 use crate::graph::identity::SymbolId;
 use crate::graph::string_table::StringTable;
+use std::collections::HashMap;
 
 /// Immutable, query-only whole-repository code graph. The only way to
 /// build one is `CodeGraphBuilder::build` -- there is no public
@@ -24,20 +26,50 @@ pub struct CodeGraph {
     strings: StringTable,
     symbols: SymbolTable,
     binder_depths: Vec<BinderDepth>,
+    /// AC6: whole-build completeness state (see `crate::graph::budget`).
+    completeness: AnalysisCompleteness,
+    /// AC6 step 3: the decoupled per-symbol referenced-bit.
+    referenced: ReferencedBits,
+    /// AC6 step 1: per-symbol cached signature lines, dropped entirely on
+    /// a budget-exceeded build.
+    signatures: HashMap<u32, String>,
 }
 
 impl CodeGraph {
     /// Crate-internal: called only by `CodeGraphBuilder::build`, which is
-    /// the sole place that produces these five parts together and keeps
+    /// the sole place that produces these eight parts together and keeps
     /// them consistent.
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn from_parts(
         references: Vec<Reference>,
         candidates: Vec<Candidate>,
         strings: StringTable,
         symbols: SymbolTable,
         binder_depths: Vec<BinderDepth>,
+        completeness: AnalysisCompleteness,
+        referenced: ReferencedBits,
+        signatures: HashMap<u32, String>,
     ) -> Self {
-        CodeGraph { references, candidates, strings, symbols, binder_depths }
+        CodeGraph { references, candidates, strings, symbols, binder_depths, completeness, referenced, signatures }
+    }
+
+    /// AC6: this build's whole-graph completeness state.
+    pub fn completeness(&self) -> AnalysisCompleteness {
+        self.completeness
+    }
+
+    /// AC6 step 3: true once ANY raw candidate (regardless of whether it
+    /// survived AC6 step-2 capping into the CSR arena) named this dense
+    /// symbol id as its target.
+    pub fn is_symbol_referenced(&self, dense_symbol_id: u32) -> bool {
+        self.referenced.is_referenced(dense_symbol_id)
+    }
+
+    /// AC6 step 1: this symbol's cached AC2 signature line, or `None` if
+    /// either the symbol never had one or snippets were dropped under
+    /// budget pressure.
+    pub fn signature_for(&self, dense_symbol_id: u32) -> Option<&str> {
+        self.signatures.get(&dense_symbol_id).map(|s| s.as_str())
     }
 
     /// AC4: "`BinderDepth` exposed per language on the graph". One entry
@@ -87,6 +119,33 @@ impl CodeGraph {
     /// shared string table -- never an owned `String`.
     pub fn resolve_string(&self, string_id: u32) -> &str {
         self.strings.resolve(string_id)
+    }
+
+    /// Reverse lookup: the dense id `symbol` was interned under in THIS
+    /// graph, if any. Lets a caller holding a real 64-bit `SymbolId` (e.g.
+    /// from `FileForBind::index`, outside this crate's CSR internals)
+    /// query `is_symbol_referenced`/`is_definitely_dead_code`.
+    pub fn dense_id_for(&self, symbol: SymbolId) -> Option<u32> {
+        self.symbols.dense_id_of(symbol)
+    }
+
+    /// AC6: "the 'no reference at all' finding tier is SUPPRESSED under
+    /// IndexBudgetExceeded". `Some(false)` ("referenced, not dead") is
+    /// always safe to report regardless of completeness -- positive
+    /// evidence a symbol has an inbound edge is never invalidated by a
+    /// later budget squeeze. `Some(true)` ("definitely dead: no reference
+    /// anywhere", the strongest dead-code tier) is only ever reported when
+    /// this graph is `Complete`; under `IndexBudgetExceeded` the same
+    /// absence of evidence reports `None` (suppressed / unknown) instead
+    /// of a false-positive dead-code verdict.
+    pub fn is_definitely_dead_code(&self, dense_symbol_id: u32) -> Option<bool> {
+        if self.is_symbol_referenced(dense_symbol_id) {
+            return Some(false);
+        }
+        if self.completeness == AnalysisCompleteness::IndexBudgetExceeded {
+            return None;
+        }
+        Some(true)
     }
 }
 
@@ -154,5 +213,39 @@ mod tests {
         assert!(graph.candidates_for(&ref2).is_empty());
 
         assert_eq!(graph.resolve_string(foo_name), "Foo");
+    }
+
+    /// AC6: `CodeGraphBuilder` records the completeness state, the
+    /// decoupled referenced-bit, and a per-symbol cached signature line;
+    /// `CodeGraph` surfaces all three as real query methods, plus a
+    /// reverse `dense_id_for` lookup and the `is_definitely_dead_code`
+    /// dead-code-tier gate AC6 requires.
+    #[test]
+    fn budget_outcome_fields_round_trip_through_the_builder() {
+        let mut builder = CodeGraphBuilder::with_candidate_capacity(0);
+        let live_symbol = make_symbol_id(1, 0);
+        let dead_symbol = make_symbol_id(1, 1);
+        let live_dense = builder.intern_symbol(live_symbol);
+        let dead_dense = builder.intern_symbol(dead_symbol);
+
+        builder.mark_referenced(live_dense);
+        builder.add_signature(live_dense, "run()".to_string());
+        builder.set_completeness(crate::graph::budget::AnalysisCompleteness::IndexBudgetExceeded);
+
+        let graph = builder.build();
+
+        assert_eq!(graph.completeness(), crate::graph::budget::AnalysisCompleteness::IndexBudgetExceeded);
+        assert!(graph.is_symbol_referenced(live_dense));
+        assert!(!graph.is_symbol_referenced(dead_dense));
+        assert_eq!(graph.signature_for(live_dense), Some("run()"));
+        assert_eq!(graph.signature_for(dead_dense), None);
+        assert_eq!(graph.dense_id_for(live_symbol), Some(live_dense));
+        assert_eq!(graph.dense_id_for(make_symbol_id(9, 9)), None);
+
+        // Referenced -> never dead, regardless of completeness.
+        assert_eq!(graph.is_definitely_dead_code(live_dense), Some(false));
+        // Unreferenced + IndexBudgetExceeded -> suppressed (None), never
+        // a false "definitely dead" verdict.
+        assert_eq!(graph.is_definitely_dead_code(dead_dense), None);
     }
 }

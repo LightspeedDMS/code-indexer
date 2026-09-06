@@ -10,7 +10,9 @@ use super::candidate::Candidate;
 use super::reference::Reference;
 use super::symbol_table::SymbolTable;
 use crate::graph::bind::depth::BinderDepth;
+use crate::graph::budget::{AnalysisCompleteness, ReferencedBits};
 use crate::graph::string_table::StringTable;
+use std::collections::HashMap;
 
 /// Assembles a `CodeGraph`'s CSR arena. See module docs for the
 /// single-allocation guarantee this exists to provide.
@@ -20,6 +22,20 @@ pub struct CodeGraphBuilder {
     strings: StringTable,
     symbols: SymbolTable,
     binder_depths: Vec<BinderDepth>,
+    /// AC6: whole-build completeness state. Defaults to `Complete` --
+    /// `bind_with_budget` calls `set_completeness` explicitly only when
+    /// the ladder actually engaged.
+    completeness: AnalysisCompleteness,
+    /// AC6 step 3: the decoupled per-symbol referenced-bit. See
+    /// `crate::graph::budget::referenced_bits` for why this must be
+    /// populated from RAW candidates, before any AC6 step-2 capping.
+    referenced: ReferencedBits,
+    /// AC6 step 1: per-symbol cached signature lines (AC2). Empty on a
+    /// budget-exceeded build -- `bind_with_budget` simply never calls
+    /// `add_signature` in that case, which is what makes dropping
+    /// snippets "presentation only, no analytical loss": nothing here
+    /// feeds resolution or the referenced-bit.
+    signatures: HashMap<u32, String>,
 }
 
 impl CodeGraphBuilder {
@@ -33,6 +49,9 @@ impl CodeGraphBuilder {
             strings: StringTable::new(),
             symbols: SymbolTable::new(),
             binder_depths: Vec::new(),
+            completeness: AnalysisCompleteness::Complete,
+            referenced: ReferencedBits::new(),
+            signatures: HashMap::new(),
         }
     }
 
@@ -41,6 +60,26 @@ impl CodeGraphBuilder {
     /// graph, set once by `super::super::bind::bind` before `build()`.
     pub fn set_binder_depths(&mut self, binder_depths: Vec<BinderDepth>) {
         self.binder_depths = binder_depths;
+    }
+
+    /// AC6: records this build's whole-graph completeness state.
+    pub fn set_completeness(&mut self, completeness: AnalysisCompleteness) {
+        self.completeness = completeness;
+    }
+
+    /// AC6 step 3: marks `dense_symbol_id` as having at least one inbound
+    /// edge. Callers MUST call this for every RAW candidate a binder
+    /// proposes, before any step-2 capping removes some of them from the
+    /// CSR arena -- see `crate::graph::budget::referenced_bits`.
+    pub fn mark_referenced(&mut self, dense_symbol_id: u32) {
+        self.referenced.mark(dense_symbol_id);
+    }
+
+    /// AC6 step 1: attaches `dense_symbol_id`'s cached AC2 signature line.
+    /// Never called by `bind_with_budget` when the index budget was
+    /// exceeded -- that omission IS the "drop snippets first" step.
+    pub fn add_signature(&mut self, dense_symbol_id: u32, signature: String) {
+        self.signatures.insert(dense_symbol_id, signature);
     }
 
     /// Interns a symbol NAME string, returning its dense id in the shared
@@ -82,6 +121,9 @@ impl CodeGraphBuilder {
             self.strings,
             self.symbols,
             self.binder_depths,
+            self.completeness,
+            self.referenced,
+            self.signatures,
         )
     }
 }

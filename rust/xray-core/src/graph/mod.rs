@@ -25,3 +25,4 @@ pub mod user_facts;
 pub mod fused;
 pub mod fused_cache;
 pub mod bind;
+pub mod budget;

@@ -23,21 +23,22 @@
 //! candidate window -- never a guessed target.
 
 pub mod depth;
+mod budget_bind;
 mod name_index;
 mod resolve;
 mod scope;
 
-use crate::graph::csr::{Candidate, CodeGraph, CodeGraphBuilder};
+use crate::graph::budget::IndexBudget;
+use crate::graph::csr::CodeGraph;
 use crate::graph::extract::local_index::LocalIndex;
 use crate::graph::identity::SymbolId;
 use crate::graph::reasons;
-use depth::{
-    BinderDepth, LEVEL_0_BARE_NAME, LEVEL_1_ARITY, LEVEL_2_IMPORT_CONTEXT, LEVEL_5_UNIQUE_NAME,
-};
+use depth::{BinderDepth, LEVEL_1_ARITY, LEVEL_2_IMPORT_CONTEXT, LEVEL_5_UNIQUE_NAME};
 use name_index::{DeclInfo, RepoNameIndex};
 use resolve::{enclosing_symbol, resolve_reference};
 use scope::build_file_scope;
-use std::collections::HashMap;
+
+pub use budget_bind::bind_with_budget;
 
 /// A method call site. See the two siblings below for the other reference
 /// kinds this binder resolves. Stored verbatim in `csr::Reference.kind`.
@@ -154,40 +155,17 @@ fn resolve_all_references(
 /// Full-rebuild-only binder entry point (AC4). Consumes `files` by value
 /// and produces a brand-new `CodeGraph` with per-language `BinderDepth`
 /// attached -- there is no other way to obtain a bound graph in this
-/// crate, which is what makes bind structurally full-rebuild-only.
+/// crate, which is what makes bind structurally full-rebuild-only. Exactly
+/// `bind_with_budget(files, &IndexBudget::unlimited())` (AC6): an
+/// unlimited budget can never be exceeded, so this is byte-for-byte the
+/// same graph `bind()` produced before AC6 existed.
 pub fn bind(files: Vec<FileForBind>) -> CodeGraph {
-    let name_index = RepoNameIndex::build(&files);
-    let mut depths: HashMap<String, BinderDepth> = HashMap::new();
-    for file in &files {
-        depths.entry(file.language.clone()).or_insert_with(|| BinderDepth::new(file.language.clone()));
-    }
-
-    let (pending, total_candidates) = resolve_all_references(&files, &name_index);
-
-    let mut builder = CodeGraphBuilder::with_candidate_capacity(total_candidates);
-    for reference in pending {
-        let depth = depths.get_mut(&reference.language).expect("language registered above");
-        if !reference.candidates.is_empty() {
-            depth.mark(LEVEL_0_BARE_NAME);
-        }
-        let from_dense = builder.intern_symbol(reference.from);
-        let built_candidates: Vec<Candidate> = reference
-            .candidates
-            .iter()
-            .map(|(decl, bits)| {
-                mark_depth_for_reasons(depth, *bits);
-                Candidate::new(builder.intern_symbol(decl.symbol), *bits)
-            })
-            .collect();
-        builder.add_reference(from_dense, reference.file, reference.line, reference.kind, &built_candidates);
-    }
-
-    builder.set_binder_depths(depths.into_values().collect());
-    builder.build()
+    bind_with_budget(files, &IndexBudget::unlimited())
 }
 
 #[cfg(test)]
 mod tests {
+    use super::depth::LEVEL_0_BARE_NAME;
     use super::*;
     use crate::graph::confidence::Confidence;
     use crate::graph::extract::local_index::{Declaration, DeclarationKind, InvocationSite};

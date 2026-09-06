@@ -51,6 +51,15 @@ impl SymbolTable {
             .unwrap_or_else(|| panic!("SymbolTable::resolve: id {id} was not interned in this table"))
     }
 
+    /// Reverse lookup: the dense id `symbol` was interned under, if any.
+    /// AC6: `CodeGraph::dense_id_for` needs this to let a caller holding a
+    /// real 64-bit `SymbolId` (e.g. from `FileForBind`) query
+    /// `is_symbol_referenced`/`is_definitely_dead_code`, which are keyed by
+    /// dense id like every other CSR query surface.
+    pub fn dense_id_of(&self, symbol: SymbolId) -> Option<u32> {
+        self.lookup.get(&symbol).copied()
+    }
+
     /// Number of DISTINCT symbols interned so far.
     pub fn len(&self) -> usize {
         self.entries.len()
