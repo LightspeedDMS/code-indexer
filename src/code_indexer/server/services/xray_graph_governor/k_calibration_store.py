@@ -242,3 +242,41 @@ class TTLCachedKProvider:
         with self._lock:
             self._cache[language] = (now, value)
         return value if value is not None else conservative_default
+
+
+# ---------------------------------------------------------------------------
+# Process-level singleton — None until server startup installs it.
+#
+# H4/H6 remediation: mirrors memory_governor.py's own
+# get/set/clear_memory_governor() pattern exactly, so service_init.py can
+# install the ONE TTLCachedKProvider instance wrapping the storage-mode-
+# appropriate K-calibration backend, and a future graph-build call site
+# retrieves that SAME instance rather than constructing a second,
+# independently-TTL'd provider.
+# ---------------------------------------------------------------------------
+
+_xray_k_provider: Optional[TTLCachedKProvider] = None
+_xray_k_provider_lock = threading.Lock()
+
+
+def get_xray_k_provider() -> Optional[TTLCachedKProvider]:
+    """Return the process-level K-calibration provider, or None
+    (CLI/pre-init)."""
+    with _xray_k_provider_lock:
+        return _xray_k_provider
+
+
+def set_xray_k_provider(provider: TTLCachedKProvider) -> None:
+    """Install the process-level K-calibration provider (called once in
+    server service_init)."""
+    global _xray_k_provider
+    with _xray_k_provider_lock:
+        _xray_k_provider = provider
+
+
+def clear_xray_k_provider() -> None:
+    """Clear the process-level K-calibration provider (lifespan shutdown /
+    test isolation)."""
+    global _xray_k_provider
+    with _xray_k_provider_lock:
+        _xray_k_provider = None

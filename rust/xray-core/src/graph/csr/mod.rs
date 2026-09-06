@@ -12,6 +12,7 @@
 pub mod reference;
 pub mod candidate;
 pub mod symbol_table;
+mod adjacency;
 pub mod builder;
 pub mod code_graph;
 pub mod ops;

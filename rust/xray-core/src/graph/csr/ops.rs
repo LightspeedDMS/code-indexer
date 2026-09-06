@@ -22,6 +22,30 @@
 use super::code_graph::CodeGraph;
 use std::collections::{HashSet, VecDeque};
 
+#[cfg(test)]
+thread_local! {
+    /// Dual-review defect M2 test seam (mirrors the `#[cfg(test)]`-only
+    /// `CANDIDATE_CAPACITY_ALLOCATIONS` counter in `csr::builder`): counts
+    /// how many `Reference` entries `callees_of` compares against per
+    /// call, so a test can assert the ACTUAL work performed scales with
+    /// the graph's edge count -- not with (nodes visited x total edges),
+    /// which is what the pre-fix linear scan produces. THREAD-LOCAL,
+    /// deliberately -- see `CANDIDATE_CAPACITY_ALLOCATIONS`'s own doc
+    /// comment for why (parallel `cargo test` execution across this
+    /// crate). Compiled out entirely in non-test builds.
+    pub(crate) static REFERENCE_COMPARISON_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn reset_reference_comparison_count() {
+    REFERENCE_COMPARISON_COUNT.with(|count| count.set(0));
+}
+
+#[cfg(test)]
+pub(crate) fn reference_comparison_count() -> usize {
+    REFERENCE_COMPARISON_COUNT.with(|count| count.get())
+}
+
 impl CodeGraph {
     /// Bounded BFS over `callees_of` edges starting at every id in `roots`
     /// (roots count as depth 0). Terminates by construction: `visited`
@@ -54,37 +78,22 @@ impl CodeGraph {
         order
     }
     /// Every candidate target (dense symbol id) of every reference written
-    /// textually inside `dense_symbol_id`. Bounded by `self.references()`
-    /// and each reference's own (u16-capped, AC5) candidate window -- a
-    /// single finite pass, no recursion.
+    /// textually inside `dense_symbol_id`. M2 fix: O(out-degree) via the
+    /// precomputed CSR forward adjacency index (`callees_index`, built
+    /// ONCE at graph construction) -- NEVER a re-scan of every reference
+    /// in the repository, which made this (and every caller that queries
+    /// it once per node: `reachable_from`, `shortest_path_to_any`,
+    /// `strongly_connected_components`) O(V*E) before this fix.
     pub fn callees_of(&self, dense_symbol_id: u32) -> Vec<u32> {
-        let mut out = Vec::new();
-        for reference in self.references() {
-            if reference.from != dense_symbol_id {
-                continue;
-            }
-            for candidate in self.candidates_for(reference) {
-                out.push(candidate.symbol());
-            }
-        }
-        out
+        self.callees_index(dense_symbol_id).to_vec()
     }
 
     /// Every symbol (dense id) that has at least one reference proposing
     /// `dense_symbol_id` as a candidate target -- the reverse of
-    /// `callees_of`. Same finite, single-pass bound.
+    /// `callees_of`. M2 fix: O(in-degree) via the precomputed CSR reverse
+    /// adjacency index, same rationale as `callees_of` above.
     pub fn callers_of(&self, dense_symbol_id: u32) -> Vec<u32> {
-        let mut out = Vec::new();
-        for reference in self.references() {
-            let is_caller = self
-                .candidates_for(reference)
-                .iter()
-                .any(|candidate| candidate.symbol() == dense_symbol_id);
-            if is_caller {
-                out.push(reference.from);
-            }
-        }
-        out
+        self.callers_index(dense_symbol_id).to_vec()
     }
 
     /// Bounded BFS from `from` to the nearest node in `targets` (shortest
@@ -246,6 +255,7 @@ impl TarjanContext {
 mod tests {
     use super::super::builder::CodeGraphBuilder;
     use super::super::candidate::Candidate;
+    use super::{reference_comparison_count, reset_reference_comparison_count};
     use crate::graph::identity::make_symbol_id;
     use crate::graph::reasons;
 
@@ -449,5 +459,51 @@ mod tests {
 
         let total_nodes: usize = components.iter().map(|c| c.len()).sum();
         assert_eq!(total_nodes, graph.symbol_count(), "every interned symbol appears in exactly one component");
+    }
+
+    /// Dual-review defect M2: at the amendment's own Elasticsearch-scale
+    /// figures (~215K declarations, ~834K call sites) a single
+    /// `strongly_connected_components()` call was estimated at roughly
+    /// 1.8e11 reference comparisons, because `callees_of` scans EVERY
+    /// reference in the repository per call and SCC calls it once per
+    /// node -- O(V*E), not O(V+E).
+    ///
+    /// This test builds a graph small enough to run instantly either way
+    /// (so it never becomes a timeout-flaky wall-clock test) but PROVES
+    /// the complexity class directly: N symbols in one big cycle (N
+    /// references, one outgoing edge each) means the true O(V+E) work is
+    /// ~2N reference-field reads, while the O(V*E) pre-fix behavior does
+    /// N calls to callees_of, each scanning all N references -- N^2
+    /// comparisons. Asserting on the REFERENCE_COMPARISON_COUNT work
+    /// counter (not wall-clock, which is load-dependent) discriminates
+    /// the two unambiguously: N^2 (90,000 for N=300) fails a `<= 2*N`
+    /// bound that O(V+E) trivially satisfies.
+    #[test]
+    fn strongly_connected_components_does_not_scan_every_reference_per_node() {
+        const N: usize = 300;
+
+        let mut builder = CodeGraphBuilder::with_candidate_capacity(N);
+        let symbols: Vec<u32> = (0..N).map(|i| builder.intern_symbol(make_symbol_id(i as u32, 0))).collect();
+        for i in 0..N {
+            let target = symbols[(i + 1) % N];
+            builder.add_reference(symbols[i], 1, i as u32, 0, &[Candidate::new(target, reasons::SAME_FILE)]);
+        }
+        let graph = builder.build();
+
+        reset_reference_comparison_count();
+        let components = graph.strongly_connected_components();
+
+        // Sanity: still functionally correct -- one big cycle is one SCC.
+        assert_eq!(components.len(), 1, "one big cycle must form exactly one strongly-connected component");
+        assert_eq!(components[0].len(), N);
+
+        let comparisons = reference_comparison_count();
+        assert!(
+            comparisons <= 2 * N,
+            "strongly_connected_components() performed {comparisons} reference comparisons for a \
+             {N}-node/{N}-edge graph -- expected O(V+E) (<= {}), got O(V*E)-shaped work \
+             (dual-review defect M2: callees_of must not scan every reference per call)",
+            2 * N
+        );
     }
 }

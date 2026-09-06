@@ -106,3 +106,50 @@ def test_a_language_with_no_recorded_samples_degrades_to_the_conservative_defaul
     provider = TTLCachedKProvider(store, ttl_seconds=TTL_SECONDS, time_fn=_FakeClock())
 
     assert provider.get_k("cobol", CONSERVATIVE_DEFAULT) == CONSERVATIVE_DEFAULT
+
+
+class TestXrayKProviderProcessSingleton:
+    """H4/H6 remediation: service_init.py installs ONE TTLCachedKProvider
+    at startup (wrapping the storage-mode-appropriate K-calibration
+    backend); a future graph-build call site must be able to retrieve
+    that SAME instance -- mirroring memory_governor.py's own
+    get/set/clear_memory_governor() singleton pattern.
+    """
+
+    def teardown_method(self) -> None:
+        from code_indexer.server.services.xray_graph_governor.k_calibration_store import (
+            clear_xray_k_provider,
+        )
+
+        clear_xray_k_provider()
+
+    def test_get_returns_none_before_any_set(self) -> None:
+        from code_indexer.server.services.xray_graph_governor.k_calibration_store import (
+            clear_xray_k_provider,
+            get_xray_k_provider,
+        )
+
+        # This is a process-wide singleton: other test modules in the same
+        # pytest process (e.g. test_app_lazy_init_repair_1638.py, via
+        # initialize_services()) may have already installed an instance
+        # before this test runs. Establish the "nothing set" precondition
+        # ourselves rather than relying on process history/ordering.
+        clear_xray_k_provider()
+        assert get_xray_k_provider() is None
+
+    def test_set_then_get_returns_the_same_instance_and_clear_resets_to_none(
+        self, tmp_path
+    ) -> None:
+        from code_indexer.server.services.xray_graph_governor.k_calibration_store import (
+            clear_xray_k_provider,
+            get_xray_k_provider,
+            set_xray_k_provider,
+        )
+
+        store = SqliteKCalibrationBackend(str(tmp_path / "k.db"))
+        provider = TTLCachedKProvider(store, ttl_seconds=TTL_SECONDS)
+        set_xray_k_provider(provider)
+        assert get_xray_k_provider() is provider
+
+        clear_xray_k_provider()
+        assert get_xray_k_provider() is None

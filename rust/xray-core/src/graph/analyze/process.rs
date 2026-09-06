@@ -22,6 +22,8 @@ use super::result::AnalyzeStatus;
 use super::result::GraphResult;
 use serde::{Deserialize, Serialize};
 use std::io::Read;
+use std::ffi::CString;
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::process::CommandExt;
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc::{self, Receiver};
@@ -158,6 +160,82 @@ fn finalize_with_memory_ceiling(
 /// aborting the job -- see `activate_memory_ceiling` and
 /// `finalize_with_memory_ceiling` for the two containment-specific steps
 /// this wraps around the unchanged spawn/poll/timeout/reap loop.
+/// Story #1787 AC15 spawn-race fix: writes `pid` (as decimal ASCII) into
+/// the file at `path`, using ONLY async-signal-safe raw syscalls
+/// (`open`/`write`/`close`) and a fixed-size stack buffer -- no heap
+/// allocation, locking, or other libstd machinery that could deadlock
+/// after `fork()` in a multithreaded parent (`std::fs::write` is NOT
+/// safe to call from a `pre_exec` hook for exactly this reason). Called
+/// from a `pre_exec` hook, which runs in the child strictly between
+/// `fork()` and `execve()`. Every failure is swallowed (best-effort): a
+/// self-add failure must degrade to uncontained execution, never abort
+/// the spawn (a `pre_exec` closure returning `Err` fails the whole
+/// `Command::spawn()` call in the parent).
+fn write_pid_signal_safe(path: &std::ffi::CStr, pid: u32) {
+    const MAX_U32_DIGITS: usize = 10;
+    // Rule 14 (anti-unbounded-loop): bounds the EINTR retry loop below --
+    // 10 bytes is at most 10 individual signal-interrupted write() calls
+    // in the worst case (one byte transferred per interruption), so this
+    // is already generous; it exists purely to make termination provable
+    // rather than to reflect an expected retry count.
+    const MAX_EINTR_RETRIES: u32 = 32;
+
+    let mut buf = [0u8; MAX_U32_DIGITS];
+    let mut i = buf.len();
+    let mut n = pid;
+    if n == 0 {
+        i -= 1;
+        buf[i] = b'0';
+    } else {
+        while n > 0 {
+            i -= 1;
+            buf[i] = b'0' + (n % 10) as u8;
+            n /= 10;
+        }
+    }
+    let to_write = &buf[i..];
+    // SAFETY: open/write/close are async-signal-safe POSIX syscalls.
+    // `path` is a valid, NUL-terminated C string built by the caller
+    // BEFORE fork(); `to_write` is a stack-local slice -- no heap
+    // allocation occurs anywhere in this function.
+    unsafe {
+        let fd = libc::open(path.as_ptr(), libc::O_WRONLY | libc::O_CREAT | libc::O_TRUNC, 0o644);
+        if fd < 0 {
+            return;
+        }
+        let mut written = 0usize;
+        let mut eintr_retries = 0u32;
+        while written < to_write.len() && eintr_retries < MAX_EINTR_RETRIES {
+            let n = libc::write(
+                fd,
+                to_write[written..].as_ptr() as *const libc::c_void,
+                to_write.len() - written,
+            );
+            if n > 0 {
+                written += n as usize;
+                continue;
+            }
+            // A signal interrupted the syscall before any bytes were
+            // transferred -- retry, bounded by MAX_EINTR_RETRIES. Any
+            // other outcome (n == 0, or n < 0 for a reason other than
+            // EINTR) abandons the write: this is best-effort, a
+            // partial/failed write degrades containment, it never
+            // aborts the spawn.
+            if n < 0 && *libc::__errno_location() == libc::EINTR {
+                eintr_retries += 1;
+                continue;
+            }
+            break;
+        }
+        // close()'s return value is intentionally discarded: this is a
+        // best-effort self-add write, and a close() failure (e.g. EINTR)
+        // has no corrective action available inside an async-signal-safe
+        // pre_exec hook -- the fd is either already closed or will be
+        // reclaimed when this process image is replaced by execve().
+        let _ = libc::close(fd);
+    }
+}
+
 pub fn run_analyze_child_with_memory_limit(
     mut command: Command,
     timeout: Duration,
@@ -168,6 +246,35 @@ pub fn run_analyze_child_with_memory_limit(
 
     command.process_group(0);
     command.stdout(Stdio::piped());
+
+    // AC15 spawn-race fix: without this, the window between spawn()
+    // returning and the parent's own add_pid(pid) call below lets the
+    // child run (and allocate) completely uncontained. When the ceiling
+    // exposes a self_add_path, install a pre_exec hook so the CHILD
+    // joins the boundary itself, strictly BEFORE execve() -- closing
+    // that window instead of merely narrowing it.
+    if containment_active {
+        if let Some(self_add_path) = ceiling.self_add_path() {
+            if let Ok(path_cstring) = CString::new(self_add_path.as_os_str().as_bytes()) {
+                // SAFETY: this closure runs in the freshly forked child,
+                // between fork() and execve(). It calls ONLY
+                // write_pid_signal_safe (async-signal-safe raw syscalls,
+                // no heap allocation) and std::process::id() (a plain
+                // getpid() wrapper), and always returns Ok(()) -- a
+                // pre_exec closure returning Err would fail the whole
+                // Command::spawn() call in the PARENT, turning a
+                // self-add failure into a total spawn failure instead of
+                // the intended degrade-to-uncontained behavior.
+                unsafe {
+                    command.pre_exec(move || {
+                        write_pid_signal_safe(&path_cstring, std::process::id());
+                        Ok(())
+                    });
+                }
+            }
+        }
+    }
+
     let mut child = match command.spawn() {
         Ok(c) => c,
         Err(_) => {
@@ -395,5 +502,53 @@ mod tests {
         assert!(ceiling.create_called.get());
         assert!(ceiling.add_pid_called_with.get().is_some(), "add_pid must have been attempted since create() succeeded");
         assert!(ceiling.cleanup_called.get(), "cleanup must run on the add_pid-failure degrade path");
+    }
+
+    /// THE spawn-race discriminator: when the ceiling exposes a
+    /// `self_add_path`, the CHILD must write its own pid into that path
+    /// via a `pre_exec` hook -- executed strictly BEFORE `execve()` --
+    /// closing the fork-to-add_pid race window where an uncontained
+    /// child could otherwise run and allocate freely between spawn()
+    /// returning and the parent's own add_pid(pid) call landing.
+    ///
+    /// The exec'd program's FIRST action is to compare self_add_path's
+    /// contents against its own `$$` (unchanged across exec) and only
+    /// self-report `ran_ok` if they already match -- reporting
+    /// `panicked` otherwise. This proves ORDERING (the write landed
+    /// before this program ever ran), not merely that the file
+    /// eventually held the right value after the fact.
+    #[test]
+    fn memory_limit_self_add_path_receives_the_real_child_pid_before_exec() {
+        const TEST_TIMEOUT: Duration = Duration::from_secs(5);
+        const TEST_MEMORY_LIMIT_BYTES: u64 = 1024;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let self_add_path = tmp.path().join("cgroup.procs");
+
+        let ceiling =
+            FakeMemoryCeiling { self_add_path: Some(self_add_path.clone()), ..FakeMemoryCeiling::default() };
+
+        let ran_ok_json = r#"{"status":"ran_ok","result":{"findings":[],"refine":[]}}"#;
+        let panicked_json = r#"{"status":"panicked","result":null}"#;
+        let command = shell_command(&format!(
+            "[ \"$(cat '{path}' 2>/dev/null)\" = \"$$\" ] && printf '%s' '{ran_ok_json}' || printf '%s' '{panicked_json}'",
+            path = self_add_path.display()
+        ));
+
+        let (status, result) =
+            run_analyze_child_with_memory_limit(command, TEST_TIMEOUT, Some(TEST_MEMORY_LIMIT_BYTES), &ceiling);
+
+        assert_eq!(
+            status,
+            AnalyzeStatus::RanOk,
+            "self_add_path must already contain the child's own pid BEFORE this exec'd program's \
+             first instruction ran (pre_exec ordering) -- a Panicked status here means the write \
+             had not landed in time, i.e. the AC15 spawn race is still open"
+        );
+        assert_eq!(result, ran_ok_result());
+        assert!(
+            ceiling.add_pid_called_with.get().is_some(),
+            "the parent-side add_pid(pid) backstop must still run even when self_add_path is used"
+        );
     }
 }

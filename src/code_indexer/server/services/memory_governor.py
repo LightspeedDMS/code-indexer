@@ -28,7 +28,7 @@ _GOV002_MIN_INTERVAL_SECONDS = 5.0
 
 # Floor entry count for YELLOW proactive LRU eviction: retain at least this
 # many (hottest) HNSW entries so repeated queries stay warm.
-_YELLOW_LRU_FLOOR = 1
+YELLOW_LRU_FLOOR = 1
 
 logger = logging.getLogger(__name__)
 
@@ -826,13 +826,13 @@ class MemoryGovernor:
 
         # YELLOW proactive LRU eviction (Story 4 Critical 2).
         # When the band is YELLOW and a cache has been attached via attach_cache(),
-        # evict the least-recently-used entries down to _YELLOW_LRU_FLOOR so the
+        # evict the least-recently-used entries down to YELLOW_LRU_FLOOR so the
         # hottest entries are retained.  Skipped silently when no cache is attached
         # (CLI/solo / pre-lifespan-wiring).
         if self.band == MemoryBand.YELLOW and self._attached_cache is not None:
             before_lru = self.counters.lru_evictions
             self.evict_lru_to_floor(
-                self._attached_cache, floor_entries=_YELLOW_LRU_FLOOR
+                self._attached_cache, floor_entries=YELLOW_LRU_FLOOR
             )
             evicted_this_tick = self.counters.lru_evictions - before_lru
             self.log_gov003_lru_evict(count=evicted_this_tick, freed_mb=0.0)

@@ -62,6 +62,17 @@ def cache_b():
     c.evict_lru_entries(DRAIN_ALL_EVICT_COUNT)
 
 
+def test_yellow_lru_floor_public_constant_matches_governor_internal_floor():
+    """H4/H6 remediation: service_init.py must build the composite cache's
+    floor_per_cache from the SAME constant memory_governor.py's own YELLOW
+    tick uses internally -- never a second, independently-duplicated magic
+    number that could silently drift from the governor's real floor.
+    """
+    from code_indexer.server.services.memory_governor import YELLOW_LRU_FLOOR
+
+    assert YELLOW_LRU_FLOOR == FLOOR_ENTRIES
+
+
 def test_get_stats_sums_both_sub_caches(cache_a, cache_b, wire_file_paths):
     cache_a.put("repo-a1", GraphWireFileHandle(wire_file_paths[0]))
     cache_a.put("repo-a2", GraphWireFileHandle(wire_file_paths[1]))

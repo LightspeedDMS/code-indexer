@@ -162,3 +162,40 @@ class XrayGraphCacheProxy:
                 handle.close()
                 evicted += 1
         return evicted
+
+
+# ---------------------------------------------------------------------------
+# Process-level singleton — None until server startup installs it.
+#
+# H4/H6 remediation: mirrors memory_governor.py's own
+# get/set/clear_memory_governor() pattern exactly, so service_init.py can
+# install the ONE XrayGraphCacheProxy instance composed into the governor
+# (see cache_governor_bridge.CompositeLRUCache) and a future graph-build
+# call site retrieves that SAME instance rather than constructing a second,
+# disconnected proxy the governor never sees.
+# ---------------------------------------------------------------------------
+
+_xray_graph_cache: Optional[XrayGraphCacheProxy] = None
+_xray_graph_cache_lock = threading.Lock()
+
+
+def get_xray_graph_cache() -> Optional[XrayGraphCacheProxy]:
+    """Return the process-level X-Ray graph cache, or None (CLI/pre-init)."""
+    with _xray_graph_cache_lock:
+        return _xray_graph_cache
+
+
+def set_xray_graph_cache(cache: XrayGraphCacheProxy) -> None:
+    """Install the process-level X-Ray graph cache (called once in server
+    service_init)."""
+    global _xray_graph_cache
+    with _xray_graph_cache_lock:
+        _xray_graph_cache = cache
+
+
+def clear_xray_graph_cache() -> None:
+    """Clear the process-level X-Ray graph cache (lifespan shutdown / test
+    isolation)."""
+    global _xray_graph_cache
+    with _xray_graph_cache_lock:
+        _xray_graph_cache = None

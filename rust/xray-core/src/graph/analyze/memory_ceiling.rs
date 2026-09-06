@@ -42,6 +42,14 @@ pub trait MemoryCeiling {
     /// Best-effort teardown. Must never panic -- containment teardown
     /// failing must not fail the analyze job either.
     fn cleanup(&self);
+    /// AC15 spawn-race fix: the path a spawned child should write its OWN
+    /// pid into (via a `pre_exec` hook, executed in the forked child
+    /// strictly BEFORE `execve()`) to join this boundary. Returns `None`
+    /// when this ceiling has no filesystem-backed `cgroup.procs` path to
+    /// self-add into (`NoopMemoryCeiling`) -- the caller then relies
+    /// solely on the pre-existing parent-side `add_pid(pid)` call, which
+    /// carries the original fork-to-add_pid race window.
+    fn self_add_path(&self) -> Option<PathBuf>;
 }
 
 /// Real cgroup v2 implementation. Creates
@@ -96,6 +104,10 @@ impl MemoryCeiling for CgroupV2MemoryCeiling {
         // the analyze job.
         let _ = std::fs::remove_dir(&self.dir);
     }
+
+    fn self_add_path(&self) -> Option<PathBuf> {
+        Some(self.dir.join("cgroup.procs"))
+    }
 }
 
 /// A ceiling that never contains anything -- used when no memory limit
@@ -119,6 +131,10 @@ impl MemoryCeiling for NoopMemoryCeiling {
     }
 
     fn cleanup(&self) {}
+
+    fn self_add_path(&self) -> Option<PathBuf> {
+        None
+    }
 }
 
 /// Test double letting `process.rs`'s tests exercise
@@ -131,6 +147,12 @@ pub(crate) struct FakeMemoryCeiling {
     pub(crate) create_fails: bool,
     pub(crate) add_pid_fails: bool,
     pub(crate) simulate_oom: bool,
+    // AC15 spawn-race fix: when Some, self_add_path() returns it so a
+    // caller-under-test can exercise the pre_exec self-add path against a
+    // real (non-cgroup) temp file. Defaults to None so every PRE-EXISTING
+    // test (constructed via ::default()) keeps exercising the original
+    // parent-side add_pid(pid) path unchanged.
+    pub(crate) self_add_path: Option<std::path::PathBuf>,
     pub(crate) create_called: std::cell::Cell<bool>,
     pub(crate) add_pid_called_with: std::cell::Cell<Option<i32>>,
     pub(crate) oom_killed_called: std::cell::Cell<bool>,
@@ -144,6 +166,7 @@ impl Default for FakeMemoryCeiling {
             create_fails: false,
             add_pid_fails: false,
             simulate_oom: false,
+            self_add_path: None,
             create_called: std::cell::Cell::new(false),
             add_pid_called_with: std::cell::Cell::new(None),
             oom_killed_called: std::cell::Cell::new(false),
@@ -177,6 +200,10 @@ impl MemoryCeiling for FakeMemoryCeiling {
 
     fn cleanup(&self) {
         self.cleanup_called.set(true);
+    }
+
+    fn self_add_path(&self) -> Option<PathBuf> {
+        self.self_add_path.clone()
     }
 }
 
@@ -285,5 +312,30 @@ mod tests {
         assert!(ceiling.add_pid(1).is_ok());
         assert!(!ceiling.oom_killed());
         ceiling.cleanup();
+    }
+
+    /// AC15 spawn-race fix: `self_add_path()` must expose the REAL
+    /// `cgroup.procs` file path so a `pre_exec` hook (installed by
+    /// `analyze/process.rs`) can have the CHILD write its own pid into it
+    /// BEFORE `execve()` -- closing the fork-to-add_pid race window where
+    /// an uncontained child could otherwise allocate freely.
+    #[test]
+    fn cgroup_v2_memory_ceiling_self_add_path_is_the_cgroup_procs_file() {
+        let root = tempfile::tempdir().unwrap();
+        let ceiling = CgroupV2MemoryCeiling::new(root.path(), "xray-analyze-test");
+        ceiling.create(1024).unwrap();
+
+        assert_eq!(
+            ceiling.self_add_path(),
+            Some(root.path().join("xray-analyze-test").join("cgroup.procs"))
+        );
+    }
+
+    /// `NoopMemoryCeiling` has no filesystem-backed boundary to self-add
+    /// into -- must return `None` so callers fall back to the pre-existing
+    /// parent-side `add_pid(pid)` call (a no-op here anyway).
+    #[test]
+    fn noop_memory_ceiling_self_add_path_is_none() {
+        assert_eq!(NoopMemoryCeiling.self_add_path(), None);
     }
 }

@@ -33,12 +33,23 @@ pub struct CodeGraph {
     /// AC6 step 1: per-symbol cached signature lines, dropped entirely on
     /// a budget-exceeded build.
     signatures: HashMap<u32, String>,
+    /// Dual-review defect M2 fix: CSR forward adjacency (callees), built
+    /// ONCE here rather than re-scanned per query -- see `super::adjacency`
+    /// module docs for why `callees_of`/`strongly_connected_components`
+    /// were O(V*E) without this.
+    forward_index: super::adjacency::AdjacencyIndex,
+    /// M2 fix: CSR reverse adjacency (callers), same rationale as
+    /// `forward_index`.
+    reverse_index: super::adjacency::AdjacencyIndex,
 }
 
 impl CodeGraph {
     /// Crate-internal: called only by `CodeGraphBuilder::build`, which is
     /// the sole place that produces these eight parts together and keeps
-    /// them consistent.
+    /// them consistent. Builds the M2 forward/reverse adjacency indices
+    /// HERE, once, from the same `references`/`candidates`/`symbols` this
+    /// constructor already receives -- no change to this function's
+    /// public parameter list.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn from_parts(
         references: Vec<Reference>,
@@ -50,7 +61,20 @@ impl CodeGraph {
         referenced: ReferencedBits,
         signatures: HashMap<u32, String>,
     ) -> Self {
-        CodeGraph { references, candidates, strings, symbols, binder_depths, completeness, referenced, signatures }
+        let forward_index = super::adjacency::AdjacencyIndex::build_forward(symbols.len(), &references, &candidates);
+        let reverse_index = super::adjacency::AdjacencyIndex::build_reverse(symbols.len(), &references, &candidates);
+        CodeGraph {
+            references,
+            candidates,
+            strings,
+            symbols,
+            binder_depths,
+            completeness,
+            referenced,
+            signatures,
+            forward_index,
+            reverse_index,
+        }
     }
 
     /// AC6: this build's whole-graph completeness state.
@@ -106,6 +130,21 @@ impl CodeGraph {
                 self.candidates.len()
             )
         })
+    }
+
+    /// M2 fix: every callee (dense symbol id) of `dense_symbol_id`, via
+    /// the precomputed CSR forward adjacency index built ONCE in
+    /// `from_parts` -- O(out-degree), never a re-scan of `references()`.
+    /// Borrowed slice, safe on an O(edges) query path.
+    pub fn callees_index(&self, dense_symbol_id: u32) -> &[u32] {
+        self.forward_index.edges_of(dense_symbol_id)
+    }
+
+    /// M2 fix: every caller (dense symbol id) of `dense_symbol_id`, via
+    /// the precomputed CSR reverse adjacency index -- O(in-degree), never
+    /// a re-scan of `references()`/`candidates()`.
+    pub fn callers_index(&self, dense_symbol_id: u32) -> &[u32] {
+        self.reverse_index.edges_of(dense_symbol_id)
     }
 
     /// Resolves a `Candidate`'s dense symbol id back to the real 64-bit

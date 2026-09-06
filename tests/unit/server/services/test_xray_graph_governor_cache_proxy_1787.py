@@ -146,3 +146,51 @@ def test_proxy_attaches_to_a_real_governor_and_is_evicted_to_floor_on_yellow_tic
 
     assert proxy.get_stats().cached_repositories == 1
     assert gov.counters.lru_evictions >= 4
+
+
+class TestXrayGraphCacheProcessSingleton:
+    """H4/H6 remediation: service_init.py installs ONE XrayGraphCacheProxy
+    at startup (composed into the governor via CompositeLRUCache); a
+    future graph-build call site must be able to retrieve that SAME
+    instance -- mirroring memory_governor.py's own
+    get/set/clear_memory_governor() singleton pattern -- rather than
+    constructing a second, disconnected proxy the governor never sees.
+    """
+
+    def teardown_method(self) -> None:
+        from code_indexer.server.services.xray_graph_governor.cache_proxy import (
+            clear_xray_graph_cache,
+        )
+
+        clear_xray_graph_cache()
+
+    def test_get_returns_none_before_any_set(self) -> None:
+        from code_indexer.server.services.xray_graph_governor.cache_proxy import (
+            clear_xray_graph_cache,
+            get_xray_graph_cache,
+        )
+
+        # This is a process-wide singleton: other test modules in the same
+        # pytest process (e.g. test_app_lazy_init_repair_1638.py, via
+        # initialize_services()) may have already installed an instance
+        # before this test runs. Establish the "nothing set" precondition
+        # ourselves rather than relying on process history/ordering.
+        clear_xray_graph_cache()
+        assert get_xray_graph_cache() is None
+
+    def test_set_then_get_returns_the_same_instance_and_clear_resets_to_none(
+        self,
+    ) -> None:
+        from code_indexer.server.services.xray_graph_governor.cache_proxy import (
+            XrayGraphCacheProxy,
+            clear_xray_graph_cache,
+            get_xray_graph_cache,
+            set_xray_graph_cache,
+        )
+
+        cache = XrayGraphCacheProxy()
+        set_xray_graph_cache(cache)
+        assert get_xray_graph_cache() is cache
+
+        clear_xray_graph_cache()
+        assert get_xray_graph_cache() is None
