@@ -121,6 +121,7 @@ Security-sensitive changes (permission-model edits, prompt-template edits for ca
 |-------|-------|---------------|------|
 | `fast-automation.sh` | CLI, core logic, chunking, storage | ALL changes | ~21 min (measured: 1272s / 14,558 tests as of 2026-08-10; was 760s / 12,697 tests on 2026-07-13 -- runtime grew 67% while test count grew 15%, so it grows FASTER than the suite; re-measure before trusting this number) |
 | `server-fast-automation.sh` | Server (MCP/REST/services/auth/storage) | Touching `src/code_indexer/server/` | ~10-15 min |
+| `slow-automation.sh` | `@pytest.mark.slow` unit tests (Bug #1798) | Not yet part of the required gate sequence -- see note below | unmeasured at full scale (2,083 tests collected across both phases as of 2026-09-06; only ever run bounded/subset so far) |
 | `e2e-automation.sh` | 5-phase E2E: CLI standalone, CLI daemon, server in-process, CLI remote, fault-injection resiliency | Final regression gate -- ALL completed work | ~45-90 min |
 
 `fast-automation.sh` does NOT run server tests -- it ignores `tests/unit/server/` entirely. Touching server code without running `server-fast-automation.sh` = untested changes.
@@ -138,7 +139,7 @@ Security-sensitive changes (permission-model edits, prompt-template edits for ca
 ### fast-automation.sh Remediation
 
 - **NEVER** "continue monitoring" after the 15-min (900000ms) timeout -- the process is dead
-- Thresholds: `<5s` target, `>10s` investigate, `>30s` MUST exclude via `@pytest.mark.slow`
+- Thresholds: `<5s` target, `>10s` investigate, `>30s` MUST exclude via `@pytest.mark.slow` -- this marker routes the test into `slow-automation.sh` (Bug #1798), NOT nowhere. Before this fix, no runner selected `slow`-marked tests at all: both fast gates exclude them and `e2e-automation.sh` selects by path only, so 266 files (447 marks) accumulated under `tests/unit/` with zero execution. Marking a test slow without confirming `slow-automation.sh` actually covers its path is the same mistake again.
 - Fix root cause, not symptoms. Failures on untouched code = regression.
 
 ### e2e-automation.sh Usage
