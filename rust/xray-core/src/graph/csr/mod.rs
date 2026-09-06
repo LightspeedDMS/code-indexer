@@ -88,6 +88,8 @@ pub mod handle {
         strongly_connected_components_fn: fn(*const ()) -> Vec<Vec<u32>>,
         resolve_symbol_fn: fn(*const (), u32) -> Option<u64>,
         resolve_string_raw_fn: fn(*const (), u32) -> Option<(*const u8, usize)>,
+        is_symbol_referenced_fn: fn(*const (), u32) -> bool,
+        is_definitely_dead_code_fn: fn(*const (), u32) -> Option<bool>,
         _graph: PhantomData<&'graph ()>,
     }
 
@@ -128,6 +130,26 @@ pub mod handle {
         graph_from_ctx(ctx).try_resolve_string(string_id).map(|s| (s.as_ptr(), s.len()))
     }
 
+    /// D2 fix (dual-review Critical): exposes the AC6 decoupled
+    /// referenced-bit through the ONLY surface `analyze_graph` ever
+    /// receives. See `CodeGraph::is_symbol_referenced` -- the bit was
+    /// marked from the RAW candidate list before any ladder capping, so it
+    /// survives candidate-arena truncation even when `callers_of` (which
+    /// reads the POST-CAP arena) reports zero callers for the same symbol.
+    fn thunk_is_symbol_referenced(ctx: CtxPtr, dense_id: u32) -> bool {
+        graph_from_ctx(ctx).is_symbol_referenced(dense_id)
+    }
+
+    /// D2 fix: exposes the AC6/D1 completeness-aware dead-code verdict.
+    /// See `CodeGraph::is_definitely_dead_code` -- `Some(false)` for any
+    /// referenced symbol regardless of completeness, `None` (suppressed)
+    /// for an unreferenced symbol on anything other than a `Complete`
+    /// build, `Some(true)` only when both the symbol is unreferenced AND
+    /// the whole graph is `Complete`.
+    fn thunk_is_definitely_dead_code(ctx: CtxPtr, dense_id: u32) -> Option<bool> {
+        graph_from_ctx(ctx).is_definitely_dead_code(dense_id)
+    }
+
     impl<'graph> GraphHandle<'graph> {
         /// Builds a handle bound to `graph`. The `'graph` lifetime
         /// parameter is what makes the SAFETY contract above a
@@ -143,6 +165,8 @@ pub mod handle {
                 strongly_connected_components_fn: thunk_strongly_connected_components,
                 resolve_symbol_fn: thunk_resolve_symbol,
                 resolve_string_raw_fn: thunk_resolve_string_raw,
+                is_symbol_referenced_fn: thunk_is_symbol_referenced,
+                is_definitely_dead_code_fn: thunk_is_definitely_dead_code,
                 _graph: PhantomData,
             }
         }
@@ -182,6 +206,29 @@ pub mod handle {
             // UTF-8 and alive for at least `'graph` -- which, per this
             // struct's borrow-checked lifetime contract, outlives `&self`.
             Some(unsafe { std::str::from_utf8_unchecked(std::slice::from_raw_parts(ptr, len)) })
+        }
+
+        /// D2 fix (dual-review Critical): "is this symbol referenced by
+        /// ANY raw candidate, even one that was later capped away by the
+        /// AC6 budget ladder?" -- see `CodeGraph::is_symbol_referenced`.
+        /// Unlike `callers_of(symbol).is_empty()`, this reads the
+        /// decoupled, pre-cap `ReferencedBits` state, so it never goes
+        /// blind under budget pressure.
+        pub fn is_symbol_referenced(&self, dense_id: u32) -> bool {
+            (self.is_symbol_referenced_fn)(self.ctx, dense_id)
+        }
+
+        /// D2 fix: the completeness-aware dead-code verdict -- see
+        /// `CodeGraph::is_definitely_dead_code`. `Some(false)` means
+        /// referenced (never dead, regardless of completeness);
+        /// `Some(true)` means definitely dead (unreferenced AND the whole
+        /// graph is `Complete`); `None` means suppressed -- unreferenced,
+        /// but under a degraded (non-`Complete`) build, so "dead" cannot
+        /// be claimed with confidence. This is the ONE surface an
+        /// evaluator needs to avoid the exact false-positive AC6/D1 exist
+        /// to prevent.
+        pub fn is_definitely_dead_code(&self, dense_id: u32) -> Option<bool> {
+            (self.is_definitely_dead_code_fn)(self.ctx, dense_id)
         }
     }
 
@@ -272,6 +319,45 @@ pub mod handle {
             assert_eq!(handle.resolve_symbol(a), Some(graph.resolve_symbol(a)));
             assert_eq!(handle.resolve_string(foo), Some("Foo"));
             assert_eq!(handle.resolve_string(foo), Some(graph.resolve_string(foo)));
+        }
+
+        /// D2 fix (dual-review Critical): the CENTRAL discriminating test.
+        /// `d` is marked referenced (simulating the AC6 ladder marking it
+        /// from the RAW pre-cap candidate list) but has ZERO entries in
+        /// the CSR candidates arena (simulating the ladder capping its
+        /// only edge away) -- so `callers_of(d)` is empty, exactly the
+        /// blind spot D2 is about. `is_symbol_referenced`/
+        /// `is_definitely_dead_code`, reached ONLY through `GraphHandle`
+        /// (the surface `analyze_graph` actually receives), must still
+        /// report it correctly.
+        #[test]
+        fn is_symbol_referenced_and_is_definitely_dead_code_survive_ladder_capping_via_the_handle() {
+            let mut builder = CodeGraphBuilder::with_candidate_capacity(0);
+            let a = builder.intern_symbol(make_symbol_id(1, 0));
+            let d = builder.intern_symbol(make_symbol_id(1, 1));
+            let dead = builder.intern_symbol(make_symbol_id(1, 2));
+            builder.add_reference(a, 1, 1, 0, &[]);
+            builder.mark_referenced(d);
+            builder.set_completeness(crate::graph::budget::AnalysisCompleteness::IndexBudgetExceeded);
+            let graph = builder.build();
+            let handle = GraphHandle::from_graph(&graph);
+
+            assert!(handle.callers_of(d).is_empty(), "fixture sanity: d has zero POST-CAP callers");
+            assert!(handle.is_symbol_referenced(d), "the pre-cap referenced bit must be reachable through the handle");
+            assert_eq!(
+                handle.is_definitely_dead_code(d),
+                Some(false),
+                "a referenced symbol must never be reported dead through the handle, even with zero POST-CAP callers"
+            );
+
+            // `dead` was never marked referenced at all, but the graph is
+            // IndexBudgetExceeded -- the strongest dead-code tier must
+            // stay suppressed (None), never a confident Some(true).
+            assert_eq!(
+                handle.is_definitely_dead_code(dead),
+                None,
+                "an unreferenced symbol under a degraded build must be suppressed through the handle too"
+            );
         }
 
         /// Defect 2 (ADR-002 GraphHandle FFI fix): `resolve_symbol`/

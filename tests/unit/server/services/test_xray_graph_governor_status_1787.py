@@ -18,12 +18,13 @@ from code_indexer.server.services.xray_graph_governor.status import (
 
 
 class TestGraphBuildAbortStatus:
-    def test_has_exactly_four_members(self):
-        assert len(list(GraphBuildAbortStatus)) == 4
+    def test_has_exactly_five_members(self):
+        # Dual-review defect H5 fix added ADMISSION_DENIED_ESTIMATE_EXCEEDS_LIMIT.
+        assert len(list(GraphBuildAbortStatus)) == 5
 
-    def test_all_four_values_are_pairwise_distinct(self):
+    def test_all_five_values_are_pairwise_distinct(self):
         values = [status.value for status in GraphBuildAbortStatus]
-        assert len(set(values)) == 4, (
+        assert len(set(values)) == 5, (
             "every GraphBuildAbortStatus member must serialize to a DISTINCT value"
         )
 
@@ -35,6 +36,10 @@ class TestGraphBuildAbortStatus:
         assert (
             GraphBuildAbortStatus.ADMISSION_DENIED_GATE2.value
             == "admission_denied_gate2"
+        )
+        assert (
+            GraphBuildAbortStatus.ADMISSION_DENIED_ESTIMATE_EXCEEDS_LIMIT.value
+            == "admission_denied_estimate_exceeds_limit"
         )
         assert (
             GraphBuildAbortStatus.ABORTED_MEMORY_PRESSURE.value

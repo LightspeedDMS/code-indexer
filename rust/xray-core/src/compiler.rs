@@ -43,10 +43,10 @@ const MAX_CACHE_ENTRIES: usize = 100;
 /// a fresh ABI/cache identity like every prior bump, since the ABI version
 /// is a whole-artifact sentinel, not a per-mode one.
 ///
-/// This slice (ADR-002 review follow-up) bumps this AGAIN, 5 -> 6: fixing
-/// two UB defects found in the ABI-5 graph-mode surface changes its shape
-/// again. (1) `xray_collect_facts` previously exported `Vec<UserFact>` with
-/// no `catch_unwind` -- a panic inside a user's `collect_facts` unwound
+/// This slice (ADR-002 review follow-up) bumped this 5 -> 6: fixing two UB
+/// defects found in the ABI-5 graph-mode surface changed its shape again.
+/// (1) `xray_collect_facts` previously exported `Vec<UserFact>` with no
+/// `catch_unwind` -- a panic inside a user's `collect_facts` unwound
 /// across the dylib boundary uncaught, empirically confirmed (via a
 /// disposable scratch-copy repro) to abort the process. It now exports
 /// `Option<Vec<UserFact>>`, wrapped in `catch_unwind` exactly like
@@ -60,7 +60,22 @@ const MAX_CACHE_ENTRIES: usize = 100;
 /// SIGABRT, "Rust cannot catch foreign exceptions"). Both accessors now
 /// return `Option` instead of panicking. An ABI-5 graph artifact (compiled
 /// before either fix) must never be loaded as if it matched ABI 6.
-pub const XRAY_ABI_VERSION: u64 = 6;
+///
+/// This slice (dual-review defect D2 fix) bumps this AGAIN, 6 -> 7:
+/// `GraphHandle` gains two new accessor fn-pointer fields,
+/// `is_symbol_referenced`/`is_definitely_dead_code`, exposing the AC6/D1
+/// referenced-bit and completeness-aware dead-code verdict to
+/// `analyze_graph` evaluators. Before this, `GraphHandle` exposed only
+/// `callees_of`/`callers_of` (which read the POST-CAP candidate arena) --
+/// an evaluator's only way to ask "is this referenced?" was
+/// `callers_of(sym).is_empty()`, which reports a FALSE dead-code verdict
+/// for a symbol whose only edge was capped away by the AC6 budget ladder,
+/// even though `CodeGraph::is_definitely_dead_code` already reported it
+/// correctly -- the guarantee AC6/D1 established was unreachable from the
+/// one surface (`GraphHandle`) that produces findings. Adding these fields
+/// changes `GraphHandle`'s memory layout, so an ABI-6 graph artifact
+/// (compiled before this fix) must never be loaded as if it matched ABI 7.
+pub const XRAY_ABI_VERSION: u64 = 7;
 
 /// Placeholder token embedded in PREAMBLE in place of a hardcoded ABI
 /// version literal. Substituted with the real `XRAY_ABI_VERSION` value by
@@ -258,6 +273,8 @@ pub struct GraphHandle<'graph> {
     strongly_connected_components_fn: fn(*const ()) -> Vec<Vec<u32>>,
     resolve_symbol_fn: fn(*const (), u32) -> Option<u64>,
     resolve_string_raw_fn: fn(*const (), u32) -> Option<(*const u8, usize)>,
+    is_symbol_referenced_fn: fn(*const (), u32) -> bool,
+    is_definitely_dead_code_fn: fn(*const (), u32) -> Option<bool>,
     _graph: PhantomData<&'graph ()>,
 }
 
@@ -302,6 +319,14 @@ pub(crate) const GRAPH_PREAMBLE_EXTRA_3: &str = r#"
     pub fn resolve_string(&self, string_id: u32) -> Option<&str> {
         let (ptr, len) = (self.resolve_string_raw_fn)(self.ctx, string_id)?;
         Some(unsafe { std::str::from_utf8_unchecked(std::slice::from_raw_parts(ptr, len)) })
+    }
+
+    pub fn is_symbol_referenced(&self, dense_id: u32) -> bool {
+        (self.is_symbol_referenced_fn)(self.ctx, dense_id)
+    }
+
+    pub fn is_definitely_dead_code(&self, dense_id: u32) -> Option<bool> {
+        (self.is_definitely_dead_code_fn)(self.ctx, dense_id)
     }
 }
 

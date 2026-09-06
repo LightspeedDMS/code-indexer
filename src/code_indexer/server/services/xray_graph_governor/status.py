@@ -19,11 +19,21 @@ class GraphBuildAbortStatus(Enum):
     per the amendment's AC12/AC13/AC15.
 
     - ADMISSION_DENIED_GATE1: AC12 Gate 1 (coarse, pre-extract byte
-      estimate) refused admission before extraction even started.
+      estimate) refused admission before extraction even started, because
+      the ESTIMATE COULD FIT but current node contention did not leave
+      enough headroom.
     - ADMISSION_DENIED_GATE2: AC12 Gate 2 (exact, post-extract counts)
       refused admission after extraction produced exact
       declaration/call-site/candidate-edge counts, BEFORE the CSR
-      candidate arena was allocated.
+      candidate arena was allocated -- same "could fit, contention
+      refused it" shape as Gate 1.
+    - ADMISSION_DENIED_ESTIMATE_EXCEEDS_LIMIT: dual-review defect H5 fix.
+      The estimate itself would leave LESS than the minimum required
+      headroom against the cgroup limit -- the build CANNOT fit
+      regardless of current contention. Distinct from
+      ADMISSION_DENIED_GATE1/2 (which mean "could fit, but the node is
+      too busy right now") so an operator can tell "this build is simply
+      too large for this node" apart from "retry when less busy".
     - ABORTED_MEMORY_PRESSURE: AC13 -- a phase-boundary check
       (extract -> bind -> analyze -> refine) observed
       `governor.band == RED` and aborted. Any per-file findings already
@@ -35,6 +45,7 @@ class GraphBuildAbortStatus(Enum):
 
     ADMISSION_DENIED_GATE1 = "admission_denied_gate1"
     ADMISSION_DENIED_GATE2 = "admission_denied_gate2"
+    ADMISSION_DENIED_ESTIMATE_EXCEEDS_LIMIT = "admission_denied_estimate_exceeds_limit"
     ABORTED_MEMORY_PRESSURE = "aborted_memory_pressure"
     ABORTED_MEMORY_LIMIT = "aborted_memory_limit"
 

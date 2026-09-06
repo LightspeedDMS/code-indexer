@@ -64,17 +64,18 @@ fn second_query_against_unchanged_snapshot_serves_from_cache_with_zero_reparsing
 
     let identity = repo_snapshot_identity(dir.path(), &files).expect("compute snapshot identity");
     let mut cache = GraphCache::new(TEST_CACHE_CAPACITY);
-    let key = GraphCacheKey::new(identity);
+    let key = GraphCacheKey::new(identity, options.budget, options.max_files);
 
     scanner::reset_parse_count();
-    let first = cache.get_or_build(key.clone(), || {
-        build_repo_graph(dir.path(), &files, &options, &NoOpCollector).expect("no file_id collision").graph
+    let first = cache.get_or_build(key.clone(), false, || {
+        let result = build_repo_graph(dir.path(), &files, &options, &NoOpCollector).expect("no file_id collision");
+        (result.graph, result.fact_graph_complete)
     });
     assert!(!first.was_cache_hit, "first query against a never-seen snapshot must be a miss");
     assert!(scanner::parse_count() > 0, "the first (miss) query must actually parse real files");
 
     scanner::reset_parse_count();
-    let second = cache.get_or_build(key, || {
+    let second = cache.get_or_build(key, false, || {
         panic!("build_repo_graph must NOT be invoked again on a cache hit");
     });
     assert!(second.was_cache_hit, "the second query against the SAME unchanged snapshot must hit");
@@ -102,10 +103,11 @@ fn an_uncommitted_edit_misses_the_graph_cache() {
     run_git(dir.path(), &["-c", "user.email=test@test.local", "-c", "user.name=test", "commit", "-q", "-m", "init"]);
 
     let identity_before = repo_snapshot_identity(dir.path(), &files).expect("compute snapshot identity");
-    let key_before = GraphCacheKey::new(identity_before.clone());
+    let key_before = GraphCacheKey::new(identity_before.clone(), options.budget, options.max_files);
     scanner::reset_parse_count();
-    let first = cache.get_or_build(key_before, || {
-        build_repo_graph(dir.path(), &files, &options, &NoOpCollector).expect("no file_id collision").graph
+    let first = cache.get_or_build(key_before, false, || {
+        let result = build_repo_graph(dir.path(), &files, &options, &NoOpCollector).expect("no file_id collision");
+        (result.graph, result.fact_graph_complete)
     });
     assert!(!first.was_cache_hit);
     assert!(scanner::parse_count() > 0);
@@ -116,10 +118,11 @@ fn an_uncommitted_edit_misses_the_graph_cache() {
     let identity_after = repo_snapshot_identity(dir.path(), &files).expect("recompute snapshot identity");
     assert_ne!(identity_before, identity_after, "editing a covered file must change the identity");
 
-    let key_after = GraphCacheKey::new(identity_after);
+    let key_after = GraphCacheKey::new(identity_after, options.budget, options.max_files);
     scanner::reset_parse_count();
-    let second = cache.get_or_build(key_after, || {
-        build_repo_graph(dir.path(), &files, &options, &NoOpCollector).expect("no file_id collision").graph
+    let second = cache.get_or_build(key_after, false, || {
+        let result = build_repo_graph(dir.path(), &files, &options, &NoOpCollector).expect("no file_id collision");
+        (result.graph, result.fact_graph_complete)
     });
     assert!(!second.was_cache_hit, "an uncommitted edit must MISS the graph cache");
     assert!(scanner::parse_count() > 0, "a genuine miss must actually re-parse the edited file");

@@ -336,6 +336,10 @@ const MIRRORED_GRAPH_HANDLE_METHODS: &[&str] = &[
     "strongly_connected_components",
     "resolve_symbol",
     "resolve_string",
+    // D2 fix (dual-review Critical): exposes the AC6/D1 referenced-bit and
+    // completeness-aware dead-code verdict to `analyze_graph` evaluators.
+    "is_symbol_referenced",
+    "is_definitely_dead_code",
 ];
 
 /// Compares struct `name` between `real_file` (labeled `real_label` in any

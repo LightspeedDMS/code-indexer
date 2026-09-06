@@ -25,11 +25,20 @@ logger = logging.getLogger(__name__)
 
 # AC12: "convert to a required headroom percentage... a large build
 # demands a LOWER watermark (more headroom); a small one passes a higher
-# watermark." Bounds keep the watermark sane regardless of how extreme
-# the estimate is (an estimate of 0 must not produce a 100% watermark
-# that defeats the RED/first-sample fail-safe baked into
-# admission_allowed(); a wildly oversized estimate must not produce a 0%
-# watermark that can never admit anything).
+# watermark." `_MAX_WATERMARK_PCT` keeps a tiny estimate from demanding an
+# unreasonably loose admission threshold (an estimate of 0 must not
+# produce a 100% watermark that defeats the RED/first-sample fail-safe
+# baked into admission_allowed()).
+#
+# `_MIN_WATERMARK_PCT` is the MINIMUM headroom this system ever requires.
+# Dual-review defect H5 fix: it is NEVER used to clamp an oversized
+# estimate UP to a passable watermark -- that was the bug (a build whose
+# own estimate already exceeded the cgroup limit was silently admitted
+# whenever current usage happened to be under 10%, the anti-fallback
+# inversion of "a build that cannot fit is precisely the one that must
+# never be admitted"). `watermark_for` returns `None` -- an outright
+# "deny, do not even consult current contention" signal -- whenever the
+# estimate would leave LESS than this minimum headroom.
 _MIN_WATERMARK_PCT = 10.0
 _MAX_WATERMARK_PCT = 80.0
 
@@ -97,20 +106,36 @@ def _require_positive_safety_factor(safety_factor: float) -> None:
         raise ValueError(f"safety_factor must be positive, got {safety_factor}")
 
 
-def watermark_for(estimated_peak_bytes: int, cgroup_limit_bytes: int) -> float:
+def watermark_for(
+    estimated_peak_bytes: int, cgroup_limit_bytes: int
+) -> Optional[float]:
     """AC12: required headroom, expressed as the admission watermark
     `governor.admission_allowed(max_used_pct=...)` expects. A larger
     estimate (relative to the cgroup limit) produces a LOWER watermark
     (stricter -- more headroom demanded); a small estimate produces a
-    HIGHER watermark (looser). Clamped to
-    [`_MIN_WATERMARK_PCT`, `_MAX_WATERMARK_PCT`].
+    HIGHER watermark (looser), clamped up to `_MAX_WATERMARK_PCT`.
+
+    Dual-review defect H5 fix: returns `None` -- never a numeric
+    watermark -- when the estimate would leave LESS than
+    `_MIN_WATERMARK_PCT` headroom against `cgroup_limit_bytes`, including
+    when the estimate exceeds the limit outright. A build in that
+    position cannot fit regardless of how idle the node currently is, so
+    the caller must deny it WITHOUT ever consulting current contention
+    via `governor.admission_allowed()` (Rule 2, anti-fallback: fail
+    closed, never silently clamp "cannot fit" into "fits when quiet").
+
+    `cgroup_limit_bytes <= 0` means the limit itself is unknown (not that
+    the estimate is oversized) -- unchanged, still the permissive
+    `_MIN_WATERMARK_PCT` default.
     """
     _require_non_negative(estimated_peak_bytes, "estimated_peak_bytes")
     if cgroup_limit_bytes <= 0:
         return _MIN_WATERMARK_PCT
     estimated_pct_of_limit = (estimated_peak_bytes / cgroup_limit_bytes) * 100.0
     watermark = 100.0 - estimated_pct_of_limit
-    return max(_MIN_WATERMARK_PCT, min(_MAX_WATERMARK_PCT, watermark))
+    if watermark < _MIN_WATERMARK_PCT:
+        return None
+    return min(_MAX_WATERMARK_PCT, watermark)
 
 
 def estimate_gate1_bytes(
@@ -161,8 +186,23 @@ def _check_gate(
     gates differ only in HOW `estimated_peak_bytes` was computed -- the
     watermark conversion, `admission_allowed()` call, and AC17 recording
     are otherwise identical.
+
+    Dual-review defect H5 fix: `watermark_for` returning `None` means the
+    estimate cannot fit regardless of current contention -- this denies
+    OUTRIGHT with the distinct `ADMISSION_DENIED_ESTIMATE_EXCEEDS_LIMIT`
+    status, WITHOUT ever calling `governor.admission_allowed()` (there is
+    no watermark to check it against, and none would be meaningful: no
+    real `used_pct` reading could ever make an impossible build fit).
     """
     watermark = watermark_for(estimated_peak_bytes, cgroup_limit_bytes)
+    if watermark is None:
+        governor.record_graph_build_outcome(
+            denied_gate=gate_name, estimated_peak_bytes=estimated_peak_bytes
+        )
+        return AdmissionDecision(
+            allowed=False,
+            abort_status=GraphBuildAbortStatus.ADMISSION_DENIED_ESTIMATE_EXCEEDS_LIMIT,
+        )
     if governor.admission_allowed(max_used_pct=watermark):
         governor.record_graph_build_outcome(estimated_peak_bytes=estimated_peak_bytes)
         return AdmissionDecision(allowed=True)

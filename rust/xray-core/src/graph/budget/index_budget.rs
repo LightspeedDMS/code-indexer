@@ -12,7 +12,12 @@
 /// `bind()` uses today (see `super::super::bind::bind`) -- the degradation
 /// ladder never engages unless a caller explicitly supplies a finite
 /// budget via `bind_with_budget`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// `Hash` (dual-review defect H3 fix): `IndexBudget` is itself a
+/// RESULT-AFFECTING input to a graph build -- a tighter budget can produce
+/// a materially less complete graph for the identical repo snapshot -- so
+/// it must be embeddable in `graph_cache::GraphCacheKey`, a `HashMap` key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct IndexBudget {
     max_total_candidates: usize,
     max_candidates_per_reference: usize,
