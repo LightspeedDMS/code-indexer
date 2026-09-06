@@ -9,6 +9,12 @@ use std::path::{Path, PathBuf};
 pub struct CacheMetadata {
     pub source_hash: String,
     pub rustc_version: String,
+    /// Bug #1784: the XRAY_ABI_VERSION the compiled .so was built against.
+    /// Recorded explicitly (not just folded into an opaque combined hash) so
+    /// a stale artifact's metadata is human-readable/debuggable. A .meta file
+    /// missing this field (written before this fix) fails to parse -- see
+    /// parse_metadata() -- which is always treated as a cache MISS.
+    pub abi_version: u64,
     pub compiled_at: String, // ISO 8601
     pub compile_ms: u128,
 }
@@ -158,14 +164,15 @@ pub fn evict_lru(cache_dir: &Path, max_entries: usize) {
 
 fn format_metadata(meta: &CacheMetadata) -> String {
     format!(
-        "source_hash={}\nrustc_version={}\ncompiled_at={}\ncompile_ms={}\n",
-        meta.source_hash, meta.rustc_version, meta.compiled_at, meta.compile_ms
+        "source_hash={}\nrustc_version={}\nabi_version={}\ncompiled_at={}\ncompile_ms={}\n",
+        meta.source_hash, meta.rustc_version, meta.abi_version, meta.compiled_at, meta.compile_ms
     )
 }
 
 fn parse_metadata(content: &str) -> Option<CacheMetadata> {
     let mut source_hash = None;
     let mut rustc_version = None;
+    let mut abi_version = None;
     let mut compiled_at = None;
     let mut compile_ms = None;
 
@@ -174,6 +181,7 @@ fn parse_metadata(content: &str) -> Option<CacheMetadata> {
             match key {
                 "source_hash" => source_hash = Some(value.to_string()),
                 "rustc_version" => rustc_version = Some(value.to_string()),
+                "abi_version" => abi_version = value.parse::<u64>().ok(),
                 "compiled_at" => compiled_at = Some(value.to_string()),
                 "compile_ms" => compile_ms = value.parse::<u128>().ok(),
                 _ => {}
@@ -184,6 +192,10 @@ fn parse_metadata(content: &str) -> Option<CacheMetadata> {
     Some(CacheMetadata {
         source_hash: source_hash?,
         rustc_version: rustc_version?,
+        // Missing/unparseable abi_version -> None here -> the whole
+        // Option<CacheMetadata> short-circuits to None via `?` -- a legacy
+        // .meta file (pre-Bug-#1784) is always a MISS, never a silent match.
+        abi_version: abi_version?,
         compiled_at: compiled_at?,
         compile_ms: compile_ms?,
     })
@@ -309,12 +321,32 @@ mod tests {
         let meta = CacheMetadata {
             source_hash: "abc123".to_string(),
             rustc_version: "rustc 1.91.0".to_string(),
+            abi_version: 2,
             compiled_at: "2025-01-01T00:00:00Z".to_string(),
             compile_ms: 252,
         };
         write_metadata(&meta_path, &meta).expect("write_metadata must succeed");
         let read_back = read_metadata(&meta_path);
         assert_eq!(read_back, Some(meta));
+    }
+
+    #[test]
+    fn test_metadata_missing_abi_version_field_is_none() {
+        // Bug #1784: a pre-fix .meta file (written before abi_version existed)
+        // must parse as None -- never silently default to a value that could
+        // spuriously match the current ABI. A missing field is ALWAYS a MISS.
+        let dir = TempDir::new().unwrap();
+        let meta_path = dir.path().join("legacy.meta");
+        std::fs::write(
+            &meta_path,
+            "source_hash=abc123\nrustc_version=rustc 1.91.0\ncompiled_at=2025-01-01T00:00:00Z\ncompile_ms=252\n",
+        )
+        .unwrap();
+        let read_back = read_metadata(&meta_path);
+        assert_eq!(
+            read_back, None,
+            "a .meta file missing abi_version must fail to parse (forces a MISS), not default"
+        );
     }
 
     #[test]
@@ -336,6 +368,7 @@ mod tests {
             .map(|i| CacheMetadata {
                 source_hash: "concurrent1425".to_string(),
                 rustc_version: "rustc 1.91.0".to_string(),
+                abi_version: 2,
                 compiled_at: format!("{}s-since-epoch", 1_700_000_000 + i),
                 compile_ms: 100 + i as u128,
             })
@@ -383,6 +416,7 @@ mod tests {
         let meta = CacheMetadata {
             source_hash: "deadbeef".to_string(),
             rustc_version: "rustc 1.91.0".to_string(),
+            abi_version: 2,
             compiled_at: "2025-01-01T00:00:00Z".to_string(),
             compile_ms: 100,
         };

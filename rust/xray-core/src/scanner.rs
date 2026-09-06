@@ -9,11 +9,11 @@ use std::sync::Mutex;
 use tree_sitter::Parser;
 use walkdir::WalkDir;
 
-/// Per-thread cached Parser.
-///
-/// Parser is !Send so it cannot be shared across rayon threads, but it CAN
-/// be reused within the same thread. Using thread_local! avoids the cost of
-/// Parser::new() (and its internal allocations) for every file processed.
+// Per-thread cached Parser.
+//
+// Parser is !Send so it cannot be shared across rayon threads, but it CAN
+// be reused within the same thread. Using thread_local! avoids the cost of
+// Parser::new() (and its internal allocations) for every file processed.
 thread_local! {
     static THREAD_PARSER: RefCell<Parser> = RefCell::new(Parser::new());
 }

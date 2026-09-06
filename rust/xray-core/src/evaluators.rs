@@ -65,7 +65,7 @@ impl Evaluator for CatchRethrowEvaluator {
                 .children
                 .iter()
                 .filter(|c| c.kind == "identifier")
-                .last()
+                .next_back()
             {
                 Some(id) => id.text().to_string(),
                 None => continue,

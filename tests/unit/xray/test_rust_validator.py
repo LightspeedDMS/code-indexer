@@ -13,7 +13,11 @@ from __future__ import annotations
 
 import pytest
 
-from code_indexer.xray.sandbox import ValidationResult, validate_rust_evaluator
+from code_indexer.xray.sandbox import (
+    ValidationResult,
+    _RUST_FORBIDDEN_PATTERNS,
+    validate_rust_evaluator,
+)
 
 # ---------------------------------------------------------------------------
 # Valid evaluator fixtures
@@ -437,3 +441,84 @@ fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> {
         f"'static' inside a string literal should NOT be rejected. "
         f"Got ok={result.ok}, reason={result.reason!r}"
     )
+
+
+# S0a: the front-door table is authoritative.  Keys deliberately use the
+# stable (error_code, construct, regex) identity rather than test names or a
+# count, so adding/reordering entries cannot silently lose coverage.
+_EXPLICIT_FRONT_DOOR_FIXTURES = {
+    expected_keyword: source for _, expected_keyword, source in _FORBIDDEN_CASES
+}
+for _macro in (
+    "include",
+    "env",
+    "println",
+    "eprintln",
+    "panic",
+    "todo",
+    "unimplemented",
+    "include_str",
+    "include_bytes",
+    "option_env",
+    "print",
+    "eprint",
+):
+    _EXPLICIT_FRONT_DOOR_FIXTURES[f"{_macro}!"] = _EXPLICIT_FRONT_DOOR_FIXTURES[_macro]
+_EXPLICIT_FRONT_DOOR_FIXTURES["static"] = """\
+static VALUE: u8 = 1;
+fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> { Vec::new() }
+"""
+_AUTHORITATIVE_FRONT_DOOR_CASES = {
+    (error_code, construct, pattern): _EXPLICIT_FRONT_DOOR_FIXTURES[construct]
+    for error_code, construct, pattern in _RUST_FORBIDDEN_PATTERNS
+    if construct in _EXPLICIT_FRONT_DOOR_FIXTURES
+}
+
+
+@pytest.mark.parametrize("error_code,construct,pattern", _RUST_FORBIDDEN_PATTERNS)
+def test_every_authoritative_front_door_entry_has_exact_outcome(
+    error_code: str, construct: str, pattern: str
+) -> None:
+    result = validate_rust_evaluator(
+        _AUTHORITATIVE_FRONT_DOOR_CASES[(error_code, construct, pattern)]
+    )
+    assert result.ok is False
+    assert result.error_code == error_code
+    assert result.offending_construct == construct
+
+
+def test_front_door_meta_test_covers_authoritative_table() -> None:
+    covered = set(_AUTHORITATIVE_FRONT_DOOR_CASES)
+    assert covered == set(_RUST_FORBIDDEN_PATTERNS)
+
+
+@pytest.mark.parametrize(
+    "code,expected_ok",
+    [
+        (
+            'fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> { let _ = "սafe"; Vec::new() }',
+            True,
+        ),
+        (
+            "// u\u0073afe\nfn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> { Vec::new() }",
+            True,
+        ),
+        (
+            'fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> { let _ = r#"unsafe std::fs"#; Vec::new() }',
+            False,
+        ),
+        (
+            "fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> { let r#unsafe = 1; let _ = r#unsafe; Vec::new() }",
+            False,
+        ),
+        (
+            "fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> { let _ = std /* comment */ ::fs::dummy; Vec::new() }",
+            True,
+        ),
+    ],
+)
+def test_bypass_attempts_have_defined_front_door_outcomes(
+    code: str, expected_ok: bool
+) -> None:
+    result = validate_rust_evaluator(code)
+    assert result.ok is expected_ok

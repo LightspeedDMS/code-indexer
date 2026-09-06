@@ -38,6 +38,10 @@ struct ParsedArgs {
     remaining_args: Vec<String>,
 }
 
+/// Evaluators built, the compile time in ms, and whether the .so was served
+/// from cache, or an `Err(error_message)` on compilation/load failure.
+type EvaluatorsResult = Result<(Vec<Box<dyn Evaluator>>, u128, bool), String>;
+
 fn default_target() -> String {
     let home = std::env::var("HOME").unwrap_or_else(|_| std::env::current_dir()
         .map(|p| p.to_string_lossy().to_string())
@@ -79,9 +83,37 @@ fn print_json_output(out: &JsonOutput) {
     }
 }
 
+/// Bug #1784: format the composite cache identity (plus its component
+/// fields) for `user_code` as 4 `key=value` lines. This is the ONE
+/// implementation of the identity formula (xray_core::compiler) exposed to
+/// Python via the `--print-cache-identity` subcommand below, so Python's
+/// RustNativeBackend never independently re-implements the hash and cannot
+/// drift from what compile_evaluator() actually uses as its cache key.
+fn format_cache_identity_output(user_code: &str) -> String {
+    let info = xray_core::compiler::cache_identity_info(user_code);
+    format!(
+        "identity={}\nsource_hash={}\nabi_version={}\nrustc_version={}\n",
+        info.identity, info.source_hash, info.abi_version, info.rustc_version
+    )
+}
+
 fn main() {
     let wall_start = Instant::now();
     let args: Vec<String> = std::env::args().skip(1).collect();
+
+    // Bug #1784: early-exit subcommand -- reads evaluator source from stdin,
+    // prints its cache identity, and exits. No compilation, no file I/O
+    // beyond stdin/stdout, near-instant.
+    if args.first().map(|s| s.as_str()) == Some("--print-cache-identity") {
+        use std::io::Read as _;
+        let mut user_code = String::new();
+        if let Err(e) = std::io::stdin().read_to_string(&mut user_code) {
+            eprintln!("Error: failed to read evaluator source from stdin: {}", e);
+            std::process::exit(1);
+        }
+        print!("{}", format_cache_identity_output(&user_code));
+        std::process::exit(0);
+    }
 
     let parsed = parse_args(&args);
     let json_output = parsed.json_output;
@@ -133,7 +165,7 @@ fn main() {
     };
 
     // Build evaluators — may fail compilation
-    let evaluators_result: Result<(Vec<Box<dyn Evaluator>>, u128, bool), String> =
+    let evaluators_result: EvaluatorsResult =
         if let Some(ref eval_path) = parsed.dynlib_path {
             build_dynlib_evaluators(eval_path, json_output)
         } else {
@@ -232,12 +264,174 @@ fn main() {
     }
 }
 
+/// Parses a flag that requires a following value (e.g. "--dynlib PATH").
+/// Exits the process with `error_msg` printed to stderr if no value follows.
+fn parse_value_flag(args: &[String], i: usize, error_msg: &str) -> (String, usize) {
+    if i + 1 < args.len() {
+        (args[i + 1].clone(), i + 2)
+    } else {
+        eprintln!("Error: {}", error_msg);
+        std::process::exit(1);
+    }
+}
+
+/// Consumes args starting at index `i` (pointing at the "--files" flag
+/// itself, Bug #1612's backward-compat path) as file paths, stopping at the
+/// first KNOWN flag. This allows filenames that start with "--" (e.g.
+/// "--weird.rs"). Returns the collected file paths and the index of the
+/// first arg that was not consumed.
+fn consume_files_flag(args: &[String], i: usize) -> (Vec<String>, usize) {
+    let mut i = i + 1; // skip "--files" itself
+    let mut file_list = Vec::new();
+    while i < args.len() {
+        if args[i] == "--json" || args[i] == "--dynlib" || args[i] == "--files-from" {
+            break;
+        }
+        file_list.push(args[i].clone());
+        i += 1;
+    }
+    (file_list, i)
+}
+
+fn parse_args(args: &[String]) -> ParsedArgs {
+    let mut dynlib_path = None;
+    let mut json_output = false;
+    let mut file_list = Vec::new();
+    let mut files_from_path = None;
+    let mut remaining = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--dynlib" => {
+                let msg = "--dynlib requires a path to an evaluator .rs file";
+                let (path, next_i) = parse_value_flag(args, i, msg);
+                dynlib_path = Some(path);
+                i = next_i;
+            }
+            "--files-from" => {
+                let msg = "--files-from requires a path to a newline-delimited file list";
+                let (path, next_i) = parse_value_flag(args, i, msg);
+                files_from_path = Some(path);
+                i = next_i;
+            }
+            "--json" => {
+                json_output = true;
+                i += 1;
+            }
+            "--files" => {
+                let (files, next_i) = consume_files_flag(args, i);
+                file_list.extend(files);
+                i = next_i;
+            }
+            _ => {
+                remaining.push(args[i].clone());
+                i += 1;
+            }
+        }
+    }
+    ParsedArgs {
+        dynlib_path,
+        json_output,
+        file_list,
+        files_from_path,
+        remaining_args: remaining,
+    }
+}
+
+/// Validates the evaluator source file exists and reads its contents.
+fn read_evaluator_source(eval_path: &str, json_output: bool) -> Result<String, String> {
+    let path = PathBuf::from(eval_path);
+    if !path.exists() {
+        let msg = format!("Evaluator file not found: {}", eval_path);
+        if !json_output {
+            eprintln!("Error: {}", msg);
+        }
+        return Err(msg);
+    }
+
+    match std::fs::read_to_string(&path) {
+        Ok(c) => Ok(c),
+        Err(e) => {
+            let msg = format!("Failed to read {}: {}", eval_path, e);
+            if !json_output {
+                eprintln!("Error: {}", msg);
+            }
+            Err(msg)
+        }
+    }
+}
+
+/// Compiles `user_code` and loads the resulting dynamic library, printing
+/// progress/timing unless `json_output`. Mirrors the original inline logic
+/// of `build_dynlib_evaluators` before it was split for readability.
+fn compile_and_load_evaluator(
+    user_code: &str,
+    eval_path: &str,
+    json_output: bool,
+) -> EvaluatorsResult {
+    let cache_dir = xray_core::cache::get_cache_dir();
+    if !json_output {
+        println!("Mode: dynamic library (evaluator: {})", eval_path);
+        println!("Cache dir: {}", cache_dir.display());
+    }
+    let compile_start = Instant::now();
+    let cr = match xray_core::compiler::compile_evaluator(user_code, &cache_dir) {
+        Ok(cr) => cr,
+        Err(e) => {
+            let msg = format!("{}", e);
+            if !json_output {
+                eprintln!("\n=== Evaluator Error ===\n{}", msg);
+            }
+            return Err(msg);
+        }
+    };
+    let compile_total_ms = compile_start.elapsed().as_millis();
+    if !json_output {
+        if cr.cached {
+            println!("Compilation: cache HIT ({}ms lookup)", compile_total_ms);
+        } else {
+            println!("Compilation: {}ms (fresh compile)", cr.compile_ms);
+        }
+    }
+    let evaluator = xray_core::dynlib::DynlibEvaluator::load(&cr.so_path).map_err(|e| {
+        let msg = format!("Failed to load compiled evaluator: {}", e);
+        if !json_output {
+            eprintln!("Error: {}", msg);
+        }
+        msg
+    })?;
+    Ok((vec![Box::new(evaluator)], cr.compile_ms, cr.cached))
+}
+
+/// Build evaluators from a dynamic library evaluator source file.
+///
+/// Returns `Ok((evaluators, compile_ms, cached))` on success.
+/// Returns `Err(error_message)` on compilation failure (human-readable message
+/// already printed to stderr for non-JSON callers).
+fn build_dynlib_evaluators(eval_path: &str, json_output: bool) -> EvaluatorsResult {
+    let user_code = read_evaluator_source(eval_path, json_output)?;
+    compile_and_load_evaluator(&user_code, eval_path, json_output)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn sv(v: &[&str]) -> Vec<String> {
         v.iter().map(|s| s.to_string()).collect()
+    }
+
+    // --- Bug #1784: --print-cache-identity bridges Python to the ONE
+    // shared Rust identity implementation (cache_identity_info) ---
+
+    #[test]
+    fn test_format_cache_identity_output_contains_all_four_fields() {
+        let user_code = "fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> { vec![] }";
+        let output = format_cache_identity_output(user_code);
+        assert!(output.contains("identity="), "output must contain identity=: {}", output);
+        assert!(output.contains("source_hash="), "output must contain source_hash=: {}", output);
+        assert!(output.contains("abi_version="), "output must contain abi_version=: {}", output);
+        assert!(output.contains("rustc_version="), "output must contain rustc_version=: {}", output);
     }
 
     // --- AC2/AC3: debug_messages field in JSON output ---
@@ -412,136 +606,4 @@ mod tests {
             "read_file_list must return Err for a nonexistent path"
         );
     }
-}
-
-fn parse_args(args: &[String]) -> ParsedArgs {
-    let mut dynlib_path = None;
-    let mut json_output = false;
-    let mut file_list = Vec::new();
-    let mut files_from_path = None;
-    let mut remaining = Vec::new();
-    let mut i = 0;
-    while i < args.len() {
-        if args[i] == "--dynlib" {
-            if i + 1 < args.len() {
-                dynlib_path = Some(args[i + 1].clone());
-                i += 2;
-                continue;
-            } else {
-                eprintln!("Error: --dynlib requires a path to an evaluator .rs file");
-                std::process::exit(1);
-            }
-        }
-        if args[i] == "--files-from" {
-            if i + 1 < args.len() {
-                files_from_path = Some(args[i + 1].clone());
-                i += 2;
-                continue;
-            } else {
-                eprintln!("Error: --files-from requires a path to a newline-delimited file list");
-                std::process::exit(1);
-            }
-        }
-        if args[i] == "--json" {
-            json_output = true;
-            i += 1;
-            continue;
-        }
-        // NOTE: --files-from (Bug #1612) is the live path used by the Python
-        // integration (RustNativeBackend) to avoid ARG_MAX overflow at fleet
-        // scale. --files is retained only for backward compatibility and
-        // manual/ad-hoc CLI invocation.
-        if args[i] == "--files" {
-            i += 1;
-            // Consume all subsequent args until we see a KNOWN flag.
-            // This allows filenames that start with "--" (e.g. "--weird.rs").
-            while i < args.len() {
-                if args[i] == "--json" || args[i] == "--dynlib" || args[i] == "--files-from" {
-                    break;
-                }
-                file_list.push(args[i].clone());
-                i += 1;
-            }
-            continue;
-        }
-        remaining.push(args[i].clone());
-        i += 1;
-    }
-    ParsedArgs {
-        dynlib_path,
-        json_output,
-        file_list,
-        files_from_path,
-        remaining_args: remaining,
-    }
-}
-
-/// Build evaluators from a dynamic library evaluator source file.
-///
-/// Returns `Ok((evaluators, compile_ms, cached))` on success.
-/// Returns `Err(error_message)` on compilation failure (human-readable message
-/// already printed to stderr for non-JSON callers).
-fn build_dynlib_evaluators(
-    eval_path: &str,
-    json_output: bool,
-) -> Result<(Vec<Box<dyn Evaluator>>, u128, bool), String> {
-    let path = PathBuf::from(eval_path);
-    if !path.exists() {
-        let msg = format!("Evaluator file not found: {}", eval_path);
-        if !json_output {
-            eprintln!("Error: {}", msg);
-        }
-        return Err(msg);
-    }
-
-    let user_code = match std::fs::read_to_string(&path) {
-        Ok(c) => c,
-        Err(e) => {
-            let msg = format!("Failed to read {}: {}", eval_path, e);
-            if !json_output {
-                eprintln!("Error: {}", msg);
-            }
-            return Err(msg);
-        }
-    };
-
-    let cache_dir = xray_core::cache::get_cache_dir();
-    if !json_output {
-        println!("Mode: dynamic library (evaluator: {})", eval_path);
-        println!("Cache dir: {}", cache_dir.display());
-    }
-
-    let compile_start = Instant::now();
-    let cr = match xray_core::compiler::compile_evaluator(&user_code, &cache_dir) {
-        Ok(cr) => cr,
-        Err(e) => {
-            let msg = format!("{}", e);
-            if !json_output {
-                eprintln!("\n=== Evaluator Error ===\n{}", msg);
-            }
-            return Err(msg);
-        }
-    };
-    let compile_total_ms = compile_start.elapsed().as_millis();
-
-    if !json_output {
-        if cr.cached {
-            println!("Compilation: cache HIT ({}ms lookup)", compile_total_ms);
-        } else {
-            println!("Compilation: {}ms (fresh compile)", cr.compile_ms);
-        }
-    }
-
-    let evaluator = match xray_core::dynlib::DynlibEvaluator::load(&cr.so_path) {
-        Ok(e) => e,
-        Err(e) => {
-            let msg = format!("Failed to load compiled evaluator: {}", e);
-            if !json_output {
-                eprintln!("Error: {}", msg);
-            }
-            return Err(msg);
-        }
-    };
-
-    Ok((vec![Box::new(evaluator)], cr.compile_ms, cr.cached))
 }

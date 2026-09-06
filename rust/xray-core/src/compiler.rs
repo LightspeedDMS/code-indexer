@@ -7,6 +7,26 @@ use std::time::Instant;
 
 const MAX_CACHE_ENTRIES: usize = 100;
 
+/// ABI version of the compiled evaluator artifact. This is the SINGLE
+/// source of truth (Bug #1784 review MAJOR-3, fixed): PREAMBLE below no
+/// longer hardcodes a duplicate numeric literal -- it embeds a placeholder
+/// token that `assemble_evaluator_source_with_preamble` substitutes with
+/// THIS constant's value at assembly time, so the compiled evaluator's own
+/// exported `xray_abi_version()` can never drift from it. `dynlib.rs`'s
+/// loader also reads this constant directly (`crate::compiler::
+/// XRAY_ABI_VERSION`) instead of declaring its own copy. `pub` so dynlib.rs
+/// (same crate, different module) can reference it. Having a real value
+/// here also lets the cache identity (Bug #1784) depend on the ABI version
+/// as an explicit, independent component.
+pub const XRAY_ABI_VERSION: u64 = 2;
+
+/// Placeholder token embedded in PREAMBLE in place of a hardcoded ABI
+/// version literal. Substituted with the real `XRAY_ABI_VERSION` value by
+/// `assemble_evaluator_source_with_preamble` before every compile -- this is
+/// what makes `XRAY_ABI_VERSION` the ONE source of truth instead of a value
+/// duplicated as text inside PREAMBLE (Bug #1784 review MAJOR-3).
+const ABI_VERSION_PLACEHOLDER: &str = "__XRAY_ABI_VERSION_PLACEHOLDER__";
+
 /// Result of a successful compilation.
 #[derive(Debug)]
 pub struct CompileResult {
@@ -41,8 +61,10 @@ impl std::fmt::Display for CompileError {
 /// `XRAY_ABI_VERSION` is exported so the loader can verify the compiled .so
 /// was built with a compatible type layout before calling the evaluate function.
 const PREAMBLE: &str = r#"
-/// ABI version sentinel — must match EXPECTED_ABI_VERSION in dynlib.rs.
-const XRAY_ABI_VERSION: u64 = 2;
+/// ABI version sentinel — substituted from the single source of truth
+/// (compiler::XRAY_ABI_VERSION) by assemble_evaluator_source_with_preamble
+/// before every compile (Bug #1784 review MAJOR-3).
+const XRAY_ABI_VERSION: u64 = __XRAY_ABI_VERSION_PLACEHOLDER__;
 
 use std::sync::Arc;
 
@@ -67,23 +89,27 @@ impl OwnedNode {
     pub fn child_by_kind(&self, kind: &str) -> Option<&OwnedNode> {
         self.children.iter().find(|c| c.kind == kind)
     }
+    // Bug #1795: explicit-stack (heap) traversal instead of recursion, so a
+    // deeply nested OwnedNode passed into a compiled evaluator cannot
+    // SIGABRT the process. Mirrors owned_node.rs's fix exactly (known
+    // duplication debt, tracked separately as AC16 on #1787 -- not
+    // refactored here).
     pub fn has_descendant_of_kind(&self, kind: &str) -> bool {
-        for child in &self.children {
-            if child.kind == kind { return true; }
-            if child.has_descendant_of_kind(kind) { return true; }
+        let mut stack: Vec<&OwnedNode> = self.children.iter().collect();
+        while let Some(node) = stack.pop() {
+            if node.kind == kind { return true; }
+            stack.extend(node.children.iter());
         }
         false
     }
     pub fn descendants_of_kind(&self, kind: &str) -> Vec<&OwnedNode> {
         let mut results = Vec::new();
-        self.collect_descendants_of_kind(kind, &mut results);
-        results
-    }
-    fn collect_descendants_of_kind<'a>(&'a self, kind: &str, results: &mut Vec<&'a OwnedNode>) {
-        for child in &self.children {
-            if child.kind == kind { results.push(child); }
-            child.collect_descendants_of_kind(kind, results);
+        let mut stack: Vec<&OwnedNode> = self.children.iter().rev().collect();
+        while let Some(node) = stack.pop() {
+            if node.kind == kind { results.push(node); }
+            stack.extend(node.children.iter().rev());
         }
+        results
     }
 }
 
@@ -157,7 +183,26 @@ pub fn xray_drain_debug_log() -> Vec<String> {
 
 /// Assemble a complete compilable .rs source from user evaluator code.
 pub fn assemble_evaluator_source(user_code: &str) -> String {
-    format!("{}\n// ---- USER CODE ----\n{}\n// ---- END USER CODE ----\n{}", PREAMBLE, user_code, EPILOGUE)
+    assemble_evaluator_source_with_preamble(PREAMBLE, user_code)
+}
+
+/// Assemble a complete compilable .rs source using a caller-supplied
+/// preamble instead of the hardcoded PREAMBLE constant.
+///
+/// Substitutes ABI_VERSION_PLACEHOLDER in `preamble` with the real
+/// XRAY_ABI_VERSION value (Bug #1784 review MAJOR-3: this is the ONE place
+/// that resolves the placeholder, so the standalone constant can never
+/// drift from what actually gets compiled into the evaluator).
+///
+/// The `preamble` parameter exists so a test can prove -- through the REAL
+/// compile_evaluator pipeline, not just the standalone compute_cache_identity
+/// hash function -- that changing ONLY the preamble text forces a fresh
+/// compile (see compile_evaluator_with_preamble, #[cfg(test)] only).
+/// Production code always goes through the public assemble_evaluator_source
+/// above, which always passes the real PREAMBLE.
+fn assemble_evaluator_source_with_preamble(preamble: &str, user_code: &str) -> String {
+    let resolved_preamble = preamble.replace(ABI_VERSION_PLACEHOLDER, &XRAY_ABI_VERSION.to_string());
+    format!("{}\n// ---- USER CODE ----\n{}\n// ---- END USER CODE ----\n{}", resolved_preamble, user_code, EPILOGUE)
 }
 
 /// Number of lines in the preamble (for adjusting rustc error line numbers).
@@ -169,6 +214,29 @@ pub fn preamble_line_count() -> usize {
 ///
 /// Pipeline: validate → hash → cache check → assemble → compile → save
 pub fn compile_evaluator(user_code: &str, cache_dir: &Path) -> Result<CompileResult, CompileError> {
+    compile_evaluator_impl(user_code, cache_dir, PREAMBLE)
+}
+
+/// Test-only seam (Bug #1784 review MAJOR-1): compiles using a
+/// caller-supplied preamble instead of the hardcoded PREAMBLE constant, so
+/// a genuine integration test can prove -- through the REAL compile_evaluator
+/// pipeline -- that changing ONLY the preamble text (user code, ABI version,
+/// and rustc toolchain held fixed) forces a fresh compile (cached == false),
+/// never a stale-artifact reuse. This is the test class that would catch a
+/// future regression where the cache identity is again derived from raw
+/// user_code alone while the composite-identity helper functions are left
+/// in place unchanged. Exists ONLY under #[cfg(test)]; production code can
+/// never call it.
+#[cfg(test)]
+pub(crate) fn compile_evaluator_with_preamble(
+    user_code: &str,
+    cache_dir: &Path,
+    preamble: &str,
+) -> Result<CompileResult, CompileError> {
+    compile_evaluator_impl(user_code, cache_dir, preamble)
+}
+
+fn compile_evaluator_impl(user_code: &str, cache_dir: &Path, preamble: &str) -> Result<CompileResult, CompileError> {
     // Step 1: Validate
     if let Err(errors) = validator::validate_evaluator_source(user_code) {
         return Err(CompileError {
@@ -185,17 +253,27 @@ pub fn compile_evaluator(user_code: &str, cache_dir: &Path) -> Result<CompileRes
         });
     }
 
-    // Step 3: Hash
-    let hash = sha256_hex(user_code);
-    let so_path = cache_dir.join(format!("{}.so", hash));
-    let meta_path = cache_dir.join(format!("{}.meta", hash));
+    // Step 3: Compute the ONE shared cache identity (Bug #1784) — sensitive
+    // to the full assembled source (PREAMBLE + user code + EPILOGUE), the
+    // ABI version, and the rustc toolchain. Computed from the assembled
+    // source ONCE here and reused below for the actual compile (Step 5b),
+    // so PREAMBLE/EPILOGUE text is never re-derived redundantly.
+    let assembled_source = assemble_evaluator_source_with_preamble(preamble, user_code);
+    let identity_info = cache_identity_info_from_source(&assembled_source);
+    let so_path = cache_dir.join(format!("{}.so", identity_info.identity));
+    let meta_path = cache_dir.join(format!("{}.meta", identity_info.identity));
 
-    // Step 4: Cache check (version + hash + TTL freshness)
-    let rustc_version = cache::get_rustc_version();
+    // Step 4: Cache check. The filename itself already encodes source_hash +
+    // abi_version + rustc_version, so a mismatch on any of them means the
+    // file simply won't be found. The per-field checks below are defense in
+    // depth against a corrupted/hand-edited .meta sitting at a colliding
+    // filename — a mismatch on ANY field is ALWAYS a MISS, never a fallback
+    // match.
     if so_path.exists() {
         if let Some(meta) = cache::read_metadata(&meta_path) {
-            if meta.rustc_version == rustc_version
-                && meta.source_hash == hash
+            if meta.rustc_version == identity_info.rustc_version
+                && meta.abi_version == identity_info.abi_version
+                && meta.source_hash == identity_info.source_hash
                 && cache::is_fresh(&meta.compiled_at, cache::LOCAL_CACHE_TTL_SECS)
             {
                 return Ok(CompileResult {
@@ -226,8 +304,9 @@ pub fn compile_evaluator(user_code: &str, cache_dir: &Path) -> Result<CompileRes
     // single atomic syscall. The TempDir guard recursively removes the build
     // directory (source + any rustc scratch files) on every exit path —
     // success or the early '?' returns below — leaving nothing to leak.
+    let identity = &identity_info.identity;
     let build_dir = tempfile::Builder::new()
-        .prefix(&format!("build-{}-", &hash[..hash.len().min(16)]))
+        .prefix(&format!("build-{}-", &identity[..identity.len().min(16)]))
         .tempdir_in(cache_dir)
         .map_err(|e| CompileError {
             message: format!(
@@ -237,11 +316,10 @@ pub fn compile_evaluator(user_code: &str, cache_dir: &Path) -> Result<CompileRes
             ),
             details: vec![],
         })?;
-    let build_rs_path = build_dir.path().join(format!("{}.rs", hash));
-    let build_so_path = build_dir.path().join(format!("{}.so", hash));
+    let build_rs_path = build_dir.path().join(format!("{}.rs", identity));
+    let build_so_path = build_dir.path().join(format!("{}.so", identity));
 
-    let full_source = assemble_evaluator_source(user_code);
-    std::fs::write(&build_rs_path, &full_source).map_err(|e| CompileError {
+    std::fs::write(&build_rs_path, &assembled_source).map_err(|e| CompileError {
         message: format!("Failed to write evaluator source: {}", e),
         details: vec![],
     })?;
@@ -291,8 +369,9 @@ pub fn compile_evaluator(user_code: &str, cache_dir: &Path) -> Result<CompileRes
     // Step 7: Write metadata (best-effort — .so already exists, warn but don't fail)
     let now = chrono_now_iso();
     if let Err(e) = cache::write_metadata(&meta_path, &CacheMetadata {
-        source_hash: hash,
-        rustc_version,
+        source_hash: identity_info.source_hash.clone(),
+        rustc_version: identity_info.rustc_version.clone(),
+        abi_version: identity_info.abi_version,
         compiled_at: now,
         compile_ms,
     }) {
@@ -329,6 +408,63 @@ fn sha256_hex(input: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(input.as_bytes());
     format!("{:x}", hasher.finalize())
+}
+
+/// Bug #1784: the ONE shared cache identity for a compiled evaluator
+/// artifact. Combines the assembled source (user code wrapped in PREAMBLE +
+/// EPILOGUE), the ABI version, and the rustc toolchain version into a single
+/// SHA-256 hex digest.
+///
+/// ANY change to user code, PREAMBLE, EPILOGUE, XRAY_ABI_VERSION, or the
+/// rustc toolchain therefore produces a DIFFERENT identity — a stale
+/// artifact compiled under old inputs can never be mistaken for a hit
+/// against new inputs. This is used as:
+///   - the local `.so`/`.meta` filename stem (see compile_evaluator),
+///   - the value written into PostgreSQL's existing `source_hash` TEXT
+///     primary key column (no schema change — see xray_cache_backend.py).
+///
+/// A `\u{0}` (NUL) separator is used between components — assembled_source
+/// can contain arbitrary text (including digits and colons), so a
+/// human-readable separator like ":" could theoretically produce a field
+/// boundary collision; NUL never appears in valid Rust source text.
+pub fn compute_cache_identity(assembled_source: &str, abi_version: u64, rustc_version: &str) -> String {
+    let combined = format!("{}\u{0}{}\u{0}{}", assembled_source, abi_version, rustc_version);
+    sha256_hex(&combined)
+}
+
+/// Bundle of the composite identity plus its individual input components.
+///
+/// `source_hash` (hash of the assembled source alone) and `abi_version` are
+/// exposed separately from `identity` so the LOCAL `.meta` file can record
+/// them as individually-checkable, debuggable fields (Bug #1784 requirement
+/// #4), in addition to `identity` being used as the opaque filename/PG key.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CacheIdentityInfo {
+    pub identity: String,
+    pub source_hash: String,
+    pub abi_version: u64,
+    pub rustc_version: String,
+}
+
+/// Compute identity info from an already-assembled source string (avoids
+/// re-assembling when the caller already has it, e.g. compile_evaluator).
+pub fn cache_identity_info_from_source(assembled_source: &str) -> CacheIdentityInfo {
+    let rustc_version = cache::get_rustc_version();
+    let source_hash = sha256_hex(assembled_source);
+    let identity = compute_cache_identity(assembled_source, XRAY_ABI_VERSION, &rustc_version);
+    CacheIdentityInfo {
+        identity,
+        source_hash,
+        abi_version: XRAY_ABI_VERSION,
+        rustc_version,
+    }
+}
+
+/// Compute identity info directly from raw user code (assembles internally).
+/// This is the entry point used by `xray-cli --print-cache-identity`, which
+/// starts from raw user code read off stdin and has no pre-assembled source.
+pub fn cache_identity_info(user_code: &str) -> CacheIdentityInfo {
+    cache_identity_info_from_source(&assemble_evaluator_source(user_code))
 }
 
 /// Adjust rustc error line numbers by subtracting the preamble offset.
@@ -547,17 +683,20 @@ fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> {
             .expect("first compile must succeed");
         assert!(!first.cached, "first compile must not be cached");
 
-        // Backdate compiled_at in the .meta file to simulate a stale entry
-        let hash = sha256_hex(user_code);
-        let meta_path = dir.path().join(format!("{}.meta", hash));
+        // Backdate compiled_at in the .meta file to simulate a stale entry.
+        // Bug #1784: the seed path must be the REAL post-fix identity, not
+        // the retired raw sha256_hex(user_code) key.
+        let info = cache_identity_info_from_source(&assemble_evaluator_source(user_code));
+        let meta_path = dir.path().join(format!("{}.meta", info.identity));
         let old_epoch = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_secs()
             - 600; // 600s ago — beyond TTL of 300
         let stale_meta = cache::CacheMetadata {
-            source_hash: hash.clone(),
-            rustc_version: cache::get_rustc_version(),
+            source_hash: info.source_hash.clone(),
+            rustc_version: info.rustc_version.clone(),
+            abi_version: info.abi_version,
             compiled_at: format!("{}s-since-epoch", old_epoch),
             compile_ms: 100,
         };
@@ -567,6 +706,202 @@ fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> {
         let second = compile_evaluator(user_code, dir.path())
             .expect("second compile must succeed");
         assert!(!second.cached, "stale cache entry must trigger recompile, not return cached=true");
+    }
+
+    // ---- Bug #1784: cache identity must cover PREAMBLE/EPILOGUE + ABI ----
+
+    const SHA256_HEX_DIGEST_LEN: usize = 64;
+    const TEST_ABI_VERSION_A: u64 = 1;
+    const TEST_ABI_VERSION_B: u64 = 2;
+    const TEST_RUSTC_VERSION: &str = "rustc 1.91.0";
+
+    #[test]
+    fn test_compute_cache_identity_deterministic() {
+        let a = compute_cache_identity("some source", TEST_ABI_VERSION_B, TEST_RUSTC_VERSION);
+        let b = compute_cache_identity("some source", TEST_ABI_VERSION_B, TEST_RUSTC_VERSION);
+        assert_eq!(a, b, "identity must be deterministic for identical inputs");
+        assert_eq!(a.len(), SHA256_HEX_DIGEST_LEN, "identity must be a SHA-256 hex digest");
+    }
+
+    #[test]
+    fn test_compute_cache_identity_differs_on_abi_version_alone() {
+        // Proves ABI version is an independent identity component, not
+        // merely subsumed by hashing the source text: same source, same
+        // rustc, only abi_version differs.
+        let source = "identical assembled source text";
+        let id_abi1 = compute_cache_identity(source, TEST_ABI_VERSION_A, TEST_RUSTC_VERSION);
+        let id_abi2 = compute_cache_identity(source, TEST_ABI_VERSION_B, TEST_RUSTC_VERSION);
+        assert_ne!(id_abi1, id_abi2, "identity must change when ONLY abi_version differs");
+    }
+
+    #[test]
+    fn test_compute_cache_identity_differs_on_source_change() {
+        // The core of Bug #1784: identity must be sensitive to the assembled
+        // source (PREAMBLE + EPILOGUE), not just the raw user code.
+        let id_a = compute_cache_identity("preamble-v1 + user code", TEST_ABI_VERSION_B, TEST_RUSTC_VERSION);
+        let id_b = compute_cache_identity("preamble-v2 + user code", TEST_ABI_VERSION_B, TEST_RUSTC_VERSION);
+        assert_ne!(id_a, id_b, "identity must change when the assembled source text differs");
+    }
+
+    #[test]
+    fn test_compute_cache_identity_differs_on_rustc_version() {
+        let source = "identical assembled source text";
+        let id_a = compute_cache_identity(source, TEST_ABI_VERSION_B, "rustc 1.91.0");
+        let id_b = compute_cache_identity(source, TEST_ABI_VERSION_B, "rustc 1.92.0");
+        assert_ne!(id_a, id_b, "identity must change when rustc_version differs");
+    }
+
+    #[test]
+    fn test_assembled_source_embeds_correct_abi_version_via_substitution() {
+        // Bug #1784 review MAJOR-3: XRAY_ABI_VERSION is now the ONE source
+        // of truth -- PREAMBLE contains a placeholder token, never a
+        // hardcoded literal duplicate. This test proves the substitution
+        // performed by assemble_evaluator_source_with_preamble actually
+        // happens (the real value is embedded) and never leaks the raw
+        // placeholder token into compilable source.
+        let assembled = assemble_evaluator_source(
+            "fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> { Vec::new() }",
+        );
+        assert!(
+            assembled.contains(&format!("XRAY_ABI_VERSION: u64 = {};", XRAY_ABI_VERSION)),
+            "assembled source must embed the current XRAY_ABI_VERSION value ({})",
+            XRAY_ABI_VERSION
+        );
+        assert!(
+            !assembled.contains(ABI_VERSION_PLACEHOLDER),
+            "assembled source must not leak the raw placeholder token"
+        );
+    }
+
+    #[test]
+    fn test_compile_evaluator_cache_miss_when_preamble_changes() {
+        // MANDATORY regression guard (Bug #1784 review MAJOR-1): proves,
+        // through the REAL compile_evaluator pipeline (not just the
+        // standalone compute_cache_identity() function), that changing
+        // ONLY the preamble text -- user code, ABI version, and rustc
+        // toolchain held fixed -- forces a fresh compile (cached == false),
+        // never a stale-artifact reuse. This is the test class that would
+        // catch a future regression where the cache identity is again
+        // derived from raw user_code alone while the composite-identity
+        // helper functions (compute_cache_identity / cache_identity_info_
+        // from_source) are left in place unchanged.
+        let dir = TempDir::new().unwrap();
+        let user_code = r#"
+fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> {
+    Vec::new()
+}
+"#;
+
+        let preamble_v1 = PREAMBLE;
+        let first = compile_evaluator_with_preamble(user_code, dir.path(), preamble_v1)
+            .expect("first compile (preamble v1) must succeed");
+        assert!(!first.cached, "first compile must not be a cache hit");
+
+        // Sanity check: repeating the SAME preamble + user code must hit the
+        // local cache -- proves the harness itself actually exercises
+        // caching, so the later cache-miss assertion is meaningful.
+        let repeat = compile_evaluator_with_preamble(user_code, dir.path(), preamble_v1)
+            .expect("repeat compile with unchanged preamble must succeed");
+        assert!(repeat.cached, "repeat compile with unchanged preamble must be a cache hit");
+
+        // preamble_v2 differs from preamble_v1 by a trivial appended comment
+        // -- still valid, compilable Rust; the OwnedNode/EvalFinding/
+        // debug_log definitions user code depends on are unchanged.
+        let preamble_v2 = format!(
+            "{}\n// preamble v2 marker (Bug #1784 regression test)\n",
+            preamble_v1
+        );
+        let second = compile_evaluator_with_preamble(user_code, dir.path(), &preamble_v2)
+            .expect("second compile (preamble v2) must succeed");
+        assert!(
+            !second.cached,
+            "changing ONLY the preamble text must force a cache MISS, never reuse the preamble-v1 artifact"
+        );
+        assert_ne!(
+            second.so_path, first.so_path,
+            "preamble v1 and v2 artifacts must be stored under different identities"
+        );
+    }
+
+    /// Test helper: write a fake `.so` + valid `.meta` pair at `{identity}.so`
+    /// / `{identity}.meta` inside `dir`, so a cache lookup for `identity`
+    /// finds a pre-existing artifact.
+    fn seed_cache_entry(dir: &Path, identity: &str, so_bytes: &[u8], meta: &cache::CacheMetadata) {
+        std::fs::write(dir.join(format!("{}.so", identity)), so_bytes).expect("seed .so");
+        cache::write_metadata(&dir.join(format!("{}.meta", identity)), meta).expect("seed .meta");
+    }
+
+    #[test]
+    fn test_stale_artifact_under_old_raw_user_code_hash_is_not_reused() {
+        // MANDATORY regression guard (Bug #1784): before the fix, the cache
+        // key was sha256_hex(user_code) alone. Seed an artifact at exactly
+        // that pre-fix lookup path, with metadata pre-fix code treats as
+        // fully valid, and prove the fix does not reuse it.
+        let dir = TempDir::new().unwrap();
+        let user_code = r#"
+fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> {
+    Vec::new()
+}
+"#;
+        let old_buggy_key = sha256_hex(user_code);
+        let garbage_bytes = b"NOT_A_REAL_SHARED_OBJECT_FROM_OLD_PREAMBLE";
+        seed_cache_entry(
+            dir.path(),
+            &old_buggy_key,
+            garbage_bytes,
+            &cache::CacheMetadata {
+                source_hash: old_buggy_key.clone(),
+                rustc_version: cache::get_rustc_version(),
+                abi_version: XRAY_ABI_VERSION,
+                compiled_at: chrono_now_iso(),
+                compile_ms: 5,
+            },
+        );
+
+        let result = compile_evaluator(user_code, dir.path())
+            .expect("compile must succeed despite the seeded stale artifact");
+
+        let garbage_so_path = dir.path().join(format!("{}.so", old_buggy_key));
+        assert!(!result.cached, "must NOT be a cache hit on an artifact keyed by the pre-fix scheme");
+        assert_ne!(result.so_path, garbage_so_path, "must NOT return the seeded garbage file");
+        let so_bytes = std::fs::read(&result.so_path).expect("compiled .so must exist");
+        assert!(so_bytes.len() > garbage_bytes.len(), "a real compiled cdylib must be far larger than the garbage placeholder");
+    }
+
+    #[test]
+    fn test_meta_abi_version_field_mismatch_at_matching_filename_forces_miss() {
+        // Defense in depth: even if a .so/.meta pair sits at the CURRENT
+        // identity's filename (so_path.exists() == true), a recorded
+        // abi_version that doesn't match XRAY_ABI_VERSION must still force a
+        // MISS. Guards the per-field freshness check independently of the
+        // filename-based key.
+        let dir = TempDir::new().unwrap();
+        let user_code = r#"
+fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> {
+    Vec::new()
+}
+"#;
+        let assembled = assemble_evaluator_source(user_code);
+        let info = cache_identity_info_from_source(&assembled);
+        let wrong_abi = info.abi_version.saturating_sub(1);
+        assert_ne!(wrong_abi, info.abi_version);
+
+        seed_cache_entry(
+            dir.path(),
+            &info.identity,
+            b"GARBAGE_AT_RIGHT_FILENAME_WRONG_ABI",
+            &cache::CacheMetadata {
+                source_hash: info.source_hash.clone(),
+                rustc_version: info.rustc_version.clone(),
+                abi_version: wrong_abi,
+                compiled_at: chrono_now_iso(),
+                compile_ms: 5,
+            },
+        );
+
+        let result = compile_evaluator(user_code, dir.path())
+            .expect("compile must succeed despite the seeded stale-ABI metadata");
+        assert!(!result.cached, "an abi_version field mismatch must force a MISS even at a matching filename");
     }
 
     #[test]
@@ -706,12 +1041,12 @@ fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> {
             messages.len()
         );
         // Verify the FIRST 100 messages are retained (not arbitrary ones).
-        for i in 0..100usize {
+        for (i, message) in messages.iter().enumerate().take(100usize) {
             assert_eq!(
-                messages[i],
-                format!("msg {}", i),
+                message,
+                &format!("msg {}", i),
                 "message at index {} must be 'msg {}', got: {}",
-                i, i, messages[i]
+                i, i, message
             );
         }
     }
@@ -875,7 +1210,7 @@ fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> {
             "10KB byte cap must be enforced: expected 51 messages, got {}",
             messages.len()
         );
-        let expected_msg: String = std::iter::repeat('b').take(200).collect();
+        let expected_msg: String = "b".repeat(200);
         for (i, msg) in messages.iter().enumerate() {
             assert_eq!(
                 msg, &expected_msg,

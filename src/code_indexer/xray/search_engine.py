@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple
 
 if TYPE_CHECKING:
-    from code_indexer.xray.rust_backend import XrayCacheBackend
+    from code_indexer.xray.rust_backend import SharedIdentityCache, XrayCacheBackend
 
 from code_indexer.global_repos.regex_search import (
     RegexSearchService,
@@ -184,14 +184,29 @@ class XRaySearchEngine:
     parallel AST evaluation via RustNativeBackend.
     """
 
-    def __init__(self) -> None:
-        """Initialise the engine, importing tree-sitter at this point."""
+    def __init__(self, identity_cache: Optional["SharedIdentityCache"] = None) -> None:
+        """Initialise the engine, importing tree-sitter at this point.
+
+        Args:
+            identity_cache: Optional shared, bounded, thread-safe cache
+                mapping evaluator source -> CacheIdentityInfo (Bug #1784
+                review MAJOR-2). Pass a cache instance that OUTLIVES multiple
+                XRaySearchEngine constructions (e.g. one per
+                xray_search_batch job, shared across every repo x scan
+                cell) so `xray-cli --print-cache-identity` is invoked once
+                per UNIQUE evaluator source across the whole operation,
+                instead of once per cell. None (default) makes
+                RustNativeBackend create its own private, per-instance
+                cache -- unchanged single-repo xray_search behaviour.
+        """
         from code_indexer.xray.ast_engine import AstSearchEngine
         from code_indexer.xray.rust_backend import RustNativeBackend
         from code_indexer.xray.sandbox import PythonEvaluatorSandbox
 
         self.ast_engine = AstSearchEngine()
-        self.rust_backend = RustNativeBackend(xray_cache_backend=_get_cluster_cache())
+        self.rust_backend = RustNativeBackend(
+            xray_cache_backend=_get_cluster_cache(), identity_cache=identity_cache
+        )
         self.sandbox = PythonEvaluatorSandbox()
 
     @staticmethod
@@ -444,7 +459,16 @@ class XRaySearchEngine:
             )
 
         if file_specs:
-            remaining = max(1, timeout_seconds - int(_elapsed()))
+            # Bug #1797 (defect 2): floor the DIFFERENCE, not the elapsed
+            # value. The old `timeout_seconds - int(_elapsed())` truncated
+            # elapsed's fractional second BEFORE subtracting, which hands
+            # run_batch up to ~1s MORE budget than truly remains -- letting
+            # total wall-clock overrun timeout_seconds by up to ~1s.
+            # `max(1, ...)` is preserved unchanged: it is the deliberate
+            # "never hand the subprocess a zero/negative timeout" floor, a
+            # separate, existing contract this fix does not touch.
+            remaining = max(1, int(timeout_seconds - _elapsed()))
+            batch_call_start = time.monotonic()
             batch_results = self.rust_backend.run_batch(
                 evaluator_code=evaluator_code,
                 file_specs=file_specs,
@@ -453,9 +477,29 @@ class XRaySearchEngine:
                 on_process_spawned=on_process_spawned,
                 repo_path=str(repo_path),
             )
+            # Bug #1797 (defect 2 follow-on): a correctly-bounded `remaining`
+            # is deliberately LESS than `timeout_seconds - elapsed_before`
+            # would be under the old (buggy) formula, so run_batch's own
+            # subprocess can hit ITS internal timeout and still leave total
+            # elapsed under the OUTER `timeout_seconds` budget (Phase 1's
+            # share of the budget is never "given back"). `_timed_out()`
+            # alone can therefore miss a genuine Phase 2 timeout once
+            # overrun is fixed. Detect it directly: run_batch consuming its
+            # entire granted sub-budget IS a timeout, regardless of whether
+            # the outer wall-clock also crossed timeout_seconds.
+            batch_call_duration = time.monotonic() - batch_call_start
+            batch_exhausted_its_budget = batch_call_duration >= remaining
             for file_matches, file_errors, file_meta in batch_results:
-                if _timed_out():
+                if _timed_out() or batch_exhausted_its_budget:
                     timeout_hit = True
+                    # Bug #1797 (defect 1): preserve the specific error
+                    # carried by this batch item (e.g. the real
+                    # XRayCliError "xray-cli timed out after Ns") instead of
+                    # silently discarding it by breaking first. The
+                    # synthetic EvaluatorTimeout added below is the
+                    # caller-facing classification; this is the diagnostic
+                    # detail -- both must survive.
+                    evaluation_errors.extend(file_errors)
                     break
                 matches.extend(file_matches)
                 evaluation_errors.extend(file_errors)
@@ -519,9 +563,13 @@ class XRaySearchEngine:
         if timeout_hit:
             result["partial"] = True
             result["timeout"] = True
-            # When the job timed out with no results and no errors, surface a
-            # synthetic error so the caller knows why the job returned nothing.
-            if not matches and not evaluation_errors:
+            # Surface a synthetic caller-facing classification whenever the
+            # job timed out with no matches -- even if a specific diagnostic
+            # error (e.g. the preserved XRayCliError, bug #1797) already
+            # populated evaluation_errors. The synthetic entry is the
+            # DISTINCT terminal classification; any specific error already
+            # present is the diagnostic detail. Both must survive together.
+            if not matches:
                 evaluation_errors.append(
                     {
                         "file_path": "",

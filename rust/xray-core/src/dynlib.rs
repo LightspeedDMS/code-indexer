@@ -8,10 +8,6 @@ type EvaluateNodeFn = fn(&OwnedNode) -> Vec<EvalFinding>;
 type AbiVersionFn = fn() -> u64;
 type DrainDebugLogFn = fn() -> Vec<String>;
 
-/// Must match `XRAY_ABI_VERSION` in compiler.rs PREAMBLE.
-/// Increment both when OwnedNode or EvalFinding layout changes.
-const EXPECTED_ABI_VERSION: u64 = 2;
-
 pub struct DynlibEvaluator {
     _lib: Library,
     evaluate_fn: EvaluateNodeFn,
@@ -39,11 +35,15 @@ impl DynlibEvaluator {
                 .map_err(|e| format!("Symbol xray_abi_version not found: {}", e))?;
             sym()
         };
-        if abi_version != EXPECTED_ABI_VERSION {
+        // Bug #1784 review MAJOR-3: reads crate::compiler::XRAY_ABI_VERSION
+        // directly -- the ONE source of truth -- instead of declaring an
+        // independent EXPECTED_ABI_VERSION copy that could drift from it.
+        if abi_version != crate::compiler::XRAY_ABI_VERSION {
             return Err(format!(
                 "ABI version mismatch: evaluator has version {} but loader expects {}. \
                  Recompile your evaluator.",
-                abi_version, EXPECTED_ABI_VERSION
+                abi_version,
+                crate::compiler::XRAY_ABI_VERSION
             ));
         }
 
@@ -134,9 +134,46 @@ fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> {
         let cr = compiler::compile_evaluator(user_code, dir.path())
             .expect("compile must succeed");
 
-        // Load should succeed only when abi version matches EXPECTED_ABI_VERSION
+        // Load should succeed only when abi version matches compiler::XRAY_ABI_VERSION
         let evaluator = DynlibEvaluator::load(&cr.so_path);
         assert!(evaluator.is_ok(), "load must succeed with matching ABI version: {:?}", evaluator.err());
+    }
+
+    #[test]
+    fn test_compiled_evaluator_exports_abi_version_matching_single_source_of_truth() {
+        // Bug #1784 review MAJOR-3: after centralizing XRAY_ABI_VERSION to
+        // compiler::XRAY_ABI_VERSION as the ONE definition (PREAMBLE text is
+        // generated from it at assemble-time via ABI_VERSION_PLACEHOLDER
+        // substitution, and this loader reads it directly rather than
+        // declaring its own copy), there is no second constant left to
+        // drift. This test proves the compiled .so's OWN exported
+        // xray_abi_version() symbol -- the actual runtime value baked into
+        // the artifact by a REAL compile -- equals compiler::XRAY_ABI_VERSION
+        // end-to-end, not just "both constants happen to read 2 today".
+        use crate::compiler;
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let user_code = r#"
+fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> {
+    Vec::new()
+}
+"#;
+        let cr = compiler::compile_evaluator(user_code, dir.path())
+            .expect("compile must succeed");
+
+        let lib = unsafe { Library::new(&cr.so_path) }.expect("must load compiled .so directly");
+        let abi_version: u64 = unsafe {
+            let sym: Symbol<AbiVersionFn> = lib
+                .get(b"xray_abi_version")
+                .expect("xray_abi_version symbol must exist on a freshly compiled evaluator");
+            sym()
+        };
+        assert_eq!(
+            abi_version,
+            compiler::XRAY_ABI_VERSION,
+            "compiled evaluator's exported ABI version must equal the single source of truth"
+        );
     }
 
     #[test]
@@ -288,5 +325,82 @@ fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> {
         let messages = eval_ref.drain_debug_log();
         assert_eq!(messages.len(), 1, "trait dispatch must return debug messages: {:?}", messages);
         assert_eq!(messages[0], "trait dispatch test");
+    }
+
+    /// Depth well past the empirically measured 8,000-12,000 SIGABRT cliff
+    /// (issue #1795). Builds an iterative (non-recursive) chain of `depth`
+    /// "wrapper" nodes around one "needle" leaf, exactly mirroring
+    /// `owned_node.rs`'s own `deep_chain` test helper but using a plain
+    /// struct literal (all `OwnedNode` fields are `pub`) since this module
+    /// cannot reach that helper's `#[cfg(test)]`-only sibling.
+    fn deep_ffi_chain(depth: usize) -> OwnedNode {
+        let source: Arc<str> = Arc::from("needle");
+        let mut node = OwnedNode {
+            kind: "needle".to_string(),
+            start_line: depth + 1,
+            start_byte: 0,
+            end_byte: source.len(),
+            children: vec![],
+            is_named: true,
+            source: Arc::clone(&source),
+        };
+        for level in (0..depth).rev() {
+            node = OwnedNode {
+                kind: "wrapper".to_string(),
+                start_line: level + 1,
+                start_byte: 0,
+                end_byte: 0,
+                children: vec![node],
+                is_named: true,
+                source: Arc::clone(&source),
+            };
+        }
+        node
+    }
+
+    /// Bug #1795: `has_descendant_of_kind`/`collect_descendants_of_kind` are
+    /// mirrored as a string literal into the evaluator PREAMBLE
+    /// (compiler.rs), so user evaluators inherit whatever stack-safety
+    /// property the mirror has. This test compiles a REAL evaluator that
+    /// calls `descendants_of_kind` (delegating to
+    /// `collect_descendants_of_kind`), builds a 50,000-level `OwnedNode`
+    /// chain via `deep_ffi_chain`, and passes it by reference across the FFI
+    /// boundary into the compiled `.so`. The evaluator's own call stack (a
+    /// separate compiled artifact, not `xray-core`'s) is what is under test.
+    ///
+    /// Pre-fix: SIGABRTs inside the compiled evaluator, proving the PREAMBLE
+    /// mirror has the identical cliff as core `owned_node.rs` — fixing only
+    /// the core crate does NOT protect user evaluators.
+    #[test]
+    fn test_preamble_mirror_survives_deep_nesting_across_ffi() {
+        use crate::compiler;
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let user_code = r#"
+fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> {
+    node.descendants_of_kind("needle").iter().map(|d| EvalFinding {
+        pattern: "found".to_string(),
+        line: d.start_line,
+        snippet: d.text().to_string(),
+    }).collect()
+}
+"#;
+        let cr = compiler::compile_evaluator(user_code, dir.path()).expect("compile must succeed");
+        let evaluator = DynlibEvaluator::load(&cr.so_path).expect("load must succeed");
+
+        const DEPTH: usize = 50_000;
+        let node = deep_ffi_chain(DEPTH);
+
+        // Exercises the PREAMBLE mirror across the FFI boundary. Pre-fix:
+        // SIGABRTs inside the compiled evaluator.
+        let findings = evaluator.evaluate_node(&node);
+        assert_eq!(findings.len(), 1, "must find exactly the one needle leaf through 50,000 levels");
+        assert_eq!(findings[0].line, DEPTH + 1);
+
+        // This test's subject is the PREAMBLE mirror, not core OwnedNode's
+        // own Drop glue (dedicated regression test in owned_node.rs).
+        // `forget` avoids conflating that separately-tested site here.
+        std::mem::forget(node);
     }
 }
