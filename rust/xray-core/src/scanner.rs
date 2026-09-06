@@ -70,6 +70,36 @@ pub fn collect_files(dir: &Path) -> Vec<PathBuf> {
         .collect()
 }
 
+// Story #1787, S2, AC2 test instrumentation ONLY (compiled out entirely in
+// production builds -- zero production overhead): counts how many times
+// tree-sitter's `Parser::parse` has actually been invoked on the CURRENT
+// thread. `thread_local!` so parallel `cargo test` threads never
+// interfere with each other's counts. This is what makes "the file is
+// parsed exactly ONCE" a provable test assertion instead of an
+// untestable claim -- the naive bug this guards against is a fused
+// pipeline that re-parses the same file once per walk (once for
+// extraction, again for `collect_facts`) instead of sharing one tree.
+//
+// Gated on `test-support` in addition to plain `test` for the same reason
+// `OwnedNode`'s `DROP_COUNT` is (Bug #1791 pattern): a `tests/*.rs`
+// integration-test crate links against a normal, non-cfg-test build of
+// this library. (Plain `//` here, not `///`: rustdoc cannot attach a doc
+// comment to a macro invocation's expanded output.)
+#[cfg(any(test, feature = "test-support"))]
+thread_local! {
+    pub static PARSE_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(any(test, feature = "test-support"))]
+pub fn reset_parse_count() {
+    PARSE_COUNT.with(|c| c.set(0));
+}
+
+#[cfg(any(test, feature = "test-support"))]
+pub fn parse_count() -> usize {
+    PARSE_COUNT.with(|c| c.get())
+}
+
 /// Parse a single file into an OwnedNode tree.
 ///
 /// Returns None if the file cannot be read, the extension is unsupported, or
@@ -83,6 +113,8 @@ pub fn parse_file(path: &Path) -> Option<OwnedNode> {
     let tree = THREAD_PARSER.with(|p| {
         let mut parser = p.borrow_mut();
         parser.set_language(&language).ok()?;
+        #[cfg(any(test, feature = "test-support"))]
+        PARSE_COUNT.with(|c| c.set(c.get() + 1));
         parser.parse(&source, None)
     })?;
 

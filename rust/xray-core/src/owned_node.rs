@@ -1,5 +1,35 @@
 use std::sync::Arc;
 
+// Story #1787, S2, AC2 test instrumentation ONLY (compiled out entirely in
+// production builds -- zero production overhead): counts how many
+// `OwnedNode` values have been dropped on the CURRENT thread.
+// `thread_local!` (not a global `static`) so parallel `cargo test` threads
+// never interfere with each other's counts. This is what makes "the tree
+// is dropped before the next file is processed" an observable, provable
+// test assertion rather than an untestable claim about internal lifetime
+// management. Wired into the real `Drop for OwnedNode` impl below.
+//
+// Gated on `test-support` in addition to plain `test` for the same reason
+// `new_leaf_for_test`/`new_node_for_test` are (Bug #1791): a `tests/*.rs`
+// integration-test crate links against a normal, non-cfg-test build of
+// this library, so a bare `#[cfg(test)]`/`pub(crate)` item is unreachable
+// from it. (Plain `//` here, not `///`: rustdoc cannot attach a doc
+// comment to a macro invocation's expanded output.)
+#[cfg(any(test, feature = "test-support"))]
+thread_local! {
+    pub static DROP_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(any(test, feature = "test-support"))]
+pub fn reset_drop_count() {
+    DROP_COUNT.with(|c| c.set(0));
+}
+
+#[cfg(any(test, feature = "test-support"))]
+pub fn drop_count() -> usize {
+    DROP_COUNT.with(|c| c.get())
+}
+
 /// OwnedNode — heap-allocated, Clone-able copy of a tree-sitter Node.
 ///
 /// tree-sitter Node objects borrow from the owning Tree and cannot cross
@@ -319,6 +349,14 @@ impl OwnedNode {
 /// child, because there are no children left to recurse into.
 impl Drop for OwnedNode {
     fn drop(&mut self) {
+        // Story #1787, S2, AC2 test instrumentation: fires once per actual
+        // `OwnedNode::drop` invocation, including the re-entrant calls
+        // below for each flattened `node` (each has an empty `children` by
+        // the time IT drops, so this does not recurse further -- see the
+        // loop comment). Compiled out entirely for non-test builds.
+        #[cfg(any(test, feature = "test-support"))]
+        DROP_COUNT.with(|c| c.set(c.get() + 1));
+
         let mut stack: Vec<OwnedNode> = std::mem::take(&mut self.children);
         // Bounded: every iteration pops exactly one node from `stack` and
         // drains its (finite) children back into `stack`; the total number
@@ -326,9 +364,12 @@ impl Drop for OwnedNode {
         // this terminates.
         while let Some(mut node) = stack.pop() {
             stack.append(&mut node.children);
-            // `node` falls out of scope here with an empty `children` Vec,
-            // so its own (recursive, unavoidable-to-remove-entirely-since
-            // it's compiler-generated) Drop::drop call does zero work.
+            // `node` falls out of scope here with an EMPTY `children` Vec
+            // (just drained above), so its own implicit `Drop::drop` call
+            // re-enters this same function, runs the entry-point counter
+            // increment above once for `node` itself, and then immediately
+            // no-ops (its own `stack` is empty) -- no second increment is
+            // needed here, and adding one would double-count every node.
         }
     }
 }
