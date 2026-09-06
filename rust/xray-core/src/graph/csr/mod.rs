@@ -14,6 +14,9 @@ pub mod candidate;
 pub mod symbol_table;
 pub mod builder;
 pub mod code_graph;
+pub mod ops;
+pub mod wire;
+mod wire_cursor;
 
 pub use candidate::Candidate;
 pub use code_graph::CodeGraph;

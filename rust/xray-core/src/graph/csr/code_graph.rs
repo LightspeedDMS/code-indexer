@@ -121,6 +121,20 @@ impl CodeGraph {
         self.strings.resolve(string_id)
     }
 
+    /// AC7: total number of DISTINCT symbols interned in this graph --
+    /// dense ids are contiguous `0..symbol_count()`, so this is what lets
+    /// `super::ops::strongly_connected_components` enumerate every node
+    /// without this module exposing the `SymbolTable` type itself.
+    pub fn symbol_count(&self) -> usize {
+        self.symbols.len()
+    }
+
+    /// AC7: total number of DISTINCT strings interned in this graph --
+    /// mirrors `symbol_count` above for the string table.
+    pub fn string_count(&self) -> usize {
+        self.strings.len()
+    }
+
     /// Reverse lookup: the dense id `symbol` was interned under in THIS
     /// graph, if any. Lets a caller holding a real 64-bit `SymbolId` (e.g.
     /// from `FileForBind::index`, outside this crate's CSR internals)
@@ -213,6 +227,39 @@ mod tests {
         assert!(graph.candidates_for(&ref2).is_empty());
 
         assert_eq!(graph.resolve_string(foo_name), "Foo");
+    }
+
+    /// AC7: `strongly_connected_components` (in `super::ops`) needs to
+    /// enumerate every interned symbol's dense id from OUTSIDE this
+    /// module, where `self.symbols` is private -- this accessor is the
+    /// seam that lets it do so without exposing the `SymbolTable` type
+    /// itself.
+    #[test]
+    fn symbol_count_reports_the_number_of_distinct_interned_symbols() {
+        let mut builder = CodeGraphBuilder::with_candidate_capacity(0);
+        builder.intern_symbol(make_symbol_id(1, 0));
+        builder.intern_symbol(make_symbol_id(1, 1));
+        // Interning the SAME symbol again must not inflate the count.
+        builder.intern_symbol(make_symbol_id(1, 0));
+
+        let graph = builder.build();
+        assert_eq!(graph.symbol_count(), 2);
+    }
+
+    /// AC7: `graph::csr::wire::write_graph_file` (next) needs to enumerate
+    /// every interned string from OUTSIDE this module (where `self.strings`
+    /// is private) to serialize the mmap-handoff wire format -- this
+    /// accessor is that seam, mirroring `symbol_count` above exactly.
+    #[test]
+    fn string_count_reports_the_number_of_distinct_interned_strings() {
+        let mut builder = CodeGraphBuilder::with_candidate_capacity(0);
+        builder.intern_string("Foo");
+        builder.intern_string("Bar");
+        // Interning the SAME string again must not inflate the count.
+        builder.intern_string("Foo");
+
+        let graph = builder.build();
+        assert_eq!(graph.string_count(), 2);
     }
 
     /// AC6: `CodeGraphBuilder` records the completeness state, the

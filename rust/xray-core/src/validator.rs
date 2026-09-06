@@ -46,6 +46,29 @@ pub fn validate_evaluator_source(source: &str) -> Result<(), Vec<ValidationError
     }
 }
 
+/// AC8: the Rust-side gate for graph-mode evaluator source, mirroring
+/// `validate_evaluator_source`'s existing pattern exactly. Runs the
+/// IDENTICAL forbidden-construct visitor first -- validator.rs's bans
+/// are UNCHANGED for graph mode; callbacks take state as PARAMETERS
+/// (`&CodeGraph`, `&FactIndex`, `&LocalIndex`), so the `static`/
+/// `static mut` ban still applies with full force. Then requires
+/// `crate::compiler::detect_evaluator_mode` to classify the source as
+/// `EvaluatorMode::Graph` -- a legacy-shaped, mixed, or empty source is
+/// rejected here too, never silently accepted as "close enough".
+pub fn validate_rust_graph_evaluator(source: &str) -> Result<(), Vec<ValidationError>> {
+    validate_evaluator_source(source)?;
+    match crate::compiler::detect_evaluator_mode(source) {
+        Ok(crate::compiler::EvaluatorMode::Graph) => Ok(()),
+        Ok(crate::compiler::EvaluatorMode::Legacy) => Err(vec![ValidationError {
+            line: 0,
+            message: "source defines evaluate_node (legacy mode) -- graph mode requires \
+                      collect_facts and analyze_graph instead"
+                .to_string(),
+        }]),
+        Err(compile_error) => Err(vec![ValidationError { line: 0, message: compile_error.message }]),
+    }
+}
+
 // ---- Visitor implementation ----
 
 struct ForbiddenConstructVisitor {
@@ -259,6 +282,49 @@ fn check_forbidden_std_subpath(tree: &syn::UseTree, errors: &mut Vec<ValidationE
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // --- AC8: validate_rust_graph_evaluator (Rust-side gate for graph mode) ---
+
+    /// AC8: "validate_rust_graph_evaluator mirroring the existing
+    /// validator patterns. validator.rs's existing bans are UNCHANGED —
+    /// callbacks take state as PARAMETERS, so the static mut ban stands."
+    /// Four cases: valid graph source (Ok); graph source with a forbidden
+    /// construct, e.g. `unsafe` (Err, same ban as legacy); legacy-shaped
+    /// source with `evaluate_node` instead of graph callbacks (Err, wrong
+    /// mode); source with neither family (Err).
+    #[test]
+    fn validate_rust_graph_evaluator_accepts_valid_graph_source_and_rejects_forbidden_constructs_and_wrong_mode() {
+        let valid_graph = r#"
+fn collect_facts(node: &OwnedNode, file: &str, index: &LocalIndex) -> Vec<UserFact> {
+    Vec::new()
+}
+fn analyze_graph(g: &CodeGraph, facts: &FactIndex) -> GraphResult {
+    GraphResult::default()
+}
+"#;
+        assert!(validate_rust_graph_evaluator(valid_graph).is_ok(), "valid graph-mode source must pass");
+
+        let graph_with_unsafe = r#"
+fn collect_facts(node: &OwnedNode, file: &str, index: &LocalIndex) -> Vec<UserFact> {
+    unsafe { Vec::new() }
+}
+fn analyze_graph(g: &CodeGraph, facts: &FactIndex) -> GraphResult {
+    GraphResult::default()
+}
+"#;
+        let result = validate_rust_graph_evaluator(graph_with_unsafe);
+        assert!(result.is_err(), "graph-mode source with `unsafe` must still be rejected -- bans are unchanged");
+        assert!(result.unwrap_err().iter().any(|e| e.message.contains("unsafe")));
+
+        let legacy_only = "fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> { Vec::new() }";
+        assert!(
+            validate_rust_graph_evaluator(legacy_only).is_err(),
+            "a legacy-shaped evaluator must not be accepted as graph mode"
+        );
+
+        let neither = "fn helper() -> i32 { 42 }";
+        assert!(validate_rust_graph_evaluator(neither).is_err(), "source with no recognized callback family must be rejected");
+    }
 
     #[test]
     fn test_valid_code_passes() {

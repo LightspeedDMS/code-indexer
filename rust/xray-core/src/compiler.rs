@@ -18,7 +18,20 @@ const MAX_CACHE_ENTRIES: usize = 100;
 /// (same crate, different module) can reference it. Having a real value
 /// here also lets the cache identity (Bug #1784) depend on the ABI version
 /// as an explicit, independent component.
-pub const XRAY_ABI_VERSION: u64 = 2;
+///
+/// AC8 (Story #1787 S2) bumps this 2 -> 4, per ADR-001's export table:
+/// ABI 4 is "the final two-mode contract" -- required exports are
+/// `xray_abi_version` plus exactly one complete callback family, either
+/// `xray_evaluate_node` (legacy) or `xray_collect_facts` + `xray_analyze_
+/// graph` (graph mode); `xray_drain_debug_log`/`xray_refine` remain
+/// optional. ABI 3 ("#1785 interim protocol": `xray_drain_facts` /
+/// `xray_reduce_facts`) is DELIBERATELY skipped -- no such artifact was
+/// ever compiled by this codebase (there is no `xray_reduce_facts`/
+/// `xray_drain_facts` export anywhere in `xray-core`/`xray-cli`), so
+/// there is no rolling-deployment population to stay compatible with;
+/// modeling that transitional state here would document a migration step
+/// this codebase never actually took.
+pub const XRAY_ABI_VERSION: u64 = 4;
 
 /// Placeholder token embedded in PREAMBLE in place of a hardcoded ABI
 /// version literal. Substituted with the real `XRAY_ABI_VERSION` value by
@@ -388,20 +401,68 @@ fn compile_evaluator_impl(user_code: &str, cache_dir: &Path, preamble: &str) -> 
     })
 }
 
-/// Returns true only if `source` contains an actual `fn evaluate_node` function
-/// definition at the top level — not just the text in a comment or string literal.
-fn has_evaluate_node_fn(source: &str) -> bool {
+/// AC8 / ADR-001: "After S2, X-Ray supports exactly two evaluator
+/// execution modes" -- `Legacy` (`evaluate_node`) and `Graph`
+/// (`collect_facts` + `analyze_graph`). No third variant: `Ambiguous`/
+/// `mixed` is a `CompileError`, never a mode value, exactly like AC4's
+/// `Confidence` deliberately has no `Ambiguous` variant for the same
+/// reason -- classification failures are errors, not states.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EvaluatorMode {
+    Legacy,
+    Graph,
+}
+
+/// Returns true only if `source` contains an actual top-level `fn` named
+/// `name` -- never just the text appearing in a comment or string
+/// literal. Shared by `has_evaluate_node_fn` and `detect_evaluator_mode`.
+fn has_top_level_fn(source: &str, name: &str) -> bool {
     let file: syn::File = match syn::parse_str(source) {
         Ok(f) => f,
         Err(_) => return false,
     };
-    file.items.iter().any(|item| {
-        if let syn::Item::Fn(func) = item {
-            func.sig.ident == "evaluate_node"
-        } else {
-            false
-        }
-    })
+    file.items.iter().any(|item| matches!(item, syn::Item::Fn(func) if func.sig.ident == name))
+}
+
+/// AC8: "A scan provides evaluate_node OR graph mode — validated
+/// synchronously before job submission, not discovered at runtime."
+/// ADR-001: "A graph evaluator must not export evaluate_node; a legacy
+/// evaluator must not be treated as graph mode. The loader rejects a
+/// mixed or incomplete callback family." This is the SYNCHRONOUS,
+/// AST-level check that classification: never a fallback guess, never
+/// silently defaulting to one mode when the source is ambiguous.
+pub fn detect_evaluator_mode(source: &str) -> Result<EvaluatorMode, CompileError> {
+    let has_legacy = has_top_level_fn(source, "evaluate_node");
+    let has_collect_facts = has_top_level_fn(source, "collect_facts");
+    let has_analyze_graph = has_top_level_fn(source, "analyze_graph");
+    let has_any_graph_fn = has_collect_facts || has_analyze_graph;
+
+    match (has_legacy, has_any_graph_fn, has_collect_facts, has_analyze_graph) {
+        (true, false, _, _) => Ok(EvaluatorMode::Legacy),
+        (false, true, true, true) => Ok(EvaluatorMode::Graph),
+        (true, true, _, _) => Err(CompileError {
+            message: "Evaluator defines both legacy evaluate_node and graph-mode callbacks \
+                      (collect_facts/analyze_graph) -- exactly one mode family is allowed"
+                .to_string(),
+            details: vec![],
+        }),
+        (false, true, _, _) => Err(CompileError {
+            message: "Graph mode requires BOTH collect_facts and analyze_graph -- one is missing".to_string(),
+            details: vec![],
+        }),
+        (false, false, _, _) => Err(CompileError {
+            message: "Evaluator must define either fn evaluate_node(...) (legacy mode) or both \
+                      fn collect_facts(...) and fn analyze_graph(...) (graph mode)"
+                .to_string(),
+            details: vec![],
+        }),
+    }
+}
+
+/// Returns true only if `source` contains an actual `fn evaluate_node` function
+/// definition at the top level — not just the text in a comment or string literal.
+fn has_evaluate_node_fn(source: &str) -> bool {
+    has_top_level_fn(source, "evaluate_node")
 }
 
 fn sha256_hex(input: &str) -> String {
@@ -901,6 +962,40 @@ fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> {
         let result = compile_evaluator(user_code, dir.path())
             .expect("compile must succeed despite the seeded stale-ABI metadata");
         assert!(!result.cached, "an abi_version field mismatch must force a MISS even at a matching filename");
+    }
+
+    // --- AC8: synchronous evaluator-mode classification ---
+
+    /// AC8: "A scan provides evaluate_node OR graph mode — validated
+    /// synchronously before job submission, not discovered at runtime."
+    /// ADR-001: "A graph evaluator must not export evaluate_node; a
+    /// legacy evaluator must not be treated as graph mode. The loader
+    /// rejects a mixed or incomplete callback family." Six cases:
+    /// legacy-only (Ok), graph-complete (Ok), both families mixed (Err),
+    /// collect_facts-without-analyze_graph (Err), analyze_graph-without-
+    /// collect_facts (Err), and neither present (Err).
+    #[test]
+    fn detect_evaluator_mode_classifies_legacy_graph_and_rejects_missing_or_mixed_families() {
+        let legacy = "fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> { Vec::new() }";
+        assert_eq!(detect_evaluator_mode(legacy).unwrap(), EvaluatorMode::Legacy);
+
+        let graph = r#"
+fn collect_facts(node: &OwnedNode, file: &str, index: &LocalIndex) -> Vec<UserFact> { Vec::new() }
+fn analyze_graph(g: &CodeGraph, facts: &FactIndex) -> GraphResult { GraphResult::default() }
+"#;
+        assert_eq!(detect_evaluator_mode(graph).unwrap(), EvaluatorMode::Graph);
+
+        let mixed = format!("{legacy}\n{graph}");
+        assert!(detect_evaluator_mode(&mixed).is_err(), "mixed legacy+graph families must be rejected");
+
+        let collect_only = "fn collect_facts(node: &OwnedNode, file: &str, index: &LocalIndex) -> Vec<UserFact> { Vec::new() }";
+        assert!(detect_evaluator_mode(collect_only).is_err(), "collect_facts without analyze_graph must be rejected");
+
+        let analyze_only = "fn analyze_graph(g: &CodeGraph, facts: &FactIndex) -> GraphResult { GraphResult::default() }";
+        assert!(detect_evaluator_mode(analyze_only).is_err(), "analyze_graph without collect_facts must be rejected");
+
+        let neither = "fn helper() -> i32 { 42 }";
+        assert!(detect_evaluator_mode(neither).is_err(), "an evaluator with no recognized callback family must be rejected");
     }
 
     #[test]

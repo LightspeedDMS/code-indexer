@@ -26,3 +26,4 @@ pub mod fused;
 pub mod fused_cache;
 pub mod bind;
 pub mod budget;
+pub mod analyze;

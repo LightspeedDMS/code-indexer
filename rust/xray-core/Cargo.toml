@@ -33,6 +33,20 @@ tree-sitter-sequel-tsql = "0.4.2"
 tree-sitter-c = "0.24.2"
 tree-sitter-cpp = "0.23.4"
 tempfile = "3"
+# Story #1787 S2 AC7: mmap-based --graph-in handoff to the killable analyze
+# child process. Safe wrapper over mmap(2)/munmap(2) -- avoids hand-rolled
+# unsafe syscall plumbing for the file-backed read side.
+memmap2 = "0.9"
+# Story #1787 S2 AC7: process-group SIGKILL (killpg) for the analyze child --
+# std::process::Child::kill() only signals the single pid, not its group, so
+# a hung analyze child (or anything it spawned) needs libc::kill(-pgid, ...).
+libc = "0.2"
+# Story #1787 S2 AC7: JSON protocol between the analyze child process and
+# its parent (AnalyzeStatus + GraphResult over stdout) -- reuses the same
+# serde/serde_json xray-cli already depends on rather than hand-rolling a
+# second ad hoc encoder.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 
 [features]
 # Bug #1791: exposes the `#[cfg(any(test, feature = "test-support"))]`
