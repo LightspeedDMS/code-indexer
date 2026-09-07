@@ -262,6 +262,73 @@ fn apply_import_context_narrowing(candidates: &mut Vec<(DeclInfo, u16)>) {
     *candidates = reachable.into_iter().map(|i| candidates[i].clone()).collect();
 }
 
+/// AC1 (Story #1806, S2b -- FINDING 3's missing narrowing): tags/narrows
+/// candidates whose `enclosing_type` matches the resolved RECEIVER type
+/// (`receiver_type`, computed by the caller via
+/// `super::receiver::resolve_receiver_type` from the call's own
+/// `ReceiverExpr`) or one of that type's transitive supertypes -- e.g.
+/// `obj.doSomething()` where `obj`'s declared type is `Foo` narrows to
+/// declarations of `doSomething` on `Foo` or an ancestor of `Foo`. `None`
+/// means the receiver's type could not be resolved (unknown variable,
+/// unsupported receiver shape, ambiguous chained return type) -- never a
+/// guessed narrowing. Same "narrow only if safe" pattern as every other
+/// pass here.
+fn apply_receiver_type_narrowing(candidates: &mut Vec<(DeclInfo, u16)>, receiver_type: Option<&str>, type_index: &super::families::TypeIndex) {
+    let Some(receiver_type) = receiver_type else { return };
+    let mut allowed = type_index.supertypes_of(receiver_type);
+    allowed.insert(receiver_type.to_string());
+    let matching: Vec<usize> = candidates
+        .iter()
+        .enumerate()
+        .filter(|(_, (d, _))| d.enclosing_type.as_deref().is_some_and(|t| allowed.contains(t)))
+        .map(|(i, _)| i)
+        .collect();
+    if matching.is_empty() {
+        return;
+    }
+    for &i in &matching {
+        candidates[i].1 |= reasons::RECEIVER_TYPE_MATCH;
+    }
+    if matching.len() < candidates.len() {
+        *candidates = matching.into_iter().map(|i| candidates[i].clone()).collect();
+    }
+}
+
+/// AC3 (Story #1806, S2b): "unqualified calls resolve against the
+/// enclosing class and its supertypes first". `same_class_context` is
+/// `Some(enclosing_type)` ONLY when the caller (`super::resolve_site`)
+/// determined this reference is an unqualified/`this`/`super` call whose
+/// enclosing type is known -- `None` for a qualified call (a receiver-type
+/// match is a DIFFERENT evidence path, AC1) or a reference kind AC3 does
+/// not apply to (type references/constructions have no "calling class").
+/// Follows the same "narrow only if safe" pattern as every other
+/// narrowing pass here: never empties the set, never no-ops onto the same
+/// set already there.
+fn apply_same_class_or_super_narrowing(
+    candidates: &mut Vec<(DeclInfo, u16)>,
+    same_class_context: Option<&str>,
+    type_index: &super::families::TypeIndex,
+) {
+    let Some(enclosing_type) = same_class_context else { return };
+    let mut allowed = type_index.supertypes_of(enclosing_type);
+    allowed.insert(enclosing_type.to_string());
+    let matching: Vec<usize> = candidates
+        .iter()
+        .enumerate()
+        .filter(|(_, (d, _))| d.enclosing_type.as_deref().is_some_and(|t| allowed.contains(t)))
+        .map(|(i, _)| i)
+        .collect();
+    if matching.is_empty() {
+        return;
+    }
+    for &i in &matching {
+        candidates[i].1 |= reasons::SAME_CLASS_OR_SUPER;
+    }
+    if matching.len() < candidates.len() {
+        *candidates = matching.into_iter().map(|i| candidates[i].clone()).collect();
+    }
+}
+
 /// Resolves ONE reference (bare `name`, of kind `ref_kind`) into its
 /// candidate set. Always a `Vec`: empty means unresolved/out-of-repo,
 /// length 1 can mean either "genuinely only one declaration anywhere with
@@ -291,6 +358,8 @@ pub(crate) fn resolve_reference(
     arg_shapes: &[crate::graph::extract::local_index::ArgShape],
     name_index: &RepoNameIndex,
     type_index: &super::families::TypeIndex,
+    receiver_type: Option<&str>,
+    same_class_context: Option<&str>,
     index_is_complete: bool,
 ) -> Vec<(DeclInfo, u16)> {
     let pool = name_index.lookup(name, target_kind_for_ref(ref_kind));
@@ -309,6 +378,8 @@ pub(crate) fn resolve_reference(
     apply_arity_narrowing(&mut with_reasons, arg_count);
     apply_overload_shape_narrowing(&mut with_reasons, arg_shapes);
     apply_import_context_narrowing(&mut with_reasons);
+    apply_receiver_type_narrowing(&mut with_reasons, receiver_type, type_index);
+    apply_same_class_or_super_narrowing(&mut with_reasons, same_class_context, type_index);
     apply_inheritance_family_expansion(&mut with_reasons, ref_kind, &full_pool, type_index);
     with_reasons
 }
@@ -436,7 +507,7 @@ mod tests {
         let scope = FileScope { package: None, imports: Vec::new() };
 
         let candidates =
-            resolve_reference("neverDeclared", REF_KIND_INVOCATION, 1, &scope, None, &[], &name_index, &super::super::families::TypeIndex::build(&[]), true);
+            resolve_reference("neverDeclared", REF_KIND_INVOCATION, 1, &scope, None, &[], &name_index, &super::super::families::TypeIndex::build(&[]), None, None, true);
         assert!(candidates.is_empty());
     }
 
@@ -453,7 +524,7 @@ mod tests {
         let name_index = RepoNameIndex::build(&[file(10, "java", file_a), file(11, "java", file_b)]);
         let scope = FileScope { package: None, imports: Vec::new() };
 
-        let candidates = resolve_reference("getId", REF_KIND_INVOCATION, 1, &scope, None, &[], &name_index, &super::super::families::TypeIndex::build(&[]), true);
+        let candidates = resolve_reference("getId", REF_KIND_INVOCATION, 1, &scope, None, &[], &name_index, &super::super::families::TypeIndex::build(&[]), None, None, true);
         assert_eq!(candidates.len(), 2);
     }
 
@@ -468,10 +539,10 @@ mod tests {
         let name_index = RepoNameIndex::build(&[file(10, "java", file_a), file(11, "java", file_b)]);
         let scope = FileScope { package: None, imports: Vec::new() };
 
-        let level0 = resolve_reference("run", REF_KIND_INVOCATION, 1, &scope, None, &[], &name_index, &super::super::families::TypeIndex::build(&[]), true);
+        let level0 = resolve_reference("run", REF_KIND_INVOCATION, 1, &scope, None, &[], &name_index, &super::super::families::TypeIndex::build(&[]), None, None, true);
         assert_eq!(level0.len(), 2, "level 0 (no arity known) keeps both");
 
-        let narrowed = resolve_reference("run", REF_KIND_INVOCATION, 1, &scope, Some(2), &[], &name_index, &super::super::families::TypeIndex::build(&[]), true);
+        let narrowed = resolve_reference("run", REF_KIND_INVOCATION, 1, &scope, Some(2), &[], &name_index, &super::super::families::TypeIndex::build(&[]), None, None, true);
         assert_eq!(narrowed.len(), 1);
         assert_eq!(narrowed[0].0.file_id, 11);
         assert_ne!(narrowed[0].1 & reasons::ARITY_MATCH, 0);
@@ -512,7 +583,7 @@ mod tests {
         let name_index = RepoNameIndex::build(&[file(10, "java", file_a), file(11, "java", file_b)]);
         let scope = FileScope { package: None, imports: Vec::new() };
 
-        let narrowed = resolve_reference("run", REF_KIND_INVOCATION, 1, &scope, Some(5), &[], &name_index, &super::super::families::TypeIndex::build(&[]), true);
+        let narrowed = resolve_reference("run", REF_KIND_INVOCATION, 1, &scope, Some(5), &[], &name_index, &super::super::families::TypeIndex::build(&[]), None, None, true);
         assert_eq!(narrowed.len(), 1, "only the varargs candidate accepts 5 args");
         assert_eq!(narrowed[0].0.file_id, 10);
         assert_ne!(narrowed[0].1 & reasons::ARITY_MATCH, 0);
@@ -537,7 +608,7 @@ mod tests {
 
         let arg_shapes = [ArgShape::Cast("Foo".to_string())];
         let narrowed =
-            resolve_reference("save", REF_KIND_INVOCATION, 1, &scope, Some(1), &arg_shapes, &name_index, &super::super::families::TypeIndex::build(&[]), true);
+            resolve_reference("save", REF_KIND_INVOCATION, 1, &scope, Some(1), &arg_shapes, &name_index, &super::super::families::TypeIndex::build(&[]), None, None, true);
         assert_eq!(narrowed.len(), 1, "the exactly-matching Foo-typed candidate must be preferred");
         assert_eq!(narrowed[0].0.file_id, 10);
         assert_ne!(narrowed[0].1 & reasons::OVERLOAD_ARG_TYPE_MATCH, 0);
@@ -578,7 +649,7 @@ mod tests {
 
         let arg_shapes = [ArgShape::StringLiteral];
         let narrowed =
-            resolve_reference("save", REF_KIND_INVOCATION, 1, &scope, Some(1), &arg_shapes, &name_index, &super::super::families::TypeIndex::build(&[]), true);
+            resolve_reference("save", REF_KIND_INVOCATION, 1, &scope, Some(1), &arg_shapes, &name_index, &super::super::families::TypeIndex::build(&[]), None, None, true);
         assert_eq!(narrowed.len(), 1, "the int-typed candidate must be excluded by a String literal argument");
         assert_eq!(narrowed[0].0.file_id, 10);
         assert_ne!(narrowed[0].1 & reasons::OVERLOAD_ARG_TYPE_MATCH, 0);
@@ -606,7 +677,7 @@ mod tests {
 
         let scope_no_import = FileScope { package: Some("pkg.ref".to_string()), imports: Vec::new() };
         let arity_only =
-            resolve_reference("run", REF_KIND_INVOCATION, 1, &scope_no_import, Some(0), &[], &name_index, &super::super::families::TypeIndex::build(&[]), true);
+            resolve_reference("run", REF_KIND_INVOCATION, 1, &scope_no_import, Some(0), &[], &name_index, &super::super::families::TypeIndex::build(&[]), None, None, true);
         assert_eq!(arity_only.len(), 3, "arity alone cannot narrow when every candidate matches");
 
         let scope_with_import = FileScope {
@@ -618,9 +689,117 @@ mod tests {
             }],
         };
         let narrowed =
-            resolve_reference("run", REF_KIND_INVOCATION, 1, &scope_with_import, Some(0), &[], &name_index, &super::super::families::TypeIndex::build(&[]), true);
+            resolve_reference("run", REF_KIND_INVOCATION, 1, &scope_with_import, Some(0), &[], &name_index, &super::super::families::TypeIndex::build(&[]), None, None, true);
         assert_eq!(narrowed.len(), 1);
         assert_eq!(narrowed[0].0.file_id, 11);
+    }
+
+    /// AC3 (Story #1806, S2b): a bare call from `Sub` (which `extends
+    /// Base`) to `helper()` must narrow to `Base.helper` -- reachable via
+    /// the caller's own supertype chain -- excluding an unrelated
+    /// `Other.helper` that shares only the name, with zero relation to
+    /// `Sub`'s type hierarchy. Neither candidate carries any import/
+    /// package/arity evidence, so `SAME_CLASS_OR_SUPER` must be the ONLY
+    /// thing doing the narrowing here.
+    #[test]
+    fn same_class_or_super_narrows_an_unqualified_call_to_the_callers_own_type_hierarchy() {
+        use crate::graph::confidence::Confidence;
+        use crate::graph::extract::local_index::{InheritanceKind, InheritanceRecord, MethodOwnerRecord};
+
+        let mut base_file = LocalIndex::new();
+        base_file.declarations.push(method_decl("helper", 20, 0, Some(0)));
+        base_file
+            .method_owners
+            .push(MethodOwnerRecord { method_symbol: make_symbol_id(20, 0), enclosing_type: "Base".to_string() });
+        base_file.inheritance.push(InheritanceRecord {
+            kind: InheritanceKind::Extends,
+            subtype_name: "Sub".to_string(),
+            supertype_name: "Base".to_string(),
+            line: 1,
+        });
+
+        let mut other_file = LocalIndex::new();
+        other_file.declarations.push(method_decl("helper", 21, 0, Some(0)));
+        other_file
+            .method_owners
+            .push(MethodOwnerRecord { method_symbol: make_symbol_id(21, 0), enclosing_type: "Other".to_string() });
+
+        let files = vec![file(20, "java", base_file), file(21, "java", other_file)];
+        let name_index = RepoNameIndex::build(&files);
+        let type_index = super::super::families::TypeIndex::build(&files);
+        let scope = FileScope { package: None, imports: Vec::new() };
+
+        let candidates = resolve_reference(
+            "helper",
+            REF_KIND_INVOCATION,
+            1,
+            &scope,
+            Some(0),
+            &[],
+            &name_index,
+            &type_index,
+            None,
+            Some("Sub"),
+            true,
+        );
+        assert_eq!(candidates.len(), 1, "Other.helper must be excluded -- it has no relation to Sub's hierarchy");
+        assert_eq!(candidates[0].0.file_id, 20);
+        assert_ne!(candidates[0].1 & reasons::SAME_CLASS_OR_SUPER, 0);
+        assert_eq!(Confidence::derive(candidates[0].1), Confidence::SameClassOrSuper);
+    }
+
+    /// AC1 (Story #1806, S2b -- FINDING 3's missing narrowing): a
+    /// qualified call's receiver was resolved (by the caller, via
+    /// `super::receiver::resolve_receiver_type`) to declared type `"Foo"`,
+    /// which `extends Base` -- narrows to `Base.doSomething` (declared on
+    /// a SUPERTYPE of the receiver's declared type, not just an
+    /// exact-type match), excluding an unrelated `Other.doSomething` that
+    /// shares only the name.
+    #[test]
+    fn receiver_type_match_narrows_a_qualified_call_to_the_receivers_declared_type() {
+        use crate::graph::confidence::Confidence;
+        use crate::graph::extract::local_index::{InheritanceKind, InheritanceRecord, MethodOwnerRecord};
+
+        let mut base_file = LocalIndex::new();
+        base_file.declarations.push(method_decl("doSomething", 30, 0, Some(0)));
+        base_file
+            .method_owners
+            .push(MethodOwnerRecord { method_symbol: make_symbol_id(30, 0), enclosing_type: "Base".to_string() });
+        base_file.inheritance.push(InheritanceRecord {
+            kind: InheritanceKind::Extends,
+            subtype_name: "Foo".to_string(),
+            supertype_name: "Base".to_string(),
+            line: 1,
+        });
+
+        let mut other_file = LocalIndex::new();
+        other_file.declarations.push(method_decl("doSomething", 31, 0, Some(0)));
+        other_file
+            .method_owners
+            .push(MethodOwnerRecord { method_symbol: make_symbol_id(31, 0), enclosing_type: "Other".to_string() });
+
+        let files = vec![file(30, "java", base_file), file(31, "java", other_file)];
+        let name_index = RepoNameIndex::build(&files);
+        let type_index = super::super::families::TypeIndex::build(&files);
+        let scope = FileScope { package: None, imports: Vec::new() };
+
+        let candidates = resolve_reference(
+            "doSomething",
+            REF_KIND_INVOCATION,
+            1,
+            &scope,
+            Some(0),
+            &[],
+            &name_index,
+            &type_index,
+            Some("Foo"),
+            None,
+            true,
+        );
+        assert_eq!(candidates.len(), 1, "Other.doSomething must be excluded -- it has no relation to Foo's hierarchy");
+        assert_eq!(candidates[0].0.file_id, 30, "Base.doSomething must be reachable via Foo's supertype chain");
+        assert_ne!(candidates[0].1 & reasons::RECEIVER_TYPE_MATCH, 0);
+        assert_eq!(Confidence::derive(candidates[0].1), Confidence::ReceiverType);
     }
 
     /// AC1 (Story #1793, S4): THE central discriminating case named in
@@ -665,7 +844,7 @@ mod tests {
         let scope = FileScope { package: Some("pkg.a".to_string()), imports: Vec::new() };
 
         let candidates =
-            resolve_reference("save", REF_KIND_INVOCATION, 1, &scope, Some(0), &[], &name_index, &type_index, true);
+            resolve_reference("save", REF_KIND_INVOCATION, 1, &scope, Some(0), &[], &name_index, &type_index, None, None, true);
         assert_eq!(
             candidates.len(),
             2,
@@ -724,7 +903,7 @@ mod tests {
         let name_index = RepoNameIndex::build(files);
         let type_index = super::super::families::TypeIndex::build(files);
         let scope = FileScope { package: Some("pkg.a".to_string()), imports: Vec::new() };
-        resolve_reference("save", REF_KIND_INVOCATION, 1, &scope, Some(0), &[], &name_index, &type_index, true)
+        resolve_reference("save", REF_KIND_INVOCATION, 1, &scope, Some(0), &[], &name_index, &type_index, None, None, true)
     }
 
     /// Memory-safety amendment (real 21.8GB-RSS incident on Elasticsearch,
@@ -823,7 +1002,7 @@ mod tests {
         let scope = FileScope { package: None, imports: Vec::new() };
 
         let candidates =
-            resolve_reference("uniqueMethod", REF_KIND_INVOCATION, 1, &scope, None, &[], &name_index, &super::super::families::TypeIndex::build(&[]), true);
+            resolve_reference("uniqueMethod", REF_KIND_INVOCATION, 1, &scope, None, &[], &name_index, &super::super::families::TypeIndex::build(&[]), None, None, true);
         assert_eq!(candidates.len(), 1);
         let reasons_bits = candidates[0].1;
         assert_ne!(reasons_bits & reasons::UNIQUE_NAME_IN_REPO, 0);
@@ -848,7 +1027,7 @@ mod tests {
         let scope = FileScope { package: None, imports: Vec::new() };
 
         let candidates =
-            resolve_reference("uniqueMethod", REF_KIND_INVOCATION, 1, &scope, None, &[], &name_index, &super::super::families::TypeIndex::build(&[]), false);
+            resolve_reference("uniqueMethod", REF_KIND_INVOCATION, 1, &scope, None, &[], &name_index, &super::super::families::TypeIndex::build(&[]), None, None, false);
         assert_eq!(candidates.len(), 1, "the sole indexed declaration is still a candidate -- never dropped");
         let reasons_bits = candidates[0].1;
         assert_eq!(

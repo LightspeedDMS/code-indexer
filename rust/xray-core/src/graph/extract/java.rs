@@ -16,7 +16,8 @@
 
 use super::local_index::{
     AnnotationRecord, ArgShape, ConstructionSite, Declaration, DeclarationKind, ImportKind, ImportRecord,
-    InheritanceKind, InheritanceRecord, InvocationSite, LocalIndex, MethodOwnerRecord, TypeReferenceRecord,
+    InheritanceKind, InheritanceRecord, InvocationSite, LocalIndex, MethodOwnerRecord, MethodReturnTypeRecord,
+    NameScope, TypeReferenceRecord, TypedNameRecord,
 };
 use super::LanguageExtractor;
 use crate::graph::identity::{make_symbol_id, SymbolId};
@@ -24,53 +25,69 @@ use crate::owned_node::OwnedNode;
 
 pub struct JavaExtractor;
 
-/// AC1 (Story #1793, S4): the bare name of a node's CURRENT immediately
-/// enclosing type (`None` outside any type), threaded through `extract`'s
-/// stack walk. `Rc<str>` rather than `String`: cloned on every child push,
-/// and an `Rc` clone is a refcount bump, never a fresh heap allocation.
-type TypeContext = Option<std::rc::Rc<str>>;
+/// AC1/AC2/AC3 (Story #1806, S2b): per-node resolution context threaded
+/// through `extract`'s stack walk -- extends the pre-existing
+/// `enclosing_type` (Story #1793, S4) with `enclosing_method`, the symbol
+/// of the CURRENT immediately enclosing method (`None` outside any method
+/// body, e.g. a field initializer). `Rc<str>` for `enclosing_type`:
+/// cloned on every child push, and an `Rc` clone is a refcount bump, never
+/// a fresh heap allocation; `enclosing_method` is `Copy` (`SymbolId` is a
+/// plain `u64`), so cloning `WalkContext` itself stays cheap.
+#[derive(Clone)]
+struct WalkContext {
+    enclosing_type: Option<std::rc::Rc<str>>,
+    enclosing_method: Option<SymbolId>,
+}
+
+impl WalkContext {
+    fn root() -> Self {
+        WalkContext { enclosing_type: None, enclosing_method: None }
+    }
+}
 
 /// Dispatches ONE node to its extraction function (if any) and returns the
 /// context its CHILDREN should see. A type declaration establishes a NEW
-/// context (its own bare name) for its own children; every other node
-/// kind simply inherits `enclosing_type` unchanged. This is why a nested
-/// class's methods are attributed to the INNER type: the inner
-/// `class_declaration` node overwrites the context before its own
-/// children (including its methods) are pushed. Split out of `extract`
-/// to keep that function under the per-function line budget.
-fn dispatch_node(
-    node: &OwnedNode,
-    file_id: u32,
-    next_local: &mut u32,
-    enclosing_type: TypeContext,
-    index: &mut LocalIndex,
-) -> TypeContext {
+/// context (its own bare name, AND resets `enclosing_method` to `None` --
+/// a nested type's own methods start their own method context) for its
+/// own children; a method/constructor declaration keeps `enclosing_type`
+/// but sets `enclosing_method` to ITS OWN symbol; every other node kind
+/// simply inherits the context unchanged. This is why a nested class's
+/// methods are attributed to the INNER type: the inner `class_declaration`
+/// node overwrites the context before its own children (including its
+/// methods) are pushed. Split out of `extract` to keep that function
+/// under the per-function line budget.
+fn dispatch_node(node: &OwnedNode, file_id: u32, next_local: &mut u32, ctx: WalkContext, index: &mut LocalIndex) -> WalkContext {
     match node.kind.as_str() {
         "class_declaration" | "interface_declaration" | "enum_declaration" | "record_declaration" => {
             extract_type_declaration(node, file_id, next_local, index);
-            node.child_by_kind("identifier").map(|n| std::rc::Rc::from(n.text()))
+            let enclosing_type = node.child_by_kind("identifier").map(|n| std::rc::Rc::from(n.text()));
+            WalkContext { enclosing_type, enclosing_method: None }
         }
         "method_declaration" | "constructor_declaration" => {
-            extract_method_declaration(node, file_id, next_local, enclosing_type.as_deref(), index);
-            enclosing_type
+            let symbol = extract_method_declaration(node, file_id, next_local, ctx.enclosing_type.as_deref(), index);
+            WalkContext { enclosing_type: ctx.enclosing_type.clone(), enclosing_method: Some(symbol) }
         }
         "field_declaration" => {
-            extract_field_declaration(node, file_id, next_local, index);
-            enclosing_type
+            extract_field_declaration(node, file_id, next_local, ctx.enclosing_type.as_deref(), index);
+            ctx
+        }
+        "local_variable_declaration" => {
+            index.typed_names.extend(super::java_receiver::local_variable_typed_names(node, ctx.enclosing_method));
+            ctx
         }
         "method_invocation" => {
-            extract_invocation(node, index);
-            enclosing_type
+            extract_invocation(node, ctx.enclosing_type.as_deref(), ctx.enclosing_method, index);
+            ctx
         }
         "object_creation_expression" => {
             extract_construction(node, index);
-            enclosing_type
+            ctx
         }
         "type_identifier" => {
             extract_type_reference(node, index);
-            enclosing_type
+            ctx
         }
-        _ => enclosing_type,
+        _ => ctx,
     }
 }
 
@@ -82,14 +99,14 @@ impl LanguageExtractor for JavaExtractor {
         extract_package(root, file_id, &mut next_local, &mut index);
         extract_imports(root, &mut index);
 
-        let mut stack: Vec<(&OwnedNode, TypeContext)> = vec![(root, None)];
+        let mut stack: Vec<(&OwnedNode, WalkContext)> = vec![(root, WalkContext::root())];
         // Bounded: each iteration pops one node from `stack` and pushes its
         // (finite) children; total pushes across the walk equal the tree's
         // finite node count -- the same bound `OwnedNode`'s own traversals
         // use (see owned_node.rs). This is the ONLY traversal of the tree
         // besides the two direct (non-recursive) top-level lookups above.
-        while let Some((node, enclosing_type)) = stack.pop() {
-            let child_context = dispatch_node(node, file_id, &mut next_local, enclosing_type, &mut index);
+        while let Some((node, ctx)) = stack.pop() {
+            let child_context = dispatch_node(node, file_id, &mut next_local, ctx, &mut index);
             stack.extend(node.children.iter().map(|c| (c, child_context.clone())));
         }
 
@@ -290,7 +307,7 @@ fn extract_annotations_from_modifiers(node: &OwnedNode, target_name: &str, index
 /// children, but here `type_node` has already been located by the caller
 /// (it may itself be a primitive/array-type node, which has no children
 /// to search and is returned verbatim via `.text()`).
-fn base_name_of_type_node(type_node: &OwnedNode) -> String {
+pub(super) fn base_name_of_type_node(type_node: &OwnedNode) -> String {
     if type_node.kind == "generic_type" {
         type_node.child_by_kind("type_identifier").map(|t| t.text().to_string()).unwrap_or_else(|| type_node.text().to_string())
     } else {
@@ -306,7 +323,7 @@ fn base_name_of_type_node(type_node: &OwnedNode) -> String {
 /// `@NonNull int x`) is skipped explicitly rather than assumed absent, so
 /// the type is "the first named child that isn't `modifiers`", never a
 /// fixed position.
-fn formal_parameter_type_name(param_node: &OwnedNode) -> Option<String> {
+pub(super) fn formal_parameter_type_name(param_node: &OwnedNode) -> Option<String> {
     let type_node = param_node.named_children().into_iter().find(|c| c.kind != "modifiers")?;
     Some(base_name_of_type_node(type_node))
 }
@@ -331,16 +348,24 @@ fn extract_param_types_and_varargs(formal_parameters: &OwnedNode) -> (Vec<String
     (param_types, is_varargs)
 }
 
+/// AC1/AC2 (Story #1806, S2b): returns the method's own `SymbolId` --
+/// `dispatch_node` threads it into `WalkContext.enclosing_method` for
+/// this method's children (nested invocations, local variable
+/// declarations). The symbol is allocated BEFORE the name lookup so a
+/// malformed/nameless declaration (parse-error recovery) still yields a
+/// valid symbol for its children's context -- no `Declaration` is pushed
+/// for it (never fabricated), but the symbol counter itself stays
+/// deterministic and every child still has SOME enclosing-method handle.
 fn extract_method_declaration(
     node: &OwnedNode,
     file_id: u32,
     next_local: &mut u32,
     enclosing_type: Option<&str>,
     index: &mut LocalIndex,
-) {
-    let Some(name_node) = node.child_by_kind("identifier") else { return };
-    let name = name_node.text().to_string();
+) -> SymbolId {
     let symbol = next_symbol(file_id, next_local);
+    let Some(name_node) = node.child_by_kind("identifier") else { return symbol };
+    let name = name_node.text().to_string();
 
     extract_annotations_from_modifiers(node, &name, index);
 
@@ -371,6 +396,28 @@ fn extract_method_declaration(
                 .method_owners
                 .push(MethodOwnerRecord { method_symbol: symbol, enclosing_type: enclosing_type.to_string() });
         }
+        // AC2 (Story #1806, S2b): constructors have no return type at all
+        // -- this branch is scoped to real methods only, mirroring the
+        // owner-record scoping immediately above.
+        if let Some(return_type) = super::java_receiver::method_return_type_name(node) {
+            index.method_return_types.push(MethodReturnTypeRecord { method_symbol: symbol, return_type });
+        }
+    }
+    if let Some(formal_parameters) = formal_parameters {
+        push_parameter_typed_names(formal_parameters, symbol, index);
+    }
+
+    symbol
+}
+
+/// AC1 (Story #1806, S2b): pushes one `TypedNameRecord` per parameter in
+/// `formal_parameters`, scoped to `enclosing_method` -- shared by both
+/// `method_declaration` and `constructor_declaration` (constructor
+/// parameters are just as valid a receiver-typing source as a method's).
+fn push_parameter_typed_names(formal_parameters: &OwnedNode, enclosing_method: SymbolId, index: &mut LocalIndex) {
+    for param in formal_parameters.named_children() {
+        let Some((name, declared_type)) = super::java_receiver::parameter_name_and_type(param) else { continue };
+        index.typed_names.push(TypedNameRecord { name, declared_type, scope: NameScope::Local { enclosing_method } });
     }
 }
 
@@ -395,10 +442,12 @@ fn extract_field_declaration(
     node: &OwnedNode,
     file_id: u32,
     next_local: &mut u32,
+    enclosing_type: Option<&str>,
     index: &mut LocalIndex,
 ) {
     let kind = field_declaration_kind(node);
     let keyword = if matches!(kind, DeclarationKind::Constant) { "constant" } else { "field" };
+    index.typed_names.extend(super::java_receiver::field_typed_names(node, enclosing_type));
 
     for declarator in node.children.iter().filter(|c| c.kind == "variable_declarator") {
         let Some(name_node) = declarator.child_by_kind("identifier") else { continue };
@@ -453,9 +502,26 @@ fn arg_shape_for(arg_node: &OwnedNode) -> ArgShape {
     }
 }
 
-fn extract_invocation(node: &OwnedNode, index: &mut LocalIndex) {
-    let Some(callee) = node.named_children().into_iter().filter(|c| c.kind == "identifier").next_back()
-    else {
+/// AC1/AC2 (Story #1806, S2b): `object` is `None` for a bare/unqualified
+/// call -- `ReceiverExpr::None`, never conflated with `super::java_receiver
+/// ::build_receiver_expr`'s OWN `None` result for a nested bare call used
+/// AS a receiver (e.g. `bareCall().foo()`), which is a genuinely different
+/// case handled entirely inside that function.
+fn receiver_expr_for(object: Option<&OwnedNode>) -> crate::graph::extract::local_index::ReceiverExpr {
+    match object {
+        Some(node) => super::java_receiver::build_receiver_expr(node),
+        None => crate::graph::extract::local_index::ReceiverExpr::None,
+    }
+}
+
+fn extract_invocation(
+    node: &OwnedNode,
+    enclosing_type: Option<&str>,
+    enclosing_method: Option<SymbolId>,
+    index: &mut LocalIndex,
+) {
+    let (object, name) = super::java_receiver::invocation_object_and_name(node);
+    let Some(callee) = name else {
         return;
     };
     // Verified real grammar output: `method_invocation`'s call arguments are
@@ -473,6 +539,9 @@ fn extract_invocation(node: &OwnedNode, index: &mut LocalIndex) {
         line: node.start_line,
         arg_count,
         arg_shapes,
+        receiver: receiver_expr_for(object),
+        enclosing_type: enclosing_type.map(|t| t.to_string()),
+        enclosing_method,
     });
 }
 
@@ -594,6 +663,90 @@ mod tests {
         );
         assert!(index.invocations.iter().any(|i| i.callee_name == "doSomething"));
         assert!(index.invocations.iter().any(|i| i.callee_name == "bareCall"));
+    }
+
+    /// AC1 (Story #1806, S2b): end-to-end through the real `JavaExtractor`
+    /// pipeline (not just `java_receiver`'s own isolated unit tests) -- a
+    /// qualified call's `InvocationSite.receiver` is a simple identifier,
+    /// and a bare call's stays `ReceiverExpr::None`.
+    #[test]
+    fn extracts_receiver_expression_on_qualified_invocations() {
+        use crate::graph::extract::local_index::ReceiverExpr;
+
+        let index = extract_source(
+            "class First {\n    void run() {\n        obj.doSomething();\n        bareCall();\n    }\n}\n",
+        );
+        let qualified = index.invocations.iter().find(|i| i.callee_name == "doSomething").unwrap();
+        assert_eq!(qualified.receiver, ReceiverExpr::Identifier("obj".to_string()));
+
+        let bare = index.invocations.iter().find(|i| i.callee_name == "bareCall").unwrap();
+        assert_eq!(bare.receiver, ReceiverExpr::None);
+    }
+
+    /// AC1/AC3 (Story #1806, S2b): a call's `enclosing_type`/
+    /// `enclosing_method` reflect the REAL innermost type/method around
+    /// it -- the discriminating case is a call inside a NESTED class's
+    /// method, which must be attributed to the INNER type, mirroring
+    /// `attributes_methods_to_their_immediately_enclosing_type_including_nested_classes`'s
+    /// own discriminating fixture shape for `method_owners`.
+    #[test]
+    fn extracts_enclosing_type_and_method_on_invocation_sites() {
+        let index = extract_source(
+            "class Outer {\n    void outerMethod() {\n        outerCall();\n    }\n    class Inner {\n        void innerMethod() {\n            innerCall();\n        }\n    }\n}\n",
+        );
+        let outer_call = index.invocations.iter().find(|i| i.callee_name == "outerCall").unwrap();
+        assert_eq!(outer_call.enclosing_type.as_deref(), Some("Outer"));
+        let outer_method = index.declaration_named("outerMethod").unwrap();
+        assert_eq!(outer_call.enclosing_method, Some(outer_method.symbol));
+
+        let inner_call = index.invocations.iter().find(|i| i.callee_name == "innerCall").unwrap();
+        assert_eq!(
+            inner_call.enclosing_type.as_deref(),
+            Some("Inner"),
+            "a call inside a nested class's method must be attributed to the INNER type"
+        );
+        let inner_method = index.declaration_named("innerMethod").unwrap();
+        assert_eq!(inner_call.enclosing_method, Some(inner_method.symbol));
+    }
+
+    /// AC2 (Story #1806, S2b): a real method declaration's return type
+    /// and its parameters' declared types are captured end-to-end,
+    /// scoped to the method's own symbol.
+    #[test]
+    fn extracts_method_return_type_and_parameter_typed_names() {
+        use crate::graph::extract::local_index::NameScope;
+
+        let index = extract_source("class First {\n    Foo save(String s) { return null; }\n}\n");
+        let method = index.declaration_named("save").unwrap();
+
+        let return_type = index.method_return_types.iter().find(|r| r.method_symbol == method.symbol).unwrap();
+        assert_eq!(return_type.return_type, "Foo");
+
+        let param = index.typed_names.iter().find(|t| t.name == "s").unwrap();
+        assert_eq!(param.declared_type, "String");
+        assert_eq!(param.scope, NameScope::Local { enclosing_method: method.symbol });
+    }
+
+    /// AC1 (Story #1806, S2b): a FIELD's declared type is scoped to its
+    /// enclosing TYPE, and a LOCAL VARIABLE's is scoped to its enclosing
+    /// METHOD -- both captured end-to-end through the real `JavaExtractor`
+    /// pipeline.
+    #[test]
+    fn extracts_field_and_local_variable_typed_names() {
+        use crate::graph::extract::local_index::NameScope;
+
+        let index = extract_source(
+            "class First {\n    private Foo field1;\n    void run() {\n        Bar local = null;\n    }\n}\n",
+        );
+
+        let field = index.typed_names.iter().find(|t| t.name == "field1").unwrap();
+        assert_eq!(field.declared_type, "Foo");
+        assert_eq!(field.scope, NameScope::Field { enclosing_type: "First".to_string() });
+
+        let run_method = index.declaration_named("run").unwrap();
+        let local = index.typed_names.iter().find(|t| t.name == "local").unwrap();
+        assert_eq!(local.declared_type, "Bar");
+        assert_eq!(local.scope, NameScope::Local { enclosing_method: run_method.symbol });
     }
 
     #[test]

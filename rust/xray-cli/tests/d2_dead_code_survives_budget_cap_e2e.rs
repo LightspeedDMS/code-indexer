@@ -65,6 +65,9 @@ fn build_capped_graph_and_dead_symbol() -> (CodeGraph, u32) {
         line: 10,
         arg_count: None,
         arg_shapes: Vec::new(),
+        receiver: xray_core::graph::extract::local_index::ReceiverExpr::None,
+        enclosing_type: None,
+        enclosing_method: None,
     });
     files.push(FileForBind { file_id: 4, language: "java".to_string(), index: caller });
     let run_symbols: Vec<u64> = (1u32..=3).map(|f| make_symbol_id(f, 0)).collect();

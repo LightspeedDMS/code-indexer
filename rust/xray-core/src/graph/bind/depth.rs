@@ -46,6 +46,14 @@ pub const LEVEL_4_OVERLOAD_DISCRIMINATION: u8 = 1 << 4;
 /// diffing this file against AC4 never has to mentally remap a compacted
 /// range back onto the story's own numbering.
 pub const LEVEL_5_UNIQUE_NAME: u8 = 1 << 5;
+/// Level 6 (Story #1806, S2b, AC1/AC5): receiver-type resolution --
+/// `reasons::RECEIVER_TYPE_MATCH` evidence was attached to at least one
+/// candidate for this language.
+pub const LEVEL_6_RECEIVER_TYPE: u8 = 1 << 6;
+/// Level 7 (Story #1806, S2b, AC3/AC5): same-class-or-super resolution --
+/// `reasons::SAME_CLASS_OR_SUPER` evidence was attached to at least one
+/// candidate for this language.
+pub const LEVEL_7_SAME_CLASS_OR_SUPER: u8 = 1 << 7;
 
 /// Per-language narrowing-depth report. One instance per DISTINCT language
 /// seen across a `bind()` call's input files -- see `super::bind` for how
@@ -149,6 +157,36 @@ mod tests {
         assert!(!depth.reached(LEVEL_0_BARE_NAME));
         assert!(!depth.reached(LEVEL_1_ARITY));
         assert!(!depth.reached(LEVEL_2_IMPORT_CONTEXT));
+        assert!(!depth.reached(LEVEL_5_UNIQUE_NAME));
+    }
+
+    /// AC1/AC3/AC5 (Story #1806, S2b): levels 6-7 occupy the next bits
+    /// after the pre-existing 0-5, and mark independently of EVERY other
+    /// level (0-5 and each other).
+    #[test]
+    fn levels_6_and_7_occupy_the_next_bits_and_mark_independently() {
+        assert_eq!(LEVEL_6_RECEIVER_TYPE, 1 << 6);
+        assert_eq!(LEVEL_7_SAME_CLASS_OR_SUPER, 1 << 7);
+
+        let mut depth = BinderDepth::new("java");
+        depth.mark(LEVEL_6_RECEIVER_TYPE);
+        assert!(depth.reached(LEVEL_6_RECEIVER_TYPE));
+        assert!(!depth.reached(LEVEL_0_BARE_NAME));
+        assert!(!depth.reached(LEVEL_1_ARITY));
+        assert!(!depth.reached(LEVEL_2_IMPORT_CONTEXT));
+        assert!(!depth.reached(LEVEL_3_INHERITANCE_FAMILY));
+        assert!(!depth.reached(LEVEL_4_OVERLOAD_DISCRIMINATION));
+        assert!(!depth.reached(LEVEL_5_UNIQUE_NAME));
+        assert!(!depth.reached(LEVEL_7_SAME_CLASS_OR_SUPER));
+
+        depth.mark(LEVEL_7_SAME_CLASS_OR_SUPER);
+        assert!(depth.reached(LEVEL_7_SAME_CLASS_OR_SUPER));
+        assert!(depth.reached(LEVEL_6_RECEIVER_TYPE), "marking level 7 must not clear level 6");
+        assert!(!depth.reached(LEVEL_0_BARE_NAME));
+        assert!(!depth.reached(LEVEL_1_ARITY));
+        assert!(!depth.reached(LEVEL_2_IMPORT_CONTEXT));
+        assert!(!depth.reached(LEVEL_3_INHERITANCE_FAMILY));
+        assert!(!depth.reached(LEVEL_4_OVERLOAD_DISCRIMINATION));
         assert!(!depth.reached(LEVEL_5_UNIQUE_NAME));
     }
 }

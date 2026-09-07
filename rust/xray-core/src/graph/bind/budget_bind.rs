@@ -118,7 +118,15 @@ mod tests {
     }
 
     fn invocation(name: &str, arg_count: Option<usize>) -> InvocationSite {
-        InvocationSite { callee_name: name.to_string(), line: 10, arg_count, arg_shapes: Vec::new() }
+        InvocationSite {
+            callee_name: name.to_string(),
+            line: 10,
+            arg_count,
+            arg_shapes: Vec::new(),
+            receiver: crate::graph::extract::local_index::ReceiverExpr::None,
+            enclosing_type: None,
+            enclosing_method: None,
+        }
     }
 
     fn file(file_id: u32, language: &str, index: LocalIndex) -> FileForBind {

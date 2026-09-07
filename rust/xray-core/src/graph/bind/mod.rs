@@ -27,6 +27,7 @@ mod admission;
 mod budget_bind;
 mod families;
 mod name_index;
+mod receiver;
 mod resolve;
 mod scope;
 
@@ -39,7 +40,7 @@ use crate::graph::identity::SymbolId;
 use crate::graph::reasons;
 use depth::{
     BinderDepth, LEVEL_1_ARITY, LEVEL_2_IMPORT_CONTEXT, LEVEL_3_INHERITANCE_FAMILY,
-    LEVEL_4_OVERLOAD_DISCRIMINATION, LEVEL_5_UNIQUE_NAME,
+    LEVEL_4_OVERLOAD_DISCRIMINATION, LEVEL_5_UNIQUE_NAME, LEVEL_6_RECEIVER_TYPE, LEVEL_7_SAME_CLASS_OR_SUPER,
 };
 use name_index::{DeclInfo, RepoNameIndex};
 pub(crate) use resolve::enclosing_symbol;
@@ -89,6 +90,8 @@ fn resolve_site(
     arg_shapes: &[crate::graph::extract::local_index::ArgShape],
     name_index: &RepoNameIndex,
     type_index: &families::TypeIndex,
+    receiver_type: Option<&str>,
+    same_class_context: Option<&str>,
     index_is_complete: bool,
 ) -> PendingReference {
     let candidates = resolve_reference(
@@ -100,6 +103,8 @@ fn resolve_site(
         arg_shapes,
         name_index,
         type_index,
+        receiver_type,
+        same_class_context,
         index_is_complete,
     );
     PendingReference {
@@ -137,6 +142,12 @@ fn mark_depth_for_reasons(depth: &mut BinderDepth, reasons_bits: u16) {
     if reasons_bits & reasons::UNIQUE_NAME_IN_REPO != 0 {
         depth.mark(LEVEL_5_UNIQUE_NAME);
     }
+    if reasons_bits & reasons::RECEIVER_TYPE_MATCH != 0 {
+        depth.mark(LEVEL_6_RECEIVER_TYPE);
+    }
+    if reasons_bits & reasons::SAME_CLASS_OR_SUPER != 0 {
+        depth.mark(LEVEL_7_SAME_CLASS_OR_SUPER);
+    }
 }
 
 /// True when any candidate in `candidates` carries
@@ -167,7 +178,52 @@ fn resolve_all_references(
     let mut family_truncated_anywhere = false;
     for file in files {
         let scope = build_file_scope(&file.index);
+        // AC1/AC2 (Story #1806, S2b): the file's declared-type substrate
+        // (locals/fields/params) -- built once per file, mirroring
+        // `scope`'s own per-file construction, since every invocation in
+        // this file's receiver-type resolution reads from it.
+        let typed_names = receiver::FileTypedNames::build(&file.index.typed_names);
         for site in &file.index.invocations {
+            // AC1 (Story #1806, S2b): resolves the call's receiver to a
+            // declared type, if the evidence exists -- `None` (never a
+            // guess) when it doesn't. Deliberately gated to a genuinely
+            // QUALIFIED receiver (`Identifier`/`Chained`): a bare/`this`/
+            // `super` call's receiver ALSO "resolves" to the enclosing
+            // type internally (needed so a chained call whose base is
+            // `this`/`super` can still follow return types correctly),
+            // but that value must never ALSO feed this AC1 evidence bit --
+            // that would make `RECEIVER_TYPE_MATCH` fire redundantly
+            // alongside AC3's `SAME_CLASS_OR_SUPER` on every bare call,
+            // and since `Confidence::derive` checks `RECEIVER_TYPE_MATCH`
+            // first, every bare call would misreport as `ReceiverType`
+            // confidence instead of the correct `SameClassOrSuper` --
+            // muddying AC5's distinct-evidence-path design even though it
+            // would not change which candidates survive (both passes
+            // compute the identical allowed-types set in that case).
+            let receiver_type = match &site.receiver {
+                crate::graph::extract::local_index::ReceiverExpr::Identifier(_)
+                | crate::graph::extract::local_index::ReceiverExpr::Chained { .. } => receiver::resolve_receiver_type(
+                    &site.receiver,
+                    site.enclosing_type.as_deref(),
+                    site.enclosing_method,
+                    &typed_names,
+                    name_index,
+                    type_index,
+                ),
+                crate::graph::extract::local_index::ReceiverExpr::None
+                | crate::graph::extract::local_index::ReceiverExpr::SelfOrSuper
+                | crate::graph::extract::local_index::ReceiverExpr::Other => None,
+            };
+            // AC3 (Story #1806, S2b): "unqualified calls resolve against
+            // the enclosing class and its supertypes first" -- applies
+            // ONLY to a bare/`this`/`super` receiver, never a qualified
+            // call on some OTHER object (that is AC1's receiver-type
+            // path instead, a separate evidence bit).
+            let same_class_context = match &site.receiver {
+                crate::graph::extract::local_index::ReceiverExpr::None
+                | crate::graph::extract::local_index::ReceiverExpr::SelfOrSuper => site.enclosing_type.as_deref(),
+                _ => None,
+            };
             let r = resolve_site(
                 &site.callee_name,
                 REF_KIND_INVOCATION,
@@ -178,6 +234,8 @@ fn resolve_all_references(
                 &site.arg_shapes,
                 name_index,
                 type_index,
+                receiver_type.as_deref(),
+                same_class_context,
                 index_is_complete,
             );
             total_candidates += r.candidates.len();
@@ -195,6 +253,8 @@ fn resolve_all_references(
                 &[],
                 name_index,
                 type_index,
+                None,
+                None,
                 index_is_complete,
             );
             total_candidates += r.candidates.len();
@@ -212,6 +272,8 @@ fn resolve_all_references(
                 &[],
                 name_index,
                 type_index,
+                None,
+                None,
                 index_is_complete,
             );
             total_candidates += r.candidates.len();
@@ -253,7 +315,15 @@ mod tests {
     }
 
     fn invocation(name: &str, arg_count: Option<usize>) -> InvocationSite {
-        InvocationSite { callee_name: name.to_string(), line: 10, arg_count, arg_shapes: Vec::new() }
+        InvocationSite {
+            callee_name: name.to_string(),
+            line: 10,
+            arg_count,
+            arg_shapes: Vec::new(),
+            receiver: crate::graph::extract::local_index::ReceiverExpr::None,
+            enclosing_type: None,
+            enclosing_method: None,
+        }
     }
 
     fn file(file_id: u32, language: &str, index: LocalIndex) -> FileForBind {
@@ -403,6 +473,9 @@ mod tests {
             line: 10,
             arg_count: Some(1),
             arg_shapes: vec![ArgShape::StringLiteral],
+            receiver: crate::graph::extract::local_index::ReceiverExpr::None,
+            enclosing_type: None,
+            enclosing_method: None,
         });
 
         vec![
@@ -434,5 +507,194 @@ mod tests {
             java_depth.reached(LEVEL_4_OVERLOAD_DISCRIMINATION),
             "overload-shape evidence must reach level 4"
         );
+    }
+
+    /// AC3 (Story #1806, S2b): Java's `BinderDepth` must reach the NEW
+    /// level 7 (same-class-or-super resolution) once real evidence is
+    /// produced, exercised end-to-end through the real `bind()` pipeline.
+    #[test]
+    fn binder_depth_reaches_level_7_for_java_via_same_class_or_super_resolution() {
+        use super::depth::LEVEL_7_SAME_CLASS_OR_SUPER;
+        use crate::graph::extract::local_index::{
+            InheritanceKind, InheritanceRecord, MethodOwnerRecord, ReceiverExpr,
+        };
+
+        const BASE_FILE_ID: u32 = 30;
+        const OTHER_FILE_ID: u32 = 31;
+        const CALLER_FILE_ID: u32 = 32;
+
+        let mut base_file = LocalIndex::new();
+        base_file.declarations.push(method_decl("helper", BASE_FILE_ID, 0, Some(0)));
+        base_file.method_owners.push(MethodOwnerRecord {
+            method_symbol: crate::graph::identity::make_symbol_id(BASE_FILE_ID, 0),
+            enclosing_type: "Base".to_string(),
+        });
+        base_file.inheritance.push(InheritanceRecord {
+            kind: InheritanceKind::Extends,
+            subtype_name: "Sub".to_string(),
+            supertype_name: "Base".to_string(),
+            line: 1,
+        });
+
+        let mut other_file = LocalIndex::new();
+        other_file.declarations.push(method_decl("helper", OTHER_FILE_ID, 0, Some(0)));
+        other_file.method_owners.push(MethodOwnerRecord {
+            method_symbol: crate::graph::identity::make_symbol_id(OTHER_FILE_ID, 0),
+            enclosing_type: "Other".to_string(),
+        });
+
+        let mut caller = LocalIndex::new();
+        caller.invocations.push(InvocationSite {
+            callee_name: "helper".to_string(),
+            line: 10,
+            arg_count: Some(0),
+            arg_shapes: Vec::new(),
+            receiver: ReceiverExpr::None,
+            enclosing_type: Some("Sub".to_string()),
+            enclosing_method: None,
+        });
+
+        let graph = bind(vec![
+            file(BASE_FILE_ID, "java", base_file),
+            file(OTHER_FILE_ID, "java", other_file),
+            file(CALLER_FILE_ID, "java", caller),
+        ]);
+
+        let java_depth = graph.binder_depths().iter().find(|d| d.language == "java").unwrap();
+        assert!(
+            java_depth.reached(LEVEL_7_SAME_CLASS_OR_SUPER),
+            "same-class-or-super evidence must reach level 7"
+        );
+    }
+
+    /// AC5 (Story #1806, S2b) regression guard: a bare call's resolved
+    /// candidate must carry `SAME_CLASS_OR_SUPER` but NEVER
+    /// `RECEIVER_TYPE_MATCH` -- the two are distinct evidence PATHS, and
+    /// `Confidence::derive` checks `RECEIVER_TYPE_MATCH` first, so a bare
+    /// call incorrectly carrying both would misreport as `ReceiverType`
+    /// confidence instead of the correct `SameClassOrSuper`.
+    #[test]
+    fn bare_call_marks_only_same_class_or_super_never_receiver_type_match() {
+        use crate::graph::extract::local_index::{InheritanceKind, InheritanceRecord, MethodOwnerRecord, ReceiverExpr};
+        use crate::graph::reasons;
+
+        const BASE_FILE_ID: u32 = 60;
+        const OTHER_FILE_ID: u32 = 61;
+        const CALLER_FILE_ID: u32 = 62;
+
+        let mut base_file = LocalIndex::new();
+        base_file.declarations.push(method_decl("helper", BASE_FILE_ID, 0, Some(0)));
+        base_file.method_owners.push(MethodOwnerRecord {
+            method_symbol: crate::graph::identity::make_symbol_id(BASE_FILE_ID, 0),
+            enclosing_type: "Base".to_string(),
+        });
+        base_file.inheritance.push(InheritanceRecord {
+            kind: InheritanceKind::Extends,
+            subtype_name: "Sub".to_string(),
+            supertype_name: "Base".to_string(),
+            line: 1,
+        });
+
+        let mut other_file = LocalIndex::new();
+        other_file.declarations.push(method_decl("helper", OTHER_FILE_ID, 0, Some(0)));
+        other_file.method_owners.push(MethodOwnerRecord {
+            method_symbol: crate::graph::identity::make_symbol_id(OTHER_FILE_ID, 0),
+            enclosing_type: "Other".to_string(),
+        });
+
+        let mut caller = LocalIndex::new();
+        caller.invocations.push(InvocationSite {
+            callee_name: "helper".to_string(),
+            line: 10,
+            arg_count: Some(0),
+            arg_shapes: Vec::new(),
+            receiver: ReceiverExpr::None,
+            enclosing_type: Some("Sub".to_string()),
+            enclosing_method: None,
+        });
+
+        let graph = bind(vec![
+            file(BASE_FILE_ID, "java", base_file),
+            file(OTHER_FILE_ID, "java", other_file),
+            file(CALLER_FILE_ID, "java", caller),
+        ]);
+
+        let reference = graph
+            .references()
+            .iter()
+            .find(|r| r.kind == REF_KIND_INVOCATION)
+            .expect("the bare call must produce a reference");
+        let candidates = graph.candidates_for(reference);
+        assert_eq!(candidates.len(), 1, "Other.helper must be excluded");
+        let reasons_bits = candidates[0].reasons();
+        assert_ne!(reasons_bits & reasons::SAME_CLASS_OR_SUPER, 0, "bare call must carry SAME_CLASS_OR_SUPER");
+        assert_eq!(
+            reasons_bits & reasons::RECEIVER_TYPE_MATCH,
+            0,
+            "bare call must NEVER also carry RECEIVER_TYPE_MATCH"
+        );
+    }
+
+    /// Shared fixture helper: a file declaring ONE method named
+    /// `"doSomething"`, owned by `enclosing_type` -- factored out of
+    /// `binder_depth_reaches_level_6_for_java_via_receiver_type_resolution`
+    /// below, whose two candidate files (`Foo`, `Other`) both need exactly
+    /// this shape.
+    fn owned_do_something_file(file_id: u32, enclosing_type: &str) -> LocalIndex {
+        use crate::graph::extract::local_index::MethodOwnerRecord;
+
+        let mut index = LocalIndex::new();
+        index.declarations.push(method_decl("doSomething", file_id, 0, Some(0)));
+        index.method_owners.push(MethodOwnerRecord {
+            method_symbol: crate::graph::identity::make_symbol_id(file_id, 0),
+            enclosing_type: enclosing_type.to_string(),
+        });
+        index
+    }
+
+    /// AC1 (Story #1806, S2b): Java's `BinderDepth` must reach the NEW
+    /// level 6 (receiver-type resolution) once real evidence is produced,
+    /// exercised end-to-end through the real `bind()` pipeline: a caller
+    /// method declares local `obj` of type `Foo`, then calls
+    /// `obj.doSomething()` -- resolved via `obj`'s declared type.
+    #[test]
+    fn binder_depth_reaches_level_6_for_java_via_receiver_type_resolution() {
+        use super::depth::LEVEL_6_RECEIVER_TYPE;
+        use crate::graph::extract::local_index::{NameScope, ReceiverExpr, TypedNameRecord};
+
+        const FOO_FILE_ID: u32 = 40;
+        const OTHER_FILE_ID: u32 = 41;
+        const CALLER_FILE_ID: u32 = 42;
+        const CALLER_METHOD_LOCAL: u32 = 0;
+
+        let foo_file = owned_do_something_file(FOO_FILE_ID, "Foo");
+        let other_file = owned_do_something_file(OTHER_FILE_ID, "Other");
+
+        let caller_method_symbol = crate::graph::identity::make_symbol_id(CALLER_FILE_ID, CALLER_METHOD_LOCAL);
+        let mut caller = LocalIndex::new();
+        caller.declarations.push(method_decl("run", CALLER_FILE_ID, CALLER_METHOD_LOCAL, Some(0)));
+        caller.typed_names.push(TypedNameRecord {
+            name: "obj".to_string(),
+            declared_type: "Foo".to_string(),
+            scope: NameScope::Local { enclosing_method: caller_method_symbol },
+        });
+        caller.invocations.push(InvocationSite {
+            callee_name: "doSomething".to_string(),
+            line: 10,
+            arg_count: Some(0),
+            arg_shapes: Vec::new(),
+            receiver: ReceiverExpr::Identifier("obj".to_string()),
+            enclosing_type: Some("Caller".to_string()),
+            enclosing_method: Some(caller_method_symbol),
+        });
+
+        let graph = bind(vec![
+            file(FOO_FILE_ID, "java", foo_file),
+            file(OTHER_FILE_ID, "java", other_file),
+            file(CALLER_FILE_ID, "java", caller),
+        ]);
+
+        let java_depth = graph.binder_depths().iter().find(|d| d.language == "java").unwrap();
+        assert!(java_depth.reached(LEVEL_6_RECEIVER_TYPE), "receiver-type evidence must reach level 6");
     }
 }

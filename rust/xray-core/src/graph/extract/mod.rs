@@ -15,6 +15,7 @@
 //! worse than an explicit, observable "not yet supported" signal.
 
 pub mod java;
+mod java_receiver;
 pub mod local_index;
 
 use crate::owned_node::OwnedNode;

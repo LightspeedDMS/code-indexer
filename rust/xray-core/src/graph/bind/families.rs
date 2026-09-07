@@ -22,6 +22,10 @@ pub(crate) struct TypeIndex {
     /// supertype name -> its DIRECT subtypes (via `Extends` or
     /// `Implements` edges recorded anywhere in the repo).
     direct_children: HashMap<String, Vec<String>>,
+    /// AC1/AC3 (Story #1806, S2b): subtype name -> its DIRECT supertypes
+    /// (the exact same edges as `direct_children`, indexed in the OPPOSITE
+    /// direction) -- the substrate `supertypes_of` walks.
+    direct_parents: HashMap<String, Vec<String>>,
     /// Bare names of every type declared as an INTERFACE anywhere in the
     /// repo.
     interface_names: HashSet<String>,
@@ -33,6 +37,7 @@ impl TypeIndex {
     /// (Rule 14).
     pub(crate) fn build(files: &[FileForBind]) -> Self {
         let mut direct_children: HashMap<String, Vec<String>> = HashMap::new();
+        let mut direct_parents: HashMap<String, Vec<String>> = HashMap::new();
         let mut interface_names: HashSet<String> = HashSet::new();
         for file in files {
             for name in &file.index.interface_names {
@@ -40,9 +45,10 @@ impl TypeIndex {
             }
             for edge in &file.index.inheritance {
                 direct_children.entry(edge.supertype_name.clone()).or_default().push(edge.subtype_name.clone());
+                direct_parents.entry(edge.subtype_name.clone()).or_default().push(edge.supertype_name.clone());
             }
         }
-        TypeIndex { direct_children, interface_names }
+        TypeIndex { direct_children, direct_parents, interface_names }
     }
 
     /// True when `type_name` is a known interface anywhere in the repo.
@@ -71,6 +77,38 @@ impl TypeIndex {
                 if visited.insert(child.clone()) {
                     result.insert(child.clone());
                     queue.push_back(child.clone());
+                }
+            }
+        }
+        result
+    }
+
+    /// AC1/AC3 (Story #1806, S2b) "engine query": every type that
+    /// `type_name` directly or transitively `extends`/`implements`, via a
+    /// genuine BFS -- the mirror image of `implementors_of` above, walking
+    /// `direct_parents` instead of `direct_children`. Same cycle-safety
+    /// argument applies verbatim (`visited` pre-seeded with `type_name`
+    /// itself, each other type enqueued at most once): a diamond or an
+    /// outright cyclic hierarchy both terminate by construction, never by
+    /// a depth cap (Rule 14, anti-unbounded-loop). No `MAX_FAMILY_SIZE`-
+    /// style cap: the `visited` guard alone already bounds total work and
+    /// memory by the repo's own finite count of distinct type names (the
+    /// same termination argument `implementors_of` relies on), which is
+    /// the honest guarantee this function makes -- it does NOT claim a
+    /// type's ancestor chain is inherently small (a type CAN declare many
+    /// direct supertypes, e.g. `implements A, B, C, D`, and each of those
+    /// can itself have many ancestors); it claims only that the walk
+    /// cannot loop or grow without bound relative to that finite count.
+    pub(crate) fn supertypes_of(&self, type_name: &str) -> HashSet<String> {
+        let mut visited: HashSet<String> = HashSet::from([type_name.to_string()]);
+        let mut queue: std::collections::VecDeque<String> = std::collections::VecDeque::from([type_name.to_string()]);
+        let mut result = HashSet::new();
+        while let Some(current) = queue.pop_front() {
+            let Some(parents) = self.direct_parents.get(&current) else { continue };
+            for parent in parents {
+                if visited.insert(parent.clone()) {
+                    result.insert(parent.clone());
+                    queue.push_back(parent.clone());
                 }
             }
         }
@@ -157,6 +195,7 @@ mod tests {
             enclosing_type: Some(enclosing_type.to_string()),
             param_types: Vec::new(),
             is_varargs: false,
+            return_type: None,
         }
     }
 
@@ -315,6 +354,50 @@ mod tests {
         let index = TypeIndex::build(&files);
         let implementors = index.implementors_of("A");
         assert_eq!(implementors, ["B"].into_iter().map(String::from).collect());
+    }
+
+    /// AC1/AC3 (Story #1806, S2b): a class that `implements` an interface
+    /// has that interface as a direct supertype; a class that `extends`
+    /// that implementor has the interface as a TRANSITIVE supertype --
+    /// both must be found. Mirrors `implementors_of_finds_direct_and_
+    /// transitive_implementors` exactly, walking the OPPOSITE direction.
+    #[test]
+    fn supertypes_of_finds_direct_and_transitive_supertypes() {
+        let files = vec![file_with(
+            1,
+            vec![edge("C", "I", InheritanceKind::Implements), edge("D", "C", InheritanceKind::Extends)],
+            vec!["I".to_string()],
+        )];
+        let index = TypeIndex::build(&files);
+        let supertypes = index.supertypes_of("D");
+        assert!(supertypes.contains("C"));
+        assert!(supertypes.contains("I"));
+        assert_eq!(supertypes.len(), 2);
+    }
+
+    /// AC1/AC3: a type with NO declared supertypes anywhere in the repo
+    /// returns an EMPTY set, never a fabricated guess.
+    #[test]
+    fn supertypes_of_returns_empty_for_a_type_with_no_declared_supertypes() {
+        let files = vec![file_with(1, Vec::new(), vec!["Lonely".to_string()])];
+        let index = TypeIndex::build(&files);
+        assert!(index.supertypes_of("Lonely").is_empty());
+    }
+
+    /// AC1/AC3 + Rule 14: a malformed/adversarial CYCLIC inheritance edge
+    /// set must still terminate -- this test itself times out (fails to
+    /// return) rather than failing an assertion if the implementation
+    /// loops forever.
+    #[test]
+    fn supertypes_of_terminates_on_a_cyclic_edge_set() {
+        let files = vec![file_with(
+            1,
+            vec![edge("B", "A", InheritanceKind::Extends), edge("A", "B", InheritanceKind::Extends)],
+            Vec::new(),
+        )];
+        let index = TypeIndex::build(&files);
+        let supertypes = index.supertypes_of("B");
+        assert_eq!(supertypes, ["A"].into_iter().map(String::from).collect());
     }
 
     #[test]

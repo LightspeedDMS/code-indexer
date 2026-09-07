@@ -68,6 +68,24 @@ pub const OVERLOAD_ARG_TYPE_MATCH: u16 = 1 << 10;
 /// never a silently-narrowed one. See
 /// `super::bind::resolve::apply_inheritance_family_expansion`.
 pub const FAMILY_TRUNCATED: u16 = 1 << 11;
+/// AC1 (Story #1806, S2b -- FINDING 3's missing narrowing): a
+/// `receiver.method(...)` call's receiver expression resolved to a
+/// declared TYPE in the SAME FILE (a local variable's, field's, or
+/// parameter's declared type, or a chained call's declared return type --
+/// no build, no classpath, no generics resolution), and the candidate's
+/// enclosing type equals that resolved type OR one of its transitive
+/// supertypes (`super::bind::families::TypeIndex::supertypes_of`).
+/// Deliberately distinct from `SAME_CLASS_OR_SUPER` below (even though
+/// both narrow via the SAME type-membership mechanism) so per-language
+/// `BinderDepth` telemetry can tell the two evidence PATHS apart, matching
+/// the amendment's own separately-measured contributions (35.4% receiver
+/// type vs 10.0% same-class/super).
+pub const RECEIVER_TYPE_MATCH: u16 = 1 << 12;
+/// AC3 (Story #1806, S2b): an UNQUALIFIED call (no explicit receiver, or
+/// an explicit `this`/`super`) resolved against the caller's OWN
+/// enclosing type or one of its transitive supertypes -- the "same-class
+/// and super resolution" the amendment attributed 10.0% of bound calls to.
+pub const SAME_CLASS_OR_SUPER: u16 = 1 << 13;
 
 /// Every reasons flag, for iteration in tests and future observability code.
 /// Ordering here is purely presentational (declaration order); it carries no
@@ -86,6 +104,8 @@ pub const ALL_FLAGS: &[u16] = &[
     INHERITANCE_FAMILY,
     OVERLOAD_ARG_TYPE_MATCH,
     FAMILY_TRUNCATED,
+    RECEIVER_TYPE_MATCH,
+    SAME_CLASS_OR_SUPER,
 ];
 
 #[cfg(test)]
@@ -115,11 +135,11 @@ mod tests {
     /// Every flag is typed `u16` (the exact storage type
     /// `Candidate.reasons` uses, AC5), so fitting is guaranteed by the type
     /// system alone. What this guards against is silently growing past 16
-    /// flags without anyone revisiting the CSR layout: with 12 flags
-    /// declared today, there is headroom for 4 more before a 17th flag
+    /// flags without anyone revisiting the CSR layout: with 14 flags
+    /// declared today, there is headroom for 2 more before a 17th flag
     /// would no longer fit and this count would need to change.
     #[test]
-    fn twelve_flags_are_declared_leaving_headroom_in_the_u16_reasons_field() {
-        assert_eq!(ALL_FLAGS.len(), 12);
+    fn fourteen_flags_are_declared_leaving_headroom_in_the_u16_reasons_field() {
+        assert_eq!(ALL_FLAGS.len(), 14);
     }
 }

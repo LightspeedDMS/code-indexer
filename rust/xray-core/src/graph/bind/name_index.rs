@@ -30,6 +30,13 @@ pub(crate) struct DeclInfo {
     pub(crate) param_types: Vec<String>,
     /// AC2: copied straight through from `Declaration::is_varargs`.
     pub(crate) is_varargs: bool,
+    /// AC2 (Story #1806, S2b): this method's declared return type,
+    /// joined from `LocalIndex.method_return_types` by `symbol` (mirrors
+    /// `enclosing_type`'s own join above exactly). `None` for a
+    /// declaration with no return-type record (every non-method kind, a
+    /// constructor, or a method whose return type could not be
+    /// determined) -- never a guessed value.
+    pub(crate) return_type: Option<String>,
 }
 
 /// Repo-wide bare-name index. Never mutated after `build` returns.
@@ -49,6 +56,12 @@ impl RepoNameIndex {
                 .iter()
                 .map(|owner| (owner.method_symbol, owner.enclosing_type.as_str()))
                 .collect();
+            let return_types_by_symbol: HashMap<SymbolId, &str> = file
+                .index
+                .method_return_types
+                .iter()
+                .map(|record| (record.method_symbol, record.return_type.as_str()))
+                .collect();
             for decl in &file.index.declarations {
                 by_name.entry(decl.name.clone()).or_default().push(DeclInfo {
                     symbol: decl.symbol,
@@ -59,6 +72,7 @@ impl RepoNameIndex {
                     enclosing_type: owners_by_symbol.get(&decl.symbol).map(|t| t.to_string()),
                     param_types: decl.param_types.clone(),
                     is_varargs: decl.is_varargs,
+                    return_type: return_types_by_symbol.get(&decl.symbol).map(|t| t.to_string()),
                 });
             }
         }
@@ -156,5 +170,46 @@ mod tests {
 
         let orphan = &name_index.lookup("orphan", DeclarationKind::Method)[0];
         assert_eq!(orphan.enclosing_type, None, "a method with no MethodOwnerRecord must never get a guessed type");
+    }
+
+    /// AC2 (Story #1806, S2b): `DeclInfo.return_type` is joined from
+    /// `LocalIndex.method_return_types` by `symbol`, mirroring
+    /// `enclosing_type`'s own join exactly. A method with NO return-type
+    /// record must get `return_type: None`, never a fabricated guess.
+    #[test]
+    fn decl_info_carries_return_type_from_method_return_type_records() {
+        use crate::graph::extract::local_index::MethodReturnTypeRecord;
+
+        let mut index = LocalIndex::new();
+        index.declarations.push(Declaration {
+            kind: DeclarationKind::Method,
+            name: "getFoo".to_string(),
+            line: 1,
+            symbol: make_symbol_id(1, 0),
+            param_count: Some(0),
+            param_types: Vec::new(),
+            is_varargs: false,
+        });
+        index
+            .method_return_types
+            .push(MethodReturnTypeRecord { method_symbol: make_symbol_id(1, 0), return_type: "Foo".to_string() });
+        index.declarations.push(Declaration {
+            kind: DeclarationKind::Method,
+            name: "orphanReturn".to_string(),
+            line: 2,
+            symbol: make_symbol_id(1, 1),
+            param_count: None,
+            param_types: Vec::new(),
+            is_varargs: false,
+        });
+
+        let files = vec![FileForBind { file_id: 1, language: "java".to_string(), index }];
+        let name_index = RepoNameIndex::build(&files);
+
+        let get_foo = &name_index.lookup("getFoo", DeclarationKind::Method)[0];
+        assert_eq!(get_foo.return_type.as_deref(), Some("Foo"));
+
+        let orphan = &name_index.lookup("orphanReturn", DeclarationKind::Method)[0];
+        assert_eq!(orphan.return_type, None, "a method with no MethodReturnTypeRecord must never get a guessed type");
     }
 }
