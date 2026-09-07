@@ -27,6 +27,20 @@
 # Required whenever rust/ is touched -- same trigger shape as
 # server-fast-automation.sh being required when src/code_indexer/server/ is
 # touched.
+#
+# TOOLCHAIN PIN: rust/rust-toolchain.toml pins the exact toolchain (currently
+# 1.98.0) this script's cargo/clippy invocations use -- rustup auto-detects
+# that file and auto-installs the pinned version+components on first run
+# whenever cwd is inside rust/. This exists because a bare floating toolchain
+# silently drifts ahead of CI's own pin (.github/workflows/main.yml's `rust`
+# job uses `dtolnay/rust-toolchain@1.98.0`, not a floating tag), which is the
+# identical drift problem CLAUDE.md's "Lint and CI" section documents for
+# ruff/mypy. Concretely: CI run 34135704952 failed `cargo clippy -D warnings`
+# on clippy::filter_next while this script had just reported a clean pass
+# locally, because local clippy was 0.1.91 (rustc 1.91.0) against CI's
+# 1.98.0. A green run of THIS script now means the SAME clippy version CI
+# runs actually passed -- keep rust/rust-toolchain.toml's `channel` and this
+# workflow's `dtolnay/rust-toolchain@<version>` ref in sync going forward.
 
 set -e  # Exit on any error -- no `|| true` anywhere in this script. A cargo
         # failure MUST fail this gate.
@@ -68,9 +82,8 @@ if ! command -v cargo &> /dev/null; then
     exit 1
 fi
 
-print_step "Checking cargo/rustc toolchain"
-cargo --version
-rustc --version
+print_step "Checking cargo/rustc/clippy toolchain (pinned via rust/rust-toolchain.toml)"
+(cd rust && cargo --version && rustc --version && cargo clippy --version)
 print_success "Toolchain checked"
 
 print_step "Running cargo test --workspace (rust/xray-core + rust/xray-cli, includes AC18 PREAMBLE parity check)"

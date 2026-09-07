@@ -64,8 +64,7 @@ impl Evaluator for CatchRethrowEvaluator {
             let param_name = match param
                 .children
                 .iter()
-                .filter(|c| c.kind == "identifier")
-                .next_back()
+                .rfind(|c| c.kind == "identifier")
             {
                 Some(id) => id.text().to_string(),
                 None => continue,
@@ -276,5 +275,40 @@ mod tests {
         let other = node("try_statement", vec![]);
         let root = node("program", vec![other]);
         assert!(evaluator.evaluate_node(&root).is_empty());
+    }
+
+    #[test]
+    fn test_catch_rethrow_multiple_identifier_children_picks_last() {
+        let evaluator = CatchRethrowEvaluator;
+
+        // catch_formal_parameter has TWO "identifier"-kind children: an
+        // annotation identifier appearing first, and the real binding
+        // identifier last. The parameter-name extraction must pick the LAST
+        // matching child — picking the first one instead would extract
+        // "Nonnull" and fail to match the rethrow of "e".
+        let annotation_id = leaf("identifier", "Nonnull", true);
+        let type_id = leaf("type_identifier", "Exception", true);
+        let param_name_id = leaf("identifier", "e", true);
+        let catch_param = node(
+            "catch_formal_parameter",
+            vec![annotation_id, type_id, param_name_id],
+        );
+        let thrown_id = leaf("identifier", "e", true);
+        let throw_stmt = OwnedNode::new_node_for_test(
+            "throw_statement",
+            "throw e;",
+            10,
+            0,
+            8,
+            vec![leaf("throw", "throw", false), thrown_id],
+            true,
+        );
+        let body = node("block", vec![throw_stmt]);
+        let catch_node = node("catch_clause", vec![catch_param, body]);
+        let root = node("program", vec![catch_node]);
+
+        let findings = evaluator.evaluate_node(&root);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].pattern, "catch-rethrow");
     }
 }

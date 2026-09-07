@@ -92,8 +92,22 @@ jobs:
       with:
         submodules: recursive
 
-    - name: Install Rust toolchain (stable + clippy)
-      uses: dtolnay/rust-toolchain@stable
+    # Pinned to an exact version (1.98.0), not the floating `@stable` tag.
+    # dtolnay/rust-toolchain@stable installs whatever "stable" resolves to on
+    # the day the job runs, which drifts ahead of every developer's local
+    # toolchain -- exactly the ruff/mypy pinning problem documented in
+    # CLAUDE.md's "Lint and CI" section (pyproject's dev extra only FLOORS
+    # those versions), just via a floating GitHub Action instead of an
+    # unpinned pip install. This action does NOT read rust-toolchain.toml
+    # itself (verified: its action.yml has no such logic -- it is driven
+    # purely by the `toolchain` input baked into the git ref); rust/
+    # rust-toolchain.toml is the separate LOCAL-side pin that rustup's own
+    # override mechanism picks up for `cargo`/`cargo clippy` invocations
+    # inside rust/, in CI and on developer machines alike. Keep this version
+    # in sync with rust/rust-toolchain.toml's `channel` -- both must name the
+    # same version or CI and local can drift apart again.
+    - name: Install Rust toolchain (1.98.0 + clippy)
+      uses: dtolnay/rust-toolchain@1.98.0
       with:
         components: clippy
 
