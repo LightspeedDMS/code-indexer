@@ -1058,6 +1058,10 @@ def _execute_tracked_search(
     user_repos: list,
     limit: int,
     index_path: Optional[str] = None,
+    # Bug #1804: out-param forwarded to _perform_search -- populated BEFORE
+    # a total-provider-failure exception is raised, so the caller can build
+    # a graceful degraded response instead of propagating the failure.
+    _provider_completeness_out: Optional[Dict[str, Any]] = None,
 ) -> tuple:
     """Execute _perform_search with query-tracker ref counting and timing.
 
@@ -1078,6 +1082,7 @@ def _execute_tracked_search(
 
     query_tracker = _get_query_tracker()
     kwargs = _build_search_kwargs(params, user, user_repos, limit)
+    kwargs["_provider_completeness_out"] = _provider_completeness_out
     start_time = time.time()
     timeout_occurred = False
     ref_incremented = False
@@ -1116,6 +1121,38 @@ def _execute_tracked_search(
     return results, execution_time_ms, timeout_occurred, effective_strategy
 
 
+def _build_provider_unavailable_response(
+    params: Dict[str, Any], completeness_info: Dict[str, Any]
+) -> Dict[str, Any]:
+    """Bug #1804 / epic #485: MCP parallel search degrades gracefully when
+    every dispatched embedding provider is unavailable, instead of
+    surfacing a hard failure. Returns success:true with an empty result
+    set and an explicit `completeness` marker (+ provider_errors) so a
+    caller can distinguish "nothing matched" from "the search never ran"
+    (anti-silent-failure, Rule 13) -- mirrors the AnalysisCompleteness
+    pattern this codebase uses for the identical problem in X-Ray.
+    """
+    return _mcp_response(
+        {
+            "success": True,
+            "results": {
+                "results": [],
+                "total_results": 0,
+                "query_metadata": {
+                    "query_text": params.get("query_text", ""),
+                    "execution_time_ms": 0,
+                    "repositories_searched": 0,
+                    "timeout_occurred": False,
+                    "completeness": completeness_info.get(
+                        "completeness", "providers_unavailable"
+                    ),
+                    "provider_errors": completeness_info.get("provider_errors", {}),
+                },
+            },
+        }
+    )
+
+
 def _search_global_repo(
     params: Dict[str, Any], user: User, repository_alias: str
 ) -> Dict[str, Any]:
@@ -1139,13 +1176,27 @@ def _search_global_repo(
     effective_limit = _compute_effective_limit(requested_limit, user)
     effective_limit = _compute_rerank_limit(params, requested_limit, effective_limit)
 
-    # Bug #1219 fix: _execute_tracked_search now returns a 4-tuple
-    # (results, execution_time_ms, timeout_occurred, effective_strategy).
-    results, execution_time_ms, timeout_occurred, effective_strategy = (
-        _execute_tracked_search(
-            params, user, mock_user_repos, effective_limit, index_path=target_path
+    # Bug #1804: out-param populated (before raise) only when every
+    # dispatched embedding provider is unavailable -- lets this path
+    # degrade gracefully instead of propagating the failure (epic #485).
+    _completeness: Dict[str, Any] = {}
+    try:
+        # Bug #1219 fix: _execute_tracked_search now returns a 4-tuple
+        # (results, execution_time_ms, timeout_occurred, effective_strategy).
+        results, execution_time_ms, timeout_occurred, effective_strategy = (
+            _execute_tracked_search(
+                params,
+                user,
+                mock_user_repos,
+                effective_limit,
+                index_path=target_path,
+                _provider_completeness_out=_completeness,
+            )
         )
-    )
+    except Exception:
+        if _completeness.get("completeness") == "providers_unavailable":
+            return _build_provider_unavailable_response(params, _completeness)
+        raise
 
     category_map = _load_category_map("search_code")
     wiki_enabled_repos = _get_wiki_enabled_repos()
@@ -1244,6 +1295,11 @@ def _search_activated_repo(params: Dict[str, Any], user: User) -> Dict[str, Any]
     del kwargs["user_repos"]
     kwargs["repository_alias"] = params.get("repository_alias")
     kwargs["precomputed_query_vector"] = shared_query_vector
+    # Bug #1804: out-param populated (before raise) only when every
+    # dispatched embedding provider is unavailable -- lets this path
+    # degrade gracefully instead of propagating the failure (epic #485).
+    _completeness: Dict[str, Any] = {}
+    kwargs["_provider_completeness_out"] = _completeness
 
     # Story #1458 AC13 gap (b): wire QueryTracker ref-counting around this
     # read, using the SAME shared track_activated_repo_query() helper the
@@ -1253,15 +1309,20 @@ def _search_activated_repo(params: Dict[str, Any], user: User) -> Dict[str, Any]
     # tracker, no repository_alias e.g. omni queries, or a -global alias --
     # golden-repo queries are a separate, already-covered concern) preserves
     # today's behavior exactly.
-    with track_activated_repo_query(
-        _get_query_tracker(),
-        getattr(_utils.app_module, "activated_repo_manager", None),
-        user.username,
-        params.get("repository_alias"),
-    ):
-        result = _utils.app_module.semantic_query_manager.query_user_repositories(
-            **kwargs
-        )
+    try:
+        with track_activated_repo_query(
+            _get_query_tracker(),
+            getattr(_utils.app_module, "activated_repo_manager", None),
+            user.username,
+            params.get("repository_alias"),
+        ):
+            result = _utils.app_module.semantic_query_manager.query_user_repositories(
+                **kwargs
+            )
+    except Exception:
+        if _completeness.get("completeness") == "providers_unavailable":
+            return _build_provider_unavailable_response(params, _completeness)
+        raise
 
     # Touch last_accessed for the activated repo (throttled, non-fatal).
     # Fixes Bug #1098 defect 2: search path never stamped last_accessed,

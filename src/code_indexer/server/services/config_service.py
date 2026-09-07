@@ -482,32 +482,41 @@ class ConfigService:
         from config.json and merges runtime from DB. Otherwise reads full
         config from file (pre-migration or early bootstrap).
 
+        Bug #1801: holds `_config_update_lock` (same lock as
+        update_settings_atomic(), reentrant-safe) for the whole
+        read-merge-publish sequence so a concurrent get_config() caller
+        (e.g. a leaked SystemMetricsCollector thread) can never observe
+        self._config is None mid-update and clobber a just-applied write
+        back to bootstrap defaults.
+
         Returns:
             ServerConfig object with current settings
         """
-        config = self.config_manager.load_config()
-        if config is None:
-            config = self.config_manager.create_default_config()
-            self.config_manager.save_config(config)
+        with self._config_update_lock:
+            config = self.config_manager.load_config()
+            if config is None:
+                config = self.config_manager.create_default_config()
+                self.config_manager.save_config(config)
 
-        # If runtime DB is available, merge runtime from DB on top of the
-        # bootstrap config.  Pass bootstrap config as base_config so that
-        # self._config is NOT published until after the full merge completes
-        # (Bug #998: prevents concurrent get_config() from seeing transient
-        # bootstrap defaults during the merge window).
-        if self._pool is not None:
-            self._load_runtime_from_pg(base_config=config)
-        elif self._sqlite_db_path:
-            runtime = self._load_runtime_from_sqlite()
-            if runtime:
-                self._merge_runtime_config(runtime, base_config=config)
+            # If runtime DB is available, merge runtime from DB on top of
+            # the bootstrap config.  Pass bootstrap config as base_config
+            # so that self._config is NOT published until after the full
+            # merge completes (Bug #998: prevents concurrent get_config()
+            # from seeing transient bootstrap defaults during the merge
+            # window).
+            if self._pool is not None:
+                self._load_runtime_from_pg(base_config=config)
+            elif self._sqlite_db_path:
+                runtime = self._load_runtime_from_sqlite()
+                if runtime:
+                    self._merge_runtime_config(runtime, base_config=config)
+                else:
+                    self._config = config
             else:
                 self._config = config
-        else:
-            self._config = config
 
-        assert self._config is not None  # All branches above set self._config
-        return self._config
+            assert self._config is not None  # All branches above set self._config
+            return self._config
 
     def get_config(self) -> ServerConfig:
         """

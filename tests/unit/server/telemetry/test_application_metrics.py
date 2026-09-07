@@ -358,6 +358,60 @@ class TestEmbeddingMetrics:
 
 
 # =============================================================================
+# X-Ray Cache Identity Failure Metric Tests (Bug #1784 review observability)
+# =============================================================================
+
+
+class TestXrayCacheIdentityFailureMetric:
+    """Tests for the cidx.xray.cache_identity_failures counter.
+
+    Added per Bug #1784 code review: a WARNING log alone is insufficient
+    observability when a node's xray-cli binary is missing/broken and EVERY
+    compile silently loses the cluster cache. This counter is incremented
+    by RustNativeBackend whenever `xray-cli --print-cache-identity` fails.
+    """
+
+    def setup_method(self):
+        reset_all_singletons()
+        from code_indexer.server.telemetry.metrics_instrumentation import (
+            reset_application_metrics,
+        )
+
+        reset_application_metrics()
+
+    def test_record_xray_cache_identity_failure(self):
+        """Increments the counter with a reason attribute when active, and
+        never raises when ApplicationMetrics is inactive (fail-open)."""
+        from tests.unit.server.telemetry.otel_test_support import (
+            active_application_metrics,
+            find_metric,
+        )
+
+        with active_application_metrics() as (metrics, reader):
+            metrics.record_xray_cache_identity_failure(reason="nonzero_exit")
+
+            assert metrics._xray_cache_identity_failures_counter is not None
+            metric = find_metric(reader, "cidx.xray.cache_identity_failures")
+            assert metric is not None
+            dp = list(metric.data.data_points)[0]
+            assert dp.value == 1
+            assert dp.attributes["reason"] == "nonzero_exit"
+
+        from code_indexer.server.telemetry.manager import TelemetryManager
+        from code_indexer.server.telemetry.metrics_instrumentation import (
+            ApplicationMetrics,
+        )
+
+        inactive_metrics = ApplicationMetrics(
+            TelemetryManager(TelemetryConfig(enabled=False))
+        )
+        assert not inactive_metrics.is_active
+        inactive_metrics.record_xray_cache_identity_failure(
+            reason="exception"
+        )  # must not raise
+
+
+# =============================================================================
 # Metrics Attributes Tests
 # =============================================================================
 

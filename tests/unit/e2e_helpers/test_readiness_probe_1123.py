@@ -289,6 +289,34 @@ class TestBashWaitForServerMutation:
             f"Expected 'source_ok' in stdout after sourcing; got: {result.stdout!r}"
         )
 
+    def test_sourcing_does_not_arm_exit_trap(self):
+        """Sourcing e2e-automation.sh must NOT arm the composite EXIT trap.
+
+        cleanup_all_servers_and_reset (registered via `trap ... EXIT`) calls
+        reset_test_environment, which reaps OTHER processes' /tmp-path
+        daemons (via pgrep/SIGTERM) and prunes pytest temp directories
+        beyond the newest few. If sourcing this script (to reuse
+        wait_for_server) armed that trap, every sibling test that sources
+        this file would risk killing another test's live daemon and
+        deleting the currently-running pytest session's own temp dir when
+        its bash subprocess exits. The trap registration must live only
+        inside the direct-execution main guard, never at source time.
+        """
+        result = subprocess.run(
+            ["bash", "-c", f"source {str(E2E_SCRIPT)!r}; trap -p EXIT"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        assert result.returncode == 0, (
+            f"Sourcing must succeed cleanly. rc={result.returncode}, "
+            f"stderr={result.stderr!r}"
+        )
+        assert result.stdout.strip() == "", (
+            "Sourcing e2e-automation.sh must NOT arm an EXIT trap -- "
+            f"'trap -p EXIT' must print nothing. Got: {result.stdout!r}"
+        )
+
     def test_wait_for_server_defined_after_source(self):
         """wait_for_server must be available as a bash function after sourcing."""
         result = subprocess.run(

@@ -95,7 +95,7 @@ def xray_search(
     1. Permission check (query_repos).
     2. Field validation (search_target, timeout_seconds range, max_files).
     3. Repository alias resolution.
-    4. Pre-flight evaluator validation via PythonEvaluatorSandbox.
+    4. Pre-flight evaluator validation via validate_rust_evaluator.
     5. Job submission via BackgroundJobManager.
     6. Return HTTP 202 with {job_id}.
 
@@ -106,7 +106,7 @@ def xray_search(
         max_files_out_of_range     — max_files provided but < 1 (422)
         repository_not_found       — alias cannot be resolved (404)
         xray_extras_not_installed  — tree-sitter extras not available (503)
-        xray_evaluator_validation_failed — evaluator AST whitelist violation (422)
+        xray_evaluator_validation_failed — Rust evaluator forbidden-construct violation (422)
     """
     # ------------------------------------------------------------------
     # 1. Permission check

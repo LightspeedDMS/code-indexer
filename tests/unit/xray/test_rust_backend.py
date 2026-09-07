@@ -612,21 +612,257 @@ def test_run_batch_solo_no_cache_calls():
 
 
 # ---------------------------------------------------------------------------
-# Test 12: _sha256_hex matches Python hashlib SHA-256
+# Bug #1784: _get_cache_identity_info() delegates to the SAME Rust identity
+# formula compile_evaluator() uses, via `xray-cli --print-cache-identity`.
 # ---------------------------------------------------------------------------
 
 
-def test_sha256_hex_matches_rust_algorithm():
-    """RustNativeBackend._sha256_hex() must produce the same output as hashlib.sha256()."""
-    import hashlib
+def test_get_cache_identity_info_parses_well_formed_output():
+    """A well-formed 4-line xray-cli output parses into a CacheIdentityInfo."""
+    from unittest.mock import MagicMock, patch
+    from code_indexer.xray.rust_backend import RustNativeBackend, CacheIdentityInfo
+
+    backend = RustNativeBackend(xray_cache_backend=None)
+    fake_stdout = (
+        "identity=" + "a" * 64 + "\n"
+        "source_hash=" + "b" * 64 + "\n"
+        "abi_version=2\n"
+        "rustc_version=rustc 1.91.0\n"
+    )
+    mock_result = MagicMock(returncode=0, stdout=fake_stdout, stderr="")
+    with patch("subprocess.run", return_value=mock_result) as mock_run:
+        info = backend._get_cache_identity_info(VALID_EVALUATOR)
+
+    assert info == CacheIdentityInfo(
+        identity="a" * 64,
+        source_hash="b" * 64,
+        abi_version=2,
+        rustc_version="rustc 1.91.0",
+    )
+    mock_run.assert_called_once()
+    _, call_kwargs = mock_run.call_args
+    assert call_kwargs.get("input") == VALID_EVALUATOR
+
+
+def test_get_cache_identity_info_returns_none_on_nonzero_exit():
+    from unittest.mock import MagicMock, patch
     from code_indexer.xray.rust_backend import RustNativeBackend
 
     backend = RustNativeBackend(xray_cache_backend=None)
-    for text in [VALID_EVALUATOR, "", "hello world"]:
-        expected = hashlib.sha256(text.encode()).hexdigest()
-        actual = backend._sha256_hex(text)
-        assert actual == expected, f"SHA-256 mismatch for {text!r}"
-        assert len(actual) == 64
+    mock_result = MagicMock(returncode=1, stdout="", stderr="boom")
+    with patch("subprocess.run", return_value=mock_result):
+        info = backend._get_cache_identity_info(VALID_EVALUATOR)
+
+    assert info is None
+
+
+def test_get_cache_identity_info_returns_none_on_incomplete_output():
+    """Missing any of the 4 required fields must return None, never a partial object."""
+    from unittest.mock import MagicMock, patch
+    from code_indexer.xray.rust_backend import RustNativeBackend
+
+    backend = RustNativeBackend(xray_cache_backend=None)
+    # abi_version line missing
+    fake_stdout = (
+        "identity="
+        + "a" * 64
+        + "\nsource_hash="
+        + "b" * 64
+        + "\nrustc_version=rustc 1.91.0\n"
+    )
+    mock_result = MagicMock(returncode=0, stdout=fake_stdout, stderr="")
+    with patch("subprocess.run", return_value=mock_result):
+        info = backend._get_cache_identity_info(VALID_EVALUATOR)
+
+    assert info is None
+
+
+# ---------------------------------------------------------------------------
+# Bug #1784 review MAJOR-2: identity subprocess timeout must never exceed
+# the caller's remaining operation deadline.
+# ---------------------------------------------------------------------------
+
+
+def _identity_ok_result() -> "MagicMock":
+    from unittest.mock import MagicMock
+
+    fake_stdout = (
+        "identity=" + "a" * 64 + "\n"
+        "source_hash=" + "b" * 64 + "\n"
+        "abi_version=2\n"
+        "rustc_version=rustc 1.91.0\n"
+    )
+    return MagicMock(returncode=0, stdout=fake_stdout, stderr="")
+
+
+def test_get_cache_identity_info_bounds_timeout_to_remaining_deadline():
+    """When deadline_seconds is SMALLER than _CACHE_IDENTITY_TIMEOUT_SECS,
+    the subprocess timeout must be clamped to the remaining deadline --
+    never block longer than the caller has left (review MAJOR-2)."""
+    from unittest.mock import patch
+    from code_indexer.xray.rust_backend import RustNativeBackend
+
+    backend = RustNativeBackend(xray_cache_backend=None)
+    with patch("subprocess.run", return_value=_identity_ok_result()) as mock_run:
+        backend._get_cache_identity_info(VALID_EVALUATOR, deadline_seconds=0.5)
+
+    _, call_kwargs = mock_run.call_args
+    assert call_kwargs.get("timeout") <= 0.5, (
+        "must never block longer than the caller's remaining deadline"
+    )
+
+
+def test_get_cache_identity_info_uses_default_timeout_without_deadline():
+    """No deadline_seconds supplied (e.g. a direct/isolated call) preserves
+    the previous fixed-timeout behaviour."""
+    from unittest.mock import patch
+    from code_indexer.xray.rust_backend import (
+        RustNativeBackend,
+        _CACHE_IDENTITY_TIMEOUT_SECS,
+    )
+
+    backend = RustNativeBackend(xray_cache_backend=None)
+    with patch("subprocess.run", return_value=_identity_ok_result()) as mock_run:
+        backend._get_cache_identity_info(VALID_EVALUATOR)
+
+    _, call_kwargs = mock_run.call_args
+    assert call_kwargs.get("timeout") == _CACHE_IDENTITY_TIMEOUT_SECS
+
+
+def test_get_cache_identity_info_deadline_larger_than_default_stays_capped():
+    """A generous remaining deadline must not INCREASE the timeout past the
+    existing _CACHE_IDENTITY_TIMEOUT_SECS ceiling."""
+    from unittest.mock import patch
+    from code_indexer.xray.rust_backend import (
+        RustNativeBackend,
+        _CACHE_IDENTITY_TIMEOUT_SECS,
+    )
+
+    backend = RustNativeBackend(xray_cache_backend=None)
+    with patch("subprocess.run", return_value=_identity_ok_result()) as mock_run:
+        backend._get_cache_identity_info(VALID_EVALUATOR, deadline_seconds=9999.0)
+
+    _, call_kwargs = mock_run.call_args
+    assert call_kwargs.get("timeout") == _CACHE_IDENTITY_TIMEOUT_SECS
+
+
+# ---------------------------------------------------------------------------
+# Bug #1784 review MAJOR-2: bounded process-local (instance) cache keyed by
+# evaluator source -- identity is a pure function of source+ABI+rustc.
+# ---------------------------------------------------------------------------
+
+
+def test_get_cache_identity_info_instance_cache_avoids_second_subprocess_call():
+    """Calling _get_cache_identity_info twice with the SAME rust_code on the
+    SAME backend instance must invoke the subprocess only once."""
+    from unittest.mock import patch
+    from code_indexer.xray.rust_backend import RustNativeBackend
+
+    backend = RustNativeBackend(xray_cache_backend=None)
+    with patch("subprocess.run", return_value=_identity_ok_result()) as mock_run:
+        first = backend._get_cache_identity_info(VALID_EVALUATOR)
+        second = backend._get_cache_identity_info(VALID_EVALUATOR)
+
+    assert first == second
+    mock_run.assert_called_once()
+
+
+def test_get_cache_identity_info_cache_is_per_evaluator_source():
+    """Different evaluator source text must NOT share a cache entry."""
+    from unittest.mock import MagicMock, patch
+    from code_indexer.xray.rust_backend import RustNativeBackend
+
+    other_evaluator = (
+        "fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> {\n"
+        '    debug_log("different");\n'
+        "    Vec::new()\n"
+        "}\n"
+    )
+    other_stdout = (
+        "identity=" + "c" * 64 + "\n"
+        "source_hash=" + "d" * 64 + "\n"
+        "abi_version=2\n"
+        "rustc_version=rustc 1.91.0\n"
+    )
+    backend = RustNativeBackend(xray_cache_backend=None)
+    results = [
+        _identity_ok_result(),
+        MagicMock(returncode=0, stdout=other_stdout, stderr=""),
+    ]
+    with patch("subprocess.run", side_effect=results) as mock_run:
+        first = backend._get_cache_identity_info(VALID_EVALUATOR)
+        second = backend._get_cache_identity_info(other_evaluator)
+
+    assert first != second
+    assert mock_run.call_count == 2
+
+
+# ---------------------------------------------------------------------------
+# Bug #1784 review MAJOR-2 (observability): identity helper failures must
+# increment the cidx.xray.cache_identity_failures counter.
+# ---------------------------------------------------------------------------
+
+
+def test_get_cache_identity_info_failure_records_telemetry_counter():
+    from unittest.mock import MagicMock, patch
+    from code_indexer.xray.rust_backend import RustNativeBackend
+    from tests.unit.server.telemetry.otel_test_support import (
+        active_application_metrics_singleton,
+        find_metric,
+    )
+
+    backend = RustNativeBackend(xray_cache_backend=None)
+    mock_result = MagicMock(returncode=1, stdout="", stderr="binary missing")
+    with active_application_metrics_singleton() as (_metrics, reader):
+        with patch("subprocess.run", return_value=mock_result):
+            info = backend._get_cache_identity_info(VALID_EVALUATOR)
+
+    assert info is None
+    metric = find_metric(reader, "cidx.xray.cache_identity_failures")
+    assert metric is not None, (
+        "a failure must record the cidx.xray.cache_identity_failures counter"
+    )
+    dp = list(metric.data.data_points)[0]
+    assert dp.value == 1
+
+
+# ---------------------------------------------------------------------------
+# Bug #1784 review MAJOR-2: solo/CLI mode (no cluster cache configured) must
+# never pay the identity-subprocess cost at all.
+# ---------------------------------------------------------------------------
+
+
+def test_run_batch_solo_mode_never_invokes_identity_subprocess():
+    """With xray_cache_backend=None, run_batch() must never call
+    `xray-cli --print-cache-identity` -- only the main compile+eval
+    subprocess (Popen) is spawned."""
+    import json
+    from unittest.mock import MagicMock, patch
+    from code_indexer.xray.rust_backend import RustNativeBackend
+
+    backend = RustNativeBackend(xray_cache_backend=None)
+    fake_json = json.dumps(
+        {"findings": [], "compile_ms": 100, "cached": False, "error": None}
+    )
+
+    def _run_raises(*args, **kwargs):
+        raise AssertionError(
+            "subprocess.run (identity helper) must never be called in solo mode"
+        )
+
+    with patch("subprocess.run", side_effect=_run_raises):
+        with patch("subprocess.Popen") as mock_popen:
+            mock_proc = MagicMock()
+            mock_proc.communicate.return_value = (fake_json, "")
+            mock_proc.returncode = 0
+            mock_popen.return_value = mock_proc
+            results = backend.run_batch(
+                evaluator_code=VALID_EVALUATOR,
+                file_specs=[_spec("src/Foo.java", SIMPLE_JAVA, "java")],
+                repo_path=str(REPO_ROOT),
+            )
+
+    assert results  # completed normally, no exception raised above
 
 
 # ---------------------------------------------------------------------------
@@ -636,7 +872,6 @@ def test_sha256_hex_matches_rust_algorithm():
 
 def test_pre_fill_from_cache(tmp_path):
     """When cluster cache has a fresh .so, pre-fill writes .so + .meta before subprocess."""
-    import hashlib
     import json
     from unittest.mock import MagicMock
     from code_indexer.xray.rust_backend import RustNativeBackend
@@ -646,9 +881,10 @@ def test_pre_fill_from_cache(tmp_path):
     mock_cache.fetch.return_value = fake_so_bytes
     backend = RustNativeBackend(xray_cache_backend=mock_cache)
 
-    source_hash = hashlib.sha256(VALID_EVALUATOR.encode()).hexdigest()
-    expected_so = tmp_path / f"{source_hash}.so"
-    expected_meta = tmp_path / f"{source_hash}.meta"
+    identity = "a" * 64
+    identity_stdout = f"identity={identity}\nsource_hash={'b' * 64}\nabi_version=2\nrustc_version=rustc 1.91.0\n"
+    expected_so = tmp_path / f"{identity}.so"
+    expected_meta = tmp_path / f"{identity}.meta"
     popen_saw_so: list = []
     popen_saw_meta: list = []
     fake_json = json.dumps(
@@ -657,11 +893,6 @@ def test_pre_fill_from_cache(tmp_path):
 
     def _popen_side_effect(cmd, **kwargs):
         mock_proc = MagicMock()
-        if "rustc" in str(cmd[0]):
-            # rustc --version call from _get_rustc_version()
-            mock_proc.communicate.return_value = ("rustc 1.91.0\n", "")
-            mock_proc.returncode = 0
-            return mock_proc
         # xray-cli invocation — assert pre-fill files exist at this point
         popen_saw_so.append(expected_so.exists())
         popen_saw_meta.append(expected_meta.exists())
@@ -669,15 +900,18 @@ def test_pre_fill_from_cache(tmp_path):
         mock_proc.returncode = 0
         return mock_proc
 
-    with patch.object(backend, "_get_cache_dir", return_value=tmp_path):
-        with patch("subprocess.Popen", side_effect=_popen_side_effect):
-            backend.run_batch(
-                evaluator_code=VALID_EVALUATOR,
-                file_specs=[_spec("src/Foo.java", SIMPLE_JAVA, "java")],
-                repo_path=str(REPO_ROOT),
-            )
+    mock_identity_result = MagicMock(returncode=0, stdout=identity_stdout, stderr="")
 
-    mock_cache.fetch.assert_called_once()
+    with patch.object(backend, "_get_cache_dir", return_value=tmp_path):
+        with patch("subprocess.run", return_value=mock_identity_result):
+            with patch("subprocess.Popen", side_effect=_popen_side_effect):
+                backend.run_batch(
+                    evaluator_code=VALID_EVALUATOR,
+                    file_specs=[_spec("src/Foo.java", SIMPLE_JAVA, "java")],
+                    repo_path=str(REPO_ROOT),
+                )
+
+    mock_cache.fetch.assert_called_once_with(identity, "rustc 1.91.0")
     assert popen_saw_so == [True], ".so must exist before subprocess is spawned"
     assert popen_saw_meta == [True], ".meta must exist before subprocess is spawned"
     assert expected_so.read_bytes() == fake_so_bytes
@@ -724,7 +958,6 @@ def test_no_post_fill_on_cache_hit():
 def test_post_fill_after_fresh_compile(tmp_path):
     """When JSON output has cached=false and compile_ms=350, cache.store() is called
     with the .so bytes and compile_ms=350."""
-    import hashlib
     import json
     from unittest.mock import MagicMock
     from code_indexer.xray.rust_backend import RustNativeBackend
@@ -733,8 +966,9 @@ def test_post_fill_after_fresh_compile(tmp_path):
     mock_cache.fetch.return_value = None
     backend = RustNativeBackend(xray_cache_backend=mock_cache)
 
-    source_hash = hashlib.sha256(VALID_EVALUATOR.encode()).hexdigest()
-    fake_so = tmp_path / f"{source_hash}.so"
+    identity = "c" * 64
+    identity_stdout = f"identity={identity}\nsource_hash={'d' * 64}\nabi_version=2\nrustc_version=rustc 1.91.0\n"
+    fake_so = tmp_path / f"{identity}.so"
     fake_so_bytes = b"\x7fELF postfill test"
     fake_so.write_bytes(fake_so_bytes)
 
@@ -746,24 +980,92 @@ def test_post_fill_after_fresh_compile(tmp_path):
             "error": None,
         }
     )
+    mock_identity_result = MagicMock(returncode=0, stdout=identity_stdout, stderr="")
 
     with patch.object(backend, "_get_cache_dir", return_value=tmp_path):
-        with patch("subprocess.Popen") as mock_popen:
-            mock_proc = MagicMock()
-            mock_proc.communicate.return_value = (fake_json, "")
-            mock_proc.returncode = 0
-            mock_popen.return_value = mock_proc
-            backend.run_batch(
-                evaluator_code=VALID_EVALUATOR,
-                file_specs=[_spec("src/Foo.java", SIMPLE_JAVA, "java")],
-                repo_path=str(REPO_ROOT),
-            )
+        with patch("subprocess.run", return_value=mock_identity_result):
+            with patch("subprocess.Popen") as mock_popen:
+                mock_proc = MagicMock()
+                mock_proc.communicate.return_value = (fake_json, "")
+                mock_proc.returncode = 0
+                mock_popen.return_value = mock_proc
+                backend.run_batch(
+                    evaluator_code=VALID_EVALUATOR,
+                    file_specs=[_spec("src/Foo.java", SIMPLE_JAVA, "java")],
+                    repo_path=str(REPO_ROOT),
+                )
 
     mock_cache.store.assert_called_once()
     store_args, store_kwargs = mock_cache.store.call_args
     all_args = list(store_args) + list(store_kwargs.values())
+    assert identity in all_args, (
+        "store() must receive the composite identity as its key"
+    )
     assert fake_so_bytes in all_args, "store() must receive the .so bytes"
     assert 350 in all_args, "store() must receive compile_ms=350"
+
+
+# ---------------------------------------------------------------------------
+# Bug #1784 review MAJOR-2: run_batch's own timeout_seconds must flow
+# through to EVERY internal identity call as a bounded deadline_seconds --
+# pre-fill and post-fill must never independently default to the fixed
+# ceiling regardless of how little of the caller's budget remains.
+# ---------------------------------------------------------------------------
+
+
+def test_run_batch_propagates_deadline_to_identity_calls(tmp_path):
+    import json
+    from unittest.mock import MagicMock, patch
+    from code_indexer.xray.rust_backend import RustNativeBackend, CacheIdentityInfo
+
+    mock_cache = MagicMock()
+    mock_cache.fetch.return_value = None
+    backend = RustNativeBackend(xray_cache_backend=mock_cache)
+
+    real_info = CacheIdentityInfo(
+        identity="7" * 64,
+        source_hash="8" * 64,
+        abi_version=2,
+        rustc_version="rustc 1.91.0",
+    )
+    fake_json = json.dumps(
+        {"findings": [], "compile_ms": 200, "cached": False, "error": None}
+    )
+    seen_deadlines: list = []
+
+    def _fake_get_identity(rust_code, deadline_seconds=None):
+        seen_deadlines.append(deadline_seconds)
+        return real_info
+
+    with patch.object(
+        backend, "_get_cache_identity_info", side_effect=_fake_get_identity
+    ):
+        with patch.object(backend, "_get_cache_dir", return_value=tmp_path):
+            (tmp_path / f"{real_info.identity}.so").write_bytes(b"\x7fELF fake")
+            with patch("subprocess.Popen") as mock_popen:
+                mock_proc = MagicMock()
+                mock_proc.communicate.return_value = (fake_json, "")
+                mock_proc.returncode = 0
+                mock_popen.return_value = mock_proc
+                backend.run_batch(
+                    evaluator_code=VALID_EVALUATOR,
+                    file_specs=[_spec("src/Foo.java", SIMPLE_JAVA, "java")],
+                    repo_path=str(REPO_ROOT),
+                    timeout_seconds=5,
+                )
+
+    # Pre-fill AND post-fill both call the identity helper.
+    assert len(seen_deadlines) >= 2, (
+        "both pre-fill and post-fill must call the identity helper"
+    )
+    for deadline in seen_deadlines:
+        assert deadline is not None, (
+            "run_batch's timeout_seconds must be propagated as a real deadline"
+        )
+        assert 0 < deadline <= 5, (
+            f"deadline {deadline} must be bounded by run_batch's own "
+            "timeout_seconds=5, never left as an independent fixed default"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -794,9 +1096,14 @@ def test_search_engine_passes_cache_to_rust_backend():
     captured: dict = {}
 
     class _CapturingBackend:
-        """Pretend RustNativeBackend; records xray_cache_backend kwarg."""
+        """Pretend RustNativeBackend; records xray_cache_backend kwarg.
 
-        def __init__(self, xray_cache_backend=None):
+        Also accepts identity_cache=None (Bug #1784: XRaySearchEngine now
+        forwards an optional shared identity cache to RustNativeBackend) so
+        the real call signature doesn't raise TypeError against this stand-in.
+        """
+
+        def __init__(self, xray_cache_backend=None, identity_cache=None):
             captured["xray_cache_backend"] = xray_cache_backend
 
     mock_config = MagicMock()
@@ -1145,7 +1452,6 @@ def test_try_pre_fill_atomic_write_via_temp_file(tmp_path):
     same hash. The temp file must not exist after a successful pre-fill, and
     the final .so must contain the correct bytes.
     """
-    import hashlib
     from unittest.mock import MagicMock, patch
     from code_indexer.xray.rust_backend import RustNativeBackend
 
@@ -1154,12 +1460,14 @@ def test_try_pre_fill_atomic_write_via_temp_file(tmp_path):
     mock_cache.fetch.return_value = fake_so_bytes
     backend = RustNativeBackend(xray_cache_backend=mock_cache)
 
-    source_hash = hashlib.sha256(VALID_EVALUATOR.encode()).hexdigest()
-    expected_so = tmp_path / f"{source_hash}.so"
-    pid_tmp = tmp_path / f"{source_hash}.so.tmp.{__import__('os').getpid()}"
+    identity = "e" * 64
+    identity_stdout = f"identity={identity}\nsource_hash={'f' * 64}\nabi_version=2\nrustc_version=rustc 1.91.0\n"
+    expected_so = tmp_path / f"{identity}.so"
+    pid_tmp = tmp_path / f"{identity}.so.tmp.{__import__('os').getpid()}"
+    mock_identity_result = MagicMock(returncode=0, stdout=identity_stdout, stderr="")
 
     with patch.object(backend, "_get_cache_dir", return_value=tmp_path):
-        with patch.object(backend, "_get_rustc_version", return_value="rustc 1.91.0"):
+        with patch("subprocess.run", return_value=mock_identity_result):
             backend._try_pre_fill(VALID_EVALUATOR)
 
     # Final .so must exist with correct bytes.
@@ -1167,6 +1475,107 @@ def test_try_pre_fill_atomic_write_via_temp_file(tmp_path):
     assert expected_so.read_bytes() == fake_so_bytes, ".so must contain cache bytes"
     # Temp file must not remain after atomic rename.
     assert not pid_tmp.exists(), "temp .so.tmp file must be cleaned up after rename"
+
+
+# ---------------------------------------------------------------------------
+# Bug #1784 review MINOR-5: pre-fill temp filename must be collision-safe
+# across concurrent threads in the SAME process, not just PID-unique.
+# ---------------------------------------------------------------------------
+
+
+def test_try_pre_fill_uses_mkstemp_not_pid_suffix_bug_1784_minor5(tmp_path):
+    """_write_prefilled_artifact must call tempfile.mkstemp() to create its
+    temp .so path -- collision-safe across concurrent threads sharing the
+    SAME PID, unlike the old f"{name}.tmp.{os.getpid()}" scheme. Spies on
+    the real tempfile.mkstemp (wraps=) so this genuinely discriminates
+    against an implementation that still uses the PID-suffix scheme but
+    happens to leave no leftover file behind -- a state-only assertion
+    cannot tell the two implementations apart."""
+    import os
+    import tempfile as tempfile_module
+    from unittest.mock import MagicMock, patch
+    from code_indexer.xray.rust_backend import RustNativeBackend
+
+    fake_so_bytes = b"\x7fELF mkstemp-test"
+    mock_cache = MagicMock()
+    mock_cache.fetch.return_value = fake_so_bytes
+    backend = RustNativeBackend(xray_cache_backend=mock_cache)
+
+    identity = "5" * 64
+    identity_stdout = f"identity={identity}\nsource_hash={'6' * 64}\nabi_version=2\nrustc_version=rustc 1.91.0\n"
+    expected_so = tmp_path / f"{identity}.so"
+    old_style_pid_tmp = tmp_path / f"{identity}.so.tmp.{os.getpid()}"
+    mock_identity_result = MagicMock(returncode=0, stdout=identity_stdout, stderr="")
+
+    with patch.object(backend, "_get_cache_dir", return_value=tmp_path):
+        with patch("subprocess.run", return_value=mock_identity_result):
+            with patch(
+                "tempfile.mkstemp", wraps=tempfile_module.mkstemp
+            ) as mock_mkstemp:
+                backend._try_pre_fill(VALID_EVALUATOR)
+
+    mock_mkstemp.assert_called_once()
+    _, mkstemp_kwargs = mock_mkstemp.call_args
+    assert mkstemp_kwargs.get("dir") == str(tmp_path), (
+        "mkstemp must create the temp file INSIDE the cache dir (same "
+        "filesystem as the final .so, required for an atomic rename)"
+    )
+
+    assert expected_so.exists(), ".so must exist after successful pre-fill"
+    assert expected_so.read_bytes() == fake_so_bytes
+    assert not old_style_pid_tmp.exists(), (
+        "must not use the old f'{name}.tmp.{pid}' naming scheme"
+    )
+    leftover = [
+        p
+        for p in tmp_path.iterdir()
+        if p.name not in (f"{identity}.so", f"{identity}.meta")
+    ]
+    assert leftover == [], f"no temp files must remain after pre-fill: {leftover}"
+
+
+# ---------------------------------------------------------------------------
+# Bug #1784 cluster guard: a stale PG row keyed under the pre-fix raw
+# sha256(user_code) must never be served to a node computing the new
+# composite identity.
+# ---------------------------------------------------------------------------
+
+
+def test_cluster_old_raw_hash_artifact_not_served_to_new_identity_node(tmp_path):
+    """A cluster cache row that exists ONLY under the pre-fix raw hash key
+    must be a MISS for a node computing the new composite identity."""
+    import hashlib
+    from unittest.mock import MagicMock, patch
+    from code_indexer.xray.rust_backend import RustNativeBackend
+
+    old_raw_hash = hashlib.sha256(VALID_EVALUATOR.encode()).hexdigest()
+    new_identity = "9" * 64
+    assert new_identity != old_raw_hash
+
+    def _fetch_side_effect(key, rustc_version):
+        # Simulates a PG row that exists ONLY under the pre-fix raw-hash key.
+        if key == old_raw_hash:
+            return b"\x7fELF STALE ARTIFACT FROM OLD RAW-HASH KEY"
+        return None
+
+    mock_cache = MagicMock()
+    mock_cache.fetch.side_effect = _fetch_side_effect
+    backend = RustNativeBackend(xray_cache_backend=mock_cache)
+
+    identity_stdout = f"identity={new_identity}\nsource_hash={'1' * 64}\nabi_version=2\nrustc_version=rustc 1.91.0\n"
+    mock_identity_result = MagicMock(returncode=0, stdout=identity_stdout, stderr="")
+
+    with patch.object(backend, "_get_cache_dir", return_value=tmp_path):
+        with patch("subprocess.run", return_value=mock_identity_result):
+            backend._try_pre_fill(VALID_EVALUATOR)
+
+    mock_cache.fetch.assert_called_once_with(new_identity, "rustc 1.91.0")
+    assert not (tmp_path / f"{new_identity}.so").exists(), (
+        "must not write a local .so from a stale old-key row"
+    )
+    assert not (tmp_path / f"{old_raw_hash}.so").exists(), (
+        "must never touch the old raw-hash path"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1288,6 +1697,11 @@ _NUL_TERMINATOR_LENGTH = 1
 # the sheer count needs headroom on slower CI hosts.
 _LARGE_LIST_TIMEOUT_SECONDS = 120
 
+# Timeout for a single-file real xray-cli invocation used by the Bug #1796
+# temp-directory-seam tests below -- generous enough for a cold rustc
+# compile of the trivial VALID_EVALUATOR on a slower CI host.
+_BUG_1796_INVOKE_TIMEOUT_SECONDS = 30
+
 
 def _require_xray_cli_binary() -> None:
     """Skip this test if the real xray-cli release binary is not built locally.
@@ -1302,6 +1716,54 @@ def _require_xray_cli_binary() -> None:
             f"xray-cli binary not built at {_XRAY_CLI_DEFAULT}; "
             "run 'cargo build --release' inside rust/ to enable this test."
         )
+
+
+def test_python_identity_matches_real_compiled_artifact_filename(tmp_path):
+    """Bug #1784: Python's identity must be byte-identical to the REAL
+    compiled artifact's filename -- not just "the same value the CLI prints
+    twice", but the actual filename compile_evaluator() used for a real
+    compile. No mocking: exercises the real binary end-to-end.
+    """
+    _require_xray_cli_binary()
+    import os
+    import subprocess
+    from code_indexer.xray.rust_backend import RustNativeBackend, _XRAY_CLI_DEFAULT
+
+    backend = RustNativeBackend(xray_cache_backend=None)
+    python_info = backend._get_cache_identity_info(VALID_EVALUATOR)
+    assert python_info is not None, "real xray-cli must answer --print-cache-identity"
+
+    eval_file = tmp_path / "eval.rs"
+    eval_file.write_text(VALID_EVALUATOR)
+    files_list = tmp_path / "files.txt"
+    files_list.write_text("")
+    cache_data_dir = tmp_path / "cidx-data"
+
+    env = dict(os.environ)
+    env["CIDX_DATA_DIR"] = str(cache_data_dir)
+    proc = subprocess.run(
+        [
+            str(_XRAY_CLI_DEFAULT),
+            "--dynlib",
+            str(eval_file),
+            "--files-from",
+            str(files_list),
+            "--json",
+        ],
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=_LARGE_LIST_TIMEOUT_SECONDS,
+    )
+    assert proc.returncode == 0, f"real xray-cli compile must succeed: {proc.stderr}"
+
+    so_files = list((cache_data_dir / "xray-cache").glob("*.so"))
+    assert len(so_files) == 1, f"exactly one compiled .so expected, found: {so_files}"
+    real_identity = so_files[0].stem
+
+    assert python_info.identity == real_identity, (
+        "Python's identity must be byte-identical to the REAL compiled artifact's filename"
+    )
 
 
 def test_large_candidate_list_does_not_overflow_argv_bug_1612():
@@ -1387,3 +1849,88 @@ def test_subprocess_oserror_becomes_structured_error_not_unhandled_bug_1612():
         f"Expected E2BIG/argument-list-too-long detail in error message, got: {msg!r}"
     )
     assert meta is None
+
+
+# ---------------------------------------------------------------------------
+# Bug #1796: temp files must land in an injectable, CIDX-owned directory
+# (never the process-wide system temp dir), and cleanup must actually happen
+# on both the success and failure paths.
+# ---------------------------------------------------------------------------
+
+
+def _xray_temp_names(directory: Path) -> List[str]:
+    """Sorted xray_eval_*/xray_files_* file names currently in `directory`."""
+    return sorted(p.name for p in directory.glob("xray_*"))
+
+
+def _xray_temp_paths_in_system_tmp() -> Any:
+    """Set of xray_eval_*/xray_files_* paths currently in the system temp dir."""
+    import tempfile as tempfile_module
+
+    system_tmp = Path(tempfile_module.gettempdir())
+    return set(system_tmp.glob("xray_eval_*")) | set(system_tmp.glob("xray_files_*"))
+
+
+def test_invoke_xray_cli_writes_temp_files_into_injected_dir_and_cleans_up(tmp_path):
+    """_invoke_xray_cli must accept a `tmp_dir` seam: both per-invocation temp
+    artifacts must be created inside that directory while the real xray-cli
+    subprocess runs, no NEW artifact may appear in the system temp dir, and
+    the directory must be empty again after a successful call.
+    """
+    _require_xray_cli_binary()
+    from code_indexer.xray.rust_backend import RustNativeBackend
+
+    isolated_dir = tmp_path / "xray-tmp-seam"
+    backend = RustNativeBackend()
+    seen_during_call: List[str] = []
+
+    def _capture(proc: Any) -> None:
+        seen_during_call.extend(_xray_temp_names(isolated_dir))
+
+    system_tmp_before = _xray_temp_paths_in_system_tmp()
+    stdout, error = backend._invoke_xray_cli(
+        VALID_EVALUATOR,
+        [str(REPO_ROOT / "README.md")],
+        timeout_seconds=_BUG_1796_INVOKE_TIMEOUT_SECONDS,
+        on_process_spawned=_capture,
+        tmp_dir=isolated_dir,
+    )
+
+    assert error is None, f"real xray-cli invocation must succeed: {error}"
+    assert stdout, "expected non-empty JSON stdout from a real xray-cli run"
+    assert len(seen_during_call) == 2, seen_during_call
+    assert any(name.startswith("xray_eval_") for name in seen_during_call)
+    assert any(name.startswith("xray_files_") for name in seen_during_call)
+
+    leaked = _xray_temp_paths_in_system_tmp() - system_tmp_before
+    assert leaked == set(), f"xray temp files leaked into system temp dir: {leaked}"
+    assert list(isolated_dir.iterdir()) == [], (
+        "temp files not cleaned up from the injected directory after success"
+    )
+
+
+def test_invoke_xray_cli_cleans_up_injected_dir_when_invocation_raises(tmp_path):
+    """Cleanup must run in a `finally` covering the failure path too: when
+    the external subprocess.Popen boundary raises a non-OSError exception
+    (which therefore propagates instead of becoming a structured error
+    tuple), the injected temp directory must still end up empty.
+    """
+    from code_indexer.xray.rust_backend import RustNativeBackend
+
+    isolated_dir = tmp_path / "xray-tmp-seam-raise"
+    backend = RustNativeBackend()
+
+    with patch("subprocess.Popen", side_effect=RuntimeError("boom-1796")):
+        with pytest.raises(RuntimeError, match="boom-1796"):
+            backend._invoke_xray_cli(
+                VALID_EVALUATOR,
+                [str(REPO_ROOT / "README.md")],
+                timeout_seconds=_BUG_1796_INVOKE_TIMEOUT_SECONDS,
+                on_process_spawned=None,
+                tmp_dir=isolated_dir,
+            )
+
+    assert isolated_dir.exists(), "injected directory must have been created"
+    assert list(isolated_dir.iterdir()) == [], (
+        "temp files must be cleaned up even when the invocation raises"
+    )

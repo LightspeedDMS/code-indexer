@@ -28,7 +28,7 @@ _GOV002_MIN_INTERVAL_SECONDS = 5.0
 
 # Floor entry count for YELLOW proactive LRU eviction: retain at least this
 # many (hottest) HNSW entries so repeated queries stay warm.
-_YELLOW_LRU_FLOOR = 1
+YELLOW_LRU_FLOOR = 1
 
 logger = logging.getLogger(__name__)
 
@@ -87,6 +87,19 @@ class GovernorCounters:
     # condition. A plain `+= 1` on an int is GIL-atomic enough that this is
     # a metrics-accuracy issue there, not a correctness one.
     query_admissions_denied: int = 0
+
+    # Story #1787 AC17: X-Ray graph-build observability, surfaced through
+    # this SAME existing stats path (never a second/parallel one) so an
+    # operator running ~900 repositories can distinguish "no graph builds
+    # were requested" from "every graph build was denied admission" --
+    # two states with opposite remedies, otherwise indistinguishable from
+    # the outside. Incremented via record_graph_build_outcome(), guarded
+    # by the SAME _counters_lock query_admissions_denied uses.
+    graph_build_requests_total: int = 0
+    graph_gate1_denials: int = 0
+    graph_gate2_denials: int = 0
+    graph_red_aborts: int = 0
+    graph_memory_limit_aborts: int = 0
 
 
 class _MemoryReaders:
@@ -417,6 +430,38 @@ class MemoryGovernor:
         with self._counters_lock:
             self.counters.query_admissions_denied += 1
 
+    def record_graph_build_outcome(
+        self,
+        *,
+        denied_gate: Optional[str] = None,
+        red_abort: bool = False,
+        memory_limit_abort: bool = False,
+        estimated_peak_bytes: Optional[int] = None,
+        actual_peak_bytes: Optional[int] = None,
+    ) -> None:
+        """Story #1787 AC17: records ONE X-Ray graph-build outcome through
+        this EXISTING stats path. Real call sites:
+        server/services/xray_graph_governor/admission.py's
+        check_gate1/check_gate2/check_phase_boundary. `denied_gate` is
+        "gate1"/"gate2" or None; at most one of denied_gate/red_abort/
+        memory_limit_abort should be set per call (caller's discipline,
+        not re-validated here). Thread-safe; never raises.
+        """
+        with self._counters_lock:
+            self.counters.graph_build_requests_total += 1
+            if denied_gate == "gate1":
+                self.counters.graph_gate1_denials += 1
+            elif denied_gate == "gate2":
+                self.counters.graph_gate2_denials += 1
+            if red_abort:
+                self.counters.graph_red_aborts += 1
+            if memory_limit_abort:
+                self.counters.graph_memory_limit_aborts += 1
+            if estimated_peak_bytes is not None:
+                self._last_graph_estimated_peak_bytes = estimated_peak_bytes
+            if actual_peak_bytes is not None:
+                self._last_graph_actual_peak_bytes = actual_peak_bytes
+
     def get_snapshot(self) -> dict:
         """Return the full §3.5 snapshot dict for the admin endpoint (Story 4).
 
@@ -489,6 +534,18 @@ class MemoryGovernor:
             "lru_evictions": self.counters.lru_evictions,
             "trim_calls": self.counters.trim_calls,
             "query_admissions_denied": self.counters.query_admissions_denied,
+            # Story #1787 AC17: X-Ray graph-build observability.
+            "graph_build_requests_total": self.counters.graph_build_requests_total,
+            "graph_gate1_denials": self.counters.graph_gate1_denials,
+            "graph_gate2_denials": self.counters.graph_gate2_denials,
+            "graph_red_aborts": self.counters.graph_red_aborts,
+            "graph_memory_limit_aborts": self.counters.graph_memory_limit_aborts,
+            "last_graph_estimated_peak_bytes": getattr(
+                self, "_last_graph_estimated_peak_bytes", None
+            ),
+            "last_graph_actual_peak_bytes": getattr(
+                self, "_last_graph_actual_peak_bytes", None
+            ),
             # Config echoes — live values when config_service is set, else constructor defaults
             "enabled": echo_enabled,
             "yellow_pct": echo_yellow_pct,
@@ -769,13 +826,13 @@ class MemoryGovernor:
 
         # YELLOW proactive LRU eviction (Story 4 Critical 2).
         # When the band is YELLOW and a cache has been attached via attach_cache(),
-        # evict the least-recently-used entries down to _YELLOW_LRU_FLOOR so the
+        # evict the least-recently-used entries down to YELLOW_LRU_FLOOR so the
         # hottest entries are retained.  Skipped silently when no cache is attached
         # (CLI/solo / pre-lifespan-wiring).
         if self.band == MemoryBand.YELLOW and self._attached_cache is not None:
             before_lru = self.counters.lru_evictions
             self.evict_lru_to_floor(
-                self._attached_cache, floor_entries=_YELLOW_LRU_FLOOR
+                self._attached_cache, floor_entries=YELLOW_LRU_FLOOR
             )
             evicted_this_tick = self.counters.lru_evictions - before_lru
             self.log_gov003_lru_evict(count=evicted_this_tick, freed_mb=0.0)

@@ -42,7 +42,7 @@ from __future__ import annotations
 import time
 import uuid
 from pathlib import Path
-from typing import Iterator
+from typing import Callable, Iterator
 
 import pytest
 from fastapi.testclient import TestClient
@@ -50,7 +50,7 @@ from fastapi.testclient import TestClient
 from code_indexer.services.temporal.temporal_server_paths import (
     server_temporal_index_root,
 )
-from tests.e2e.server.conftest import AdminTokenProvider
+from tests.e2e.server.conftest import AdminTokenProvider, wait_for_terminal_job
 from tests.e2e.server.mcp_helpers import call_mcp_tool, parse_mcp_result
 
 _PREBUILT_REPO = Path.home() / ".tmp" / "temporal_recall_full_repo"
@@ -78,23 +78,6 @@ _POLL_SEARCH_JOB_INTERVAL = 1.0
 # to have ever been seen before by TemporalDedupCache, in this run or any
 # other -- independent of whatever base phrase is used.
 _UNIQUE_QUERY_SUFFIX = uuid.uuid4().hex[:12]
-
-
-def _wait_for_job(client: TestClient, job_id: str, headers: dict, label: str) -> None:
-    deadline = time.monotonic() + _JOB_TIMEOUT
-    while time.monotonic() < deadline:
-        resp = client.get(f"/api/jobs/{job_id}", headers=headers)
-        assert resp.status_code < 500, (
-            f"{label}: job poll HTTP {resp.status_code}: {resp.text[:200]}"
-        )
-        if resp.status_code == 200:
-            body = resp.json()
-            status = body.get("status")
-            if status in ("completed", "failed", "cancelled"):
-                assert status == "completed", f"{label}: job {job_id} -> {body}"
-                return
-        time.sleep(_JOB_POLL)
-    raise TimeoutError(f"{label}: job {job_id} did not complete in {_JOB_TIMEOUT}s")
 
 
 @pytest.fixture(scope="module")
@@ -126,8 +109,13 @@ def live_wiring_repo(
     )
     reg_job_id = reg_resp.json().get("job_id", "")
     assert reg_job_id
-    _wait_for_job(
-        test_client, reg_job_id, admin_token_provider.get_headers(), "register"
+    wait_for_terminal_job(
+        test_client,
+        reg_job_id,
+        admin_token_provider,
+        timeout=_JOB_TIMEOUT,
+        poll_interval=_JOB_POLL,
+        label="register",
     )
 
     golden_repo_dir = test_client_data_dir / "data" / "golden-repos" / _ALIAS
@@ -161,8 +149,13 @@ def live_wiring_repo(
     )
     act_job_id = act_resp.json().get("job_id", "")
     assert act_job_id
-    _wait_for_job(
-        test_client, act_job_id, admin_token_provider.get_headers(), "activate"
+    wait_for_terminal_job(
+        test_client,
+        act_job_id,
+        admin_token_provider,
+        timeout=_JOB_TIMEOUT,
+        poll_interval=_JOB_POLL,
+        label="activate",
     )
 
     yield _ALIAS
@@ -200,13 +193,16 @@ def forced_deferred_inline_wait() -> Iterator[None]:
 
 
 def _poll_search_job_until_completed(
-    test_client: TestClient, job_id: str, headers: dict
+    test_client: TestClient, job_id: str, get_headers: Callable[[], dict]
 ) -> dict:
+    """Bug #1803: get_headers is called fresh on EVERY poll iteration, not
+    once before the loop -- a frozen dict can outlive the JWT's real
+    remaining life over this loop's 120s bound."""
     deadline = time.monotonic() + _POLL_SEARCH_JOB_TIMEOUT
     last_body: dict = {}
     while time.monotonic() < deadline:
         resp = call_mcp_tool(
-            test_client, "poll_search_job", {"job_id": job_id}, headers
+            test_client, "poll_search_job", {"job_id": job_id}, get_headers()
         )
         assert resp.status_code == 200, (
             f"poll_search_job HTTP {resp.status_code}: {resp.text[:300]}"
@@ -225,12 +221,15 @@ def _poll_search_job_until_completed(
 
 
 def _poll_rest_query_result_until_completed(
-    test_client: TestClient, job_id: str, headers: dict
+    test_client: TestClient, job_id: str, get_headers: Callable[[], dict]
 ) -> dict:
+    """Bug #1803: get_headers is called fresh on EVERY poll iteration, not
+    once before the loop -- a frozen dict can outlive the JWT's real
+    remaining life over this loop's 120s bound."""
     deadline = time.monotonic() + _POLL_SEARCH_JOB_TIMEOUT
     last_body: dict = {}
     while time.monotonic() < deadline:
-        resp = test_client.get(f"/api/query/result/{job_id}", headers=headers)
+        resp = test_client.get(f"/api/query/result/{job_id}", headers=get_headers())
         assert resp.status_code in (200, 404), (
             f"unexpected status {resp.status_code}: {resp.text[:300]}"
         )
@@ -286,6 +285,7 @@ class TestMcpForcedHandoffAndPoll:
         test_client: TestClient,
         live_wiring_repo: str,
         auth_headers: dict,
+        admin_token_provider: AdminTokenProvider,
         forced_deferred_inline_wait: None,
     ) -> None:
         """Scenario 4: the background worker keeps running after the
@@ -307,7 +307,9 @@ class TestMcpForcedHandoffAndPoll:
         job_id = submit_body.get("job_id")
         assert job_id, f"expected a job_id from the forced handoff: {submit_body}"
 
-        completed = _poll_search_job_until_completed(test_client, job_id, auth_headers)
+        completed = _poll_search_job_until_completed(
+            test_client, job_id, admin_token_provider.get_headers
+        )
 
         assert completed["status"] == "completed"
         assert completed.get("continue_polling") is False
@@ -354,6 +356,7 @@ class TestRestForcedHandoffAndPoll:
         test_client: TestClient,
         live_wiring_repo: str,
         auth_headers: dict,
+        admin_token_provider: AdminTokenProvider,
         forced_deferred_inline_wait: None,
     ) -> None:
         """Scenario 4/12: GET /api/query/result/{job_id} eventually
@@ -375,7 +378,7 @@ class TestRestForcedHandoffAndPoll:
         assert job_id
 
         last_body = _poll_rest_query_result_until_completed(
-            test_client, job_id, auth_headers
+            test_client, job_id, admin_token_provider.get_headers
         )
 
         assert last_body["status"] == "completed"

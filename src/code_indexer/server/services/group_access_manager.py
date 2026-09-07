@@ -9,12 +9,13 @@ Manages user groups and group-based access control:
 Story #705: Default Group Bootstrap and User Assignment Infrastructure
 """
 
+import json
 import logging
 import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, List, Optional
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional
 
 from code_indexer.server.storage.database_manager import DatabaseConnectionManager
 
@@ -1078,28 +1079,37 @@ class GroupAccessManager:
         action_type: str,
         target_type: str,
         target_id: str,
-        details: Optional[str] = None,
+        details: Optional[Dict[str, Any]] = None,
     ) -> None:
         """
         Record an audit log entry.
 
         Story #710: AC7 - Audit Log for Administrative Actions
         Story #399: Delegates to AuditLogService when injected.
+        Bug #1802: `details` must be a dict (or None); serialized to JSON
+        here, once, so every call site shares one contract with the reader.
 
         Args:
             admin_id: ID of the admin performing the action
             action_type: Type of action (user_group_change, repo_access_grant, etc.)
             target_type: Type of target (user, group, repo)
             target_id: ID of the target
-            details: Optional JSON details about the action
+            details: Optional structured payload describing the action
         """
+        if details is not None and not isinstance(details, dict):
+            raise TypeError(
+                "log_audit(details=...) requires a dict or None, got "
+                f"{type(details).__name__} -- see Bug #1802"
+            )
+        details_json = json.dumps(details) if details is not None else None
+
         if self._audit_service is not None:
             self._audit_service.log(
                 admin_id=admin_id,
                 action_type=action_type,
                 target_type=target_type,
                 target_id=target_id,
-                details=details,
+                details=details_json,
             )
             return
 
@@ -1113,7 +1123,7 @@ class GroupAccessManager:
                 (timestamp, admin_id, action_type, target_type, target_id, details)
                 VALUES (?, ?, ?, ?, ?, ?)
             """,
-                (now, admin_id, action_type, target_type, target_id, details),
+                (now, admin_id, action_type, target_type, target_id, details_json),
             )
 
         self._conn_manager.execute_atomic(_do_log)

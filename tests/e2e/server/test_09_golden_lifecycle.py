@@ -43,12 +43,13 @@ from __future__ import annotations
 
 import json
 import os
-import time
 from pathlib import Path
 from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
+
+from tests.e2e.server.conftest import AdminTokenProvider, wait_for_terminal_job
 
 
 # ---------------------------------------------------------------------------
@@ -90,30 +91,27 @@ def _require_seed_repo() -> None:
 def _wait_for_job(
     client: TestClient,
     job_id: str,
-    auth_headers: dict[str, str],
+    admin_token_provider: AdminTokenProvider,
 ) -> dict[str, Any]:
     """Poll GET /api/jobs/{job_id} until a terminal state is reached.
 
-    Timeouts and poll intervals are resolved from environment variables
-    (E2E_GOLDEN_JOB_TIMEOUT, E2E_GOLDEN_JOB_POLL) at module load time.
+    Thin delegation to the canonical wait_for_terminal_job() (conftest.py,
+    Bug #1803): the loop body -- including the per-iteration
+    admin_token_provider.get_headers() refresh -- lives there ONLY.
+    Timeouts/poll intervals still resolve from the same env vars this
+    module already reads (E2E_GOLDEN_JOB_TIMEOUT, E2E_GOLDEN_JOB_POLL).
 
     Returns the final job status dict.
     Raises TimeoutError if the job does not complete within the timeout.
     The caller is responsible for asserting the returned status value.
     """
-    deadline = time.monotonic() + _JOB_TIMEOUT
-    while time.monotonic() < deadline:
-        resp = client.get(f"/api/jobs/{job_id}", headers=auth_headers)
-        assert resp.status_code < 500, (
-            f"Job poll returned HTTP {resp.status_code}: {resp.text[:300]}"
-        )
-        if resp.status_code == 200:
-            body: dict[str, Any] = resp.json()
-            if body.get("status") in _TERMINAL_STATES:
-                return body
-        time.sleep(_JOB_POLL_INTERVAL)
-    raise TimeoutError(
-        f"Job {job_id!r} did not reach a terminal state within {_JOB_TIMEOUT}s"
+    return wait_for_terminal_job(
+        client,
+        job_id,
+        admin_token_provider,
+        timeout=_JOB_TIMEOUT,
+        poll_interval=_JOB_POLL_INTERVAL,
+        assert_completed=False,
     )
 
 
@@ -159,7 +157,7 @@ def _assert_job_completed(status: dict[str, Any], label: str) -> None:
 def _wait_on_job_id(
     source: dict[str, Any],
     client: TestClient,
-    auth_headers: dict[str, str],
+    admin_token_provider: AdminTokenProvider,
     label: str,
 ) -> None:
     """Extract ``job_id`` from *source* and wait for completion if present.
@@ -170,14 +168,16 @@ def _wait_on_job_id(
     synchronous).
 
     Args:
-        source:       Dict that may contain a ``job_id`` key.
-        client:       In-process TestClient.
-        auth_headers: Authorization header dict.
-        label:        Human-readable label forwarded to _assert_job_completed.
+        source:              Dict that may contain a ``job_id`` key.
+        client:               In-process TestClient.
+        admin_token_provider: Token provider; get_headers() is called fresh
+            on every poll iteration inside _wait_for_job (Bug #1803).
+        label:                Human-readable label forwarded to
+            _assert_job_completed.
     """
     job_id: str | None = source.get("job_id")
     if job_id:
-        status = _wait_for_job(client, job_id, auth_headers)
+        status = _wait_for_job(client, job_id, admin_token_provider)
         _assert_job_completed(status, label)
 
 
@@ -218,7 +218,7 @@ def _rest_step(
     client: TestClient,
     method: str,
     path: str,
-    auth_headers: dict[str, str],
+    admin_token_provider: AdminTokenProvider,
     label: str,
     ok_statuses: tuple[int, ...] = (200, 202),
     *,
@@ -230,15 +230,19 @@ def _rest_step(
     Waits for any returned job_id to reach a terminal completed state.
 
     Args:
-        client:      TestClient bound to the CIDX app.
-        method:      HTTP method string ("POST", "DELETE", …).
-        path:        URL path relative to the server root.
-        auth_headers: Authorization header dict.
-        label:       Human-readable step name for failure messages.
-        ok_statuses: Acceptable HTTP status codes (default 200, 202).
-        json_body:   Optional JSON body for POST/PUT requests.
+        client:               TestClient bound to the CIDX app.
+        method:               HTTP method string ("POST", "DELETE", …).
+        path:                 URL path relative to the server root.
+        admin_token_provider: Token provider; get_headers() is called for
+            this request and again fresh on every poll iteration inside
+            _wait_on_job_id -> _wait_for_job (Bug #1803).
+        label:                Human-readable step name for failure
+            messages.
+        ok_statuses:          Acceptable HTTP status codes (default 200,
+            202).
+        json_body:            Optional JSON body for POST/PUT requests.
     """
-    kwargs: dict[str, Any] = {"headers": auth_headers}
+    kwargs: dict[str, Any] = {"headers": admin_token_provider.get_headers()}
     if json_body is not None:
         kwargs["json"] = json_body
     resp = client.request(method, path, **kwargs)
@@ -246,4 +250,4 @@ def _rest_step(
         pytest.fail(f"REST {label} failed: HTTP {resp.status_code} — {resp.text[:200]}")
     if resp.status_code in (200, 202):
         body: dict[str, Any] = resp.json()
-        _wait_on_job_id(body, client, auth_headers, label)
+        _wait_on_job_id(body, client, admin_token_provider, label)

@@ -614,6 +614,19 @@ class TantivyIndexManager:
         writer = self._writer
         writer.commit()
         writer.wait_merging_threads()
+        # Bug #1799: Tantivy releases the directory lockfile only when the
+        # underlying Rust IndexWriter is dropped, which for this PyO3-wrapped
+        # object happens only once its CPython refcount reaches zero. Before
+        # this fix, `self._writer = self._index.writer(self._heap_size)`
+        # evaluated the RHS (acquiring a NEW writer) while BOTH the local
+        # `writer` variable above AND the not-yet-reassigned `self._writer`
+        # attribute still referenced the OLD writer -- delaying the lock
+        # release and causing an intermittent LockBusy ValueError under
+        # production load. Drop every Python reference to the old writer
+        # FIRST so the lock is released deterministically before requesting
+        # its replacement.
+        self._writer = None
+        del writer
         # wait_merging_threads() consumes the writer; re-create it so
         # subsequent add_document() calls remain valid.
         assert self._index is not None

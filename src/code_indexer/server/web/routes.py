@@ -1703,7 +1703,10 @@ def create_user(
                     action_type="user_group_assign",
                     target_type="user",
                     target_id=new_username,
-                    details=f"Auto-assigned to '{target_group.name}' group on creation",
+                    details={
+                        "group": target_group.name,
+                        "reason": "auto_assign_on_creation",
+                    },
                 )
                 logger.info(
                     f"Auto-assigned new user '{new_username}' to '{target_group.name}' group"
@@ -2265,7 +2268,7 @@ def create_group(
             action_type="group_create",
             target_type="group",
             target_id=str(group.id),
-            details=json.dumps({"name": group.name, "description": group.description}),
+            details={"name": group.name, "description": group.description},
         )
 
         return _create_groups_page_response(
@@ -2315,14 +2318,12 @@ def update_group(
                 action_type="group_update",
                 target_type="group",
                 target_id=str(group_id),
-                details=json.dumps(
-                    {
-                        "old_name": old_group.name,
-                        "new_name": name,
-                        "old_description": old_group.description,
-                        "new_description": description,
-                    }
-                ),
+                details={
+                    "old_name": old_group.name,
+                    "new_name": name,
+                    "old_description": old_group.description,
+                    "new_description": description,
+                },
             )
             return _create_groups_page_response(
                 request, session, success_message=f"Group '{name}' updated successfully"
@@ -2372,7 +2373,7 @@ def delete_group(
                 action_type="group_delete",
                 target_type="group",
                 target_id=str(group_id),
-                details=json.dumps({"name": group_name}),
+                details={"name": group_name},
             )
             return _create_groups_page_response(
                 request,
@@ -2429,12 +2430,10 @@ def assign_user_to_group(
             action_type="user_group_change",
             target_type="user",
             target_id=user_id,
-            details=json.dumps(
-                {
-                    "old_group": old_group_name,
-                    "new_group": new_group.name,
-                }
-            ),
+            details={
+                "old_group": old_group_name,
+                "new_group": new_group.name,
+            },
         )
 
         return _create_groups_page_response(
@@ -2773,7 +2772,7 @@ async def grant_repo_access(
                 action_type="repo_access_grant",
                 target_type="repo",
                 target_id=repo_name,
-                details=f"Granted access to group '{group.name}'",
+                details={"repo": repo_name, "group": group.name},
             )
 
         message = (
@@ -2856,7 +2855,7 @@ async def revoke_repo_access(
                 action_type="repo_access_revoke",
                 target_type="repo",
                 target_id=repo_name,
-                details=f"Revoked access from group '{group.name}'",
+                details={"repo": repo_name, "group": group.name},
             )
 
         message = (

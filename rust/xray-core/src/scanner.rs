@@ -9,11 +9,11 @@ use std::sync::Mutex;
 use tree_sitter::Parser;
 use walkdir::WalkDir;
 
-/// Per-thread cached Parser.
-///
-/// Parser is !Send so it cannot be shared across rayon threads, but it CAN
-/// be reused within the same thread. Using thread_local! avoids the cost of
-/// Parser::new() (and its internal allocations) for every file processed.
+// Per-thread cached Parser.
+//
+// Parser is !Send so it cannot be shared across rayon threads, but it CAN
+// be reused within the same thread. Using thread_local! avoids the cost of
+// Parser::new() (and its internal allocations) for every file processed.
 thread_local! {
     static THREAD_PARSER: RefCell<Parser> = RefCell::new(Parser::new());
 }
@@ -70,11 +70,46 @@ pub fn collect_files(dir: &Path) -> Vec<PathBuf> {
         .collect()
 }
 
-/// Parse a single file into an OwnedNode tree.
+// Story #1787, S2, AC2 test instrumentation ONLY (compiled out entirely in
+// production builds -- zero production overhead): counts how many times
+// tree-sitter's `Parser::parse` has actually been invoked on the CURRENT
+// thread. `thread_local!` so parallel `cargo test` threads never
+// interfere with each other's counts. This is what makes "the file is
+// parsed exactly ONCE" a provable test assertion instead of an
+// untestable claim -- the naive bug this guards against is a fused
+// pipeline that re-parses the same file once per walk (once for
+// extraction, again for `collect_facts`) instead of sharing one tree.
+//
+// Gated on `test-support` in addition to plain `test` for the same reason
+// `OwnedNode`'s `DROP_COUNT` is (Bug #1791 pattern): a `tests/*.rs`
+// integration-test crate links against a normal, non-cfg-test build of
+// this library. (Plain `//` here, not `///`: rustdoc cannot attach a doc
+// comment to a macro invocation's expanded output.)
+#[cfg(any(test, feature = "test-support"))]
+thread_local! {
+    pub static PARSE_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(any(test, feature = "test-support"))]
+pub fn reset_parse_count() {
+    PARSE_COUNT.with(|c| c.set(0));
+}
+
+#[cfg(any(test, feature = "test-support"))]
+pub fn parse_count() -> usize {
+    PARSE_COUNT.with(|c| c.get())
+}
+
+/// Parses `path`, ALSO reporting whether tree-sitter's root node carries a
+/// syntax error (`Node::has_error`) -- Story #1787 AC10 needs this to count
+/// "files with parse errors" SEPARATELY from files that cannot be
+/// read/parsed at all (unsupported extension, I/O error, or a total
+/// tree-sitter failure), which still return `None`, unchanged.
 ///
-/// Returns None if the file cannot be read, the extension is unsupported, or
-/// tree-sitter fails to produce a tree.
-pub fn parse_file(path: &Path) -> Option<OwnedNode> {
+/// `parse_file` below is a thin wrapper discarding the error flag, so there
+/// is exactly ONE parsing implementation (Rule 4, anti-duplication) --
+/// never two independently-maintained copies of this logic.
+pub fn parse_file_with_error_flag(path: &Path) -> Option<(OwnedNode, bool)> {
     let ext = path.extension()?.to_str()?;
     let language = languages::language_for_extension(ext)?;
 
@@ -83,10 +118,21 @@ pub fn parse_file(path: &Path) -> Option<OwnedNode> {
     let tree = THREAD_PARSER.with(|p| {
         let mut parser = p.borrow_mut();
         parser.set_language(&language).ok()?;
+        #[cfg(any(test, feature = "test-support"))]
+        PARSE_COUNT.with(|c| c.set(c.get() + 1));
         parser.parse(&source, None)
     })?;
 
-    Some(OwnedNode::build_from_ts_node(tree.root_node(), &source))
+    let has_error = tree.root_node().has_error();
+    Some((OwnedNode::build_from_ts_node(tree.root_node(), &source), has_error))
+}
+
+/// Parse a single file into an OwnedNode tree.
+///
+/// Returns None if the file cannot be read, the extension is unsupported, or
+/// tree-sitter fails to produce a tree.
+pub fn parse_file(path: &Path) -> Option<OwnedNode> {
+    parse_file_with_error_flag(path).map(|(root, _has_error)| root)
 }
 
 /// Call every evaluator once with the file's root node, accumulating findings.
@@ -229,6 +275,27 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let path = write_temp_file(&dir, "notes.txt", "hello");
         assert!(parse_file(&path).is_none());
+    }
+
+    /// Story #1787 AC10 needs "files with parse errors" counted SEPARATELY
+    /// from files that could not be read/parsed at all (which stay `None`,
+    /// unchanged). `has_error` must be false for genuinely valid syntax and
+    /// true for a tree-sitter ERROR node -- a wrong implementation that
+    /// always reports `false` (or always `true`) would pass neither half of
+    /// this test on its own.
+    #[test]
+    fn parse_file_with_error_flag_reports_true_only_for_a_genuine_syntax_error() {
+        let dir = TempDir::new().unwrap();
+        let valid = write_temp_file(&dir, "Valid.java", "class Valid { void run() {} }");
+        let (_, valid_has_error) = parse_file_with_error_flag(&valid).unwrap();
+        assert!(!valid_has_error, "well-formed Java must not report a syntax error");
+
+        // Deliberately malformed: an unterminated method body/class. This is
+        // NOT unreadable or unsupported (it parses -- tree-sitter is
+        // error-tolerant) -- it produces a real ERROR node in the tree.
+        let malformed = write_temp_file(&dir, "Malformed.java", "class Broken { void run( {");
+        let (_, malformed_has_error) = parse_file_with_error_flag(&malformed).unwrap();
+        assert!(malformed_has_error, "malformed Java must report a syntax error");
     }
 
     #[test]

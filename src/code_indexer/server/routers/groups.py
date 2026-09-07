@@ -255,7 +255,7 @@ def create_group(
             action_type="group_create",
             target_type="group",
             target_id=str(group.id),
-            details=f"Created group '{group.name}'",
+            details={"name": group.name, "description": group.description},
         )
         return _group_to_response(group)
     except ValueError:
@@ -344,7 +344,10 @@ def update_group(
             action_type="group_update",
             target_type="group",
             target_id=str(group_id),
-            details=f"Updated group '{updated_group.name}'",
+            details={
+                "name": updated_group.name,
+                "description": updated_group.description,
+            },
         )
         return _group_to_response(updated_group)
     except ValueError as e:
@@ -435,7 +438,7 @@ def delete_group(
             action_type="group_delete",
             target_type="group",
             target_id=str(group_id),
-            details=f"Deleted group '{group_name}'",
+            details={"name": group_name},
         )
         # AC7: Return 204 No Content on success
         return None
@@ -512,7 +515,7 @@ def add_repo_to_group(
             action_type="repo_access_grant",
             target_type="repo",
             target_id=repo_name,
-            details=f"Granted access to '{repo_name}' for group '{group.name}'",
+            details={"repo": repo_name, "group": group.name},
         )
 
     # Return 201 for new grants, 200 for idempotent (no new grants)
@@ -632,7 +635,7 @@ def bulk_remove_repos_from_group(
             action_type="repo_access_revoke",
             target_type="repo",
             target_id=repo_name,
-            details=f"Revoked access to '{repo_name}' from group '{group.name}'",
+            details={"repo": repo_name, "group": group.name},
         )
 
     return BulkRemoveReposResponse(
@@ -749,7 +752,11 @@ def move_user_to_group(
         action_type="user_group_change",
         target_type="user",
         target_id=user_id,
-        details=f"Moved user '{user_id}' from '{previous_group_name}' to '{target_group.name}'",
+        details={
+            "user_id": user_id,
+            "from_group": previous_group_name,
+            "to_group": target_group.name,
+        },
     )
 
     return MessageResponse(

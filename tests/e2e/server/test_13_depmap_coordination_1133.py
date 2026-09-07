@@ -71,6 +71,7 @@ import httpx
 import pytest
 from fastapi.testclient import TestClient
 
+from tests.e2e.server.conftest import AdminTokenProvider
 from tests.e2e.server.mcp_helpers import call_mcp_tool, parse_mcp_result
 
 # ---------------------------------------------------------------------------
@@ -296,13 +297,24 @@ def _cancel_and_wait_for_available(
     return bool(dep_map_service.is_available())
 
 
-def _drain_jobs(client: TestClient, auth_headers: dict, job_ids: list[str]) -> None:
+def _drain_jobs(
+    client: TestClient,
+    admin_token_provider: AdminTokenProvider,
+    job_ids: list[str],
+) -> None:
     """Bounded-wait until each given background job reaches a terminal state.
 
     Ensures any worker spawned by an accepted (202) trigger has finished (and
     its log lines flushed) before the test returns, so teardown and the
     session log-audit gate observe a settled state.  Monotonic-deadline bound
     (Messi Rule #14): terminates on terminal state OR deadline — never hangs.
+
+    Bug #1803: admin_token_provider.get_headers() is called fresh on EVERY
+    poll iteration (not once before the loop) -- this drains a LIST of jobs
+    with any-terminal-state/404-as-drained semantics that the shared
+    wait_for_terminal_job() helper does not express, so the fix is applied
+    locally rather than forcing this onto that helper's single-job,
+    completed-only contract.
     """
     for job_id in job_ids:
         if not job_id:
@@ -310,7 +322,8 @@ def _drain_jobs(client: TestClient, auth_headers: dict, job_ids: list[str]) -> N
         deadline = time.monotonic() + _JOB_DRAIN_TIMEOUT_S
         while time.monotonic() < deadline:
             resp = client.get(
-                JOB_STATUS_TMPL.format(job_id=job_id), headers=auth_headers
+                JOB_STATUS_TMPL.format(job_id=job_id),
+                headers=admin_token_provider.get_headers(),
             )
             if resp.status_code == 200:
                 if resp.json().get("status") in _TERMINAL_JOB_STATES:
@@ -429,7 +442,9 @@ def test_ac1_mcp_trigger_returns_conflict_with_active_job_id(
 
 
 def test_ac1_release_then_trigger_is_accepted(
-    depmap_enabled_client: TestClient, auth_headers: dict
+    depmap_enabled_client: TestClient,
+    auth_headers: dict,
+    admin_token_provider: AdminTokenProvider,
 ) -> None:
     """Seed -> 409 -> release -> fresh trigger is ACCEPTED (202).
 
@@ -484,7 +499,7 @@ def test_ac1_release_then_trigger_is_accepted(
         active = sentinel.read_active(SENTINEL_OP_ANALYSIS)
         if active is not None and active.job_id == seed_job_id:
             sentinel.release(SENTINEL_OP_ANALYSIS, expected_job_id=seed_job_id)
-        _drain_jobs(depmap_enabled_client, auth_headers, accepted_job_ids)
+        _drain_jobs(depmap_enabled_client, admin_token_provider, accepted_job_ids)
 
         # Wait until dep_map_service.is_available() returns True before returning.
         #
@@ -521,7 +536,9 @@ def test_ac1_release_then_trigger_is_accepted(
 
 
 async def test_ac1_concurrent_triggers_single_winner(
-    depmap_enabled_client: TestClient, auth_headers: dict
+    depmap_enabled_client: TestClient,
+    auth_headers: dict,
+    admin_token_provider: AdminTokenProvider,
 ) -> None:
     """Two truly-concurrent REST triggers -> exactly ONE 202 + ONE 409.
 
@@ -633,7 +650,7 @@ async def test_ac1_concurrent_triggers_single_winner(
                 break
             accepted_job_ids = [active.job_id]
             time.sleep(_JOB_DRAIN_POLL_S)
-        _drain_jobs(depmap_enabled_client, auth_headers, accepted_job_ids)
+        _drain_jobs(depmap_enabled_client, admin_token_provider, accepted_job_ids)
 
 
 # ===========================================================================

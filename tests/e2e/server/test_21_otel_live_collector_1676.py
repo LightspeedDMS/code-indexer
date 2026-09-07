@@ -67,7 +67,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from tests.e2e.helpers import require_voyage_key
-from tests.e2e.server.conftest import AdminTokenProvider
+from tests.e2e.server.conftest import AdminTokenProvider, wait_for_terminal_job
 from tests.e2e.server.mcp_helpers import call_mcp_tool
 
 logger = logging.getLogger(__name__)
@@ -110,7 +110,6 @@ _HTTP_OK: int = 200
 
 _JOB_TIMEOUT_S: float = float(os.environ.get("E2E_GOLDEN_JOB_TIMEOUT", "300"))
 _JOB_POLL_S: float = 0.5
-_TERMINAL_JOB_STATES: frozenset[str] = frozenset({"completed", "failed", "cancelled"})
 
 _TELEMETRY_METRICS_EXPORT_INTERVAL_S: int = 3
 _FORCE_FLUSH_TIMEOUT_MS: int = 30_000
@@ -220,28 +219,6 @@ def _wait_for_collector_health() -> None:
         _COLLECTOR_HEALTH_TIMEOUT_S,
         _COLLECTOR_HEALTH_POLL_S,
         f"otel-collector health_check extension at {_COLLECTOR_HEALTH_URL}",
-    )
-
-
-def _wait_for_job(client: TestClient, job_id: str, headers: dict, label: str) -> None:
-    """Poll GET /api/jobs/{job_id} until terminal state; fail loudly on timeout/failure."""
-    deadline = time.monotonic() + _JOB_TIMEOUT_S
-    while time.monotonic() < deadline:
-        resp = client.get(f"/api/jobs/{job_id}", headers=headers)
-        assert resp.status_code < 500, (
-            f"{label}: job poll returned HTTP {resp.status_code}: {resp.text[:200]}"
-        )
-        if resp.status_code == _HTTP_OK:
-            body = resp.json()
-            status = body.get("status")
-            if status in _TERMINAL_JOB_STATES:
-                assert status == "completed", (
-                    f"{label}: job {job_id!r} ended with status {status!r}: {body}"
-                )
-                return
-        time.sleep(_JOB_POLL_S)
-    raise TimeoutError(
-        f"{label}: job {job_id!r} did not complete within {_JOB_TIMEOUT_S}s"
     )
 
 
@@ -545,7 +522,14 @@ def test_real_mcp_call_round_trips_span_metric_and_log_through_live_collector(
     )
     reg_job_id = reg_resp.json().get("job_id", "")
     assert reg_job_id, f"register response missing job_id: {reg_resp.json()}"
-    _wait_for_job(client, reg_job_id, token_provider.get_headers(), "register")
+    wait_for_terminal_job(
+        client,
+        reg_job_id,
+        token_provider,
+        timeout=_JOB_TIMEOUT_S,
+        poll_interval=_JOB_POLL_S,
+        label="register",
+    )
 
     act_resp = client.post(
         "/api/repos/activate",
@@ -557,7 +541,14 @@ def test_real_mcp_call_round_trips_span_metric_and_log_through_live_collector(
     )
     act_job_id = act_resp.json().get("job_id", "")
     assert act_job_id, f"activate response missing job_id: {act_resp.json()}"
-    _wait_for_job(client, act_job_id, token_provider.get_headers(), "activate")
+    wait_for_terminal_job(
+        client,
+        act_job_id,
+        token_provider,
+        timeout=_JOB_TIMEOUT_S,
+        poll_interval=_JOB_POLL_S,
+        label="activate",
+    )
 
     # Drive the real front-door call known to produce a span (FastAPI +
     # custom instrumentation), a metric (cidx.fts.requests), and log

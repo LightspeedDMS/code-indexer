@@ -7,6 +7,93 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [12.40.0] - 2026-09-07
+
+Note: 12.39.0 carried this same content but was never released. Its push failed CI's
+`rust` job on a `clippy::filter_next` error, which skipped `create-tag`/`create-release`,
+so no v12.39.0 tag exists. Rather than rewrite pushed history or move a tag -- both
+prohibited -- the fix landed on top and the version was bumped again. See the toolchain-pin
+entry below for why a locally-green tree failed CI.
+
+### Added
+
+- **Epic #1786 -- X-Ray repository code graph**. X-Ray could previously answer questions about
+  one file at a time; any question whose answer is a RELATIONSHIP BETWEEN FILES was structurally
+  unanswerable. This epic adds a whole-repository graph substrate under the existing two-phase
+  engine, delivered across eight stories:
+  - **#1789 (S0a)** live-path regression floor: forbidden-construct matrix, language round-trips.
+  - **#1787 (S2)** the substrate itself -- fused single-walk extract+collect, a CSR candidate arena
+    with interned ids and path-derived (never positional) `SymbolId`s, a confidence-scored binder,
+    a fail-closed budget ladder that never silently drops an edge, `analyze_graph` in a killable
+    process with mmap handoff, an in-process graph cache, and memory-governor integration.
+    Four dual-review remediation rounds resolved 11 defects, two of them genuine undefined
+    behaviour (a missing `catch_unwind` on `xray_collect_facts`, and host thunks able to panic
+    across the dylib boundary).
+  - **#1806 (S2b)** receiver-type and return-type-chaining resolution. Ambiguity on Keycloak
+    (8,404 files) fell 71.36% -> 54.64%, and Tier C (blind, name-only candidates) 47.88% -> 28.53%,
+    a 40% relative drop, with elapsed time improving 87.3s -> 77.7s and no peak-RSS regression.
+  - **#1792 (S3)** per-file refine pass with the graph in hand.
+  - **#1793 (S4)** Java binder depth: inheritance families and overload discrimination.
+  - **#1790 (S0b)** retired 287 dead-path tests asserting a Python AST whitelist the engine no
+    longer enforces, after proving deadness rather than assuming it.
+  - **#1785 (S1)** non-symbol fact keys wired end to end.
+  Output is tiered A/B/C with an explicit `AnalysisCompleteness`, so a negative result can be
+  distinguished from an incomplete index -- the epic exists to eliminate confidently-wrong
+  verdicts, not merely to answer more questions.
+
+- **`rust-automation.sh`** and a matching CI `rust` job: `cargo test --workspace` plus
+  `cargo clippy --workspace --all-targets -- -D warnings`. Before this, no gate anywhere ran the
+  Rust suite -- including the AC18 structural-parity check that guards against a repeat of Bug
+  #1795's memory-unsafe PREAMBLE/type divergence. The job now gates tag and release creation.
+
+- **`slow-automation.sh`** (Bug #1798): the lane `@pytest.mark.slow` routes into. Both fast gates
+  exclude `slow` and `e2e-automation.sh` selects by path, so 266 files carrying 447 marks had
+  accumulated under `tests/unit/` with ZERO execution. Its first run found 18 real failures.
+
+### Fixed
+
+- **CI Rust toolchain drift**: `./rust-automation.sh` could pass locally on a tree CI rejected,
+  because the two ran different compilers -- local `clippy 0.1.91` (2025-10-28) against CI's
+  `0.1.98` (2026-08-18), since the workflow used `dtolnay/rust-toolchain@stable` and nothing in
+  the repo pinned a toolchain. A newer clippy then failed `-D warnings` on
+  `clippy::filter_next` in `evaluators.rs` (fixed with `.rfind(..)`, plus a regression test that
+  fails if the "last match" semantics degrade to "first match"). Now pinned at BOTH ends --
+  `@1.98.0` in the workflow and a new `rust/rust-toolchain.toml` -- which is not redundant:
+  `dtolnay/rust-toolchain@stable` hardcodes its toolchain input and never reads
+  `rust-toolchain.toml`, so a toolchain file alone fixes only local runs while pinning only the
+  action leaves every developer on a different compiler. This is the same class of defect
+  CLAUDE.md already documents for the ruff/mypy pinning in the `lint` job; the claim that
+  `rust-automation.sh` was a faithful local mirror of the CI gate was false until this release.
+- **Bug #1798**: `@pytest.mark.slow` silently deleted coverage rather than deferring it. Both
+  phases now run clean (Phase 1 579 passed, Phase 2 1,499 passed).
+- **Bug #1807**: the repo-categories endpoints declare TWO admin-auth dependencies; tests overrode
+  only one, so the un-overridden hybrid dependency ran real auth and returned 401 before the
+  handler. Fourteen tests had been asserting nothing -- including five `requires_admin_role` tests
+  that passed trivially on the uniform 401, meaning a real authorization regression would also have
+  gone undetected. A new fixture now fails loudly when a test overrides a callable no route declares.
+- **Bug #1808**: JWT-persistence tests patched `Path.home()` while production resolves
+  `CIDX_SERVER_DATA_DIR` first, so they could only pass in the one environment the server test lane
+  must never run in. Fixed via the mechanism production actually uses, preserving the isolation that
+  keeps tests out of the live server's data directory.
+- **Bug #1801**: `ConfigService.get_config()`'s unlocked check-then-act let a concurrent READER's
+  stale load complete after a write and overwrite it (3 failures in 3000 iterations; 0 after).
+  Reported as a test-isolation leak; there was no leaking test.
+- **Bug #1803**: poll helpers captured auth headers once before a bounded loop, so a token valid at
+  capture expired mid-loop and every later poll silently 401'd. Fixed as a class across seven
+  offenders and consolidated into one shared helper, the worst being a 900s poll that exceeded the
+  entire token lifetime.
+- **Bug #1805**: `cidx xray search`/`explore` validated Rust evaluators with the Python AST sandbox
+  and rejected every valid input.
+- **Bug #1804**: MCP parallel search returned a bare failure when every provider was dead; it now
+  carries an explicit degraded state, so callers can distinguish "nothing matched" from
+  "we could not look".
+- **Bug #1802**: `log_audit` now takes a structured payload and serializes internally, so a caller
+  cannot pass free text the reader cannot parse.
+- **Bug #1799**: the Tantivy commit path now releases the writer reference deterministically before
+  re-acquiring, closing an intermittent `LockBusy` window.
+- **Bug #1784**: the X-Ray compile-cache identity now covers the assembled PREAMBLE/EPILOGUE and ABI
+  version, so a preamble change can no longer silently reuse a `.so` built against a stale layout.
+
 ## [12.38.0] - 2026-09-03
 
 ### Fixed

@@ -183,7 +183,15 @@ class SSOProvisioningHook:
                 action_type="user_assign",
                 target_type="user",
                 target_id=user_id,
-                details=f"SSO auto-provisioned to '{target_group_name}' group{mapping_info}",
+                details={
+                    "group": target_group_name,
+                    "source": "sso_auto_provision",
+                    "external_groups": (
+                        external_groups
+                        if external_groups and target_group_name != DEFAULT_GROUP_USERS
+                        else None
+                    ),
+                },
             )
 
             logger.info(
