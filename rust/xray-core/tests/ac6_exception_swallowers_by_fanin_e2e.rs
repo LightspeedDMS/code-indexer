@@ -38,7 +38,7 @@ fn find_empty_catches(node: &OwnedNode, out: &mut Vec<UserFact>) {
     if node.kind == "catch_clause" {
         let is_empty = node.child_by_kind("block").map(|b| b.named_children().is_empty()).unwrap_or(false);
         if is_empty {
-            out.push(UserFact { kind: "empty_catch".to_string(), line: node.start_line, message: "swallowed".to_string() });
+            out.push(UserFact { kind: "empty_catch".to_string(), line: node.start_line, message: "swallowed".to_string(), custom_key: None });
         }
     }
     for child in &node.children {

@@ -991,7 +991,7 @@ fn analyze_graph(g: &GraphHandle<'_>, facts: &FactsHandle<'_>) -> GraphResult {
         let mut facts = FactIndex::new();
         facts.insert(
             FactKey::Symbol(b_symbol),
-            UserFact { kind: "deprecated".to_string(), line: 1, message: "old API".to_string() },
+            UserFact { kind: "deprecated".to_string(), line: 1, message: "old API".to_string(), custom_key: None },
         );
         let facts_path = dir.path().join("facts.json");
         write_facts_file(&facts, &facts_path).expect("write_facts_file must succeed");

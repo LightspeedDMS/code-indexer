@@ -58,6 +58,7 @@ fn find_deprecated_methods(node: &OwnedNode, out: &mut Vec<UserFact>) {
                     kind: "deprecated".to_string(),
                     line: node.start_line,
                     message: method_name.text().to_string(),
+                    custom_key: None,
                 });
             }
         }

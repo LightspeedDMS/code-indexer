@@ -17,10 +17,20 @@
 //! thousands), never once per edge (millions). It is not on the read path
 //! this AC is protecting.
 
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 /// One shared, append-only string table for a whole repository's worth of
 /// interned symbol names.
+///
+/// Story #1785: derives `Debug`/`Serialize`/`Deserialize` (every field
+/// already supports all three) so `graph::user_facts::FactIndex` can embed
+/// one for `FactKey::Custom` key names and round-trip it, byte-identical id
+/// assignment included, through `write_facts_file`/`read_facts_file` --
+/// otherwise a `FactKey::Custom` fact surviving the `--analyze-graph`
+/// two-process handoff would become permanently unreachable by name once
+/// reloaded into a fresh, empty table.
+#[derive(Debug, Serialize, Deserialize)]
 pub struct StringTable {
     /// ONE contiguous buffer holding the bytes of every interned string,
     /// back to back. `resolve` slices directly into this.
@@ -79,6 +89,16 @@ impl StringTable {
     pub fn try_resolve(&self, id: u32) -> Option<&str> {
         let (start, len) = *self.spans.get(id as usize)?;
         Some(&self.buffer[start as usize..(start + len) as usize])
+    }
+
+    /// Story #1785: non-mutating counterpart to `intern` -- looks up `s` in
+    /// the dedup index without ever appending a new entry, so a caller
+    /// probing for a name that may or may not have been interned (e.g.
+    /// `FactIndex::get_custom` resolving a `FactKey::Custom` name at read
+    /// time) can never silently corrupt this table's id assignment as a
+    /// side effect of a failed lookup.
+    pub fn find(&self, s: &str) -> Option<u32> {
+        self.lookup.get(s).copied()
     }
 
     /// Number of DISTINCT strings interned so far.
@@ -177,5 +197,21 @@ mod tests {
 
         assert_eq!(table.try_resolve(id), Some("com.example.Foo"));
         assert_eq!(table.try_resolve(u32::MAX), None, "an id never interned in this table must return None, never panic");
+    }
+
+    /// Story #1785: `find` is the non-mutating counterpart to `intern` --
+    /// needed by `FactIndex::get_custom` (read path) so a graph-mode
+    /// evaluator probing a `FactKey::Custom` name that was never written
+    /// gets an empty result, NEVER a new id silently interned as a side
+    /// effect of a failed lookup (that would corrupt the table's id space
+    /// for every later real `intern` call on this shared table).
+    #[test]
+    fn find_returns_the_interned_id_for_a_known_string_and_none_for_an_absent_one_without_mutating() {
+        let mut table = StringTable::new();
+        let id = table.intern("db.host");
+
+        assert_eq!(table.find("db.host"), Some(id));
+        assert_eq!(table.find("never.interned"), None);
+        assert_eq!(table.len(), 1, "a failed find() must never intern a new entry as a side effect");
     }
 }

@@ -84,7 +84,22 @@ const MAX_CACHE_ENTRIES: usize = 100;
 /// slice, so this is the one ABI bump covering all of S3's structural
 /// changes together. An ABI-7 graph artifact (compiled before this fix)
 /// must never be loaded as if it matched ABI 8.
-pub const XRAY_ABI_VERSION: u64 = 8;
+///
+/// Story #1785 bumps this AGAIN, 8 -> 9: wires up the previously-orphaned
+/// `FactKey::Custom(InternedStr)` read path -- `FactsHandle` gains a second
+/// accessor field, `for_custom_fn`, and its mirrored `UserFact` gains a
+/// `custom_key: Option<String>` field so a `FactCollector` can name a
+/// genuinely non-symbol fact (config key, event topic, structural hash)
+/// instead of it always being silently attributed to whichever symbol
+/// happens to enclose its line (ADR-001). Both changes alter memory layout
+/// (`FactsHandle` gains a field; `UserFact` gains a field), so an ABI-8
+/// graph artifact (compiled before this fix, whose `collect_facts`/
+/// `analyze_graph` exports still use the 3-field `UserFact`/2-field
+/// `FactsHandle` shape) must never be loaded as if it matched ABI 9 -- per
+/// Bug #1784, the ABI version participates in the compile-cache identity,
+/// so this bump is also what forces a correct cache-identity miss instead
+/// of silently reusing a `.so` compiled against the stale layout.
+pub const XRAY_ABI_VERSION: u64 = 9;
 
 /// Placeholder token embedded in PREAMBLE in place of a hardcoded ABI
 /// version literal. Substituted with the real `XRAY_ABI_VERSION` value by
@@ -322,9 +337,10 @@ pub(crate) const GRAPH_PREAMBLE_EXTRA_2: &str = r#"
 /// Closes `GraphHandle`'s impl block with its final accessor
 /// (`resolve_string`), then mirrors the REAL `UserFact` and `FactsHandle`
 /// types (`graph::user_facts`) the same way: `FactsHandle` carries only an
-/// opaque context pointer plus one accessor function pointer, never
-/// `FactIndex`'s internal `HashMap` layout (the same ADR-002 principle
-/// extended from `CodeGraph` to `FactIndex`).
+/// opaque context pointer plus accessor function pointers (Story #1785:
+/// `for_symbol_fn` and `for_custom_fn`), never `FactIndex`'s internal
+/// `HashMap`/`StringTable` layout (the same ADR-002 principle extended
+/// from `CodeGraph` to `FactIndex`).
 pub(crate) const GRAPH_PREAMBLE_EXTRA_3: &str = r#"
     pub fn resolve_string(&self, string_id: u32) -> Option<&str> {
         let (ptr, len) = (self.resolve_string_raw_fn)(self.ctx, string_id)?;
@@ -350,18 +366,24 @@ pub struct UserFact {
     pub kind: String,
     pub line: usize,
     pub message: String,
+    pub custom_key: Option<String>,
 }
 
 #[derive(Clone, Copy)]
 pub struct FactsHandle<'facts> {
     ctx: *const (),
     for_symbol_fn: fn(*const (), u64) -> Vec<UserFact>,
+    for_custom_fn: fn(*const (), &str) -> Vec<UserFact>,
     _facts: std::marker::PhantomData<&'facts ()>,
 }
 
 impl<'facts> FactsHandle<'facts> {
     pub fn for_symbol(&self, symbol: SymbolId) -> Vec<UserFact> {
         (self.for_symbol_fn)(self.ctx, symbol)
+    }
+
+    pub fn for_custom(&self, name: &str) -> Vec<UserFact> {
+        (self.for_custom_fn)(self.ctx, name)
     }
 }
 "#;

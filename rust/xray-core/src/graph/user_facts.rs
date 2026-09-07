@@ -16,6 +16,7 @@
 
 use crate::graph::extract::local_index::LocalIndex;
 use crate::graph::identity::SymbolId;
+use crate::graph::string_table::StringTable;
 use crate::owned_node::OwnedNode;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -27,11 +28,25 @@ use std::path::Path;
 /// crossing, the dylib FFI boundary `dynlib::GraphDynlibEvaluator::
 /// call_collect_facts` uses, which passes a real in-memory `Vec<UserFact>`
 /// by value.
+///
+/// `custom_key` (Story #1785): `None` (the default shape every existing
+/// collector already produces) means "attribute this fact to whichever
+/// symbol encloses `line`" -- the pre-#1785 behavior, unchanged.
+/// `Some(name)` means this fact names a genuinely non-symbol key (a config
+/// key, event topic, or structural clone hash) and must be recorded under
+/// `FactKey::Custom` ONLY, at the `repo_index::record_fused_result`
+/// aggregation site -- never ALSO attributed to an enclosing symbol, which
+/// would be a false identity (ADR-001). `name` is a plain `String`, not
+/// `InternedStr`: a `FactCollector` never sees the graph's interning
+/// substrate (`StringTable`/`CsrBuilder`) directly, mirroring how it never
+/// constructs a `SymbolId` either -- the aggregation site is the one place
+/// that owns interning, exactly like it already owns `enclosing_symbol`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UserFact {
     pub kind: String,
     pub line: usize,
     pub message: String,
+    pub custom_key: Option<String>,
 }
 
 /// Mirrors `crate::scanner::Evaluator`'s shape (`Send + Sync`, called
@@ -70,11 +85,20 @@ pub enum FactKey {
 #[derive(Debug, Default)]
 pub struct FactIndex {
     facts: HashMap<FactKey, Vec<UserFact>>,
+    /// Story #1785: ONE shared string table for this index's
+    /// `FactKey::Custom` names, owned here (never a bare caller-supplied
+    /// `InternedStr`) so `insert_custom`/`get_custom` can round-trip a
+    /// human-readable name (config key, event topic, structural hash)
+    /// without a `FactCollector` or a graph-mode evaluator ever having to
+    /// intern the string itself. Reuses the exact interning substrate
+    /// `StringTable::intern`/`CsrBuilder::intern_string` already establish
+    /// (Rule 4, anti-duplication) rather than inventing a second one.
+    custom_keys: StringTable,
 }
 
 impl FactIndex {
     pub fn new() -> Self {
-        FactIndex { facts: HashMap::new() }
+        FactIndex { facts: HashMap::new(), custom_keys: StringTable::new() }
     }
 
     /// Appends `fact` under `key`, preserving insertion order among facts
@@ -92,18 +116,68 @@ impl FactIndex {
     pub fn get(&self, key: &FactKey) -> &[UserFact] {
         self.facts.get(key).map(|v| v.as_slice()).unwrap_or(&[])
     }
+
+    /// Story #1785: the name-based write surface for a genuinely non-symbol
+    /// fact (config key, event topic, structural clone hash). Interns
+    /// `name` into this index's OWN `custom_keys` table (same-name calls
+    /// dedup to the same id, per `StringTable::intern`'s contract) and
+    /// inserts `fact` under `FactKey::Custom(id)` -- the caller never
+    /// constructs a `FactKey::Custom` or an `InternedStr` by hand.
+    pub fn insert_custom(&mut self, name: &str, fact: UserFact) {
+        let id = self.custom_keys.intern(name);
+        self.insert(FactKey::Custom(id), fact);
+    }
+
+    /// Story #1785: the name-based read surface `FactsHandle::for_custom`
+    /// delegates to. Resolves `name` against this index's OWN `custom_keys`
+    /// table via `StringTable::find` -- a NON-mutating lookup, so probing a
+    /// name nobody ever inserted under returns an EMPTY slice (mirroring
+    /// `get`'s own absent-key contract) without silently interning a new,
+    /// meaningless id as a side effect of the failed probe.
+    pub fn get_custom(&self, name: &str) -> &[UserFact] {
+        match self.custom_keys.find(name) {
+            Some(id) => self.get(&FactKey::Custom(id)),
+            None => &[],
+        }
+    }
 }
 
-/// Dual-review defect H2: persists `facts` to `path` as a JSON array of
-/// `(FactKey, Vec<UserFact>)` pairs -- a plain array rather than a JSON
-/// object, since `FactKey` is an enum and `serde_json` cannot use a
-/// non-string type as an object key. This is the counterpart
-/// `repo_index::build_repo_graph`'s real, aggregated `FactIndex` needs so
-/// the separate `--analyze-graph` process (`xray-cli`'s `run_analyze_graph`)
-/// can load real facts instead of always constructing an empty one.
+/// On-disk shape `write_facts_file`/`read_facts_file` (de)serialize --
+/// factored into its own borrowed/owned pair (rather than serializing
+/// `FactIndex` itself) purely to let `write_facts_file` keep borrowing out
+/// of `facts` instead of cloning it, exactly like the pre-#1785 `entries`
+/// tuple already did. Story #1785 extends the H2-era `entries`-only format
+/// with `custom_keys`: without it, a `FactKey::Custom` fact reloaded by a
+/// SEPARATE `--analyze-graph` process would carry only an opaque id --
+/// `FactIndex::get_custom`'s name-based lookup depends on the SAME
+/// `StringTable` name->id assignment the writing process used, which lives
+/// nowhere else on disk.
+#[derive(Serialize)]
+struct FactsFileWrite<'a> {
+    entries: Vec<(&'a FactKey, &'a Vec<UserFact>)>,
+    custom_keys: &'a StringTable,
+}
+
+#[derive(Deserialize)]
+struct FactsFileRead {
+    entries: Vec<(FactKey, Vec<UserFact>)>,
+    custom_keys: StringTable,
+}
+
+/// Dual-review defect H2: persists `facts` to `path` as JSON -- the
+/// `(FactKey, Vec<UserFact>)` entries as a plain array (since `FactKey` is
+/// an enum and `serde_json` cannot use a non-string type as an object key),
+/// plus (Story #1785) `facts`'s own `custom_keys` `StringTable` alongside
+/// them so a `FactKey::Custom` fact survives the round trip resolvable BY
+/// NAME, not just by its now-meaningless-across-processes id. This is the
+/// counterpart `repo_index::build_repo_graph`'s real, aggregated
+/// `FactIndex` needs so the separate `--analyze-graph` process (`xray-cli`'s
+/// `run_analyze_graph`) can load real facts instead of always constructing
+/// an empty one.
 pub fn write_facts_file(facts: &FactIndex, path: &Path) -> std::io::Result<()> {
     let entries: Vec<(&FactKey, &Vec<UserFact>)> = facts.facts.iter().collect();
-    let json = serde_json::to_vec(&entries)
+    let on_disk = FactsFileWrite { entries, custom_keys: &facts.custom_keys };
+    let json = serde_json::to_vec(&on_disk)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
     std::fs::write(path, json)
 }
@@ -117,9 +191,9 @@ pub fn write_facts_file(facts: &FactIndex, path: &Path) -> std::io::Result<()> {
 /// accompanying facts) decide that at the call site, not here.
 pub fn read_facts_file(path: &Path) -> std::io::Result<FactIndex> {
     let bytes = std::fs::read(path)?;
-    let entries: Vec<(FactKey, Vec<UserFact>)> = serde_json::from_slice(&bytes)
+    let on_disk: FactsFileRead = serde_json::from_slice(&bytes)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-    Ok(FactIndex { facts: entries.into_iter().collect() })
+    Ok(FactIndex { facts: on_disk.entries.into_iter().collect(), custom_keys: on_disk.custom_keys })
 }
 
 /// ADR-002 / Story #1787 AC8: the SAME opaque-handle principle
@@ -129,15 +203,19 @@ pub fn read_facts_file(path: &Path) -> std::io::Result<FactIndex> {
 /// would reopen exactly the memory-layout-mismatch risk ADR-002 rejected
 /// for `CodeGraph`, for the same underlying reason (a private std-collection
 /// field, not a small/stable public shape). `FactsHandle` instead carries an
-/// opaque context pointer plus one accessor function pointer, scoped to the
-/// one query graph-mode evaluators need: symbol-keyed facts. `Custom`-keyed
-/// (non-symbol) facts are not exposed through this narrow accessor; that is
-/// a deliberate scope decision for this slice, not an oversight, and can be
-/// added as a second accessor later without touching this one's shape.
+/// opaque context pointer plus accessor function pointers, scoped to the two
+/// queries graph-mode evaluators need: symbol-keyed facts (`for_symbol`)
+/// and, as of Story #1785, name-based `FactKey::Custom` facts (`for_custom`)
+/// -- config keys, event topics, structural clone hashes that genuinely
+/// have no `SymbolId` and would be a false identity if forced into one
+/// (ADR-001). `for_custom` was scoped OUT of the original AC8 slice as a
+/// deliberate deferral, not an oversight; #1785 is that deferred accessor
+/// landing.
 #[derive(Clone, Copy)]
 pub struct FactsHandle<'facts> {
     ctx: *const (),
     for_symbol_fn: fn(*const (), u64) -> Vec<UserFact>,
+    for_custom_fn: fn(*const (), &str) -> Vec<UserFact>,
     _facts: std::marker::PhantomData<&'facts ()>,
 }
 
@@ -149,6 +227,19 @@ fn thunk_facts_for_symbol(ctx: *const (), symbol: SymbolId) -> Vec<UserFact> {
     facts_from_ctx(ctx).get(&FactKey::Symbol(symbol)).to_vec()
 }
 
+/// Story #1785: the `FactsHandle::for_custom` thunk, mirroring
+/// `thunk_facts_for_symbol`'s exact shape one level down (`FactIndex::
+/// get_custom` instead of `get(&FactKey::Symbol(..))`). `name: &str` crosses
+/// this fn-pointer boundary as a plain borrowed input parameter -- the same
+/// established pattern `GraphHandle::reachable_from_fn`'s `&[u32]` input
+/// already proves safe on this exact plain-Rust-ABI fn-pointer convention
+/// (see `graph::csr::mod`'s module doc comment); only a RETURNED borrow
+/// needs the raw-`(ptr, len)` workaround `resolve_string_raw_fn` uses, which
+/// does not apply here since `Vec<UserFact>` is returned by value.
+fn thunk_facts_for_custom(ctx: *const (), name: &str) -> Vec<UserFact> {
+    facts_from_ctx(ctx).get_custom(name).to_vec()
+}
+
 impl<'facts> FactsHandle<'facts> {
     /// Builds a handle bound to `facts`. Mirrors `GraphHandle::from_graph`'s
     /// lifetime contract exactly: the `'facts` parameter is enforced by the
@@ -158,6 +249,7 @@ impl<'facts> FactsHandle<'facts> {
         FactsHandle {
             ctx: facts as *const FactIndex as *const (),
             for_symbol_fn: thunk_facts_for_symbol,
+            for_custom_fn: thunk_facts_for_custom,
             _facts: std::marker::PhantomData,
         }
     }
@@ -167,6 +259,18 @@ impl<'facts> FactsHandle<'facts> {
     /// contract exactly.
     pub fn for_symbol(&self, symbol: SymbolId) -> Vec<UserFact> {
         (self.for_symbol_fn)(self.ctx, symbol)
+    }
+
+    /// Story #1785: every fact recorded under the `FactKey::Custom` named
+    /// `name`, or an empty `Vec` if none were -- mirrors `for_symbol`'s own
+    /// "absent key" contract exactly. `name` is a literal the evaluator's
+    /// own source already knows (e.g. `facts.for_custom("db.host")`), never
+    /// a value derived from graph data -- there is no accessor that turns a
+    /// `SymbolId` into a custom-key name, which is precisely what keeps
+    /// this surface from becoming a second way to smuggle a symbol
+    /// reference through as a formatted string (ADR-001).
+    pub fn for_custom(&self, name: &str) -> Vec<UserFact> {
+        (self.for_custom_fn)(self.ctx, name)
     }
 }
 
@@ -182,6 +286,7 @@ mod tests {
                 kind: "declaration_count".to_string(),
                 line: 1,
                 message: format!("{file}:{}", index.declarations.len()),
+                custom_key: None,
             }]
         }
     }
@@ -222,11 +327,11 @@ mod tests {
         let mut index = FactIndex::new();
         index.insert(
             FactKey::Symbol(symbol),
-            UserFact { kind: "deprecated".to_string(), line: 10, message: "old API".to_string() },
+            UserFact { kind: "deprecated".to_string(), line: 10, message: "old API".to_string(), custom_key: None },
         );
         index.insert(
             FactKey::Custom(db_host_key),
-            UserFact { kind: "config_key".to_string(), line: 1, message: "db.host".to_string() },
+            UserFact { kind: "config_key".to_string(), line: 1, message: "db.host".to_string(), custom_key: None },
         );
 
         let symbol_facts = index.get(&FactKey::Symbol(symbol));
@@ -239,6 +344,60 @@ mod tests {
 
         assert!(index.get(&FactKey::Symbol(make_symbol_id(99, 99))).is_empty());
         assert!(index.get(&FactKey::Custom(unused_key)).is_empty());
+    }
+
+    /// Story #1785: `insert_custom`/`get_custom` are the NAME-based
+    /// write/read surface a `FactCollector` and a graph-mode evaluator
+    /// actually use -- neither ever sees a raw `InternedStr`. `insert_custom`
+    /// interns `name` into `FactIndex`'s OWN string table (never the raw
+    /// `FactIndex::insert` a caller would have to intern for manually), and
+    /// `get_custom` resolves `name` back to the same id to look the facts
+    /// up. A name nobody ever inserted under must return an EMPTY slice --
+    /// mirroring `get`'s own absent-key contract -- never a panic and never
+    /// a side-effecting intern of a brand-new id for a probe that found
+    /// nothing.
+    #[test]
+    fn fact_index_insert_custom_and_get_custom_round_trip_by_name() {
+        let mut index = FactIndex::new();
+        index.insert_custom(
+            "db.host",
+            UserFact { kind: "config_key".to_string(), line: 1, message: "db.host".to_string(), custom_key: None },
+        );
+
+        let facts = index.get_custom("db.host");
+        assert_eq!(facts.len(), 1);
+        assert_eq!(facts[0].message, "db.host");
+
+        assert!(index.get_custom("never.inserted").is_empty());
+    }
+
+    /// Story #1785: `write_facts_file`/`read_facts_file` must preserve
+    /// `FactIndex`'s OWN `custom_keys` name->id mapping, not just the raw
+    /// `(FactKey, Vec<UserFact>)` entries -- otherwise a `FactKey::Custom`
+    /// fact survives the disk round trip only as an opaque id nothing can
+    /// resolve BY NAME any more, which is exactly the shape the CLI's
+    /// `--analyze-graph --facts-in` two-process handoff (`main.rs`'s
+    /// `run_analyze_graph`) depends on: the reloading process never shares
+    /// the original process's in-memory `StringTable`, so `get_custom` must
+    /// still find the fact after `read_facts_file` reconstructs a BRAND NEW
+    /// `FactIndex` from disk.
+    #[test]
+    fn insert_custom_facts_written_to_disk_are_still_reachable_by_name_after_read_facts_file() {
+        let mut original = FactIndex::new();
+        original.insert_custom(
+            "db.host",
+            UserFact { kind: "config_key".to_string(), line: 1, message: "db.host".to_string(), custom_key: None },
+        );
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("facts.json");
+        write_facts_file(&original, &path).expect("write_facts_file must succeed");
+        let reloaded = read_facts_file(&path).expect("read_facts_file must succeed");
+
+        let facts = reloaded.get_custom("db.host");
+        assert_eq!(facts.len(), 1, "a FactKey::Custom fact must still be reachable BY NAME after a disk round trip");
+        assert_eq!(facts[0].message, "db.host");
+        assert!(reloaded.get_custom("never.inserted").is_empty());
     }
 
     /// Dual-review defect H2: `main.rs`'s `--analyze-graph` subcommand can
@@ -259,11 +418,11 @@ mod tests {
         let mut original = FactIndex::new();
         original.insert(
             FactKey::Symbol(make_symbol_id(1, 0)),
-            UserFact { kind: "deprecated".to_string(), line: 10, message: "old API".to_string() },
+            UserFact { kind: "deprecated".to_string(), line: 10, message: "old API".to_string(), custom_key: None },
         );
         original.insert(
             FactKey::Custom(custom_key),
-            UserFact { kind: "config_key".to_string(), line: 1, message: "db.host".to_string() },
+            UserFact { kind: "config_key".to_string(), line: 1, message: "db.host".to_string(), custom_key: None },
         );
 
         let dir = tempfile::tempdir().unwrap();
@@ -289,7 +448,7 @@ mod tests {
         let mut index = FactIndex::new();
         index.insert(
             FactKey::Symbol(symbol),
-            UserFact { kind: "deprecated".to_string(), line: 10, message: "old API".to_string() },
+            UserFact { kind: "deprecated".to_string(), line: 10, message: "old API".to_string(), custom_key: None },
         );
 
         let handle = FactsHandle::from_facts(&index);
@@ -298,5 +457,28 @@ mod tests {
         assert_eq!(handle.for_symbol(symbol).len(), 1);
         assert_eq!(handle.for_symbol(symbol)[0].message, "old API");
         assert!(handle.for_symbol(absent_symbol).is_empty());
+    }
+
+    /// Story #1785: `FactsHandle::for_custom` is the read-path counterpart
+    /// to `FactIndex::insert_custom` -- a graph-mode evaluator's ONLY way
+    /// to retrieve a `FactKey::Custom` fact (config key, event topic,
+    /// structural hash). Mirrors `facts_handle_for_symbol_delegates_to_the_
+    /// real_fact_index` exactly: must delegate to the real `FactIndex.
+    /// get_custom` rather than reimplementing lookup logic, for both a
+    /// populated name and one nobody ever inserted under.
+    #[test]
+    fn facts_handle_for_custom_delegates_to_the_real_fact_index() {
+        let mut index = FactIndex::new();
+        index.insert_custom(
+            "db.host",
+            UserFact { kind: "config_key".to_string(), line: 1, message: "db.host".to_string(), custom_key: None },
+        );
+
+        let handle = FactsHandle::from_facts(&index);
+
+        assert_eq!(handle.for_custom("db.host"), index.get_custom("db.host").to_vec());
+        assert_eq!(handle.for_custom("db.host").len(), 1);
+        assert_eq!(handle.for_custom("db.host")[0].message, "db.host");
+        assert!(handle.for_custom("never.inserted").is_empty());
     }
 }

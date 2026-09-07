@@ -151,8 +151,21 @@ fn record_fused_result(full_path: &Path, relative_path: &str, fused_result: Fuse
     if let Some(index) = fused_result.index {
         let file_id_val = file_id(relative_path);
         for fact in &fused_result.facts {
-            let symbol = enclosing_symbol(&index, file_id_val, fact.line);
-            acc.facts.insert(FactKey::Symbol(symbol), fact.clone());
+            // Story #1785 / ADR-001: a fact naming a `custom_key` is a
+            // genuinely non-symbol value (config key, event topic,
+            // structural hash) and is attributed to that custom key ONLY --
+            // never ALSO to `enclosing_symbol`, which would reintroduce the
+            // exact false identity ADR-001's closed `FactKey::Symbol(
+            // SymbolId) | FactKey::Custom(InternedStr)` sum type exists to
+            // prevent. A fact with no `custom_key` keeps the pre-#1785
+            // behavior unchanged.
+            match &fact.custom_key {
+                Some(name) => acc.facts.insert_custom(name, fact.clone()),
+                None => {
+                    let symbol = enclosing_symbol(&index, file_id_val, fact.line);
+                    acc.facts.insert(FactKey::Symbol(symbol), fact.clone());
+                }
+            }
         }
         let language = full_path.extension().and_then(|e| e.to_str()).unwrap_or_default().to_string();
         acc.files_for_bind.push(FileForBind { file_id: file_id_val, language, index });
@@ -645,7 +658,7 @@ mod tests {
         struct DeprecatedAnnotationCollector;
         impl FactCollector for DeprecatedAnnotationCollector {
             fn collect_facts(&self, _root: &OwnedNode, file: &str, _index: &LocalIndex) -> Vec<UserFact> {
-                vec![UserFact { kind: "deprecated".to_string(), line: 1, message: format!("{file}: old API") }]
+                vec![UserFact { kind: "deprecated".to_string(), line: 1, message: format!("{file}: old API"), custom_key: None }]
             }
         }
 
@@ -670,5 +683,53 @@ mod tests {
             "the fact collected during indexing must have reached RepoIndexResult.facts, never been discarded"
         );
         assert_eq!(facts[0].message, "Legacy.java: old API");
+    }
+
+    /// Story #1785 / ADR-001: a `UserFact` naming a `custom_key` (config
+    /// key, event topic, structural hash) must be attributed to that
+    /// custom key ONLY -- never ALSO to whichever symbol happens to
+    /// enclose its reported line. Attributing it to both would reintroduce
+    /// the exact false identity ADR-001's closed `FactKey::Symbol(SymbolId)
+    /// | FactKey::Custom(InternedStr)` sum type exists to prevent: a config
+    /// key has no real `SymbolId`, so `enclosing_symbol`'s "whichever
+    /// declaration happens to precede this line" answer is meaningless for
+    /// it and must never be recorded as if it were.
+    #[test]
+    fn a_fact_naming_a_custom_key_is_attributed_only_to_that_custom_key_never_also_to_its_enclosing_symbol() {
+        use crate::graph::identity::make_symbol_id;
+
+        struct ConfigKeyCollector;
+        impl FactCollector for ConfigKeyCollector {
+            fn collect_facts(&self, _root: &OwnedNode, _file: &str, _index: &LocalIndex) -> Vec<UserFact> {
+                vec![UserFact {
+                    kind: "config_key".to_string(),
+                    line: 1,
+                    message: "db.host".to_string(),
+                    custom_key: Some("db.host".to_string()),
+                }]
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        write_java(&dir, "Legacy.java", "class Legacy {\n    void run() {}\n}\n");
+
+        let options = RepoIndexOptions { budget: IndexBudget::unlimited(), max_files: None };
+        let result = build_repo_graph(dir.path(), &["Legacy.java".to_string()], &options, &ConfigKeyCollector)
+            .expect("no file_id collision in this fixture");
+
+        let custom_facts = result.facts.get_custom("db.host");
+        assert_eq!(custom_facts.len(), 1, "the custom-keyed fact must be reachable via get_custom");
+        assert_eq!(custom_facts[0].message, "db.host");
+
+        // Line 1 is Legacy's own class declaration (local index 0) -- the
+        // SAME symbol `enclosing_symbol` would have attributed this fact
+        // to had it been treated as symbol-shaped. It must be EMPTY.
+        let legacy_file_id = crate::graph::identity::file_id("Legacy.java");
+        let would_be_enclosing = FactKey::Symbol(make_symbol_id(legacy_file_id, 0));
+        assert!(
+            result.facts.get(&would_be_enclosing).is_empty(),
+            "a custom-keyed fact must NEVER also be attributed to its enclosing symbol -- \
+             that would reintroduce the false identity ADR-001's closed sum type exists to prevent"
+        );
     }
 }

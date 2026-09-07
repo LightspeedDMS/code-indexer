@@ -414,6 +414,13 @@ fn collect_ac8_graph_mirror_divergences(
         "FactsHandle",
         "for_symbol",
     ));
+    divergences.extend(diff_mirrored_method(
+        user_facts_file,
+        "user_facts.rs",
+        graph_preamble_file,
+        "FactsHandle",
+        "for_custom",
+    ));
     divergences.extend(diff_mirrored_struct(user_facts_file, "user_facts.rs", graph_preamble_file, "UserFact"));
 
     divergences.extend(diff_mirrored_struct(
@@ -600,7 +607,7 @@ impl Foo {
     /// field-for-field / method-for-method structural parity via
     /// `collect_ac8_graph_mirror_divergences`. Mirrored surface: `GraphHandle`'s
     /// fields plus its 7 accessor methods, `FactsHandle`'s fields plus its
-    /// 1 accessor method, `UserFact`'s fields, and `GraphResult`/
+    /// 2 accessor methods, `UserFact`'s fields, and `GraphResult`/
     /// `ReduceFinding`'s fields.
     #[test]
     fn graph_mode_mirror_matches_real_types_structurally() {
