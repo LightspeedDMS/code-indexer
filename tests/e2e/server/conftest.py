@@ -44,6 +44,73 @@ _ENV_ADMIN_PASS = "E2E_ADMIN_PASS"
 
 
 # ---------------------------------------------------------------------------
+# Guard: a second create_app() must not corrupt shared auth globals
+# ---------------------------------------------------------------------------
+
+# create_app() -> app_wiring.create_fastapi_app() wires these services as
+# MODULE-LEVEL globals on auth.dependencies -- correct for production
+# (exactly one create_app() per process) but a hazard here: a test that
+# legitimately builds a SECOND, throwaway create_app() (e.g.
+# test_20_telemetry_metrics_wiring_1586.py, test_21_otel_live_collector_1676.py)
+# permanently overwrites them, splitting JWT minting (still the shared
+# session app's own jwt_manager) from JWT validation (now the throwaway
+# app's jwt_manager/secret_key) for the rest of the process -- 401s for
+# every later test, unfixable by re-login/refresh. See
+# test_23_shared_app_globals_isolation.py for the full root-cause narrative
+# and regression proof. This suite runs single-threaded/sequential (no
+# xdist/parallel plugin), so snapshot/restore needs no lock.
+_GUARDED_AUTH_DEPENDENCY_ATTRS = (
+    "jwt_manager",
+    "user_manager",
+    "oauth_manager",
+    "mcp_credential_manager",
+    "server_config",
+    "api_key_manager",
+)
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _golden_auth_dependencies_snapshot(test_client: TestClient) -> dict:
+    """Capture the CORRECT auth.dependencies values exactly once, right
+    after the shared session app exists -- before any test body or any
+    wider-than-function-scoped fixture (e.g. test_21's module-scoped
+    ``telemetry_app_client``, which poisons these globals during its OWN
+    setup) gets a chance to run. Depending on ``test_client`` guarantees
+    this fixture's setup happens after the shared app's create_app() call.
+    A per-test live snapshot is NOT enough: pytest sets up wider-scoped
+    fixtures needed by a test BEFORE narrower ones, so a plain
+    function-scoped snapshot taken for test_21's single test would already
+    observe the poisoned state.
+    """
+    from code_indexer.server.auth import dependencies as _auth_dependencies
+
+    return {
+        attr: getattr(_auth_dependencies, attr, None)
+        for attr in _GUARDED_AUTH_DEPENDENCY_ATTRS
+    }
+
+
+@pytest.fixture(autouse=True)
+def _restore_auth_dependencies_globals(
+    _golden_auth_dependencies_snapshot: dict,
+) -> Iterator[None]:
+    """Restore auth.dependencies to the golden baseline after each test.
+
+    Function-scoped so it fires after EVERY test (undoing a poisoning
+    create_app() called directly inside a test body, e.g. test_20), and it
+    restores to the FIXED baseline above (never a live re-snapshot) so it
+    also fixes a poisoning that happened during a wider-scoped fixture's
+    setup (e.g. test_21), which a live snapshot taken at this fixture's own
+    setup time would have missed.
+    """
+    from code_indexer.server.auth import dependencies as _auth_dependencies
+
+    yield
+    for attr, value in _golden_auth_dependencies_snapshot.items():
+        setattr(_auth_dependencies, attr, value)
+
+
+# ---------------------------------------------------------------------------
 # AdminTokenProvider — automatic JWT refresh on near-expiry
 # ---------------------------------------------------------------------------
 
@@ -371,14 +438,16 @@ def log_audit_app_client(test_client: TestClient) -> Iterator[TestClient]:
     yield test_client
 
 
-@pytest.fixture(scope="session")
+@pytest.fixture(scope="function")
 def log_audit_admin_token(admin_token_provider: AdminTokenProvider) -> str:
     """JWT string for the log-audit gate fixtures (test_log_audit_gate_e2e.py).
 
-    Returns a plain str from the provider so callers that type-annotate as
-    ``str`` work without change.  Within a single test the token is fixed;
-    the critical teardown freshness is handled by ``_phase3_log_audit_gate``
-    which calls ``admin_token_provider.get_token()`` at teardown time directly.
+    Function-scoped (like ``admin_token``/``auth_headers``) so every test
+    gets a not-near-expiry token via ``admin_token_provider.get_token()``.
+    A prior session-scoped version cached one token for the WHOLE session,
+    resolved once on first use -- stale by the time later tests in
+    test_log_audit_gate_e2e.py ran in a long Phase 3 session, since nothing
+    ever re-checked it against the near-expiry threshold again.
     """
     return admin_token_provider.get_token()
 
