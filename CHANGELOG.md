@@ -7,7 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [12.39.0] - 2026-09-07
+## [12.40.0] - 2026-09-07
+
+Note: 12.39.0 carried this same content but was never released. Its push failed CI's
+`rust` job on a `clippy::filter_next` error, which skipped `create-tag`/`create-release`,
+so no v12.39.0 tag exists. Rather than rewrite pushed history or move a tag -- both
+prohibited -- the fix landed on top and the version was bumped again. See the toolchain-pin
+entry below for why a locally-green tree failed CI.
 
 ### Added
 
@@ -46,6 +52,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **CI Rust toolchain drift**: `./rust-automation.sh` could pass locally on a tree CI rejected,
+  because the two ran different compilers -- local `clippy 0.1.91` (2025-10-28) against CI's
+  `0.1.98` (2026-08-18), since the workflow used `dtolnay/rust-toolchain@stable` and nothing in
+  the repo pinned a toolchain. A newer clippy then failed `-D warnings` on
+  `clippy::filter_next` in `evaluators.rs` (fixed with `.rfind(..)`, plus a regression test that
+  fails if the "last match" semantics degrade to "first match"). Now pinned at BOTH ends --
+  `@1.98.0` in the workflow and a new `rust/rust-toolchain.toml` -- which is not redundant:
+  `dtolnay/rust-toolchain@stable` hardcodes its toolchain input and never reads
+  `rust-toolchain.toml`, so a toolchain file alone fixes only local runs while pinning only the
+  action leaves every developer on a different compiler. This is the same class of defect
+  CLAUDE.md already documents for the ruff/mypy pinning in the `lint` job; the claim that
+  `rust-automation.sh` was a faithful local mirror of the CI gate was false until this release.
 - **Bug #1798**: `@pytest.mark.slow` silently deleted coverage rather than deferring it. Both
   phases now run clean (Phase 1 579 passed, Phase 2 1,499 passed).
 - **Bug #1807**: the repo-categories endpoints declare TWO admin-auth dependencies; tests overrode
