@@ -214,14 +214,24 @@ fn realistic_budget() -> IndexBudget {
     IndexBudget::new(REALISTIC_MAX_TOTAL_CANDIDATES, REALISTIC_MAX_CANDIDATES_PER_REFERENCE)
 }
 
-/// S2 baseline reference numbers from Story #1793's own context (two
-/// independent prototypes measured against the SAME Keycloak corpus, prior
-/// to S4's AC1/AC2 changes). Named constants per Messi Rule 17
-/// (anti-magic) -- NOT remeasured by this binary; a different codebase and
-/// methodology produced them, so they are printed for comparison only,
-/// never recomputed here.
-const S2_BASELINE_PROTOTYPE_1_PCT: f64 = 35.8;
-const S2_BASELINE_PROTOTYPE_2_PCT: f64 = 26.4;
+/// S2 prototype numbers from Story #1793's own context (two independent
+/// THROWAWAY prototypes measured against the SAME Keycloak corpus, prior
+/// to S4's AC1/AC2 changes). HISTORICAL CONTEXT ONLY -- Bug found during
+/// this story's own re-evaluation: both prototypes had receiver-type and
+/// return-type-chaining resolution, a capability that was accidentally
+/// dropped from Story #1787 and did not exist in SHIPPED code until
+/// commit 2515a42d (#1806, S2b) landed it -- two commits AFTER S4 itself
+/// (33a92233). Comparing S4's shipped ambiguity_pct against these numbers
+/// judges S4 against a baseline it could never have reached in the code
+/// that actually existed at S4-ship time; that comparison is INVALID and
+/// must never again be used as AC3's pass/fail basis (see
+/// `print_s4_isolated_contribution_vs_valid_baseline` below for the
+/// replacement: a same-corpus, same-binder, family-expansion-toggle-only
+/// comparison). Retained here, named constants per Messi Rule 17
+/// (anti-magic), ONLY so the historical numbers remain visible for
+/// context -- never recomputed here, never used in any arithmetic below.
+const S2_BASELINE_PROTOTYPE_1_PCT_HISTORICAL_CONTEXT_ONLY: f64 = 35.8;
+const S2_BASELINE_PROTOTYPE_2_PCT_HISTORICAL_CONTEXT_ONLY: f64 = 26.4;
 
 /// DIAGNOSTIC: item 2 (family-collapsed ambiguity, a SEPARATE line, never
 /// a replacement for the AC3 number) and item 3 (before/after
@@ -245,37 +255,56 @@ fn print_family_collapsed_ambiguity_and_distribution(diag: &FamilyDiagnostics, c
     );
 }
 
-/// DIAGNOSTIC: item 4 from this task's diagnostic spec -- attribution of
-/// the increase from the S2 baseline to the current S4 number, split into
-/// the portion explained by family expansion vs. everything else.
-fn print_baseline_attribution(ambiguous_total: usize, resolved: usize, collapsed_ambiguous: usize) {
+/// AC3 re-evaluation (Story #1793, this task): S4's isolated contribution
+/// to ambiguity, measured against a VALID same-corpus, same-binder
+/// baseline that toggles ONLY S4's inheritance-family expansion:
+///   WITH S4    = `with_s4_ambiguous` / `resolved` (the AC3 metric itself)
+///   WITHOUT S4 = `without_s4_ambiguous` / `resolved` (the family-collapsed
+///                figure: each pure-family set counted as ONE dispatch
+///                site, i.e. exactly what the binder would have produced
+///                had `apply_inheritance_family_expansion` never run)
+/// The delta between these two percentages IS S4's isolated contribution,
+/// in percentage points. Pure function over already-computed counts --
+/// unit-testable without constructing a graph, and independent of the
+/// S2 prototype numbers entirely (see the historical-context constants
+/// above for why those are no longer a valid comparison basis).
+fn s4_isolated_contribution_pp(with_s4_ambiguous: usize, without_s4_ambiguous: usize, resolved: usize) -> f64 {
+    pct(with_s4_ambiguous, resolved) - pct(without_s4_ambiguous, resolved)
+}
+
+/// DIAGNOSTIC: item 4 from this task's diagnostic spec, reworked for AC3's
+/// re-evaluation -- attribution of S4's contribution against a VALID
+/// baseline (same corpus, same binder, family-expansion toggled), never
+/// again against the invalid S2 prototype comparison. The S2 numbers are
+/// still printed, but ONLY as clearly-labelled historical context that is
+/// explicitly NOT a target and NOT part of the arithmetic below.
+fn print_s4_isolated_contribution_vs_valid_baseline(ambiguous_total: usize, resolved: usize, collapsed_ambiguous: usize) {
     println!();
     println!(
-        "=== DIAGNOSTIC: attribution vs S2 baseline (reference numbers from Story #1793's own \
-         context, NOT remeasured by this binary -- different codebase/methodology) ==="
+        "=== S4 isolated contribution vs a VALID baseline (same corpus, same binder, \
+         toggling ONLY S4's inheritance-family expansion) ==="
     );
-    println!("s2_baseline_pct_prototype_1 (higher of the two independent prototypes): {S2_BASELINE_PROTOTYPE_1_PCT:.2}%");
-    println!("s2_baseline_pct_prototype_2 (lower of the two independent prototypes): {S2_BASELINE_PROTOTYPE_2_PCT:.2}%");
-    let current_pct = pct(ambiguous_total, resolved);
-    let collapsed_pct = pct(collapsed_ambiguous, resolved);
-    println!("current_s4_ambiguity_pct_of_resolved (== the AC3 metric above, repeated for convenience): {current_pct:.2}%");
-    println!("family_collapsed_ambiguity_pct_of_resolved (diagnostic, repeated for convenience): {collapsed_pct:.2}%");
-    let raw_increase_pp = current_pct - S2_BASELINE_PROTOTYPE_1_PCT;
-    let collapsed_increase_pp = collapsed_pct - S2_BASELINE_PROTOTYPE_1_PCT;
-    println!("raw_increase_over_s2_higher_baseline_pp: {raw_increase_pp:.2}");
-    println!("family_collapsed_increase_over_s2_higher_baseline_pp: {collapsed_increase_pp:.2}");
-    if raw_increase_pp > 0.0 {
-        let fraction_explained_by_family = ((raw_increase_pp - collapsed_increase_pp) / raw_increase_pp) * 100.0;
-        println!(
-            "fraction_of_increase_over_s2_higher_baseline_explained_by_family_expansion_pct: {:.2}%",
-            fraction_explained_by_family.max(0.0)
-        );
-    } else {
-        println!(
-            "fraction_of_increase_over_s2_higher_baseline_explained_by_family_expansion_pct: n/a \
-             (no increase over baseline to explain)"
-        );
-    }
+    let with_s4_pct = pct(ambiguous_total, resolved);
+    let without_s4_pct = pct(collapsed_ambiguous, resolved);
+    let contribution_pp = s4_isolated_contribution_pp(ambiguous_total, collapsed_ambiguous, resolved);
+    println!("with_s4_ambiguity_pct_of_resolved (== the AC3 metric above, repeated for convenience): {with_s4_pct:.2}%");
+    println!(
+        "without_s4_ambiguity_pct_of_resolved (family-collapsed, diagnostic, repeated for convenience): {without_s4_pct:.2}%"
+    );
+    println!("s4_isolated_contribution_pp (with_s4_pct - without_s4_pct, same corpus/binder): {contribution_pp:.2}");
+    println!();
+    println!(
+        "--- historical context only, NOT a valid baseline, NOT a target (see doc comment on the \
+         constants below for why) ---"
+    );
+    println!(
+        "s2_baseline_pct_prototype_1_historical_context_only: \
+         {S2_BASELINE_PROTOTYPE_1_PCT_HISTORICAL_CONTEXT_ONLY:.2}%"
+    );
+    println!(
+        "s2_baseline_pct_prototype_2_historical_context_only: \
+         {S2_BASELINE_PROTOTYPE_2_PCT_HISTORICAL_CONTEXT_ONLY:.2}%"
+    );
 }
 
 /// DIAGNOSTIC (Story #1793 S4 investigation) -- NOT part of the AC3
@@ -471,6 +500,31 @@ mod tests {
             "the harness's per-reference budget cap must exceed families::MAX_FAMILY_SIZE"
         );
     }
+
+    /// RED phase (Story #1793 S4 AC3 re-evaluation against a VALID
+    /// baseline): pins the arithmetic of `s4_isolated_contribution_pp`,
+    /// the pure function that replaces the invalid S2-prototype
+    /// comparison. WITH S4 = 300/1000 = 30.00%; WITHOUT S4 (family-
+    /// collapsed, same corpus/binder) = 200/1000 = 20.00%; the isolated
+    /// contribution is the percentage-point delta between them: 10.00.
+    #[test]
+    fn s4_isolated_contribution_pp_computes_percentage_point_delta() {
+        let contribution = s4_isolated_contribution_pp(300, 200, 1000);
+        assert!(
+            (contribution - 10.0).abs() < 1e-9,
+            "expected 30.00% - 20.00% = 10.00pp, got {contribution}"
+        );
+    }
+
+    /// Boundary case mirroring `pct`'s own zero-denominator handling
+    /// (Rule 13, anti-silent-failure via a defined zero-state rather than
+    /// a division-by-zero panic): zero resolved references must yield a
+    /// zero contribution, never NaN or a panic.
+    #[test]
+    fn s4_isolated_contribution_pp_zero_resolved_returns_zero() {
+        let contribution = s4_isolated_contribution_pp(0, 0, 0);
+        assert_eq!(contribution, 0.0);
+    }
 }
 
 fn main() {
@@ -567,7 +621,7 @@ fn print_family_diagnostics(graph: &xray_core::graph::csr::CodeGraph, ambiguous_
     let collapsed_ambiguous = diag.heterogeneous_ambiguous;
     print_family_expansion_counts(&diag);
     print_family_collapsed_ambiguity_and_distribution(&diag, collapsed_ambiguous);
-    print_baseline_attribution(ambiguous_total, resolved, collapsed_ambiguous);
+    print_s4_isolated_contribution_vs_valid_baseline(ambiguous_total, resolved, collapsed_ambiguous);
 }
 
 /// DIAGNOSTIC: raw family-expansion/family-purity counts.
