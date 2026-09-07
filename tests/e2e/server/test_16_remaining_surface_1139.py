@@ -91,7 +91,6 @@ from __future__ import annotations
 import logging
 import os
 import re
-import time
 from pathlib import Path
 from typing import Any, Iterator, Optional, Tuple
 
@@ -99,7 +98,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from tests.e2e.helpers import require_voyage_key
-from tests.e2e.server.conftest import AdminTokenProvider
+from tests.e2e.server.conftest import AdminTokenProvider, wait_for_terminal_job
 from tests.e2e.server.mcp_helpers import call_mcp_tool, parse_mcp_result
 
 logger = logging.getLogger(__name__)
@@ -200,33 +199,33 @@ def _ok_tool(resp: Any, label: str) -> dict:
 def _poll_job(
     client: TestClient,
     job_id: str,
-    auth_headers: dict,
+    admin_token_provider: AdminTokenProvider,
     label: str,
     timeout: float = _JOB_TIMEOUT_S,
 ) -> Tuple[str, dict]:
     """Poll GET /api/jobs/{job_id} until terminal; return (status, body).
 
-    Bounded by a monotonic deadline (Messi Rule #14).  Raises TimeoutError if
-    the job does not reach a terminal state in time.
+    Thin adapter over the canonical wait_for_terminal_job() (conftest.py,
+    Bug #1803): the loop body -- including the per-iteration
+    admin_token_provider.get_headers() refresh -- lives there ONLY. This
+    wrapper exists solely to preserve the (status, body) tuple contract
+    every call site in this file already destructures.
     """
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        resp = client.get(JOB_STATUS_TMPL.format(job_id=job_id), headers=auth_headers)
-        assert resp.status_code < 500, (
-            f"{label}: job poll HTTP {resp.status_code}: {resp.text[:200]}"
-        )
-        if resp.status_code == 200:
-            body = resp.json()
-            status = body.get("status")
-            if status in _TERMINAL_JOB_STATES:
-                return str(status), body
-        time.sleep(_JOB_POLL_S)
-    raise TimeoutError(f"{label}: job {job_id!r} did not terminate within {timeout}s")
+    body = wait_for_terminal_job(
+        client,
+        job_id,
+        admin_token_provider,
+        timeout=timeout,
+        poll_interval=_JOB_POLL_S,
+        label=label,
+        assert_completed=False,
+    )
+    return str(body.get("status")), body
 
 
 def _register_and_activate(
     client: TestClient,
-    auth_headers: dict,
+    admin_token_provider: AdminTokenProvider,
     source_path: Path,
     alias: str,
 ) -> None:
@@ -238,27 +237,27 @@ def _register_and_activate(
     reg = client.post(
         GOLDEN_REPOS,
         json={"repo_url": str(source_path), "alias": alias},
-        headers=auth_headers,
+        headers=admin_token_provider.get_headers(),
     )
     assert reg.status_code in (200, 202), (
         f"register {alias}: HTTP {reg.status_code} -- {reg.text[:300]}"
     )
     reg_job = reg.json().get("job_id", "")
     assert reg_job, f"register {alias}: response missing job_id: {reg.json()}"
-    status, body = _poll_job(client, reg_job, auth_headers, f"register-{alias}")
+    status, body = _poll_job(client, reg_job, admin_token_provider, f"register-{alias}")
     assert status == "completed", f"register {alias} ended {status}: {body}"
 
     act = client.post(
         REPOS_ACTIVATE,
         json={"golden_repo_alias": alias},
-        headers=auth_headers,
+        headers=admin_token_provider.get_headers(),
     )
     assert act.status_code in (200, 202), (
         f"activate {alias}: HTTP {act.status_code} -- {act.text[:300]}"
     )
     act_job = act.json().get("job_id", "")
     assert act_job, f"activate {alias}: response missing job_id: {act.json()}"
-    status, body = _poll_job(client, act_job, auth_headers, f"activate-{alias}")
+    status, body = _poll_job(client, act_job, admin_token_provider, f"activate-{alias}")
     assert status == "completed", f"activate {alias} ended {status}: {body}"
 
 
@@ -404,13 +403,9 @@ def extra_global_repos(
 
     registered: list[str] = []
     try:
-        _register_and_activate(
-            client, admin_token_provider.get_headers(), scip_src, _ALIAS_SCIP
-        )
+        _register_and_activate(client, admin_token_provider, scip_src, _ALIAS_SCIP)
         registered.append(_ALIAS_SCIP)
-        _register_and_activate(
-            client, admin_token_provider.get_headers(), mock_src, _ALIAS_MOCK
-        )
+        _register_and_activate(client, admin_token_provider, mock_src, _ALIAS_MOCK)
         registered.append(_ALIAS_MOCK)
         yield client, markupsafe_alias, [_ALIAS_SCIP, _ALIAS_MOCK]
     finally:
@@ -428,6 +423,7 @@ class TestAC1CompositeRepository:
         self,
         extra_global_repos: Tuple[TestClient, str, list[str]],
         auth_headers: dict,
+        admin_token_provider: AdminTokenProvider,
     ) -> None:
         """Create a composite from markupsafe + ms1139scip and query it.
 
@@ -463,7 +459,9 @@ class TestAC1CompositeRepository:
             )
             job_id = created.get("job_id")
             assert job_id, f"composite create returned no job_id: {created}"
-            status, body = _poll_job(client, job_id, auth_headers, "composite-create")
+            status, body = _poll_job(
+                client, job_id, admin_token_provider, "composite-create"
+            )
             assert status == "completed", (
                 f"AC1: composite-create job ended {status} (expected completed): {body}"
             )
@@ -618,6 +616,7 @@ class TestAC2ProviderIndexManagement:
         self,
         seeded_indexed_client: tuple[TestClient, str],
         auth_headers: dict,
+        admin_token_provider: AdminTokenProvider,
     ) -> None:
         """``trigger_reindex`` submits an FTS reindex job that reaches ``completed``.
 
@@ -643,7 +642,11 @@ class TestAC2ProviderIndexManagement:
         assert job_id, f"AC2: trigger_reindex returned no job_id: {submitted}"
 
         status, body = _poll_job(
-            client, job_id, auth_headers, "AC2-reindex-fts", timeout=_REINDEX_TIMEOUT_S
+            client,
+            job_id,
+            admin_token_provider,
+            "AC2-reindex-fts",
+            timeout=_REINDEX_TIMEOUT_S,
         )
         assert status == "completed", (
             f"AC2: reindex job {job_id!r} reached terminal state {status!r} "

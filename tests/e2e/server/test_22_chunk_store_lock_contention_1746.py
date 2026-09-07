@@ -48,6 +48,8 @@ from typing import Any, Tuple
 import pytest
 from fastapi.testclient import TestClient
 
+from tests.e2e.server.conftest import wait_for_terminal_job
+
 # Held longer than sqlite3's default 5.0s busy-timeout so the reindex
 # job's preflight check (and any per-file write attempted before the lock
 # releases) genuinely observes "database is locked", not a lucky race.
@@ -55,31 +57,6 @@ _LOCK_HOLD_SECONDS = 7.0
 
 _JOB_TIMEOUT: float = float(os.environ.get("E2E_GOLDEN_JOB_TIMEOUT", "300"))
 _JOB_POLL_INTERVAL: float = float(os.environ.get("E2E_GOLDEN_JOB_POLL", "0.5"))
-_TERMINAL_STATES = frozenset({"completed", "failed", "cancelled"})
-
-
-def _wait_for_terminal_job(
-    client: TestClient, job_id: str, auth_headers: dict
-) -> dict[str, Any]:
-    """Poll GET /api/jobs/{job_id} until a terminal state; return the body.
-
-    Bounded loop (Messi Rule #14): terminates on deadline (TimeoutError)
-    or terminal state. Does NOT assert success -- the caller decides.
-    """
-    deadline = time.monotonic() + _JOB_TIMEOUT
-    while time.monotonic() < deadline:
-        resp = client.get(f"/api/jobs/{job_id}", headers=auth_headers)
-        assert resp.status_code < 500, (
-            f"Job poll returned HTTP {resp.status_code}: {resp.text[:300]}"
-        )
-        if resp.status_code == 200:
-            body: dict[str, Any] = resp.json()
-            if body.get("status") in _TERMINAL_STATES:
-                return body
-        time.sleep(_JOB_POLL_INTERVAL)
-    raise TimeoutError(
-        f"Job {job_id!r} did not reach a terminal state within {_JOB_TIMEOUT}s"
-    )
 
 
 def _find_real_chunks_db(activated_repo_path: Path) -> Path:
@@ -168,8 +145,13 @@ class TestBug1746B3TransientLockContentionDoesNotAbortRealJob:
             job_id = body.get("job_id")
             assert job_id, f"reindex response missing job_id: {body}"
 
-            status = _wait_for_terminal_job(
-                client, job_id, admin_token_provider.get_headers()
+            status = wait_for_terminal_job(
+                client,
+                job_id,
+                admin_token_provider,
+                timeout=_JOB_TIMEOUT,
+                poll_interval=_JOB_POLL_INTERVAL,
+                assert_completed=False,
             )
         finally:
             lock_thread.join(timeout=_LOCK_HOLD_SECONDS + 5.0)
