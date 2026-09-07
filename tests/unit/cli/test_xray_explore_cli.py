@@ -80,6 +80,24 @@ def make_py_fixture(tmp_path: Path, files: dict) -> Path:
 
 
 # ---------------------------------------------------------------------------
+# Genuine Rust evaluator (Bug #1805)
+#
+# The engine `cidx xray explore` actually runs against is the Rust backend
+# (RustNativeBackend), so a valid evaluator MUST be Rust source containing
+# `fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding>`. The legacy
+# Python expression `return True` (and the dict-comprehension pseudo-Python
+# strings some tests below used while mocking run_batch) are NOT valid Rust
+# and are now correctly rejected by validate_rust_evaluator.
+# ---------------------------------------------------------------------------
+
+VALID_RUST_EVALUATOR = (
+    "fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> { "
+    'vec![EvalFinding { pattern: "match".to_string(), '
+    "line: node.start_line, snippet: String::new() }] }"
+)
+
+
+# ---------------------------------------------------------------------------
 # AC1: --max-debug-nodes 0 rejected (below range 1..500)
 # ---------------------------------------------------------------------------
 
@@ -95,7 +113,7 @@ def test_xray_explore_invalid_max_debug_nodes_zero():
             "--regex",
             "x",
             "--eval",
-            "return True",
+            VALID_RUST_EVALUATOR,
             "--max-debug-nodes",
             "0",
         ],
@@ -126,7 +144,7 @@ def test_xray_explore_invalid_max_debug_nodes_high():
             "--regex",
             "x",
             "--eval",
-            "return True",
+            VALID_RUST_EVALUATOR,
             "--max-debug-nodes",
             "1000",
         ],
@@ -162,7 +180,7 @@ def test_xray_explore_default_max_debug_nodes_is_50(tmp_path: Path):
             "--regex",
             "x",
             "--eval",
-            "return True",
+            VALID_RUST_EVALUATOR,
             "--json",
         ],
     )
@@ -209,7 +227,7 @@ def test_xray_explore_invalid_repo_path():
             "--regex",
             "x",
             "--eval",
-            "return True",
+            VALID_RUST_EVALUATOR,
         ],
     )
     assert result.exit_code == 2
@@ -246,7 +264,7 @@ def test_xray_explore_runs_against_real_fixture(tmp_path: Path):
             "--regex",
             "password",
             "--eval",
-            "return True",
+            VALID_RUST_EVALUATOR,
         ],
     )
     assert result.exit_code == 0, (
@@ -277,7 +295,7 @@ def test_xray_explore_table_shows_ast_section(tmp_path: Path):
             "--regex",
             "x",
             "--eval",
-            "return True",
+            VALID_RUST_EVALUATOR,
         ],
     )
     assert result.exit_code == 0, f"Output: {result.output}"
@@ -314,7 +332,7 @@ def test_xray_explore_json_output(tmp_path: Path):
                 "--regex",
                 "password",
                 "--eval",
-                "return {'matches': [{'line_number': mp['line_number']} for mp in match_positions]}",
+                VALID_RUST_EVALUATOR,
                 "--json",
             ],
         )
@@ -374,7 +392,7 @@ def test_xray_explore_max_files_cap_shows_partial(tmp_path: Path):
             "--regex",
             "x",
             "--eval",
-            "return {'matches': [{'line_number': mp['line_number']} for mp in match_positions]}",
+            VALID_RUST_EVALUATOR,
             "--max-files",
             "1",
             "--json",
@@ -413,7 +431,7 @@ def test_xray_explore_ast_renderer_hierarchical(tmp_path: Path):
                 "--regex",
                 "foo",
                 "--eval",
-                "return {'matches': [{'line_number': mp['line_number']} for mp in match_positions]}",
+                VALID_RUST_EVALUATOR,
             ],
         )
     assert result.exit_code == 0, f"Output: {result.output}"
@@ -444,7 +462,7 @@ def test_xray_explore_ast_renderer_shows_truncated_sentinel(tmp_path: Path):
                 "--regex",
                 "x",
                 "--eval",
-                "return {'matches': [{'line_number': mp['line_number']} for mp in match_positions]}",
+                VALID_RUST_EVALUATOR,
                 "--max-debug-nodes",
                 "1",
             ],
@@ -504,7 +522,7 @@ def test_xray_explore_partial_max_files_exits_3(tmp_path: Path):
             "--regex",
             "x",
             "--eval",
-            "return True",
+            VALID_RUST_EVALUATOR,
             "--max-files",
             "1",
         ],
@@ -523,7 +541,7 @@ def test_xray_explore_partial_max_files_exits_3(tmp_path: Path):
 def test_xray_explore_eval_and_eval_file_mutually_exclusive(tmp_path: Path):
     """Providing both --eval and --eval-file should exit non-zero with mutual exclusion error."""
     eval_file = tmp_path / "eval.py"
-    eval_file.write_text("return True", encoding="utf-8")
+    eval_file.write_text(VALID_RUST_EVALUATOR, encoding="utf-8")
 
     runner = CliRunner()
     result = invoke_xray_explore(
@@ -534,7 +552,7 @@ def test_xray_explore_eval_and_eval_file_mutually_exclusive(tmp_path: Path):
             "--regex",
             "x",
             "--eval",
-            "return True",
+            VALID_RUST_EVALUATOR,
             "--eval-file",
             str(eval_file),
         ],
@@ -561,7 +579,7 @@ def test_xray_explore_eval_file_loads_code(tmp_path: Path):
         {"main.py": "password = 'secret'\n"},
     )
     eval_file = tmp_path / "eval.py"
-    eval_file.write_text("return True", encoding="utf-8")
+    eval_file.write_text(VALID_RUST_EVALUATOR, encoding="utf-8")
 
     runner = CliRunner()
     result = invoke_xray_explore(
@@ -631,7 +649,7 @@ def test_xray_explore_quiet_suppresses_progress(tmp_path: Path):
             "--regex",
             "x",
             "--eval",
-            "return True",
+            VALID_RUST_EVALUATOR,
             "--quiet",
         ],
     )
@@ -666,7 +684,7 @@ def test_xray_explore_no_matches_exits_zero(tmp_path: Path):
             "--regex",
             "ZZZNOTFOUND",
             "--eval",
-            "return True",
+            VALID_RUST_EVALUATOR,
         ],
     )
     assert result.exit_code == 0
@@ -696,7 +714,7 @@ def test_xray_explore_target_filename(tmp_path: Path):
             "--regex",
             r"auth.*\.py$",
             "--eval",
-            "return True",
+            VALID_RUST_EVALUATOR,
             "--target",
             "filename",
         ],
@@ -716,7 +734,7 @@ def test_xray_explore_missing_repo_flag():
     runner = CliRunner()
     result = invoke_xray_explore(
         runner,
-        ["--regex", "x", "--eval", "return True"],
+        ["--regex", "x", "--eval", VALID_RUST_EVALUATOR],
     )
     assert result.exit_code != 0
 
@@ -726,6 +744,6 @@ def test_xray_explore_missing_regex_flag():
     runner = CliRunner()
     result = invoke_xray_explore(
         runner,
-        ["--repo", "/tmp", "--eval", "return True"],
+        ["--repo", "/tmp", "--eval", VALID_RUST_EVALUATOR],
     )
     assert result.exit_code != 0

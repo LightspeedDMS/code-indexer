@@ -479,7 +479,7 @@ async def handle_xray_search(params: Dict[str, Any], user: User) -> Dict[str, An
     1. Auth + permission check (query_repos).
     2. Parameter parse + validation.
     3. Repository alias resolution.
-    4. Pre-flight evaluator validation via PythonEvaluatorSandbox.
+    4. Pre-flight evaluator validation via validate_rust_evaluator.
     5. Job submission via BackgroundJobManager.
     6. Return {job_id}.
 
@@ -490,7 +490,7 @@ async def handle_xray_search(params: Dict[str, Any], user: User) -> Dict[str, An
         max_files_out_of_range  — max_files provided but < 1.
         repository_not_found    — alias cannot be resolved.
         xray_extras_not_installed — tree-sitter extras not available.
-        xray_evaluator_validation_failed — evaluator AST whitelist violation.
+        xray_evaluator_validation_failed — Rust evaluator forbidden-construct violation.
     """
     _admission = check_query_admission()
     if not _admission.allowed:
@@ -1201,7 +1201,7 @@ async def handle_xray_explore(params: Dict[str, Any], user: User) -> Dict[str, A
         max_debug_nodes_out_of_range   — max_debug_nodes outside [1, 500].
         repository_not_found           — alias cannot be resolved.
         xray_extras_not_installed      — tree-sitter extras not available.
-        xray_evaluator_validation_failed — evaluator AST whitelist violation.
+        xray_evaluator_validation_failed — Rust evaluator forbidden-construct violation.
     """
     _admission = check_query_admission()
     if not _admission.allowed:
