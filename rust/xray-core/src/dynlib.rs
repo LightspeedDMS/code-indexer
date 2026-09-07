@@ -122,17 +122,33 @@ type CollectFactsFn = fn(&OwnedNode, &str) -> Option<Vec<crate::graph::user_fact
 type AnalyzeGraphFn =
     fn(&crate::graph::csr::handle::GraphHandle, &crate::graph::user_facts::FactsHandle) -> Option<crate::graph::analyze::result::GraphResult>;
 
+/// Story #1792 (S3, AC1): returns `Option<Vec<EvalFinding>>` -- `None`
+/// means the dylib's OWN `catch_unwind` (see `GRAPH_REFINE_EPILOGUE` in
+/// `compiler.rs`) caught a panic inside `refine` before it could ever try
+/// to cross this dylib boundary, mirroring `AnalyzeGraphFn`'s doc comment
+/// exactly. OPTIONAL: a graph-mode evaluator with no `fn refine` has no
+/// such symbol at all, distinct from a panic.
+type RefineFn = fn(
+    &OwnedNode,
+    &crate::graph::refine::FileContext,
+    &crate::graph::csr::handle::GraphHandle,
+    &crate::graph::user_facts::FactsHandle,
+) -> Option<Vec<EvalFinding>>;
+
 /// Story #1787 AC8: loads a GRAPH-MODE compiled evaluator, distinct from
 /// `DynlibEvaluator` (legacy-only). Mirrors `DynlibEvaluator::load`'s ABI
 /// verification exactly, then resolves `xray_collect_facts`/
-/// `xray_analyze_graph` the SAME optional-symbol way
+/// `xray_analyze_graph`/`xray_refine` the SAME optional-symbol way
 /// `xray_drain_debug_log` already is -- a missing symbol is a legitimate
-/// outcome (a legacy-mode `.so` loaded here has neither), reported via
-/// `has_collect_facts`/`has_analyze_graph`, never a load failure.
+/// outcome (a legacy-mode `.so`, or a graph-mode one with no `fn refine`,
+/// loaded here has none), reported via
+/// `has_collect_facts`/`has_analyze_graph`/`has_refine`, never a load
+/// failure.
 pub struct GraphDynlibEvaluator {
     _lib: Library,
     collect_facts_fn: Option<CollectFactsFn>,
     analyze_graph_fn: Option<AnalyzeGraphFn>,
+    refine_fn: Option<RefineFn>,
 }
 
 impl std::fmt::Debug for GraphDynlibEvaluator {
@@ -166,8 +182,10 @@ impl GraphDynlibEvaluator {
             unsafe { lib.get::<CollectFactsFn>(b"xray_collect_facts").ok().map(|sym| *sym) };
         let analyze_graph_fn: Option<AnalyzeGraphFn> =
             unsafe { lib.get::<AnalyzeGraphFn>(b"xray_analyze_graph").ok().map(|sym| *sym) };
+        let refine_fn: Option<RefineFn> =
+            unsafe { lib.get::<RefineFn>(b"xray_refine").ok().map(|sym| *sym) };
 
-        Ok(Self { _lib: lib, collect_facts_fn, analyze_graph_fn })
+        Ok(Self { _lib: lib, collect_facts_fn, analyze_graph_fn, refine_fn })
     }
 
     /// AC7/AC8: distinguishes "the loaded artifact exports analyze_graph"
@@ -180,6 +198,13 @@ impl GraphDynlibEvaluator {
 
     pub fn has_collect_facts(&self) -> bool {
         self.collect_facts_fn.is_some()
+    }
+
+    /// Story #1792 (S3, AC1): distinguishes "the loaded artifact exports
+    /// xray_refine" (a graph-mode evaluator defining `fn refine`) from
+    /// "not exported" (`false` here, the common case: refine is OPTIONAL).
+    pub fn has_refine(&self) -> bool {
+        self.refine_fn.is_some()
     }
 
     /// Calls the loaded evaluator's `analyze_graph`, if exported. The
@@ -208,6 +233,23 @@ impl GraphDynlibEvaluator {
         file: &str,
     ) -> Option<Option<Vec<crate::graph::user_facts::UserFact>>> {
         self.collect_facts_fn.map(|f| f(node, file))
+    }
+
+    /// Story #1792 (S3, AC1): calls the loaded evaluator's `refine`, if
+    /// exported. Mirrors `call_analyze_graph`'s exact two-level Option
+    /// contract: OUTER `None` = not exported, outer `Some(inner)` =
+    /// exported, where inner `None` = the dylib's own `catch_unwind`
+    /// (`GRAPH_REFINE_EPILOGUE`) caught a panic, inner `Some(findings)` =
+    /// succeeded. No `catch_unwind` needed HERE -- the panic never crosses
+    /// this dylib boundary at all.
+    pub fn call_refine(
+        &self,
+        node: &OwnedNode,
+        ctx: &crate::graph::refine::FileContext,
+        g: &crate::graph::csr::handle::GraphHandle,
+        facts: &crate::graph::user_facts::FactsHandle,
+    ) -> Option<Option<Vec<EvalFinding>>> {
+        self.refine_fn.map(|f| f(node, ctx, g, facts))
     }
 }
 
@@ -264,6 +306,81 @@ fn analyze_graph(g: &GraphHandle<'_>, facts: &FactsHandle<'_>) -> GraphResult {
         let b = builder.intern_symbol(make_symbol_id(1, 1));
         builder.add_reference(a, 1, 1, 0, &[Candidate::new(b, reasons::SAME_FILE)]);
         (builder.build(), crate::graph::user_facts::FactIndex::new())
+    }
+
+    /// Story #1792 (S3, AC3/AC4): a genuinely CROSS-FILE graph -- A (file 1)
+    /// calls B (file 2), and B carries a cached AC2 signature line. This is
+    /// the fixture the signature-captioning test below needs: unlike
+    /// `small_graph_and_facts` (both symbols in file 1, via `SAME_FILE`),
+    /// this proves captioning works when the flagged definition genuinely
+    /// lives in a DIFFERENT file than the call site.
+    fn two_file_graph_with_cached_signature() -> crate::graph::csr::CodeGraph {
+        use crate::graph::csr::builder::CodeGraphBuilder;
+        use crate::graph::csr::candidate::Candidate;
+        use crate::graph::identity::make_symbol_id;
+        use crate::graph::reasons;
+
+        let mut builder = CodeGraphBuilder::with_candidate_capacity(1);
+        let a = builder.intern_symbol(make_symbol_id(1, 0));
+        let b = builder.intern_symbol(make_symbol_id(2, 0));
+        builder.add_signature(b, "run()".to_string());
+        builder.add_reference(a, 1, 1, 0, &[Candidate::new(b, reasons::UNIQUE_NAME_IN_REPO)]);
+        builder.build()
+    }
+
+    /// THE AC3/AC4 discriminating proof: a real compiled `analyze_graph`
+    /// resolves A's callee (B, declared in a DIFFERENT file), captions the
+    /// finding with B's CACHED signature via the new `g.signature_for`
+    /// accessor, and never adds B to `result.refine`. This is exactly the
+    /// mechanism that "stops RefineSet approaching whole-repo size on path
+    /// queries" (AC3): with `signature_for` available, an evaluator has no
+    /// need to request a second, per-file look at B just to caption it.
+    #[test]
+    fn analyze_graph_captions_a_cross_file_symbol_via_signature_for_without_entering_refine_set() {
+        use tempfile::TempDir;
+        let dir = TempDir::new().unwrap();
+        let graph = two_file_graph_with_cached_signature();
+        let facts = crate::graph::user_facts::FactIndex::new();
+        let graph_handle = crate::graph::csr::handle::GraphHandle::from_graph(&graph);
+        let facts_handle = crate::graph::user_facts::FactsHandle::from_facts(&facts);
+
+        let user_code = r#"
+fn collect_facts(node: &OwnedNode, file: &str) -> Vec<UserFact> {
+    Vec::new()
+}
+fn analyze_graph(g: &GraphHandle<'_>, facts: &FactsHandle<'_>) -> GraphResult {
+    let mut result = GraphResult::default();
+    for callee in g.callees_of(0) {
+        let symbol = g.resolve_symbol(callee).expect("callee came from g.callees_of, always valid");
+        let signature = g.signature_for(callee).unwrap_or("<no signature>").to_string();
+        result.findings.push(ReduceFinding {
+            pattern: "cross-file-caption".to_string(),
+            message: "captioned without re-parsing".to_string(),
+            involved: vec![symbol],
+            signatures: vec![signature],
+        });
+        // Deliberately NEVER pushed to result.refine -- signature_for
+        // already supplied everything needed to caption this finding.
+    }
+    result
+}
+"#;
+        let evaluator = compile_and_load_graph(user_code, dir.path());
+        let result = evaluator
+            .call_analyze_graph(&graph_handle, &facts_handle)
+            .expect("analyze_graph IS exported -- outer must be Some(..)")
+            .expect("a real graph-mode evaluator calling a real accessor must not panic");
+
+        assert_eq!(result.findings.len(), 1, "must have captioned the one cross-file call site");
+        assert_eq!(
+            result.findings[0].signatures,
+            vec!["run()".to_string()],
+            "the finding must carry B's cached signature, retrieved WITHOUT re-parsing file 2"
+        );
+        assert!(
+            result.refine.is_empty(),
+            "B must never enter the RefineSet -- signature_for made a second per-file look unnecessary"
+        );
     }
 
     /// Compiles `user_code` into `dir` and loads it as a
@@ -489,6 +606,150 @@ fn analyze_graph(g: &GraphHandle<'_>, facts: &FactsHandle<'_>) -> GraphResult {
             "resolve_symbol/resolve_string must both have returned None for the out-of-range id, \
              proving they discriminate gracefully rather than panicking"
         );
+    }
+
+    /// Shared setup for the `call_refine`/`has_refine` tests below -- a
+    /// real two-file graph (with B's cached signature), an empty
+    /// `FactIndex`, a leaf `OwnedNode`, and a `FileContext` naming the file
+    /// under refine. Returns owned values (never the handles themselves,
+    /// which borrow from `graph`/`facts` and cannot outlive this function)
+    /// so each call site builds its own `GraphHandle`/`FactsHandle` locally.
+    fn refine_test_fixture() -> (
+        crate::graph::csr::CodeGraph,
+        crate::graph::user_facts::FactIndex,
+        OwnedNode,
+        crate::graph::refine::FileContext,
+    ) {
+        let graph = two_file_graph_with_cached_signature();
+        let facts = crate::graph::user_facts::FactIndex::new();
+        let node = OwnedNode::new_leaf_for_test("root", "", 1, true);
+        let ctx = crate::graph::refine::FileContext { file: "src/A.java".to_string() };
+        (graph, facts, node, ctx)
+    }
+
+    /// Story #1792 (S3, AC1): `has_refine()` must distinguish "the loaded
+    /// artifact exports xray_refine" (a graph-mode evaluator defining
+    /// `fn refine`) from "not exported" (one that does not) -- mirroring
+    /// `has_analyze_graph`/`has_collect_facts`'s exact contract.
+    #[test]
+    fn graph_dynlib_evaluator_detects_presence_of_refine_export() {
+        use tempfile::TempDir;
+        let dir = TempDir::new().unwrap();
+
+        let without_refine = r#"
+fn collect_facts(node: &OwnedNode, file: &str) -> Vec<UserFact> { Vec::new() }
+fn analyze_graph(g: &GraphHandle<'_>, facts: &FactsHandle<'_>) -> GraphResult { GraphResult::default() }
+"#;
+        let evaluator = compile_and_load_graph(without_refine, dir.path());
+        assert!(!evaluator.has_refine(), "an evaluator with no fn refine must not export xray_refine");
+
+        let with_refine = r#"
+fn collect_facts(node: &OwnedNode, file: &str) -> Vec<UserFact> { Vec::new() }
+fn analyze_graph(g: &GraphHandle<'_>, facts: &FactsHandle<'_>) -> GraphResult { GraphResult::default() }
+fn refine(node: &OwnedNode, ctx: &FileContext, g: &GraphHandle<'_>, facts: &FactsHandle<'_>) -> Vec<EvalFinding> { Vec::new() }
+"#;
+        let evaluator = compile_and_load_graph(with_refine, dir.path());
+        assert!(evaluator.has_refine(), "an evaluator defining fn refine must export xray_refine");
+    }
+
+    /// AC1's central invariant: a real compiled `refine` callback, given
+    /// the file's `OwnedNode`, a `FileContext` naming the file, and the
+    /// SAME `GraphHandle`/`FactsHandle` accessor ABI `analyze_graph`
+    /// already uses -- including calling the REAL `g.signature_for`
+    /// accessor -- must run to completion and return real `EvalFinding`s.
+    /// Proves `call_refine`'s `Some(Some(result))` arm end-to-end through a
+    /// REAL dylib call, not a stub, and that the accessor ABI genuinely
+    /// works from inside `refine` (not just `analyze_graph`).
+    #[test]
+    fn call_refine_succeeds_with_a_real_accessor_call() {
+        use tempfile::TempDir;
+        let dir = TempDir::new().unwrap();
+        let (graph, facts, node, ctx) = refine_test_fixture();
+        let graph_handle = crate::graph::csr::handle::GraphHandle::from_graph(&graph);
+        let facts_handle = crate::graph::user_facts::FactsHandle::from_facts(&facts);
+
+        let user_code = r#"
+fn collect_facts(node: &OwnedNode, file: &str) -> Vec<UserFact> { Vec::new() }
+fn analyze_graph(g: &GraphHandle<'_>, facts: &FactsHandle<'_>) -> GraphResult { GraphResult::default() }
+fn refine(node: &OwnedNode, ctx: &FileContext, g: &GraphHandle<'_>, facts: &FactsHandle<'_>) -> Vec<EvalFinding> {
+    let signature = g.signature_for(1).unwrap_or("<no signature>");
+    vec![EvalFinding {
+        pattern: "refine-ran".to_string(),
+        line: node.start_line,
+        snippet: format!("{}:{}", ctx.file, signature),
+    }]
+}
+"#;
+        let evaluator = compile_and_load_graph(user_code, dir.path());
+        let outer = evaluator
+            .call_refine(&node, &ctx, &graph_handle, &facts_handle)
+            .expect("refine IS exported -- outer must be Some(..)");
+        let findings = outer.expect("a real, non-panicking refine must not panic");
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].pattern, "refine-ran");
+        assert_eq!(
+            findings[0].snippet, "src/A.java:run()",
+            "the FileContext's file AND the real g.signature_for(1) call must both reach refine"
+        );
+    }
+
+    /// Builds a `(GraphHandle, FactsHandle)` pair borrowing from `graph`/
+    /// `facts` -- deduplicates the two-line handle-construction pair the
+    /// `call_refine` tests below would otherwise each repeat.
+    fn refine_handles<'g, 'f>(
+        graph: &'g crate::graph::csr::CodeGraph,
+        facts: &'f crate::graph::user_facts::FactIndex,
+    ) -> (crate::graph::csr::handle::GraphHandle<'g>, crate::graph::user_facts::FactsHandle<'f>) {
+        (crate::graph::csr::handle::GraphHandle::from_graph(graph), crate::graph::user_facts::FactsHandle::from_facts(facts))
+    }
+
+    /// Mirrors `call_analyze_graph_is_outer_none_when_not_exported`'s exact
+    /// shape: an evaluator with no `fn refine` has nothing to call at all,
+    /// which must be the OUTER `None`, distinct from a successful empty
+    /// result (`Some(Some(vec![]))`).
+    #[test]
+    fn call_refine_is_outer_none_when_not_exported() {
+        use tempfile::TempDir;
+        let dir = TempDir::new().unwrap();
+        let (graph, facts, node, ctx) = refine_test_fixture();
+        let (graph_handle, facts_handle) = refine_handles(&graph, &facts);
+
+        let without_refine = r#"
+fn collect_facts(node: &OwnedNode, file: &str) -> Vec<UserFact> { Vec::new() }
+fn analyze_graph(g: &GraphHandle<'_>, facts: &FactsHandle<'_>) -> GraphResult { GraphResult::default() }
+"#;
+        let evaluator = compile_and_load_graph(without_refine, dir.path());
+        assert!(
+            evaluator.call_refine(&node, &ctx, &graph_handle, &facts_handle).is_none(),
+            "calling refine on an evaluator with no export must be the outer None, never Some(Some(empty))"
+        );
+    }
+
+    /// A genuinely panicking `refine` (triggered via `.unwrap()` on `None`)
+    /// must be caught INSIDE the dylib (Rule 13) and reported as the inner
+    /// `Some(None)`, never crashing the test process -- mirrors
+    /// `call_analyze_graph_catches_a_genuine_panic_inside_the_dylib` exactly.
+    #[test]
+    fn call_refine_catches_a_genuine_panic_inside_the_dylib() {
+        use tempfile::TempDir;
+        let dir = TempDir::new().unwrap();
+        let (graph, facts, node, ctx) = refine_test_fixture();
+        let (graph_handle, facts_handle) = refine_handles(&graph, &facts);
+
+        let panic_code = r#"
+fn collect_facts(node: &OwnedNode, file: &str) -> Vec<UserFact> { Vec::new() }
+fn analyze_graph(g: &GraphHandle<'_>, facts: &FactsHandle<'_>) -> GraphResult { GraphResult::default() }
+fn refine(node: &OwnedNode, ctx: &FileContext, g: &GraphHandle<'_>, facts: &FactsHandle<'_>) -> Vec<EvalFinding> {
+    let boom: Option<i32> = None;
+    boom.unwrap();
+    Vec::new()
+}
+"#;
+        let evaluator = compile_and_load_graph(panic_code, dir.path());
+        let outer = evaluator
+            .call_refine(&node, &ctx, &graph_handle, &facts_handle)
+            .expect("must be the outer Some(..) -- refine IS exported, the panic is caught inside");
+        assert!(outer.is_none(), "a panic inside refine must be caught inside the dylib, reported as Some(None), never a crash");
     }
 
     #[test]

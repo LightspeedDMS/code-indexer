@@ -19,6 +19,7 @@
 //! `TimedOut` instead of the child's real (successful) outcome.
 
 use super::result::AnalyzeStatus;
+#[cfg(test)]
 use super::result::GraphResult;
 use serde::{Deserialize, Serialize};
 use std::io::Read;
@@ -53,9 +54,9 @@ const STDOUT_DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
 /// self-report its own outcome -- the wire format `run_analyze_child`
 /// parses on a normal (non-timeout) exit.
 #[derive(Debug, Serialize, Deserialize)]
-pub struct ChildReport {
+pub struct ChildReport<T> {
     pub status: AnalyzeStatus,
-    pub result: Option<GraphResult>,
+    pub result: Option<T>,
 }
 
 /// Sends `SIGKILL` to the WHOLE process group led by `pid` -- never just
@@ -120,7 +121,10 @@ fn spawn_stdout_reader(child: &mut Child) -> Receiver<Vec<u8>> {
 /// existed, including the rare `try_wait` OS-error path, treated as
 /// `Panicked` (an abnormal termination this process could not cleanly
 /// observe) rather than misreported as a spawn failure.
-pub fn run_analyze_child(command: Command, timeout: Duration) -> (AnalyzeStatus, Option<GraphResult>) {
+pub fn run_analyze_child<T: serde::de::DeserializeOwned>(
+    command: Command,
+    timeout: Duration,
+) -> (AnalyzeStatus, Option<T>) {
     run_analyze_child_with_memory_limit(command, timeout, None, &super::memory_ceiling::NoopMemoryCeiling)
 }
 
@@ -139,11 +143,11 @@ fn activate_memory_ceiling(memory_limit_bytes: Option<u64>, ceiling: &dyn super:
 /// genuinely active AND the kernel actually OOM-killed something inside
 /// it -- never inferred from a bare exit code. Always tears down the
 /// containment boundary, on every path.
-fn finalize_with_memory_ceiling(
+fn finalize_with_memory_ceiling<T>(
     containment_active: bool,
     ceiling: &dyn super::memory_ceiling::MemoryCeiling,
-    outcome: (AnalyzeStatus, Option<GraphResult>),
-) -> (AnalyzeStatus, Option<GraphResult>) {
+    outcome: (AnalyzeStatus, Option<T>),
+) -> (AnalyzeStatus, Option<T>) {
     let final_outcome =
         if containment_active && ceiling.oom_killed() { (AnalyzeStatus::AbortedMemoryLimit, None) } else { outcome };
     ceiling.cleanup();
@@ -236,12 +240,12 @@ fn write_pid_signal_safe(path: &std::ffi::CStr, pid: u32) {
     }
 }
 
-pub fn run_analyze_child_with_memory_limit(
+pub fn run_analyze_child_with_memory_limit<T: serde::de::DeserializeOwned>(
     mut command: Command,
     timeout: Duration,
     memory_limit_bytes: Option<u64>,
     ceiling: &dyn super::memory_ceiling::MemoryCeiling,
-) -> (AnalyzeStatus, Option<GraphResult>) {
+) -> (AnalyzeStatus, Option<T>) {
     let mut containment_active = activate_memory_ceiling(memory_limit_bytes, ceiling);
 
     command.process_group(0);
@@ -316,12 +320,12 @@ pub fn run_analyze_child_with_memory_limit(
 /// child's own `catch_unwind` boundary cannot intercept) looks like from
 /// here. Never silently mapped onto `RanOk` with an empty result, which
 /// would look identical to "analyzed a graph with zero findings".
-fn finish(exited_successfully: bool, stdout_rx: &Receiver<Vec<u8>>) -> (AnalyzeStatus, Option<GraphResult>) {
+fn finish<T: serde::de::DeserializeOwned>(exited_successfully: bool, stdout_rx: &Receiver<Vec<u8>>) -> (AnalyzeStatus, Option<T>) {
     let stdout_bytes = stdout_rx.recv_timeout(STDOUT_DRAIN_TIMEOUT).unwrap_or_default();
     if !exited_successfully {
         return (AnalyzeStatus::Panicked, None);
     }
-    match serde_json::from_slice::<ChildReport>(&stdout_bytes) {
+    match serde_json::from_slice::<ChildReport<T>>(&stdout_bytes) {
         Ok(report) => (report.status, report.result),
         Err(_) => (AnalyzeStatus::Panicked, None),
     }
@@ -337,6 +341,26 @@ mod tests {
         command
     }
 
+    /// Story #1792 (S3, AC5): a locally-defined report shape, deliberately
+    /// NOT `GraphResult`, standing in for the refine child's per-file
+    /// report. Proves `run_analyze_child` is generic over the report type
+    /// `T: DeserializeOwned` -- the SAME cgroup-ceiling/process-containment
+    /// mechanism AC7 built for `analyze_graph` must be reusable for a
+    /// completely different child report shape, never duplicated.
+    #[derive(Debug, Serialize, Deserialize, PartialEq)]
+    struct SampleOtherReport {
+        value: u32,
+    }
+
+    #[test]
+    fn run_analyze_child_is_generic_over_the_report_type_not_hardcoded_to_graph_result() {
+        let json = r#"{"status":"ran_ok","result":{"value":42}}"#;
+        let command = shell_command(&format!("printf '%s' '{json}'"));
+        let (status, result) = run_analyze_child::<SampleOtherReport>(command, Duration::from_secs(5));
+        assert_eq!(status, AnalyzeStatus::RanOk);
+        assert_eq!(result, Some(SampleOtherReport { value: 42 }));
+    }
+
     /// AC7's core discriminating requirement: a child that never
     /// terminates (here, a shell spawning `sleep 100` as a grandchild)
     /// must be KILLED -- process group and all -- once `timeout` elapses,
@@ -347,7 +371,7 @@ mod tests {
     fn a_hanging_child_is_killed_at_timeout_and_reported_as_timed_out() {
         let command = shell_command("sleep 100");
         let start = Instant::now();
-        let (status, result) = run_analyze_child(command, Duration::from_millis(200));
+        let (status, result) = run_analyze_child::<GraphResult>(command, Duration::from_millis(200));
         let elapsed = start.elapsed();
 
         assert_eq!(status, AnalyzeStatus::TimedOut);
@@ -365,7 +389,7 @@ mod tests {
     fn a_child_that_reports_ran_ok_is_passed_through_verbatim() {
         let json = r#"{"status":"ran_ok","result":{"findings":[],"refine":[]}}"#;
         let command = shell_command(&format!("printf '%s' '{json}'"));
-        let (status, result) = run_analyze_child(command, Duration::from_secs(5));
+        let (status, result) = run_analyze_child::<GraphResult>(command, Duration::from_secs(5));
 
         assert_eq!(status, AnalyzeStatus::RanOk);
         assert_eq!(result, Some(GraphResult { findings: vec![], refine: vec![] }));
@@ -379,7 +403,7 @@ mod tests {
     fn a_child_that_self_reports_panicked_is_reported_as_panicked_not_timed_out_or_ran_ok() {
         let json = r#"{"status":"panicked","result":null}"#;
         let command = shell_command(&format!("printf '%s' '{json}'"));
-        let (status, result) = run_analyze_child(command, Duration::from_secs(5));
+        let (status, result) = run_analyze_child::<GraphResult>(command, Duration::from_secs(5));
 
         assert_eq!(status, AnalyzeStatus::Panicked);
         assert!(result.is_none());
@@ -392,7 +416,7 @@ mod tests {
     #[test]
     fn a_child_that_exits_nonzero_with_no_report_is_reported_as_panicked() {
         let command = shell_command("exit 1");
-        let (status, result) = run_analyze_child(command, Duration::from_secs(5));
+        let (status, result) = run_analyze_child::<GraphResult>(command, Duration::from_secs(5));
 
         assert_eq!(status, AnalyzeStatus::Panicked);
         assert!(result.is_none());
@@ -404,7 +428,7 @@ mod tests {
     #[test]
     fn a_command_that_cannot_even_be_spawned_is_reported_as_load_failed() {
         let command = Command::new("/definitely/does/not/exist/xray-analyze-child");
-        let (status, result) = run_analyze_child(command, Duration::from_secs(5));
+        let (status, result) = run_analyze_child::<GraphResult>(command, Duration::from_secs(5));
 
         assert_eq!(status, AnalyzeStatus::LoadFailed);
         assert!(result.is_none());
@@ -459,7 +483,7 @@ mod tests {
         let ceiling = FakeMemoryCeiling { simulate_oom: true, ..FakeMemoryCeiling::default() };
 
         let (status, result) =
-            run_analyze_child_with_memory_limit(ran_ok_command(), Duration::from_secs(5), Some(1024), &ceiling);
+            run_analyze_child_with_memory_limit::<GraphResult>(ran_ok_command(), Duration::from_secs(5), Some(1024), &ceiling);
 
         assert_eq!(status, AnalyzeStatus::AbortedMemoryLimit);
         assert!(result.is_none());
@@ -477,7 +501,7 @@ mod tests {
         let ceiling = FakeMemoryCeiling { create_fails: true, simulate_oom: true, ..FakeMemoryCeiling::default() };
 
         let (status, result) =
-            run_analyze_child_with_memory_limit(ran_ok_command(), Duration::from_secs(5), Some(1024), &ceiling);
+            run_analyze_child_with_memory_limit::<GraphResult>(ran_ok_command(), Duration::from_secs(5), Some(1024), &ceiling);
 
         assert_eq!(status, AnalyzeStatus::RanOk, "create() failing must degrade to the real, unoverridden status");
         assert_eq!(result, ran_ok_result());
@@ -495,7 +519,7 @@ mod tests {
         let ceiling = FakeMemoryCeiling { add_pid_fails: true, simulate_oom: true, ..FakeMemoryCeiling::default() };
 
         let (status, result) =
-            run_analyze_child_with_memory_limit(ran_ok_command(), Duration::from_secs(5), Some(1024), &ceiling);
+            run_analyze_child_with_memory_limit::<GraphResult>(ran_ok_command(), Duration::from_secs(5), Some(1024), &ceiling);
 
         assert_eq!(status, AnalyzeStatus::RanOk, "add_pid() failing must ALSO degrade to the real, unoverridden status");
         assert_eq!(result, ran_ok_result());

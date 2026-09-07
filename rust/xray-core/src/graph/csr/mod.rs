@@ -91,6 +91,9 @@ pub mod handle {
         resolve_string_raw_fn: fn(*const (), u32) -> Option<(*const u8, usize)>,
         is_symbol_referenced_fn: fn(*const (), u32) -> bool,
         is_definitely_dead_code_fn: fn(*const (), u32) -> Option<bool>,
+        /// Story #1792 (S3, AC4): cross-file captioning without re-parsing --
+        /// see `GraphHandle::signature_for`'s doc comment.
+        signature_for_raw_fn: fn(*const (), u32) -> Option<(*const u8, usize)>,
         _graph: PhantomData<&'graph ()>,
     }
 
@@ -151,6 +154,15 @@ pub mod handle {
         graph_from_ctx(ctx).is_definitely_dead_code(dense_id)
     }
 
+    /// Story #1792 (S3, AC4): exposes `CodeGraph::signature_for` -- the
+    /// per-symbol cached signature line captured at extraction -- through
+    /// the ONLY surface a graph-mode evaluator ever receives. Mirrors
+    /// `thunk_resolve_string_raw`'s exact raw-parts shape for the same
+    /// reason: a bare `fn` pointer cannot return a borrowed `&str` directly.
+    fn thunk_signature_for_raw(ctx: CtxPtr, dense_id: u32) -> Option<RawStr> {
+        graph_from_ctx(ctx).signature_for(dense_id).map(|s| (s.as_ptr(), s.len()))
+    }
+
     impl<'graph> GraphHandle<'graph> {
         /// Builds a handle bound to `graph`. The `'graph` lifetime
         /// parameter is what makes the SAFETY contract above a
@@ -168,6 +180,7 @@ pub mod handle {
                 resolve_string_raw_fn: thunk_resolve_string_raw,
                 is_symbol_referenced_fn: thunk_is_symbol_referenced,
                 is_definitely_dead_code_fn: thunk_is_definitely_dead_code,
+                signature_for_raw_fn: thunk_signature_for_raw,
                 _graph: PhantomData,
             }
         }
@@ -230,6 +243,26 @@ pub mod handle {
         /// to prevent.
         pub fn is_definitely_dead_code(&self, dense_id: u32) -> Option<bool> {
             (self.is_definitely_dead_code_fn)(self.ctx, dense_id)
+        }
+
+        /// Story #1792 (S3, AC4): the symbol's cached AC2 signature line
+        /// (`CodeGraph::signature_for`), or `None` when extraction never
+        /// captured one -- never fabricated. This is what lets
+        /// `analyze_graph`/`refine` caption a cross-file symbol (e.g. the
+        /// definition a call site resolves to) WITHOUT adding that file to
+        /// the RefineSet: the signature was already cached at extraction
+        /// time and travels with the mmap'd graph, so no second parse of
+        /// the defining file is ever needed. Returns a `&str` borrowed from
+        /// the graph's shared signature storage, with a lifetime tied to
+        /// `&self` -- never an owned `String` (AC5/ADR-002), mirroring
+        /// `resolve_string`'s exact contract.
+        pub fn signature_for(&self, dense_id: u32) -> Option<&str> {
+            let (ptr, len) = (self.signature_for_raw_fn)(self.ctx, dense_id)?;
+            // SAFETY: identical to `resolve_string` above -- `ptr`/`len`
+            // come from `CodeGraph::signature_for`'s own `&str` (via
+            // `thunk_signature_for_raw`), guaranteed valid UTF-8 and alive
+            // for at least `'graph`, which outlives `&self`.
+            Some(unsafe { std::str::from_utf8_unchecked(std::slice::from_raw_parts(ptr, len)) })
         }
     }
 
@@ -377,6 +410,34 @@ pub mod handle {
 
             assert_eq!(handle.resolve_symbol(u32::MAX), None, "out-of-range dense id must return None, never panic");
             assert_eq!(handle.resolve_string(u32::MAX), None, "out-of-range string id must return None, never panic");
+        }
+
+        /// Story #1792 (S3, AC4): "Each Symbol carries a short cached
+        /// signature line captured at extraction" -- already true of
+        /// `CodeGraph::signature_for` since #1787's S2 (AC6 step 1), but
+        /// AC4 requires "cross-file captioning WITHOUT re-parsing", which
+        /// means a graph-mode evaluator (the only consumer that ever
+        /// crosses the dylib boundary) must be able to reach it. Before
+        /// this fix, `GraphHandle` exposed no such accessor at all --
+        /// `analyze_graph` had no way to caption a cross-file symbol
+        /// without adding it to the RefineSet, which is exactly the blind
+        /// spot AC3/AC4 exist to close. Must return `None` for a symbol
+        /// with no cached signature (never panic, never fabricate one) and
+        /// for an out-of-range dense id, mirroring `resolve_string`'s exact
+        /// contract.
+        #[test]
+        fn signature_for_delegates_to_the_real_graph_and_returns_none_when_absent_or_out_of_range() {
+            let mut builder = CodeGraphBuilder::with_candidate_capacity(0);
+            let with_sig = builder.intern_symbol(make_symbol_id(1, 0));
+            let without_sig = builder.intern_symbol(make_symbol_id(1, 1));
+            builder.add_signature(with_sig, "run()".to_string());
+            let graph = builder.build();
+            let handle = GraphHandle::from_graph(&graph);
+
+            assert_eq!(handle.signature_for(with_sig), Some("run()"));
+            assert_eq!(handle.signature_for(with_sig), graph.signature_for(with_sig));
+            assert_eq!(handle.signature_for(without_sig), None, "a symbol with no cached signature must return None, never panic or fabricate one");
+            assert_eq!(handle.signature_for(u32::MAX), None, "an out-of-range dense id must return None, never panic");
         }
     }
 }

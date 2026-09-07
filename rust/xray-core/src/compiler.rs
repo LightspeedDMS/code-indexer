@@ -75,7 +75,16 @@ const MAX_CACHE_ENTRIES: usize = 100;
 /// one surface (`GraphHandle`) that produces findings. Adding these fields
 /// changes `GraphHandle`'s memory layout, so an ABI-6 graph artifact
 /// (compiled before this fix) must never be loaded as if it matched ABI 7.
-pub const XRAY_ABI_VERSION: u64 = 7;
+///
+/// Story #1792 (S3) bumps this AGAIN, 7 -> 8: `GraphHandle` gains a ninth
+/// accessor field, `signature_for_raw_fn` (AC4 -- exposes the per-symbol
+/// cached signature line for cross-file captioning without re-parsing),
+/// changing `GraphHandle`'s memory layout again. The optional `xray_refine`
+/// export (AC1) and the new `FileContext` mirror type land in this same
+/// slice, so this is the one ABI bump covering all of S3's structural
+/// changes together. An ABI-7 graph artifact (compiled before this fix)
+/// must never be loaded as if it matched ABI 8.
+pub const XRAY_ABI_VERSION: u64 = 8;
 
 /// Placeholder token embedded in PREAMBLE in place of a hardcoded ABI
 /// version literal. Substituted with the real `XRAY_ABI_VERSION` value by
@@ -275,6 +284,7 @@ pub struct GraphHandle<'graph> {
     resolve_string_raw_fn: fn(*const (), u32) -> Option<(*const u8, usize)>,
     is_symbol_referenced_fn: fn(*const (), u32) -> bool,
     is_definitely_dead_code_fn: fn(*const (), u32) -> Option<bool>,
+    signature_for_raw_fn: fn(*const (), u32) -> Option<(*const u8, usize)>,
     _graph: PhantomData<&'graph ()>,
 }
 
@@ -328,6 +338,11 @@ pub(crate) const GRAPH_PREAMBLE_EXTRA_3: &str = r#"
     pub fn is_definitely_dead_code(&self, dense_id: u32) -> Option<bool> {
         (self.is_definitely_dead_code_fn)(self.ctx, dense_id)
     }
+
+    pub fn signature_for(&self, dense_id: u32) -> Option<&str> {
+        let (ptr, len) = (self.signature_for_raw_fn)(self.ctx, dense_id)?;
+        Some(unsafe { std::str::from_utf8_unchecked(std::slice::from_raw_parts(ptr, len)) })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -370,6 +385,20 @@ pub struct ReduceFinding {
 pub struct GraphResult {
     pub findings: Vec<ReduceFinding>,
     pub refine: Vec<SymbolId>,
+}
+"#;
+
+/// Story #1792 (S3, AC1): mirrors the REAL `FileContext` type
+/// (`graph::refine::FileContext`) -- the per-file host context an OPTIONAL
+/// `refine` callback receives alongside the file's `OwnedNode` and the
+/// whole-graph handles. Unlike `CodeGraph`/`FactIndex`, `FileContext` is
+/// small, plain data with no internal collection layout to evolve, so it is
+/// mirrored directly (like `EvalFinding`) rather than exposed through an
+/// opaque handle.
+pub(crate) const GRAPH_PREAMBLE_EXTRA_5: &str = r#"
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileContext {
+    pub file: String,
 }
 "#;
 
@@ -430,6 +459,21 @@ pub fn xray_drain_debug_log() -> Vec<String> {
 }
 "#;
 
+/// Story #1792 (S3, AC1): the OPTIONAL `xray_refine` export -- "all-or-none
+/// with the graph family" (ADR-001): only ever appended to the assembled
+/// source when the user's code defines `fn refine`, checked via the same
+/// `has_top_level_fn` AST-level detection `detect_evaluator_mode` already
+/// uses (never a substring guess). Follows the IDENTICAL catch_unwind
+/// pattern `xray_analyze_graph`/`xray_collect_facts` already establish: a
+/// panic inside `refine` is caught INSIDE this compiled unit and reported
+/// as `None`, never allowed to unwind across the dylib boundary (Rule 13).
+const GRAPH_REFINE_EPILOGUE: &str = r#"
+#[no_mangle]
+pub fn xray_refine(node: &OwnedNode, ctx: &FileContext, g: &GraphHandle<'_>, facts: &FactsHandle<'_>) -> Option<Vec<EvalFinding>> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| refine(node, ctx, g, facts))).ok()
+}
+"#;
+
 /// Assemble a complete compilable .rs source from user evaluator code.
 pub fn assemble_evaluator_source(user_code: &str) -> String {
     assemble_evaluator_source_with_preamble(PREAMBLE, user_code)
@@ -462,18 +506,32 @@ fn assemble_with_epilogue(preamble: &str, user_code: &str, epilogue: &str) -> St
     format!("{}\n// ---- USER CODE ----\n{}\n// ---- END USER CODE ----\n{}", resolved_preamble, user_code, epilogue)
 }
 
-/// Story #1787 AC8: assembles a graph-mode evaluator's complete compilable
-/// source -- the COMMON `PREAMBLE` (OwnedNode/EvalFinding/debug_log, shared
-/// with legacy mode) plus all 4 `GRAPH_PREAMBLE_EXTRA_*` slices (GraphHandle/
-/// FactsHandle/UserFact/GraphResult/ReduceFinding), followed by user code,
-/// followed by `GRAPH_EPILOGUE` (xray_collect_facts + xray_analyze_graph,
-/// never xray_evaluate_node).
+/// Story #1787 AC8 / Story #1792 (S3, AC1): assembles a graph-mode
+/// evaluator's complete compilable source -- the COMMON `PREAMBLE`
+/// (OwnedNode/EvalFinding/debug_log, shared with legacy mode) plus all 5
+/// `GRAPH_PREAMBLE_EXTRA_*` slices (GraphHandle/FactsHandle/UserFact/
+/// GraphResult/ReduceFinding/FileContext), followed by user code, followed
+/// by `GRAPH_EPILOGUE` (xray_collect_facts + xray_analyze_graph, never
+/// xray_evaluate_node) plus `GRAPH_REFINE_EPILOGUE` (xray_refine) ONLY when
+/// `user_code` defines `fn refine` -- AC1's "all-or-none with the graph
+/// family" applies to whether the export exists at all, not to whether this
+/// function is invoked.
 fn assemble_graph_evaluator_source(user_code: &str) -> String {
     let preamble = format!(
-        "{}\n{}\n{}\n{}\n{}",
-        PREAMBLE, GRAPH_PREAMBLE_EXTRA_1, GRAPH_PREAMBLE_EXTRA_2, GRAPH_PREAMBLE_EXTRA_3, GRAPH_PREAMBLE_EXTRA_4
+        "{}\n{}\n{}\n{}\n{}\n{}",
+        PREAMBLE,
+        GRAPH_PREAMBLE_EXTRA_1,
+        GRAPH_PREAMBLE_EXTRA_2,
+        GRAPH_PREAMBLE_EXTRA_3,
+        GRAPH_PREAMBLE_EXTRA_4,
+        GRAPH_PREAMBLE_EXTRA_5,
     );
-    assemble_with_epilogue(&preamble, user_code, GRAPH_EPILOGUE)
+    let epilogue = if has_top_level_fn(user_code, "refine") {
+        format!("{}\n{}", GRAPH_EPILOGUE, GRAPH_REFINE_EPILOGUE)
+    } else {
+        GRAPH_EPILOGUE.to_string()
+    };
+    assemble_with_epilogue(&preamble, user_code, &epilogue)
 }
 
 /// Number of lines in the preamble (for adjusting rustc error line numbers).
@@ -845,6 +903,48 @@ fn analyze_graph(g: &GraphHandle<'_>, facts: &FactsHandle<'_>) -> GraphResult { 
         assert!(assembled.contains("xray_analyze_graph"), "must export xray_analyze_graph");
         assert!(assembled.contains(user_code), "must contain user code verbatim");
         assert!(!assembled.contains("xray_evaluate_node"), "graph mode must NEVER export xray_evaluate_node");
+    }
+
+    /// Story #1792 (S3, AC1): every graph-mode evaluator's assembled source
+    /// must carry the `FileContext` mirror -- the per-file host context an
+    /// optional `refine` callback receives -- regardless of whether THIS
+    /// particular evaluator defines `refine` at all (it is part of the
+    /// shared graph-mode preamble, exactly like `GraphHandle`/`FactsHandle`).
+    #[test]
+    fn assemble_graph_evaluator_source_includes_file_context_mirror() {
+        let user_code = r#"
+fn collect_facts(node: &OwnedNode, file: &str) -> Vec<UserFact> { Vec::new() }
+fn analyze_graph(g: &GraphHandle<'_>, facts: &FactsHandle<'_>) -> GraphResult { GraphResult::default() }
+"#;
+        let assembled = assemble_graph_evaluator_source(user_code);
+        assert!(assembled.contains("pub struct FileContext"), "must contain the FileContext mirror");
+    }
+
+    /// Story #1792 (S3, AC1): "OPTIONAL export ... `xray_refine` is
+    /// all-or-none with the graph family." A graph-mode evaluator that
+    /// defines `fn refine(...)` must get the `xray_refine` export; one that
+    /// does NOT define it (the pre-existing collect_facts+analyze_graph-only
+    /// shape) must NEVER get it -- there is no such symbol to load, which is
+    /// exactly what `GraphDynlibEvaluator::has_refine()` distinguishes later.
+    #[test]
+    fn assemble_graph_evaluator_source_conditionally_exports_xray_refine_only_when_user_defines_refine() {
+        let without_refine = r#"
+fn collect_facts(node: &OwnedNode, file: &str) -> Vec<UserFact> { Vec::new() }
+fn analyze_graph(g: &GraphHandle<'_>, facts: &FactsHandle<'_>) -> GraphResult { GraphResult::default() }
+"#;
+        assert!(
+            !assemble_graph_evaluator_source(without_refine).contains("xray_refine"),
+            "an evaluator with no fn refine must NEVER export xray_refine"
+        );
+
+        let with_refine = r#"
+fn collect_facts(node: &OwnedNode, file: &str) -> Vec<UserFact> { Vec::new() }
+fn analyze_graph(g: &GraphHandle<'_>, facts: &FactsHandle<'_>) -> GraphResult { GraphResult::default() }
+fn refine(node: &OwnedNode, ctx: &FileContext, g: &GraphHandle<'_>, facts: &FactsHandle<'_>) -> Vec<EvalFinding> { Vec::new() }
+"#;
+        let assembled = assemble_graph_evaluator_source(with_refine);
+        assert!(assembled.contains("xray_refine"), "an evaluator defining fn refine must export xray_refine");
+        assert!(assembled.contains(with_refine), "must contain user code verbatim");
     }
 
     #[test]

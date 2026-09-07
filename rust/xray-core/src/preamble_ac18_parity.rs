@@ -33,6 +33,10 @@ const FINDING_SRC: &str = include_str!("finding.rs");
 const CSR_MOD_SRC: &str = include_str!("graph/csr/mod.rs");
 const USER_FACTS_SRC: &str = include_str!("graph/user_facts.rs");
 const ANALYZE_RESULT_SRC: &str = include_str!("graph/analyze/result.rs");
+/// Story #1792 (S3, AC1): `FileContext`'s real source -- the per-file host
+/// context an optional `refine` callback receives, mirrored into
+/// `compiler::GRAPH_PREAMBLE_EXTRA_5`.
+const REFINE_SRC: &str = include_str!("graph/refine.rs");
 
 /// Parses `src` as a sequence of top-level Rust items. Panics naming `label`
 /// on a parse failure -- this helper is only ever fed known-good Rust source
@@ -340,6 +344,9 @@ const MIRRORED_GRAPH_HANDLE_METHODS: &[&str] = &[
     // completeness-aware dead-code verdict to `analyze_graph` evaluators.
     "is_symbol_referenced",
     "is_definitely_dead_code",
+    // Story #1792 (S3, AC4): exposes the per-symbol cached signature line
+    // for cross-file captioning without re-parsing.
+    "signature_for",
 ];
 
 /// Compares struct `name` between `real_file` (labeled `real_label` in any
@@ -383,6 +390,7 @@ fn collect_ac8_graph_mirror_divergences(
     csr_mod_file: &File,
     user_facts_file: &File,
     analyze_result_file: &File,
+    refine_file: &File,
     graph_preamble_file: &File,
 ) -> Vec<String> {
     let mut divergences: Vec<String> = Vec::new();
@@ -420,6 +428,10 @@ fn collect_ac8_graph_mirror_divergences(
         graph_preamble_file,
         "ReduceFinding",
     ));
+
+    // Story #1792 (S3, AC1): FileContext -- the per-file host context an
+    // optional `refine` callback receives.
+    divergences.extend(diff_mirrored_struct(refine_file, "graph/refine.rs", graph_preamble_file, "FileContext"));
 
     divergences
 }
@@ -595,12 +607,14 @@ impl Foo {
         let csr_mod_file = parse_items(CSR_MOD_SRC, "graph/csr/mod.rs");
         let user_facts_file = parse_items(USER_FACTS_SRC, "graph/user_facts.rs");
         let analyze_result_file = parse_items(ANALYZE_RESULT_SRC, "graph/analyze/result.rs");
+        let refine_file = parse_items(REFINE_SRC, "graph/refine.rs");
         let graph_preamble_text = format!(
-            "{}\n{}\n{}\n{}",
+            "{}\n{}\n{}\n{}\n{}",
             crate::compiler::GRAPH_PREAMBLE_EXTRA_1,
             crate::compiler::GRAPH_PREAMBLE_EXTRA_2,
             crate::compiler::GRAPH_PREAMBLE_EXTRA_3,
             crate::compiler::GRAPH_PREAMBLE_EXTRA_4,
+            crate::compiler::GRAPH_PREAMBLE_EXTRA_5,
         );
         let graph_preamble_file = parse_items(&graph_preamble_text, "compiler::GRAPH_PREAMBLE_EXTRA_*");
 
@@ -608,6 +622,7 @@ impl Foo {
             &csr_mod_file,
             &user_facts_file,
             &analyze_result_file,
+            &refine_file,
             &graph_preamble_file,
         );
 

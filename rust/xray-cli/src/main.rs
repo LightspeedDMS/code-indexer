@@ -17,7 +17,7 @@ struct JsonOutput {
     debug_messages: Vec<String>,
 }
 
-#[derive(serde::Serialize)]
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
 struct JsonFinding {
     pattern: String,
     file: String,
@@ -146,6 +146,71 @@ fn parse_analyze_graph_args(args: &[String]) -> Result<AnalyzeGraphArgs, String>
     })
 }
 
+/// Story #1792 (S3, AC1/AC5): parsed flags for the `--refine` subcommand.
+/// Unlike `--analyze-graph`, EVERY flag except `--facts-in` is required --
+/// there is no bare directory-walk mode: the caller has already computed
+/// the narrowed RefineSet-intersect-driver-matched file list and must hand
+/// it over explicitly via `--files-from` (repo-relative paths, one per
+/// line, resolved against `--repo-root` for the actual reads).
+struct RefineArgs {
+    graph_in: PathBuf,
+    dylib: PathBuf,
+    repo_root: PathBuf,
+    files_from: PathBuf,
+    facts_in: Option<PathBuf>,
+}
+
+/// Parses the `--refine` subcommand's four REQUIRED flags (`--graph-in`,
+/// `--dylib`, `--repo-root`, `--files-from`) plus the OPTIONAL
+/// `--facts-in`. Order-independent; errors with a clear message naming
+/// which required flag is missing, never silently defaulting any of them
+/// -- mirrors `parse_analyze_graph_args`'s exact loop structure.
+fn parse_refine_args(args: &[String]) -> Result<RefineArgs, String> {
+    let mut graph_in: Option<PathBuf> = None;
+    let mut dylib: Option<PathBuf> = None;
+    let mut repo_root: Option<PathBuf> = None;
+    let mut files_from: Option<PathBuf> = None;
+    let mut facts_in: Option<PathBuf> = None;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--graph-in" => {
+                let (value, next_i) = parse_value_flag(args, i, "--graph-in requires a path");
+                graph_in = Some(PathBuf::from(value));
+                i = next_i;
+            }
+            "--dylib" => {
+                let (value, next_i) = parse_value_flag(args, i, "--dylib requires a path");
+                dylib = Some(PathBuf::from(value));
+                i = next_i;
+            }
+            "--repo-root" => {
+                let (value, next_i) = parse_value_flag(args, i, "--repo-root requires a path");
+                repo_root = Some(PathBuf::from(value));
+                i = next_i;
+            }
+            "--files-from" => {
+                let (value, next_i) = parse_value_flag(args, i, "--files-from requires a path");
+                files_from = Some(PathBuf::from(value));
+                i = next_i;
+            }
+            "--facts-in" => {
+                let (value, next_i) = parse_value_flag(args, i, "--facts-in requires a path");
+                facts_in = Some(PathBuf::from(value));
+                i = next_i;
+            }
+            other => return Err(format!("--refine: unrecognized argument '{other}'")),
+        }
+    }
+    Ok(RefineArgs {
+        graph_in: graph_in.ok_or_else(|| "--refine requires --graph-in <path>".to_string())?,
+        dylib: dylib.ok_or_else(|| "--refine requires --dylib <path>".to_string())?,
+        repo_root: repo_root.ok_or_else(|| "--refine requires --repo-root <path>".to_string())?,
+        files_from: files_from.ok_or_else(|| "--refine requires --files-from <path>".to_string())?,
+        facts_in,
+    })
+}
+
 /// Story #1787 AC7+AC8: the core of the `--analyze-graph` subcommand,
 /// factored out from argv/exit-code plumbing so it is directly unit
 /// testable. Reads `graph_in` (the AC7 mmap wire format), loads `dylib` as
@@ -176,7 +241,7 @@ fn run_analyze_graph(
     graph_in: &std::path::Path,
     dylib: &std::path::Path,
     facts_in: Option<&std::path::Path>,
-) -> xray_core::graph::analyze::process::ChildReport {
+) -> xray_core::graph::analyze::process::ChildReport<xray_core::graph::analyze::result::GraphResult> {
     use xray_core::graph::analyze::process::ChildReport;
     use xray_core::graph::analyze::result::AnalyzeStatus;
     use xray_core::graph::user_facts::{read_facts_file, FactIndex};
@@ -205,6 +270,180 @@ fn run_analyze_graph(
         Some(None) => ChildReport { status: AnalyzeStatus::Panicked, result: None },
         Some(Some(result)) => ChildReport { status: AnalyzeStatus::RanOk, result: Some(result) },
     }
+}
+
+/// Story #1792 (S3, AC1): one file's outcome inside the `--refine`
+/// subcommand's JSON report. `status` is a snake_case label mirroring
+/// `graph::refine::RefineFileStatus`'s variant names exactly ("ran",
+/// "panicked", "parse_failed", "not_exported"), plus this subcommand's own
+/// `"path_escapes_repo_root"` (see `resolve_repo_relative_path`) -- kept as
+/// a plain `String` (not the enum itself) so this wire type carries no
+/// xray-core enum dependency beyond the data already flowing through
+/// `JsonFinding`.
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+struct RefineChildFileOutcome {
+    file: String,
+    findings: Vec<JsonFinding>,
+    status: String,
+}
+
+/// Story #1792 (S3, AC5): the `--refine` subcommand's PAYLOAD, carried
+/// inside `ChildReport<RefineBatchResult>.result` -- the SAME
+/// `{status, result}` wire envelope `run_analyze_graph`/`ChildReport<
+/// GraphResult>` already uses. This is what makes `--refine` a genuine
+/// drop-in for `run_analyze_child`/`run_analyze_child_with_memory_limit`
+/// (Rule 4, anti-duplication): a bespoke `{status, files}` top-level shape
+/// would silently fail `finish<T>`'s `ChildReport<T>` deserialization,
+/// reporting every real refine child as `Panicked` regardless of what it
+/// actually did.
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+struct RefineBatchResult {
+    files: Vec<RefineChildFileOutcome>,
+}
+
+/// Maps `RefineFileStatus` to its snake_case wire label -- the ONE place
+/// that resolves this mapping (Rule 4), so `RefineChildFileOutcome.status`
+/// can never independently drift from the real enum's variant set.
+fn refine_status_label(status: xray_core::graph::refine::RefineFileStatus) -> &'static str {
+    use xray_core::graph::refine::RefineFileStatus::*;
+    match status {
+        Ran => "ran",
+        Panicked => "panicked",
+        ParseFailed => "parse_failed",
+        NotExported => "not_exported",
+    }
+}
+
+/// Validates `rel` resolves to a path genuinely CONTAINED within
+/// `repo_root` -- mirrors `graph::repo_index`'s own `path_is_contained`
+/// canonicalize-and-`starts_with` containment check (Rule 4: same
+/// technique, re-derived here because the real one is a private fn in a
+/// different crate module). Rejects `rel` OUTRIGHT if it is absolute --
+/// `PathBuf::join` silently REPLACES the base with an absolute second
+/// operand instead of appending it, so an absolute `rel` that happens to
+/// canonicalize under `repo_root` would otherwise slip past the
+/// `starts_with` check even though it never went through `repo_root` at
+/// all; this guard closes that gap before any join/canonicalize happens.
+/// Also rejects a `..`-style escape and a path that cannot be
+/// canonicalized (does not exist, dangling symlink) -- `run_refine` could
+/// not safely read it either way. Returns the resolved absolute path on
+/// success.
+fn resolve_repo_relative_path(
+    canonical_repo_root: &std::path::Path,
+    repo_root: &std::path::Path,
+    rel: &std::path::Path,
+) -> Option<PathBuf> {
+    if rel.is_absolute() {
+        return None;
+    }
+    let candidate = repo_root.join(rel);
+    match candidate.canonicalize() {
+        Ok(canonical) if canonical.starts_with(canonical_repo_root) => Some(candidate),
+        _ => None,
+    }
+}
+
+/// Splits `repo_relative_paths` into files safe to hand to
+/// `run_refine_over_files` (valid `(abs_path, repo_relative_str)` pairs)
+/// and pre-built `RefineChildFileOutcome`s for any entry that escapes
+/// `repo_root` -- factored out of `run_refine` to keep it under the
+/// project's per-function line budget.
+fn partition_files_by_containment(
+    canonical_repo_root: &std::path::Path,
+    repo_root: &std::path::Path,
+    repo_relative_paths: &[PathBuf],
+) -> (Vec<(PathBuf, String)>, Vec<RefineChildFileOutcome>) {
+    let mut valid_files = Vec::new();
+    let mut escaped_outcomes = Vec::new();
+    for rel in repo_relative_paths {
+        let rel_str = rel.to_string_lossy().to_string();
+        match resolve_repo_relative_path(canonical_repo_root, repo_root, rel) {
+            Some(abs) => valid_files.push((abs, rel_str)),
+            None => escaped_outcomes.push(RefineChildFileOutcome {
+                file: rel_str,
+                findings: vec![],
+                status: "path_escapes_repo_root".to_string(),
+            }),
+        }
+    }
+    (valid_files, escaped_outcomes)
+}
+
+/// Maps `run_refine_over_files`'s real per-file results into the JSON wire
+/// shape, appending the already-built `escaped_outcomes` -- factored out
+/// of `run_refine` to keep it under the project's per-function line budget.
+fn build_refine_file_outcomes(
+    results: Vec<xray_core::graph::refine::RefineFileResult>,
+    escaped_outcomes: Vec<RefineChildFileOutcome>,
+) -> Vec<RefineChildFileOutcome> {
+    let mut files_out: Vec<RefineChildFileOutcome> = results
+        .into_iter()
+        .map(|r| RefineChildFileOutcome {
+            file: r.file,
+            findings: r
+                .findings
+                .into_iter()
+                .map(|f| JsonFinding { pattern: f.pattern, file: f.file, line: f.line, snippet: f.snippet })
+                .collect(),
+            status: refine_status_label(r.status).to_string(),
+        })
+        .collect();
+    files_out.extend(escaped_outcomes);
+    files_out
+}
+
+/// Story #1792 (S3, AC1): the core of the `--refine` subcommand, mirroring
+/// `run_analyze_graph`'s status-mapping discipline exactly. Every terminal
+/// status is DISTINCT and explicit (Rule 13, anti-silent-failure):
+///
+/// - graph file fails to read/parse -> `GraphInvalid`
+/// - dylib fails to load, OR `repo_root` itself cannot be resolved ->
+///   `LoadFailed` (nothing downstream could safely proceed either way)
+/// - dylib loads but exports no `xray_refine` at all -> `Absent`
+/// - otherwise -> `RanOk`, with each file's own outcome (ran/panicked/
+///   parse_failed/path_escapes_repo_root) itemized in `files` -- a
+///   per-file panic, parse failure, or path-containment violation never
+///   aborts the whole batch or the top-level status.
+fn run_refine(
+    graph_in: &std::path::Path,
+    dylib: &std::path::Path,
+    repo_root: &std::path::Path,
+    repo_relative_paths: &[PathBuf],
+    facts_in: Option<&std::path::Path>,
+) -> xray_core::graph::analyze::process::ChildReport<RefineBatchResult> {
+    use xray_core::graph::analyze::process::ChildReport;
+    use xray_core::graph::analyze::result::AnalyzeStatus;
+    use xray_core::graph::user_facts::{read_facts_file, FactIndex};
+
+    let graph = match xray_core::graph::csr::wire::read_graph_file(graph_in) {
+        Ok(g) => g,
+        Err(_) => return ChildReport { status: AnalyzeStatus::GraphInvalid, result: None },
+    };
+    let evaluator = match xray_core::dynlib::GraphDynlibEvaluator::load(dylib) {
+        Ok(e) => e,
+        Err(_) => return ChildReport { status: AnalyzeStatus::LoadFailed, result: None },
+    };
+    if !evaluator.has_refine() {
+        return ChildReport { status: AnalyzeStatus::Absent, result: None };
+    }
+    let canonical_repo_root = match repo_root.canonicalize() {
+        Ok(c) => c,
+        Err(_) => return ChildReport { status: AnalyzeStatus::LoadFailed, result: None },
+    };
+
+    let facts = match facts_in {
+        Some(path) => read_facts_file(path).unwrap_or_else(|e| {
+            eprintln!("Warning: failed to read --facts-in {}: {}", path.display(), e);
+            FactIndex::new()
+        }),
+        None => FactIndex::new(),
+    };
+
+    let (valid_files, escaped_outcomes) =
+        partition_files_by_containment(&canonical_repo_root, repo_root, repo_relative_paths);
+    let results = xray_core::graph::refine::run_refine_over_files(&valid_files, &graph, &facts, &evaluator);
+    let files_out = build_refine_file_outcomes(results, escaped_outcomes);
+    ChildReport { status: AnalyzeStatus::RanOk, result: Some(RefineBatchResult { files: files_out }) }
 }
 
 fn main() {
@@ -245,6 +484,47 @@ fn main() {
         match serde_json::to_string(&report) {
             Ok(json) => println!("{}", json),
             Err(e) => eprintln!("Error: failed to serialize ChildReport: {}", e),
+        }
+        std::process::exit(0);
+    }
+
+    // Story #1792 (S3, AC1): `--refine --graph-in <path> --dylib <path>
+    // --repo-root <path> --files-from <path>` -- runs in its OWN map-shaped
+    // xray-cli invocation, driven by the SAME `run_analyze_child`/
+    // `run_analyze_child_with_memory_limit` process container AC7 built for
+    // `--analyze-graph` (AC5's cgroup ceiling + cancellation reuse).
+    // ALWAYS exits 0 for a legitimate terminal status (GraphInvalid/
+    // LoadFailed/Absent/RanOk, the last carrying per-file outcomes) --
+    // exiting 1 is reserved for a malformed invocation (missing required
+    // flags or an unreadable --files-from list), which the parent's
+    // run_analyze_child already maps to Panicked via its own nonzero-exit
+    // fallback.
+    if args.first().map(|s| s.as_str()) == Some("--refine") {
+        let parsed = match parse_refine_args(&args[1..]) {
+            Ok(p) => p,
+            Err(msg) => {
+                eprintln!("Error: {}", msg);
+                std::process::exit(1);
+            }
+        };
+        let files_from_path = parsed.files_from.to_string_lossy().to_string();
+        let repo_relative_paths = match read_file_list(&files_from_path) {
+            Ok(list) => list,
+            Err(msg) => {
+                eprintln!("Error: {}", msg);
+                std::process::exit(1);
+            }
+        };
+        let report = run_refine(
+            &parsed.graph_in,
+            &parsed.dylib,
+            &parsed.repo_root,
+            &repo_relative_paths,
+            parsed.facts_in.as_deref(),
+        );
+        match serde_json::to_string(&report) {
+            Ok(json) => println!("{}", json),
+            Err(e) => eprintln!("Error: failed to serialize RefineChildReport: {}", e),
         }
         std::process::exit(0);
     }
@@ -585,6 +865,58 @@ mod tests {
         assert_eq!(parsed.facts_in, Some(std::path::PathBuf::from("/tmp/f.json")));
     }
 
+    /// Story #1792 (S3, AC1/AC5): the `--refine` subcommand's own argument
+    /// parsing -- `--graph-in`, `--dylib`, `--repo-root`, and `--files-from`
+    /// are all REQUIRED (unlike `--analyze-graph`, refine has no bare
+    /// directory-walk mode: the caller has already computed the narrowed
+    /// RefineSet-intersect-driver-matched file list and must hand it over
+    /// explicitly); `--facts-in` remains OPTIONAL, mirroring
+    /// `parse_analyze_graph_args` exactly.
+    #[test]
+    fn parse_refine_args_extracts_all_required_flags_and_optional_facts_in() {
+        let without_facts = sv(&[
+            "--graph-in", "/tmp/g.bin", "--dylib", "/tmp/e.so", "--repo-root", "/repo", "--files-from", "/tmp/list.txt",
+        ]);
+        let parsed = parse_refine_args(&without_facts).expect("all required flags present must parse");
+        assert_eq!(parsed.graph_in, std::path::PathBuf::from("/tmp/g.bin"));
+        assert_eq!(parsed.dylib, std::path::PathBuf::from("/tmp/e.so"));
+        assert_eq!(parsed.repo_root, std::path::PathBuf::from("/repo"));
+        assert_eq!(parsed.files_from, std::path::PathBuf::from("/tmp/list.txt"));
+        assert_eq!(parsed.facts_in, None, "facts-in must be optional");
+
+        let with_facts = sv(&[
+            "--graph-in", "/tmp/g.bin", "--dylib", "/tmp/e.so", "--repo-root", "/repo", "--files-from", "/tmp/list.txt",
+            "--facts-in", "/tmp/f.json",
+        ]);
+        let parsed = parse_refine_args(&with_facts).expect("all required flags plus facts-in must parse");
+        assert_eq!(parsed.facts_in, Some(std::path::PathBuf::from("/tmp/f.json")));
+    }
+
+    /// Every one of the FOUR required `--refine` flags must be individually
+    /// required -- omitting ANY ONE of them (with the other three present)
+    /// must error loudly, never silently default to an empty/placeholder
+    /// value. Unlike the legacy scan mode, `--refine` has no bare
+    /// directory-walk fallback for `--files-from`.
+    #[test]
+    fn parse_refine_args_errors_when_any_required_flag_is_missing() {
+        let full = sv(&[
+            "--graph-in", "/tmp/g.bin", "--dylib", "/tmp/e.so", "--repo-root", "/repo", "--files-from", "/tmp/list.txt",
+        ]);
+        assert!(parse_refine_args(&full).is_ok(), "fixture sanity: the full flag set must parse");
+
+        let without_graph_in = sv(&["--dylib", "/tmp/e.so", "--repo-root", "/repo", "--files-from", "/tmp/list.txt"]);
+        assert!(parse_refine_args(&without_graph_in).is_err(), "--graph-in is required");
+
+        let without_dylib = sv(&["--graph-in", "/tmp/g.bin", "--repo-root", "/repo", "--files-from", "/tmp/list.txt"]);
+        assert!(parse_refine_args(&without_dylib).is_err(), "--dylib is required");
+
+        let without_repo_root = sv(&["--graph-in", "/tmp/g.bin", "--dylib", "/tmp/e.so", "--files-from", "/tmp/list.txt"]);
+        assert!(parse_refine_args(&without_repo_root).is_err(), "--repo-root is required");
+
+        let without_files_from = sv(&["--graph-in", "/tmp/g.bin", "--dylib", "/tmp/e.so", "--repo-root", "/repo"]);
+        assert!(parse_refine_args(&without_files_from).is_err(), "--files-from is required");
+    }
+
     /// Builds a tiny real `CodeGraph` (A -> B), writes it to a real file
     /// via `write_graph_file`, and returns the path -- the AC7 wire
     /// format `run_analyze_graph` reads via `read_graph_file`.
@@ -756,6 +1088,93 @@ fn analyze_graph(g: &GraphHandle<'_>, facts: &FactsHandle<'_>) -> GraphResult {
                 assert_ne!(statuses[i], statuses[j], "status at index {i} must differ from index {j}");
             }
         }
+    }
+
+    /// Shared setup for the two `run_refine` tests below: writes each
+    /// `file_names` entry as a trivial real `.java` file under `dir`, and
+    /// writes a real (empty) graph file -- returns the graph's path.
+    /// `--refine`'s logic only needs a REAL, mmap-readable graph file and
+    /// real on-disk source files; the graph's own content is irrelevant to
+    /// either test, which exercise `refine`'s dispatch, not graph queries.
+    fn write_empty_graph_and_files(dir: &std::path::Path, file_names: &[&str]) -> std::path::PathBuf {
+        use xray_core::graph::csr::builder::CodeGraphBuilder;
+        use xray_core::graph::csr::wire::write_graph_file;
+
+        for name in file_names {
+            std::fs::write(dir.join(name), format!("class {} {{}}", name.trim_end_matches(".java"))).unwrap();
+        }
+        let graph = CodeGraphBuilder::with_candidate_capacity(0).build();
+        let graph_path = dir.join("graph.bin");
+        write_graph_file(&graph, &graph_path).expect("write_graph_file must succeed");
+        graph_path
+    }
+
+    /// THE end-to-end proof of the `--refine` subcommand's core logic: a
+    /// real graph, TWO real files written under a real `repo_root`, and a
+    /// real compiled evaluator whose `refine` reports the file it ran on.
+    /// `run_refine` must load the graph, resolve each repo-relative path
+    /// against `repo_root`, call `refine` once per file, and report
+    /// `RanOk` with one `RefineChildFileOutcome` per file, each carrying
+    /// its real findings.
+    #[test]
+    fn run_refine_produces_ran_ok_with_real_findings_for_each_file() {
+        use tempfile::TempDir;
+        use xray_core::graph::analyze::result::AnalyzeStatus;
+
+        let dir = TempDir::new().unwrap();
+        let graph_path = write_empty_graph_and_files(dir.path(), &["A.java", "B.java"]);
+
+        let user_code = r#"
+fn collect_facts(node: &OwnedNode, file: &str) -> Vec<UserFact> { Vec::new() }
+fn analyze_graph(g: &GraphHandle<'_>, facts: &FactsHandle<'_>) -> GraphResult { GraphResult::default() }
+fn refine(node: &OwnedNode, ctx: &FileContext, g: &GraphHandle<'_>, facts: &FactsHandle<'_>) -> Vec<EvalFinding> {
+    vec![EvalFinding { pattern: "refine-visited".to_string(), line: node.start_line, snippet: ctx.file.clone() }]
+}
+"#;
+        let cr = xray_core::compiler::compile_evaluator(user_code, dir.path()).expect("must compile");
+
+        let report = run_refine(
+            &graph_path,
+            &cr.so_path,
+            dir.path(),
+            &[std::path::PathBuf::from("A.java"), std::path::PathBuf::from("B.java")],
+            None,
+        );
+
+        assert_eq!(report.status, AnalyzeStatus::RanOk);
+        let result = report.result.expect("RanOk must carry a real RefineBatchResult");
+        assert_eq!(result.files.len(), 2);
+        for (outcome, expected_file) in result.files.iter().zip(["A.java", "B.java"]) {
+            assert_eq!(outcome.status, "ran");
+            assert_eq!(outcome.file, expected_file);
+            assert_eq!(outcome.findings.len(), 1);
+            assert_eq!(outcome.findings[0].snippet, expected_file);
+        }
+    }
+
+    /// THE central `--refine` invariant, mirroring `--analyze-graph`'s own
+    /// `Absent` test: a graph-mode dylib with NO `fn refine` at all must
+    /// report the top-level `Absent` status -- DISTINCT from a successful
+    /// empty run (`RanOk` with an empty `files` list would look identical
+    /// to "ran over zero files", which this must never be confused with).
+    #[test]
+    fn run_refine_reports_absent_when_dylib_has_no_refine_export() {
+        use tempfile::TempDir;
+        use xray_core::graph::analyze::result::AnalyzeStatus;
+
+        let dir = TempDir::new().unwrap();
+        let graph_path = write_empty_graph_and_files(dir.path(), &["A.java"]);
+
+        let no_refine_code = r#"
+fn collect_facts(node: &OwnedNode, file: &str) -> Vec<UserFact> { Vec::new() }
+fn analyze_graph(g: &GraphHandle<'_>, facts: &FactsHandle<'_>) -> GraphResult { GraphResult::default() }
+"#;
+        let cr = xray_core::compiler::compile_evaluator(no_refine_code, dir.path()).expect("must compile");
+
+        let report = run_refine(&graph_path, &cr.so_path, dir.path(), &[std::path::PathBuf::from("A.java")], None);
+
+        assert_eq!(report.status, AnalyzeStatus::Absent, "no fn refine at all must report Absent, never RanOk");
+        assert!(report.result.is_none(), "Absent must carry no result, distinct from a successful empty RanOk");
     }
 
     // --- Bug #1784: --print-cache-identity bridges Python to the ONE
