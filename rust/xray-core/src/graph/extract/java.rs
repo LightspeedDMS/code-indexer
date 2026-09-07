@@ -15,14 +15,64 @@
 //! creation), not guessed.
 
 use super::local_index::{
-    AnnotationRecord, ConstructionSite, Declaration, DeclarationKind, ImportKind, ImportRecord,
-    InheritanceKind, InheritanceRecord, InvocationSite, LocalIndex, TypeReferenceRecord,
+    AnnotationRecord, ArgShape, ConstructionSite, Declaration, DeclarationKind, ImportKind, ImportRecord,
+    InheritanceKind, InheritanceRecord, InvocationSite, LocalIndex, MethodOwnerRecord, TypeReferenceRecord,
 };
 use super::LanguageExtractor;
 use crate::graph::identity::{make_symbol_id, SymbolId};
 use crate::owned_node::OwnedNode;
 
 pub struct JavaExtractor;
+
+/// AC1 (Story #1793, S4): the bare name of a node's CURRENT immediately
+/// enclosing type (`None` outside any type), threaded through `extract`'s
+/// stack walk. `Rc<str>` rather than `String`: cloned on every child push,
+/// and an `Rc` clone is a refcount bump, never a fresh heap allocation.
+type TypeContext = Option<std::rc::Rc<str>>;
+
+/// Dispatches ONE node to its extraction function (if any) and returns the
+/// context its CHILDREN should see. A type declaration establishes a NEW
+/// context (its own bare name) for its own children; every other node
+/// kind simply inherits `enclosing_type` unchanged. This is why a nested
+/// class's methods are attributed to the INNER type: the inner
+/// `class_declaration` node overwrites the context before its own
+/// children (including its methods) are pushed. Split out of `extract`
+/// to keep that function under the per-function line budget.
+fn dispatch_node(
+    node: &OwnedNode,
+    file_id: u32,
+    next_local: &mut u32,
+    enclosing_type: TypeContext,
+    index: &mut LocalIndex,
+) -> TypeContext {
+    match node.kind.as_str() {
+        "class_declaration" | "interface_declaration" | "enum_declaration" | "record_declaration" => {
+            extract_type_declaration(node, file_id, next_local, index);
+            node.child_by_kind("identifier").map(|n| std::rc::Rc::from(n.text()))
+        }
+        "method_declaration" | "constructor_declaration" => {
+            extract_method_declaration(node, file_id, next_local, enclosing_type.as_deref(), index);
+            enclosing_type
+        }
+        "field_declaration" => {
+            extract_field_declaration(node, file_id, next_local, index);
+            enclosing_type
+        }
+        "method_invocation" => {
+            extract_invocation(node, index);
+            enclosing_type
+        }
+        "object_creation_expression" => {
+            extract_construction(node, index);
+            enclosing_type
+        }
+        "type_identifier" => {
+            extract_type_reference(node, index);
+            enclosing_type
+        }
+        _ => enclosing_type,
+    }
+}
 
 impl LanguageExtractor for JavaExtractor {
     fn extract(&self, root: &OwnedNode, file_id: u32) -> LocalIndex {
@@ -32,30 +82,15 @@ impl LanguageExtractor for JavaExtractor {
         extract_package(root, file_id, &mut next_local, &mut index);
         extract_imports(root, &mut index);
 
-        let mut stack: Vec<&OwnedNode> = vec![root];
+        let mut stack: Vec<(&OwnedNode, TypeContext)> = vec![(root, None)];
         // Bounded: each iteration pops one node from `stack` and pushes its
         // (finite) children; total pushes across the walk equal the tree's
         // finite node count -- the same bound `OwnedNode`'s own traversals
         // use (see owned_node.rs). This is the ONLY traversal of the tree
         // besides the two direct (non-recursive) top-level lookups above.
-        while let Some(node) = stack.pop() {
-            match node.kind.as_str() {
-                "class_declaration" | "interface_declaration" | "enum_declaration"
-                | "record_declaration" => {
-                    extract_type_declaration(node, file_id, &mut next_local, &mut index);
-                }
-                "method_declaration" | "constructor_declaration" => {
-                    extract_method_declaration(node, file_id, &mut next_local, &mut index);
-                }
-                "field_declaration" => {
-                    extract_field_declaration(node, file_id, &mut next_local, &mut index);
-                }
-                "method_invocation" => extract_invocation(node, &mut index),
-                "object_creation_expression" => extract_construction(node, &mut index),
-                "type_identifier" => extract_type_reference(node, &mut index),
-                _ => {}
-            }
-            stack.extend(node.children.iter());
+        while let Some((node, enclosing_type)) = stack.pop() {
+            let child_context = dispatch_node(node, file_id, &mut next_local, enclosing_type, &mut index);
+            stack.extend(node.children.iter().map(|c| (c, child_context.clone())));
         }
 
         index
@@ -97,6 +132,8 @@ fn extract_package(root: &OwnedNode, file_id: u32, next_local: &mut u32, index: 
         line: decl.start_line,
         symbol,
         param_count: None,
+        param_types: Vec::new(),
+        is_varargs: false,
     });
 }
 
@@ -147,6 +184,9 @@ fn extract_type_declaration(
 
     extract_annotations_from_modifiers(node, &name, index);
     extract_inheritance(node, &name, index);
+    if node.kind == "interface_declaration" {
+        index.interface_names.push(name.clone());
+    }
 
     let signature = format!("{} {}", type_keyword(&node.kind), name);
     index.signatures.insert(symbol, signature);
@@ -156,6 +196,8 @@ fn extract_type_declaration(
         line: node.start_line,
         symbol,
         param_count: None,
+        param_types: Vec::new(),
+        is_varargs: false,
     });
 }
 
@@ -242,10 +284,58 @@ fn extract_annotations_from_modifiers(node: &OwnedNode, target_name: &str, index
     }
 }
 
+/// AC2 (Story #1793, S4): resolves a TYPE node's local-syntactic base name
+/// -- generics stripped to the base `type_identifier`, exactly the same
+/// stripping `base_type_name` above applies when searching a CONTAINER's
+/// children, but here `type_node` has already been located by the caller
+/// (it may itself be a primitive/array-type node, which has no children
+/// to search and is returned verbatim via `.text()`).
+fn base_name_of_type_node(type_node: &OwnedNode) -> String {
+    if type_node.kind == "generic_type" {
+        type_node.child_by_kind("type_identifier").map(|t| t.text().to_string()).unwrap_or_else(|| type_node.text().to_string())
+    } else {
+        type_node.text().to_string()
+    }
+}
+
+/// Reads one `formal_parameter`/`spread_parameter` node's declared type.
+/// Verified real tree-sitter-java 0.23.5 grammar shapes: `(formal_parameter
+/// [modifiers]? type: (T) name: (identifier))` and `(spread_parameter
+/// [modifiers]? (T) (variable_declarator name: (identifier)))` -- an
+/// optional leading `modifiers` node (present for e.g. `final String s` or
+/// `@NonNull int x`) is skipped explicitly rather than assumed absent, so
+/// the type is "the first named child that isn't `modifiers`", never a
+/// fixed position.
+fn formal_parameter_type_name(param_node: &OwnedNode) -> Option<String> {
+    let type_node = param_node.named_children().into_iter().find(|c| c.kind != "modifiers")?;
+    Some(base_name_of_type_node(type_node))
+}
+
+/// AC2: declared parameter type names (in call order) and whether the
+/// method's last parameter is variable-arity, read from its
+/// `formal_parameters` node -- the SAME node `param_count` above already
+/// reads, so this adds no second tree walk.
+fn extract_param_types_and_varargs(formal_parameters: &OwnedNode) -> (Vec<String>, bool) {
+    let mut param_types = Vec::new();
+    let mut is_varargs = false;
+    for param in formal_parameters.named_children() {
+        match param.kind.as_str() {
+            "formal_parameter" => param_types.extend(formal_parameter_type_name(param)),
+            "spread_parameter" => {
+                is_varargs = true;
+                param_types.extend(formal_parameter_type_name(param));
+            }
+            _ => {}
+        }
+    }
+    (param_types, is_varargs)
+}
+
 fn extract_method_declaration(
     node: &OwnedNode,
     file_id: u32,
     next_local: &mut u32,
+    enclosing_type: Option<&str>,
     index: &mut LocalIndex,
 ) {
     let Some(name_node) = node.child_by_kind("identifier") else { return };
@@ -254,8 +344,10 @@ fn extract_method_declaration(
 
     extract_annotations_from_modifiers(node, &name, index);
 
-    let param_count =
-        node.child_by_kind("formal_parameters").map(|p| p.named_children().len()).unwrap_or(0);
+    let formal_parameters = node.child_by_kind("formal_parameters");
+    let param_count = formal_parameters.map(|p| p.named_children().len()).unwrap_or(0);
+    let (param_types, is_varargs) =
+        formal_parameters.map(extract_param_types_and_varargs).unwrap_or_default();
     index.signatures.insert(symbol, format!("{name}({param_count} params)"));
 
     index.declarations.push(Declaration {
@@ -264,7 +356,22 @@ fn extract_method_declaration(
         line: node.start_line,
         symbol,
         param_count: Some(param_count),
+        param_types,
+        is_varargs,
     });
+
+    // AC1 (Story #1793, S4): only real methods (this function is also
+    // called for `constructor_declaration`, which has no useful "family"
+    // semantics -- a constructor is never overridden the way an interface
+    // method is) get an owner record, and only when an enclosing type is
+    // actually known.
+    if node.kind == "method_declaration" {
+        if let Some(enclosing_type) = enclosing_type {
+            index
+                .method_owners
+                .push(MethodOwnerRecord { method_symbol: symbol, enclosing_type: enclosing_type.to_string() });
+        }
+    }
 }
 
 fn has_modifier(modifiers: &OwnedNode, keyword: &str) -> bool {
@@ -298,7 +405,51 @@ fn extract_field_declaration(
         let name = name_node.text().to_string();
         let symbol = next_symbol(file_id, next_local);
         index.signatures.insert(symbol, format!("{keyword} {name}"));
-        index.declarations.push(Declaration { kind, name, line: node.start_line, symbol, param_count: None });
+        index.declarations.push(Declaration {
+            kind,
+            name,
+            line: node.start_line,
+            symbol,
+            param_count: None,
+            param_types: Vec::new(),
+            is_varargs: false,
+        });
+    }
+}
+
+/// AC2: an explicit cast's (`(Foo) x`) target type. `cast_expression`
+/// never carries a leading `modifiers` node (verified real grammar
+/// output for both a class cast and a primitive cast: `cast_expression
+/// type: (T) value: (V))`), so its type is always the first named child,
+/// unlike `formal_parameter`/`spread_parameter` above.
+fn cast_target_type_name(cast_node: &OwnedNode) -> Option<String> {
+    cast_node.named_children().into_iter().next().map(base_name_of_type_node)
+}
+
+/// AC2: the coarse `ArgShape` for one call-site argument node, verified
+/// against real tree-sitter-java 0.23.5 output for every documented
+/// category: string/boolean/null/numeric literals (`true`/`false` are
+/// their own literal node kinds, not a shared `boolean_literal`), an
+/// explicit cast, an inline constructor call, a lambda, and a method
+/// reference. Any other argument shape (bare identifier, field access,
+/// nested call, ...) -- OR a cast/constructor whose target type name
+/// could not be determined -- carries no discriminating evidence at this
+/// position: `Other`, never a fabricated empty-string `Cast`/`Constructor`
+/// (Rule 2, anti-fallback).
+fn arg_shape_for(arg_node: &OwnedNode) -> ArgShape {
+    match arg_node.kind.as_str() {
+        "string_literal" => ArgShape::StringLiteral,
+        "true" | "false" => ArgShape::BooleanLiteral,
+        "null_literal" => ArgShape::NullLiteral,
+        "decimal_integer_literal" | "hex_integer_literal" | "octal_integer_literal"
+        | "binary_integer_literal" | "decimal_floating_point_literal" | "hex_floating_point_literal" => {
+            ArgShape::NumericLiteral
+        }
+        "cast_expression" => cast_target_type_name(arg_node).map(ArgShape::Cast).unwrap_or(ArgShape::Other),
+        "object_creation_expression" => base_type_name(arg_node).map(ArgShape::Constructor).unwrap_or(ArgShape::Other),
+        "lambda_expression" => ArgShape::Lambda,
+        "method_reference" => ArgShape::MethodReference,
+        _ => ArgShape::Other,
     }
 }
 
@@ -313,11 +464,15 @@ fn extract_invocation(node: &OwnedNode, index: &mut LocalIndex) {
     // still part of the ONE existing walk over this node, no new
     // traversal. `None` (never a fabricated `Some(0)`) if that child is
     // genuinely absent, e.g. under parse-error recovery on malformed source.
-    let arg_count = node.child_by_kind("argument_list").map(|a| a.named_children().len());
+    let argument_list = node.child_by_kind("argument_list");
+    let arg_count = argument_list.map(|a| a.named_children().len());
+    let arg_shapes =
+        argument_list.map(|a| a.named_children().into_iter().map(arg_shape_for).collect()).unwrap_or_default();
     index.invocations.push(InvocationSite {
         callee_name: callee.text().to_string(),
         line: node.start_line,
         arg_count,
+        arg_shapes,
     });
 }
 
@@ -487,6 +642,97 @@ mod tests {
         // Non-method declarations never carry a param_count.
         let type_decl = index.declaration_named("First").unwrap();
         assert_eq!(type_decl.param_count, None);
+    }
+
+    /// AC2 (Story #1793, S4): declared parameter TYPE names (beyond the
+    /// existing `param_count`) and the varargs flag, verified against the
+    /// real tree-sitter-java 0.23.5 grammar shapes for `formal_parameter`
+    /// (`type: (T) name: (identifier)`) and `spread_parameter`
+    /// (`(T) (variable_declarator name: (identifier))`).
+    #[test]
+    fn extracts_declared_parameter_type_names_and_varargs_flag() {
+        let index = extract_source(
+            "class First {\n    void save(String s, int x) {}\n    void tail(String... parts) {}\n}\n",
+        );
+        let save_decl = index.declaration_named("save").unwrap();
+        assert_eq!(save_decl.param_types, vec!["String".to_string(), "int".to_string()]);
+        assert!(!save_decl.is_varargs);
+
+        let tail_decl = index.declaration_named("tail").unwrap();
+        assert_eq!(tail_decl.param_types, vec!["String".to_string()]);
+        assert!(tail_decl.is_varargs, "a spread_parameter must set is_varargs");
+    }
+
+    /// Discriminating regression for a code-review-caught defect: a
+    /// PARAMETER with a modifier (`final`) or annotation (`@NonNull`) puts
+    /// a `modifiers` node BEFORE the type in the real grammar shape -- a
+    /// naive "first named child is always the type" implementation would
+    /// wrongly record the modifiers node's text instead of the real type.
+    #[test]
+    fn parameter_modifiers_and_annotations_do_not_shift_the_declared_type() {
+        let index = extract_source(
+            "class First {\n    void save(final String s, @NonNull int x) {}\n}\n",
+        );
+        let save_decl = index.declaration_named("save").unwrap();
+        assert_eq!(save_decl.param_types, vec!["String".to_string(), "int".to_string()]);
+    }
+
+    /// AC2 (Story #1793, S4): every documented `ArgShape` category is read
+    /// off real call-site argument nodes -- string/numeric/boolean/null
+    /// literals, an explicit cast, an inline constructor, a lambda, and a
+    /// method reference -- verified against real tree-sitter-java 0.23.5
+    /// grammar output for each argument kind.
+    #[test]
+    fn extracts_per_argument_shapes_at_call_sites() {
+        let index = extract_source(
+            "class First {\n    void go() {\n        save(\"a\", 1, true, null, (Foo) obj, new Foo(), x -> x, Foo::bar);\n    }\n}\n",
+        );
+        let call = index.invocations.iter().find(|i| i.callee_name == "save").unwrap();
+        assert_eq!(
+            call.arg_shapes,
+            vec![
+                ArgShape::StringLiteral,
+                ArgShape::NumericLiteral,
+                ArgShape::BooleanLiteral,
+                ArgShape::NullLiteral,
+                ArgShape::Cast("Foo".to_string()),
+                ArgShape::Constructor("Foo".to_string()),
+                ArgShape::Lambda,
+                ArgShape::MethodReference,
+            ]
+        );
+    }
+
+    /// AC1 (Story #1793, S4): the family binder's `is_interface` check
+    /// reads `LocalIndex.interface_names` -- populated ONLY for
+    /// `interface_declaration` nodes, never for `class`/`enum`/`record`.
+    #[test]
+    fn extracts_interface_names_only_for_interface_declarations() {
+        let index = extract_source("interface Shape {}\nclass Foo {}\nenum Color { RED }\n");
+        assert_eq!(index.interface_names, vec!["Shape".to_string()]);
+    }
+
+    /// AC1: the enclosing-type context threaded through the stack walk
+    /// must attribute each method to its IMMEDIATELY enclosing type --
+    /// the discriminating case is a NESTED class, whose own method must
+    /// be attributed to the inner type, never to the outer one a naive
+    /// "last type seen" implementation might wrongly keep using.
+    #[test]
+    fn attributes_methods_to_their_immediately_enclosing_type_including_nested_classes() {
+        let index = extract_source(
+            "class Outer {\n    void outerMethod() {}\n    class Inner {\n        void innerMethod() {}\n    }\n}\n",
+        );
+        let outer_decl = index.declaration_named("outerMethod").unwrap();
+        let inner_decl = index.declaration_named("innerMethod").unwrap();
+        let owner_of = |symbol: SymbolId| {
+            index.method_owners.iter().find(|o| o.method_symbol == symbol).map(|o| o.enclosing_type.clone())
+        };
+        assert_eq!(owner_of(outer_decl.symbol), Some("Outer".to_string()));
+        assert_eq!(
+            owner_of(inner_decl.symbol),
+            Some("Inner".to_string()),
+            "a nested class's method must be attributed to the INNER type, not Outer"
+        );
     }
 
     #[test]

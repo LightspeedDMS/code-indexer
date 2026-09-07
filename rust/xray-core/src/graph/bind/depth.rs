@@ -5,8 +5,10 @@
 //! Without this, `Confidence::SamePackage` (say) on a language whose
 //! binder only ever reached level 0/2 would be silently indistinguishable
 //! from the same `Confidence` value on Java, which also has levels 3-4
-//! (S4, out of scope here) available to it. `BinderDepth` makes that
-//! difference visible instead of leaving it as an unstated assumption.
+//! (Story #1793, S4: inheritance-family expansion and overload
+//! discrimination, Java-only per the epic's per-family applicability
+//! contract) available to it. `BinderDepth` makes that difference visible
+//! instead of leaving it as an unstated assumption.
 //!
 //! "Reached" is computed from ACTUAL evidence produced, never from "the
 //! code path for this level executed": a level only counts as reached once
@@ -28,15 +30,21 @@ pub const LEVEL_1_ARITY: u8 = 1 << 1;
 /// `IMPORTED`/`STATIC_IMPORT`/`WILDCARD_IMPORT` was attached to at least
 /// one candidate for this language.
 pub const LEVEL_2_IMPORT_CONTEXT: u8 = 1 << 2;
+/// Level 3 (Story #1793, S4, Java only): inheritance-family expansion --
+/// `INHERITANCE_FAMILY` evidence was attached to at least one candidate
+/// for this language.
+pub const LEVEL_3_INHERITANCE_FAMILY: u8 = 1 << 3;
+/// Level 4 (Story #1793, S4, Java only): overload discrimination beyond
+/// arity -- `OVERLOAD_ARG_TYPE_MATCH` evidence was attached to at least
+/// one candidate for this language.
+pub const LEVEL_4_OVERLOAD_DISCRIMINATION: u8 = 1 << 4;
 /// Level 5: `unique-name-in-repo -> Exact` -- `UNIQUE_NAME_IN_REPO`
 /// evidence was attached to at least one candidate for this language.
 ///
-/// The gap between `1 << 2` and `1 << 5` is deliberate, not a packing bug:
-/// AC4 explicitly numbers this level 5 (levels 3-4 are Java-only receiver-
-/// type inference, S4, out of scope here), so this constant's shift keeps
-/// the bit position matching the story's own level number exactly -- a
-/// reader diffing this file against AC4 never has to mentally remap a
-/// compacted 0..3 range back onto 0/1/2/5.
+/// The bit position matches the story's own level number exactly (0, 1,
+/// 2, 3, 4, 5 -- levels 3-4 filled by Story #1793, S4, above) -- a reader
+/// diffing this file against AC4 never has to mentally remap a compacted
+/// range back onto the story's own numbering.
 pub const LEVEL_5_UNIQUE_NAME: u8 = 1 << 5;
 
 /// Per-language narrowing-depth report. One instance per DISTINCT language
@@ -113,6 +121,34 @@ mod tests {
         assert!(depth.reached(LEVEL_0_BARE_NAME));
         assert!(depth.reached(LEVEL_2_IMPORT_CONTEXT));
         assert!(!depth.reached(LEVEL_1_ARITY));
+        assert!(!depth.reached(LEVEL_5_UNIQUE_NAME));
+    }
+
+    /// AC4 (Story #1793, S4): levels 3-4 fill the gap this module's own
+    /// docs reserved for "Java-only levels 3-4, S4, out of scope" -- now in
+    /// scope. `LEVEL_3_INHERITANCE_FAMILY` occupies bit 3, and
+    /// `LEVEL_4_OVERLOAD_DISCRIMINATION` occupies bit 4, both independent
+    /// of EVERY other level (0, 1, 2, 5, and each other).
+    #[test]
+    fn levels_3_and_4_occupy_the_previously_reserved_gap_and_mark_independently() {
+        assert_eq!(LEVEL_3_INHERITANCE_FAMILY, 1 << 3);
+        assert_eq!(LEVEL_4_OVERLOAD_DISCRIMINATION, 1 << 4);
+
+        let mut depth = BinderDepth::new("java");
+        depth.mark(LEVEL_3_INHERITANCE_FAMILY);
+        assert!(depth.reached(LEVEL_3_INHERITANCE_FAMILY));
+        assert!(!depth.reached(LEVEL_0_BARE_NAME));
+        assert!(!depth.reached(LEVEL_1_ARITY));
+        assert!(!depth.reached(LEVEL_2_IMPORT_CONTEXT));
+        assert!(!depth.reached(LEVEL_4_OVERLOAD_DISCRIMINATION));
+        assert!(!depth.reached(LEVEL_5_UNIQUE_NAME));
+
+        depth.mark(LEVEL_4_OVERLOAD_DISCRIMINATION);
+        assert!(depth.reached(LEVEL_4_OVERLOAD_DISCRIMINATION));
+        assert!(depth.reached(LEVEL_3_INHERITANCE_FAMILY), "marking level 4 must not clear level 3");
+        assert!(!depth.reached(LEVEL_0_BARE_NAME));
+        assert!(!depth.reached(LEVEL_1_ARITY));
+        assert!(!depth.reached(LEVEL_2_IMPORT_CONTEXT));
         assert!(!depth.reached(LEVEL_5_UNIQUE_NAME));
     }
 }

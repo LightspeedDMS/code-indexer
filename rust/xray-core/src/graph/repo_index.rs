@@ -600,6 +600,8 @@ mod tests {
             line: 1,
             symbol: make_symbol_id(alive_file_id, 0),
             param_count: None,
+            param_types: Vec::new(),
+            is_varargs: false,
         });
         let alive = fused_result_fixture("Alive.java", Some(alive_index), ExtractionStatus::Completed);
         record_fused_result(&repo_root.join("Alive.java"), "Alive.java", alive, &mut acc);

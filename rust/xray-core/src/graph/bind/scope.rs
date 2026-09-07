@@ -44,6 +44,8 @@ mod tests {
             line: 1,
             symbol: make_symbol_id(1, 0),
             param_count: None,
+            param_types: Vec::new(),
+            is_varargs: false,
         }
     }
 

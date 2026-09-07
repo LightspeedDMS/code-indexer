@@ -44,6 +44,11 @@ pub struct PreparedBind {
     depths: HashMap<String, BinderDepth>,
     pending: Vec<PendingReference>,
     total_candidates: usize,
+    /// Memory-safety amendment: true when ANY reference's
+    /// inheritance-family expansion was truncated by
+    /// `families::MAX_FAMILY_SIZE` -- `finish_bind` uses this to report
+    /// `AnalysisCompleteness::ResolutionAmbiguous`.
+    family_truncated: bool,
 }
 
 /// AC12 Gate 2, step 1 ("measure"): resolves every reference across
@@ -52,17 +57,19 @@ pub struct PreparedBind {
 /// per file's finite invocation/type-reference/construction lists).
 pub fn prepare_bind(files: Vec<FileForBind>, index_is_complete: bool) -> (PreparedBind, PreBindStats) {
     let name_index = RepoNameIndex::build(&files);
+    let type_index = super::families::TypeIndex::build(&files);
     let mut depths: HashMap<String, BinderDepth> = HashMap::new();
     for file in &files {
         depths.entry(file.language.clone()).or_insert_with(|| BinderDepth::new(file.language.clone()));
     }
-    let (pending, total_candidates) = resolve_all_references(&files, &name_index, index_is_complete);
+    let (pending, total_candidates, family_truncated) =
+        resolve_all_references(&files, &name_index, &type_index, index_is_complete);
     let declaration_count = files.iter().map(|f| f.index.declarations.len()).sum();
     let call_site_count = pending.len();
 
     let stats =
         PreBindStats { declaration_count, call_site_count, candidate_edge_count: total_candidates };
-    let prepared = PreparedBind { files, depths, pending, total_candidates };
+    let prepared = PreparedBind { files, depths, pending, total_candidates, family_truncated };
     (prepared, stats)
 }
 
@@ -71,7 +78,7 @@ pub fn prepare_bind(files: Vec<FileForBind>, index_is_complete: bool) -> (Prepar
 /// allocation point (`CodeGraphBuilder::with_candidate_capacity`). Never
 /// called by `bind_with_admission_gate` when the gate denies.
 pub fn finish_bind(prepared: PreparedBind, budget: &IndexBudget) -> CodeGraph {
-    let PreparedBind { files, mut depths, pending, total_candidates } = prepared;
+    let PreparedBind { files, mut depths, pending, total_candidates, family_truncated } = prepared;
     let exceeded = budget.is_exceeded_by(total_candidates);
     let max_per_reference = budget.max_candidates_per_reference();
     let capacity = capped_candidate_total(&pending, exceeded, max_per_reference);
@@ -106,6 +113,13 @@ pub fn finish_bind(prepared: PreparedBind, budget: &IndexBudget) -> CodeGraph {
     builder.set_binder_depths(depths.into_values().collect());
     builder.set_completeness(if exceeded {
         AnalysisCompleteness::IndexBudgetExceeded
+    } else if family_truncated {
+        // Memory-safety amendment: a family cap truncation is a
+        // resolution-time concern, independent of (and reported even
+        // when the budget ladder never engages -- see
+        // `family_truncated_anywhere`'s doc comment on
+        // `resolve_all_references`.
+        AnalysisCompleteness::ResolutionAmbiguous
     } else {
         AnalysisCompleteness::Complete
     });
@@ -155,11 +169,13 @@ mod tests {
             line: 1,
             symbol: make_symbol_id(file_id, local),
             param_count,
+            param_types: Vec::new(),
+            is_varargs: false,
         }
     }
 
     fn invocation(name: &str, arg_count: Option<usize>) -> InvocationSite {
-        InvocationSite { callee_name: name.to_string(), line: 10, arg_count }
+        InvocationSite { callee_name: name.to_string(), line: 10, arg_count, arg_shapes: Vec::new() }
     }
 
     fn file(file_id: u32, language: &str, index: LocalIndex) -> FileForBind {
@@ -256,5 +272,91 @@ mod tests {
             stats.declaration_count == 2 && stats.call_site_count == 2 && stats.candidate_edge_count == 2
         });
         assert!(matches!(outcome, BindOutcome::Built(_)), "gate must have observed the real, exact PreBindStats");
+    }
+
+    /// Memory-safety amendment: `apply_inheritance_family_expansion`'s
+    /// `MAX_FAMILY_SIZE` cap truncating a family anywhere in the bind must
+    /// surface at the WHOLE-GRAPH level as `AnalysisCompleteness::
+    /// ResolutionAmbiguous` -- even under an `unlimited()` `IndexBudget`
+    /// that never exceeds its own (unrelated) raw-candidate ceiling. This
+    /// proves the two completeness signals are independent: a family cap
+    /// is a resolution-time concern, not a budget-ladder concern, so it
+    /// must be reported even when the ladder itself never engages.
+    #[test]
+    fn family_truncation_reports_resolution_ambiguous_completeness_even_under_an_unlimited_budget() {
+        use super::super::families::MAX_FAMILY_SIZE;
+        use crate::graph::extract::local_index::{InheritanceKind, InheritanceRecord, MethodOwnerRecord};
+
+        const INTERFACE_FILE_ID: u32 = 10;
+        const CALLER_FILE_ID: u32 = 20;
+        const IMPL_FILE_ID_BASE: u32 = 100;
+        // Strictly more implementors than MAX_FAMILY_SIZE allows -- the
+        // minimal discriminating fixture that must trigger truncation.
+        const IMPLEMENTOR_COUNT: usize = MAX_FAMILY_SIZE + 5;
+
+        // Every fixture file below declares its OWN package so
+        // import-context narrowing collapses to just the interface's own
+        // candidate (its package alone matches the caller's) BEFORE family
+        // expansion runs -- mirroring the real AC1 scenario family
+        // expansion exists for (`resolve.rs`'s own fixtures). Without this,
+        // every implementor would already be an un-narrowed candidate and
+        // `apply_inheritance_family_expansion`'s symbol-dedup would never
+        // freshly add (and thus never mark truncated) any of them.
+        // Sentinel local-symbol index for a file's package declaration --
+        // mirrors `mod.rs`'s own `PACKAGE_DECL_LOCAL_ID` test constant.
+        const PACKAGE_DECL_LOCAL_ID: u32 = 999;
+        fn package_decl(file_id: u32, name: &str) -> Declaration {
+            Declaration {
+                kind: DeclarationKind::Package,
+                name: name.to_string(),
+                line: 1,
+                symbol: make_symbol_id(file_id, PACKAGE_DECL_LOCAL_ID),
+                param_count: None,
+                param_types: Vec::new(),
+                is_varargs: false,
+            }
+        }
+
+        let mut interface_file = LocalIndex::new();
+        interface_file.declarations.push(package_decl(INTERFACE_FILE_ID, "pkg.a"));
+        interface_file.declarations.push(method_decl("save", INTERFACE_FILE_ID, 1, Some(0)));
+        interface_file.interface_names.push("Repo".to_string());
+        interface_file.method_owners.push(MethodOwnerRecord {
+            method_symbol: make_symbol_id(INTERFACE_FILE_ID, 1),
+            enclosing_type: "Repo".to_string(),
+        });
+
+        let mut caller = LocalIndex::new();
+        caller.declarations.push(package_decl(CALLER_FILE_ID, "pkg.a"));
+        caller.invocations.push(invocation("save", Some(0)));
+
+        let mut files = vec![file(INTERFACE_FILE_ID, "java", interface_file), file(CALLER_FILE_ID, "java", caller)];
+        for i in 0..IMPLEMENTOR_COUNT {
+            let file_id = IMPL_FILE_ID_BASE + i as u32;
+            let impl_type_name = format!("Impl{i}");
+            let mut impl_file = LocalIndex::new();
+            impl_file.declarations.push(package_decl(file_id, &format!("pkg.impl{i}")));
+            impl_file.declarations.push(method_decl("save", file_id, 1, Some(0)));
+            impl_file.method_owners.push(MethodOwnerRecord {
+                method_symbol: make_symbol_id(file_id, 1),
+                enclosing_type: impl_type_name.clone(),
+            });
+            impl_file.inheritance.push(InheritanceRecord {
+                kind: InheritanceKind::Implements,
+                subtype_name: impl_type_name,
+                supertype_name: "Repo".to_string(),
+                line: 1,
+            });
+            files.push(file(file_id, "java", impl_file));
+        }
+
+        let (prepared, _stats) = prepare_bind(files, true);
+        let graph = finish_bind(prepared, &IndexBudget::unlimited());
+
+        assert_eq!(
+            graph.completeness(),
+            crate::graph::budget::AnalysisCompleteness::ResolutionAmbiguous,
+            "a truncated inheritance family must be visible at the whole-graph completeness level"
+        );
     }
 }

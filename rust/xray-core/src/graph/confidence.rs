@@ -30,8 +30,15 @@ pub enum Confidence {
     SameFile = 1,
     Imported = 2,
     SamePackage = 3,
-    QualifiedName = 4,
-    Exact = 5,
+    /// AC1 (Story #1793, S4): a call resolved to an INHERITANCE FAMILY
+    /// (an interface/supertype method plus every implementor's override,
+    /// bound together as a set via `reasons::INHERITANCE_FAMILY`) --
+    /// stronger evidence than mere same-package proximity, but weaker than
+    /// an exact qualified-name match: the family is a known, bounded set
+    /// of real declarations, not a single proven target.
+    High = 4,
+    QualifiedName = 5,
+    Exact = 6,
 }
 
 impl Confidence {
@@ -46,6 +53,8 @@ impl Confidence {
             Confidence::Exact
         } else if reasons_bits & reasons::QUALIFIED_NAME != 0 {
             Confidence::QualifiedName
+        } else if reasons_bits & reasons::INHERITANCE_FAMILY != 0 {
+            Confidence::High
         } else if reasons_bits & reasons::SAME_PACKAGE != 0 {
             Confidence::SamePackage
         } else if reasons_bits
@@ -73,8 +82,9 @@ impl Confidence {
             1 => Confidence::SameFile,
             2 => Confidence::Imported,
             3 => Confidence::SamePackage,
-            4 => Confidence::QualifiedName,
-            5 => Confidence::Exact,
+            4 => Confidence::High,
+            5 => Confidence::QualifiedName,
+            6 => Confidence::Exact,
             other => panic!("corrupt Confidence byte in CSR arena: {other}"),
         }
     }
@@ -104,6 +114,18 @@ mod tests {
     #[test]
     fn same_package_alone_derives_same_package() {
         assert_eq!(Confidence::derive(reasons::SAME_PACKAGE), Confidence::SamePackage);
+    }
+
+    /// AC1 (Story #1793, S4): "a family match is `Confidence::High` **as a
+    /// set**" -- `INHERITANCE_FAMILY` evidence alone derives `High`, ranked
+    /// strictly between `SamePackage` and `QualifiedName` (a family match
+    /// is stronger evidence than mere same-package proximity, but weaker
+    /// than an exact qualified-name match).
+    #[test]
+    fn inheritance_family_alone_derives_high() {
+        assert_eq!(Confidence::derive(reasons::INHERITANCE_FAMILY), Confidence::High);
+        assert!(Confidence::SamePackage < Confidence::High);
+        assert!(Confidence::High < Confidence::QualifiedName);
     }
 
     #[test]
@@ -170,6 +192,6 @@ mod tests {
     #[test]
     #[should_panic(expected = "corrupt Confidence byte")]
     fn from_u8_panics_on_a_value_derive_never_produces() {
-        Confidence::from_u8(6);
+        Confidence::from_u8(7);
     }
 }

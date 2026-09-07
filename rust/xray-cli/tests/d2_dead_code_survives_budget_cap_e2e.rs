@@ -49,6 +49,8 @@ fn build_capped_graph_and_dead_symbol() -> (CodeGraph, u32) {
         line: 1,
         symbol: make_symbol_id(file_id, 0),
         param_count: None,
+        param_types: Vec::new(),
+        is_varargs: false,
     };
     let mut files: Vec<FileForBind> = (1u32..=3)
         .map(|file_id| {
@@ -58,7 +60,12 @@ fn build_capped_graph_and_dead_symbol() -> (CodeGraph, u32) {
         })
         .collect();
     let mut caller = LocalIndex::new();
-    caller.invocations.push(InvocationSite { callee_name: "run".to_string(), line: 10, arg_count: None });
+    caller.invocations.push(InvocationSite {
+        callee_name: "run".to_string(),
+        line: 10,
+        arg_count: None,
+        arg_shapes: Vec::new(),
+    });
     files.push(FileForBind { file_id: 4, language: "java".to_string(), index: caller });
     let run_symbols: Vec<u64> = (1u32..=3).map(|f| make_symbol_id(f, 0)).collect();
 

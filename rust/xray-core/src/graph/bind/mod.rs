@@ -25,6 +25,7 @@
 pub mod depth;
 mod admission;
 mod budget_bind;
+mod families;
 mod name_index;
 mod resolve;
 mod scope;
@@ -36,7 +37,10 @@ use crate::graph::csr::CodeGraph;
 use crate::graph::extract::local_index::LocalIndex;
 use crate::graph::identity::SymbolId;
 use crate::graph::reasons;
-use depth::{BinderDepth, LEVEL_1_ARITY, LEVEL_2_IMPORT_CONTEXT, LEVEL_5_UNIQUE_NAME};
+use depth::{
+    BinderDepth, LEVEL_1_ARITY, LEVEL_2_IMPORT_CONTEXT, LEVEL_3_INHERITANCE_FAMILY,
+    LEVEL_4_OVERLOAD_DISCRIMINATION, LEVEL_5_UNIQUE_NAME,
+};
 use name_index::{DeclInfo, RepoNameIndex};
 pub(crate) use resolve::enclosing_symbol;
 use resolve::resolve_reference;
@@ -82,11 +86,22 @@ fn resolve_site(
     file: &FileForBind,
     scope: &scope::FileScope,
     arg_count: Option<usize>,
+    arg_shapes: &[crate::graph::extract::local_index::ArgShape],
     name_index: &RepoNameIndex,
+    type_index: &families::TypeIndex,
     index_is_complete: bool,
 ) -> PendingReference {
-    let candidates =
-        resolve_reference(name, ref_kind, file.file_id, scope, arg_count, name_index, index_is_complete);
+    let candidates = resolve_reference(
+        name,
+        ref_kind,
+        file.file_id,
+        scope,
+        arg_count,
+        arg_shapes,
+        name_index,
+        type_index,
+        index_is_complete,
+    );
     PendingReference {
         from: enclosing_symbol(&file.index, file.file_id, line),
         file: file.file_id,
@@ -113,22 +128,43 @@ fn mark_depth_for_reasons(depth: &mut BinderDepth, reasons_bits: u16) {
     if reasons_bits & CONTEXT_MASK != 0 {
         depth.mark(LEVEL_2_IMPORT_CONTEXT);
     }
+    if reasons_bits & reasons::INHERITANCE_FAMILY != 0 {
+        depth.mark(LEVEL_3_INHERITANCE_FAMILY);
+    }
+    if reasons_bits & reasons::OVERLOAD_ARG_TYPE_MATCH != 0 {
+        depth.mark(LEVEL_4_OVERLOAD_DISCRIMINATION);
+    }
     if reasons_bits & reasons::UNIQUE_NAME_IN_REPO != 0 {
         depth.mark(LEVEL_5_UNIQUE_NAME);
     }
 }
 
+/// True when any candidate in `candidates` carries
+/// `reasons::FAMILY_TRUNCATED` -- i.e. this reference's inheritance-family
+/// expansion (if any) hit the `families::MAX_FAMILY_SIZE` cap. Bounded
+/// loop: iterates exactly `candidates.len()` times (finite, fixed by an
+/// already-produced candidate list).
+fn any_family_truncated(candidates: &[(DeclInfo, u16)]) -> bool {
+    candidates.iter().any(|(_, bits)| bits & reasons::FAMILY_TRUNCATED != 0)
+}
+
 /// Resolves every invocation/type-reference/construction site across
 /// EVERY file in `files` into `PendingReference`s, and returns them
 /// alongside the total candidate count (needed to reserve the CSR arena's
-/// single allocation up front, AC5).
+/// single allocation up front, AC5) and whether ANY reference's
+/// inheritance-family expansion was truncated by `families::
+/// MAX_FAMILY_SIZE` -- the signal `admission::prepare_bind`/`finish_bind`
+/// use to set `AnalysisCompleteness::ResolutionAmbiguous` at the
+/// whole-graph level.
 fn resolve_all_references(
     files: &[FileForBind],
     name_index: &RepoNameIndex,
+    type_index: &families::TypeIndex,
     index_is_complete: bool,
-) -> (Vec<PendingReference>, usize) {
+) -> (Vec<PendingReference>, usize, bool) {
     let mut pending = Vec::new();
     let mut total_candidates = 0usize;
+    let mut family_truncated_anywhere = false;
     for file in files {
         let scope = build_file_scope(&file.index);
         for site in &file.index.invocations {
@@ -139,10 +175,13 @@ fn resolve_all_references(
                 file,
                 &scope,
                 site.arg_count,
+                &site.arg_shapes,
                 name_index,
+                type_index,
                 index_is_complete,
             );
             total_candidates += r.candidates.len();
+            family_truncated_anywhere |= any_family_truncated(&r.candidates);
             pending.push(r);
         }
         for site in &file.index.type_references {
@@ -153,10 +192,13 @@ fn resolve_all_references(
                 file,
                 &scope,
                 None,
+                &[],
                 name_index,
+                type_index,
                 index_is_complete,
             );
             total_candidates += r.candidates.len();
+            family_truncated_anywhere |= any_family_truncated(&r.candidates);
             pending.push(r);
         }
         for site in &file.index.constructions {
@@ -167,14 +209,17 @@ fn resolve_all_references(
                 file,
                 &scope,
                 None,
+                &[],
                 name_index,
+                type_index,
                 index_is_complete,
             );
             total_candidates += r.candidates.len();
+            family_truncated_anywhere |= any_family_truncated(&r.candidates);
             pending.push(r);
         }
     }
-    (pending, total_candidates)
+    (pending, total_candidates, family_truncated_anywhere)
 }
 
 /// Full-rebuild-only binder entry point (AC4). Consumes `files` by value
@@ -202,11 +247,13 @@ mod tests {
             line: 1,
             symbol: crate::graph::identity::make_symbol_id(file_id, local),
             param_count,
+            param_types: Vec::new(),
+            is_varargs: false,
         }
     }
 
     fn invocation(name: &str, arg_count: Option<usize>) -> InvocationSite {
-        InvocationSite { callee_name: name.to_string(), line: 10, arg_count }
+        InvocationSite { callee_name: name.to_string(), line: 10, arg_count, arg_shapes: Vec::new() }
     }
 
     fn file(file_id: u32, language: &str, index: LocalIndex) -> FileForBind {
@@ -258,6 +305,134 @@ mod tests {
         assert_eq!(
             text_depth.levels_reached, 0,
             "a language with no declarations/references must claim no depth"
+        );
+    }
+
+    /// A sentinel local-symbol index for a file's package declaration --
+    /// mirrors the pattern `resolve.rs`'s own `package_decl` helper uses.
+    const PACKAGE_DECL_LOCAL_ID: u32 = 999;
+
+    fn package_decl(file_id: u32, name: &str) -> Declaration {
+        Declaration {
+            kind: DeclarationKind::Package,
+            name: name.to_string(),
+            line: 1,
+            symbol: crate::graph::identity::make_symbol_id(file_id, PACKAGE_DECL_LOCAL_ID),
+            param_count: None,
+            param_types: Vec::new(),
+            is_varargs: false,
+        }
+    }
+
+    /// AC1 fixture: interface Repo (pkg.a) + implementor Impl (pkg.b);
+    /// the caller shares pkg.a, so import-context narrowing alone would
+    /// collapse the call to Repo.save alone -- family expansion must add
+    /// Impl.save back. Mirrors `resolve.rs`'s own family-expansion test
+    /// fixture, assembled as real `FileForBind`s for the full `bind()`
+    /// pipeline.
+    fn family_expansion_fixture_files() -> Vec<FileForBind> {
+        use crate::graph::extract::local_index::{InheritanceKind, InheritanceRecord, MethodOwnerRecord};
+        use crate::graph::identity::make_symbol_id;
+        const INTERFACE_FILE_ID: u32 = 10;
+        const IMPL_FILE_ID: u32 = 11;
+        const CALLER_FILE_ID: u32 = 12;
+        const SAVE_METHOD_LOCAL: u32 = 1;
+
+        let mut interface_file = LocalIndex::new();
+        interface_file.declarations.push(package_decl(INTERFACE_FILE_ID, "pkg.a"));
+        interface_file.declarations.push(method_decl("save", INTERFACE_FILE_ID, SAVE_METHOD_LOCAL, Some(0)));
+        interface_file.interface_names.push("Repo".to_string());
+        interface_file.method_owners.push(MethodOwnerRecord {
+            method_symbol: make_symbol_id(INTERFACE_FILE_ID, SAVE_METHOD_LOCAL),
+            enclosing_type: "Repo".to_string(),
+        });
+
+        let mut impl_file = LocalIndex::new();
+        impl_file.declarations.push(package_decl(IMPL_FILE_ID, "pkg.b"));
+        impl_file.declarations.push(method_decl("save", IMPL_FILE_ID, SAVE_METHOD_LOCAL, Some(0)));
+        impl_file.method_owners.push(MethodOwnerRecord {
+            method_symbol: make_symbol_id(IMPL_FILE_ID, SAVE_METHOD_LOCAL),
+            enclosing_type: "Impl".to_string(),
+        });
+        impl_file.inheritance.push(InheritanceRecord {
+            kind: InheritanceKind::Implements,
+            subtype_name: "Impl".to_string(),
+            supertype_name: "Repo".to_string(),
+            line: 1,
+        });
+
+        let mut caller = LocalIndex::new();
+        caller.declarations.push(package_decl(CALLER_FILE_ID, "pkg.a"));
+        caller.invocations.push(invocation("save", Some(0)));
+
+        vec![
+            file(INTERFACE_FILE_ID, "java", interface_file),
+            file(IMPL_FILE_ID, "java", impl_file),
+            file(CALLER_FILE_ID, "java", caller),
+        ]
+    }
+
+    /// AC2 fixture: two `process` overloads distinguished only by
+    /// declared parameter type, called with a discriminating literal.
+    fn overload_discrimination_fixture_files() -> Vec<FileForBind> {
+        use crate::graph::extract::local_index::ArgShape;
+        use crate::graph::identity::make_symbol_id;
+        const STRING_OVERLOAD_FILE_ID: u32 = 20;
+        const INT_OVERLOAD_FILE_ID: u32 = 21;
+        const CALLER_FILE_ID: u32 = 22;
+
+        fn overload_decl(file_id: u32, param_type: &str) -> Declaration {
+            Declaration {
+                kind: DeclarationKind::Method,
+                name: "process".to_string(),
+                line: 1,
+                symbol: make_symbol_id(file_id, 0),
+                param_count: Some(1),
+                param_types: vec![param_type.to_string()],
+                is_varargs: false,
+            }
+        }
+
+        let mut string_overload = LocalIndex::new();
+        string_overload.declarations.push(overload_decl(STRING_OVERLOAD_FILE_ID, "String"));
+        let mut int_overload = LocalIndex::new();
+        int_overload.declarations.push(overload_decl(INT_OVERLOAD_FILE_ID, "int"));
+        let mut caller = LocalIndex::new();
+        caller.invocations.push(InvocationSite {
+            callee_name: "process".to_string(),
+            line: 10,
+            arg_count: Some(1),
+            arg_shapes: vec![ArgShape::StringLiteral],
+        });
+
+        vec![
+            file(STRING_OVERLOAD_FILE_ID, "java", string_overload),
+            file(INT_OVERLOAD_FILE_ID, "java", int_overload),
+            file(CALLER_FILE_ID, "java", caller),
+        ]
+    }
+
+    /// AC4 (Story #1793, S4): Java's `BinderDepth` must reach the NEW
+    /// levels 3 (inheritance-family expansion) and 4 (overload
+    /// discrimination) once real evidence for each is produced, exercised
+    /// end-to-end through the real `bind()` pipeline.
+    #[test]
+    fn binder_depth_reaches_levels_3_and_4_for_java_via_family_expansion_and_overload_discrimination() {
+        use super::depth::{LEVEL_3_INHERITANCE_FAMILY, LEVEL_4_OVERLOAD_DISCRIMINATION};
+
+        let mut files = family_expansion_fixture_files();
+        files.extend(overload_discrimination_fixture_files());
+        let graph = bind(files);
+
+        let java_depth = graph
+            .binder_depths()
+            .iter()
+            .find(|d| d.language == "java")
+            .expect("java depth must be present: both fixtures declare java files");
+        assert!(java_depth.reached(LEVEL_3_INHERITANCE_FAMILY), "family expansion evidence must reach level 3");
+        assert!(
+            java_depth.reached(LEVEL_4_OVERLOAD_DISCRIMINATION),
+            "overload-shape evidence must reach level 4"
         );
     }
 }

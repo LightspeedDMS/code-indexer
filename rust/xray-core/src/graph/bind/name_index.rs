@@ -20,6 +20,16 @@ pub(crate) struct DeclInfo {
     pub(crate) package: Option<String>,
     pub(crate) kind: DeclarationKind,
     pub(crate) param_count: Option<usize>,
+    /// AC1 (Story #1793, S4): the bare name of this method's immediately
+    /// enclosing type, joined from `LocalIndex.method_owners` by `symbol`
+    /// (never a new field on `Declaration` itself -- see
+    /// `local_index::MethodOwnerRecord`'s own docs). `None` for a
+    /// declaration with no owner record, never a guessed value.
+    pub(crate) enclosing_type: Option<String>,
+    /// AC2: copied straight through from `Declaration::param_types`.
+    pub(crate) param_types: Vec<String>,
+    /// AC2: copied straight through from `Declaration::is_varargs`.
+    pub(crate) is_varargs: bool,
 }
 
 /// Repo-wide bare-name index. Never mutated after `build` returns.
@@ -33,6 +43,12 @@ impl RepoNameIndex {
         let mut by_name: HashMap<String, Vec<DeclInfo>> = HashMap::new();
         for file in files {
             let package = build_file_scope(&file.index).package;
+            let owners_by_symbol: HashMap<SymbolId, &str> = file
+                .index
+                .method_owners
+                .iter()
+                .map(|owner| (owner.method_symbol, owner.enclosing_type.as_str()))
+                .collect();
             for decl in &file.index.declarations {
                 by_name.entry(decl.name.clone()).or_default().push(DeclInfo {
                     symbol: decl.symbol,
@@ -40,6 +56,9 @@ impl RepoNameIndex {
                     package: package.clone(),
                     kind: decl.kind,
                     param_count: decl.param_count,
+                    enclosing_type: owners_by_symbol.get(&decl.symbol).map(|t| t.to_string()),
+                    param_types: decl.param_types.clone(),
+                    is_varargs: decl.is_varargs,
                 });
             }
         }
@@ -71,6 +90,8 @@ mod tests {
             line: 1,
             symbol: make_symbol_id(file_id, 0),
             param_count: None,
+            param_types: Vec::new(),
+            is_varargs: false,
         }
     }
 
@@ -84,5 +105,56 @@ mod tests {
         assert_eq!(name_index.lookup("run", DeclarationKind::Method).len(), 1);
         assert!(name_index.lookup("run", DeclarationKind::Type).is_empty());
         assert!(name_index.lookup("doesNotExist", DeclarationKind::Method).is_empty());
+    }
+
+    /// AC1/AC2 (Story #1793, S4): `DeclInfo` must expose which TYPE
+    /// declared a method (joined from `LocalIndex.method_owners` by
+    /// `symbol`, since `Declaration` itself carries no such field) so the
+    /// family binder can ask "is this method's declaring type an
+    /// interface", and must carry `param_types`/`is_varargs` straight
+    /// through from `Declaration` for overload-shape narrowing. A method
+    /// with NO owner record (e.g. a bare top-level declaration, or a
+    /// hand-built fixture that never populated `method_owners`) must get
+    /// `enclosing_type: None`, never a fabricated guess.
+    #[test]
+    fn decl_info_carries_enclosing_type_from_method_owner_records_and_param_shape_from_declaration() {
+        use crate::graph::extract::local_index::MethodOwnerRecord;
+
+        let mut index = LocalIndex::new();
+        index.declarations.push(Declaration {
+            kind: DeclarationKind::Method,
+            name: "save".to_string(),
+            line: 1,
+            symbol: make_symbol_id(1, 0),
+            param_count: Some(1),
+            param_types: vec!["String".to_string()],
+            is_varargs: true,
+        });
+        index
+            .method_owners
+            .push(MethodOwnerRecord { method_symbol: make_symbol_id(1, 0), enclosing_type: "Repo".to_string() });
+        // A second method with no owner record at all -- a DISTINCT symbol
+        // (local index 1) from "save"'s (local index 0), so the two are
+        // never accidentally aliased in `owners_by_symbol`.
+        index.declarations.push(Declaration {
+            kind: DeclarationKind::Method,
+            name: "orphan".to_string(),
+            line: 2,
+            symbol: make_symbol_id(1, 1),
+            param_count: None,
+            param_types: Vec::new(),
+            is_varargs: false,
+        });
+
+        let files = vec![FileForBind { file_id: 1, language: "java".to_string(), index }];
+        let name_index = RepoNameIndex::build(&files);
+
+        let save = &name_index.lookup("save", DeclarationKind::Method)[0];
+        assert_eq!(save.enclosing_type.as_deref(), Some("Repo"));
+        assert_eq!(save.param_types, vec!["String".to_string()]);
+        assert!(save.is_varargs);
+
+        let orphan = &name_index.lookup("orphan", DeclarationKind::Method)[0];
+        assert_eq!(orphan.enclosing_type, None, "a method with no MethodOwnerRecord must never get a guessed type");
     }
 }

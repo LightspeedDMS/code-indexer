@@ -41,6 +41,33 @@ pub const QUALIFIED_NAME: u16 = 1 << 7;
 /// reflection-style string literal matching a symbol name) rather than any
 /// of the structural signals above.
 pub const STRING_HEURISTIC: u16 = 1 << 8;
+/// AC1 (Story #1793, S4): the candidate was added to the set by
+/// INHERITANCE-FAMILY expansion -- a call resolved (via the OTHER reasons
+/// bits) to an interface/supertype method, and this candidate is one
+/// implementor's override of that same method, added by
+/// `super::bind::families::TypeIndex::overrides_of`. Never set alone by
+/// narrowing; it only ever WIDENS a candidate set, and every candidate
+/// carrying it is part of a family bound together at `Confidence::High`.
+pub const INHERITANCE_FAMILY: u16 = 1 << 9;
+/// AC2 (Story #1793, S4): the candidate's declared parameter type shapes
+/// (`Declaration::param_types`) are structurally CONSISTENT with the call
+/// site's per-argument shapes (`InvocationSite::arg_shapes`) beyond plain
+/// arity -- e.g. a string-literal argument against a `String` parameter,
+/// or a cast/constructor argument whose named type matches. Used for
+/// candidate-set REDUCTION only, exactly like `ARITY_MATCH`: it carries no
+/// dedicated `Confidence` level of its own.
+pub const OVERLOAD_ARG_TYPE_MATCH: u16 = 1 << 10;
+/// Memory-safety amendment (Story #1793, S4): the candidate is part of an
+/// inheritance family (always co-set with `INHERITANCE_FAMILY`) whose true
+/// member count exceeded `super::bind::families::MAX_FAMILY_SIZE` --
+/// `super::bind::families::TypeIndex::overrides_of` capped the expansion
+/// rather than growing it without bound. This is deliberately NOT
+/// evidence of confidence (it never participates in `Confidence::derive`,
+/// which falls back to `NameOnly` for any bit it does not recognize): it
+/// is a visibility flag saying "this family set is known-INCOMPLETE",
+/// never a silently-narrowed one. See
+/// `super::bind::resolve::apply_inheritance_family_expansion`.
+pub const FAMILY_TRUNCATED: u16 = 1 << 11;
 
 /// Every reasons flag, for iteration in tests and future observability code.
 /// Ordering here is purely presentational (declaration order); it carries no
@@ -56,6 +83,9 @@ pub const ALL_FLAGS: &[u16] = &[
     UNIQUE_NAME_IN_REPO,
     QUALIFIED_NAME,
     STRING_HEURISTIC,
+    INHERITANCE_FAMILY,
+    OVERLOAD_ARG_TYPE_MATCH,
+    FAMILY_TRUNCATED,
 ];
 
 #[cfg(test)]
@@ -85,11 +115,11 @@ mod tests {
     /// Every flag is typed `u16` (the exact storage type
     /// `Candidate.reasons` uses, AC5), so fitting is guaranteed by the type
     /// system alone. What this guards against is silently growing past 16
-    /// flags without anyone revisiting the CSR layout: with 9 flags
-    /// declared today, there is headroom for 7 more before a 17th flag
+    /// flags without anyone revisiting the CSR layout: with 12 flags
+    /// declared today, there is headroom for 4 more before a 17th flag
     /// would no longer fit and this count would need to change.
     #[test]
-    fn nine_flags_are_declared_leaving_headroom_in_the_u16_reasons_field() {
-        assert_eq!(ALL_FLAGS.len(), 9);
+    fn twelve_flags_are_declared_leaving_headroom_in_the_u16_reasons_field() {
+        assert_eq!(ALL_FLAGS.len(), 12);
     }
 }

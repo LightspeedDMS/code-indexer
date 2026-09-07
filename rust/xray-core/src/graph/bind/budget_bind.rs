@@ -112,11 +112,13 @@ mod tests {
             line: 1,
             symbol: make_symbol_id(file_id, local),
             param_count,
+            param_types: Vec::new(),
+            is_varargs: false,
         }
     }
 
     fn invocation(name: &str, arg_count: Option<usize>) -> InvocationSite {
-        InvocationSite { callee_name: name.to_string(), line: 10, arg_count }
+        InvocationSite { callee_name: name.to_string(), line: 10, arg_count, arg_shapes: Vec::new() }
     }
 
     fn file(file_id: u32, language: &str, index: LocalIndex) -> FileForBind {

@@ -77,6 +77,24 @@ fn context_reasons(name: &str, decl: &DeclInfo, ref_file_id: u32, ref_scope: &Fi
     bits
 }
 
+/// AC2 (Story #1793, S4): does `decl`'s declared arity accept a call
+/// passing `arg_count` arguments? A varargs declaration (`Foo... x` as
+/// its last formal parameter) accepts any `arg_count >= param_count - 1`
+/// (the fixed leading parameters, plus zero or more trailing varargs) --
+/// `saturating_sub` avoids an unsigned underflow if `param_count` were
+/// ever 0 (never true for a genuine varargs method, which always has at
+/// least its one varargs parameter, but this keeps the arithmetic total
+/// rather than trusting that invariant). A non-varargs declaration keeps
+/// the pre-existing exact-equality check.
+fn param_count_matches_arity(decl: &DeclInfo, arg_count: usize) -> bool {
+    let Some(param_count) = decl.param_count else { return false };
+    if decl.is_varargs {
+        arg_count >= param_count.saturating_sub(1)
+    } else {
+        param_count == arg_count
+    }
+}
+
 /// AC4 Level 1 ("+arity"): tags every candidate whose declared
 /// `param_count` matches `arg_count` with `ARITY_MATCH`, and NARROWS the
 /// set to just those matches -- but only when that is safe: `arg_count`
@@ -88,7 +106,7 @@ fn apply_arity_narrowing(candidates: &mut Vec<(DeclInfo, u16)>, arg_count: Optio
     let matching: Vec<usize> = candidates
         .iter()
         .enumerate()
-        .filter(|(_, (d, _))| d.param_count == Some(arg_count))
+        .filter(|(_, (d, _))| param_count_matches_arity(d, arg_count))
         .map(|(i, _)| i)
         .collect();
     if matching.is_empty() {
@@ -99,6 +117,126 @@ fn apply_arity_narrowing(candidates: &mut Vec<(DeclInfo, u16)>, arg_count: Optio
     }
     if matching.len() < candidates.len() {
         *candidates = matching.into_iter().map(|i| candidates[i].clone()).collect();
+    }
+}
+
+/// AC2 (Story #1793, S4): `decl`'s declared parameter TYPE at call-site
+/// argument `position`, or `None` if `decl` carries no param-type
+/// evidence at all (non-Java, or an extraction gap -- never fabricated).
+/// For a varargs declaration, every position from `param_types.len() - 1`
+/// onward maps to the SAME (last, element) declared type -- the varargs
+/// parameter itself.
+fn declared_type_at(decl: &DeclInfo, position: usize) -> Option<&str> {
+    if decl.param_types.is_empty() {
+        return None;
+    }
+    let index = if decl.is_varargs { position.min(decl.param_types.len() - 1) } else { position };
+    decl.param_types.get(index).map(|s| s.as_str())
+}
+
+/// AC2: is `shape` DEFINITELY incompatible with `declared_type`? Only the
+/// closed, fixed set of Java primitive/String/boxed-numeric/boolean/char
+/// type NAMES is used here -- this is closed-world-safe (a
+/// `StringLiteral` genuinely cannot bind to `int` in Java, full stop),
+/// unlike a named class/interface type (open-world: this repo's
+/// heuristic inheritance index can never prove "these two named types are
+/// definitely unrelated"). `Cast`/`Constructor`/`Lambda`/`MethodReference`/
+/// `Other` therefore never report incompatibility here -- see
+/// `apply_overload_shape_narrowing`'s named-type PREFERENCE step for how
+/// those contribute positive (not exclusionary) evidence instead.
+fn literal_shape_is_incompatible(shape: &crate::graph::extract::local_index::ArgShape, declared_type: &str) -> bool {
+    use crate::graph::extract::local_index::ArgShape;
+    let is_numeric = matches!(
+        declared_type,
+        "int" | "long" | "double" | "float" | "short" | "byte" | "Integer" | "Long" | "Double" | "Float" | "Short" | "Byte"
+    );
+    let is_boolean = matches!(declared_type, "boolean" | "Boolean");
+    let is_char = matches!(declared_type, "char" | "Character");
+    let is_primitive = matches!(declared_type, "int" | "long" | "double" | "float" | "short" | "byte" | "boolean" | "char");
+    match shape {
+        ArgShape::StringLiteral => is_numeric || is_boolean || is_char,
+        ArgShape::NumericLiteral => declared_type == "String" || is_boolean || is_char,
+        ArgShape::BooleanLiteral => declared_type == "String" || is_numeric || is_char,
+        ArgShape::NullLiteral => is_primitive,
+        ArgShape::Cast(_) | ArgShape::Constructor(_) | ArgShape::Lambda | ArgShape::MethodReference | ArgShape::Other => false,
+    }
+}
+
+/// AC2: true when ANY call-site argument position hits a DEFINITE
+/// literal-shape mismatch against `decl`'s declared parameter type at
+/// that position (positions with no declared-type evidence, or a
+/// non-discriminating shape, never count).
+fn candidate_has_definite_mismatch(decl: &DeclInfo, arg_shapes: &[crate::graph::extract::local_index::ArgShape]) -> bool {
+    arg_shapes
+        .iter()
+        .enumerate()
+        .any(|(i, shape)| declared_type_at(decl, i).is_some_and(|t| literal_shape_is_incompatible(shape, t)))
+}
+
+/// AC2: how many argument positions carry a `Cast`/`Constructor` shape
+/// whose named type EXACTLY equals `decl`'s declared type at that
+/// position -- positive, open-world-safe evidence (see
+/// `literal_shape_is_incompatible`'s docs on why a NAME MISMATCH here is
+/// never treated as exclusionary).
+fn named_type_match_count(decl: &DeclInfo, arg_shapes: &[crate::graph::extract::local_index::ArgShape]) -> usize {
+    use crate::graph::extract::local_index::ArgShape;
+    arg_shapes
+        .iter()
+        .enumerate()
+        .filter(|(i, shape)| {
+            let target = match shape {
+                ArgShape::Cast(t) | ArgShape::Constructor(t) => Some(t.as_str()),
+                _ => None,
+            };
+            target.is_some() && declared_type_at(decl, *i) == target
+        })
+        .count()
+}
+
+/// AC2 (Story #1793, S4) Level 4 "overload discrimination": candidate-set
+/// REDUCTION beyond arity, never exact resolution. Two independent
+/// passes, each following the SAME "narrow only if safe" pattern as
+/// `apply_arity_narrowing`/`apply_import_context_narrowing` (never empty
+/// the set, never a no-op "narrow" to the same set already there):
+/// (1) exclude candidates with a definite literal-shape mismatch;
+/// (2) among survivors, prefer the highest cast/constructor named-type
+/// match count. `OVERLOAD_ARG_TYPE_MATCH` is marked on every surviving
+/// candidate that carried genuine `param_types` evidence to check against
+/// -- never on a candidate with no such evidence at all.
+fn apply_overload_shape_narrowing(
+    candidates: &mut Vec<(DeclInfo, u16)>,
+    arg_shapes: &[crate::graph::extract::local_index::ArgShape],
+) {
+    if arg_shapes.is_empty() {
+        return;
+    }
+    let surviving: Vec<usize> = candidates
+        .iter()
+        .enumerate()
+        .filter(|(_, (d, _))| !candidate_has_definite_mismatch(d, arg_shapes))
+        .map(|(i, _)| i)
+        .collect();
+    if !surviving.is_empty() && surviving.len() < candidates.len() {
+        *candidates = surviving.into_iter().map(|i| candidates[i].clone()).collect();
+    }
+
+    let max_score = candidates.iter().map(|(d, _)| named_type_match_count(d, arg_shapes)).max().unwrap_or(0);
+    if max_score > 0 {
+        let preferred: Vec<usize> = candidates
+            .iter()
+            .enumerate()
+            .filter(|(_, (d, _))| named_type_match_count(d, arg_shapes) == max_score)
+            .map(|(i, _)| i)
+            .collect();
+        if preferred.len() < candidates.len() {
+            *candidates = preferred.into_iter().map(|i| candidates[i].clone()).collect();
+        }
+    }
+
+    for (decl, bits) in candidates.iter_mut() {
+        if !decl.param_types.is_empty() {
+            *bits |= reasons::OVERLOAD_ARG_TYPE_MATCH;
+        }
     }
 }
 
@@ -143,13 +281,16 @@ fn apply_import_context_narrowing(candidates: &mut Vec<(DeclInfo, u16)>) {
 /// never be silently ignored -- the reference instead flows through the
 /// same context/arity/import narrowing an ambiguous (`pool.len() > 1`)
 /// reference already uses, which can never produce `Confidence::Exact`.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn resolve_reference(
     name: &str,
     ref_kind: u8,
     ref_file_id: u32,
     ref_scope: &FileScope,
     arg_count: Option<usize>,
+    arg_shapes: &[crate::graph::extract::local_index::ArgShape],
     name_index: &RepoNameIndex,
+    type_index: &super::families::TypeIndex,
     index_is_complete: bool,
 ) -> Vec<(DeclInfo, u16)> {
     let pool = name_index.lookup(name, target_kind_for_ref(ref_kind));
@@ -160,13 +301,73 @@ pub(crate) fn resolve_reference(
         return vec![(pool[0].clone(), reasons::UNIQUE_NAME_IN_REPO)];
     }
 
+    let full_pool: Vec<DeclInfo> = pool.iter().map(|d| (*d).clone()).collect();
     let mut with_reasons: Vec<(DeclInfo, u16)> = pool
         .into_iter()
         .map(|d| (d.clone(), context_reasons(name, d, ref_file_id, ref_scope)))
         .collect();
     apply_arity_narrowing(&mut with_reasons, arg_count);
+    apply_overload_shape_narrowing(&mut with_reasons, arg_shapes);
     apply_import_context_narrowing(&mut with_reasons);
+    apply_inheritance_family_expansion(&mut with_reasons, ref_kind, &full_pool, type_index);
     with_reasons
+}
+
+/// AC1 (Story #1793, S4) Level 3 "inheritance families": a call resolving
+/// to an interface method binds to the FAMILY of implementations, never
+/// silently collapsed to one -- this EXPANDS the (possibly already
+/// narrowed) candidate set, it never removes anything. Only
+/// `REF_KIND_INVOCATION` is in scope (type references/constructions have
+/// no "override" concept). `full_pool` is the ORIGINAL, un-narrowed
+/// same-named pool: an implementor's own override may have already been
+/// narrowed away by import-context evidence (the exact scenario this
+/// exists to fix), so `overrides_of` must search the full pool, never the
+/// already-narrowed `candidates`. Deduplicated by symbol so a candidate
+/// already present (e.g. still surviving narrowing) is never added twice.
+///
+/// Memory-safety amendment: `overrides_of` itself hard-caps each
+/// `interface_name`'s expansion at `families::MAX_FAMILY_SIZE` (see its
+/// doc comment for the real 21.8GB-RSS incident this fixes). When ANY
+/// interface processed for this reference was truncated, every surviving
+/// `INHERITANCE_FAMILY` candidate on this reference (not just the ones
+/// added by the truncated interface) is additionally marked
+/// `reasons::FAMILY_TRUNCATED` -- the family this candidate set represents
+/// is known-INCOMPLETE, and that must be visible on the result rather than
+/// silently dropped.
+fn apply_inheritance_family_expansion(
+    candidates: &mut Vec<(DeclInfo, u16)>,
+    ref_kind: u8,
+    full_pool: &[DeclInfo],
+    type_index: &super::families::TypeIndex,
+) {
+    if ref_kind != REF_KIND_INVOCATION {
+        return;
+    }
+    let mut existing_symbols: std::collections::HashSet<SymbolId> =
+        candidates.iter().map(|(d, _)| d.symbol).collect();
+    let interface_names: Vec<String> = candidates
+        .iter()
+        .filter_map(|(d, _)| d.enclosing_type.as_deref())
+        .filter(|t| type_index.is_interface(t))
+        .map(|t| t.to_string())
+        .collect();
+    let mut any_truncated = false;
+    for interface_name in interface_names {
+        let (overrides, truncated) = type_index.overrides_of(&interface_name, full_pool);
+        any_truncated |= truncated;
+        for over in overrides {
+            if existing_symbols.insert(over.symbol) {
+                candidates.push((over.clone(), reasons::INHERITANCE_FAMILY));
+            }
+        }
+    }
+    if any_truncated {
+        for (_, bits) in candidates.iter_mut() {
+            if *bits & reasons::INHERITANCE_FAMILY != 0 {
+                *bits |= reasons::FAMILY_TRUNCATED;
+            }
+        }
+    }
 }
 
 /// Approximates the enclosing declaration for a reference at `line` in
@@ -210,6 +411,8 @@ mod tests {
             line: 1,
             symbol: make_symbol_id(file_id, local),
             param_count,
+            param_types: Vec::new(),
+            is_varargs: false,
         }
     }
 
@@ -220,6 +423,8 @@ mod tests {
             line: 1,
             symbol: make_symbol_id(file_id, 999),
             param_count: None,
+            param_types: Vec::new(),
+            is_varargs: false,
         }
     }
 
@@ -231,7 +436,7 @@ mod tests {
         let scope = FileScope { package: None, imports: Vec::new() };
 
         let candidates =
-            resolve_reference("neverDeclared", REF_KIND_INVOCATION, 1, &scope, None, &name_index, true);
+            resolve_reference("neverDeclared", REF_KIND_INVOCATION, 1, &scope, None, &[], &name_index, &super::super::families::TypeIndex::build(&[]), true);
         assert!(candidates.is_empty());
     }
 
@@ -248,7 +453,7 @@ mod tests {
         let name_index = RepoNameIndex::build(&[file(10, "java", file_a), file(11, "java", file_b)]);
         let scope = FileScope { package: None, imports: Vec::new() };
 
-        let candidates = resolve_reference("getId", REF_KIND_INVOCATION, 1, &scope, None, &name_index, true);
+        let candidates = resolve_reference("getId", REF_KIND_INVOCATION, 1, &scope, None, &[], &name_index, &super::super::families::TypeIndex::build(&[]), true);
         assert_eq!(candidates.len(), 2);
     }
 
@@ -263,13 +468,120 @@ mod tests {
         let name_index = RepoNameIndex::build(&[file(10, "java", file_a), file(11, "java", file_b)]);
         let scope = FileScope { package: None, imports: Vec::new() };
 
-        let level0 = resolve_reference("run", REF_KIND_INVOCATION, 1, &scope, None, &name_index, true);
+        let level0 = resolve_reference("run", REF_KIND_INVOCATION, 1, &scope, None, &[], &name_index, &super::super::families::TypeIndex::build(&[]), true);
         assert_eq!(level0.len(), 2, "level 0 (no arity known) keeps both");
 
-        let narrowed = resolve_reference("run", REF_KIND_INVOCATION, 1, &scope, Some(2), &name_index, true);
+        let narrowed = resolve_reference("run", REF_KIND_INVOCATION, 1, &scope, Some(2), &[], &name_index, &super::super::families::TypeIndex::build(&[]), true);
         assert_eq!(narrowed.len(), 1);
         assert_eq!(narrowed[0].0.file_id, 11);
         assert_ne!(narrowed[0].1 & reasons::ARITY_MATCH, 0);
+    }
+
+    fn varargs_method_decl(
+        name: &str,
+        file_id: u32,
+        local: u32,
+        param_count: usize,
+    ) -> crate::graph::extract::local_index::Declaration {
+        crate::graph::extract::local_index::Declaration {
+            kind: DeclarationKind::Method,
+            name: name.to_string(),
+            line: 1,
+            symbol: make_symbol_id(file_id, local),
+            param_count: Some(param_count),
+            param_types: Vec::new(),
+            is_varargs: true,
+        }
+    }
+
+    /// AC2 (Story #1793, S4): a VARARGS declaration's arity match is
+    /// `arg_count >= param_count - 1` (any call passing zero or more
+    /// trailing varargs), never plain equality -- the pre-existing
+    /// `apply_arity_narrowing` equality check would wrongly exclude a
+    /// varargs candidate from every call whose arg_count differs from its
+    /// formal parameter count. A sibling NON-varargs candidate with a
+    /// different declared param_count must still be excluded by ordinary
+    /// equality, proving this is a widened match for varargs only, not a
+    /// blanket relaxation.
+    #[test]
+    fn varargs_declaration_matches_any_arg_count_at_or_above_its_minimum() {
+        let mut file_a = LocalIndex::new();
+        file_a.declarations.push(varargs_method_decl("run", 10, 0, 1));
+        let mut file_b = LocalIndex::new();
+        file_b.declarations.push(method_decl("run", 11, 0, Some(3)));
+        let name_index = RepoNameIndex::build(&[file(10, "java", file_a), file(11, "java", file_b)]);
+        let scope = FileScope { package: None, imports: Vec::new() };
+
+        let narrowed = resolve_reference("run", REF_KIND_INVOCATION, 1, &scope, Some(5), &[], &name_index, &super::super::families::TypeIndex::build(&[]), true);
+        assert_eq!(narrowed.len(), 1, "only the varargs candidate accepts 5 args");
+        assert_eq!(narrowed[0].0.file_id, 10);
+        assert_ne!(narrowed[0].1 & reasons::ARITY_MATCH, 0);
+    }
+
+    /// AC2: a `Cast`/`Constructor` argument's named type is OPEN-WORLD
+    /// evidence -- it never EXCLUDES a candidate on name mismatch alone
+    /// (this repo's heuristic inheritance index cannot prove two named
+    /// types are unrelated), but it DOES preferentially narrow to the
+    /// candidate whose declared type EXACTLY matches, when a genuine
+    /// match exists among the candidates.
+    #[test]
+    fn named_type_preference_narrows_between_two_unrelated_named_types() {
+        use crate::graph::extract::local_index::ArgShape;
+
+        let mut file_a = LocalIndex::new();
+        file_a.declarations.push(method_decl_with_types("save", 10, 0, vec!["Foo".to_string()]));
+        let mut file_b = LocalIndex::new();
+        file_b.declarations.push(method_decl_with_types("save", 11, 0, vec!["Bar".to_string()]));
+        let name_index = RepoNameIndex::build(&[file(10, "java", file_a), file(11, "java", file_b)]);
+        let scope = FileScope { package: None, imports: Vec::new() };
+
+        let arg_shapes = [ArgShape::Cast("Foo".to_string())];
+        let narrowed =
+            resolve_reference("save", REF_KIND_INVOCATION, 1, &scope, Some(1), &arg_shapes, &name_index, &super::super::families::TypeIndex::build(&[]), true);
+        assert_eq!(narrowed.len(), 1, "the exactly-matching Foo-typed candidate must be preferred");
+        assert_eq!(narrowed[0].0.file_id, 10);
+        assert_ne!(narrowed[0].1 & reasons::OVERLOAD_ARG_TYPE_MATCH, 0);
+    }
+
+    fn method_decl_with_types(
+        name: &str,
+        file_id: u32,
+        local: u32,
+        param_types: Vec<String>,
+    ) -> crate::graph::extract::local_index::Declaration {
+        crate::graph::extract::local_index::Declaration {
+            kind: DeclarationKind::Method,
+            name: name.to_string(),
+            line: 1,
+            symbol: make_symbol_id(file_id, local),
+            param_count: Some(param_types.len()),
+            param_types,
+            is_varargs: false,
+        }
+    }
+
+    /// AC2 (Story #1793, S4): a `StringLiteral` argument DEFINITELY
+    /// cannot bind to a numeric or boolean declared parameter type --
+    /// candidate-set REDUCTION beyond arity (both candidates here already
+    /// match arity: one parameter each). The `String`-typed sibling must
+    /// survive; the `int`-typed one must be excluded.
+    #[test]
+    fn literal_shape_excludes_a_candidate_with_a_definitely_incompatible_declared_type() {
+        use crate::graph::extract::local_index::ArgShape;
+
+        let mut file_a = LocalIndex::new();
+        file_a.declarations.push(method_decl_with_types("save", 10, 0, vec!["String".to_string()]));
+        let mut file_b = LocalIndex::new();
+        file_b.declarations.push(method_decl_with_types("save", 11, 0, vec!["int".to_string()]));
+        let name_index = RepoNameIndex::build(&[file(10, "java", file_a), file(11, "java", file_b)]);
+        let scope = FileScope { package: None, imports: Vec::new() };
+
+        let arg_shapes = [ArgShape::StringLiteral];
+        let narrowed =
+            resolve_reference("save", REF_KIND_INVOCATION, 1, &scope, Some(1), &arg_shapes, &name_index, &super::super::families::TypeIndex::build(&[]), true);
+        assert_eq!(narrowed.len(), 1, "the int-typed candidate must be excluded by a String literal argument");
+        assert_eq!(narrowed[0].0.file_id, 10);
+        assert_ne!(narrowed[0].1 & reasons::OVERLOAD_ARG_TYPE_MATCH, 0);
     }
 
     /// AC4 Level 2: import context narrows further than arity alone. Every
@@ -294,7 +606,7 @@ mod tests {
 
         let scope_no_import = FileScope { package: Some("pkg.ref".to_string()), imports: Vec::new() };
         let arity_only =
-            resolve_reference("run", REF_KIND_INVOCATION, 1, &scope_no_import, Some(0), &name_index, true);
+            resolve_reference("run", REF_KIND_INVOCATION, 1, &scope_no_import, Some(0), &[], &name_index, &super::super::families::TypeIndex::build(&[]), true);
         assert_eq!(arity_only.len(), 3, "arity alone cannot narrow when every candidate matches");
 
         let scope_with_import = FileScope {
@@ -306,9 +618,196 @@ mod tests {
             }],
         };
         let narrowed =
-            resolve_reference("run", REF_KIND_INVOCATION, 1, &scope_with_import, Some(0), &name_index, true);
+            resolve_reference("run", REF_KIND_INVOCATION, 1, &scope_with_import, Some(0), &[], &name_index, &super::super::families::TypeIndex::build(&[]), true);
         assert_eq!(narrowed.len(), 1);
         assert_eq!(narrowed[0].0.file_id, 11);
+    }
+
+    /// AC1 (Story #1793, S4): THE central discriminating case named in
+    /// the story -- import-context narrowing alone would collapse a call
+    /// resolving to an interface method down to just that ONE
+    /// declaration (the interface's own package matches the caller's;
+    /// the real implementor lives in an unrelated package with zero
+    /// import evidence). Family expansion must add the implementor's
+    /// override BACK, marked `INHERITANCE_FAMILY` and `Confidence::High`
+    /// -- never leaving the call silently collapsed to the interface
+    /// declaration alone.
+    #[test]
+    fn interface_method_expands_to_its_family_after_narrowing_would_have_collapsed_it_to_one() {
+        use crate::graph::confidence::Confidence;
+        use crate::graph::extract::local_index::{InheritanceKind, InheritanceRecord, MethodOwnerRecord};
+        use crate::graph::identity::make_symbol_id;
+
+        let mut interface_file = LocalIndex::new();
+        interface_file.declarations.push(package_decl(10, "pkg.a"));
+        interface_file.declarations.push(method_decl("save", 10, 1, Some(0)));
+        interface_file.interface_names.push("Repo".to_string());
+        interface_file
+            .method_owners
+            .push(MethodOwnerRecord { method_symbol: make_symbol_id(10, 1), enclosing_type: "Repo".to_string() });
+
+        let mut impl_file = LocalIndex::new();
+        impl_file.declarations.push(package_decl(11, "pkg.b"));
+        impl_file.declarations.push(method_decl("save", 11, 1, Some(0)));
+        impl_file
+            .method_owners
+            .push(MethodOwnerRecord { method_symbol: make_symbol_id(11, 1), enclosing_type: "Impl".to_string() });
+        impl_file.inheritance.push(InheritanceRecord {
+            kind: InheritanceKind::Implements,
+            subtype_name: "Impl".to_string(),
+            supertype_name: "Repo".to_string(),
+            line: 1,
+        });
+
+        let files = vec![file(10, "java", interface_file), file(11, "java", impl_file)];
+        let name_index = RepoNameIndex::build(&files);
+        let type_index = super::super::families::TypeIndex::build(&files);
+        let scope = FileScope { package: Some("pkg.a".to_string()), imports: Vec::new() };
+
+        let candidates =
+            resolve_reference("save", REF_KIND_INVOCATION, 1, &scope, Some(0), &[], &name_index, &type_index, true);
+        assert_eq!(
+            candidates.len(),
+            2,
+            "the family (interface + its real implementor) must both be present, never collapsed to one"
+        );
+
+        let impl_candidate = candidates.iter().find(|(d, _)| d.file_id == 11).expect("Impl.save must be present");
+        assert_ne!(impl_candidate.1 & reasons::INHERITANCE_FAMILY, 0);
+        assert_eq!(Confidence::derive(impl_candidate.1), Confidence::High);
+    }
+
+    /// Shared fixture helper: a file declaring interface(s) `interface_names`
+    /// plus one `save` method owned by `enclosing_type`, in `package`. Used
+    /// by the `MAX_FAMILY_SIZE` cap and cyclic-hierarchy tests below.
+    fn interface_decl_file(file_id: u32, package: &str, interface_names: &[&str], enclosing_type: &str) -> LocalIndex {
+        use crate::graph::extract::local_index::MethodOwnerRecord;
+        use crate::graph::identity::make_symbol_id;
+        let mut f = LocalIndex::new();
+        f.declarations.push(package_decl(file_id, package));
+        f.declarations.push(method_decl("save", file_id, 1, Some(0)));
+        for name in interface_names {
+            f.interface_names.push(name.to_string());
+        }
+        f.method_owners
+            .push(MethodOwnerRecord { method_symbol: make_symbol_id(file_id, 1), enclosing_type: enclosing_type.to_string() });
+        f
+    }
+
+    /// Shared fixture helper: a file declaring type `type_name` (which
+    /// `implements supertype`) plus its own `save` override, in `package`.
+    fn implementor_file(file_id: u32, package: &str, type_name: &str, supertype: &str) -> LocalIndex {
+        use crate::graph::extract::local_index::{InheritanceKind, InheritanceRecord, MethodOwnerRecord};
+        use crate::graph::identity::make_symbol_id;
+        let mut f = LocalIndex::new();
+        f.declarations.push(package_decl(file_id, package));
+        f.declarations.push(method_decl("save", file_id, 1, Some(0)));
+        f.method_owners
+            .push(MethodOwnerRecord { method_symbol: make_symbol_id(file_id, 1), enclosing_type: type_name.to_string() });
+        f.inheritance.push(InheritanceRecord {
+            kind: InheritanceKind::Implements,
+            subtype_name: type_name.to_string(),
+            supertype_name: supertype.to_string(),
+            line: 1,
+        });
+        f
+    }
+
+    /// Shared fixture helper: resolves `"save"` (`REF_KIND_INVOCATION`,
+    /// `arg_count = Some(0)`) from a caller scoped to `"pkg.a"` -- the
+    /// package every interface-owning fixture file above declares itself
+    /// in, so import-context narrowing alone always collapses to the
+    /// interface's own candidate, forcing family expansion to do the real
+    /// work (mirrors `interface_method_expands_to_its_family_...`'s own
+    /// fixture shape).
+    fn resolve_save_against(files: &[FileForBind]) -> Vec<(DeclInfo, u16)> {
+        let name_index = RepoNameIndex::build(files);
+        let type_index = super::super::families::TypeIndex::build(files);
+        let scope = FileScope { package: Some("pkg.a".to_string()), imports: Vec::new() };
+        resolve_reference("save", REF_KIND_INVOCATION, 1, &scope, Some(0), &[], &name_index, &type_index, true)
+    }
+
+    /// Memory-safety amendment (real 21.8GB-RSS incident on Elasticsearch,
+    /// killed before it exhausted the host): family expansion through the
+    /// FULL `resolve_reference` pipeline must cap the family at
+    /// `MAX_FAMILY_SIZE` and mark every surviving family candidate
+    /// `reasons::FAMILY_TRUNCATED` -- never silently return a partial
+    /// family indistinguishable from a genuinely small one.
+    #[test]
+    fn family_expansion_caps_at_max_family_size_and_marks_family_truncated() {
+        use super::super::families::MAX_FAMILY_SIZE;
+        const INTERFACE_FILE_ID: u32 = 10;
+        const IMPL_FILE_ID_BASE: u32 = 100;
+        const IMPLEMENTOR_COUNT: usize = MAX_FAMILY_SIZE + 5;
+
+        let mut files =
+            vec![file(INTERFACE_FILE_ID, "java", interface_decl_file(INTERFACE_FILE_ID, "pkg.a", &["Repo"], "Repo"))];
+        for i in 0..IMPLEMENTOR_COUNT {
+            let file_id = IMPL_FILE_ID_BASE + i as u32;
+            let impl_type_name = format!("Impl{i}");
+            let impl_file = implementor_file(file_id, &format!("pkg.impl{i}"), &impl_type_name, "Repo");
+            files.push(file(file_id, "java", impl_file));
+        }
+
+        let candidates = resolve_save_against(&files);
+
+        assert_eq!(
+            candidates.len(),
+            MAX_FAMILY_SIZE + 1,
+            "the interface's own candidate plus a family capped at MAX_FAMILY_SIZE"
+        );
+        let family_candidates: Vec<_> =
+            candidates.iter().filter(|(_, bits)| bits & reasons::INHERITANCE_FAMILY != 0).collect();
+        assert_eq!(family_candidates.len(), MAX_FAMILY_SIZE);
+        assert!(
+            family_candidates.iter().all(|(_, bits)| bits & reasons::FAMILY_TRUNCATED != 0),
+            "every surviving family candidate must be marked FAMILY_TRUNCATED once the cap is hit"
+        );
+    }
+
+    /// A class hierarchy can contain cycles through interfaces (malformed
+    /// or adversarial extraction, never valid real Java) -- family
+    /// expansion through the FULL `resolve_reference` pipeline must still
+    /// terminate, not merely the lower-level `TypeIndex::implementors_of`
+    /// BFS in isolation. `I` and `J` extend each other (a 2-cycle); `Impl`
+    /// genuinely implements `I`. This test itself fails to return (times
+    /// out the test run) rather than failing an assertion if
+    /// `apply_inheritance_family_expansion` loops forever on the cycle.
+    #[test]
+    fn family_expansion_terminates_on_a_cyclic_interface_hierarchy_through_resolve_reference() {
+        use crate::graph::extract::local_index::{InheritanceKind, InheritanceRecord};
+        const INTERFACE_FILE_ID: u32 = 10;
+        const IMPL_FILE_ID: u32 = 11;
+
+        let mut interface_file = interface_decl_file(INTERFACE_FILE_ID, "pkg.a", &["I", "J"], "I");
+        // The adversarial 2-cycle: I extends J, J extends I.
+        interface_file.inheritance.push(InheritanceRecord {
+            kind: InheritanceKind::Extends,
+            subtype_name: "I".to_string(),
+            supertype_name: "J".to_string(),
+            line: 1,
+        });
+        interface_file.inheritance.push(InheritanceRecord {
+            kind: InheritanceKind::Extends,
+            subtype_name: "J".to_string(),
+            supertype_name: "I".to_string(),
+            line: 1,
+        });
+
+        let files = vec![
+            file(INTERFACE_FILE_ID, "java", interface_file),
+            file(IMPL_FILE_ID, "java", implementor_file(IMPL_FILE_ID, "pkg.b", "Impl", "I")),
+        ];
+
+        let candidates = resolve_save_against(&files);
+
+        assert_eq!(
+            candidates.len(),
+            2,
+            "must terminate and return exactly the interface's own candidate plus Impl.save -- \
+             a cyclic hierarchy must never hang or fabricate extra candidates"
+        );
+        assert!(candidates.iter().any(|(d, _)| d.file_id == IMPL_FILE_ID));
     }
 
     /// AC4 Level 5: a name unique across the whole repo reaches
@@ -324,7 +823,7 @@ mod tests {
         let scope = FileScope { package: None, imports: Vec::new() };
 
         let candidates =
-            resolve_reference("uniqueMethod", REF_KIND_INVOCATION, 1, &scope, None, &name_index, true);
+            resolve_reference("uniqueMethod", REF_KIND_INVOCATION, 1, &scope, None, &[], &name_index, &super::super::families::TypeIndex::build(&[]), true);
         assert_eq!(candidates.len(), 1);
         let reasons_bits = candidates[0].1;
         assert_ne!(reasons_bits & reasons::UNIQUE_NAME_IN_REPO, 0);
@@ -349,7 +848,7 @@ mod tests {
         let scope = FileScope { package: None, imports: Vec::new() };
 
         let candidates =
-            resolve_reference("uniqueMethod", REF_KIND_INVOCATION, 1, &scope, None, &name_index, false);
+            resolve_reference("uniqueMethod", REF_KIND_INVOCATION, 1, &scope, None, &[], &name_index, &super::super::families::TypeIndex::build(&[]), false);
         assert_eq!(candidates.len(), 1, "the sole indexed declaration is still a candidate -- never dropped");
         let reasons_bits = candidates[0].1;
         assert_eq!(

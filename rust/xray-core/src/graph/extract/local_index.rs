@@ -33,6 +33,19 @@ pub struct Declaration {
     /// AC4's Level-1 "+arity" binder narrowing can compare it against a
     /// call site's `InvocationSite::arg_count` without re-parsing text.
     pub param_count: Option<usize>,
+    /// AC2 (Story #1793, S4): the declared, simple TYPE name of each
+    /// formal parameter in order (e.g. `["String", "int"]`), for a
+    /// `Method` declaration; empty for every other `DeclarationKind` and
+    /// for a method whose parameter types could not be read. This is
+    /// LOCAL SYNTACTIC evidence only (a bare/generic-stripped type name,
+    /// never a resolved/qualified type) -- used for candidate-set
+    /// REDUCTION beyond arity, never exact overload resolution.
+    pub param_types: Vec<String>,
+    /// AC2: true when this method's LAST formal parameter is
+    /// variable-arity (`Foo... x`). A varargs method accepts any call
+    /// arg_count >= `param_count - 1`, which the AC4 Level-1 arity
+    /// narrowing's plain equality check would otherwise wrongly exclude.
+    pub is_varargs: bool,
 }
 
 /// AC2: "imports (ordinary, static, wildcard)".
@@ -73,6 +86,39 @@ pub struct AnnotationRecord {
     pub line: usize,
 }
 
+/// AC2 (Story #1793, S4): a coarse, per-argument SHAPE category read off
+/// LOCAL syntax at a call site -- never a resolved/inferred type (no
+/// generics, no type inference beyond local syntactic evidence, per the
+/// story's Non-Goals). Used purely for candidate-set REDUCTION: matching
+/// this against a candidate's `Declaration::param_types` narrows an
+/// overloaded call site's candidates, it never proves exact resolution.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ArgShape {
+    StringLiteral,
+    NumericLiteral,
+    BooleanLiteral,
+    NullLiteral,
+    /// An explicit cast `(Foo) x` -- carries the cast's simple type name.
+    Cast(String),
+    /// An inline `new Foo(...)` passed directly as an argument -- carries
+    /// the constructed type's simple name.
+    Constructor(String),
+    /// A lambda expression (`x -> ...`) argument. Captured as required
+    /// evidence (AC2: "lambda ... shapes") but deliberately NOT used for
+    /// narrowing in this slice -- matching it against a declared
+    /// functional-interface parameter type requires type inference beyond
+    /// local syntactic evidence, an explicit Non-Goal.
+    Lambda,
+    /// A method reference (`Foo::bar`) argument -- same scope note as
+    /// `Lambda` above.
+    MethodReference,
+    /// Any other argument shape (bare identifier, field access, further
+    /// method call, ...): carries no discriminating evidence at this
+    /// position, so it is always treated as consistent with any declared
+    /// parameter type during shape narrowing.
+    Other,
+}
+
 /// AC2: "invocation sites".
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InvocationSite {
@@ -85,6 +131,10 @@ pub struct InvocationSite {
     /// that case. See `Declaration::param_count` -- the AC4 binder
     /// compares the two structurally.
     pub arg_count: Option<usize>,
+    /// AC2: one `ArgShape` per actual call argument, in order. Always the
+    /// same length as `arg_count` when `arg_count.is_some()`; empty when
+    /// `arg_count` is `None` (no `argument_list` child at all).
+    pub arg_shapes: Vec<ArgShape>,
 }
 
 /// AC2: "type references".
@@ -101,6 +151,17 @@ pub struct ConstructionSite {
     pub line: usize,
 }
 
+/// AC1 (Story #1793, S4): links one method's `symbol` to the bare name of
+/// its immediately enclosing type. Deliberately a SEPARATE record (never a
+/// new field on `Declaration`, which every `DeclarationKind` shares) --
+/// only methods need this, and adding it here avoids touching the many
+/// existing `Declaration { .. }` construction sites across the crate.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MethodOwnerRecord {
+    pub method_symbol: SymbolId,
+    pub enclosing_type: String,
+}
+
 /// The complete per-file extraction output. Built exactly once per file, in
 /// its ENTIRETY, before `collect_facts` (see `crate::graph::user_facts`)
 /// ever runs -- see `crate::graph::fused` for the sequencing guarantee.
@@ -115,6 +176,14 @@ pub struct LocalIndex {
     pub constructions: Vec<ConstructionSite>,
     /// AC2: "a short cached signature line per symbol".
     pub signatures: HashMap<SymbolId, String>,
+    /// AC1 (Story #1793, S4): one record per method declaration in this
+    /// file whose immediately enclosing type is known (top-level methods
+    /// with no enclosing type produce no record here).
+    pub method_owners: Vec<MethodOwnerRecord>,
+    /// AC1: bare names of every type declared as an INTERFACE in this
+    /// file (`interface_declaration`, not `class`/`enum`/`record`) --
+    /// the substrate the family binder's `is_interface` check reads.
+    pub interface_names: Vec<String>,
 }
 
 impl LocalIndex {
@@ -147,6 +216,64 @@ mod tests {
         assert!(index.type_references.is_empty());
         assert!(index.constructions.is_empty());
         assert!(index.signatures.is_empty());
+        assert!(index.method_owners.is_empty());
+    }
+
+    /// AC1 (Story #1793, S4): a `Declaration` for a method carries the
+    /// declaring type's name via a SEPARATE `MethodOwnerRecord` (joined by
+    /// `symbol`, never a new field on the shared `Declaration` struct
+    /// every `DeclarationKind` uses) so the family binder can ask "which
+    /// type declared this method" without touching the many existing
+    /// `Declaration { .. }` call sites across the crate.
+    /// AC1 (Story #1793, S4): the family binder needs to know which
+    /// declared types are INTERFACES (a call resolving to an interface
+    /// method is what triggers family expansion) -- `LocalIndex` tracks
+    /// this as a plain list of bare interface names, defaulting empty.
+    #[test]
+    fn local_index_carries_interface_names_defaulting_empty() {
+        let index = LocalIndex::new();
+        assert!(index.interface_names.is_empty());
+    }
+
+    #[test]
+    fn method_owner_record_links_a_method_symbol_to_its_declaring_type_by_name() {
+        let owner = MethodOwnerRecord { method_symbol: make_symbol_id(1, 0), enclosing_type: "Foo".to_string() };
+        assert_eq!(owner.enclosing_type, "Foo");
+        assert_eq!(owner.method_symbol, make_symbol_id(1, 0));
+    }
+
+    /// AC2 (Story #1793, S4): a `Declaration` for a method carries its
+    /// declared parameter TYPE names (beyond the existing `param_count`)
+    /// and whether its last parameter is variable-arity -- both default to
+    /// "no evidence" (empty/false) for every non-method `DeclarationKind`.
+    #[test]
+    fn declaration_carries_param_types_and_varargs_flag() {
+        let decl = Declaration {
+            kind: DeclarationKind::Method,
+            name: "save".to_string(),
+            line: 1,
+            symbol: make_symbol_id(1, 0),
+            param_count: Some(1),
+            param_types: vec!["String".to_string()],
+            is_varargs: false,
+        };
+        assert_eq!(decl.param_types, vec!["String".to_string()]);
+        assert!(!decl.is_varargs);
+    }
+
+    /// AC2: an `InvocationSite` carries a per-position `ArgShape` --
+    /// literal category, explicit cast, constructor name, or lambda/
+    /// method-reference shape -- alongside the existing `arg_count`.
+    #[test]
+    fn invocation_site_carries_per_position_arg_shapes() {
+        let site = InvocationSite {
+            callee_name: "save".to_string(),
+            line: 10,
+            arg_count: Some(2),
+            arg_shapes: vec![ArgShape::StringLiteral, ArgShape::Cast("Foo".to_string())],
+        };
+        assert_eq!(site.arg_shapes.len(), 2);
+        assert_eq!(site.arg_shapes[1], ArgShape::Cast("Foo".to_string()));
     }
 
     #[test]
@@ -158,6 +285,8 @@ mod tests {
             line: 1,
             symbol: make_symbol_id(1, 0),
             param_count: None,
+            param_types: Vec::new(),
+            is_varargs: false,
         });
         assert_eq!(index.declaration_named("Foo").unwrap().name, "Foo");
     }
