@@ -82,12 +82,18 @@ fn read_file_list(path: &str) -> Result<Vec<PathBuf>, String> {
 /// `BufReader::read_line`, which reads lazily line-by-line, and stops
 /// collecting once `max_lines` valid (non-blank) paths are found.
 ///
-/// Truncation ("were there more lines?") is detected via a RAW BYTE peek
-/// (`BufRead::fill_buf`) on the underlying reader -- deliberately NEVER
-/// UTF-8-decoding anything beyond the cap, so malformed content past the
-/// cap can never cause an error or be interpreted as a path; it can only
-/// be detected as "present" or "absent". A genuine I/O error during that
-/// peek IS propagated as `Err` (never silently treated as "not
+/// Truncation ("was there at least one further real entry?") is detected
+/// by consuming remaining RAW BYTES (`BufRead::read_until(b'\n', ..)`) on
+/// the underlying reader and checking whether that raw line contains any
+/// non-ASCII-whitespace byte -- deliberately NEVER UTF-8-decoding
+/// anything beyond the cap (both the "is this blank" check and the
+/// "present/absent" check operate on raw bytes), so malformed content
+/// past the cap can never cause a decode error; it is only ever
+/// classified as "blank" or "non-blank content". Bug #1814: a naive
+/// "any bytes remain" check (the previous `fill_buf`-based peek) treated
+/// trailing blank lines/whitespace as truncation, falsely downgrading a
+/// genuinely complete list. A genuine I/O error while consuming those
+/// bytes IS propagated as `Err` (never silently treated as "not
 /// truncated") -- only the CONTENT beyond the cap is never inspected.
 ///
 /// Left as a SEPARATE function rather than changing `read_file_list`
@@ -121,10 +127,28 @@ fn read_file_list_capped(path: &str, max_lines: usize) -> Result<(Vec<PathBuf>, 
             paths.push(PathBuf::from(trimmed));
         }
     }
-    let truncated = !reader
-        .fill_buf()
-        .map_err(|e| format!("Failed to read --files-from list at {}: {}", path, e))?
-        .is_empty();
+    // Bug #1814: decide `truncated` by whether at least one further
+    // NON-BLANK raw line exists beyond the cap, never by whether any
+    // bytes remain -- trailing blank lines/whitespace-only lines must
+    // not report truncation on a genuinely complete list. Reads raw
+    // bytes (`read_until`, not `read_line`) so malformed UTF-8 beyond
+    // the cap is still never decoded; blankness is judged byte-wise via
+    // `is_ascii_whitespace()`.
+    let mut truncated = false;
+    let mut raw_line: Vec<u8> = Vec::new();
+    loop {
+        raw_line.clear();
+        let bytes_read = reader
+            .read_until(b'\n', &mut raw_line)
+            .map_err(|e| format!("Failed to read --files-from list at {}: {}", path, e))?;
+        if bytes_read == 0 {
+            break; // genuinely exhausted, not truncated
+        }
+        if raw_line.iter().any(|b| !b.is_ascii_whitespace()) {
+            truncated = true;
+            break;
+        }
+    }
     Ok((paths, truncated))
 }
 
@@ -2421,5 +2445,65 @@ fn analyze_graph(g: &GraphHandle<'_>, facts: &FactsHandle<'_>) -> GraphResult {
             result.expect("must succeed -- the corrupt 3rd line must never be decoded as text");
         assert_eq!(files, vec![PathBuf::from("/a/One.java"), PathBuf::from("/a/Two.java")]);
         assert!(truncated, "must report that more content existed beyond the cap");
+    }
+
+    /// Bug #1814 test helper: writes `content` to a uniquely-named temp
+    /// file, runs `read_file_list_capped` against it with `max_lines`,
+    /// removes the temp file (asserting cleanup itself succeeded, never
+    /// silently discarded), and returns the raw `Result` for the caller
+    /// to assert on.
+    fn read_file_list_capped_via_temp_file(
+        name_suffix: &str,
+        content: &str,
+        max_lines: usize,
+    ) -> Result<(Vec<PathBuf>, bool), String> {
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!(
+            "xray_cli_test_1814_{}_{}.txt",
+            name_suffix,
+            std::process::id()
+        ));
+        std::fs::write(&path, content).expect("failed to write test fixture file");
+        let result = read_file_list_capped(path.to_str().unwrap(), max_lines);
+        std::fs::remove_file(&path).expect("failed to clean up test fixture file");
+        result
+    }
+
+    /// Bug #1814 test helper: `n` synthetic `/a/File{i}.java\n` lines
+    /// concatenated -- the shared fixture-content builder for the
+    /// boundary table below.
+    fn n_valid_path_lines(n: usize) -> String {
+        (0..n).map(|i| format!("/a/File{}.java\n", i)).collect()
+    }
+
+    #[test]
+    fn test_read_file_list_capped_truncation_boundary_pins_real_values() {
+        // Bug #1814: `truncated` must be decided by whether at least one
+        // further NON-BLANK entry exists beyond the cap, not by whether
+        // any bytes remain -- trailing blank lines/whitespace must NOT
+        // report truncation on a genuinely complete list. Every case
+        // pins the REAL expected file count and truncated value, not
+        // merely "a bound exists".
+        let max_lines = GRAPH_INDEX_MAX_FILES;
+        let exact = n_valid_path_lines(max_lines);
+        let exact_with_trailing_blanks = exact.clone() + "\n\n   \n";
+        let exact_no_trailing_newline = exact.trim_end_matches('\n').to_string();
+        let one_over_cap = n_valid_path_lines(max_lines + 1);
+
+        // (case name, file content, expected files.len(), expected truncated)
+        let cases: [(&str, &str, usize, bool); 5] = [
+            ("trailing_blank_lines", exact_with_trailing_blanks.as_str(), max_lines, false),
+            ("one_more_real_path", one_over_cap.as_str(), max_lines, true),
+            ("no_trailing_newline", exact_no_trailing_newline.as_str(), max_lines, false),
+            ("fifty_thousand_and_one", one_over_cap.as_str(), max_lines, true),
+            ("empty_file", "", 0, false),
+        ];
+
+        for (name, content, expected_len, expected_truncated) in cases {
+            let (files, truncated) = read_file_list_capped_via_temp_file(name, content, max_lines)
+                .unwrap_or_else(|e| panic!("case '{}' must succeed: {}", name, e));
+            assert_eq!(files.len(), expected_len, "case '{}': unexpected file count", name);
+            assert_eq!(truncated, expected_truncated, "case '{}': unexpected truncated value", name);
+        }
     }
 }

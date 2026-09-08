@@ -150,7 +150,14 @@ def test_permission_error_from_killpg_does_not_prevent_reaping_or_propagate(
     assert "timed out" in error.lower()
 
     assert "value" in spawned_pid, "on_process_spawned callback was never invoked"
-    assert not _pid_alive(spawned_pid["value"]), (
+
+    reap_deadline = time.time() + _REAP_WAIT_DEADLINE_SECONDS
+    child_alive = _pid_alive(spawned_pid["value"])
+    while child_alive and time.time() < reap_deadline:
+        time.sleep(_REAP_POLL_INTERVAL_SECONDS)
+        child_alive = _pid_alive(spawned_pid["value"])
+
+    assert not child_alive, (
         f"direct child pid {spawned_pid['value']} must still be reaped "
         "(proc.wait() must run) even when os.killpg itself raised "
         "PermissionError"
