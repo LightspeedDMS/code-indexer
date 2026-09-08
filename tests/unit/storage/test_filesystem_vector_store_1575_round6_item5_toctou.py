@@ -9,21 +9,35 @@ unproven/partial picture), and that this TOCTOU may become MOOT once item
 authoritative disk rescan via ``_rebuild_and_repair_path_index()``, which
 reads the TRUE on-disk state regardless of in-memory races).
 
-This test verifies empirically rather than assuming either way: real
-threads, a single SHARED ``FilesystemVectorStore`` instance (so the race
-is on the SAME in-memory ``_indexing_session_changes``/``_path_indexes``
-state a genuine concurrent ``begin_indexing()`` would contend on), driving
-many trials of an out-of-session ``upsert_points()`` call (Gap D's own
-path) racing against a normal ``begin_indexing()``/``upsert_points()``/
-``end_indexing()`` session for the SAME collection -- each trial adding
-TWO distinct new files (one per thread). Real thread scheduling means the
-exact interleave point cannot be pinned deterministically (asserting on it
-would be scheduling-dependent and flaky), so this test instead asserts on
-the property that actually matters: after all trials, an independent
-verification pass (a fresh, uninvolved store instance, mirroring the
-"separate process" simulation the round-3 Gap B/D tests use) confirms the
-final ``unique_file_count`` equals the TRUE total of distinct files
-written, proving no data was lost across the repeated race.
+Bug #1823 (truthfulness correction): this test was originally built to
+verify empirically whether the TOCTOU race causes real data loss, using
+real thread scheduling to try to interleave an out-of-session
+``upsert_points()`` (Gap D's own path) against a concurrent
+``begin_indexing()``/``upsert_points()``/``end_indexing()`` session. It
+CANNOT actually detect that race, at any trial count: an isolated
+verification script runtime-monkeypatched
+``_persist_out_of_session_path_index`` to insert a 0.05s sleep between the
+lock-protected capture of the live PathIndex and the ``_save_path_index()``
+call -- deliberately forcing the TOCTOU window wide open, far beyond what
+real thread scheduling could ever produce naturally -- then delegated to
+the REAL, unmodified ``_save_path_index``/``_rebuild_and_repair_path_index``
+(production source on disk verified byte-identical, md5sum, throughout).
+10 trials against that deliberately-forced-open window produced ZERO data
+loss. This is consistent with the module docstring's "may become moot"
+assessment above: item 1's provenance-gating fix re-reads
+``self._path_indexes[cache_key]`` live, under lock, immediately before any
+window could open, so the captured reference already reflects the
+freshest write ordering available at read time -- there may be no real
+race left for ANY trial count or window width to catch on the current
+production code shape.
+
+Given that, this test is kept as a cheap SMOKE CHECK ONLY: real threads,
+a single SHARED ``FilesystemVectorStore`` instance, real concurrent
+out-of-session-upsert-vs-session-upsert load, asserting the property that
+actually matters end-to-end (a fresh, independent verification store's
+``unique_file_count`` matches the true total of distinct files written).
+It is NOT relied upon to catch a regression in the TOCTOU window itself --
+see ``test_gap_d_toctou_race_smoke_check_no_data_loss``'s own docstring.
 """
 
 from __future__ import annotations
@@ -38,7 +52,15 @@ from code_indexer.storage.filesystem_vector_store import FilesystemVectorStore
 
 from _pathindex_gap_1575_helpers import make_vector, read_unique_file_count
 
-NUM_TRIALS = 40
+# Bug #1823: lowered from 40, then from 10. See the module docstring's
+# "truthfulness correction" paragraph for the full investigation: this
+# test cannot detect the TOCTOU race it was originally built to catch, at
+# ANY trial count -- even a 0.05s forced-open window produced zero data
+# loss across 10 trials. With no evidence this test can ever go RED for
+# its intended purpose, a large trial count buys nothing; 3 trials is
+# enough to keep it a meaningful smoke check (real concurrent load,
+# multiple distinct files) while keeping wall time low.
+NUM_TRIALS = 3
 WORKER_COUNT = 2
 WORKER_TIMEOUT_SECONDS = 30
 TEST_TIMEOUT_SECONDS = 90
@@ -121,7 +143,21 @@ def _run_one_race_trial(
 
 
 @pytest.mark.timeout(TEST_TIMEOUT_SECONDS)
-def test_gap_d_toctou_race_never_loses_data_across_many_trials(tmp_path):
+def test_gap_d_toctou_race_smoke_check_no_data_loss(tmp_path):
+    """Bug #1823: SMOKE CHECK ONLY -- see the module docstring's
+    "truthfulness correction" paragraph. This test does NOT reliably
+    detect the Codex item-5 TOCTOU race it was originally written to
+    catch: a separate investigation forced the race window open by
+    50x normal (a 0.05s monkeypatched sleep, vs. real thread-scheduling
+    gaps of microseconds) and still saw zero data loss across 10 trials
+    against the real, unmodified production code. What remains here is
+    real concurrent load (real threads, a shared store instance, an
+    out-of-session upsert racing a normal indexing session) asserting
+    that no data is lost end-to-end -- a property worth re-validating
+    against future refactors of the persist path, even though a failure
+    here is more likely to indicate an unrelated regression in that path
+    than a reproduction of the original TOCTOU concern.
+    """
     store = _build_baseline_store(tmp_path)
     barrier = threading.Barrier(WORKER_COUNT)
 
@@ -145,7 +181,8 @@ def test_gap_d_toctou_race_never_loses_data_across_many_trials(tmp_path):
         f"+ 2 distinct new files per trial across {NUM_TRIALS} racing "
         f"trials of an out-of-session upsert vs. a concurrent "
         f"begin_indexing()/end_indexing() session), got {final_count} -- "
-        f"this would indicate the Gap D TOCTOU race (Codex's item 5 "
-        f"concern) causes real data loss even after item 1's "
-        f"provenance-gating fix."
+        f"this smoke check is not known to detect the original Codex "
+        f"item-5 TOCTOU concern (see module docstring), so a failure here "
+        f"more likely indicates an unrelated regression in the "
+        f"out-of-session persist path than a reproduction of that race."
     )
