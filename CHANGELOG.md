@@ -7,6 +7,67 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [12.41.0] - 2026-09-08
+
+### Security
+
+- X-Ray evaluator sandbox: closed an escape where forbidden constructs
+  (std::process, std::fs, unsafe, include!) hidden inside a user-defined or
+  allowlisted macro body passed validation and were expanded by rustc
+  afterwards. The validator inspected only a macro's name, never its token
+  stream. Since the server compiles and dlopen()s evaluator code, this was
+  arbitrary code execution on the X-Ray host. The validator now rejects
+  macro_rules! definitions, requires an exact bare single-segment macro path
+  (closing the qualified `evil::vec!` bypass), recursively re-validates the
+  token streams of the allowlisted macros, applies a fail-closed attribute
+  allowlist permitting only `doc`, and bounds macro recursion depth.
+
+### Added
+
+- `analyze_graph` MCP tool (#1811): whole-repository, multi-file graph
+  analysis answering cross-file questions single-file AST search cannot --
+  dead code, unwired components, layering violations, endpoint-to-sink
+  reachability and blast radius. Epic #1786 had built the underlying graph
+  engine with no user-reachable path to it; this wires it through a real
+  front door.
+- `files_with_unsupported_language` degradation counter, surfaced through the
+  existing completeness path.
+
+### Fixed
+
+- `fact_graph_complete` no longer reports `true` for repositories the graph
+  extractor never analyzed. The extractor supports Java only, and
+  LanguageNotSupported was produced but never counted, so a Python or
+  TypeScript repository returned an empty findings list with all-zero
+  degradation -- which the tool's own documentation describes as a
+  verified-clean result.
+- `analyze_graph` added to the MCP dispatcher's timeout-exempt set; a generic
+  60s cap made its advertised 10..600s range unreachable, and the completed
+  work was computed then discarded.
+- Graph-mode compile cache identity now derives from the graph assembly
+  rather than the legacy one, so compiled artifacts are actually reusable.
+- Graph candidate collection stops during the filesystem walk instead of
+  collecting everything and slicing afterwards; skipped subtrees are never
+  descended.
+- Finite index budget and file cap, surfaced honestly through
+  `truncated_by_max_files` -> `fact_graph_complete`.
+- Concurrency admission for graph analyses via the shared X-Ray cell limiter,
+  plus a bounded compile semaphore.
+- Malformed facts input, missing required CLI JSON fields, and non-zero
+  subprocess exits now fail loudly instead of returning empty-but-successful
+  results.
+- X-Ray subprocesses spawn in their own session and are killed by process
+  group, so a timeout no longer leaves orphaned rustc descendants.
+- Pattern seeding and resolution moved off the event loop; they performed
+  filesystem writes and git subprocesses on the request thread, where the
+  hard NFS mount can block indefinitely.
+- A malformed repository-specific pattern now raises `pattern_parse_error`
+  instead of silently falling through to the global pattern and running
+  different evaluator code than requested.
+- REST `POST /api/xray/search` accepts `pattern_name`/`pattern_params`
+  (#1812), resolving through the same helper the MCP handler uses. The stored
+  pattern library was previously unreachable from this endpoint.
+
 ## [12.40.0] - 2026-09-07
 
 Note: 12.39.0 carried this same content but was never released. Its push failed CI's
