@@ -1003,4 +1003,579 @@ fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> {
         // `forget` avoids conflating that separately-tested site here.
         std::mem::forget(node);
     }
+
+    /// Shared host-side setup/execution for the two Bug #1816 reproducer
+    /// tests below -- builds the real `small_graph_and_facts` fixture,
+    /// compiles+loads `user_code` as a real dylib, and calls
+    /// `analyze_graph`, returning the outer `Option`. Kept out of the two
+    /// `#[test]` functions themselves so each can stay focused on naming
+    /// its own call order and evaluator source.
+    fn run_bug_1816_reproducer(
+        user_code: &str,
+        dir: &std::path::Path,
+    ) -> Option<Option<crate::graph::analyze::result::GraphResult>> {
+        let (graph, facts) = small_graph_and_facts();
+        let graph_handle = crate::graph::csr::handle::GraphHandle::from_graph(&graph);
+        let facts_handle = crate::graph::user_facts::FactsHandle::from_facts(&facts);
+        let evaluator = compile_and_load_graph(user_code, dir);
+        evaluator.call_analyze_graph(&graph_handle, &facts_handle)
+    }
+
+    /// Bounded BFS depth used by both Bug #1816 reproducer evaluators below
+    /// -- an arbitrary but generous ceiling for the tiny 2-symbol fixture
+    /// graph (`small_graph_and_facts`), matching the bug report's own
+    /// minimal reproducer exactly so these tests reproduce the SAME shape
+    /// that was observed crashing, not merely a same-symptom variant.
+    const BUG_1816_MAX_DEPTH: usize = 20;
+
+    /// Bug #1816 RED-phase reproducer, order A: `signature_for` called
+    /// before `shortest_path_to_any` in the SAME `analyze_graph` evaluator.
+    /// Per the bug report this combination corrupts the heap
+    /// (`free(): double free detected in tcache 2`, SIGABRT) even though
+    /// each accessor alone runs clean over every symbol in a loop. This
+    /// test is deliberately run in ISOLATION (see the module doc note in
+    /// the fix commit) because a SIGABRT/SIGSEGV inside `cargo test`'s
+    /// single shared process would take down every other test running
+    /// concurrently in the same binary.
+    #[test]
+    fn bug_1816_signature_for_then_shortest_path_to_any_does_not_corrupt_the_heap() {
+        use tempfile::TempDir;
+        let dir = TempDir::new().unwrap();
+
+        let user_code = format!(
+            r#"
+fn collect_facts(node: &OwnedNode, file: &str) -> Vec<UserFact> {{ Vec::new() }}
+fn analyze_graph(g: &GraphHandle<'_>, facts: &FactsHandle<'_>) -> GraphResult {{
+    let _ = g.signature_for(0).is_some();
+    let t: Vec<u32> = Vec::new();
+    let _ = g.shortest_path_to_any(0u32, &t, {BUG_1816_MAX_DEPTH});
+    GraphResult::default()
+}}
+"#
+        );
+        let outer = run_bug_1816_reproducer(&user_code, dir.path());
+        assert!(
+            outer.expect("analyze_graph IS exported -- outer must be Some(..)").is_some(),
+            "signature_for followed by shortest_path_to_any must not corrupt the heap or panic"
+        );
+    }
+
+    /// Bug #1816 RED-phase reproducer, order B: the reverse call order --
+    /// `shortest_path_to_any` before `signature_for`. The bug report notes
+    /// order only changes which signal is raised (SIGSEGV here vs SIGABRT
+    /// for order A), not whether corruption happens, so both orders are
+    /// required as separate regression tests.
+    #[test]
+    fn bug_1816_shortest_path_to_any_then_signature_for_does_not_corrupt_the_heap() {
+        use tempfile::TempDir;
+        let dir = TempDir::new().unwrap();
+
+        let user_code = format!(
+            r#"
+fn collect_facts(node: &OwnedNode, file: &str) -> Vec<UserFact> {{ Vec::new() }}
+fn analyze_graph(g: &GraphHandle<'_>, facts: &FactsHandle<'_>) -> GraphResult {{
+    let t: Vec<u32> = Vec::new();
+    let _ = g.shortest_path_to_any(0u32, &t, {BUG_1816_MAX_DEPTH});
+    let _ = g.signature_for(0).is_some();
+    GraphResult::default()
+}}
+"#
+        );
+        let outer = run_bug_1816_reproducer(&user_code, dir.path());
+        assert!(
+            outer.expect("analyze_graph IS exported -- outer must be Some(..)").is_some(),
+            "shortest_path_to_any followed by signature_for must not corrupt the heap or panic"
+        );
+    }
+
+    /// Number of distinct `GraphHandle` accessors the pairwise evaluator
+    /// source (`pairwise_accessor_evaluator_source`) exercises -- kept as
+    /// its own constant so the host-side assertion in the test below can
+    /// name the expected call count without duplicating the literal `9`.
+    const PAIRWISE_ACCESSOR_COUNT: usize = 9;
+
+    /// Evaluator source for the Bug #1816 pairwise regression test below:
+    /// numbers all 9 `GraphHandle` accessors 0..9 (a plain `u32` kind rather
+    /// than an `enum` -- the evaluator security validator forbids
+    /// `#[derive]` attributes, and `Accessor` would need `Clone`/`Copy` to
+    /// be indexed out of an array repeatedly, so a bare integer dispatched
+    /// via `match` sidesteps that without weakening the validator), then
+    /// calls EVERY ordered pair (9*9=81 pairs) inside a single
+    /// `analyze_graph` invocation, reporting the total call count so the
+    /// host can assert none were skipped. Split out from the `#[test]`
+    /// itself purely to keep that function short and scannable.
+    fn pairwise_accessor_evaluator_source() -> &'static str {
+        r#"
+const ACCESSOR_COUNT: u32 = 9;
+const PAIRWISE_MAX_DEPTH: usize = 20;
+
+fn call_accessor(g: &GraphHandle<'_>, kind: u32, sym: u32, targets: &Vec<u32>) -> usize {
+    match kind {
+        0 => { let _ = g.resolve_symbol(sym); 1 }
+        1 => { let _ = g.signature_for(sym); 1 }
+        2 => { let _ = g.is_symbol_referenced(sym); 1 }
+        3 => { let _ = g.is_definitely_dead_code(sym); 1 }
+        4 => { let _ = g.callers_of(sym); 1 }
+        5 => { let _ = g.callees_of(sym); 1 }
+        6 => { let _ = g.strongly_connected_components(); 1 }
+        7 => { let _ = g.shortest_path_to_any(sym, targets, PAIRWISE_MAX_DEPTH); 1 }
+        _ => { let _ = g.reachable_from(targets, PAIRWISE_MAX_DEPTH); 1 }
+    }
+}
+
+fn collect_facts(node: &OwnedNode, file: &str) -> Vec<UserFact> { Vec::new() }
+
+fn analyze_graph(g: &GraphHandle<'_>, facts: &FactsHandle<'_>) -> GraphResult {
+    let targets: Vec<u32> = vec![0u32, 1u32];
+    let mut calls: usize = 0;
+    for i in 0..ACCESSOR_COUNT {
+        for j in 0..ACCESSOR_COUNT {
+            calls += call_accessor(g, i, 0u32, &targets);
+            calls += call_accessor(g, j, 0u32, &targets);
+        }
+    }
+    let mut result = GraphResult::default();
+    result.findings.push(ReduceFinding {
+        pattern: "pairwise_probe".to_string(),
+        message: format!("calls={}", calls),
+        involved: Vec::new(),
+        signatures: Vec::new(),
+    });
+    result
+}
+"#
+    }
+
+    /// Bug #1816, PAIRWISE regression coverage: per-accessor tests (like
+    /// `all_seven_graph_handle_accessors_survive_adversarial_input_without_panicking`
+    /// above) ALL PASSED while this bug was live -- single-accessor
+    /// coverage is provably insufficient, since the corruption only
+    /// appeared when TWO specific accessors were combined. This test
+    /// compiles ONE real evaluator (`pairwise_accessor_evaluator_source`)
+    /// that, inside a single `analyze_graph` call, invokes every ORDERED
+    /// pair across all 9 `GraphHandle` accessors against a REAL built
+    /// `CodeGraph` (via `two_file_graph_with_cached_signature`, which --
+    /// unlike the bare `small_graph_and_facts` fixture -- has a real cached
+    /// signature and a real cross-file reference, so
+    /// `signature_for`/`is_symbol_referenced` exercise genuine data, not
+    /// just the `None`/`false` early-return paths). A single compiled `.so`
+    /// making 9*9=81 sequential accessor calls through the real FFI
+    /// boundary is both more efficient and MORE aggressive than 81 separate
+    /// single-pair binaries -- it also mirrors how a real multi-use-case
+    /// evaluator (see the six-use-case fixture used for requirement #3)
+    /// actually calls many accessors in sequence within one `analyze_graph`
+    /// invocation.
+    #[test]
+    fn all_ordered_pairs_of_graph_accessors_run_clean_against_a_real_compiled_dylib() {
+        use tempfile::TempDir;
+        let dir = TempDir::new().unwrap();
+        let graph = two_file_graph_with_cached_signature();
+        let facts = crate::graph::user_facts::FactIndex::new();
+        let graph_handle = crate::graph::csr::handle::GraphHandle::from_graph(&graph);
+        let facts_handle = crate::graph::user_facts::FactsHandle::from_facts(&facts);
+
+        let evaluator = compile_and_load_graph(pairwise_accessor_evaluator_source(), dir.path());
+        let outer = evaluator
+            .call_analyze_graph(&graph_handle, &facts_handle)
+            .expect("analyze_graph IS exported -- outer must be Some(..)");
+        let result = outer.expect(
+            "every ordered pair of GraphHandle accessors must run clean through a real compiled \
+             dylib -- Some(None) here would mean a panic or heap corruption was caught/observed",
+        );
+        assert_eq!(
+            result.findings[0].message,
+            format!("calls={}", 2 * PAIRWISE_ACCESSOR_COUNT * PAIRWISE_ACCESSOR_COUNT),
+            "must have executed exactly 2 accessor calls for every one of the 9x9 ordered pairs"
+        );
+    }
+
+    /// Bug #1816, requirement #3: the FULL six-use-case `analyze_graph`
+    /// evaluator (orphans, unwired components, layering violations, package
+    /// cycles, endpoint-to-sink reachability, blast radius) must complete
+    /// without crashing. Embedded verbatim -- this is the SAME evaluator
+    /// already manually verified end to end through the real `xray-cli`
+    /// CLI, run from OUTSIDE `rust/` (the condition that reproduced the
+    /// original bug), against the real 16-file `xray-graph-fixture` Java
+    /// repo (see the bug's investigation notes): `--build-graph` then three
+    /// consecutive `--analyze-graph` runs all exited 0 with sane findings
+    /// (uc1_dead_code x43, uc3 layering, uc4 cycles, uc5 reachability +
+    /// negative control) after this fix, and reliably crashed with
+    /// `free(): double free detected in tcache 2` before it.
+    ///
+    /// This `cargo test` version cannot reproduce that ABI-mismatch
+    /// condition directly (the test binary's own `rustc` invocations always
+    /// run from inside `rust/`, so toolchain resolution is self-consistent
+    /// even on the pre-fix code -- see `cache::pinned_toolchain_channel`'s
+    /// doc comment), so it is a FUNCTIONAL regression test: it proves the
+    /// full evaluator's logic is correct end to end against a real compiled
+    /// dylib and a real, deliberately layered/cyclic/reachable fixture
+    /// graph -- every one of the six use cases must actually fire, not just
+    /// "the process didn't crash".
+    #[test]
+    fn six_use_case_evaluator_runs_end_to_end_without_crashing() {
+        use tempfile::TempDir;
+        let dir = TempDir::new().unwrap();
+        let graph = six_use_case_test_graph();
+        let facts = crate::graph::user_facts::FactIndex::new();
+        let graph_handle = crate::graph::csr::handle::GraphHandle::from_graph(&graph);
+        let facts_handle = crate::graph::user_facts::FactsHandle::from_facts(&facts);
+
+        let evaluator = compile_and_load_graph(six_use_case_evaluator_source(), dir.path());
+        let outer = evaluator
+            .call_analyze_graph(&graph_handle, &facts_handle)
+            .expect("analyze_graph IS exported -- outer must be Some(..)");
+        let result = outer.expect(
+            "the full six-use-case evaluator must complete without crashing or panicking -- \
+             Some(None) here would mean the dylib's own catch_unwind caught a panic",
+        );
+
+        let patterns: Vec<&str> = result.findings.iter().map(|f| f.pattern.as_str()).collect();
+        assert!(
+            result.findings.iter().any(|f| f.pattern == "uc1_dead_code" && f.message.contains("neverCalled")),
+            "the unreferenced neverCalled symbol must be flagged as UC1 dead code: {patterns:?}"
+        );
+        assert!(
+            result.findings.iter().any(|f| f.pattern == "uc2_unreferenced" && f.message.contains("neverCalled")),
+            "the unreferenced neverCalled symbol must be flagged as UC2 unreferenced: {patterns:?}"
+        );
+        assert!(patterns.contains(&"uc3_layering_violation"), "controller->repository layering violation must fire: {patterns:?}");
+        assert!(patterns.contains(&"uc4_cycle"), "the 2-node cycle must be reported as a strongly connected component: {patterns:?}");
+        assert!(patterns.contains(&"uc5_endpoint_reaches_sink"), "the deleteUser endpoint must reach the rawDelete sink: {patterns:?}");
+        assert!(patterns.contains(&"uc5_control_evaluated"), "the ping health-check negative control must be evaluated: {patterns:?}");
+        assert!(
+            !patterns.contains(&"uc5_control_UNEXPECTED_PATH"),
+            "the ping health-check control must NOT reach any sink: {patterns:?}"
+        );
+        assert!(patterns.contains(&"uc6_blast_radius"), "the once-named symbol must be flagged for blast radius: {patterns:?}");
+    }
+
+    /// Builds the synthetic fixture graph `six_use_case_evaluator_runs_end_to_end_without_crashing`
+    /// exercises: an `OrderController` (dense 0) that calls straight into
+    /// `OrderRepository` (dense 2, a real UC3 layering violation), a
+    /// `deleteUserAccount` endpoint (dense 1, signature contains
+    /// "deleteUser") that calls `rawDeleteRow` (dense 3, signature contains
+    /// "rawDelete" -- a real UC5 endpoint-to-sink path), a `pingCheck`
+    /// health endpoint (dense 4, signature contains "ping") with NO
+    /// outgoing edges at all (the UC5 negative control -- must reach no
+    /// sink), a `getOnce` cache accessor (dense 5, signature contains
+    /// "once" -- UC6 blast radius), an unreferenced `neverCalled` symbol
+    /// (dense 6, UC1/UC2 dead code), and a genuine 2-node cycle (dense 7 <->
+    /// 8, UC4).
+    fn six_use_case_test_graph() -> crate::graph::csr::CodeGraph {
+        use crate::graph::csr::builder::CodeGraphBuilder;
+        use crate::graph::csr::candidate::Candidate;
+        use crate::graph::identity::make_symbol_id;
+        use crate::graph::reasons;
+
+        let mut builder = CodeGraphBuilder::with_candidate_capacity(6);
+        let order_controller = builder.intern_symbol(make_symbol_id(1, 0));
+        let delete_user_account = builder.intern_symbol(make_symbol_id(1, 1));
+        let order_repository = builder.intern_symbol(make_symbol_id(2, 0));
+        let raw_delete_row = builder.intern_symbol(make_symbol_id(2, 1));
+        let ping_check = builder.intern_symbol(make_symbol_id(3, 0));
+        let get_once = builder.intern_symbol(make_symbol_id(4, 0));
+        let never_called = builder.intern_symbol(make_symbol_id(5, 0));
+        let cycle_a = builder.intern_symbol(make_symbol_id(6, 0));
+        let cycle_b = builder.intern_symbol(make_symbol_id(6, 1));
+
+        builder.add_signature(order_controller, "class OrderController".to_string());
+        builder.add_signature(delete_user_account, "deleteUserAccount() deleteUser".to_string());
+        builder.add_signature(order_repository, "class OrderRepository".to_string());
+        builder.add_signature(raw_delete_row, "rawDeleteRow() rawDelete".to_string());
+        builder.add_signature(ping_check, "pingCheck() ping".to_string());
+        builder.add_signature(get_once, "getOnce() once".to_string());
+        builder.add_signature(never_called, "neverCalled()".to_string());
+        builder.add_signature(cycle_a, "methodA()".to_string());
+        builder.add_signature(cycle_b, "methodB()".to_string());
+
+        // UC3: controller calls repository directly.
+        builder.add_reference(order_controller, 1, 1, 0, &[Candidate::new(order_repository, reasons::SAME_FILE)]);
+        // UC5 positive: endpoint reaches the sink in one hop.
+        builder.add_reference(delete_user_account, 1, 2, 0, &[Candidate::new(raw_delete_row, reasons::SAME_FILE)]);
+        // UC4: a genuine 2-node cycle.
+        builder.add_reference(cycle_a, 6, 1, 0, &[Candidate::new(cycle_b, reasons::SAME_FILE)]);
+        builder.add_reference(cycle_b, 6, 2, 0, &[Candidate::new(cycle_a, reasons::SAME_FILE)]);
+
+        for referenced in [order_repository, raw_delete_row, cycle_a, cycle_b] {
+            builder.mark_referenced(referenced);
+        }
+        // ping_check deliberately has NO outgoing references -- the UC5
+        // negative control -- and never_called is deliberately never
+        // referenced at all -- the UC1/UC2 dead-code fixture.
+        let _ = ping_check;
+        let _ = never_called;
+
+        builder.build()
+    }
+
+    /// Verbatim copy of the six-use-case `analyze_graph` evaluator used by
+    /// `six_use_case_evaluator_runs_end_to_end_without_crashing` -- kept in
+    /// sync manually with the scratch copy this bug's investigation used
+    /// for the real CLI/real-repo run (see that test's doc comment).
+    fn six_use_case_evaluator_source() -> &'static str {
+        r#"
+fn collect_facts(node: &OwnedNode, file: &str) -> Vec<UserFact> {
+    Vec::new()
+}
+
+// Bounded enumeration of dense ids. Returns (ids, truncated).
+// truncated=true means we hit the ceiling, so absent findings are NOT trustworthy.
+fn enumerate_ids(g: &GraphHandle<'_>) -> (Vec<u32>, bool) {
+    let max_scan: u32 = 20000;
+    let mut ids: Vec<u32> = Vec::new();
+    let mut i: u32 = 0;
+    while i < max_scan {
+        if g.resolve_symbol(i).is_none() {
+            return (ids, false);
+        }
+        ids.push(i);
+        i += 1;
+    }
+    (ids, true)
+}
+
+// Explicit signature lookup. Deliberately returns None rather than "" so a
+// failed lookup can be COUNTED and REPORTED -- an empty-string substitution
+// would silently fail every .contains() probe and fake a passing control.
+fn sig_of(g: &GraphHandle<'_>, d: u32) -> Option<String> {
+    match g.signature_for(d) {
+        Some(s) => Some(s.to_string()),
+        None => None,
+    }
+}
+
+fn flag(pattern: &str, message: String, sym: u64, sig: String) -> ReduceFinding {
+    ReduceFinding {
+        pattern: pattern.to_string(),
+        message,
+        involved: vec![sym],
+        signatures: vec![sig],
+    }
+}
+
+// UC1 dead code, UC2 unreferenced, UC6 blast radius.
+fn uc1_uc2_uc6(g: &GraphHandle<'_>, ids: &Vec<u32>) -> Vec<ReduceFinding> {
+    let mut out: Vec<ReduceFinding> = Vec::new();
+    let mut missing: usize = 0;
+    for idx in 0..ids.len() {
+        let d = ids[idx];
+        let sym = match g.resolve_symbol(d) {
+            Some(s) => s,
+            None => continue,
+        };
+        let sig = match sig_of(g, d) {
+            Some(s) => s,
+            None => {
+                missing += 1;
+                String::new()
+            }
+        };
+        if g.is_definitely_dead_code(d) == Some(true) {
+            out.push(flag("uc1_dead_code", sig.clone(), sym, sig.clone()));
+        }
+        if !g.is_symbol_referenced(d) {
+            out.push(flag("uc2_unreferenced", sig.clone(), sym, sig.clone()));
+        }
+        if sig.contains("format") || sig.contains("once") {
+            let n = g.callers_of(d).len();
+            let msg = format!("callers={} sig={}", n, sig);
+            out.push(flag("uc6_blast_radius", msg, sym, sig.clone()));
+        }
+    }
+    if missing > 0 {
+        out.push(ReduceFinding {
+            pattern: "uc0_missing_signatures".to_string(),
+            message: format!("{} symbols lacked a signature; text probes unreliable", missing),
+            involved: Vec::new(),
+            signatures: Vec::new(),
+        });
+    }
+    out
+}
+
+// UC3: an api-layer Controller calling a data-layer Repository directly.
+fn uc3_layering(g: &GraphHandle<'_>, ids: &Vec<u32>) -> Vec<ReduceFinding> {
+    let mut out: Vec<ReduceFinding> = Vec::new();
+    for idx in 0..ids.len() {
+        let d = ids[idx];
+        let sig = match sig_of(g, d) {
+            Some(s) => s,
+            None => continue,
+        };
+        if !sig.contains("Controller") {
+            continue;
+        }
+        let sym = match g.resolve_symbol(d) {
+            Some(s) => s,
+            None => continue,
+        };
+        let callees = g.callees_of(d);
+        for ci in 0..callees.len() {
+            let c = callees[ci];
+            let csig = match sig_of(g, c) {
+                Some(s) => s,
+                None => continue,
+            };
+            if csig.contains("Repository") {
+                if let Some(csym) = g.resolve_symbol(c) {
+                    out.push(ReduceFinding {
+                        pattern: "uc3_layering_violation".to_string(),
+                        message: format!("{} -> {}", sig, csig),
+                        involved: vec![sym, csym],
+                        signatures: vec![sig.clone(), csig.clone()],
+                    });
+                }
+            }
+        }
+    }
+    out
+}
+
+// UC4: module/package cycles via strongly connected components.
+fn uc4_cycles(g: &GraphHandle<'_>) -> Vec<ReduceFinding> {
+    let mut out: Vec<ReduceFinding> = Vec::new();
+    let sccs = g.strongly_connected_components();
+    for si in 0..sccs.len() {
+        let comp = &sccs[si];
+        if comp.len() < 2 {
+            continue;
+        }
+        let mut involved: Vec<u64> = Vec::new();
+        let mut signatures: Vec<String> = Vec::new();
+        for ci in 0..comp.len() {
+            let d = comp[ci];
+            if let Some(s) = g.resolve_symbol(d) {
+                involved.push(s);
+                signatures.push(sig_of(g, d).unwrap_or_else(|| String::from("<no-signature>")));
+            }
+        }
+        out.push(ReduceFinding {
+            pattern: "uc4_cycle".to_string(),
+            message: format!("scc_size={}", comp.len()),
+            involved,
+            signatures,
+        });
+    }
+    out
+}
+
+// Reachability findings must SHIP THE PATH (directional asymmetry rule).
+fn path_finding(g: &GraphHandle<'_>, pattern: &str, path: &Vec<u32>) -> ReduceFinding {
+    let mut involved: Vec<u64> = Vec::new();
+    let mut signatures: Vec<String> = Vec::new();
+    for pi in 0..path.len() {
+        let d = path[pi];
+        if let Some(s) = g.resolve_symbol(d) {
+            involved.push(s);
+            signatures.push(sig_of(g, d).unwrap_or_else(|| String::from("<no-signature>")));
+        }
+    }
+    ReduceFinding {
+        pattern: pattern.to_string(),
+        message: format!("path_len={}", path.len()),
+        involved,
+        signatures,
+    }
+}
+
+// UC5 probe discovery: (sinks, endpoints, controls).
+fn uc5_probes(g: &GraphHandle<'_>, ids: &Vec<u32>) -> (Vec<u32>, Vec<u32>, Vec<u32>) {
+    let mut sinks: Vec<u32> = Vec::new();
+    let mut endpoints: Vec<u32> = Vec::new();
+    let mut controls: Vec<u32> = Vec::new();
+    for idx in 0..ids.len() {
+        let d = ids[idx];
+        let sig = match sig_of(g, d) {
+            Some(s) => s,
+            None => continue,
+        };
+        if sig.contains("rawDelete") {
+            sinks.push(d);
+        }
+        if sig.contains("deleteUser") {
+            endpoints.push(d);
+        }
+        if sig.contains("ping") {
+            controls.push(d);
+        }
+    }
+    (sinks, endpoints, controls)
+}
+
+// UC5: endpoint -> dangerous sink reachability, plus its negative control.
+fn uc5_reachability(g: &GraphHandle<'_>, ids: &Vec<u32>) -> Vec<ReduceFinding> {
+    // Max call-graph hops explored when asking "can this endpoint reach a sink".
+    const MAX_REACHABILITY_DEPTH: usize = 20;
+
+    let mut out: Vec<ReduceFinding> = Vec::new();
+    let (sinks, endpoints, controls) = uc5_probes(g, ids);
+
+    out.push(ReduceFinding {
+        pattern: "uc5_probe_counts".to_string(),
+        message: format!(
+            "sinks={} endpoints={} controls={}",
+            sinks.len(),
+            endpoints.len(),
+            controls.len()
+        ),
+        involved: Vec::new(),
+        signatures: Vec::new(),
+    });
+
+    for ei in 0..endpoints.len() {
+        if let Some(path) = g.shortest_path_to_any(endpoints[ei], &sinks, MAX_REACHABILITY_DEPTH) {
+            out.push(path_finding(g, "uc5_endpoint_reaches_sink", &path));
+        }
+    }
+
+    // Negative control: the health endpoint must reach NO sink.
+    // The affirmative marker proves the control was really evaluated;
+    // UNEXPECTED_PATH is the failure signal and must never appear.
+    for ci in 0..controls.len() {
+        let p = controls[ci];
+        let sym = match g.resolve_symbol(p) {
+            Some(s) => s,
+            None => continue,
+        };
+        let sig = sig_of(g, p).unwrap_or_else(|| String::from("<no-signature>"));
+        match g.shortest_path_to_any(p, &sinks, MAX_REACHABILITY_DEPTH) {
+            Some(path) => out.push(path_finding(g, "uc5_control_UNEXPECTED_PATH", &path)),
+            None => out.push(flag("uc5_control_evaluated", sig.clone(), sym, sig.clone())),
+        }
+    }
+    out
+}
+
+fn analyze_graph(g: &GraphHandle<'_>, facts: &FactsHandle<'_>) -> GraphResult {
+    let mut result = GraphResult::default();
+    let (ids, truncated) = enumerate_ids(g);
+
+    result.findings.push(ReduceFinding {
+        pattern: "uc0_graph_size".to_string(),
+        message: format!("symbols={}", ids.len()),
+        involved: Vec::new(),
+        signatures: Vec::new(),
+    });
+    if truncated {
+        result.findings.push(ReduceFinding {
+            pattern: "uc0_scan_truncated".to_string(),
+            message: "hit max_scan ceiling; absent findings are NOT trustworthy".to_string(),
+            involved: Vec::new(),
+            signatures: Vec::new(),
+        });
+    }
+
+    let mut p1 = uc1_uc2_uc6(g, &ids);
+    result.findings.append(&mut p1);
+    let mut p2 = uc3_layering(g, &ids);
+    result.findings.append(&mut p2);
+    let mut p3 = uc4_cycles(g);
+    result.findings.append(&mut p3);
+    let mut p4 = uc5_reachability(g, &ids);
+    result.findings.append(&mut p4);
+
+    result
+}
+"#
+    }
 }

@@ -670,6 +670,36 @@ fn drain_pipe_or_warn(rx: std::sync::mpsc::Receiver<Vec<u8>>, pipe_name: &str) -
     }
 }
 
+/// Bug #1816: builds the `rustc` invocation that compiles an evaluator's
+/// assembled source into the `.so` `xray-cli` later loads across the
+/// `GraphHandle` FFI boundary, pinned via `RUSTUP_TOOLCHAIN` to
+/// `cache::pinned_toolchain_channel()` -- the SAME toolchain `cargo build`
+/// uses to compile `xray-cli` itself, since both read the identical
+/// `rust-toolchain.toml`. See `cache::pinned_toolchain_channel`'s doc
+/// comment for the full root-cause writeup: without this pin, this
+/// subprocess's own `rustc` binary resolution depended on the CALLING
+/// PROCESS's current working directory, which in production sits outside
+/// this repository entirely, letting the evaluator compile under a
+/// DIFFERENT rustc version than the one that built `xray-cli` -- an ABI
+/// mismatch that manifested as heap corruption (`free(): double free
+/// detected in tcache 2` / SIGSEGV) the moment `analyze_graph` called both
+/// `signature_for` and `shortest_path_to_any` in the same evaluator.
+/// Extracted into its own function so the pin itself is directly testable
+/// via `Command::get_envs()`, independent of ever actually invoking rustc.
+fn evaluator_rustc_command(build_rs_path: &Path, build_so_path: &Path) -> std::process::Command {
+    let mut command = std::process::Command::new("rustc");
+    command
+        .env("RUSTUP_TOOLCHAIN", crate::cache::pinned_toolchain_channel())
+        .args([
+            "--edition", "2021",
+            "--crate-type", "cdylib",
+            "-C", "opt-level=2",
+            "-o", build_so_path.to_str().unwrap(),
+            build_rs_path.to_str().unwrap(),
+        ]);
+    command
+}
+
 /// H2 (consolidated review, Issue #1811/Bug #1812, Codex): runs `command`
 /// (rustc) to completion or until `timeout` elapses, whichever is first --
 /// mirroring `graph::analyze::process::run_analyze_child`'s established
@@ -862,14 +892,7 @@ fn compile_evaluator_impl(user_code: &str, cache_dir: &Path, preamble: &str) -> 
     // timeout entirely, and let killing the PARENT (xray-cli) orphan the
     // rustc CHILD.
     let compile_start = Instant::now();
-    let mut rustc_command = std::process::Command::new("rustc");
-    rustc_command.args([
-        "--edition", "2021",
-        "--crate-type", "cdylib",
-        "-C", "opt-level=2",
-        "-o", build_so_path.to_str().unwrap(),
-        build_rs_path.to_str().unwrap(),
-    ]);
+    let rustc_command = evaluator_rustc_command(&build_rs_path, &build_so_path);
     let (success, _stdout, stderr_bytes) =
         run_rustc_with_timeout(rustc_command, RUSTC_COMPILE_TIMEOUT)?;
     let compile_ms = compile_start.elapsed().as_millis();
@@ -1126,6 +1149,32 @@ mod tests {
             elapsed < std::time::Duration::from_secs(2),
             "rejection must be near-instant (no rustc invocation attempted), took {:?}",
             elapsed
+        );
+    }
+
+    /// Bug #1816 (THE fix's discriminating test, evaluator-compile side):
+    /// the actual `rustc` invocation that compiles a user evaluator `.so`
+    /// must carry `RUSTUP_TOOLCHAIN` pinned to `cache::pinned_toolchain_channel()`.
+    /// This is the MORE important of the two Bug #1816 toolchain-pin call
+    /// sites (the other is `cache::get_rustc_version`'s version probe) --
+    /// this is the command that produces the artifact loaded across the
+    /// `GraphHandle` FFI boundary, so an unpinned toolchain here is exactly
+    /// what let the compiled evaluator diverge from the rustc version that
+    /// built `xray-cli` itself, corrupting the heap the moment
+    /// `analyze_graph` called both `signature_for` and
+    /// `shortest_path_to_any` (see the module doc comment on
+    /// `cache::pinned_toolchain_channel` for the full root-cause writeup).
+    #[test]
+    fn evaluator_rustc_command_pins_rustup_toolchain_env_var() {
+        let dir = TempDir::new().unwrap();
+        let build_rs_path = dir.path().join("evaluator.rs");
+        let build_so_path = dir.path().join("evaluator.so");
+        let command = evaluator_rustc_command(&build_rs_path, &build_so_path);
+        let envs: std::collections::HashMap<_, _> = command.get_envs().collect();
+        assert_eq!(
+            envs.get(std::ffi::OsStr::new("RUSTUP_TOOLCHAIN")),
+            Some(&Some(std::ffi::OsStr::new(crate::cache::pinned_toolchain_channel()))),
+            "the evaluator-compiling rustc command must pin RUSTUP_TOOLCHAIN to the workspace channel"
         );
     }
 
