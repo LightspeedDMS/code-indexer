@@ -127,3 +127,173 @@ class TestXrayDefaultTimeoutReadsConfigService:
         )
 
         assert captured.get("timeout_seconds") == _DEFAULT_TIMEOUT_SECONDS
+
+
+class TestConfigReadFailureObservability:
+    """Consolidated review (Issue #1811/Bug #1812, new finding #7, Codex):
+    a ConfigService read failure in _resolve_default_xray_timeout_seconds
+    must be observable beyond log-scraping -- a persistently broken
+    ConfigService silently ignores the operator-configured
+    xray_timeout_seconds default forever, with only a WARNING log line.
+    This must NOT change the fail-soft behavior itself (still returns
+    _DEFAULT_TIMEOUT_SECONDS); it must ALSO record a counter."""
+
+    def test_config_read_failure_records_otel_counter(self):
+        from code_indexer.server.mcp.handlers import xray as xray_handlers
+
+        class _BrokenConfigService:
+            def get_config(self):
+                raise RuntimeError("DB unavailable")
+
+        with (
+            patch.object(
+                xray_handlers,
+                "get_config_service",
+                return_value=_BrokenConfigService(),
+            ),
+            patch.object(
+                xray_handlers,
+                "_record_xray_timeout_config_read_failure_metric",
+            ) as mock_record,
+        ):
+            result = xray_handlers._resolve_default_xray_timeout_seconds()
+
+        assert result == xray_handlers._DEFAULT_TIMEOUT_SECONDS
+        mock_record.assert_called_once_with(reason="exception")
+
+
+class _BrokenConfigService:
+    """Test double whose get_config() always raises."""
+
+    def get_config(self) -> Any:  # Any: never returns (always raises)
+        raise RuntimeError("DB unavailable")
+
+
+async def _assert_configuration_degraded_surfaced(
+    *,
+    # Any (import_handler/env_ctx_factory/make_user): each call site passes
+    # the SAME structurally-shaped helper (zero-arg handler factory / env
+    # context-manager factory / role->User factory) from one of two
+    # independent test modules (test_xray_search_handler.py,
+    # test_xray_explore_handler.py) sharing no common base class or
+    # Protocol -- only duck-typed structural compatibility. A Protocol for
+    # a 4-call-site test-only helper would be more machinery than the
+    # duplication it replaces.
+    import_handler: Any,
+    env_ctx_factory: Any,
+    make_user: Any,
+    # Any (params values): an MCP tool params dict is heterogeneous by
+    # design (str/int/list/dict values) -- mirrors VALID_PARAMS'/
+    # EXPLORE_VALID_PARAMS' own Dict[str, Any] typing in the source modules.
+    params: Dict[str, Any],
+    expected_key: str,
+) -> None:
+    """Shared assertion for the 4 xray_search/xray_explore x
+    single-repo/multi-repo response-construction points: run the real
+    handler with a broken ConfigService and confirm the returned response
+    body carries BOTH the normal success key (job_id/job_ids) AND
+    configuration_degraded: true.
+    """
+    import json as _json
+
+    from code_indexer.server.auth.user_manager import UserRole
+
+    assert "timeout_seconds" not in params
+    user = make_user(UserRole.NORMAL_USER)
+
+    with (
+        patch(
+            "code_indexer.server.mcp.handlers.xray._resolve_repo_path",
+            return_value="/some/path",
+        ),
+        patch(
+            "code_indexer.server.mcp.handlers.xray.get_config_service",
+            return_value=_BrokenConfigService(),
+        ),
+    ):
+        with env_ctx_factory() as (_bjm, _jt, _exec, _mock_loop):
+            response = await import_handler()(params, user)
+
+    body = _json.loads(response["content"][0]["text"])
+    assert expected_key in body, f"expected a {expected_key!r} response, got {body!r}"
+    assert body.get("configuration_degraded") is True, (
+        "A ConfigService read failure must surface configuration_degraded: "
+        f"true in the response; got {body!r}"
+    )
+
+
+# Coordinator follow-up on new finding #7 (Codex): an OTEL counter alone is
+# invisible to the CALLER of xray_search/xray_explore. When the
+# ConfigService read fails and the hardcoded default is silently
+# substituted, the immediate job-submission response itself must say so
+# via `configuration_degraded: true`. The 4 functions below cover all 4
+# response-construction points: xray_search x single-repo/multi-repo,
+# xray_explore x single-repo/multi-repo. Kept as standalone module-level
+# functions (not class methods) to stay under the 3-methods-per-class
+# limit while sharing the assertion helper above.
+
+
+async def test_search_single_repo_job_id_response_surfaces_configuration_degraded() -> (
+    None
+):
+    from .test_xray_search_handler import _import_handler, _make_user
+
+    await _assert_configuration_degraded_surfaced(
+        import_handler=_import_handler,
+        env_ctx_factory=_xray_single_repo_env,
+        make_user=_make_user,
+        params={**VALID_PARAMS},
+        expected_key="job_id",
+    )
+
+
+async def test_search_multi_repo_job_ids_response_surfaces_configuration_degraded() -> (
+    None
+):
+    from .test_xray_search_handler import _import_handler, _make_user
+
+    await _assert_configuration_degraded_surfaced(
+        import_handler=_import_handler,
+        env_ctx_factory=_xray_single_repo_env,
+        make_user=_make_user,
+        params={**VALID_PARAMS, "repository_alias": ["repo-a", "repo-b"]},
+        expected_key="job_ids",
+    )
+
+
+async def test_explore_single_repo_job_id_response_surfaces_configuration_degraded() -> (
+    None
+):
+    from .test_xray_explore_handler import VALID_PARAMS as EXPLORE_VALID_PARAMS
+    from .test_xray_explore_handler import _import_handler as _import_explore
+    from .test_xray_explore_handler import _make_user as _make_explore_user
+    from .test_xray_explore_handler import (
+        _xray_single_repo_env as _explore_single_repo_env,
+    )
+
+    await _assert_configuration_degraded_surfaced(
+        import_handler=_import_explore,
+        env_ctx_factory=_explore_single_repo_env,
+        make_user=_make_explore_user,
+        params={**EXPLORE_VALID_PARAMS},
+        expected_key="job_id",
+    )
+
+
+async def test_explore_multi_repo_job_ids_response_surfaces_configuration_degraded() -> (
+    None
+):
+    from .test_xray_explore_handler import VALID_PARAMS as EXPLORE_VALID_PARAMS
+    from .test_xray_explore_handler import _import_handler as _import_explore
+    from .test_xray_explore_handler import _make_user as _make_explore_user
+    from .test_xray_explore_handler import (
+        _xray_single_repo_env as _explore_single_repo_env,
+    )
+
+    await _assert_configuration_degraded_surfaced(
+        import_handler=_import_explore,
+        env_ctx_factory=_explore_single_repo_env,
+        make_user=_make_explore_user,
+        params={**EXPLORE_VALID_PARAMS, "repository_alias": ["repo-a", "repo-b"]},
+        expected_key="job_ids",
+    )

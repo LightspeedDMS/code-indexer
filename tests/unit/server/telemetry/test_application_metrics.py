@@ -411,6 +411,61 @@ class TestXrayCacheIdentityFailureMetric:
         )  # must not raise
 
 
+class TestXrayTimeoutConfigReadFailureMetric:
+    """Tests for the cidx.xray.timeout_config_read_failures counter.
+
+    Consolidated review (Issue #1811/Bug #1812, new finding #7, Codex):
+    _resolve_default_xray_timeout_seconds (handlers/xray.py) fails soft to
+    the hardcoded _DEFAULT_TIMEOUT_SECONDS on any ConfigService read
+    failure -- a deliberate, tested fail-soft contract (Bug #1399) that
+    must NOT change. But a WARNING log alone is insufficient observability
+    at fleet scale (~900 repos): a node whose ConfigService is permanently
+    broken silently ignores every operator-configured xray_timeout_seconds
+    override forever, with no signal beyond log-scraping. This counter,
+    mirroring cidx.xray.cache_identity_failures (Bug #1784), closes that
+    gap without touching the fail-soft behavior itself.
+    """
+
+    def setup_method(self):
+        reset_all_singletons()
+        from code_indexer.server.telemetry.metrics_instrumentation import (
+            reset_application_metrics,
+        )
+
+        reset_application_metrics()
+
+    def test_record_xray_timeout_config_read_failure(self):
+        """Increments the counter with a reason attribute when active, and
+        never raises when ApplicationMetrics is inactive (fail-open)."""
+        from tests.unit.server.telemetry.otel_test_support import (
+            active_application_metrics,
+            find_metric,
+        )
+
+        with active_application_metrics() as (metrics, reader):
+            metrics.record_xray_timeout_config_read_failure(reason="exception")
+
+            assert metrics._xray_timeout_config_read_failures_counter is not None
+            metric = find_metric(reader, "cidx.xray.timeout_config_read_failures")
+            assert metric is not None
+            dp = list(metric.data.data_points)[0]
+            assert dp.value == 1
+            assert dp.attributes["reason"] == "exception"
+
+        from code_indexer.server.telemetry.manager import TelemetryManager
+        from code_indexer.server.telemetry.metrics_instrumentation import (
+            ApplicationMetrics,
+        )
+
+        inactive_metrics = ApplicationMetrics(
+            TelemetryManager(TelemetryConfig(enabled=False))
+        )
+        assert not inactive_metrics.is_active
+        inactive_metrics.record_xray_timeout_config_read_failure(
+            reason="exception"
+        )  # must not raise
+
+
 # =============================================================================
 # Metrics Attributes Tests
 # =============================================================================

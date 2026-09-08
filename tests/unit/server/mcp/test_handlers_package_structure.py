@@ -170,6 +170,8 @@ EXPECTED_REGISTRY_KEYS = frozenset(
         "xray_dump_ast",
         # Story #1055: cross-repo multi-expression X-Ray batch
         "xray_search_batch",
+        # Story #1811: whole-repository graph-mode analysis (Epic #1786 front door)
+        "analyze_graph",
         # Story #996: cancel background jobs with process termination
         "cancel_job",
         # Payload cache retrieval handler (added post-v10)

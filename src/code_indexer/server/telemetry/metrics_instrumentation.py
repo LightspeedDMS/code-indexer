@@ -88,6 +88,14 @@ class ApplicationMetrics:
         # convention rather than introducing a one-off stricter type.
         self._xray_cache_identity_failures_counter: Optional[Any] = None
 
+        # X-Ray timeout-config-read failure counter (consolidated review,
+        # Issue #1811/Bug #1812, new finding #7). _resolve_default_xray_
+        # timeout_seconds (handlers/xray.py) fails soft to the hardcoded
+        # default on any ConfigService read failure -- a deliberate, tested
+        # contract (Bug #1399) this counter does not change. It only makes
+        # a persistently broken ConfigService observable beyond log-scraping.
+        self._xray_timeout_config_read_failures_counter: Optional[Any] = None
+
         if (
             telemetry_manager.is_initialized
             and telemetry_manager._config.export_metrics
@@ -160,8 +168,20 @@ class ApplicationMetrics:
                 unit="1",
             )
 
+            # X-Ray timeout-config-read failure metric (consolidated review,
+            # Issue #1811/Bug #1812, new finding #7): observability for a
+            # ConfigService read that keeps failing, silently ignoring the
+            # operator-configured xray_timeout_seconds default forever.
+            self._xray_timeout_config_read_failures_counter = meter.create_counter(
+                name="cidx.xray.timeout_config_read_failures",
+                description=(
+                    "Number of xray default-timeout ConfigService read failures"
+                ),
+                unit="1",
+            )
+
             self._is_active = True
-            logger.info("ApplicationMetrics initialized: 10 metrics registered")
+            logger.info("ApplicationMetrics initialized: 11 metrics registered")
 
         except Exception as e:
             logger.warning(
@@ -300,6 +320,40 @@ class ApplicationMetrics:
             self._xray_cache_identity_failures_counter.add(1, attributes)
         except Exception as e:
             logger.debug(f"Failed to record xray cache identity failure metric: {e}")
+
+    def record_xray_timeout_config_read_failure(self, reason: str) -> None:
+        """
+        Record an xray default-timeout ConfigService read failure
+        (consolidated review, Issue #1811/Bug #1812, new finding #7).
+
+        _resolve_default_xray_timeout_seconds (handlers/xray.py) fails soft
+        to the hardcoded _DEFAULT_TIMEOUT_SECONDS on any read failure -- a
+        deliberate, tested contract (Bug #1399) this counter does not
+        change. A WARNING log alone is insufficient observability at fleet
+        scale (~900 repos): a node whose ConfigService stays broken would
+        silently ignore the operator-configured xray_timeout_seconds
+        override on every xray request, forever, with only a log line to
+        notice. This counter, viewed as a rate over time, surfaces that.
+
+        Args:
+            reason: Short failure classification, e.g. "exception".
+        """
+        if not self._is_active:
+            return
+
+        # Defensive normalization: this becomes an OTEL attribute value, so
+        # a non-str/empty caller mistake must never break emission of this
+        # failure metric or leak a malformed attribute.
+        safe_reason = reason if isinstance(reason, str) and reason else "unknown"
+        attributes = {"reason": safe_reason}
+
+        try:
+            assert self._xray_timeout_config_read_failures_counter is not None
+            self._xray_timeout_config_read_failures_counter.add(1, attributes)
+        except Exception as e:
+            logger.debug(
+                f"Failed to record xray timeout config read failure metric: {e}"
+            )
 
     @property
     def is_active(self) -> bool:

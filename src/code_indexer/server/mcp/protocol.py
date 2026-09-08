@@ -146,6 +146,26 @@ _HANDLER_TIMEOUT_OVERRIDES: Dict[str, int] = {
 #   retry_run, cancel_run, and their gitlab_ci_*/ci_* equivalents) makes
 #   exactly ONE bounded external API call with no per-item loop --
 #   genuinely safe under the 60s default, left ungoverned by this set.
+#
+#   analyze_graph (consolidated review finding C1, Issue #1811/Bug #1812):
+#   the handler (mcp/handlers/xray_graph.py) validates and clamps its own
+#   `timeout_seconds` param to [_TIMEOUT_MIN=10, _TIMEOUT_MAX=600] BEFORE
+#   ever reaching this dispatcher -- it already owns and enforces its own
+#   bound exactly like xray_search's await_seconds, so no outer generic
+#   cap should re-govern it (same rationale as the xray_search/xray_explore
+#   entry above). Leaving it OUT of this set is actively harmful, not just
+#   redundant: the whole graph-analysis pipeline (repo-alias resolution +
+#   file walk + rustc compile + --build-graph + --analyze-graph) runs
+#   inside `anyio.to_thread.run_sync`, which defaults to
+#   `abandon_on_cancel=False` -- an outer `asyncio.wait_for` firing at the
+#   generic `default_handler_timeout_seconds` (60s) CANNOT cancel that
+#   worker thread. The real analysis keeps running to completion in the
+#   background, unobserved, while the caller is told "timed out after 60
+#   seconds" and the computed result is silently discarded. Since
+#   `await_seconds`/job polling is not wired for this tool (Story #1811
+#   deliberately runs synchronously, not via BackgroundJobManager), that
+#   discarded result is unrecoverable. Every value above 60 in the tool's
+#   advertised 10..600s range would otherwise be unreachable in practice.
 _ASYNC_DISPATCH_TIMEOUT_EXEMPT_TOOLS = frozenset(
     {
         "regex_search",
@@ -154,6 +174,7 @@ _ASYNC_DISPATCH_TIMEOUT_EXEMPT_TOOLS = frozenset(
         "gh_actions_search_logs",
         "gitlab_ci_search_logs",
         "ci_search_logs",
+        "analyze_graph",
     }
 )
 

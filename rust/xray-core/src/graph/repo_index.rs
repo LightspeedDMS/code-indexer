@@ -89,6 +89,18 @@ pub struct RepoIndexResult {
     /// deliberately does NOT flip `fact_graph_complete` -- facts feed the
     /// separate `facts` FactIndex, never the reference graph itself.
     pub files_with_collector_panics: usize,
+    /// Consolidated review finding C2 (Issue #1811/Bug #1812): files whose
+    /// `ExtractionStatus` came back `LanguageNotSupported` -- a recognized
+    /// source-language extension (distinct from
+    /// `unreadable_or_unsupported_files`) for which the engine simply has
+    /// no `LanguageExtractor` implemented yet (Java is currently the only
+    /// language with one; see `extract::extractor_for_language`). The
+    /// file's declarations are as invisible to the graph as an extractor
+    /// panic's would be, so this DOES flip `fact_graph_complete` -- see
+    /// `index_is_complete` below. Without this counter, an analysis over a
+    /// non-Java repo silently reported `fact_graph_complete: true` with
+    /// zero degradation signals: a false "verified clean" reading.
+    pub files_with_unsupported_language: usize,
     pub truncated_by_max_files: bool,
     /// Dual-review defect H2: every `UserFact` collected across the whole
     /// repository, keyed by the fact's enclosing declaration
@@ -131,6 +143,7 @@ struct IndexAccumulator {
     files_with_read_errors: usize,
     files_with_extractor_panics: usize,
     files_with_collector_panics: usize,
+    files_with_unsupported_language: usize,
 }
 
 /// Handles one `Some(fused_result)` outcome from `process_file_fused`:
@@ -147,6 +160,9 @@ fn record_fused_result(full_path: &Path, relative_path: &str, fused_result: Fuse
     }
     if fused_result.collect_facts_status == CollectFactsStatus::Panicked {
         acc.files_with_collector_panics += 1;
+    }
+    if fused_result.extraction_status == ExtractionStatus::LanguageNotSupported {
+        acc.files_with_unsupported_language += 1;
     }
     if let Some(index) = fused_result.index {
         let file_id_val = file_id(relative_path);
@@ -236,7 +252,8 @@ pub fn build_repo_graph(
     // parse error still extracts whatever it could parse (see module docs).
     let index_is_complete = !truncated_by_max_files
         && acc.files_with_extractor_panics == 0
-        && acc.files_with_read_errors == 0;
+        && acc.files_with_read_errors == 0
+        && acc.files_with_unsupported_language == 0;
 
     let mut graph = bind_with_budget_and_completeness(acc.files_for_bind, &options.budget, index_is_complete);
     let budget_exceeded = graph.completeness() != AnalysisCompleteness::Complete;
@@ -261,6 +278,7 @@ pub fn build_repo_graph(
         files_with_read_errors: acc.files_with_read_errors,
         files_with_extractor_panics: acc.files_with_extractor_panics,
         files_with_collector_panics: acc.files_with_collector_panics,
+        files_with_unsupported_language: acc.files_with_unsupported_language,
         truncated_by_max_files,
         facts: acc.facts,
     })
@@ -331,6 +349,59 @@ mod tests {
         assert_eq!(result.files_with_collector_panics, 0);
         assert!(!result.truncated_by_max_files);
         assert_eq!(result.graph.completeness(), AnalysisCompleteness::Complete);
+    }
+
+    /// Consolidated review finding C2 (Issue #1811/Bug #1812): Java is the
+    /// ONLY language with a graph extractor (`extract::extractor_for_
+    /// language`) -- every other engine-supported language (e.g. Python)
+    /// produces `ExtractionStatus::LanguageNotSupported`. A `.py` file that
+    /// parses perfectly fine (recognized extension, no syntax error) must
+    /// still count as a repo-level indexing gap distinct from BOTH
+    /// `unreadable_or_unsupported_files` (genuinely unsupported/no
+    /// extension) and `files_with_read_errors` (I/O failure) -- and must
+    /// flip `fact_graph_complete` to `false`, exactly like an extractor
+    /// panic or read error would, because the file's declarations are
+    /// entirely invisible to the graph either way. Before the fix, NO
+    /// counter tracks this case at all and `fact_graph_complete` stays
+    /// `true` -- a confident, false "verified clean" reading for any
+    /// non-Java repo.
+    #[test]
+    fn unsupported_language_file_flips_fact_graph_complete_and_counts_separately() {
+        let dir = tempfile::tempdir().unwrap();
+        write_java(&dir, "A.java", "class A { void run() {} }\n");
+        std::fs::write(dir.path().join("script.py"), "def totally_unused():\n    pass\n").unwrap();
+
+        let options = RepoIndexOptions { budget: IndexBudget::unlimited(), max_files: None };
+        let result = build_repo_graph(
+            dir.path(),
+            &["A.java".to_string(), "script.py".to_string()],
+            &options,
+            &NoOpCollector,
+        )
+        .expect("no file_id collision in this fixture");
+
+        assert_eq!(
+            result.files_with_unsupported_language, 1,
+            "the .py file (recognized extension, no graph extractor) must be counted"
+        );
+        assert_eq!(
+            result.unreadable_or_unsupported_files, 0,
+            "an unsupported-LANGUAGE file (recognized extension) must never be conflated \
+             with a genuinely unsupported/no-extension file"
+        );
+        assert_eq!(result.files_with_read_errors, 0);
+        assert_eq!(result.files_with_parse_errors, 0);
+        assert!(
+            !result.fact_graph_complete,
+            "a file whose language has no graph extractor must flip fact_graph_complete to \
+             false -- its declarations are as invisible to the graph as a read error's"
+        );
+        assert_ne!(
+            result.graph.completeness(),
+            AnalysisCompleteness::Complete,
+            "the missing-extractor gap must also downgrade the GRAPH's own completeness(), \
+             mirroring the D1 propagation every other repo-level gap already gets"
+        );
     }
 
     /// AC10: `max_files` truncation must set BOTH `truncated_by_max_files`

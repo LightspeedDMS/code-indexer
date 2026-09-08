@@ -382,6 +382,25 @@ class XrayPatternService:
         if pattern_params is None:
             pattern_params = {}
 
+        # Consolidated review finding H3 (Issue #1811/Bug #1812): a
+        # non-dict pattern_params (e.g. a list or bare string, both
+        # iterable) must be rejected HERE, before _resolve_params ever
+        # iterates it -- `for key in overrides` silently iterates a list's
+        # elements (or a string's characters) as if they were dict keys,
+        # and the subsequent `overrides.get(name, default)` then raises an
+        # unhandled AttributeError (list) or produces a nonsensical
+        # unknown_parameter/parameter_type_mismatch report keyed off single
+        # characters (string). Validating the TYPE here, at the one shared
+        # choke point both the REST route (xray_routes.py) and the MCP
+        # handler (handlers/xray.py::_resolve_evaluator_code) funnel
+        # through, means the fix covers both callers without duplicating
+        # the check in each.
+        if not isinstance(pattern_params, dict):
+            raise ValueError(
+                f"invalid_pattern_params: pattern_params must be a dict, "
+                f"got {type(pattern_params).__name__}"
+            )
+
         # Bug #1423 (defense in depth): repo_alias must be a str before it
         # reaches the path-traversal check below or _load_pattern's Path
         # division. A list (even single-element -- the omni multi-repo
@@ -618,7 +637,30 @@ class XrayPatternService:
     def _load_pattern(
         self, repo_alias: str, pattern_name: str
     ) -> Optional[Dict[str, Any]]:
-        """Try repo-specific path then __any__ path. Returns parsed spec or None."""
+        """Try repo-specific path then __any__ path. Returns parsed spec or None.
+
+        Raises:
+            ValueError: "pattern_parse_error" if a candidate file EXISTS but
+                is unreadable, fails YAML parsing, or fails schema
+                validation (consolidated review, Issue #1811/Bug #1812,
+                new finding #5 + R2-5 re-review). A malformed
+                repo-specific pattern must surface loudly here rather than
+                silently falling through to the __any__ global pattern of
+                the same name -- an operator-authored typo in a
+                repo-specific override would otherwise be masked by a
+                same-named global pattern quietly taking over, with only a
+                WARNING log to notice. R2-5 widened this from "YAML syntax
+                errors only" to a full schema check: an EMPTY file
+                (yaml.safe_load returns None) was previously
+                indistinguishable from "file doesn't exist" and silently
+                fell through to __any__ as pattern_not_found; a
+                list/scalar-shaped YAML document crashed downstream with a
+                raw AttributeError; a missing 'evaluator_code' key crashed
+                with a raw KeyError; and a wrong-typed 'evaluator_code'
+                (e.g. an int) silently proceeded as a bogus evaluator
+                value. All four collapse into ONE explicit
+                pattern_parse_error here instead.
+        """
         candidates = [
             self._patterns_root / repo_alias / f"{pattern_name}.yaml",
             self._patterns_root / self.ANY_SCOPE / f"{pattern_name}.yaml",
@@ -626,10 +668,72 @@ class XrayPatternService:
         for path in candidates:
             if path.is_file():
                 try:
-                    return yaml.safe_load(path.read_text(encoding="utf-8"))  # type: ignore[no-any-return]
-                except yaml.YAMLError:
-                    logger.warning("xray_pattern_service: failed to parse %s", path)
+                    text = path.read_text(encoding="utf-8")
+                except (OSError, UnicodeDecodeError) as exc:
+                    raise ValueError(
+                        f"pattern_parse_error: pattern file '{path}' exists "
+                        f"but could not be read: {exc}"
+                    ) from exc
+                try:
+                    spec = yaml.safe_load(text)
+                except yaml.YAMLError as exc:
+                    raise ValueError(
+                        f"pattern_parse_error: pattern file '{path}' exists "
+                        f"but failed to parse as YAML: {exc}"
+                    ) from exc
+                self._validate_pattern_schema(spec, path)
+                return spec  # type: ignore[no-any-return]
         return None
+
+    def _validate_pattern_schema(self, spec: Any, path: Path) -> None:
+        """Validate a freshly-parsed pattern spec's structural shape.
+
+        Raises:
+            ValueError: "pattern_parse_error" for ANY of: not a YAML
+                mapping (list/scalar/None -- including an EMPTY file,
+                which yaml.safe_load parses as None), a missing or
+                wrong-typed required key (name, evaluator_code -- both
+                already required at WRITE time by store_xray_pattern's
+                own validation; requiring them again here keeps
+                read/write validation symmetric), or a malformed
+                'parameters' declaration list (non-list entry, or an
+                entry failing _validate_parameter_declarations).
+                Collapses every schema-invalid shape into ONE explicit,
+                non-fall-through error instead of a raw
+                AttributeError/KeyError or a silently-accepted bad value.
+        """
+        if not isinstance(spec, dict):
+            raise ValueError(
+                f"pattern_parse_error: pattern file '{path}' does not "
+                f"contain a YAML mapping (got {type(spec).__name__})"
+            )
+        name = spec.get("name")
+        if not isinstance(name, str) or not name:
+            raise ValueError(
+                f"pattern_parse_error: pattern file '{path}' is missing a "
+                "non-empty 'name' string"
+            )
+        evaluator_code = spec.get("evaluator_code")
+        if not isinstance(evaluator_code, str) or not evaluator_code:
+            raise ValueError(
+                f"pattern_parse_error: pattern file '{path}' is missing a "
+                "non-empty 'evaluator_code' string"
+            )
+        params = spec.get("parameters")
+        if params is not None:
+            if not isinstance(params, list) or any(
+                not isinstance(decl, dict) for decl in params
+            ):
+                raise ValueError(
+                    f"pattern_parse_error: pattern file '{path}' has a "
+                    "'parameters' field that is not a list of mappings"
+                )
+            error = self._validate_parameter_declarations(params)
+            if error is not None:
+                raise ValueError(
+                    f"pattern_parse_error: pattern file '{path}' has an "
+                    f"invalid parameter declaration: {error.get('message', error)}"
+                )
 
     def _validate_parameter_declarations(
         self, params: List[Dict[str, Any]]

@@ -103,6 +103,7 @@ def _make_success_future() -> "asyncio.Future[Any]":
 def _patched_xray_env(
     cidx_meta: Path,
     success_future_count: int = 1,
+    has_pattern_name: bool = False,
 ) -> Generator[Tuple[Any, Any, Any, Any], None, None]:
     """Patch infra boundaries shared by single-repo and multi-repo paths.
 
@@ -155,9 +156,47 @@ def _patched_xray_env(
         patch("asyncio.get_running_loop") as mock_loop,
     ):
         mock_validate.return_value = MagicMock(ok=True)
-        mock_loop.return_value.run_in_executor.side_effect = lambda *a, **kw: next(
-            future_iter
-        )
+
+        if has_pattern_name:
+            # H3 (consolidated review, Issue #1811/Bug #1812, Codex):
+            # pattern-name resolution ALSO offloads via loop.run_in_executor
+            # (see handlers.xray._resolve_evaluator_code_off_loop) as the
+            # FIRST call in the real code path, ahead of the per-repo
+            # job-submission calls this fixture's `future_iter` already
+            # models. That first call is executed EAGERLY (for real,
+            # synchronously) so the test observes the genuine
+            # pattern-lookup result; every subsequent call keeps drawing
+            # from `future_iter` unchanged. Only wired in for the
+            # pattern_name test rows -- rows without pattern_name never
+            # take this offload branch at all, so their sole/first
+            # run_in_executor call is genuinely the mocked job-submission
+            # one `future_iter` was always meant to model.
+            _FIRST_EXECUTOR_CALL = 1
+            call_count = {"n": 0}
+
+            # `*a`/`**kw` typed loosely (`Any`) deliberately: this mocks
+            # asyncio's `AbstractEventLoop.run_in_executor(executor, func,
+            # *args)`, whose own signature is equally generic (it forwards
+            # arbitrary positional args to an arbitrary callable) -- there
+            # is no more specific type to express here without
+            # re-declaring that same generic contract.
+            def _run_in_executor_side_effect(*a: Any, **kw: Any) -> Any:
+                call_count["n"] += 1
+                if call_count["n"] == _FIRST_EXECUTOR_CALL:
+                    func = a[1]
+                    real_result = func()
+                    first_call_future: "asyncio.Future[Any]" = asyncio.Future()
+                    first_call_future.set_result(real_result)
+                    return first_call_future
+                return next(future_iter)
+
+            mock_loop.return_value.run_in_executor.side_effect = (
+                _run_in_executor_side_effect
+            )
+        else:
+            mock_loop.return_value.run_in_executor.side_effect = lambda *a, **kw: next(
+                future_iter
+            )
         yield mock_bjm, mock_jt, mock_xe, mock_loop
 
 
@@ -184,7 +223,9 @@ class TestBug1423CrashReproduction:
         _store_deep_nesting_pattern(cidx_meta)
         user = _make_user()
 
-        with _patched_xray_env(cidx_meta, success_future_count=2):
+        with _patched_xray_env(
+            cidx_meta, success_future_count=2, has_pattern_name=True
+        ):
             try:
                 result = await handle_xray_search(
                     {
@@ -217,7 +258,9 @@ class TestBug1423CrashReproduction:
         _store_deep_nesting_pattern(cidx_meta)
         user = _make_user()
 
-        with _patched_xray_env(cidx_meta, success_future_count=2):
+        with _patched_xray_env(
+            cidx_meta, success_future_count=2, has_pattern_name=True
+        ):
             try:
                 result = await handle_xray_explore(
                     {
@@ -254,7 +297,9 @@ class TestBug1423CrashReproduction:
         _store_deep_nesting_pattern(cidx_meta)
         user = _make_user()
 
-        with _patched_xray_env(cidx_meta, success_future_count=1):
+        with _patched_xray_env(
+            cidx_meta, success_future_count=1, has_pattern_name=True
+        ):
             try:
                 result = await handle_xray_search(
                     {
@@ -378,7 +423,9 @@ class TestBug1423RegressionAlreadyWorkingCombinations:
         _store_deep_nesting_pattern(cidx_meta)
         user = _make_user()
 
-        with _patched_xray_env(cidx_meta, success_future_count=1):
+        with _patched_xray_env(
+            cidx_meta, success_future_count=1, has_pattern_name=True
+        ):
             result = await handle_xray_search(
                 {
                     "repository_alias": "myrepo-global",
