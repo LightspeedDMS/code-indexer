@@ -4,6 +4,7 @@ Stores vectors in filesystem with path-as-vector quantization and git-aware chun
 Following Story 2 requirements.
 """
 
+import contextvars
 import fcntl
 import hashlib
 import json
@@ -180,14 +181,17 @@ def _write_embed_meta_to_event_ctx(embed_meta: "Any", provider_name: str = "") -
 
         event_ctx = _search_event_ctx.get(None)
         if event_ctx is not None:
-            if "cohere" in provider_name.lower():
-                event_ctx.cohere_cache_hit = embed_meta.key_found
-                event_ctx.cohere_cache_mode = embed_meta.cache_mode
-                event_ctx.cohere_latency_ms = embed_meta.provider_latency_ms
-            else:
-                event_ctx.voyage_cache_hit = embed_meta.key_found
-                event_ctx.voyage_cache_mode = embed_meta.cache_mode
-                event_ctx.voyage_latency_ms = embed_meta.provider_latency_ms
+            # Bug #1813 (DEFECT 2): write the triple atomically -- omni
+            # fan-out workers share this SAME context instance
+            # (contextvars.copy_context() is a shallow copy), so three
+            # separate unsynchronized assignments here could interleave
+            # with a concurrent repo's write and produce a torn triple.
+            event_ctx.record_provider_cache_fields(
+                provider_name,
+                cache_hit=embed_meta.key_found,
+                cache_mode=embed_meta.cache_mode,
+                latency_ms=embed_meta.provider_latency_ms,
+            )
     except Exception as _exc:  # noqa: BLE001
         import logging
 
@@ -6691,21 +6695,58 @@ class FilesystemVectorStore:
         # Fires only when the coalesced embedding path sampled this request.
         # _run_deep_fidelity_audit is already fail-open internally; we also
         # guard externally so a bug in the import or the call never breaks search.
+        #
+        # Bug #1813 (DEFECT 1): an on-mode sampled audit performs a REAL,
+        # un-coalesced provider re-embed call plus a second HNSW search --
+        # pure telemetry (top10_overlap) that never influences the returned
+        # results. Running it synchronously here made a cache HIT cost MORE
+        # wall-clock time than a MISS (which never triggers the audit and is
+        # naturally coalesced). The audit result has no bearing on this
+        # request's response, so it is dispatched OUT OF BAND on the shared,
+        # long-lived server executor (fire-and-forget, not awaited) instead
+        # of blocking the caller. contextvars.copy_context() captures the
+        # request's correlation_id so the audit's durable stamp
+        # (_record_audit_metrics -> update_audit_by_key) still resolves the
+        # correct search_embed_event row from the background thread.
+        #
+        # CLI/solo path (parallel_executor is None): the query-embedding
+        # cache is server-only (get_query_embedding_cache() returns None
+        # there), so audit_ctx["sampled"] is never True in practice on this
+        # branch -- kept synchronous+fail-open as a defensive fallback since
+        # there is no shared long-lived executor to dispatch onto safely.
         if audit_ctx.get("sampled") and _run_deep_fidelity_audit is not None:
-            try:
-                _run_deep_fidelity_audit(
-                    audit_ctx=audit_ctx,
-                    hnsw_index=hnsw_index,
-                    hnsw_manager=hnsw_manager,
-                    collection_path=collection_path,
-                    ef=ef,
-                    primary_candidate_ids=candidate_ids,
-                    embedding_provider=embedding_provider,
-                    query=query,
-                    embed_key=_embed_meta.embed_key,
-                )
-            except Exception:  # noqa: BLE001
-                pass  # fail-open: audit never breaks primary search
+            _audit_kwargs: Dict[str, Any] = dict(
+                audit_ctx=audit_ctx,
+                hnsw_index=hnsw_index,
+                hnsw_manager=hnsw_manager,
+                collection_path=collection_path,
+                ef=ef,
+                primary_candidate_ids=candidate_ids,
+                embedding_provider=embedding_provider,
+                query=query,
+                embed_key=_embed_meta.embed_key,
+            )
+            if parallel_executor is not None:
+                _audit_run_ctx = contextvars.copy_context()
+
+                def _run_audit_out_of_band(
+                    _ctx: "contextvars.Context" = _audit_run_ctx,
+                    _kwargs: Dict[str, Any] = _audit_kwargs,
+                ) -> None:
+                    try:
+                        _ctx.run(_run_deep_fidelity_audit, **_kwargs)  # type: ignore[misc]
+                    except Exception:  # noqa: BLE001
+                        pass  # fail-open: audit never breaks primary search
+
+                try:
+                    parallel_executor.submit(_run_audit_out_of_band)
+                except Exception:  # noqa: BLE001
+                    pass  # fail-open: a shutting-down executor must never break search
+            else:
+                try:
+                    _run_deep_fidelity_audit(**_audit_kwargs)
+                except Exception:  # noqa: BLE001
+                    pass  # fail-open: audit never breaks primary search
 
         # ID index already loaded in parallel section
         # Re-acquire lock for thread-safe reference assignment

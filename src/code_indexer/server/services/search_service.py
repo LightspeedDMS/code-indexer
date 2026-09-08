@@ -625,14 +625,18 @@ class SemanticSearchService:
 
                 _event_ctx = _search_event_ctx.get(None)
                 if _event_ctx is not None:
-                    if "cohere" in embedding_service.get_provider_name().lower():
-                        _event_ctx.cohere_cache_hit = _embed_meta.key_found
-                        _event_ctx.cohere_cache_mode = _embed_meta.cache_mode
-                        _event_ctx.cohere_latency_ms = _embed_meta.provider_latency_ms
-                    else:
-                        _event_ctx.voyage_cache_hit = _embed_meta.key_found
-                        _event_ctx.voyage_cache_mode = _embed_meta.cache_mode
-                        _event_ctx.voyage_latency_ms = _embed_meta.provider_latency_ms
+                    # Bug #1813 (DEFECT 2): write the triple atomically --
+                    # omni fan-out workers share this SAME context instance
+                    # (contextvars.copy_context() is a shallow copy), so
+                    # three separate unsynchronized assignments here could
+                    # interleave with a concurrent repo's write and produce
+                    # a torn triple.
+                    _event_ctx.record_provider_cache_fields(
+                        embedding_service.get_provider_name(),
+                        cache_hit=_embed_meta.key_found,
+                        cache_mode=_embed_meta.cache_mode,
+                        latency_ms=_embed_meta.provider_latency_ms,
+                    )
                 # Story #1293: emit the durable search_embed_event row for this
                 # inline (non-FSV) direct call. No-op when meta isn't yet
                 # classified (Path A coalescer path — Story #1293 S1b) or when
