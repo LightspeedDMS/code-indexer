@@ -2,6 +2,9 @@
 ///
 /// Uses `syn` to parse the code and walk the AST, rejecting any forbidden
 /// constructs before they reach the compiler.
+use proc_macro2::TokenStream;
+use syn::parse::Parser;
+use syn::punctuated::Punctuated;
 use syn::visit::Visit;
 use syn::{File, ItemMod};
 
@@ -36,6 +39,7 @@ pub fn validate_evaluator_source(source: &str) -> Result<(), Vec<ValidationError
 
     let mut visitor = ForbiddenConstructVisitor {
         errors: Vec::new(),
+        macro_depth: 0,
     };
     visitor.visit_file(&file);
 
@@ -73,6 +77,13 @@ pub fn validate_rust_graph_evaluator(source: &str) -> Result<(), Vec<ValidationE
 
 struct ForbiddenConstructVisitor {
     errors: Vec<ValidationError>,
+    /// R3-3 (Codex re-review, ROUND 3): tracks recursive macro-token
+    /// validation nesting (visit_macro -> validate_allowed_macro_tokens
+    /// -> self.visit_expr -> visit_macro again for a nested macro).
+    /// ~2000 nested vec! overflowed the real call stack -- this bounds
+    /// the recursion instead of relying on the subprocess boundary alone
+    /// to contain a stack overflow.
+    macro_depth: usize,
 }
 
 impl ForbiddenConstructVisitor {
@@ -83,6 +94,121 @@ impl ForbiddenConstructVisitor {
     fn span_line(span: proc_macro2::Span) -> usize {
         span.start().line
     }
+
+    /// R2-1 CRITICAL (Codex re-review): recursively parse and validate an
+    /// ALLOWLISTED macro's token stream against its REAL grammar, then
+    /// re-run THIS SAME visitor over the resulting sub-expressions/
+    /// patterns -- so a forbidden construct nested inside an allowed
+    /// macro's arguments (e.g. `format!("{}", std::process::Command::
+    /// new("id").spawn())`) is caught exactly as if it had been written
+    /// outside the macro. `syn::Macro.tokens` is otherwise an OPAQUE,
+    /// unparsed `TokenStream` that `Visit` cannot walk into on its own.
+    /// Thin dispatcher -- see `validate_vec_macro_tokens`/
+    /// `validate_matches_macro_tokens`/`validate_comma_separated_exprs`
+    /// for the per-macro grammars.
+    fn validate_allowed_macro_tokens(&mut self, name: &str, tokens: TokenStream, fallback_line: usize) {
+        match name {
+            "vec" => self.validate_vec_macro_tokens(tokens, fallback_line),
+            "format" => self.validate_comma_separated_exprs(name, tokens, fallback_line),
+            "matches" => self.validate_matches_macro_tokens(tokens, fallback_line),
+            other => unreachable!(
+                "validate_allowed_macro_tokens called with non-allowlisted macro name: {}",
+                other
+            ),
+        }
+    }
+
+    /// `vec![a, b, c]` (comma-separated exprs) OR `vec![expr; count]`
+    /// (array-repeat form) -- tries the repeat form first since it has a
+    /// distinct `;` separator; BOTH the repeated element and the count
+    /// are inspected, since either can hide a forbidden construct.
+    fn validate_vec_macro_tokens(&mut self, tokens: TokenStream, fallback_line: usize) {
+        let repeat_parser = |input: syn::parse::ParseStream<'_>| -> syn::Result<(syn::Expr, syn::Expr)> {
+            let expr: syn::Expr = input.parse()?;
+            input.parse::<syn::Token![;]>()?;
+            let count: syn::Expr = input.parse()?;
+            if !input.is_empty() {
+                return Err(input.error("unexpected trailing tokens"));
+            }
+            Ok((expr, count))
+        };
+        if let Ok((expr, count)) = repeat_parser.parse2(tokens.clone()) {
+            self.visit_expr(&expr);
+            self.visit_expr(&count);
+            return;
+        }
+        self.validate_comma_separated_exprs("vec", tokens, fallback_line);
+    }
+
+    /// `matches!(scrutinee, pattern1 | pattern2 if guard)` -- the guard
+    /// clause is optional. Fails CLOSED on anything that doesn't parse
+    /// under this exact grammar.
+    fn validate_matches_macro_tokens(&mut self, tokens: TokenStream, fallback_line: usize) {
+        let matches_parser = |input: syn::parse::ParseStream<'_>| -> syn::Result<(syn::Expr, syn::Pat, Option<syn::Expr>)> {
+            let scrutinee: syn::Expr = input.parse()?;
+            input.parse::<syn::Token![,]>()?;
+            let pattern = syn::Pat::parse_multi_with_leading_vert(input)?;
+            let guard = if input.peek(syn::Token![if]) {
+                input.parse::<syn::Token![if]>()?;
+                Some(input.parse::<syn::Expr>()?)
+            } else {
+                None
+            };
+            if !input.is_empty() {
+                return Err(input.error("unexpected trailing tokens"));
+            }
+            Ok((scrutinee, pattern, guard))
+        };
+        match matches_parser.parse2(tokens) {
+            Ok((scrutinee, pattern, guard)) => {
+                self.visit_expr(&scrutinee);
+                self.visit_pat(&pattern);
+                if let Some(guard_expr) = guard {
+                    self.visit_expr(&guard_expr);
+                }
+            }
+            Err(_) => {
+                self.add_error(
+                    fallback_line,
+                    "`matches!` macro arguments could not be fully inspected and are rejected (fail-closed)".to_string(),
+                );
+            }
+        }
+    }
+
+    /// Shared token-tree validator for vec!/format!: both take a
+    /// comma-separated list of expressions (format!'s leading format
+    /// string is itself just a string-literal expression, harmlessly
+    /// visited like any other -- it cannot inject new code, only
+    /// reference already-in-scope names via `{name}` captures).
+    fn validate_comma_separated_exprs(&mut self, name: &str, tokens: TokenStream, fallback_line: usize) {
+        match Punctuated::<syn::Expr, syn::Token![,]>::parse_terminated.parse2(tokens) {
+            Ok(exprs) => {
+                for expr in exprs.iter() {
+                    self.visit_expr(expr);
+                }
+            }
+            Err(_) => {
+                self.add_error(
+                    fallback_line,
+                    format!(
+                        "`{}!` macro arguments could not be fully inspected and are rejected (fail-closed)",
+                        name
+                    ),
+                );
+            }
+        }
+    }
+}
+
+/// Render a `syn::Path` as a `::`-joined string for error messages (e.g.
+/// `evil::vec`, `no_mangle`).
+fn path_to_string(path: &syn::Path) -> String {
+    path.segments
+        .iter()
+        .map(|s| s.ident.to_string())
+        .collect::<Vec<_>>()
+        .join("::")
 }
 
 impl<'ast> Visit<'ast> for ForbiddenConstructVisitor {
@@ -189,34 +315,147 @@ impl<'ast> Visit<'ast> for ForbiddenConstructVisitor {
         syn::visit::visit_item_mod(self, node);
     }
 
-    // Reject forbidden macros: include!, include_str!, include_bytes!, env!, option_env!,
-    // println!, eprintln!, print!, eprint! (I/O side effects)
-    fn visit_macro(&mut self, node: &'ast syn::Macro) {
-        if let Some(last) = node.path.segments.last() {
-            let name = last.ident.to_string();
-            if matches!(
-                name.as_str(),
-                "include"
-                    | "include_str"
-                    | "include_bytes"
-                    | "env"
-                    | "option_env"
-                    | "println"
-                    | "eprintln"
-                    | "print"
-                    | "eprint"
-                    | "panic"
-                    | "todo"
-                    | "unimplemented"
-            ) {
-                let line = Self::span_line(node.path.segments.first().unwrap().ident.span());
-                self.add_error(
-                    line,
-                    format!("`{}!` macro is not allowed in evaluator code", name),
-                );
-            }
+    // CRITICAL (Codex follow-up review): reject ALL `macro_rules!`
+    // definitions outright. A macro DEFINITION's expansion body is an
+    // opaque, unparsed `proc_macro2::TokenStream` -- `syn`'s `Visit` trait
+    // has no structured AST to walk into it with, so NONE of the other
+    // visit_* methods in this file (visit_path, visit_expr_unsafe, etc.)
+    // can ever see a forbidden construct hidden inside one. Without this,
+    // a user could define `macro_rules! innocuous { () => {
+    // std::process::Command::new(..).spawn(); } }`, invoke `innocuous!()`
+    // under a name that passes the `visit_macro` allowlist below, and have
+    // the validator see nothing wrong -- rustc expands the macro body
+    // AFTER this validator runs, at which point the forbidden code is
+    // real, compiled, and dlopen()'d by the server (arbitrary code
+    // execution). Never attempt to parse/expand and selectively whitelist
+    // macro_rules! bodies -- that reintroduces the same bypass class one
+    // token pattern at a time.
+    fn visit_item_macro(&mut self, node: &'ast syn::ItemMacro) {
+        if node.ident.is_some() {
+            let line = node
+                .mac
+                .path
+                .segments
+                .first()
+                .map(|s| Self::span_line(s.ident.span()))
+                .unwrap_or(0);
+            self.add_error(
+                line,
+                "`macro_rules!` definitions are not allowed in evaluator code".to_string(),
+            );
+            return; // never recurse into the opaque macro_rules! body
         }
+        syn::visit::visit_item_macro(self, node);
+    }
+
+    // CRITICAL (Codex follow-up review, R2-1 re-review): FAIL-CLOSED
+    // ALLOWLIST, not a blocklist. A macro invocation whose name is not
+    // explicitly listed here is rejected, no matter how innocuous it
+    // looks -- this is what makes the `visit_item_macro` ban above
+    // actually effective: a blocklist checking only well-known I/O macro
+    // NAMES (println!, include!, etc.) would let a user-defined macro's
+    // INVOCATION sail through under any unlisted name. `vec!`/`format!`/
+    // `matches!` are the only macros this project's own shipped evaluator
+    // examples (incl. the catch-rethrow seed pattern) use.
+    //
+    // R2-1 fixes two gaps a re-review found in the FIRST version of this
+    // allowlist:
+    //   1. The path match was LAST-SEGMENT-ONLY (`node.path.segments.
+    //      last()`), so a QUALIFIED path ending in an allowlisted name --
+    //      `evil::vec!`, `std::vec!`, `::vec!` -- sailed through. Now
+    //      requires a bare, single-segment, non-leading-colon path.
+    //   2. An allowlisted macro's TOKEN STREAM was never inspected --
+    //      `syn::Macro.tokens` is opaque to `Visit`, so a forbidden
+    //      construct hidden inside e.g. `format!("{}", std::process::
+    //      Command::new("id").spawn())` was accepted. Now dispatches to
+    //      `validate_allowed_macro_tokens`, which recursively parses the
+    //      tokens into their real grammar and re-runs this visitor over
+    //      the result, failing CLOSED on anything it cannot parse.
+    fn visit_macro(&mut self, node: &'ast syn::Macro) {
+        const ALLOWED_MACROS: &[&str] = &["vec", "format", "matches"];
+        // R3-3 (Codex re-review, ROUND 3): ~2000 nested vec! overflowed
+        // the real call stack during validation, aborting the xray-cli
+        // child process. This bounds macro-nesting recursion explicitly
+        // instead of relying solely on the subprocess boundary to
+        // contain a stack overflow -- 32 is far beyond any realistic
+        // legitimate evaluator's nesting depth.
+        const MAX_MACRO_RECURSION_DEPTH: usize = 32;
+
+        let name = node
+            .path
+            .segments
+            .last()
+            .map(|s| s.ident.to_string())
+            .unwrap_or_default();
+        let name_line = node
+            .path
+            .segments
+            .first()
+            .map(|s| Self::span_line(s.ident.span()))
+            .unwrap_or(0);
+        let is_bare_path = node.path.leading_colon.is_none() && node.path.segments.len() == 1;
+
+        if self.macro_depth >= MAX_MACRO_RECURSION_DEPTH {
+            self.add_error(
+                name_line,
+                format!(
+                    "macro nesting exceeds the maximum allowed depth ({}) -- \
+                     rejected to avoid a stack overflow during validation",
+                    MAX_MACRO_RECURSION_DEPTH
+                ),
+            );
+            return; // never recurse further -- exactly what this guards against
+        }
+
+        if !is_bare_path {
+            self.add_error(
+                name_line,
+                format!(
+                    "qualified macro invocation `{}!` is not allowed -- only a bare, \
+                     unqualified vec!/format!/matches! is permitted",
+                    path_to_string(&node.path)
+                ),
+            );
+        } else if !ALLOWED_MACROS.contains(&name.as_str()) {
+            self.add_error(
+                name_line,
+                format!(
+                    "`{}!` macro is not allowed in evaluator code (only vec!/format!/matches! are permitted)",
+                    name
+                ),
+            );
+        } else {
+            self.macro_depth += 1;
+            self.validate_allowed_macro_tokens(&name, node.tokens.clone(), name_line);
+            self.macro_depth -= 1;
+        }
+
         syn::visit::visit_macro(self, node);
+    }
+
+    // R2-1 (Codex re-review): attributes and their token streams were
+    // accepted without ANY inspection. `#[no_mangle]` can be used to
+    // clobber or impersonate exported symbols in the compiled dynamic
+    // library; `#![no_std]` and any other attribute carry an opaque token
+    // stream this validator cannot otherwise see into. Fail-closed
+    // ALLOWLIST: only `doc` (the lowered form of `///`/`//!` comments,
+    // which carry no executable content) is permitted -- every other
+    // attribute name is rejected outright, regardless of what its own
+    // token stream contains.
+    fn visit_attribute(&mut self, node: &'ast syn::Attribute) {
+        if !node.path().is_ident("doc") {
+            let name = path_to_string(node.path());
+            let line = Self::span_line(node.pound_token.span);
+            self.add_error(
+                line,
+                format!(
+                    "`#[{name}]`/`#![{name}]` attributes are not allowed in evaluator \
+                     code (only doc comments are permitted)",
+                    name = name
+                ),
+            );
+        }
+        syn::visit::visit_attribute(self, node);
     }
 }
 
@@ -282,6 +521,320 @@ fn check_forbidden_std_subpath(tree: &syn::UseTree, errors: &mut Vec<ValidationE
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // --- CRITICAL (Codex follow-up review): user-defined macros bypass
+    // the entire evaluator security whitelist ---
+    //
+    // `visit_macro` previously inspected only the macro NAME at each
+    // INVOCATION site against a fixed blocklist -- it never looked at
+    // `macro_rules!` DEFINITION bodies, which `syn` stores as an opaque,
+    // unparsed `TokenStream` its `Visit` trait cannot walk into. A user
+    // could therefore define a macro whose expansion contains forbidden
+    // constructs, invoke it under an innocuous name, and have the
+    // validator see nothing wrong -- rustc expands macro_rules! bodies
+    // AFTER validation, at which point the forbidden code is real,
+    // compiled, and dlopen()'d by the server. Fixed via `visit_item_macro`
+    // (rejects every macro_rules! definition outright) plus converting
+    // `visit_macro` to a fail-closed allowlist.
+
+    #[test]
+    fn macro_rules_definition_smuggling_std_process_must_be_rejected() {
+        let payload = r#"
+macro_rules! innocuous_helper {
+    () => {
+        std::process::Command::new("id").spawn().ok();
+    };
+}
+fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> {
+    innocuous_helper!();
+    Vec::new()
+}
+"#;
+        assert!(
+            validate_evaluator_source(payload).is_err(),
+            "a macro_rules! definition must be rejected outright -- its body is opaque \
+             to this validator and can smuggle any forbidden construct, including \
+             std::process::Command"
+        );
+    }
+
+    #[test]
+    fn macro_rules_definition_smuggling_unsafe_must_be_rejected() {
+        let payload = r#"
+macro_rules! innocuous_helper {
+    () => {
+        unsafe { std::ptr::null::<u8>().read(); }
+    };
+}
+fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> {
+    innocuous_helper!();
+    Vec::new()
+}
+"#;
+        assert!(
+            validate_evaluator_source(payload).is_err(),
+            "a macro_rules! definition must be rejected outright, regardless of what \
+             forbidden construct its body smuggles"
+        );
+    }
+
+    #[test]
+    fn non_whitelisted_macro_invocation_is_rejected_fail_closed() {
+        let payload = r#"
+fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> {
+    println!("{}", node.kind);
+    Vec::new()
+}
+"#;
+        assert!(
+            validate_evaluator_source(payload).is_err(),
+            "a macro invocation not on the explicit allowlist must be rejected \
+             fail-closed, even one as innocuous-looking as println!"
+        );
+    }
+
+    #[test]
+    fn allowlisted_macros_vec_and_format_are_still_accepted() {
+        let payload = r#"
+fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> {
+    let msg = format!("kind={}", node.kind);
+    vec![EvalFinding { pattern: "x".to_string(), line: node.start_line, snippet: msg }]
+}
+"#;
+        assert!(
+            validate_evaluator_source(payload).is_ok(),
+            "vec!/format! are the two macros this project's own documented evaluator \
+             examples use and must remain allowed"
+        );
+    }
+
+    // --- R2-1 CRITICAL (Codex re-review): allowlisted macro token streams
+    // were never inspected, and the path match was last-segment-only ---
+
+    #[test]
+    fn qualified_vec_macro_path_is_rejected() {
+        // No `mod evil { ... }` declaration on purpose: syn only parses
+        // SYNTAX, not semantics, so `evil::vec![1, 2, 3]` is syntactically
+        // valid without `evil` needing to exist anywhere. Declaring the
+        // module would accidentally trigger the UNRELATED pre-existing
+        // `mod` ban (visit_item_mod) instead of genuinely discriminating
+        // on the path-exactness check this test targets.
+        let payload = r#"
+fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> {
+    let _v: Vec<i32> = evil::vec![1, 2, 3];
+    Vec::new()
+}
+"#;
+        let result = validate_evaluator_source(payload);
+        assert!(
+            result.is_err(),
+            "a QUALIFIED macro path (evil::vec!) must be rejected even though \
+             the last path segment matches an allowlisted name -- only a bare, \
+             unqualified vec!/format!/matches! is permitted"
+        );
+        let errors = result.unwrap_err();
+        assert!(
+            !errors.iter().any(|e| e.message.contains("mod")),
+            "this test must discriminate on the QUALIFIED PATH check \
+             specifically, not an unrelated `mod` declaration ban; got: {:?}",
+            errors
+        );
+    }
+
+    #[test]
+    fn forbidden_construct_hidden_inside_format_macro_tokens_is_rejected() {
+        let payload = r#"
+fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> {
+    let msg = format!("{}", std::process::Command::new("id").spawn().unwrap().id());
+    vec![EvalFinding { pattern: "x".to_string(), line: node.start_line, snippet: msg }]
+}
+"#;
+        assert!(
+            validate_evaluator_source(payload).is_err(),
+            "a forbidden construct (std::process::Command) hidden inside an \
+             ALLOWLISTED format! macro's argument tokens must still be \
+             rejected -- the allowlist covers the macro NAME, not a license \
+             to skip inspecting its contents"
+        );
+    }
+
+    #[test]
+    fn forbidden_construct_hidden_inside_vec_macro_tokens_is_rejected() {
+        let payload = r#"
+fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> {
+    let _x = vec![std::process::Command::new("id").spawn().unwrap().id() as i32];
+    Vec::new()
+}
+"#;
+        assert!(
+            validate_evaluator_source(payload).is_err(),
+            "a forbidden construct hidden inside an ALLOWLISTED vec! macro's \
+             argument tokens must still be rejected"
+        );
+    }
+
+    #[test]
+    fn vec_repeat_form_with_forbidden_construct_in_count_is_rejected() {
+        let payload = r#"
+fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> {
+    let _x: Vec<i32> = vec![0; std::process::Command::new("id").spawn().unwrap().id() as usize];
+    Vec::new()
+}
+"#;
+        assert!(
+            validate_evaluator_source(payload).is_err(),
+            "the vec![expr; count] array-repeat form's COUNT expression must \
+             also be inspected, not just the repeated element"
+        );
+    }
+
+    // --- R2-2 HIGH regression fix (Codex re-review): matches! must be
+    // safely supported (token-inspected), not merely re-allowlisted ---
+
+    #[test]
+    fn matches_macro_is_allowlisted_and_accepted() {
+        let payload = r#"
+fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> {
+    let _ = matches!(node.kind.as_str(), "x" | "y" if node.start_line > 0);
+    Vec::new()
+}
+"#;
+        assert!(
+            validate_evaluator_source(payload).is_ok(),
+            "matches! is used by this project's own shipped seed patterns \
+             (catch-rethrow) and must be allowed once its token tree is \
+             safely inspected rather than special-cased"
+        );
+    }
+
+    #[test]
+    fn forbidden_construct_hidden_inside_matches_guard_is_rejected() {
+        let payload = r#"
+fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> {
+    let _ = matches!(node.kind.as_str(), _ if { std::process::Command::new("id").spawn().unwrap(); true });
+    Vec::new()
+}
+"#;
+        assert!(
+            validate_evaluator_source(payload).is_err(),
+            "a forbidden construct hidden inside matches!'s `if` guard \
+             expression must be rejected"
+        );
+    }
+
+    #[test]
+    fn forbidden_construct_hidden_inside_matches_scrutinee_is_rejected() {
+        let payload = r#"
+fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> {
+    let _ = matches!(std::process::Command::new("id").spawn().unwrap().id(), 0);
+    Vec::new()
+}
+"#;
+        assert!(
+            validate_evaluator_source(payload).is_err(),
+            "a forbidden construct hidden inside matches!'s scrutinee \
+             expression must be rejected"
+        );
+    }
+
+    // --- R2-1 attribute closure (Codex re-review): #[no_mangle]/#![no_std]
+    // and other attributes were accepted without inspection ---
+
+    #[test]
+    fn no_mangle_attribute_is_rejected() {
+        let payload = r#"
+#[no_mangle]
+fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> {
+    Vec::new()
+}
+"#;
+        assert!(
+            validate_evaluator_source(payload).is_err(),
+            "`#[no_mangle]` must be rejected -- it can be used to clobber or \
+             impersonate exported symbols in the compiled dynamic library"
+        );
+    }
+
+    #[test]
+    fn no_std_inner_attribute_is_rejected() {
+        let payload = r#"
+#![no_std]
+fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> {
+    Vec::new()
+}
+"#;
+        assert!(
+            validate_evaluator_source(payload).is_err(),
+            "`#![no_std]` must be rejected -- attribute token streams are not \
+             otherwise inspected and must not be blanket-accepted"
+        );
+    }
+
+    #[test]
+    fn doc_comment_attributes_are_still_accepted() {
+        let payload = r#"
+/// Finds try-catch-rethrow patterns.
+fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> {
+    Vec::new()
+}
+"#;
+        assert!(
+            validate_evaluator_source(payload).is_ok(),
+            "doc comments (lowered to #[doc = \"...\"] attributes) must remain \
+             allowed -- they carry no executable content"
+        );
+    }
+
+    // --- R3-3 (Codex re-review, ROUND 3): recursive macro-token
+    // validation has no depth bound -- ~2000 nested vec! overflowed the
+    // real call stack, aborting the xray-cli child process. Test nesting
+    // levels below are deliberately far below that ~2000 crash threshold
+    // so these tests themselves can NEVER crash the test binary
+    // regardless of whether the fix is present -- pre-fix, exceeding the
+    // limit must be a normal, safe assertion failure, not a crash.
+    // ---
+
+    const TEST_NESTING_BEYOND_LIMIT: usize = 70;
+    const TEST_NESTING_WITHIN_LIMIT: usize = 5;
+
+    fn nested_vec_macro_payload(nesting: usize) -> String {
+        let nested = format!("{}1{}", "vec![".repeat(nesting), "]".repeat(nesting));
+        format!(
+            "fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> {{\n    let _x = {};\n    Vec::new()\n}}\n",
+            nested
+        )
+    }
+
+    #[test]
+    fn deeply_nested_macros_beyond_the_recursion_limit_are_rejected() {
+        let payload = nested_vec_macro_payload(TEST_NESTING_BEYOND_LIMIT);
+        let result = validate_evaluator_source(&payload);
+        assert!(
+            result.is_err(),
+            "macro nesting beyond the recursion depth limit must be rejected \
+             with a clear error, never silently accepted or left to overflow \
+             the real call stack"
+        );
+        let errors = result.unwrap_err();
+        assert!(
+            errors.iter().any(|e| e.message.to_lowercase().contains("depth")
+                || e.message.to_lowercase().contains("recursion")
+                || e.message.to_lowercase().contains("nest")),
+            "the rejection message should explain it's a nesting/recursion \
+             depth limit, not an unrelated error; got: {:?}",
+            errors
+        );
+    }
+
+    #[test]
+    fn modestly_nested_macros_within_the_limit_are_still_accepted() {
+        let payload = nested_vec_macro_payload(TEST_NESTING_WITHIN_LIMIT);
+        assert!(
+            validate_evaluator_source(&payload).is_ok(),
+            "modest, realistic macro nesting (well within the depth limit) \
+             must remain accepted"
+        );
+    }
 
     // --- AC8: validate_rust_graph_evaluator (Rust-side gate for graph mode) ---
 
