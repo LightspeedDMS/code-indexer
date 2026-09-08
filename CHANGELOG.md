@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [12.42.0] - 2026-09-08
+
+### Fixed
+
+- X-Ray graph mode: evaluators are now compiled by the SAME rustc toolchain that
+  built xray-cli. rustup resolves the toolchain from the calling process's
+  working directory, so an evaluator compiled at runtime by the server picked up
+  `rustup default` instead of the pinned channel. GraphHandle crosses the dylib
+  boundary as plain Rust fn pointers, whose ABI is unspecified across compiler
+  versions, so a mismatch corrupted the heap -- observed as a double free or
+  SIGSEGV when signature_for and shortest_path_to_any were used together
+  (#1816).
+
 ## [12.41.0] - 2026-09-08
 
 ### Security
