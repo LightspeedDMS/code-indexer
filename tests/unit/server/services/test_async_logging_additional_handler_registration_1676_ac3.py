@@ -49,7 +49,7 @@ class TestRegisterAdditionalListenerHandler:
             assert result is True
             assert extra in listener.handlers
         finally:
-            listener.stop()
+            shutdown_queue_logging()
 
     def test_registering_same_handler_twice_is_idempotent(self) -> None:
         listener, _base = _install_listener()
@@ -66,7 +66,7 @@ class TestRegisterAdditionalListenerHandler:
             )
             assert listener.handlers.count(extra) == 1
         finally:
-            listener.stop()
+            shutdown_queue_logging()
 
     def test_returns_false_when_no_active_listener(self) -> None:
         # No install_queue_logging() call in this test -- simulate the
@@ -91,7 +91,7 @@ class TestUnregisterAdditionalListenerHandler:
             assert result is True
             assert extra not in listener.handlers
         finally:
-            listener.stop()
+            shutdown_queue_logging()
 
     def test_unregistering_an_unregistered_handler_returns_false(self) -> None:
         listener, _base = _install_listener()
@@ -102,7 +102,7 @@ class TestUnregisterAdditionalListenerHandler:
 
             assert result is False
         finally:
-            listener.stop()
+            shutdown_queue_logging()
 
     def test_returns_false_when_no_active_listener(self) -> None:
         shutdown_queue_logging()
