@@ -66,6 +66,41 @@ def _pid_alive(pid: int) -> bool:
     return state != "Z"
 
 
+def _pid_state(pid: int) -> str:
+    """Classify `pid` as "gone" (fully reaped -- no process-table entry
+    at all), "zombie" (exited but not yet reaped by its parent), or
+    "running" (still executing).
+
+    Unlike `_pid_alive` above (which deliberately treats a zombie as
+    dead -- correct for the sibling orphan-grandchild test, where a
+    killed orphan grandchild is expected to end up a zombie under its
+    new (init) parent), this function must NOT collapse "zombie" into
+    "gone": `os.kill(pid, 0)` succeeds against a zombie's pid because
+    the kernel has not recycled the process-table entry yet, so a bug
+    that merely SIGKILLs the child but skips `proc.wait()` -- leaving
+    it an unreaped zombie -- must be reported as "zombie", not "gone".
+    """
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return "gone"
+    except PermissionError:
+        # Process exists but owned by someone else -- shouldn't happen
+        # for our own child, but fail safe rather than claim "gone".
+        return "running"
+
+    try:
+        stat_text = Path(f"/proc/{pid}/stat").read_text()
+    except OSError:
+        # Vanished between os.kill(0) succeeding and reading /proc --
+        # the race resolved in our favor.
+        return "gone"
+
+    after_comm = stat_text.rsplit(")", 1)[-1]
+    state = after_comm.split()[0]
+    return "zombie" if state == "Z" else "running"
+
+
 def test_orphan_descendant_does_not_survive_timeout_kill(tmp_path: Path) -> None:
     """A grandchild process spawned by the timed-out child must NOT
     survive `_run_xray_cli_process`'s timeout-triggered kill."""
@@ -125,8 +160,16 @@ def test_permission_error_from_killpg_does_not_prevent_reaping_or_propagate(
     subprocess, real `proc.wait()` reaping) stays real. Captures the real
     child PID via `on_process_spawned` and proves it is genuinely reaped
     afterward, not just that a normal error tuple was returned."""
+    # This test mocks os.killpg to RAISE, so the child is never actually
+    # signalled -- it exits only when its own sleep ends, and proc.wait()
+    # blocks for that whole duration. Reusing _PARENT_SLEEP_SECONDS (30) made
+    # this the slowest test in tests/unit/xray/ at 30.08s, past the fast
+    # suite's 10s investigate threshold. It only has to still be RUNNING when
+    # the 1s timeout fires, so a few seconds preserves the exact condition
+    # under test at a fraction of the cost.
+    unkilled_parent_sleep_seconds = 3
     script = tmp_path / "sleep_only.sh"
-    script.write_text(f"#!/bin/bash\nsleep {_PARENT_SLEEP_SECONDS}\n")
+    script.write_text(f"#!/bin/bash\nsleep {unkilled_parent_sleep_seconds}\n")
     script.chmod(0o755)
 
     spawned_pid: dict = {}
@@ -151,14 +194,24 @@ def test_permission_error_from_killpg_does_not_prevent_reaping_or_propagate(
 
     assert "value" in spawned_pid, "on_process_spawned callback was never invoked"
 
+    # NOTE: deliberately uses `_pid_state` (gone/zombie/running), NOT the
+    # zombie-tolerant `_pid_alive` above. `_pid_alive` treats a zombie as
+    # dead, which would make this assertion pass whether or not
+    # `proc.wait()` actually ran -- a bug that SIGKILLs the child but skips
+    # `proc.wait()` leaves it an unreaped ZOMBIE, and `os.kill(pid, 0)`
+    # alone cannot tell that apart from a fully-reaped pid (Bug #1819).
     reap_deadline = time.time() + _REAP_WAIT_DEADLINE_SECONDS
-    child_alive = _pid_alive(spawned_pid["value"])
-    while child_alive and time.time() < reap_deadline:
+    child_state = _pid_state(spawned_pid["value"])
+    while child_state != "gone" and time.time() < reap_deadline:
         time.sleep(_REAP_POLL_INTERVAL_SECONDS)
-        child_alive = _pid_alive(spawned_pid["value"])
+        child_state = _pid_state(spawned_pid["value"])
 
-    assert not child_alive, (
-        f"direct child pid {spawned_pid['value']} must still be reaped "
+    assert child_state == "gone", (
+        f"direct child pid {spawned_pid['value']} must be fully reaped "
         "(proc.wait() must run) even when os.killpg itself raised "
-        "PermissionError"
+        f"PermissionError -- observed state: {child_state!r} (a 'zombie' "
+        "state means the process exited but proc.wait() never consumed "
+        "it, which os.kill(pid, 0)/`_pid_alive` alone cannot detect since "
+        "both also report success/alive against a zombie's still-present "
+        "process-table entry)"
     )
