@@ -14,7 +14,7 @@ import logging
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, Dict, Optional, cast
+from typing import TYPE_CHECKING, Any, Callable, Dict, NamedTuple, Optional, cast
 
 if TYPE_CHECKING:
     from code_indexer.server.services.resizable_limiter import ResizableLimiter
@@ -94,8 +94,66 @@ _DEFAULT_EVALUATOR_CODE = (
 _DEFAULT_TIMEOUT_SECONDS = 120
 
 
-def _resolve_default_xray_timeout_seconds() -> int:
-    """Return the effective default xray timeout, read LIVE from ConfigService.
+def _record_xray_timeout_config_read_failure_metric(reason: str) -> None:
+    """Record a cidx.xray.timeout_config_read_failures OTEL counter event
+    (consolidated review, Issue #1811/Bug #1812, new finding #7).
+
+    A WARNING log alone is insufficient observability at fleet scale
+    (~900 repos): a node whose ConfigService stays permanently broken
+    would silently ignore the operator-configured xray_timeout_seconds
+    override on EVERY xray request, forever, with only a log line to
+    notice. This never changes the fail-soft fallback itself (Bug #1399) --
+    it only makes repeated failures observable beyond log-scraping.
+
+    Follows the same peek_telemetry_manager() + is_active gating pattern as
+    code_indexer.xray.rust_backend._record_identity_failure_metric: lazy
+    import (this module is server-only, but keeping the import local avoids
+    paying telemetry import cost on the hot path when telemetry is
+    disabled) and never raises -- a metrics failure must never break xray
+    timeout resolution.
+
+    Args:
+        reason: Short failure classification, e.g. "exception".
+    """
+    try:
+        from code_indexer.server.telemetry.manager import (  # noqa: PLC0415
+            peek_telemetry_manager,
+        )
+        from code_indexer.server.telemetry.metrics_instrumentation import (  # noqa: PLC0415
+            get_application_metrics,
+        )
+
+        telemetry_manager = peek_telemetry_manager()
+        if telemetry_manager is None:
+            return
+        app_metrics = get_application_metrics(telemetry_manager)
+        if not app_metrics.is_active:
+            return
+        app_metrics.record_xray_timeout_config_read_failure(reason=reason)
+    except Exception as exc:  # never break xray timeout resolution
+        logger.debug(
+            "Failed to record xray timeout config read failure metric: %s", exc
+        )
+
+
+class _TimeoutResolution(NamedTuple):
+    """Result of resolving the effective default xray timeout.
+
+    Consolidated review (Issue #1811/Bug #1812, new finding #7 follow-up):
+    `degraded=True` means the ConfigService read failed and the hardcoded
+    `_DEFAULT_TIMEOUT_SECONDS` was silently substituted. Callers that reach
+    this state must surface `configuration_degraded: true` in their
+    immediate response -- an OTEL counter and a WARNING log are invisible
+    to the caller making THIS specific request.
+    """
+
+    seconds: int
+    degraded: bool
+
+
+def _resolve_default_xray_timeout_seconds_detailed() -> _TimeoutResolution:
+    """Return the effective default xray timeout, read LIVE from ConfigService,
+    plus whether the fail-soft fallback was used.
 
     Bug #1399: xray_config.xray_timeout_seconds was settable/validated via
     the Web UI Config screen but never consulted here -- the effective
@@ -105,10 +163,16 @@ def _resolve_default_xray_timeout_seconds() -> int:
 
     Fails soft to _DEFAULT_TIMEOUT_SECONDS on any read failure (no
     config_service wired yet, DB outage, etc.) so a config-layer problem
-    never blocks an xray search request.
+    never blocks an xray search request -- but reports `degraded=True` so
+    the caller can decide whether/how to surface that fact.
     """
     try:
-        return int(get_config_service().get_config().xray_config.xray_timeout_seconds)
+        return _TimeoutResolution(
+            seconds=int(
+                get_config_service().get_config().xray_config.xray_timeout_seconds
+            ),
+            degraded=False,
+        )
     except Exception as exc:  # noqa: BLE001
         logger.warning(
             "xray: failed to read configured xray_timeout_seconds, falling "
@@ -116,7 +180,33 @@ def _resolve_default_xray_timeout_seconds() -> int:
             _DEFAULT_TIMEOUT_SECONDS,
             exc,
         )
-        return _DEFAULT_TIMEOUT_SECONDS
+        _record_xray_timeout_config_read_failure_metric(reason="exception")
+        return _TimeoutResolution(seconds=_DEFAULT_TIMEOUT_SECONDS, degraded=True)
+
+
+def _resolve_default_xray_timeout_seconds() -> int:
+    """Return the effective default xray timeout, read LIVE from ConfigService.
+
+    Thin wrapper around `_resolve_default_xray_timeout_seconds_detailed()`
+    for call sites that only need the timeout value (not the degraded
+    flag). See that function's docstring for the fail-soft contract.
+    """
+    return _resolve_default_xray_timeout_seconds_detailed().seconds
+
+
+def _resolve_effective_timeout(timeout_override: Optional[int]) -> "tuple[int, bool]":
+    """Return (effective_timeout, configuration_degraded) for a call site.
+
+    Centralizes the override-vs-config-default choice so every xray_search/
+    xray_explore branch (single-repo, multi-repo) surfaces the SAME
+    `configuration_degraded` semantics: an explicit caller override never
+    degrades (the config default was never consulted); an omitted override
+    degrades only when the ConfigService read itself failed.
+    """
+    if timeout_override is not None:
+        return timeout_override, False
+    resolution = _resolve_default_xray_timeout_seconds_detailed()
+    return resolution.seconds, resolution.degraded
 
 
 # Guard so ensure_seed_patterns() is called at most once per process lifetime.
@@ -151,12 +241,26 @@ def _resolve_evaluator_code(
     params: Dict[str, Any],
     repo_alias: str,
     default_evaluator: str = _DEFAULT_EVALUATOR_CODE,
+    allow_default_evaluator: bool = False,
 ) -> "tuple[str, Optional[Dict[str, Any]]]":
     """Resolve evaluator_code from pattern_name or raw evaluator_code.
 
     Returns ``(evaluator_code, None)`` on success, or
     ``("", error_response)`` where *error_response* is a complete
     ``_mcp_response`` dict that the caller must return immediately.
+
+    Consolidated review finding H5 (Issue #1811/Bug #1812): when NEITHER
+    ``pattern_name`` nor ``evaluator_code`` is supplied, the SAFE-BY-DEFAULT
+    behavior (``allow_default_evaluator=False``) is to reject the request
+    with ``evaluator_code_required`` -- never silently substitute
+    ``default_evaluator`` (Rule 2, anti-fallback). Pass
+    ``allow_default_evaluator=True`` ONLY from a call site that has its own
+    documented contract for this fallback (currently ``handle_xray_search``
+    and ``handle_xray_explore`` -- both document "when omitted, the server
+    substitutes a default..." in their tool_docs). This makes the rule live
+    in exactly ONE place instead of being duplicated by every caller that
+    does NOT want the fallback (e.g. the REST route, which no longer needs
+    its own hand-rolled pre-check).
     """
     global _seeds_ensured
 
@@ -208,10 +312,68 @@ def _resolve_evaluator_code(
             )
         return (evaluator_code, None)
 
-    evaluator_code = (
-        raw_evaluator_code if raw_evaluator_code.strip() else default_evaluator
+    if raw_evaluator_code.strip():
+        return (raw_evaluator_code, None)
+
+    if allow_default_evaluator:
+        return (default_evaluator, None)
+
+    return (
+        "",
+        _mcp_response(
+            {
+                "error": "evaluator_code_required",
+                "message": "Either evaluator_code or pattern_name must be provided",
+            }
+        ),
     )
-    return (evaluator_code, None)
+
+
+async def _resolve_evaluator_code_off_loop(
+    params: Dict[str, Any],
+    repo_alias: str,
+    allow_default_evaluator: bool = False,
+) -> "tuple[str, Optional[Dict[str, Any]]]":
+    """H3 (consolidated review, Issue #1811/Bug #1812, Codex): async
+    wrapper that runs `_resolve_evaluator_code` on the DEDICATED
+    `xray_executor` (this file's own established offloading idiom --
+    `loop.run_in_executor(xray_executor, ...)`, already used for the real
+    search execution below) instead of directly on the event loop thread.
+
+    `_resolve_evaluator_code` can do real filesystem I/O
+    (`XrayPatternService.ensure_seed_patterns`'s mkdir/write_text,
+    `_load_pattern`'s YAML read) AND spawn a git subprocess
+    (`ensure_seed_patterns`'s git add + git commit) whenever `pattern_name`
+    is supplied. `cidx-meta` lives on a hard NFSv3 mount, where any of
+    these calls can block FOREVER -- calling this directly inside an
+    `async def` handler (as both `handle_xray_search`/`handle_xray_explore`
+    previously did) blocks the WHOLE event loop, stalling every other
+    request on this node (this project's explicit async-I/O invariant).
+
+    Only offloads when `pattern_name` is supplied AND `evaluator_code` is
+    NOT -- mirroring `_resolve_evaluator_code`'s own internal guard
+    exactly (`if pattern_name and raw_evaluator_code.strip(): return
+    mutually_exclusive_params`). That is the ONLY branch capable of any
+    I/O at all: when both are given, the function returns the
+    mutually-exclusive error immediately with zero I/O; when neither is
+    given, it returns the caller-supplied/default evaluator verbatim,
+    also zero I/O. Offloading either of those cases would be a pointless
+    thread-pool round-trip for no safety benefit.
+    """
+    pattern_name = params.get("pattern_name")
+    raw_evaluator_code = (params.get("evaluator_code") or "").strip()
+    if not (pattern_name and not raw_evaluator_code):
+        return _resolve_evaluator_code(
+            params, repo_alias, allow_default_evaluator=allow_default_evaluator
+        )
+    loop = asyncio.get_running_loop()
+    xray_executor = _get_xray_executor()
+    return await loop.run_in_executor(
+        xray_executor,
+        lambda: _resolve_evaluator_code(
+            params, repo_alias, allow_default_evaluator=allow_default_evaluator
+        ),
+    )
 
 
 # await_seconds range and poll interval.
@@ -526,8 +688,16 @@ async def handle_xray_search(params: Dict[str, Any], user: User) -> Dict[str, An
         if isinstance(candidate, str) and candidate:
             repo_alias_parsed = candidate
 
-    evaluator_code, err_resp = _resolve_evaluator_code(
-        params, _pattern_scope_alias(repo_alias_parsed)
+    # H5 (consolidated review, Issue #1811/Bug #1812): this handler's own
+    # tool_docs document the default-evaluator fallback as intentional
+    # ("when omitted, the server substitutes a default...") -- opt in
+    # explicitly rather than relying on the function's old unconditional
+    # behavior. H3: offloaded to the dedicated xray_executor -- see
+    # _resolve_evaluator_code_off_loop's docstring for why.
+    evaluator_code, err_resp = await _resolve_evaluator_code_off_loop(
+        params,
+        _pattern_scope_alias(repo_alias_parsed),
+        allow_default_evaluator=True,
     )
     if err_resp is not None:
         return err_resp
@@ -654,10 +824,8 @@ async def handle_xray_search(params: Dict[str, Any], user: User) -> Dict[str, An
         # ------------------------------------------------------------------
         # 4. Effective timeout + range check (multi-repo path)
         # ------------------------------------------------------------------
-        effective_timeout_multi: int = (
-            timeout_override
-            if timeout_override is not None
-            else _resolve_default_xray_timeout_seconds()
+        effective_timeout_multi, timeout_config_degraded_multi = (
+            _resolve_effective_timeout(timeout_override)
         )
         if not (_TIMEOUT_MIN <= effective_timeout_multi <= _TIMEOUT_MAX):
             return _mcp_response(
@@ -798,7 +966,10 @@ async def handle_xray_search(params: Dict[str, Any], user: User) -> Dict[str, An
             _future.add_done_callback(_make_search_done_cb(jid))
             job_ids.append(jid)
 
-        return _mcp_response({"job_ids": job_ids, "errors": errors})
+        multi_response_body: Dict[str, Any] = {"job_ids": job_ids, "errors": errors}
+        if timeout_config_degraded_multi:
+            multi_response_body["configuration_degraded"] = True
+        return _mcp_response(multi_response_body)
 
     # ------------------------------------------------------------------
     # Single-repo path (string alias)
@@ -840,10 +1011,8 @@ async def handle_xray_search(params: Dict[str, Any], user: User) -> Dict[str, An
     # ------------------------------------------------------------------
     # 4. Effective timeout + range check
     # ------------------------------------------------------------------
-    effective_timeout: int = (
+    effective_timeout, timeout_config_degraded = _resolve_effective_timeout(
         timeout_override
-        if timeout_override is not None
-        else _resolve_default_xray_timeout_seconds()
     )
     if not (_TIMEOUT_MIN <= effective_timeout <= _TIMEOUT_MAX):
         return _mcp_response(
@@ -956,9 +1125,14 @@ async def handle_xray_search(params: Dict[str, Any], user: User) -> Dict[str, An
     if await_seconds > 0:
         inline = await _await_xray_future(future, await_seconds)
         if inline is not None:
+            if timeout_config_degraded:
+                inline = {**inline, "configuration_degraded": True}
             return _mcp_response(inline)
 
-    return _mcp_response({"job_id": job_id})
+    response_body: Dict[str, Any] = {"job_id": job_id}
+    if timeout_config_degraded:
+        response_body["configuration_degraded"] = True
+    return _mcp_response(response_body)
 
 
 # Default and range constants for max_debug_nodes (xray_explore).
@@ -1237,8 +1411,16 @@ async def handle_xray_explore(params: Dict[str, Any], user: User) -> Dict[str, A
         if isinstance(candidate, str) and candidate:
             repo_alias_parsed = candidate
 
-    evaluator_code, err_resp = _resolve_evaluator_code(
-        params, _pattern_scope_alias(repo_alias_parsed)
+    # H5 (consolidated review, Issue #1811/Bug #1812): this handler's own
+    # tool_docs document the default-evaluator fallback as intentional
+    # ("when omitted, the server substitutes a default...") -- opt in
+    # explicitly rather than relying on the function's old unconditional
+    # behavior. H3: offloaded to the dedicated xray_executor -- see
+    # _resolve_evaluator_code_off_loop's docstring for why.
+    evaluator_code, err_resp = await _resolve_evaluator_code_off_loop(
+        params,
+        _pattern_scope_alias(repo_alias_parsed),
+        allow_default_evaluator=True,
     )
     if err_resp is not None:
         return err_resp
@@ -1368,10 +1550,8 @@ async def handle_xray_explore(params: Dict[str, Any], user: User) -> Dict[str, A
     # ------------------------------------------------------------------
     # 4. Effective timeout + range check  (shared — runs before alias branch)
     # ------------------------------------------------------------------
-    effective_timeout: int = (
+    effective_timeout, timeout_config_degraded = _resolve_effective_timeout(
         timeout_override
-        if timeout_override is not None
-        else _resolve_default_xray_timeout_seconds()
     )
     if not (_TIMEOUT_MIN <= effective_timeout <= _TIMEOUT_MAX):
         return _mcp_response(
@@ -1429,16 +1609,17 @@ async def handle_xray_explore(params: Dict[str, Any], user: User) -> Dict[str, A
         _omni_loop = asyncio.get_running_loop()
         _omni_jt = _get_job_tracker()
         _omni_xe = _get_xray_executor()
-        return _mcp_response(
-            _submit_xray_explore_omni(
-                aliases=repo_alias_parsed,
-                user=user,
-                loop=_omni_loop,
-                job_tracker=_omni_jt,
-                xray_executor=_omni_xe,
-                **explore_kwargs,
-            )
+        _omni_response_body = _submit_xray_explore_omni(
+            aliases=repo_alias_parsed,
+            user=user,
+            loop=_omni_loop,
+            job_tracker=_omni_jt,
+            xray_executor=_omni_xe,
+            **explore_kwargs,
         )
+        if timeout_config_degraded:
+            _omni_response_body["configuration_degraded"] = True
+        return _mcp_response(_omni_response_body)
 
     # Single-repo path
 
@@ -1515,9 +1696,14 @@ async def handle_xray_explore(params: Dict[str, Any], user: User) -> Dict[str, A
     if await_seconds > 0:
         inline = await _await_xray_future(future, await_seconds)
         if inline is not None:
+            if timeout_config_degraded:
+                inline = {**inline, "configuration_degraded": True}
             return _mcp_response(inline)
 
-    return _mcp_response({"job_id": job_id})
+    explore_response_body: Dict[str, Any] = {"job_id": job_id}
+    if timeout_config_degraded:
+        explore_response_body["configuration_degraded"] = True
+    return _mcp_response(explore_response_body)
 
 
 def handle_xray_dump_ast(params: Dict[str, Any], user: User) -> Dict[str, Any]:
@@ -1782,23 +1968,70 @@ def handle_cidx_fetch_cached_payload(
         return _mcp_response({"success": False, "error": str(exc)})
 
 
-def _truncate_xray_result(result: Dict[str, Any]) -> Dict[str, Any]:
-    """Apply PayloadCache truncation to the large fields of an X-Ray result.
+_TRUNCATION_INLINE_LIMIT = 3
 
-    Serialises matches[] and evaluation_errors[] as a single JSON blob and
-    delegates to PayloadCache.truncate_result().  When the combined payload
+# R2-7 (Codex re-review): _TRUNCATION_INLINE_LIMIT bounds the OUTER
+# findings/refine (or matches/evaluation_errors) array to 3 entries, but a
+# SINGLE retained entry can itself be huge -- analyze_graph's
+# ReduceFinding carries an `involved` array plus a parallel `signatures`
+# array of full declaration lines, and any entry can carry an oversized
+# `message`/text field. These bound what's INSIDE each of the 3 inlined
+# entries, not just how many entries there are.
+_NESTED_FIELD_LIST_LIMIT = 5
+_NESTED_FIELD_STRING_LIMIT = 500
+
+
+def _cap_nested_fields(entry: Any) -> Any:
+    """Cap unbounded nested list/string fields within a single inline
+    preview entry (e.g. a ReduceFinding's `involved`/`signatures` arrays
+    or a long `message`) before it goes into the response.
+
+    Deliberately generic (not hardcoded to specific field names) so it
+    applies safely to both matches/evaluation_errors and findings/refine
+    shapes: a single entry can be arbitrarily large even after the OUTER
+    array is capped to _TRUNCATION_INLINE_LIMIT, if that one entry alone
+    carries a big nested collection or string. Non-dict entries (e.g. the
+    plain-int `refine` list) are returned unchanged.
+    """
+    if not isinstance(entry, dict):
+        return entry
+    capped: Dict[str, Any] = {}
+    for key, value in entry.items():
+        if isinstance(value, list):
+            capped[key] = value[:_NESTED_FIELD_LIST_LIMIT]
+        elif isinstance(value, str) and len(value) > _NESTED_FIELD_STRING_LIMIT:
+            capped[key] = value[:_NESTED_FIELD_STRING_LIMIT] + "... [truncated]"
+        else:
+            capped[key] = value
+    return capped
+
+
+def _truncate_large_array_fields(
+    result: Dict[str, Any], field_a: str, field_b: str, preview_key: str
+) -> Dict[str, Any]:
+    """Apply PayloadCache truncation to two large array fields of an
+    X-Ray-family result. Shared core behind both `_truncate_xray_result`
+    (matches/evaluation_errors) and `_truncate_graph_result`
+    (findings/refine, H7 -- Issue #1811/Bug #1812) -- the truncation
+    mechanics are identical, only which two fields hold the large arrays
+    differs.
+
+    Serialises `field_a`[] and `field_b`[] as a single JSON blob and
+    delegates to PayloadCache.truncate_result(). When the combined payload
     exceeds payload_preview_size_chars (default 2000 chars) the full blob is
     stored in the cache and the response carries:
       - cache_handle: str           — use GET /api/cache/{handle} for full data
       - has_more: True
       - total_size: int             — full payload byte size
-      - matches_and_errors_preview  — first N chars of the JSON
-      - matches[]: first 3 entries  — inline quick-scan subset
-      - evaluation_errors[]: first 3 entries — inline quick-scan subset
+      - {preview_key}               — first N chars of the JSON
+      - {field_a}[]: first 3 entries, nested fields capped (R2-7) — inline
+        quick-scan subset
+      - {field_b}[]: first 3 entries, nested fields capped (R2-7) — inline
+        quick-scan subset
       - truncated: True
 
     When the payload is small (fits within preview_size_chars) the full
-    matches and evaluation_errors arrays are returned inline:
+    field_a/field_b arrays are returned inline:
       - cache_handle: None
       - has_more: False
       - truncated: False
@@ -1820,39 +2053,69 @@ def _truncate_xray_result(result: Dict[str, Any]) -> Dict[str, Any]:
 
     large_payload = json.dumps(
         {
-            "matches": result.get("matches", []),
-            "evaluation_errors": result.get("evaluation_errors", []),
+            field_a: result.get(field_a, []),
+            field_b: result.get(field_b, []),
         }
     )
 
     truncation = payload_cache.truncate_result(large_payload)
 
-    # Build base dict: preserve all top-level fields except matches/evaluation_errors
-    truncated_result = {
-        k: v for k, v in result.items() if k not in ("matches", "evaluation_errors")
-    }
+    # Build base dict: preserve all top-level fields except field_a/field_b
+    truncated_result = {k: v for k, v in result.items() if k not in (field_a, field_b)}
 
     if truncation.get("has_more"):
-        truncated_result["matches_and_errors_preview"] = truncation["preview"]
+        truncated_result[preview_key] = truncation["preview"]
         truncated_result["cache_handle"] = truncation["cache_handle"]
         truncated_result["has_more"] = True
         truncated_result["total_size"] = truncation["total_size"]
-        truncated_result["matches"] = result.get("matches", [])[:3]
-        truncated_result["evaluation_errors"] = result.get("evaluation_errors", [])[:3]
+        # R2-7: cap each RETAINED entry's own nested fields too -- the
+        # outer slice alone doesn't stop one huge entry from reaching the
+        # inline response unbounded.
+        truncated_result[field_a] = [
+            _cap_nested_fields(entry)
+            for entry in result.get(field_a, [])[:_TRUNCATION_INLINE_LIMIT]
+        ]
+        truncated_result[field_b] = [
+            _cap_nested_fields(entry)
+            for entry in result.get(field_b, [])[:_TRUNCATION_INLINE_LIMIT]
+        ]
         truncated_result["truncated"] = True
         truncated_result["fetch_tool_hint"] = (
-            f"Result truncated to first 3 entries; full result available at "
-            f"cache_handle '{truncation['cache_handle']}' — fetch via the "
+            f"Result truncated to first {_TRUNCATION_INLINE_LIMIT} entries; "
+            f"full result available at cache_handle "
+            f"'{truncation['cache_handle']}' — fetch via the "
             f"`cidx_fetch_cached_payload` MCP tool with that handle."
         )
     else:
-        truncated_result["matches"] = result.get("matches", [])
-        truncated_result["evaluation_errors"] = result.get("evaluation_errors", [])
+        truncated_result[field_a] = result.get(field_a, [])
+        truncated_result[field_b] = result.get(field_b, [])
         truncated_result["cache_handle"] = None
         truncated_result["has_more"] = False
         truncated_result["truncated"] = False
 
     return truncated_result
+
+
+def _truncate_xray_result(result: Dict[str, Any]) -> Dict[str, Any]:
+    """Apply PayloadCache truncation to matches[]/evaluation_errors[] --
+    see `_truncate_large_array_fields` for the shared mechanics."""
+    return _truncate_large_array_fields(
+        result, "matches", "evaluation_errors", "matches_and_errors_preview"
+    )
+
+
+def _truncate_graph_result(result: Dict[str, Any]) -> Dict[str, Any]:
+    """H7 (consolidated review, Issue #1811/Bug #1812): apply the SAME
+    PayloadCache truncation `_truncate_xray_result` gives xray_search/
+    xray_explore to `analyze_graph`'s findings[]/refine[] -- a whole-repo
+    graph analysis produces strictly MORE output than a single-file
+    search (each ReduceFinding carries `involved` plus a parallel
+    `signatures` array of full declaration lines), so a dead-code sweep
+    over a large repo can be a multi-megabyte MCP response without this.
+    See `_truncate_large_array_fields` for the shared mechanics."""
+    return _truncate_large_array_fields(
+        result, "findings", "refine", "findings_and_refine_preview"
+    )
 
 
 def handle_cancel_job(params: Dict[str, Any], user: User) -> Dict[str, Any]:

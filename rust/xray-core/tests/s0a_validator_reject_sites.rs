@@ -65,7 +65,21 @@ const SINGLETON_CONSTRUCTS: &[&str] = &[
     "mod_decl",
     "use_std_glob",
     "syntax_error",
+    "macro_rules_definition",
+    "macro_body_smuggled_forbidden_construct",
 ];
+
+/// CRITICAL (Codex follow-up review; expanded R2-2 re-review): macro
+/// invocations are a FAIL-CLOSED ALLOWLIST, not a blocklist -- `vec!`/
+/// `format!`/`matches!` are the only macros this project's own shipped
+/// evaluator examples (incl. the catch-rethrow seed pattern) use. Each
+/// allowlisted macro's token stream is recursively parsed and validated
+/// (see `validate_allowed_macro_tokens` in validator.rs) rather than
+/// trusted blindly -- `matches!` was re-added here only once that content
+/// inspection existed, never as a bare re-permit. Mirrored from
+/// `visit_macro`'s `ALLOWED_MACROS` constant, drift-guarded below exactly
+/// like `FORBIDDEN_STD_MODULES`/`FORBIDDEN_MACROS`.
+const ALLOWED_MACROS: &[&str] = &["format", "matches", "vec"];
 
 // ---------------------------------------------------------------------------
 // Shared assertion
@@ -260,6 +274,16 @@ reject_site_tests! {
     rejects_unimplemented_macro: "macro:unimplemented"
         => "fn f() { unimplemented!(); }",
            "`unimplemented!` macro is not allowed";
+
+    // ---- CRITICAL (Codex follow-up review): macro definition/expansion
+    // evasion -- a macro_rules! DEFINITION's body is opaque to every other
+    // reject site, so the definition itself must be rejected outright. ----
+    rejects_macro_rules_definition: "macro_rules_definition"
+        => r#"macro_rules! harmless_name { () => { 1 + 1 }; } fn f() { harmless_name!(); }"#,
+           "`macro_rules!` definitions are not allowed";
+    rejects_macro_body_smuggled_forbidden_construct: "macro_body_smuggled_forbidden_construct"
+        => r#"macro_rules! harmless_name { () => { std::process::Command::new("id").spawn().ok(); }; } fn f() { harmless_name!(); }"#,
+           "`macro_rules!` definitions are not allowed";
 }
 
 // ---------------------------------------------------------------------------
@@ -361,16 +385,27 @@ fn ident_literals_between(start_marker: &str, end_marker: &str) -> Vec<String> {
 
 #[test]
 fn rule_tables_match_validator_source() {
-    // Forbidden macros, as literally listed in `visit_macro`.
+    // CRITICAL (Codex follow-up review): visit_macro is now a fail-closed
+    // ALLOWLIST, not a blocklist -- the mirror check compares against
+    // ALLOWED_MACROS instead of FORBIDDEN_MACROS. FORBIDDEN_MACROS (and
+    // its per-site tests above) stays a valid, separate assertion that
+    // those specific macros are indeed still rejected -- just via the
+    // allowlist mechanism rather than an explicit name match.
     let mut expected_macros: Vec<String> =
-        FORBIDDEN_MACROS.iter().map(|s| s.to_string()).collect();
+        ALLOWED_MACROS.iter().map(|s| s.to_string()).collect();
     expected_macros.sort();
     let actual_macros = ident_literals_between("fn visit_macro", "syn::visit::visit_macro");
     assert_eq!(
         actual_macros, expected_macros,
-        "FORBIDDEN_MACROS is out of sync with validator.rs's visit_macro. \
-         Update the table AND add a reject_site_tests! entry for each new macro."
+        "ALLOWED_MACROS is out of sync with validator.rs's visit_macro. \
+         Update the table if the allowlist itself changed."
     );
+    for forbidden in FORBIDDEN_MACROS {
+        assert!(
+            !ALLOWED_MACROS.contains(forbidden),
+            "FORBIDDEN_MACROS and ALLOWED_MACROS must never overlap: {forbidden:?} is in both"
+        );
+    }
 
     // Forbidden std modules, as literally listed in `visit_path`. "std" is the
     // path root, not a forbidden module, so it is excluded from the comparison.

@@ -1,6 +1,9 @@
 # Memory Index
 
 ## Safety Rules (prevent recurring mistakes)
+- [feedback_never_ship_unwired_work.md](feedback_never_ship_unwired_work.md) - NEVER build work that is not wired to a user-reachable front door; unit tests over an unreachable capability are not "done" (Epic #1786)
+- [feedback_never_claim_ready_without_staging_e2e.md](feedback_never_claim_ready_without_staging_e2e.md) - NEVER say ready/complete/promoted without driving the NEW capability through the staging front door; green gates are not evidence
+- [feedback_grep_absence_is_not_evidence.md](feedback_grep_absence_is_not_evidence.md) - A grep returning zero proves one spelling absent, NOT a capability missing; prove wiring by runtime introspection or a real call
 - [feedback_never_reindex_evolution.md](feedback_never_reindex_evolution.md) - NEVER full-re-index evolution (hours + embedder $$); repairs keep worktree bit-identical, temporal OFF, restore from copies
 - [feedback_verify_zero_json_chunks_on_indexing.md](feedback_verify_zero_json_chunks_on_indexing.md) - Before chunk-storage/temporal work, verify zero vector_*.json created on all 3 envs — Bug #1528
 - [feedback_never_touch_other_repos.md](feedback_never_touch_other_repos.md) - NEVER modify files outside the assigned working directory
@@ -64,7 +67,7 @@
 - [feedback_implement_story_agentic_no_stops.md](feedback_implement_story_agentic_no_stops.md) - /implement-story-spec runs non-stop — no pre-flight questions
 - [feedback_progress_reporting_delicate.md](feedback_progress_reporting_delicate.md) - Ask confirmation before ANY changes to progress reporting
 - [feedback_targeted_scope_discipline.md](feedback_targeted_scope_discipline.md) - Targeted requests must NOT trigger UI rewrites or unrelated styling changes
-- [feedback_use_code_reviewer.md](feedback_use_code_reviewer.md) - Use code-reviewer (opus) for all reviews — Codex credits running low
+- [feedback_use_code_reviewer.md](feedback_use_code_reviewer.md) - Codex is the PRIMARY reviewer (supersedes the old opus-only rule); green lint + green tests are NEVER a substitute for a review gate
 - [feedback_default_agents_to_sonnet5.md](feedback_default_agents_to_sonnet5.md) - Opus OK for code-reviewer dispatches only; tdd-engineer/implementation dispatches always stay on Sonnet 5 (no model override)
 - [feedback_dual_review_claude_and_codex.md](feedback_dual_review_claude_and_codex.md) - Standing rule: dual review (Claude + independent Codex) for every review gate
 - [feedback_opus_arbiter_of_codex_nitpicking.md](feedback_opus_arbiter_of_codex_nitpicking.md) - After 2-3 Codex REJECT rounds on the same fix, dispatch Opus to judge materiality before another round

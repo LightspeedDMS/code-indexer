@@ -4,6 +4,58 @@
 
 NEVER modify files outside this project's working directory. For running tests use `PYTHONPATH=<this-project-root>/src pytest ...`. See memory: `feedback_never_touch_other_repos.md`.
 
+## Definition of Done -- TWO ABSOLUTE RULES
+
+These override every other notion of "complete" in this file. They apply to main context AND
+every subagent.
+
+### 1. Work that is not WIRED is not done
+
+NEVER build a capability that a user cannot reach. Every story must be traceable from a real
+front door inward -- MCP tool -> handler -> service -> library -- with every hop present. A
+feature reachable only from unit tests is NOT done, regardless of how many tests pass.
+
+Mechanical check, run BEFORE closing any issue: grep the capability's core function names across
+the layer that should call them. Zero hits means unwired.
+
+```bash
+grep -rn "<core_fn_1>\|<core_fn_2>" src/code_indexer/ --include=*.py   # must be non-empty
+```
+
+**Incident (2026-09-07, Epic #1786).** S2 #1787, S2b #1806, S3 #1792 and S4 #1793 were
+implemented, dual-reviewed, closed and merged to staging: CSR arena, binder, receiver-type
+resolution, inheritance families, refine phase, 500+ green Rust tests. The multi-file capability
+they exist to provide had NO user-reachable path. `grep` for
+`analyze_graph|collect_facts|build_repo_graph` across `src/code_indexer/**.py` returned ZERO
+hits; Python called `xray-cli` only for `--print-cache-identity` and the per-file legacy scan;
+the MCP handler, REST route and tool docs never mentioned graph mode; and Rust-side nothing even
+BUILT a graph (`--analyze-graph` needs a prebuilt `--graph-in`, and `build_repo_graph` was called
+only by its own unit tests). Filed as #1811. Note the irony: this same epic's #1785 fixed exactly
+this defect for `FactKey::Custom`, so the pattern was known and still missed on the headline
+feature.
+
+### 2. "Ready" requires an END-TO-END STAGING run through the front door
+
+NEVER state that anything is ready, complete, validated, or promotable to master/production
+without having driven the NEW capability through the REST/MCP front door on staging and seen real
+output. Green local gates and a green CI badge are NOT evidence of this -- they answer a
+different question (does it build and do its tests pass), not whether it is reachable, deployed
+and functional.
+
+Before writing "ready"/"complete"/"validated"/"promoted", state all three:
+
+1. the front-door call actually made (tool/endpoint, arguments, staging repo),
+2. the real output it returned,
+3. confirmation that the call exercises the NEW capability -- not a neighbouring path that
+   already worked.
+
+If any is missing, the honest phrasing is "gates green locally, NOT yet validated end to end in
+staging". A related failure from the same incident: a semantic query and a single-file X-Ray call
+were run on staging and reported as validating the epic. They exercised pre-existing paths and
+proved nothing about the new work.
+
+---
+
 ## Documentation Standards
 
 No emoji or decorative characters in `*.md` files (README, CLAUDE, CHANGELOG, docs). Plain-text headers only.

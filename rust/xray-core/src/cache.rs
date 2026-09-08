@@ -71,12 +71,78 @@ pub fn write_metadata(meta_path: &Path, meta: &CacheMetadata) -> Result<(), std:
     Ok(())
 }
 
-/// Returns the current rustc version string by running `rustc --version`.
-/// Falls back to "unknown" if rustc is not on PATH.
+/// Bug #1816: the exact Rust toolchain channel this workspace is pinned to
+/// (`rust/rust-toolchain.toml`'s `channel` field), embedded at BUILD TIME
+/// via `include_str!` so a fully-deployed `xray-cli` binary carries the
+/// value with no runtime file dependency -- the same `include_str!` pattern
+/// `preamble_ac18_parity.rs` already establishes elsewhere in this crate
+/// for pulling a real source file's content into the binary.
+///
+/// WHY THIS EXISTS: every `rustc` subprocess this crate spawns (this
+/// module's own `rustc --version` probe below, and `compiler.rs`'s
+/// evaluator-compiling `rustc` invocation) previously ran with NO explicit
+/// toolchain selection, so rustup resolved a toolchain by walking UP from
+/// the CALLING PROCESS's own current working directory looking for a
+/// `rust-toolchain.toml`. That resolution is correct only when `xray-cli`
+/// happens to be invoked from inside this repository's `rust/` tree (true
+/// for `cargo test`/manual dev-shell runs) -- production invokes `xray-cli`
+/// from wherever the MCP server process itself runs, which has no such file
+/// above it, so rustup silently fell back to `rustup default`, a version
+/// that can differ from whatever toolchain actually compiled the
+/// statically-linked `xray-cli` binary (via `cargo build`, which DOES honor
+/// this same `rust-toolchain.toml`).
+///
+/// Bug #1816's root cause: a `.so` compiled by a DIFFERENT rustc/LLVM
+/// version than the one that built `xray-cli` corrupted the heap across the
+/// `GraphHandle` FFI boundary the moment `analyze_graph` called both
+/// `signature_for` and `shortest_path_to_any` in the same evaluator
+/// (`free(): double free detected in tcache 2` / SIGSEGV depending on call
+/// order) -- reproduced directly by compiling the SAME two-call evaluator
+/// once from inside `rust/` (no crash: both sides land on the SAME pinned
+/// toolchain) and once from `/tmp` (crashes every time: the evaluator
+/// compiles under whatever `rustup default` resolves to, while the release
+/// `xray-cli` binary itself was built with the pinned channel). Plain Rust
+/// `fn` pointers have an explicitly UNSPECIFIED ABI across compiler
+/// versions (see the `graph::csr::handle` module doc comment's own defense
+/// of using them, which assumes -- and this fix now GUARANTEES -- "both
+/// sides are compiled by the identical rustc invocation"); no change to the
+/// FFI thunk code itself is needed once that assumption is actually true.
+const RUST_TOOLCHAIN_TOML: &str = include_str!("../../rust-toolchain.toml");
+
+/// Extracts the `channel = "..."` value from `RUST_TOOLCHAIN_TOML`. A
+/// deliberately narrow, single-purpose parse (Rule 3, KISS) rather than a
+/// full TOML parser dependency: this file has exactly one meaningful line
+/// and is fully controlled by this repository.
+pub(crate) fn pinned_toolchain_channel() -> &'static str {
+    RUST_TOOLCHAIN_TOML
+        .lines()
+        .find_map(|line| {
+            let (key, rest) = line.trim().split_once('=')?;
+            if key.trim() != "channel" {
+                return None;
+            }
+            rest.trim().strip_prefix('"')?.split('"').next()
+        })
+        .unwrap_or_else(|| panic!("rust-toolchain.toml has no parsable `channel = \"...\"` line"))
+}
+
+/// Builds the `rustc --version` probe `Command`, pinned via
+/// `RUSTUP_TOOLCHAIN` to `pinned_toolchain_channel()` -- see that function's
+/// doc comment for why this must never be left to rustup's own cwd-based
+/// resolution. Extracted from `get_rustc_version()` so the pinning itself
+/// (not just the version string it produces) is directly, deterministically
+/// testable via `Command::get_envs()`.
+pub(crate) fn rustc_version_command() -> std::process::Command {
+    let mut command = std::process::Command::new("rustc");
+    command.arg("--version").env("RUSTUP_TOOLCHAIN", pinned_toolchain_channel());
+    command
+}
+
+/// Returns the current rustc version string by running `rustc --version`
+/// under the pinned toolchain (`rustc_version_command`). Falls back to
+/// "unknown" if rustc is not on PATH.
 pub fn get_rustc_version() -> String {
-    let output = std::process::Command::new("rustc")
-        .arg("--version")
-        .output();
+    let output = rustc_version_command().output();
     match output {
         Ok(o) if o.status.success() => {
             String::from_utf8_lossy(&o.stdout).trim().to_string()
@@ -468,6 +534,45 @@ mod tests {
         assert!(!v.is_empty());
         // Should contain "rustc" or fall back to "unknown"
         assert!(v.starts_with("rustc") || v == "unknown");
+    }
+
+    /// Bug #1816: `pinned_toolchain_channel()` must parse the EXACT channel
+    /// this workspace is pinned to out of the real, `include_str!`-embedded
+    /// `rust/rust-toolchain.toml` -- not a hardcoded duplicate. This test
+    /// intentionally hardcodes the current pin value: if the pin is ever
+    /// bumped, this test must be updated in the SAME commit, which is
+    /// exactly the kind of drift-detector this bug fix exists to prevent
+    /// (see the sync-constraint-3 note in the project's own CLAUDE.md about
+    /// keeping this file and CI's toolchain action in lockstep).
+    #[test]
+    fn pinned_toolchain_channel_matches_the_workspace_pin() {
+        assert_eq!(pinned_toolchain_channel(), "1.98.0");
+    }
+
+    /// Bug #1816 (THE fix's discriminating test): the `rustc --version`
+    /// probe `Command` must carry `RUSTUP_TOOLCHAIN` pinned to
+    /// `pinned_toolchain_channel()`. Before this fix, `get_rustc_version()`
+    /// spawned a bare `rustc --version` with no env override, so its
+    /// reported version silently tracked whatever toolchain rustup resolved
+    /// from the CALLING PROCESS's current working directory -- correct only
+    /// by coincidence when that cwd happened to sit under this workspace's
+    /// `rust-toolchain.toml`. Production invokes `xray-cli` from directories
+    /// with no such file above them, so the resolved toolchain there
+    /// silently drifted from whatever toolchain actually compiled the
+    /// `xray-cli` binary itself. Inspecting `Command::get_envs()` proves the
+    /// mechanism directly and deterministically, without spawning a second
+    /// real toolchain (which the CI machine is not guaranteed to have
+    /// installed) or mutating the test process's own working directory
+    /// (unsafe under `cargo test`'s parallel execution).
+    #[test]
+    fn rustc_version_command_pins_rustup_toolchain_env_var() {
+        let command = rustc_version_command();
+        let envs: std::collections::HashMap<_, _> = command.get_envs().collect();
+        assert_eq!(
+            envs.get(std::ffi::OsStr::new("RUSTUP_TOOLCHAIN")),
+            Some(&Some(std::ffi::OsStr::new(pinned_toolchain_channel()))),
+            "the rustc --version probe command must pin RUSTUP_TOOLCHAIN to the workspace channel"
+        );
     }
 
     #[test]

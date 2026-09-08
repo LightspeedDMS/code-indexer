@@ -26,6 +26,7 @@ import subprocess
 import tempfile
 import threading
 import time
+import uuid
 from collections import OrderedDict
 from pathlib import Path
 from typing import Any, Callable, Dict, List, NamedTuple, Optional, Protocol, Tuple
@@ -43,6 +44,37 @@ _RE_XRAY_CACHE_PATH = re.compile(r"/[^\s\"']+/xray-cache/(?:[^/\s\"']+/)?[a-f0-9
 # Rule 2: other absolute paths under /home/, /root/, /tmp/ — replaced with a
 # redaction token so callers know a path was present but cannot reconstruct it.
 _RE_SERVER_PATH = re.compile(r"/(?:home|root|tmp)/[^\s\"':,\])\}]+")
+
+# R2-4 (consolidated review, Issue #1811/Bug #1812, Codex re-review):
+# process-wide, deadline-aware semaphore bounding concurrent
+# rustc-invoking xray-cli launches. The graph admission limiter (H8)
+# bounds concurrent GRAPH JOBS, but nothing previously bounded concurrent
+# COMPILES specifically -- multiple users triggering many simultaneous
+# evaluator compiles (each a real rustc process) can exhaust CPU/RAM/
+# temp-disk/NFS at fleet scale (~900 repos). Hardcoded rather than a new
+# Web UI setting (project convention: no new config surface to gate a bug
+# fix; mirrors the documented hardcoded constants in
+# graph::analyze::process.rs -- POLL_INTERVAL/STDOUT_DRAIN_TIMEOUT/
+# REAP_RETRY_COUNT). Revisit if fleet telemetry shows a need to tune it
+# live.
+_MAX_CONCURRENT_COMPILES = 4
+_compile_semaphore = threading.Semaphore(_MAX_CONCURRENT_COMPILES)
+
+
+def _acquire_compile_slot(timeout_seconds: float) -> bool:
+    """Acquire a compile slot, waiting at most `timeout_seconds`.
+
+    Deadline-aware: returns False (never blocks indefinitely) once the
+    caller's own remaining operation budget is exhausted, so a saturated
+    compile queue degrades to a clear timeout error rather than hanging
+    the request.
+    """
+    return _compile_semaphore.acquire(timeout=timeout_seconds)
+
+
+def _release_compile_slot() -> None:
+    """Release a previously-acquired compile slot."""
+    _compile_semaphore.release()
 
 
 def _sanitize_error_message(msg: str) -> str:
@@ -381,6 +413,55 @@ def _error_all(
     ]
 
 
+def _graph_error_result(
+    error_type: str,
+    error_message: str,
+    build_status: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Story #1811 (S5, AC2): the structured error shape every failure path
+    of `RustNativeBackend.run_graph_analysis` returns -- never a raw
+    exception (Bug #1612's rule). Mirrors `_error_tuple`'s role for the
+    legacy `run_batch` path, adapted to graph mode's single-result (not
+    per-file) shape. Every non-error field is set to an honest "unknown/
+    not reached" value (`None`/empty/`False`) rather than a value that
+    could be misread as a real, successful outcome.
+    """
+    return {
+        "ok": False,
+        "error": {
+            "error_type": error_type,
+            "error_message": _sanitize_error_message(error_message),
+        },
+        "status": None,
+        "findings": [],
+        "refine": [],
+        "fact_graph_complete": None,
+        "build_status": build_status,
+        "degradation": None,
+        "cached": False,
+        "compile_ms": 0,
+    }
+
+
+def _safe_unlink_graph_temp_path(path: Optional[Any]) -> None:
+    """Best-effort cleanup for one graph-mode temp path -- catches and
+    LOGS `OSError` rather than letting a cleanup failure escape a
+    `finally` block, which would otherwise override the real return value
+    `run_graph_analysis`'s `try` already computed (a correctness bug, not
+    merely an aesthetic one: `finally` exceptions replace whatever the
+    `try`/`except` returned). `path` may be `None` (nothing to clean up
+    yet) or any path-like value accepted by `Path(...)`.
+    """
+    if path is None:
+        return
+    try:
+        Path(path).unlink(missing_ok=True)
+    except OSError as exc:
+        logger.warning(
+            "RustNativeBackend: graph-mode temp cleanup failed for %s: %s", path, exc
+        )
+
+
 class RustNativeBackend:
     """Rust-native xray evaluator backend.
 
@@ -421,7 +502,10 @@ class RustNativeBackend:
         )
 
     def _get_cache_identity_info(
-        self, rust_code: str, deadline_seconds: Optional[float] = None
+        self,
+        rust_code: str,
+        deadline_seconds: Optional[float] = None,
+        graph_mode: bool = False,
     ) -> Optional[CacheIdentityInfo]:
         """Bug #1784: get the composite cache identity for `rust_code`.
 
@@ -435,8 +519,20 @@ class RustNativeBackend:
         already-expired deadline skips the subprocess entirely). Returns
         None (never raises) on any failure and records a
         cidx.xray.cache_identity_failures metric.
+
+        H9 (consolidated review, Issue #1811/Bug #1812): `graph_mode` must
+        be True for a graph-mode evaluator (fn collect_facts + fn
+        analyze_graph) -- it selects the graph-mode-aware identity formula
+        (`cache_identity_info_graph` on the Rust side, via `--graph-mode`),
+        which is the ONLY identity that matches what `compile_evaluator`
+        actually uses as the real `.so` filename for that evaluator. The
+        cache key is mode-qualified (`"graph:" + rust_code` vs plain
+        `rust_code`) so a legacy and a graph-mode call sharing one
+        SharedIdentityCache instance can never collide on identical source
+        text mapping to two different real identities.
         """
-        cached = self._identity_cache.get(rust_code)
+        cache_key = f"graph:{rust_code}" if graph_mode else rust_code
+        cached = self._identity_cache.get(cache_key)
         if cached is not None:
             return cached
         if deadline_seconds is not None and deadline_seconds <= 0:
@@ -446,13 +542,18 @@ class RustNativeBackend:
             )
             _record_identity_failure_metric("deadline_exhausted")
             return None
-        info = self._fetch_identity_via_subprocess(rust_code, deadline_seconds)
+        info = self._fetch_identity_via_subprocess(
+            rust_code, deadline_seconds, graph_mode=graph_mode
+        )
         if info is not None:
-            self._identity_cache.put(rust_code, info)
+            self._identity_cache.put(cache_key, info)
         return info
 
     def _fetch_identity_via_subprocess(
-        self, rust_code: str, deadline_seconds: Optional[float]
+        self,
+        rust_code: str,
+        deadline_seconds: Optional[float],
+        graph_mode: bool = False,
     ) -> Optional[CacheIdentityInfo]:
         """Run `xray-cli --print-cache-identity`, parse, classify failures.
 
@@ -461,7 +562,9 @@ class RustNativeBackend:
         """
         try:
             timeout = self._resolve_identity_timeout(deadline_seconds)
-            result = self._run_cache_identity_subprocess(rust_code, timeout)
+            result = self._run_cache_identity_subprocess(
+                rust_code, timeout, graph_mode=graph_mode
+            )
             if result.returncode != 0:
                 logger.warning(
                     "XrayCache: --print-cache-identity exited %d; stderr=%r",
@@ -491,10 +594,16 @@ class RustNativeBackend:
         return min(_CACHE_IDENTITY_TIMEOUT_SECS, deadline_seconds)
 
     def _run_cache_identity_subprocess(
-        self, rust_code: str, timeout_seconds: float = _CACHE_IDENTITY_TIMEOUT_SECS
+        self,
+        rust_code: str,
+        timeout_seconds: float = _CACHE_IDENTITY_TIMEOUT_SECS,
+        graph_mode: bool = False,
     ) -> "subprocess.CompletedProcess[str]":
+        cmd = [str(self._xray_cli_path), "--print-cache-identity"]
+        if graph_mode:
+            cmd.append("--graph-mode")
         return subprocess.run(
-            [str(self._xray_cli_path), "--print-cache-identity"],
+            cmd,
             input=rust_code,
             capture_output=True,
             text=True,
@@ -670,6 +779,7 @@ class RustNativeBackend:
         rust_code: str,
         compile_ms: int,
         deadline_seconds: Optional[float] = None,
+        graph_mode: bool = False,
     ) -> None:
         """Upload freshly compiled .so to cluster cache after a successful compile.
 
@@ -683,6 +793,11 @@ class RustNativeBackend:
                 forwarded to the identity helper's subprocess timeout. None
                 preserves the previous fixed-timeout behaviour for direct/
                 isolated callers.
+            graph_mode: H9 (consolidated review, Issue #1811/Bug #1812) --
+                must be True when `rust_code` is a graph-mode evaluator, so
+                the identity computed here (used to locate the local .so to
+                upload) matches the one `compile_evaluator` actually used
+                (`_compile_for_graph_mode` always passes True).
         """
         try:
             if self._xray_cache is None:
@@ -691,7 +806,7 @@ class RustNativeBackend:
                 )
                 return
             info = self._get_cache_identity_info(
-                rust_code, deadline_seconds=deadline_seconds
+                rust_code, deadline_seconds=deadline_seconds, graph_mode=graph_mode
             )
             if info is None:
                 logger.warning(
@@ -734,7 +849,10 @@ class RustNativeBackend:
         return evaluator_code, None
 
     def _try_pre_fill(
-        self, rust_code: str, deadline_seconds: Optional[float] = None
+        self,
+        rust_code: str,
+        deadline_seconds: Optional[float] = None,
+        graph_mode: bool = False,
     ) -> None:
         """Fetch .so from cluster cache and write locally so Rust skips recompile.
 
@@ -749,6 +867,11 @@ class RustNativeBackend:
                 forwarded to the identity helper's subprocess timeout. None
                 preserves the previous fixed-timeout behaviour for direct/
                 isolated callers.
+            graph_mode: H9 (consolidated review, Issue #1811/Bug #1812) --
+                must be True when `rust_code` is a graph-mode evaluator, so
+                the identity computed here matches the one
+                `compile_evaluator` actually uses (`_compile_for_graph_mode`
+                always passes True).
 
         Early-returns when BOTH .so and .meta already exist for the identity.
         """
@@ -757,7 +880,7 @@ class RustNativeBackend:
         )
         try:
             info = self._get_cache_identity_info(
-                rust_code, deadline_seconds=deadline_seconds
+                rust_code, deadline_seconds=deadline_seconds, graph_mode=graph_mode
             )
             if info is None:
                 return  # cannot determine identity -- Rust will compile fresh
@@ -854,35 +977,95 @@ class RustNativeBackend:
         cmd: List[str],
         timeout_seconds: int,
         on_process_spawned: Optional[Callable],
+        acquire_compile_slot: bool,
     ) -> Tuple[str, Optional[str]]:
-        """Spawn xray-cli, wait for completion, return (stdout, error_msg)."""
-        proc = subprocess.Popen(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-        )
+        """Spawn xray-cli, wait for completion, return (stdout, error_msg).
 
-        if on_process_spawned is not None:
-            on_process_spawned(proc)
+        R2-3 (Codex re-review): spawned in its OWN process group
+        (`start_new_session=True`) so that on timeout the ENTIRE group --
+        including any grandchild the direct child spawned (e.g. rustc
+        launched by xray-cli) -- is killed via `os.killpg`, never just the
+        direct child via a bare `proc.kill()`. SIGKILL cannot be caught or
+        forwarded by the process it kills, so a bare `proc.kill()` leaves
+        any grandchild reparented to init, running FOREVER as an orphan
+        that keeps consuming CPU/RAM.
 
-        try:
-            stdout, stderr = proc.communicate(timeout=timeout_seconds)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            proc.wait()
-            msg = f"xray-cli timed out after {timeout_seconds}s"
+        R2-4 (Codex re-review): `acquire_compile_slot` has NO DEFAULT --
+        every call site must state whether this invocation can trigger a
+        fresh rustc compile (the legacy scan path: True) or only runs an
+        already-compiled dylib (--build-graph/--analyze-graph: False), so
+        a future call site can never silently inherit an unthrottled
+        default. When True, a process-wide compile slot is acquired
+        (deadline-aware, bounded by `timeout_seconds`) BEFORE spawning the
+        subprocess -- a saturated compile queue returns a clear timeout
+        error instead of an unbounded Nth concurrent rustc process, and
+        the slot is released in `finally` regardless of outcome.
+        """
+        import os  # noqa: PLC0415 — stdlib, lazy import to keep startup clean
+        import signal  # noqa: PLC0415 — stdlib, lazy import to keep startup clean
+
+        if acquire_compile_slot and not _acquire_compile_slot(
+            timeout_seconds=float(timeout_seconds)
+        ):
+            msg = (
+                f"xray-cli compile queue full: timed out waiting "
+                f"{timeout_seconds}s for a compile slot"
+            )
             logger.warning("RustNativeBackend: %s", msg)
             return "", _sanitize_error_message(msg)
 
-        if proc.returncode != 0 and not stdout.strip():
-            raw_msg = (
-                f"xray-cli exited with code {proc.returncode}: "
-                f"{stderr[:_XRAY_CLI_STDERR_ERROR_LIMIT]}"
+        try:
+            proc = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                start_new_session=True,
             )
-            logger.warning("RustNativeBackend: %s", raw_msg)
-            return "", _sanitize_error_message(raw_msg)
-        return stdout or "", None
+
+            if on_process_spawned is not None:
+                on_process_spawned(proc)
+
+            try:
+                stdout, stderr = proc.communicate(timeout=timeout_seconds)
+            except subprocess.TimeoutExpired:
+                # `start_new_session=True` makes proc.pid both the process
+                # ID AND the process group ID (new session/group leader),
+                # so `os.killpg(proc.pid, ...)` reaches the direct child
+                # AND every descendant it spawned in one signal.
+                # ProcessLookupError means the whole group already exited
+                # between TimeoutExpired firing and this line (a benign
+                # race, not an error). PermissionError is a second, rarer
+                # benign race: the group leader already exited and its
+                # PGID was reused by an unrelated process this session
+                # cannot signal. Neither must prevent proc.wait() below
+                # from reaping the direct child.
+                try:
+                    os.killpg(proc.pid, signal.SIGKILL)
+                except (ProcessLookupError, PermissionError):
+                    pass
+                proc.wait()
+                msg = f"xray-cli timed out after {timeout_seconds}s"
+                logger.warning("RustNativeBackend: %s", msg)
+                return "", _sanitize_error_message(msg)
+
+            # H12 (consolidated review, Issue #1811/Bug #1812, Codex):
+            # treat EVERY non-zero return code as failure, including
+            # stderr in the message -- a crashed subprocess that happened
+            # to emit plausible-looking (partial/stale) JSON to stdout
+            # before exiting non-zero must never be silently parsed and
+            # accepted as a real result just because stdout was non-empty.
+            if proc.returncode != 0:
+                raw_msg = (
+                    f"xray-cli exited with code {proc.returncode}: "
+                    f"{stderr[:_XRAY_CLI_STDERR_ERROR_LIMIT]}"
+                )
+                logger.warning("RustNativeBackend: %s", raw_msg)
+                return "", _sanitize_error_message(raw_msg)
+            return stdout or "", None
+        finally:
+            if acquire_compile_slot:
+                _release_compile_slot()
 
     def _invoke_xray_cli(
         self,
@@ -946,7 +1129,9 @@ class RustNativeBackend:
                 files_tmp.name,
                 "--json",
             ]
-            return self._run_xray_cli_process(cmd, timeout_seconds, on_process_spawned)
+            return self._run_xray_cli_process(
+                cmd, timeout_seconds, on_process_spawned, acquire_compile_slot=True
+            )
         except OSError as exc:
             # Broadened from FileNotFoundError (Bug #1612): ANY OS-level
             # failure -- creating the temp files or spawning xray-cli,
@@ -996,6 +1181,358 @@ class RustNativeBackend:
             results.append((matches, [], None))
 
         return results
+
+    # ------------------------------------------------------------------
+    # Story #1811 (S5, AC2): graph-mode driver
+    # ------------------------------------------------------------------
+
+    def _compile_for_graph_mode(
+        self,
+        rust_code: str,
+        eval_path: str,
+        deadline_seconds: Optional[float],
+    ) -> Tuple[Optional[str], Dict[str, Any], Optional[str]]:
+        """Compile `rust_code` (already written to `eval_path`) to a `.so`
+        via `xray-cli --compile-only`, reusing the EXISTING cluster-cache
+        pre-fill/post-fill machinery unchanged (Bug #1784: identity comes
+        ONLY from `--print-cache-identity`, never re-derived here).
+
+        Honours `deadline_seconds` the way `_get_cache_identity_info`
+        already does: an already-exhausted deadline skips the subprocess
+        entirely rather than spawning one doomed to time out immediately.
+
+        Returns `(so_path, {"cached": bool, "compile_ms": int},
+        error_message)`. `so_path` is `None` iff `error_message` is not
+        `None`.
+        """
+        if self._xray_cache is not None:
+            self._try_pre_fill(
+                rust_code, deadline_seconds=deadline_seconds, graph_mode=True
+            )
+
+        if deadline_seconds is not None and deadline_seconds <= 0:
+            return None, {}, "operation deadline already exhausted before compile"
+        timeout = int(deadline_seconds) + 1 if deadline_seconds is not None else 300
+
+        output, error = self._run_compile_only_subprocess(eval_path, timeout)
+        if error is not None:
+            return None, {}, error
+        compile_error = output.get("error")
+        if compile_error:
+            return None, {}, str(compile_error)
+        so_path = output.get("so_path")
+        if not so_path:
+            return None, {}, "xray-cli --compile-only produced no so_path"
+
+        compile_info = {
+            "cached": bool(output.get("cached", False)),
+            "compile_ms": int(output.get("compile_ms", 0)),
+        }
+        if (
+            self._xray_cache is not None
+            and not compile_info["cached"]
+            and compile_info["compile_ms"] > 0
+        ):
+            self._try_post_fill(
+                rust_code,
+                compile_info["compile_ms"],
+                deadline_seconds=deadline_seconds,
+                graph_mode=True,
+            )
+        return so_path, compile_info, None
+
+    def _run_compile_only_subprocess(
+        self, eval_path: str, timeout_seconds: int
+    ) -> Tuple[Dict[str, Any], Optional[str]]:
+        """Spawn `xray-cli --compile-only --dynlib <eval_path>` and parse its
+        JSON `CompileOnlyOutput`. Reuses `_run_xray_cli_process` (subprocess
+        spawn/timeout handling) and `_parse_json_output` (JSON parsing) --
+        never reimplements either. Returns `(output_dict, error_msg)` --
+        `error_msg` is `None` on a successful subprocess run (the COMPILE
+        itself may still have failed; check `output_dict["error"]`).
+        """
+        cmd = [str(self._xray_cli_path), "--compile-only", "--dynlib", eval_path]
+        stdout, error = self._run_xray_cli_process(
+            cmd, timeout_seconds, None, acquire_compile_slot=True
+        )
+        if error is not None:
+            return {}, error
+        return self._parse_json_output(stdout)
+
+    def _run_graph_subcommand(
+        self, args: List[str], timeout_seconds: int
+    ) -> Tuple[Dict[str, Any], Optional[str]]:
+        """Spawn `xray-cli <args...>` and parse its JSON report -- shared
+        by `--build-graph` and `--analyze-graph` (Rule 4).
+        """
+        cmd = [str(self._xray_cli_path)] + args
+        stdout, error = self._run_xray_cli_process(
+            cmd, timeout_seconds, None, acquire_compile_slot=False
+        )
+        if error is not None:
+            return {}, error
+        return self._parse_json_output(stdout)
+
+    @staticmethod
+    def _build_graph_analysis_result(
+        analyze_output: Dict[str, Any],
+        build_status: str,
+        build_result: Dict[str, Any],
+        compile_info: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Story #1811 (AC3): assembles the final result, surfacing
+        `AnalysisCompleteness` HONESTLY. Every degradation counter comes
+        from the real `BuildGraphResult` via a bare `.get(key)` -- NO
+        default: `build_result` is only passed here once the build's
+        status was confirmed `"ok"`, at which point every field is always
+        present; a missing key means malformed JSON, surfacing as `None`
+        (distinct from a genuine `0`/`False`), never a silently-masked
+        "clean" reading.
+        """
+        status = analyze_output.get("status")
+        raw_result = analyze_output.get("result")
+        result = raw_result if isinstance(raw_result, dict) else {}
+        reported_ran_ok = status == "ran_ok"
+
+        # H11 (consolidated review, Issue #1811/Bug #1812, Codex): a
+        # ran_ok status is only trustworthy if "result" is a REAL dict
+        # carrying BOTH required fields -- `.get("x", [])`-style
+        # defaulting on a missing/malformed payload would otherwise accept
+        # `{"status": "ran_ok"}` alone as a plausible, quietly-empty
+        # success. Missing required fields under a ran_ok status is
+        # malformed CLI output, never a legitimate "nothing found".
+        schema_complete = (
+            isinstance(raw_result, dict)
+            and "findings" in raw_result
+            and "refine" in raw_result
+        )
+        ok = reported_ran_ok and schema_complete
+
+        if reported_ran_ok and not schema_complete:
+            error = {
+                "error_type": "MalformedCliOutput",
+                "error_message": _sanitize_error_message(
+                    "--analyze-graph reported status=ran_ok but result is "
+                    "missing required findings/refine fields"
+                ),
+            }
+        elif not ok:
+            error = {
+                "error_type": "GraphAnalysisError",
+                "error_message": _sanitize_error_message(
+                    f"--analyze-graph reported status={status}"
+                ),
+            }
+        else:
+            error = None
+
+        degradation_keys = (
+            "files_with_parse_errors",
+            "unreadable_or_unsupported_files",
+            "files_with_read_errors",
+            "files_with_extractor_panics",
+            "files_with_collector_panics",
+            "files_with_unsupported_language",
+            "truncated_by_max_files",
+        )
+        return {
+            "ok": ok,
+            "error": error,
+            "status": status,
+            "findings": result.get("findings", []),
+            "refine": result.get("refine", []),
+            "fact_graph_complete": build_result.get("fact_graph_complete"),
+            "build_status": build_status,
+            "degradation": {key: build_result.get(key) for key in degradation_keys},
+            "cached": compile_info.get("cached", False),
+            "compile_ms": compile_info.get("compile_ms", 0),
+        }
+
+    def _run_build_graph_step(
+        self,
+        repo_root: str,
+        files_from_path: str,
+        so_path: str,
+        graph_out: Path,
+        facts_out: Path,
+        deadline: float,
+    ) -> Tuple[Optional[Tuple[str, Dict[str, Any]]], Optional[Dict[str, Any]]]:
+        """Runs `--build-graph`. Returns `((status, result), None)` on a
+        real `"ok"` build, or `(None, error_result)` on any failure --
+        including an already-exhausted deadline, which never spawns a
+        doomed subprocess.
+        """
+        remaining = self._remaining_seconds(deadline)
+        if remaining <= 0:
+            return None, _graph_error_result(
+                "Timeout", "deadline exhausted before --build-graph"
+            )
+        args = [
+            "--build-graph",
+            "--repo-root",
+            repo_root,
+            "--files-from",
+            files_from_path,
+            "--dylib",
+            so_path,
+            "--graph-out",
+            str(graph_out),
+            "--facts-out",
+            str(facts_out),
+        ]
+        output, error = self._run_graph_subcommand(args, int(remaining) + 1)
+        if error is not None:
+            return None, _graph_error_result("XRayCliError", error)
+        status = output.get("status")
+        result = output.get("result") or {}
+        if status != "ok":
+            return None, _graph_error_result(
+                "GraphBuildError",
+                f"--build-graph reported status={status}",
+                build_status=status,
+            )
+        return (status, result), None
+
+    def _run_analyze_graph_step(
+        self,
+        graph_out: Path,
+        so_path: str,
+        facts_out: Path,
+        deadline: float,
+        build_status: str,
+    ) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
+        """Runs `--analyze-graph`. Returns `(output, None)` on a real
+        subprocess success (the ChildReport's OWN status may still be
+        non-`ran_ok`; that is handled by `_build_graph_analysis_result`,
+        not here), or `(None, error_result)` on a subprocess-level failure
+        or an already-exhausted deadline.
+        """
+        remaining = self._remaining_seconds(deadline)
+        if remaining <= 0:
+            return None, _graph_error_result(
+                "Timeout",
+                "deadline exhausted before --analyze-graph",
+                build_status=build_status,
+            )
+        args = [
+            "--analyze-graph",
+            "--graph-in",
+            str(graph_out),
+            "--dylib",
+            so_path,
+            "--facts-in",
+            str(facts_out),
+        ]
+        output, error = self._run_graph_subcommand(args, int(remaining) + 1)
+        if error is not None:
+            return None, _graph_error_result(
+                "XRayCliError", error, build_status=build_status
+            )
+        return output, None
+
+    def _compile_build_and_analyze(
+        self,
+        rust_code: str,
+        repo_root: str,
+        eval_path: str,
+        files_from_path: str,
+        graph_out: Path,
+        facts_out: Path,
+        deadline: float,
+    ) -> Dict[str, Any]:
+        """Compiles `rust_code` ONCE via `_compile_for_graph_mode`, then
+        drives `_run_build_graph_step` -> `_run_analyze_graph_step` ->
+        `_build_graph_analysis_result` -- the whole graph-mode pipeline in
+        one short orchestrator. `assert`s below are real type-narrowing
+        (Optional -> non-Optional), never a suppression: each one directly
+        follows the `is not None` check on the sibling error-result value
+        that guarantees it.
+        """
+        so_path, compile_info, compile_error = self._compile_for_graph_mode(
+            rust_code, eval_path, self._remaining_seconds(deadline)
+        )
+        if compile_error is not None:
+            return _graph_error_result("CompileError", compile_error)
+        assert so_path is not None
+
+        build_pair, build_error_result = self._run_build_graph_step(
+            repo_root, files_from_path, so_path, graph_out, facts_out, deadline
+        )
+        if build_error_result is not None:
+            return build_error_result
+        assert build_pair is not None
+        build_status, build_result = build_pair
+
+        analyze_output, analyze_error_result = self._run_analyze_graph_step(
+            graph_out, so_path, facts_out, deadline, build_status
+        )
+        if analyze_error_result is not None:
+            return analyze_error_result
+        assert analyze_output is not None
+
+        return self._build_graph_analysis_result(
+            analyze_output, build_status, build_result, compile_info
+        )
+
+    def run_graph_analysis(
+        self,
+        *,
+        evaluator_code: str,
+        repo_root: str,
+        file_paths: List[str],
+        timeout_seconds: int = 60,
+    ) -> Dict[str, Any]:
+        """Story #1811 (S5, AC2): compile the evaluator ONCE (reusing the
+        existing compile/cache machinery, Bug #1784), then --build-graph ->
+        --analyze-graph. Every KNOWN failure returns a structured
+        `_graph_error_result`; the temp-file+subprocess flow is wrapped in
+        `except OSError` (mirrors `_invoke_xray_cli` above) -- the MCP front
+        door is the final backstop for anything truly unexpected (Bug #1612).
+        """
+        if timeout_seconds <= 0 or not repo_root or not file_paths:
+            return _graph_error_result(
+                "InvalidArgument", "invalid timeout_seconds/repo_root/file_paths"
+            )
+
+        rust_code, validation_error = self._validate_rust_code(evaluator_code)
+        if validation_error is not None:
+            return _graph_error_result("ValidationError", validation_error)
+        if not self._xray_cli_path.exists():
+            msg = f"xray-cli binary not found at {self._xray_cli_path}."
+            logger.error("RustNativeBackend: %s", msg)
+            return _graph_error_result("BinaryNotFound", msg)
+
+        tmp_eval = tmp_files_from = graph_out = facts_out = None
+        try:
+            deadline = time.monotonic() + timeout_seconds
+            tmp_dir = _get_xray_tmp_dir()
+            tmp_dir.mkdir(parents=True, exist_ok=True)
+            graph_out = tmp_dir / f"xray_graph_out_{uuid.uuid4().hex}.bin"
+            facts_out = tmp_dir / f"xray_graph_facts_{uuid.uuid4().hex}.json"
+            tmp_eval = _write_temp_file(rust_code, ".rs", "xray_graph_eval_", tmp_dir)
+            tmp_files_from = _write_temp_file(
+                "\n".join(file_paths), ".txt", "xray_graph_files_", tmp_dir
+            )
+            return self._compile_build_and_analyze(
+                rust_code,
+                repo_root,
+                tmp_eval.name,
+                tmp_files_from.name,
+                graph_out,
+                facts_out,
+                deadline,
+            )
+        except OSError as exc:
+            msg = f"xray-cli graph analysis could not be executed: {exc}"
+            logger.error("RustNativeBackend: %s", msg)
+            return _graph_error_result("XRayCliError", msg)
+        finally:
+            eval_name = tmp_eval.name if tmp_eval is not None else None
+            files_name = tmp_files_from.name if tmp_files_from is not None else None
+            _safe_unlink_graph_temp_path(eval_name)
+            _safe_unlink_graph_temp_path(files_name)
+            _safe_unlink_graph_temp_path(graph_out)
+            _safe_unlink_graph_temp_path(facts_out)
 
 
 def _build_matches(

@@ -587,7 +587,207 @@ pub(crate) fn compile_evaluator_with_preamble(
     compile_evaluator_impl(user_code, cache_dir, preamble)
 }
 
+/// H2 (consolidated review, Issue #1811/Bug #1812, Codex): a source-size
+/// cap, checked BEFORE validation/compilation ever runs. Real evaluator
+/// sources are at most a few hundred lines; this is a generous ceiling
+/// (2 MiB) whose only purpose is to reject a pathological payload cheaply
+/// rather than let it reach rustc at all.
+///
+/// Deliberately a hardcoded constant, NOT a Web-UI/config setting -- per
+/// this project's standing rule against adding configuration to gate a
+/// bug fix, and matching the sibling constants below.
+const MAX_USER_CODE_BYTES: usize = 2 * 1024 * 1024;
+
+/// H2: upper bound on how long a single rustc invocation may run before
+/// `run_rustc_with_timeout` kills its whole process group. Real evaluator
+/// compiles take well under a second; this is a generous ceiling that
+/// only fires for a genuinely pathological (compile-bomb) payload.
+///
+/// Hardcoded, like `graph::analyze::process::POLL_INTERVAL`/
+/// `STDOUT_DRAIN_TIMEOUT`/`REAP_RETRY_COUNT` are for the identical class
+/// of problem in that sibling module -- this project's standing rule is
+/// to never add configuration to gate a bug fix.
+const RUSTC_COMPILE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// How often `run_rustc_with_timeout` polls `try_wait()` while under budget.
+const RUSTC_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(20);
+
+/// Upper bound on waiting for the stdout/stderr reader threads to hand
+/// back their collected bytes once rustc has already exited (or been
+/// killed) -- a safety margin, not the expected wait (the pipe's write
+/// end closes the moment the process, and anything it spawned holding the
+/// fd open, is gone).
+const RUSTC_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Spawns a dedicated thread that drains `pipe` (a child's stdout or
+/// stderr) into a `Vec<u8>` and sends it once the pipe closes. Mirrors
+/// `graph::analyze::process::spawn_stdout_reader`'s established pattern
+/// (Rule 4, anti-duplication) generalized over BOTH pipes so
+/// `run_rustc_with_timeout` needs only one call site per pipe instead of
+/// two near-identical closures.
+///
+/// `read_to_end`'s error and the channel `send`'s error are both
+/// deliberately discarded (`let _ = ...`), matching
+/// `spawn_stdout_reader`'s own already-reviewed rationale: a broken pipe
+/// read has no corrective action available on a background thread, and a
+/// disconnected receiver only happens when the caller itself gave up
+/// waiting (see `RUSTC_DRAIN_TIMEOUT`) -- in both cases there is nothing
+/// left to report to from INSIDE this thread; the caller-side drain
+/// timeout is instead observably logged at the `recv_timeout` call site.
+fn spawn_pipe_reader<R: std::io::Read + Send + 'static>(mut pipe: R) -> std::sync::mpsc::Receiver<Vec<u8>> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        let _ = pipe.read_to_end(&mut buf);
+        let _ = tx.send(buf);
+    });
+    rx
+}
+
+/// Drains `rx` (a `spawn_pipe_reader` receiver), bounded by
+/// `RUSTC_DRAIN_TIMEOUT`. On a timeout or a disconnected channel (the
+/// reader thread panicked before sending), emits an observable warning
+/// naming `pipe_name` and degrades to empty bytes -- deliberately NEVER a
+/// `CompileError`: `success` (this function's other return value) already
+/// comes from the process's real exit status, independent of this drain,
+/// so a slow/stuck drain must never mask a genuine compile failure behind
+/// a different "could not read output" error -- it can only ever make
+/// that failure's own message less detailed.
+fn drain_pipe_or_warn(rx: std::sync::mpsc::Receiver<Vec<u8>>, pipe_name: &str) -> Vec<u8> {
+    match rx.recv_timeout(RUSTC_DRAIN_TIMEOUT) {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            eprintln!(
+                "Warning: failed to drain rustc's {} within {}s ({}); \
+                 continuing with empty {} for this compile",
+                pipe_name,
+                RUSTC_DRAIN_TIMEOUT.as_secs(),
+                e,
+                pipe_name
+            );
+            Vec::new()
+        }
+    }
+}
+
+/// Bug #1816: builds the `rustc` invocation that compiles an evaluator's
+/// assembled source into the `.so` `xray-cli` later loads across the
+/// `GraphHandle` FFI boundary, pinned via `RUSTUP_TOOLCHAIN` to
+/// `cache::pinned_toolchain_channel()` -- the SAME toolchain `cargo build`
+/// uses to compile `xray-cli` itself, since both read the identical
+/// `rust-toolchain.toml`. See `cache::pinned_toolchain_channel`'s doc
+/// comment for the full root-cause writeup: without this pin, this
+/// subprocess's own `rustc` binary resolution depended on the CALLING
+/// PROCESS's current working directory, which in production sits outside
+/// this repository entirely, letting the evaluator compile under a
+/// DIFFERENT rustc version than the one that built `xray-cli` -- an ABI
+/// mismatch that manifested as heap corruption (`free(): double free
+/// detected in tcache 2` / SIGSEGV) the moment `analyze_graph` called both
+/// `signature_for` and `shortest_path_to_any` in the same evaluator.
+/// Extracted into its own function so the pin itself is directly testable
+/// via `Command::get_envs()`, independent of ever actually invoking rustc.
+fn evaluator_rustc_command(build_rs_path: &Path, build_so_path: &Path) -> std::process::Command {
+    let mut command = std::process::Command::new("rustc");
+    command
+        .env("RUSTUP_TOOLCHAIN", crate::cache::pinned_toolchain_channel())
+        .args([
+            "--edition", "2021",
+            "--crate-type", "cdylib",
+            "-C", "opt-level=2",
+            "-o", build_so_path.to_str().unwrap(),
+            build_rs_path.to_str().unwrap(),
+        ]);
+    command
+}
+
+/// H2 (consolidated review, Issue #1811/Bug #1812, Codex): runs `command`
+/// (rustc) to completion or until `timeout` elapses, whichever is first --
+/// mirroring `graph::analyze::process::run_analyze_child`'s established
+/// process-group-timeout-kill pattern exactly (Rule 4, anti-duplication:
+/// reuses its `reap_after_kill` primitive -- which itself calls
+/// `kill_process_group` -- rather than reimplementing either).
+///
+/// The bare `std::process::Command::output()` this replaces had NO
+/// timeout at all -- a compile-expensive or genuinely hanging evaluator
+/// escaped the pipeline's advertised timeout entirely. Worse, `output()`
+/// never puts the child in its own process group, so a caller (Python)
+/// that kills only the xray-cli PARENT process on ITS OWN timeout leaves
+/// the already-running rustc CHILD (and any linker grandchild) orphaned,
+/// continuing to consume CPU/RAM/disk with nothing left to account for
+/// it. `command.process_group(0)` here makes the spawned pid a genuine
+/// process-group leader, so a timeout-triggered kill reaches the whole
+/// tree, not just rustc itself.
+///
+/// Returns `(success, stdout_bytes, stderr_bytes)` on a completed process
+/// (regardless of exit code -- callers inspect `success`), or a
+/// `CompileError` if the command could not be spawned, timed out, or
+/// `try_wait` itself failed.
+fn run_rustc_with_timeout(
+    mut command: std::process::Command,
+    timeout: std::time::Duration,
+) -> Result<(bool, Vec<u8>, Vec<u8>), CompileError> {
+    use crate::graph::analyze::process::reap_after_kill;
+    use std::os::unix::process::CommandExt;
+    use std::process::Stdio;
+
+    command.process_group(0);
+    command.stdout(Stdio::piped());
+    command.stderr(Stdio::piped());
+
+    let mut child = command.spawn().map_err(|e| CompileError {
+        message: format!("Failed to invoke rustc: {}", e),
+        details: vec!["Is rustc installed and on PATH?".to_string()],
+    })?;
+    let pid = child.id() as i32;
+    let stdout_rx = spawn_pipe_reader(child.stdout.take().expect("stdout piped above"));
+    let stderr_rx = spawn_pipe_reader(child.stderr.take().expect("stderr piped above"));
+
+    let start = Instant::now();
+    let success = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status.success(),
+            Ok(None) => {
+                if start.elapsed() >= timeout {
+                    reap_after_kill(&mut child, pid);
+                    return Err(CompileError {
+                        message: format!(
+                            "rustc compilation timed out after {}s and was killed",
+                            timeout.as_secs()
+                        ),
+                        details: vec![],
+                    });
+                }
+                std::thread::sleep(RUSTC_POLL_INTERVAL);
+            }
+            Err(e) => {
+                reap_after_kill(&mut child, pid);
+                return Err(CompileError {
+                    message: format!("Failed to wait for rustc: {}", e),
+                    details: vec![],
+                });
+            }
+        }
+    };
+
+    let stdout = drain_pipe_or_warn(stdout_rx, "stdout");
+    let stderr = drain_pipe_or_warn(stderr_rx, "stderr");
+    Ok((success, stdout, stderr))
+}
+
 fn compile_evaluator_impl(user_code: &str, cache_dir: &Path, preamble: &str) -> Result<CompileResult, CompileError> {
+    // Step 0 (H2): reject an oversized source before validation/compilation
+    // are ever attempted -- see MAX_USER_CODE_BYTES's own doc comment.
+    if user_code.len() > MAX_USER_CODE_BYTES {
+        return Err(CompileError {
+            message: format!(
+                "Evaluator source exceeds the maximum allowed size of {} bytes (got {} bytes)",
+                MAX_USER_CODE_BYTES,
+                user_code.len()
+            ),
+            details: vec![],
+        });
+    }
+
     // Step 1: Validate
     if let Err(errors) = validator::validate_evaluator_source(user_code) {
         return Err(CompileError {
@@ -684,24 +884,21 @@ fn compile_evaluator_impl(user_code: &str, cache_dir: &Path, preamble: &str) -> 
     // Step 6: Compile — output goes into the isolated build dir, never
     // directly into the shared cache_dir, so no two concurrent invocations
     // ever share a -o directory.
+    //
+    // H2 (consolidated review, Issue #1811/Bug #1812, Codex): bounded via
+    // `run_rustc_with_timeout` -- see that function's docs for why a bare
+    // `.output()` (no timeout, no process-group isolation) let a
+    // compile-expensive evaluator escape the pipeline's advertised
+    // timeout entirely, and let killing the PARENT (xray-cli) orphan the
+    // rustc CHILD.
     let compile_start = Instant::now();
-    let output = std::process::Command::new("rustc")
-        .args([
-            "--edition", "2021",
-            "--crate-type", "cdylib",
-            "-C", "opt-level=2",
-            "-o", build_so_path.to_str().unwrap(),
-            build_rs_path.to_str().unwrap(),
-        ])
-        .output()
-        .map_err(|e| CompileError {
-            message: format!("Failed to invoke rustc: {}", e),
-            details: vec!["Is rustc installed and on PATH?".to_string()],
-        })?;
+    let rustc_command = evaluator_rustc_command(&build_rs_path, &build_so_path);
+    let (success, _stdout, stderr_bytes) =
+        run_rustc_with_timeout(rustc_command, RUSTC_COMPILE_TIMEOUT)?;
     let compile_ms = compile_start.elapsed().as_millis();
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    if !success {
+        let stderr = String::from_utf8_lossy(&stderr_bytes).to_string();
         let preamble_lines = preamble_line_count();
         let adjusted = adjust_error_lines(&stderr, preamble_lines);
         return Err(CompileError {
@@ -862,8 +1059,29 @@ pub fn cache_identity_info_from_source(assembled_source: &str) -> CacheIdentityI
 /// Compute identity info directly from raw user code (assembles internally).
 /// This is the entry point used by `xray-cli --print-cache-identity`, which
 /// starts from raw user code read off stdin and has no pre-assembled source.
+///
+/// LEGACY-MODE ONLY (H9, consolidated review, Issue #1811/Bug #1812): this
+/// always assembles via `assemble_evaluator_source` regardless of the
+/// evaluator's real mode. For a graph-mode evaluator, use
+/// `cache_identity_info_graph` instead -- `compile_evaluator_impl` itself
+/// assembles graph-mode sources via `assemble_graph_evaluator_source`, and
+/// the two assemblies produce DIFFERENT identities (different preamble/
+/// epilogue text hashed into the composite). Calling this function on
+/// graph-mode source computes an identity that will never match the real
+/// compiled `.so` filename.
 pub fn cache_identity_info(user_code: &str) -> CacheIdentityInfo {
     cache_identity_info_from_source(&assemble_evaluator_source(user_code))
+}
+
+/// H9 (consolidated review, Issue #1811/Bug #1812): the graph-mode
+/// counterpart of `cache_identity_info` -- assembles via
+/// `assemble_graph_evaluator_source`, EXACTLY mirroring the assembly
+/// `compile_evaluator_impl` performs for `EvaluatorMode::Graph` (Step 3),
+/// so the identity this returns always matches the real `.so` filename a
+/// graph-mode compile produces. This is the entry point
+/// `xray-cli --print-cache-identity --graph-mode` uses.
+pub fn cache_identity_info_graph(user_code: &str) -> CacheIdentityInfo {
+    cache_identity_info_from_source(&assemble_graph_evaluator_source(user_code))
 }
 
 /// Adjust rustc error line numbers by subtracting the preamble offset.
@@ -907,6 +1125,79 @@ fn chrono_now_iso() -> String {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    // --- HIGH (Codex follow-up review): no compile timeout/resource
+    // limit; killing xray-cli orphans rustc ---
+
+    /// A source exceeding the size cap must be rejected IMMEDIATELY,
+    /// before rustc is ever invoked -- proven by using a size so large
+    /// (10 MiB) that a real compile attempt would take dramatically
+    /// longer than a fast, no-compile rejection.
+    #[test]
+    fn compile_evaluator_rejects_oversized_source_before_invoking_rustc() {
+        let dir = TempDir::new().unwrap();
+        let huge_user_code = format!(
+            "fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> {{\n// {}\n    Vec::new()\n}}",
+            "x".repeat(10 * 1024 * 1024)
+        );
+        let start = std::time::Instant::now();
+        let result = compile_evaluator(&huge_user_code, dir.path());
+        let elapsed = start.elapsed();
+
+        assert!(result.is_err(), "an oversized source must be rejected, not compiled");
+        assert!(
+            elapsed < std::time::Duration::from_secs(2),
+            "rejection must be near-instant (no rustc invocation attempted), took {:?}",
+            elapsed
+        );
+    }
+
+    /// Bug #1816 (THE fix's discriminating test, evaluator-compile side):
+    /// the actual `rustc` invocation that compiles a user evaluator `.so`
+    /// must carry `RUSTUP_TOOLCHAIN` pinned to `cache::pinned_toolchain_channel()`.
+    /// This is the MORE important of the two Bug #1816 toolchain-pin call
+    /// sites (the other is `cache::get_rustc_version`'s version probe) --
+    /// this is the command that produces the artifact loaded across the
+    /// `GraphHandle` FFI boundary, so an unpinned toolchain here is exactly
+    /// what let the compiled evaluator diverge from the rustc version that
+    /// built `xray-cli` itself, corrupting the heap the moment
+    /// `analyze_graph` called both `signature_for` and
+    /// `shortest_path_to_any` (see the module doc comment on
+    /// `cache::pinned_toolchain_channel` for the full root-cause writeup).
+    #[test]
+    fn evaluator_rustc_command_pins_rustup_toolchain_env_var() {
+        let dir = TempDir::new().unwrap();
+        let build_rs_path = dir.path().join("evaluator.rs");
+        let build_so_path = dir.path().join("evaluator.so");
+        let command = evaluator_rustc_command(&build_rs_path, &build_so_path);
+        let envs: std::collections::HashMap<_, _> = command.get_envs().collect();
+        assert_eq!(
+            envs.get(std::ffi::OsStr::new("RUSTUP_TOOLCHAIN")),
+            Some(&Some(std::ffi::OsStr::new(crate::cache::pinned_toolchain_channel()))),
+            "the evaluator-compiling rustc command must pin RUSTUP_TOOLCHAIN to the workspace channel"
+        );
+    }
+
+    /// `run_rustc_with_timeout` must return promptly with a timeout error
+    /// for a hanging command, rather than blocking for the command's full
+    /// runtime -- proving the timeout+process-group-kill mechanism
+    /// actually works, not just that a timeout constant exists somewhere.
+    #[test]
+    fn run_rustc_with_timeout_returns_promptly_instead_of_blocking_forever() {
+        let mut hanging_command = std::process::Command::new("sh");
+        hanging_command.arg("-c").arg("sleep 30");
+
+        let start = std::time::Instant::now();
+        let result = run_rustc_with_timeout(hanging_command, std::time::Duration::from_millis(200));
+        let elapsed = start.elapsed();
+
+        assert!(result.is_err(), "a hanging command must time out, not succeed");
+        assert!(
+            elapsed < std::time::Duration::from_secs(5),
+            "must return promptly after the timeout, not block for the full 30s sleep, took {:?}",
+            elapsed
+        );
+    }
 
     /// RED phase: `assemble_graph_evaluator_source` does not exist yet.
     /// This proves what its GREEN implementation must do -- assemble
@@ -1032,6 +1323,48 @@ fn analyze_graph(g: &GraphHandle<'_>, facts: &FactsHandle<'_>) -> GraphResult {
             assert!(has_analyze_graph, "graph-mode .so must export xray_analyze_graph");
             assert!(!has_legacy, "graph-mode .so must NEVER export xray_evaluate_node");
         }
+    }
+
+    /// Consolidated review finding H9 (Issue #1811/Bug #1812, Codex): the
+    /// Bug #1784 class recurring at the graph-mode bridge. `--print-cache-
+    /// identity` (backed by `cache_identity_info`) ALWAYS assembles via the
+    /// LEGACY `assemble_evaluator_source`, regardless of the evaluator's
+    /// real mode -- but `compile_evaluator_impl` (Step 3) assembles a
+    /// graph-mode evaluator via `assemble_graph_evaluator_source` instead,
+    /// and derives the REAL `.so` filename identity from THAT assembled
+    /// source. A mode-aware `cache_identity_info_graph` must produce
+    /// EXACTLY the identity `compile_evaluator` actually uses for a
+    /// graph-mode evaluator -- otherwise a cluster-cache pre-fill keyed on
+    /// the wrong identity can never be consumed by the graph compile path.
+    #[test]
+    fn cache_identity_info_graph_matches_compile_evaluators_real_identity_for_graph_mode() {
+        let dir = TempDir::new().unwrap();
+        let user_code = r#"
+fn collect_facts(node: &OwnedNode, file: &str) -> Vec<UserFact> {
+    Vec::new()
+}
+fn analyze_graph(g: &GraphHandle<'_>, facts: &FactsHandle<'_>) -> GraphResult {
+    GraphResult::default()
+}
+"#;
+        assert_eq!(detect_evaluator_mode(user_code).unwrap(), EvaluatorMode::Graph);
+
+        let compiled = compile_evaluator(user_code, dir.path())
+            .expect("a genuine graph-mode evaluator must compile successfully");
+        let real_identity = compiled
+            .so_path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .expect("so_path must have a valid file stem")
+            .to_string();
+
+        let graph_identity_info = cache_identity_info_graph(user_code);
+
+        assert_eq!(
+            graph_identity_info.identity, real_identity,
+            "cache_identity_info_graph() must produce EXACTLY the identity \
+             compile_evaluator() actually uses for a graph-mode evaluator"
+        );
     }
 
     #[test]

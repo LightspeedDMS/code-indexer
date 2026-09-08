@@ -74,6 +74,60 @@ fn read_file_list(path: &str) -> Result<Vec<PathBuf>, String> {
         .collect())
 }
 
+/// R3-2 (Codex re-review, ROUND 3): a bounded variant of `read_file_list`
+/// for `--build-graph` specifically. `read_file_list` (above) reads the
+/// ENTIRE file into memory via `read_to_string` before parsing a single
+/// line -- on a `--files-from` list with millions of entries that alone
+/// materializes the full text before any limit engages. This variant uses
+/// `BufReader::read_line`, which reads lazily line-by-line, and stops
+/// collecting once `max_lines` valid (non-blank) paths are found.
+///
+/// Truncation ("were there more lines?") is detected via a RAW BYTE peek
+/// (`BufRead::fill_buf`) on the underlying reader -- deliberately NEVER
+/// UTF-8-decoding anything beyond the cap, so malformed content past the
+/// cap can never cause an error or be interpreted as a path; it can only
+/// be detected as "present" or "absent". A genuine I/O error during that
+/// peek IS propagated as `Err` (never silently treated as "not
+/// truncated") -- only the CONTENT beyond the cap is never inspected.
+///
+/// Left as a SEPARATE function rather than changing `read_file_list`
+/// itself: that function is also used by `--refine` and the legacy
+/// (non-`--files-from`) default scan path, both of which have their own
+/// existing, unbounded-by-design contracts and tests this change must not
+/// touch.
+fn read_file_list_capped(path: &str, max_lines: usize) -> Result<(Vec<PathBuf>, bool), String> {
+    use std::io::{BufRead, BufReader};
+
+    let path_buf = PathBuf::from(path);
+    if !path_buf.is_absolute() {
+        return Err(format!("--files-from path must be absolute, got: {}", path));
+    }
+    let file = std::fs::File::open(&path_buf)
+        .map_err(|e| format!("Failed to read --files-from list at {}: {}", path, e))?;
+    let mut reader = BufReader::new(file);
+
+    let mut paths: Vec<PathBuf> = Vec::new();
+    let mut line = String::new();
+    while paths.len() < max_lines {
+        line.clear();
+        let bytes_read = reader
+            .read_line(&mut line)
+            .map_err(|e| format!("Failed to read --files-from list at {}: {}", path, e))?;
+        if bytes_read == 0 {
+            return Ok((paths, false)); // genuinely exhausted, not truncated
+        }
+        let trimmed = line.trim();
+        if !trimmed.is_empty() {
+            paths.push(PathBuf::from(trimmed));
+        }
+    }
+    let truncated = !reader
+        .fill_buf()
+        .map_err(|e| format!("Failed to read --files-from list at {}: {}", path, e))?
+        .is_empty();
+    Ok((paths, truncated))
+}
+
 /// Serialize `out` to a JSON line on stdout, or a plain-text error to stderr
 /// if serialization itself fails (never panics via `.unwrap()`).
 fn print_json_output(out: &JsonOutput) {
@@ -89,8 +143,20 @@ fn print_json_output(out: &JsonOutput) {
 /// Python via the `--print-cache-identity` subcommand below, so Python's
 /// RustNativeBackend never independently re-implements the hash and cannot
 /// drift from what compile_evaluator() actually uses as its cache key.
-fn format_cache_identity_output(user_code: &str) -> String {
-    let info = xray_core::compiler::cache_identity_info(user_code);
+///
+/// H9 (consolidated review, Issue #1811/Bug #1812): `graph_mode` selects
+/// which of the two assembly-aware identity functions to use --
+/// `cache_identity_info` (legacy assembly) or `cache_identity_info_graph`
+/// (graph assembly, matching what `compile_evaluator` uses for a
+/// `EvaluatorMode::Graph` evaluator). Without this, a graph-mode caller
+/// pre-fills/post-fills the cluster cache under an identity the graph
+/// compile path can never look up.
+fn format_cache_identity_output(user_code: &str, graph_mode: bool) -> String {
+    let info = if graph_mode {
+        xray_core::compiler::cache_identity_info_graph(user_code)
+    } else {
+        xray_core::compiler::cache_identity_info(user_code)
+    };
     format!(
         "identity={}\nsource_hash={}\nabi_version={}\nrustc_version={}\n",
         info.identity, info.source_hash, info.abi_version, info.rustc_version
@@ -256,10 +322,17 @@ fn run_analyze_graph(
     };
 
     let facts = match facts_in {
-        Some(path) => read_facts_file(path).unwrap_or_else(|e| {
-            eprintln!("Warning: failed to read --facts-in {}: {}", path.display(), e);
-            FactIndex::new()
-        }),
+        // H10 (consolidated review, Issue #1811/Bug #1812): a facts file
+        // that EXISTS but fails to read/parse is a real failure, not
+        // "no facts collected" -- hard-fail with FactsInvalid rather than
+        // silently degrading to an empty FactIndex (Rule 2/13).
+        Some(path) => match read_facts_file(path) {
+            Ok(f) => f,
+            Err(e) => {
+                eprintln!("Error: failed to read --facts-in {}: {}", path.display(), e);
+                return ChildReport { status: AnalyzeStatus::FactsInvalid, result: None };
+            }
+        },
         None => FactIndex::new(),
     };
     let graph_handle = xray_core::graph::csr::handle::GraphHandle::from_graph(&graph);
@@ -432,10 +505,18 @@ fn run_refine(
     };
 
     let facts = match facts_in {
-        Some(path) => read_facts_file(path).unwrap_or_else(|e| {
-            eprintln!("Warning: failed to read --facts-in {}: {}", path.display(), e);
-            FactIndex::new()
-        }),
+        // H10 (consolidated review, Issue #1811/Bug #1812): mirrors
+        // run_analyze_graph's identical fix -- a facts file that EXISTS
+        // but fails to read/parse is a real failure, hard-fail with
+        // FactsInvalid rather than silently degrading to an empty
+        // FactIndex (Rule 2/13).
+        Some(path) => match read_facts_file(path) {
+            Ok(f) => f,
+            Err(e) => {
+                eprintln!("Error: failed to read --facts-in {}: {}", path.display(), e);
+                return ChildReport { status: AnalyzeStatus::FactsInvalid, result: None };
+            }
+        },
         None => FactIndex::new(),
     };
 
@@ -446,21 +527,398 @@ fn run_refine(
     ChildReport { status: AnalyzeStatus::RanOk, result: Some(RefineBatchResult { files: files_out }) }
 }
 
+/// Story #1811 (S5, AC1): parsed flags for the `--build-graph` subcommand.
+/// Every flag except `--facts-out` is required -- there is no bare
+/// directory-walk mode, mirroring `--refine`'s own `RefineArgs` exactly:
+/// the caller has already computed the candidate file list and must hand
+/// it over via `--files-from`.
+struct BuildGraphArgs {
+    repo_root: PathBuf,
+    files_from: PathBuf,
+    dylib: PathBuf,
+    graph_out: PathBuf,
+    facts_out: Option<PathBuf>,
+}
+
+/// Parses the `--build-graph` subcommand's four REQUIRED flags
+/// (`--repo-root`, `--files-from`, `--dylib`, `--graph-out`) plus the
+/// OPTIONAL `--facts-out` -- order-independent, mirrors `parse_refine_
+/// args`'s exact loop structure (Rule 4, anti-duplication).
+fn parse_build_graph_args(args: &[String]) -> Result<BuildGraphArgs, String> {
+    let mut repo_root: Option<PathBuf> = None;
+    let mut files_from: Option<PathBuf> = None;
+    let mut dylib: Option<PathBuf> = None;
+    let mut graph_out: Option<PathBuf> = None;
+    let mut facts_out: Option<PathBuf> = None;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--repo-root" => {
+                let (value, next_i) = parse_value_flag(args, i, "--repo-root requires a path");
+                repo_root = Some(PathBuf::from(value));
+                i = next_i;
+            }
+            "--files-from" => {
+                let (value, next_i) = parse_value_flag(args, i, "--files-from requires a path");
+                files_from = Some(PathBuf::from(value));
+                i = next_i;
+            }
+            "--dylib" => {
+                let (value, next_i) = parse_value_flag(args, i, "--dylib requires a path");
+                dylib = Some(PathBuf::from(value));
+                i = next_i;
+            }
+            "--graph-out" => {
+                let (value, next_i) = parse_value_flag(args, i, "--graph-out requires a path");
+                graph_out = Some(PathBuf::from(value));
+                i = next_i;
+            }
+            "--facts-out" => {
+                let (value, next_i) = parse_value_flag(args, i, "--facts-out requires a path");
+                facts_out = Some(PathBuf::from(value));
+                i = next_i;
+            }
+            other => return Err(format!("--build-graph: unrecognized argument '{other}'")),
+        }
+    }
+    Ok(BuildGraphArgs {
+        repo_root: repo_root.ok_or_else(|| "--build-graph requires --repo-root <path>".to_string())?,
+        files_from: files_from.ok_or_else(|| "--build-graph requires --files-from <path>".to_string())?,
+        dylib: dylib.ok_or_else(|| "--build-graph requires --dylib <path>".to_string())?,
+        graph_out: graph_out.ok_or_else(|| "--build-graph requires --graph-out <path>".to_string())?,
+        facts_out,
+    })
+}
+
+/// Adapts a loaded `GraphDynlibEvaluator` into the `FactCollector` trait
+/// `build_repo_graph` requires (Rule 4: reuses the REAL dylib call, never
+/// reimplements fact collection). `_index` (the completed `LocalIndex`) is
+/// unused here -- `GraphDynlibEvaluator::call_collect_facts` does not take
+/// it, mirroring how the dylib ABI itself only passes `node`/`file`.
+///
+/// Only the "not exported" case (outer `None`) degrades to an empty fact
+/// list -- that is a legitimate, non-failure outcome (mirrors AC7/AC8's
+/// own `Absent` treatment for a dylib with no graph-mode exports at all).
+/// A genuine dylib-internal panic (inner `None`, already caught once by
+/// the dylib's own `catch_unwind` at the FFI boundary) is deliberately
+/// RE-PANICKED here rather than silently swallowed into an empty `Vec`:
+/// `graph::fused::run_collect_facts` (the ONLY real caller of this trait
+/// method, via `build_repo_graph`) wraps every `collect_facts` call in its
+/// OWN `catch_unwind` and records `CollectFactsStatus::Panicked`, which
+/// `record_fused_result` rolls up into `RepoIndexResult::files_with_
+/// collector_panics` -- surfaced verbatim in `BuildGraphResult`. Silently
+/// returning `Vec::new()` for a real panic would make that counter always
+/// read zero regardless of what actually happened inside the dylib,
+/// hiding a genuine failure behind a "ran successfully, found nothing"
+/// report (Rule 13, anti-silent-failure).
+struct DylibFactCollector<'a> {
+    evaluator: &'a xray_core::dynlib::GraphDynlibEvaluator,
+}
+
+impl<'a> xray_core::graph::user_facts::FactCollector for DylibFactCollector<'a> {
+    fn collect_facts(
+        &self,
+        root: &xray_core::owned_node::OwnedNode,
+        file: &str,
+        _index: &xray_core::graph::extract::local_index::LocalIndex,
+    ) -> Vec<xray_core::graph::user_facts::UserFact> {
+        match self.evaluator.call_collect_facts(root, file) {
+            None => Vec::new(),
+            Some(None) => panic!("dylib collect_facts panicked while processing {file}"),
+            Some(Some(facts)) => facts,
+        }
+    }
+}
+
+/// Story #1811 (S5, AC1): `--build-graph`'s terminal statuses -- every one
+/// DISTINCT and explicit (Rule 13, anti-silent-failure), mirroring
+/// `AnalyzeStatus`'s discipline. `RepoRootInvalid` exists specifically
+/// because `build_repo_graph` itself `.expect()`s a successful
+/// `repo_root.canonicalize()` -- `run_build_graph` guards that BEFORE
+/// delegating, so an invalid `--repo-root` reports cleanly instead of
+/// crashing the whole process.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum BuildGraphStatus {
+    RepoRootInvalid,
+    LoadFailed,
+    FileIdCollision,
+    GraphWriteFailed,
+    FactsWriteFailed,
+    Ok,
+}
+
+/// Story #1811 (S5, AC1): "a caller MUST be able to tell a complete graph
+/// from a degraded one" -- surfaces `RepoIndexResult`'s own completeness
+/// and degradation counters verbatim (Rule 4: never re-derives them),
+/// including `files_with_collector_panics` (see `DylibFactCollector`'s
+/// doc comment for why a dylib-side `collect_facts` panic reaches this
+/// counter rather than being silently absorbed).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+struct BuildGraphResult {
+    fact_graph_complete: bool,
+    files_with_parse_errors: usize,
+    unreadable_or_unsupported_files: usize,
+    files_with_read_errors: usize,
+    files_with_extractor_panics: usize,
+    files_with_collector_panics: usize,
+    /// Consolidated review finding C2 (Issue #1811/Bug #1812): surfaces
+    /// `RepoIndexResult::files_with_unsupported_language` verbatim -- files
+    /// with a recognized source-language extension for which the engine
+    /// has no graph extractor (Java is currently the only one). Alongside
+    /// the six pre-existing counters, never re-derived.
+    files_with_unsupported_language: usize,
+    truncated_by_max_files: bool,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct BuildGraphReport {
+    status: BuildGraphStatus,
+    result: Option<BuildGraphResult>,
+}
+
+/// R2-6 (Codex re-review): `run_build_graph` previously used
+/// `IndexBudget::unlimited()` and `max_files: None`, so a whole-repo
+/// `--build-graph` request could allocate candidate paths and graph state
+/// with NO graph-specific bound -- an exhaustion risk at ~900-repo fleet
+/// scale (a single very large or adversarial repo could consume unbounded
+/// memory building its graph). `IndexBudget`'s degradation ladder and
+/// `max_files`'s truncation reporting (`truncated_by_max_files`,
+/// `fact_graph_complete` downgrade) were ALREADY implemented and tested in
+/// `repo_index.rs` -- this was purely a missing finite default at the one
+/// production call site, never a missing mechanism.
+///
+/// Values are hardcoded (not a new Web UI setting -- project convention:
+/// no new config surface to gate a bug fix) and deliberately generous so
+/// no realistic legitimate repo is truncated; they exist to cap the
+/// PATHOLOGICAL case, not to constrain everyday use. Revisit with real
+/// fleet telemetry if a genuinely huge monorepo needs a higher ceiling.
+const GRAPH_INDEX_MAX_FILES: usize = 50_000;
+const GRAPH_INDEX_MAX_TOTAL_CANDIDATES: usize = 2_000_000;
+const GRAPH_INDEX_MAX_CANDIDATES_PER_REFERENCE: usize = 1_000;
+
+fn build_graph_index_options() -> xray_core::graph::repo_index::RepoIndexOptions {
+    xray_core::graph::repo_index::RepoIndexOptions {
+        budget: xray_core::graph::budget::IndexBudget::new(
+            GRAPH_INDEX_MAX_TOTAL_CANDIDATES,
+            GRAPH_INDEX_MAX_CANDIDATES_PER_REFERENCE,
+        ),
+        max_files: Some(GRAPH_INDEX_MAX_FILES),
+    }
+}
+
+/// Story #1811 (S5, AC1): the core of `--build-graph`, factored out from
+/// argv/exit-code plumbing exactly like `run_analyze_graph`/`run_refine`
+/// are. Drives the EXISTING `build_repo_graph` + `write_graph_file` +
+/// (when `facts_out` is `Some`) `write_facts_file` pipeline -- never
+/// reimplements any of the three. Every terminal status is distinct:
+///
+/// - `--repo-root` fails to canonicalize -> `RepoRootInvalid`
+/// - `--dylib` fails to load/verify -> `LoadFailed`
+/// - two distinct `repo_relative_paths` hash to the same `file_id` ->
+///   `FileIdCollision`
+/// - `write_graph_file` fails (e.g. an unwritable `--graph-out` parent
+///   directory) -> `GraphWriteFailed`
+/// - `write_facts_file` fails -> `FactsWriteFailed`
+/// - otherwise -> `Ok`, carrying `RepoIndexResult`'s completeness/
+///   degradation counters verbatim.
+///
+/// `dylib`/`graph_out`/`facts_out` are TRUSTED paths -- xray-cli is always
+/// invoked directly by a trusted parent process (Python's
+/// `RustNativeBackend`, never a network-facing service proxying untrusted
+/// end-user paths), exactly like every neighboring subcommand's
+/// `--dylib`/`--graph-in` above already assumes: `run_analyze_graph` and
+/// `run_refine` apply zero path-containment validation to either flag
+/// either. `--refine`'s OWN `resolve_repo_relative_path` containment check
+/// exists for a genuinely different reason -- narrowing untrusted-shaped
+/// repo-relative FILE paths against `--repo-root` before reading their
+/// contents -- and is orthogonal to the CLI's own trusted invocation
+/// paths. This subcommand does not lower that pre-existing trust boundary,
+/// it reuses it.
+fn run_build_graph(
+    repo_root: &std::path::Path,
+    repo_relative_paths: &[PathBuf],
+    dylib: &std::path::Path,
+    graph_out: &std::path::Path,
+    facts_out: Option<&std::path::Path>,
+) -> BuildGraphReport {
+    use xray_core::graph::repo_index::build_repo_graph;
+    use xray_core::graph::user_facts::write_facts_file;
+    use xray_core::graph::csr::wire::write_graph_file;
+
+    if repo_root.canonicalize().is_err() {
+        return BuildGraphReport { status: BuildGraphStatus::RepoRootInvalid, result: None };
+    }
+    let evaluator = match xray_core::dynlib::GraphDynlibEvaluator::load(dylib) {
+        Ok(e) => e,
+        Err(_) => return BuildGraphReport { status: BuildGraphStatus::LoadFailed, result: None },
+    };
+    let collector = DylibFactCollector { evaluator: &evaluator };
+
+    let path_strings: Vec<String> =
+        repo_relative_paths.iter().map(|p| p.to_string_lossy().to_string()).collect();
+    let options = build_graph_index_options();
+    let index_result = match build_repo_graph(repo_root, &path_strings, &options, &collector) {
+        Ok(r) => r,
+        Err(_) => return BuildGraphReport { status: BuildGraphStatus::FileIdCollision, result: None },
+    };
+
+    if write_graph_file(&index_result.graph, graph_out).is_err() {
+        return BuildGraphReport { status: BuildGraphStatus::GraphWriteFailed, result: None };
+    }
+    if let Some(facts_path) = facts_out {
+        if write_facts_file(&index_result.facts, facts_path).is_err() {
+            return BuildGraphReport { status: BuildGraphStatus::FactsWriteFailed, result: None };
+        }
+    }
+
+    BuildGraphReport {
+        status: BuildGraphStatus::Ok,
+        result: Some(BuildGraphResult {
+            fact_graph_complete: index_result.fact_graph_complete,
+            files_with_parse_errors: index_result.files_with_parse_errors,
+            unreadable_or_unsupported_files: index_result.unreadable_or_unsupported_files,
+            files_with_read_errors: index_result.files_with_read_errors,
+            files_with_extractor_panics: index_result.files_with_extractor_panics,
+            files_with_collector_panics: index_result.files_with_collector_panics,
+            files_with_unsupported_language: index_result.files_with_unsupported_language,
+            truncated_by_max_files: index_result.truncated_by_max_files,
+        }),
+    }
+}
+
+/// Story #1811 (S5, AC1/AC2): the `--compile-only` subcommand's JSON
+/// report. `--build-graph`/`--analyze-graph`/`--refine` all require an
+/// ALREADY-COMPILED `.so` via `--dylib`, but the only existing xray-cli
+/// path that compiles a raw `.rs` source (the default legacy scan's
+/// `compile_and_load_evaluator`) also immediately tries to load the result
+/// as a LEGACY evaluator (`DynlibEvaluator::load`, which requires the
+/// `xray_evaluate_node` export) -- rejecting a graph-mode-only artifact
+/// outright even though compilation itself succeeded. `run_compile_only`
+/// calls `compiler::compile_evaluator` directly and stops there: it is
+/// mode-agnostic (legacy OR graph OR malformed -- `detect_evaluator_mode`
+/// inside `compile_evaluator` is the single authority on which), so this
+/// is the missing bridge Python's graph-mode driver needs to obtain a real
+/// `.so` path before invoking `--build-graph`/`--analyze-graph`.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct CompileOnlyOutput {
+    so_path: String,
+    compile_ms: u128,
+    cached: bool,
+    error: Option<String>,
+}
+
+/// Parses `--compile-only`'s one required flag, `--dynlib <path>` --
+/// deliberately the SAME flag name the legacy default path already uses
+/// for a raw `.rs` source file (Rule 4: one name for "a source file to
+/// compile" across both subcommands, never a second name for the same
+/// concept).
+fn parse_compile_only_args(args: &[String]) -> Result<PathBuf, String> {
+    let mut dynlib: Option<PathBuf> = None;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--dynlib" => {
+                let (value, next_i) = parse_value_flag(args, i, "--dynlib requires a path");
+                dynlib = Some(PathBuf::from(value));
+                i = next_i;
+            }
+            other => return Err(format!("--compile-only: unrecognized argument '{other}'")),
+        }
+    }
+    dynlib.ok_or_else(|| "--compile-only requires --dynlib <path>".to_string())
+}
+
+/// Reads `dynlib_path` and compiles it via the REAL `compiler::
+/// compile_evaluator`, writing into `cache_dir` (the SAME cache the
+/// legacy default path and `--print-cache-identity` share) -- never
+/// reimplements compilation. `cache_dir` is an explicit parameter (rather
+/// than always resolving `xray_core::cache::get_cache_dir()` internally)
+/// so tests can point it at an isolated directory.
+///
+/// `dynlib_path` is a TRUSTED path -- the SAME `--dynlib <path.rs>` flag
+/// the pre-existing legacy default path's `read_evaluator_source` (above
+/// in this file) already reads via a bare `std::fs::read_to_string` with
+/// zero extension/containment validation. This subcommand does not lower
+/// that pre-existing trust boundary, it reuses it exactly.
+fn run_compile_only(dynlib_path: &std::path::Path, cache_dir: &std::path::Path) -> CompileOnlyOutput {
+    let user_code = match std::fs::read_to_string(dynlib_path) {
+        Ok(c) => c,
+        Err(e) => {
+            return CompileOnlyOutput {
+                so_path: String::new(),
+                compile_ms: 0,
+                cached: false,
+                error: Some(format!("Failed to read {}: {}", dynlib_path.display(), e)),
+            }
+        }
+    };
+    match xray_core::compiler::compile_evaluator(&user_code, cache_dir) {
+        Ok(cr) => CompileOnlyOutput {
+            so_path: cr.so_path.to_string_lossy().to_string(),
+            compile_ms: cr.compile_ms,
+            cached: cr.cached,
+            error: None,
+        },
+        Err(e) => CompileOnlyOutput {
+            so_path: String::new(),
+            compile_ms: 0,
+            cached: false,
+            error: Some(format!("{}", e)),
+        },
+    }
+}
+
 fn main() {
     let wall_start = Instant::now();
     let args: Vec<String> = std::env::args().skip(1).collect();
 
+    // Story #1811 (S5, AC1/AC2): `--compile-only --dynlib <path.rs>` --
+    // compiles a raw evaluator source (legacy OR graph-mode, mode-agnostic)
+    // via the real compile_evaluator() and reports the resulting `.so`
+    // path, WITHOUT the legacy default path's follow-on `DynlibEvaluator::
+    // load` (which would reject a graph-mode-only artifact). Mirrors
+    // `--print-cache-identity`'s early-exit placement and the ONE-flag
+    // simplicity of a bridge subcommand. ALWAYS exits 0 with a JSON report
+    // on stdout for a legitimate outcome (successful compile OR a real
+    // `CompileError`/unreadable source, both carried in `error`) -- exit 1
+    // is reserved for a malformed invocation (missing `--dynlib`).
+    if args.first().map(|s| s.as_str()) == Some("--compile-only") {
+        let dynlib_path = match parse_compile_only_args(&args[1..]) {
+            Ok(p) => p,
+            Err(msg) => {
+                eprintln!("Error: {}", msg);
+                std::process::exit(1);
+            }
+        };
+        let cache_dir = xray_core::cache::get_cache_dir();
+        let output = run_compile_only(&dynlib_path, &cache_dir);
+        match serde_json::to_string(&output) {
+            Ok(json) => println!("{}", json),
+            Err(e) => eprintln!("Error: failed to serialize CompileOnlyOutput: {}", e),
+        }
+        std::process::exit(0);
+    }
+
     // Bug #1784: early-exit subcommand -- reads evaluator source from stdin,
     // prints its cache identity, and exits. No compilation, no file I/O
     // beyond stdin/stdout, near-instant.
+    //
+    // H9 (consolidated review, Issue #1811/Bug #1812): an optional trailing
+    // `--graph-mode` flag selects the graph-mode-aware identity
+    // (`cache_identity_info_graph`) instead of the legacy one -- callers
+    // computing a cache identity for a graph-mode evaluator MUST pass this,
+    // or the identity they compute can never match what compile_evaluator()
+    // actually uses as the real .so filename.
     if args.first().map(|s| s.as_str()) == Some("--print-cache-identity") {
         use std::io::Read as _;
+        let graph_mode = args.get(1).map(|s| s.as_str()) == Some("--graph-mode");
         let mut user_code = String::new();
         if let Err(e) = std::io::stdin().read_to_string(&mut user_code) {
             eprintln!("Error: failed to read evaluator source from stdin: {}", e);
             std::process::exit(1);
         }
-        print!("{}", format_cache_identity_output(&user_code));
+        print!("{}", format_cache_identity_output(&user_code, graph_mode));
         std::process::exit(0);
     }
 
@@ -525,6 +983,61 @@ fn main() {
         match serde_json::to_string(&report) {
             Ok(json) => println!("{}", json),
             Err(e) => eprintln!("Error: failed to serialize RefineChildReport: {}", e),
+        }
+        std::process::exit(0);
+    }
+
+    // Story #1811 (S5, AC1): `--build-graph --repo-root <path> --files-from
+    // <path> --dylib <path> --graph-out <path> [--facts-out <path>]` --
+    // the one genuinely missing Rust piece: builds and persists a real
+    // multi-file graph via `build_repo_graph`, so a subsequent
+    // `--analyze-graph`/`--refine` invocation has a `--graph-in` to read.
+    // Mirrors `--analyze-graph`/`--refine`'s exact exit-code convention:
+    // ALWAYS exits 0 for a legitimate terminal `BuildGraphStatus` reported
+    // via JSON on stdout (including `RepoRootInvalid`/`LoadFailed`/
+    // `FileIdCollision`/`GraphWriteFailed`/`FactsWriteFailed`) -- exiting 1
+    // is reserved for a malformed invocation (missing required flags, or
+    // an unreadable `--files-from` list).
+    if args.first().map(|s| s.as_str()) == Some("--build-graph") {
+        let parsed = match parse_build_graph_args(&args[1..]) {
+            Ok(p) => p,
+            Err(msg) => {
+                eprintln!("Error: {}", msg);
+                std::process::exit(1);
+            }
+        };
+        let files_from_path = parsed.files_from.to_string_lossy().to_string();
+        // R3-2 (Codex re-review, ROUND 3): read_file_list_capped stops
+        // collecting at GRAPH_INDEX_MAX_FILES rather than fully
+        // materializing an unbounded --files-from list into memory first.
+        let (repo_relative_paths, files_from_truncated) =
+            match read_file_list_capped(&files_from_path, GRAPH_INDEX_MAX_FILES) {
+                Ok(result) => result,
+                Err(msg) => {
+                    eprintln!("Error: {}", msg);
+                    std::process::exit(1);
+                }
+            };
+        let mut report = run_build_graph(
+            &parsed.repo_root,
+            &repo_relative_paths,
+            &parsed.dylib,
+            &parsed.graph_out,
+            parsed.facts_out.as_deref(),
+        );
+        // The file-list read itself may have truncated BEFORE
+        // run_build_graph ever saw the full path count -- its own
+        // internal max_files check cannot detect that independently once
+        // the list handed to it is already capped, so surface it here.
+        if files_from_truncated {
+            if let Some(result) = report.result.as_mut() {
+                result.truncated_by_max_files = true;
+                result.fact_graph_complete = false;
+            }
+        }
+        match serde_json::to_string(&report) {
+            Ok(json) => println!("{}", json),
+            Err(e) => eprintln!("Error: failed to serialize BuildGraphReport: {}", e),
         }
         std::process::exit(0);
     }
@@ -835,6 +1348,95 @@ mod tests {
         v.iter().map(|s| s.to_string()).collect()
     }
 
+    /// R2-6 (Codex re-review): `run_build_graph` used `IndexBudget::
+    /// unlimited()` and `max_files: None`, so a whole-repo request could
+    /// allocate candidate paths and graph state with NO graph-specific
+    /// bound -- an exhaustion risk at ~900-repo fleet scale.
+    ///
+    /// R3-5 (Codex re-review, ROUND 3): the ORIGINAL version of this test
+    /// only asserted `budget != IndexBudget::unlimited()` and `max_files.
+    /// is_some()` -- tautological, since ANY finite value (even an
+    /// accidentally tiny or huge one) would satisfy both. Asserts the
+    /// ACTUAL configured VALUES instead, via `IndexBudget`'s public
+    /// `is_exceeded_by`/`max_candidates_per_reference` accessors (its
+    /// fields are private).
+    #[test]
+    fn run_build_graph_options_are_finitely_bounded_not_unlimited() {
+        let options = build_graph_index_options();
+
+        assert_eq!(
+            options.max_files,
+            Some(GRAPH_INDEX_MAX_FILES),
+            "run_build_graph's max_files must equal the configured constant"
+        );
+        assert!(
+            !options.budget.is_exceeded_by(GRAPH_INDEX_MAX_TOTAL_CANDIDATES),
+            "the budget must NOT be exceeded at exactly its configured ceiling"
+        );
+        assert!(
+            options.budget.is_exceeded_by(GRAPH_INDEX_MAX_TOTAL_CANDIDATES + 1),
+            "the budget MUST be exceeded one candidate past its configured ceiling"
+        );
+        assert_eq!(
+            options.budget.max_candidates_per_reference(),
+            GRAPH_INDEX_MAX_CANDIDATES_PER_REFERENCE,
+            "the per-reference cap must equal the configured constant"
+        );
+    }
+
+    /// R3-5 (Codex re-review, ROUND 3): proves the SECOND half of the
+    /// finite-budget contract -- not just that the configured values are
+    /// correct, but that hitting `max_files` during a REAL build actually
+    /// truncates the file set AND downgrades `fact_graph_complete`, via
+    /// the real `build_repo_graph` pipeline (real compiled evaluator,
+    /// real on-disk files).
+    ///
+    /// Uses `build_graph_index_options().budget` (the REAL production
+    /// IndexBudget, tying this test to the actual configured ceiling)
+    /// but overrides `max_files` to `TEST_MAX_FILES_CAP` rather than the
+    /// real 50,000 -- creating 50,001 real files would make this test
+    /// impractically slow; the truncation MECHANISM itself
+    /// (`repo_relative_paths.len() > limit`) is exercised identically
+    /// regardless of the ceiling's magnitude.
+    const TEST_MAX_FILES_CAP: usize = 2;
+
+    #[test]
+    fn graph_index_options_max_files_cap_truncates_real_build_and_downgrades_completeness() {
+        use tempfile::TempDir;
+        use xray_core::graph::repo_index::{build_repo_graph, RepoIndexOptions};
+
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("A.java"), "class A {}\n").unwrap();
+        std::fs::write(dir.path().join("B.java"), "class B {}\n").unwrap();
+        std::fs::write(dir.path().join("C.java"), "class C {}\n").unwrap();
+
+        let cr = xray_core::compiler::compile_evaluator(
+            minimal_graph_mode_evaluator_source(),
+            dir.path(),
+        )
+        .expect("must compile");
+        let evaluator =
+            xray_core::dynlib::GraphDynlibEvaluator::load(&cr.so_path).expect("must load");
+        let collector = DylibFactCollector { evaluator: &evaluator };
+
+        let small_cap_options = RepoIndexOptions {
+            budget: build_graph_index_options().budget,
+            max_files: Some(TEST_MAX_FILES_CAP),
+        };
+        let paths = vec!["A.java".to_string(), "B.java".to_string(), "C.java".to_string()];
+        let result = build_repo_graph(dir.path(), &paths, &small_cap_options, &collector)
+            .expect("no file_id collisions among 3 distinct real files");
+
+        assert!(
+            result.truncated_by_max_files,
+            "3 real files against a cap of {TEST_MAX_FILES_CAP} must report truncated_by_max_files=true"
+        );
+        assert!(
+            !result.fact_graph_complete,
+            "a truncated build must downgrade fact_graph_complete to false"
+        );
+    }
+
     /// RED phase: `parse_analyze_graph_args` does not exist yet.
     #[test]
     fn parse_analyze_graph_args_extracts_graph_in_and_dylib() {
@@ -1021,6 +1623,37 @@ fn analyze_graph(g: &GraphHandle<'_>, facts: &FactsHandle<'_>) -> GraphResult {
         );
     }
 
+    /// Consolidated review finding H10 (Issue #1811/Bug #1812, Codex): a
+    /// `--facts-in` file that EXISTS but is malformed (truncated/corrupt
+    /// JSON) must NOT silently degrade to an empty `FactIndex` with only a
+    /// stderr warning -- that makes a real read/parse failure
+    /// indistinguishable from "this build genuinely collected no facts",
+    /// exactly the ambiguity `read_facts_file`'s own doc comment says
+    /// callers must not introduce. A malformed facts file must report an
+    /// explicit `AnalyzeStatus::FactsInvalid`, never `RanOk`.
+    #[test]
+    fn run_analyze_graph_reports_facts_invalid_for_malformed_facts_in_file() {
+        use tempfile::TempDir;
+        use xray_core::graph::analyze::result::AnalyzeStatus;
+
+        let dir = TempDir::new().unwrap();
+        let (graph_path, _b_symbol) = write_small_graph_file(dir.path());
+
+        let facts_path = dir.path().join("facts.json");
+        std::fs::write(&facts_path, b"this is not valid JSON at all {{{").unwrap();
+
+        let user_code = "fn collect_facts(node: &OwnedNode, file: &str) -> Vec<UserFact> {\n    Vec::new()\n}\nfn analyze_graph(g: &GraphHandle<'_>, facts: &FactsHandle<'_>) -> GraphResult {\n    GraphResult::default()\n}\n";
+        let cr = xray_core::compiler::compile_evaluator(user_code, dir.path()).expect("must compile");
+
+        let report = run_analyze_graph(&graph_path, &cr.so_path, Some(&facts_path));
+        assert_eq!(
+            report.status,
+            AnalyzeStatus::FactsInvalid,
+            "a malformed --facts-in file must report FactsInvalid, never silently succeed"
+        );
+        assert!(report.result.is_none(), "FactsInvalid must carry no result");
+    }
+
     /// THE central AC7/AC8 invariant: an evaluator that does NOT export
     /// `analyze_graph` is reported as `Absent` -- DISTINCT from a
     /// successful empty analysis (`RanOk` with `refine: vec![]`) -- and
@@ -1177,17 +1810,97 @@ fn analyze_graph(g: &GraphHandle<'_>, facts: &FactsHandle<'_>) -> GraphResult { 
         assert!(report.result.is_none(), "Absent must carry no result, distinct from a successful empty RanOk");
     }
 
+    // --- Story #1811 (S5, AC1/AC2): `--compile-only` bridges the raw `.rs`
+    // evaluator source Python holds to the pre-compiled `.so` path
+    // `--build-graph`/`--analyze-graph`/`--refine` all require via
+    // `--dylib`. RED phase: `run_compile_only` does not exist yet.
+
+    /// A well-formed graph-mode evaluator source must compile successfully
+    /// and report a REAL `.so` path that exists on disk -- mode-agnostic:
+    /// `compiler::compile_evaluator` itself does not require the legacy
+    /// `xray_evaluate_node` export, unlike the default legacy scan path's
+    /// `compile_and_load_evaluator`, which would reject this exact source.
+    #[test]
+    fn run_compile_only_returns_so_path_on_successful_compile() {
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let src_path = dir.path().join("eval.rs");
+        std::fs::write(&src_path, minimal_graph_mode_evaluator_source()).unwrap();
+
+        let output = run_compile_only(&src_path, dir.path());
+        assert!(output.error.is_none(), "a well-formed evaluator must compile without error: {:?}", output.error);
+        let so_path = std::path::PathBuf::from(&output.so_path);
+        assert!(so_path.exists(), "the reported so_path must be a real file on disk: {}", output.so_path);
+    }
+
+    /// Malformed Rust source (neither `evaluate_node` nor `collect_facts`+
+    /// `analyze_graph`) must report a structured `error`, never panic and
+    /// never a bare empty `so_path` with no explanation.
+    #[test]
+    fn run_compile_only_reports_an_error_for_malformed_rust_source() {
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let src_path = dir.path().join("eval.rs");
+        std::fs::write(&src_path, "this is not a valid evaluator at all\n").unwrap();
+
+        let output = run_compile_only(&src_path, dir.path());
+        assert!(output.error.is_some(), "malformed source must report a structured error, not silently succeed");
+        assert!(output.so_path.is_empty());
+    }
+
     // --- Bug #1784: --print-cache-identity bridges Python to the ONE
     // shared Rust identity implementation (cache_identity_info) ---
 
     #[test]
     fn test_format_cache_identity_output_contains_all_four_fields() {
         let user_code = "fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> { vec![] }";
-        let output = format_cache_identity_output(user_code);
+        let output = format_cache_identity_output(user_code, false);
         assert!(output.contains("identity="), "output must contain identity=: {}", output);
         assert!(output.contains("source_hash="), "output must contain source_hash=: {}", output);
         assert!(output.contains("abi_version="), "output must contain abi_version=: {}", output);
         assert!(output.contains("rustc_version="), "output must contain rustc_version=: {}", output);
+    }
+
+    /// Consolidated review finding H9 (Issue #1811/Bug #1812, Codex): the
+    /// CLI-level `--print-cache-identity` bridge must be mode-aware --
+    /// `format_cache_identity_output(user_code, graph_mode=true)` must
+    /// report EXACTLY the identity `compile_evaluator` actually uses for a
+    /// graph-mode evaluator (verified via the real compiled `.so`
+    /// filename), not the legacy-assembly identity.
+    #[test]
+    fn format_cache_identity_output_graph_mode_matches_real_compiled_identity() {
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let user_code = r#"
+fn collect_facts(node: &OwnedNode, file: &str) -> Vec<UserFact> {
+    Vec::new()
+}
+fn analyze_graph(g: &GraphHandle<'_>, facts: &FactsHandle<'_>) -> GraphResult {
+    GraphResult::default()
+}
+"#;
+        let compiled = xray_core::compiler::compile_evaluator(user_code, dir.path())
+            .expect("a genuine graph-mode evaluator must compile successfully");
+        let real_identity = compiled
+            .so_path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .expect("so_path must have a valid file stem");
+
+        let output = format_cache_identity_output(user_code, true);
+        let reported_identity = output
+            .lines()
+            .find_map(|line| line.strip_prefix("identity="))
+            .expect("output must contain an identity= line");
+
+        assert_eq!(
+            reported_identity, real_identity,
+            "graph-mode --print-cache-identity must report the SAME \
+             identity compile_evaluator actually used for the real .so"
+        );
     }
 
     // --- AC2/AC3: debug_messages field in JSON output ---
@@ -1318,6 +2031,315 @@ fn analyze_graph(g: &GraphHandle<'_>, facts: &FactsHandle<'_>) -> GraphResult { 
         assert!(parsed.files_from_path.is_none());
     }
 
+    // --- Story #1811 (S5, AC1): `--build-graph` subcommand ---
+    //
+    // RED phase: `parse_build_graph_args` does not exist yet.
+
+    /// `--build-graph --repo-root <path> --files-from <path> --dylib <path>
+    /// --graph-out <path> [--facts-out <path>]`: all five flags round-trip,
+    /// `--facts-out` is the only optional one.
+    #[test]
+    fn parse_build_graph_args_extracts_all_required_flags_and_optional_facts_out() {
+        let without_facts_out = sv(&[
+            "--repo-root", "/repo", "--files-from", "/tmp/list.txt", "--dylib", "/tmp/e.so",
+            "--graph-out", "/tmp/g.bin",
+        ]);
+        let parsed = parse_build_graph_args(&without_facts_out).expect("all required flags present must parse");
+        assert_eq!(parsed.repo_root, PathBuf::from("/repo"));
+        assert_eq!(parsed.files_from, PathBuf::from("/tmp/list.txt"));
+        assert_eq!(parsed.dylib, PathBuf::from("/tmp/e.so"));
+        assert_eq!(parsed.graph_out, PathBuf::from("/tmp/g.bin"));
+        assert_eq!(parsed.facts_out, None, "facts-out must be optional");
+
+        let with_facts_out = sv(&[
+            "--repo-root", "/repo", "--files-from", "/tmp/list.txt", "--dylib", "/tmp/e.so",
+            "--graph-out", "/tmp/g.bin", "--facts-out", "/tmp/f.json",
+        ]);
+        let parsed = parse_build_graph_args(&with_facts_out).expect("all required flags plus facts-out must parse");
+        assert_eq!(parsed.facts_out, Some(PathBuf::from("/tmp/f.json")));
+    }
+
+    /// Every one of the FOUR required `--build-graph` flags must be
+    /// individually required -- mirrors `parse_refine_args_errors_when_any_
+    /// required_flag_is_missing`'s exact structure.
+    #[test]
+    fn parse_build_graph_args_errors_when_any_required_flag_is_missing() {
+        let full = sv(&[
+            "--repo-root", "/repo", "--files-from", "/tmp/list.txt", "--dylib", "/tmp/e.so",
+            "--graph-out", "/tmp/g.bin",
+        ]);
+        assert!(parse_build_graph_args(&full).is_ok(), "fixture sanity: the full flag set must parse");
+
+        let without_repo_root =
+            sv(&["--files-from", "/tmp/list.txt", "--dylib", "/tmp/e.so", "--graph-out", "/tmp/g.bin"]);
+        assert!(parse_build_graph_args(&without_repo_root).is_err(), "--repo-root is required");
+
+        let without_files_from = sv(&["--repo-root", "/repo", "--dylib", "/tmp/e.so", "--graph-out", "/tmp/g.bin"]);
+        assert!(parse_build_graph_args(&without_files_from).is_err(), "--files-from is required");
+
+        let without_dylib = sv(&["--repo-root", "/repo", "--files-from", "/tmp/list.txt", "--graph-out", "/tmp/g.bin"]);
+        assert!(parse_build_graph_args(&without_dylib).is_err(), "--dylib is required");
+
+        let without_graph_out = sv(&["--repo-root", "/repo", "--files-from", "/tmp/list.txt", "--dylib", "/tmp/e.so"]);
+        assert!(parse_build_graph_args(&without_graph_out).is_err(), "--graph-out is required");
+    }
+
+    /// Test-only fixture shared by every `run_build_graph` test below: a
+    /// minimal real evaluator source that compiles successfully (just
+    /// enough for `GraphDynlibEvaluator::load` to succeed) so `run_build_
+    /// graph` has something to load.
+    fn minimal_graph_mode_evaluator_source() -> &'static str {
+        "fn collect_facts(node: &OwnedNode, file: &str) -> Vec<UserFact> { Vec::new() }\n\
+         fn analyze_graph(g: &GraphHandle<'_>, facts: &FactsHandle<'_>) -> GraphResult { GraphResult::default() }\n"
+    }
+
+    /// RED phase: `run_build_graph` does not exist yet. A dylib that fails
+    /// to load (missing entirely) must report `BuildGraphStatus::
+    /// LoadFailed`, never panic and never a bare `Ok` with an empty graph.
+    #[test]
+    fn run_build_graph_reports_load_failed_for_a_missing_dylib() {
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("A.java"), "class A {}\n").unwrap();
+        let missing_dylib = dir.path().join("does_not_exist.so");
+        let graph_out = dir.path().join("graph.bin");
+
+        let report =
+            run_build_graph(dir.path(), &[PathBuf::from("A.java")], &missing_dylib, &graph_out, None);
+        assert_eq!(report.status, BuildGraphStatus::LoadFailed);
+        assert!(report.result.is_none());
+        assert!(!graph_out.exists(), "no graph file must be written on a load failure");
+    }
+
+    /// A `--repo-root` that does not exist/cannot canonicalize must report
+    /// `BuildGraphStatus::RepoRootInvalid` -- NEVER panic. `build_repo_
+    /// graph` itself calls `.expect(..)` on `repo_root.canonicalize()`, so
+    /// `run_build_graph` MUST guard this before delegating, or an invalid
+    /// `--repo-root` would crash the whole process instead of reporting a
+    /// clean JSON status (Rule 13, anti-silent-failure -- and here, also
+    /// anti-crash).
+    #[test]
+    fn run_build_graph_reports_repo_root_invalid_instead_of_panicking() {
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let cr = xray_core::compiler::compile_evaluator(minimal_graph_mode_evaluator_source(), dir.path())
+            .expect("must compile");
+
+        let nonexistent_repo_root = dir.path().join("does_not_exist_dir");
+        let graph_out = dir.path().join("graph.bin");
+
+        let report = run_build_graph(
+            &nonexistent_repo_root,
+            &[PathBuf::from("A.java")],
+            &cr.so_path,
+            &graph_out,
+            None,
+        );
+        assert_eq!(report.status, BuildGraphStatus::RepoRootInvalid);
+        assert!(report.result.is_none());
+    }
+
+    /// `--build-graph` must also write a REAL `--facts-out` file when asked
+    /// -- readable back by `read_facts_file` (the same reader `--analyze-
+    /// graph --facts-in` uses), proving `write_facts_file` is genuinely
+    /// wired here, never silently skipped.
+    #[test]
+    fn run_build_graph_writes_a_real_facts_out_file_when_requested() {
+        use tempfile::TempDir;
+        use xray_core::graph::user_facts::read_facts_file;
+
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("A.java"), "class A {}\n").unwrap();
+
+        let user_code = "fn collect_facts(node: &OwnedNode, file: &str) -> Vec<UserFact> {\n\
+             vec![UserFact { kind: \"todo\".to_string(), line: node.start_line, message: \"m\".to_string(), custom_key: None }]\n\
+             }\n\
+             fn analyze_graph(g: &GraphHandle<'_>, facts: &FactsHandle<'_>) -> GraphResult { GraphResult::default() }\n";
+        let cr = xray_core::compiler::compile_evaluator(user_code, dir.path()).expect("must compile");
+
+        let graph_out = dir.path().join("graph.bin");
+        let facts_out = dir.path().join("facts.json");
+        let report = run_build_graph(
+            dir.path(),
+            &[PathBuf::from("A.java")],
+            &cr.so_path,
+            &graph_out,
+            Some(&facts_out),
+        );
+        assert_eq!(report.status, BuildGraphStatus::Ok);
+        assert!(facts_out.exists(), "--facts-out must have been written to disk");
+        read_facts_file(&facts_out).expect("the written facts file must be readable back");
+    }
+
+    /// Consolidated review finding C2 (Issue #1811/Bug #1812), step 2:
+    /// `--build-graph`'s `BuildGraphResult` must surface the new
+    /// `RepoIndexResult::files_with_unsupported_language` counter verbatim,
+    /// exactly like the six pre-existing degradation counters, so a Python
+    /// (or any other non-Java) file in the candidate set is visible to the
+    /// MCP/REST caller instead of silently vanishing from every report.
+    #[test]
+    fn run_build_graph_surfaces_files_with_unsupported_language_counter() {
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("A.java"), "class A { void run() {} }\n").unwrap();
+        std::fs::write(dir.path().join("script.py"), "def totally_unused():\n    pass\n").unwrap();
+
+        let minimal_cr = xray_core::compiler::compile_evaluator(
+            minimal_graph_mode_evaluator_source(),
+            dir.path(),
+        )
+        .expect("must compile");
+        let graph_out = dir.path().join("graph.bin");
+        let report = run_build_graph(
+            dir.path(),
+            &[PathBuf::from("A.java"), PathBuf::from("script.py")],
+            &minimal_cr.so_path,
+            &graph_out,
+            None,
+        );
+
+        assert_eq!(report.status, BuildGraphStatus::Ok);
+        let result = report.result.expect("Ok must carry a result");
+        assert_eq!(
+            result.files_with_unsupported_language, 1,
+            "the .py file (no graph extractor) must be surfaced by --build-graph's report"
+        );
+        assert!(
+            !result.fact_graph_complete,
+            "a non-Java file in the candidate set must flip fact_graph_complete to false"
+        );
+    }
+
+    /// Test-only fixture shared by the cross-file discriminating test below:
+    /// two real on-disk Java files where `A.java` calls `helper()`, defined
+    /// ONLY in `B.java` -- `helper()` has no caller inside its own file, so
+    /// only a graph spanning BOTH files can see it is genuinely referenced.
+    fn write_cross_file_java_fixture(dir: &std::path::Path) {
+        std::fs::write(dir.join("A.java"), "class A { void run() { helper(); } }\n").unwrap();
+        std::fs::write(dir.join("B.java"), "class B { void helper() {} }\n").unwrap();
+    }
+
+    /// Reads a graph file back and returns its REAL `symbol_count()` -- used
+    /// to derive the exact dense-id scan bound the cross-file test's
+    /// `analyze_graph` evaluator needs, rather than a guessed magic number
+    /// that could under-scan and produce a false negative.
+    fn graph_symbol_count(graph_path: &std::path::Path) -> usize {
+        xray_core::graph::csr::wire::read_graph_file(graph_path)
+            .expect("a graph file this same test just wrote via write_graph_file must read back")
+            .symbol_count()
+    }
+
+    /// Builds the cross-file fixture, drives `run_build_graph` over it with
+    /// a minimal evaluator, and asserts the build itself succeeded cleanly
+    /// -- factored out of the discriminating test below to keep it under
+    /// the project's per-function line budget. Returns the written graph
+    /// file's path.
+    fn build_cross_file_fixture_graph(dir: &std::path::Path) -> PathBuf {
+        write_cross_file_java_fixture(dir);
+        let minimal_cr = xray_core::compiler::compile_evaluator(minimal_graph_mode_evaluator_source(), dir)
+            .expect("must compile");
+        let graph_out = dir.join("graph.bin");
+        let build_report = run_build_graph(
+            dir,
+            &[PathBuf::from("A.java"), PathBuf::from("B.java")],
+            &minimal_cr.so_path,
+            &graph_out,
+            None,
+        );
+        assert_eq!(build_report.status, BuildGraphStatus::Ok);
+        let build_result = build_report.result.expect("Ok must carry a result");
+        assert!(build_result.fact_graph_complete, "a clean two-file build must be complete");
+        graph_out
+    }
+
+    /// Compiles a real graph-mode evaluator whose `analyze_graph` scans
+    /// dense ids `0..symbol_count` (the graph's OWN real `symbol_count()`,
+    /// never a guessed magic number) and records, for every symbol
+    /// `is_definitely_dead_code` finds `Some(false)` (referenced, not
+    /// dead), a `ReduceFinding` carrying that symbol's REAL `signature_
+    /// for(..)` text -- so a caller can identify which SPECIFIC symbol was
+    /// found, not merely that some symbol in some file was.
+    fn compile_not_dead_scan_evaluator(dir: &std::path::Path, symbol_count: usize) -> xray_core::compiler::CompileResult {
+        let code = format!(
+            "fn collect_facts(node: &OwnedNode, file: &str) -> Vec<UserFact> {{ Vec::new() }}\n\
+             fn analyze_graph(g: &GraphHandle<'_>, facts: &FactsHandle<'_>) -> GraphResult {{\n\
+             let mut result = GraphResult::default();\n\
+             let mut i: u32 = 0;\n\
+             while i < {symbol_count}u32 {{\n\
+             if let Some(sym) = g.resolve_symbol(i) {{\n\
+             if g.is_definitely_dead_code(i) == Some(false) {{\n\
+             let sig = g.signature_for(i).unwrap_or(\"\").to_string();\n\
+             result.findings.push(ReduceFinding {{ pattern: \"not_dead\".to_string(), message: sig.clone(), involved: vec![sym], signatures: vec![sig] }});\n\
+             }}\n\
+             }}\n\
+             i += 1;\n\
+             }}\n\
+             result\n\
+             }}\n"
+        );
+        xray_core::compiler::compile_evaluator(&code, dir).expect("must compile")
+    }
+
+    /// THE central end-to-end proof of `--build-graph`'s wiring, and the
+    /// story's own required discriminating test: `B.java`'s `helper()` has
+    /// NO caller inside its own file -- a single-file (legacy) scan of
+    /// `B.java` alone would report it dead. Only a graph spanning BOTH
+    /// files can see the real caller in `A.java` and correctly report it
+    /// as referenced. `run_build_graph` drives the real `build_repo_graph`
+    /// and `write_graph_file` pipeline; the resulting graph file is then
+    /// read back by the PRE-EXISTING `run_analyze_graph` (AC7) -- chaining
+    /// `--build-graph` into `--analyze-graph` is the real, wired,
+    /// cross-command pipeline a caller uses.
+    #[test]
+    fn build_graph_then_analyze_graph_finds_cross_file_reference() {
+        use tempfile::TempDir;
+        use xray_core::graph::analyze::result::AnalyzeStatus;
+        use xray_core::graph::identity::file_id;
+
+        // `identity::SymbolId`'s own doc comment defines its encoding as
+        // `(file_id << 32) | local_index` -- named here (rather than a bare
+        // `>> 32`) so the shift width is self-explaining at its one call
+        // site below. Mirrors the identical shift already used in
+        // production code at `graph::refine::refine_symbols_to_files`.
+        const SYMBOL_ID_FILE_ID_SHIFT_BITS: u32 = 32;
+
+        let dir = TempDir::new().unwrap();
+        let graph_out = build_cross_file_fixture_graph(dir.path());
+
+        let bound = graph_symbol_count(&graph_out);
+        let scan_cr = compile_not_dead_scan_evaluator(dir.path(), bound);
+
+        let analyze_report = run_analyze_graph(&graph_out, &scan_cr.so_path, None);
+        assert_eq!(analyze_report.status, AnalyzeStatus::RanOk);
+        let analyze_result = analyze_report.result.expect("RanOk must carry a result");
+
+        let b_file_id = file_id("B.java");
+        let b_findings: Vec<_> = analyze_result
+            .findings
+            .iter()
+            .filter(|f| {
+                f.involved.iter().any(|&sym| (sym >> SYMBOL_ID_FILE_ID_SHIFT_BITS) as u32 == b_file_id)
+            })
+            .collect();
+        assert_eq!(
+            b_findings.len(),
+            1,
+            "exactly one B.java symbol (helper()) must be referenced -- class B itself has no \
+             caller anywhere (no `new B()`), so it must remain dead and absent from findings. \
+             all findings: {:?}",
+            analyze_result.findings
+        );
+        assert!(
+            b_findings[0].message.contains("helper"),
+            "the one referenced B.java symbol must be helper() by name (proven via its real \
+             signature_for(..) text), not merely some unidentified symbol in that file: {:?}",
+            b_findings[0]
+        );
+    }
+
     // --- Bug #1612: read_file_list() reads the candidate list from disk ---
 
     #[test]
@@ -1361,5 +2383,43 @@ fn analyze_graph(g: &GraphHandle<'_>, facts: &FactsHandle<'_>) -> GraphResult { 
             result.is_err(),
             "read_file_list must return Err for a nonexistent path"
         );
+    }
+
+    // --- R3-2 (Codex re-review, ROUND 3): --build-graph must not fully
+    // materialize an unbounded --files-from list before any limit engages.
+    // ---
+
+    #[test]
+    fn test_read_file_list_capped_stops_before_reading_corrupt_line_beyond_cap() {
+        // Real, deterministic proof of "stops reading early": the 3rd
+        // line is INVALID UTF-8. If the function ever tried to DECODE it
+        // as text (even just to check "is this a real path"), it would
+        // hit a UTF-8 error. Truncation is detected via a RAW BYTE peek
+        // instead (never decoding), so this must succeed with exactly the
+        // 2 valid paths plus truncated=true -- proving the corrupt line
+        // was never interpreted as text.
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!(
+            "xray_cli_test_read_file_list_capped_{}.txt",
+            std::process::id()
+        ));
+        let mut content: Vec<u8> = Vec::new();
+        content.extend_from_slice(b"/a/One.java\n/a/Two.java\n");
+        content.extend_from_slice(&[0xFF, 0xFE, b'\n']); // invalid UTF-8 line
+        std::fs::write(&path, &content).unwrap();
+
+        let result = read_file_list_capped(path.to_str().unwrap(), 2);
+
+        // Best-effort cleanup (mirrors the identical `.ok()` convention
+        // used by the two `read_file_list` tests directly above): a
+        // leftover tempfile here would only affect this process's own
+        // /tmp, never test correctness, and the path is PID-scoped so it
+        // cannot collide across concurrent test runs.
+        std::fs::remove_file(&path).ok();
+
+        let (files, truncated) =
+            result.expect("must succeed -- the corrupt 3rd line must never be decoded as text");
+        assert_eq!(files, vec![PathBuf::from("/a/One.java"), PathBuf::from("/a/Two.java")]);
+        assert!(truncated, "must report that more content existed beyond the cap");
     }
 }

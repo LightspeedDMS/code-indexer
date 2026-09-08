@@ -8,7 +8,9 @@
 use crate::graph::identity::SymbolId;
 use serde::{Deserialize, Serialize};
 
-/// AC7's eight-way terminal status, EXACTLY as named in the story text.
+/// AC7's original eight-way terminal status, EXACTLY as named in the story
+/// text, plus `FactsInvalid` (consolidated review finding H10, Issue
+/// #1811/Bug #1812) -- nine terminal states total.
 /// `#[serde(rename_all = "snake_case")]` is what makes the enum variant
 /// names themselves (not a hand-maintained parallel string table) the
 /// single source of truth for the wire format the child process writes
@@ -16,6 +18,15 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AnalyzeStatus {
+    /// H10 (consolidated review, Issue #1811/Bug #1812): a `--facts-in`
+    /// path was supplied and the file EXISTS, but `read_facts_file` failed
+    /// to read/parse it (I/O error or malformed JSON). Distinct from
+    /// simply not supplying `--facts-in` at all (which keeps analyzing
+    /// with a genuinely empty `FactIndex`, not an error) -- a present-but-
+    /// corrupt facts file is a real failure that must never be silently
+    /// downgraded to "no facts collected", per `read_facts_file`'s own
+    /// anti-silent-failure contract.
+    FactsInvalid,
     /// The caller never asked for graph-mode analysis at all (e.g. a
     /// legacy-only scan, or no dylib configured).
     NotRequested,

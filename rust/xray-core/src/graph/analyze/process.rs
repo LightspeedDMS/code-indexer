@@ -66,7 +66,7 @@ pub struct ChildReport<T> {
 /// child itself spawned before it needed to be killed. Returns whether
 /// the syscall itself reported success -- `reap_after_kill` uses this to
 /// decide whether to retry, rather than discarding it.
-fn kill_process_group(pid: i32) -> bool {
+pub(crate) fn kill_process_group(pid: i32) -> bool {
     // SAFETY: `libc::kill` with a negative pid targets a process GROUP
     // rather than a single process, per POSIX `kill(2)`. Sending SIGKILL
     // to a group this process itself just spawned (and is the leader of)
@@ -82,7 +82,7 @@ fn kill_process_group(pid: i32) -> bool {
 /// failure and the child still hasn't been reaped -- most commonly
 /// meaningless (the process already exited, `try_wait` will confirm that
 /// on the next check), but never silently ignored either.
-fn reap_after_kill(child: &mut Child, pid: i32) {
+pub(crate) fn reap_after_kill(child: &mut Child, pid: i32) {
     let mut killed = kill_process_group(pid);
     for _ in 0..REAP_RETRY_COUNT {
         if matches!(child.try_wait(), Ok(Some(_))) {

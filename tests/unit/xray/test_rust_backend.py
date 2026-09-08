@@ -1033,7 +1033,7 @@ def test_run_batch_propagates_deadline_to_identity_calls(tmp_path):
     )
     seen_deadlines: list = []
 
-    def _fake_get_identity(rust_code, deadline_seconds=None):
+    def _fake_get_identity(rust_code, deadline_seconds=None, graph_mode=False):
         seen_deadlines.append(deadline_seconds)
         return real_info
 
@@ -1933,4 +1933,72 @@ def test_invoke_xray_cli_cleans_up_injected_dir_when_invocation_raises(tmp_path)
     assert isolated_dir.exists(), "injected directory must have been created"
     assert list(isolated_dir.iterdir()) == [], (
         "temp files must be cleaned up even when the invocation raises"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Consolidated review finding H12 (Issue #1811/Bug #1812, Codex): "treat
+# EVERY non-zero return code as failure, including stderr in the message."
+# ---------------------------------------------------------------------------
+
+
+def test_nonzero_exit_with_nonempty_stdout_is_still_reported_as_failure():
+    """A crashed subprocess (returncode != 0) that happened to write
+    plausible-looking JSON to stdout before crashing must be reported as a
+    failure -- never silently parsed and accepted as a real result."""
+    from code_indexer.xray.rust_backend import RustNativeBackend
+
+    backend = RustNativeBackend()
+
+    with patch("subprocess.Popen") as mock_popen:
+        mock_proc = MagicMock()
+        mock_proc.communicate.return_value = (
+            '{"findings": [], "error": null}',  # plausible but from a crash
+            "fatal runtime error: stack overflow",
+        )
+        mock_proc.returncode = 1
+        mock_popen.return_value = mock_proc
+
+        stdout, error = backend._run_xray_cli_process(
+            ["xray-cli", "--json"],
+            timeout_seconds=30,
+            on_process_spawned=None,
+            acquire_compile_slot=False,
+        )
+
+    assert error is not None, (
+        f"a nonzero exit code must always be reported as a failure, even "
+        f"with non-empty stdout, got: stdout={stdout!r}, error={error!r}"
+    )
+    assert stdout == "", "no stdout should be returned on a reported failure"
+
+
+def test_nonzero_exit_with_nonempty_stdout_error_message_includes_stderr():
+    """Per H12's own stated fix text ("including stderr in the message"):
+    the failure error message for THIS newly-universal non-zero-exit path
+    (nonzero exit + non-empty stdout) must include the real stderr content,
+    not just the exit code."""
+    from code_indexer.xray.rust_backend import RustNativeBackend
+
+    backend = RustNativeBackend()
+
+    with patch("subprocess.Popen") as mock_popen:
+        mock_proc = MagicMock()
+        mock_proc.communicate.return_value = (
+            '{"findings": []}',
+            "fatal runtime error: stack overflow",
+        )
+        mock_proc.returncode = 1
+        mock_popen.return_value = mock_proc
+
+        _stdout, error = backend._run_xray_cli_process(
+            ["xray-cli", "--json"],
+            timeout_seconds=30,
+            on_process_spawned=None,
+            acquire_compile_slot=False,
+        )
+
+    assert error is not None
+    assert "stack overflow" in error, (
+        f"expected stderr content in error, got: {error!r}"
     )

@@ -148,9 +148,10 @@ def _spy_on_identity_subprocess():
         self: "RustNativeBackend",
         rust_code: str,
         timeout_seconds: float = 10,
+        graph_mode: bool = False,
     ) -> "subprocess.CompletedProcess[str]":
         calls.append(rust_code)
-        return original(self, rust_code, timeout_seconds)
+        return original(self, rust_code, timeout_seconds, graph_mode=graph_mode)
 
     with patch.object(RustNativeBackend, "_run_cache_identity_subprocess", _counting):
         yield calls

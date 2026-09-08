@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Any, List, Optional, Union, cast
+from typing import Any, Dict, List, Optional, Union, cast
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import JSONResponse
@@ -40,7 +40,9 @@ class XRaySearchRequest(BaseModel):
 
     repository_alias: str
     driver_regex: str
-    evaluator_code: str
+    evaluator_code: Optional[str] = None
+    pattern_name: Optional[str] = None
+    pattern_params: Optional[Dict[str, Any]] = None
     search_target: str  # validated manually; Literal requires py3.8+ typing compat
     include_patterns: List[str] = Field(default_factory=list)
     exclude_patterns: List[str] = Field(default_factory=list)
@@ -76,6 +78,53 @@ def _get_background_job_manager() -> Any:
     return _utils.app_module.background_job_manager
 
 
+def _resolve_evaluator_code_or_raise(body: "XRaySearchRequest") -> str:
+    """Resolve evaluator_code from pattern_name or raw evaluator_code (Bug #1812).
+
+    Delegates to handlers.xray._resolve_evaluator_code — the SAME shared
+    helper the MCP xray_search handler uses — so pattern lookup (repo-scoped
+    with an __any__ fallback), the mutual-exclusion check, and
+    XrayPatternService's path-traversal guard are never re-implemented here.
+
+    H5 (consolidated review, Issue #1811/Bug #1812): the "neither
+    evaluator_code nor pattern_name supplied" rejection used to be a
+    hand-rolled duplicate check here that had to independently agree with
+    _resolve_evaluator_code's own default-substitution behavior forever.
+    That duplication is gone -- _resolve_evaluator_code itself now rejects
+    this case UNLESS the caller explicitly opts into the default-evaluator
+    fallback via allow_default_evaluator=True, which this REST route
+    deliberately never passes (unlike the MCP xray_search/xray_explore
+    handlers, which do document and want that fallback).
+
+    Raises:
+        HTTPException: 422 when neither evaluator_code nor pattern_name is
+            supplied (evaluator_code_required), when both are supplied
+            (mutually_exclusive_params), or when pattern resolution itself
+            fails (e.g. pattern_not_found).
+    """
+    import json as _json
+
+    from code_indexer.server.mcp.handlers.xray import _resolve_evaluator_code
+
+    params = {
+        "evaluator_code": body.evaluator_code,
+        "pattern_name": body.pattern_name,
+        "pattern_params": body.pattern_params,
+    }
+    evaluator_code, err_resp = _resolve_evaluator_code(params, body.repository_alias)
+    if err_resp is not None:
+        error_data = _json.loads(err_resp["content"][0]["text"])
+        error_code = error_data.get("error", "pattern_resolution_failed")
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={
+                "error_code": error_code,
+                "detail": error_data.get("message", error_code),
+            },
+        )
+    return evaluator_code
+
+
 # ---------------------------------------------------------------------------
 # Route handler
 # ---------------------------------------------------------------------------
@@ -94,16 +143,20 @@ def xray_search(
 
     1. Permission check (query_repos).
     2. Field validation (search_target, timeout_seconds range, max_files).
-    3. Repository alias resolution.
-    4. Pre-flight evaluator validation via validate_rust_evaluator.
-    5. Job submission via BackgroundJobManager.
-    6. Return HTTP 202 with {job_id}.
+    3. Evaluator resolution — evaluator_code or pattern_name (Bug #1812).
+    4. Repository alias resolution.
+    5. Pre-flight evaluator validation via validate_rust_evaluator.
+    6. Job submission via BackgroundJobManager.
+    7. Return HTTP 202 with {job_id}.
 
     Error codes:
         auth_required              — missing query_repos permission (403)
         invalid_search_target      — search_target not 'content' or 'filename' (422)
         timeout_out_of_range       — timeout_seconds outside [10, 600] (422)
         max_files_out_of_range     — max_files provided but < 1 (422)
+        evaluator_code_required    — neither evaluator_code nor pattern_name given (422)
+        mutually_exclusive_params  — both evaluator_code and pattern_name given (422)
+        pattern_not_found          — pattern_name not found in repo or __any__ scope (422)
         repository_not_found       — alias cannot be resolved (404)
         xray_extras_not_installed  — tree-sitter extras not available (503)
         xray_evaluator_validation_failed — Rust evaluator forbidden-construct violation (422)
@@ -162,7 +215,12 @@ def xray_search(
         )
 
     # ------------------------------------------------------------------
-    # 3. Repository alias resolution
+    # 3. Evaluator resolution — evaluator_code or pattern_name (Bug #1812)
+    # ------------------------------------------------------------------
+    evaluator_code = _resolve_evaluator_code_or_raise(body)
+
+    # ------------------------------------------------------------------
+    # 4. Repository alias resolution
     # ------------------------------------------------------------------
     repo_path_str = _resolve_repo_path(body.repository_alias)
     if repo_path_str is None:
@@ -175,9 +233,9 @@ def xray_search(
         )
 
     # ------------------------------------------------------------------
-    # 4. Pre-flight evaluator validation
+    # 5. Pre-flight evaluator validation
     # ------------------------------------------------------------------
-    validation = validate_rust_evaluator(body.evaluator_code)
+    validation = validate_rust_evaluator(evaluator_code)
     if not validation.ok:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
@@ -188,7 +246,7 @@ def xray_search(
         )
 
     # ------------------------------------------------------------------
-    # 5. Submit background job
+    # 6. Submit background job
     # ------------------------------------------------------------------
     repo_path = Path(repo_path_str)
     include_patterns = list(body.include_patterns)
@@ -201,7 +259,7 @@ def xray_search(
         return _Engine().run(
             repo_path=repo_path,
             driver_regex=body.driver_regex,
-            evaluator_code=body.evaluator_code,
+            evaluator_code=evaluator_code,
             search_target=body.search_target,
             include_patterns=include_patterns,
             exclude_patterns=exclude_patterns,
@@ -242,7 +300,7 @@ class XRayBatchScanBundle(BaseModel):
     driver_regex: str
     evaluator_code: Optional[str] = None
     pattern_name: Optional[str] = None
-    pattern_params: Optional[Any] = None
+    pattern_params: Optional[Dict[str, Any]] = None
     search_target: str = "content"
     case_sensitive: bool = True
     multiline: bool = False
@@ -299,8 +357,9 @@ def xray_search_batch(
     Delegates to handle_xray_search_batch (same logic as the MCP tool).
     Returns HTTP 202 with {"job_id": "<uuid>"}; poll GET /api/jobs/{job_id}.
 
-    Error codes follow the NEW batch contract (not the legacy xray_search REST
-    shape which uses driver_regex, requires evaluator_code, and lacks pattern_name).
+    Error codes follow the batch contract (distinct from the single-search
+    xray_search endpoint's error codes, though both now support pattern_name
+    and evaluator_code — Bug #1812).
     """
     import json as _json
 

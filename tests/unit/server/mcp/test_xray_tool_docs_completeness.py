@@ -572,3 +572,31 @@ def test_no_tool_doc_uses_text_as_field_access_not_method_call():
         "invalid Rust if copy-pasted by a user. Violations by file:\n"
         + "\n".join(f"  {f}: {m}" for f, m in violations.items())
     )
+
+
+def test_xray_md_await_seconds_prose_matches_real_handler_max(
+    xray_frontmatter_and_body,
+):
+    """Consolidated review (Issue #1811/Bug #1812, new finding #6, Codex):
+    xray_search.md's summary prose describing the inline-wait window must
+    agree with the REAL enforced ceiling (_AWAIT_SECONDS_MAX in
+    handlers/xray.py), never a stale pre-Bug-#1070 value. The doc's own
+    parameter description and parameter table elsewhere already say 45.0
+    (lowered from 120.0 by Bug #1070); a summary sentence still claiming
+    "up to 120 seconds" self-contradicts the same document and would
+    mislead a caller into requesting a window the server rejects.
+    """
+    from code_indexer.server.mcp.handlers.xray import _AWAIT_SECONDS_MAX
+
+    _frontmatter, body = xray_frontmatter_and_body
+    stale_claim = "up to 120 seconds"
+    assert stale_claim not in body, (
+        f"xray_search.md still claims the stale pre-Bug-#1070 inline-wait "
+        f"ceiling ({stale_claim!r}); the real enforced ceiling is "
+        f"{_AWAIT_SECONDS_MAX}s"
+    )
+    real_ceiling_claim = f"up to {int(_AWAIT_SECONDS_MAX)} seconds"
+    assert real_ceiling_claim in body, (
+        f"xray_search.md must state the REAL inline-wait ceiling in its "
+        f"summary prose ({real_ceiling_claim!r} not found)"
+    )
