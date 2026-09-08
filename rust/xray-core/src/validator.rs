@@ -836,6 +836,30 @@ fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> {
         );
     }
 
+    // Bug #1815: the depth-70 test above proves "70 is rejected", not "the
+    // limit is exactly 32" -- raising MAX_MACRO_RECURSION_DEPTH to 100
+    // would leave it green while silently changing the security-relevant
+    // ceiling. This test PINS the intended VALUE: the two literals below
+    // (32, 33) are deliberately HARDCODED, matching
+    // `MAX_MACRO_RECURSION_DEPTH` in `visit_macro` above, rather than
+    // referencing that constant by name -- referencing it would make this
+    // test drift together with any future change and defeat its entire
+    // purpose as a pinning test.
+    #[test]
+    fn macro_recursion_depth_boundary_pins_the_intended_limit_value() {
+        let at_limit = nested_vec_macro_payload(32);
+        assert!(
+            validate_evaluator_source(&at_limit).is_ok(),
+            "macro nesting at exactly the intended limit (32) must be accepted"
+        );
+
+        let one_over_limit = nested_vec_macro_payload(33);
+        assert!(
+            validate_evaluator_source(&one_over_limit).is_err(),
+            "macro nesting one level past the intended limit (33) must be rejected"
+        );
+    }
+
     // --- AC8: validate_rust_graph_evaluator (Rust-side gate for graph mode) ---
 
     /// AC8: "validate_rust_graph_evaluator mirroring the existing

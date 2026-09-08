@@ -7,6 +7,67 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [12.43.0] - 2026-09-08
+
+### Fixed
+
+- Omni/single-repo semantic search: a cache HIT no longer performs an uncoalesced
+  re-embed on the request path. The deep-fidelity audit is dispatched off the hot
+  path to a dedicated, bounded executor (4 workers) behind a 16-slot semaphore, so
+  audit work can never queue without limit onto the pool that serves requests. When
+  capacity is exhausted the audit is skipped and logged rather than silently
+  dropped -- it is advisory telemetry and never affects the response. (#1813, #1822)
+
+- `read_file_list_capped` no longer reports `truncated=true` for a file list of
+  exactly the cap followed only by blank lines. The trailing-content scan that
+  fixed the false positive is now bounded by a 64 KiB budget read in fixed chunks,
+  so a multi-gigabyte whitespace suffix (or one enormous unterminated line) cannot
+  be consumed in full. Budget exhaustion is an explicit error rather than an
+  assumption of completeness. (#1814, #1822)
+
+- Bound tests now pin the actual limit values instead of merely asserting that some
+  limit exists, so a regression that widens a bound is detectable. (#1815)
+
+- X-Ray unit tests no longer leak a closed event loop into sibling suites.
+  `asyncio.run()` clears the loop in its `finally` while leaving `_set_called`
+  true, which made 16 `regex_search` tests fail only in the combined
+  xray+mcp run. Fixed at the leak with an autouse fixture. (#1817)
+
+- The killpg `PermissionError` reaping test is no longer flaky or vacuous: it polls
+  to a bounded deadline instead of asserting immediately, and distinguishes a
+  fully-reaped pid from an unreaped ZOMBIE -- `os.kill(pid, 0)` succeeds against
+  both, so the previous check could not detect a missing `proc.wait()`. Also cut
+  from 30.08s to ~3s. (#1818, #1819)
+
+- The server/services test suite no longer stalls for ~50 minutes on 266 CPU
+  seconds. A leaked `IdentityQueueHandler` left the async log queue undrained, so
+  every ERROR record paid the full 2s high-severity timeout before being dropped.
+  Runtime for the affected selection went from ~50min to 3.31s. (#1820)
+
+- `SearchEventContext` provider cache fields are written through the lock-guarded
+  recorder in the temporal query path, closing an unsynchronized write. (#1821)
+
+### Changed
+
+- Storage concurrency guards are now deterministic rather than slow and lucky.
+  These tests previously hoped real threads would collide in a narrow window;
+  measurement showed thread count is not the lever, because SQLite's exclusive
+  write lock serializes threads through schema-init's own commit before most reach
+  the window. The Bug #1585 migration TOCTOU and the Bug #1575 ABBA lock-order race
+  are now constructed explicitly -- a real second connection commits the `ALTER`
+  between the probe and the retry, and a rendezvous handshake forces opposite lock
+  acquisition order. Detection went from roughly 33% probabilistic to 100%
+  deterministic, and the five affected files went from ~68s to ~13s with the 24.58s
+  tail (which had been flaking `fast-automation.sh` red) eliminated.
+
+  Two of these tests were found to have never discriminated at all, each
+  documenting its own blindness in its comments while its docstring claimed
+  otherwise; those claims are corrected and the guards made real. Coverage was also
+  added for two previously untested branches, including the non-duplicate
+  `OperationalError` re-raise, where the recovery could have been widened to
+  swallow every error without any test noticing. No production behavior changed --
+  lock-contention semantics remain as established in #1746. (#1823)
+
 ## [12.42.0] - 2026-09-08
 
 ### Fixed

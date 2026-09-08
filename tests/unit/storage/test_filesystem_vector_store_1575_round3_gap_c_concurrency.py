@@ -47,7 +47,21 @@ from _pathindex_gap_1575_helpers import make_vector
 
 CONTENDED_POINT_ID = "contended_point"
 CONTENDED_FILE_PATH = "src/contended.py"
-CONCURRENCY_TRIALS = 100
+# Bug #1823: lowered from 100 -- this module's own docstring records the
+# pre-Fix-C empirical reproduction rate as 284/300 trials (94.7%)
+# disagreeing, so a much smaller trial count still reliably catches a
+# reintroduced regression. Directly confirmed via THIS file's own real
+# pytest test (not a scratch harness) with Fix C's `with
+# self._path_index_lock:` scope narrowed back to pre-fix ordering
+# (chunk_store.delete() called BEFORE acquiring the lock, exactly
+# reproducing the TOCTOU gap Fix C closed): the reduced test failed on
+# the FIRST invocation with 4/20 trials disagreeing (first at trial 0) --
+# see the Bug #1823 fix commit for the exact repro output. Production was
+# restored immediately after and verified byte-identical (md5sum) before
+# this comment was written. 20 trials cost ~3-4s isolated, comfortably under the 10s
+# investigate ceiling. Never reduce below this without re-establishing a
+# fresh RED confirmation.
+CONCURRENCY_TRIALS = 20
 VECTOR_SIZE = 8
 INITIAL_SEED = 1
 WORKER_COUNT = 2

@@ -74,6 +74,84 @@ fn read_file_list(path: &str) -> Result<Vec<PathBuf>, String> {
         .collect())
 }
 
+/// Bug #1822 Defect 2: total number of raw trailing bytes the post-cap
+/// truncation scan (`scan_trailing_content_bounded`) is willing to inspect
+/// while looking for the first non-whitespace byte beyond the cap. A
+/// `--files-from` list can be adversarial/corrupt (e.g. gigabytes of
+/// whitespace with no newline anywhere) -- this budget guarantees the scan
+/// performs a bounded amount of work regardless of how much trailing
+/// content actually exists on disk.
+const TRUNCATION_SCAN_BYTE_BUDGET: usize = 64 * 1024;
+
+/// Bug #1822 Defect 2: fixed chunk size the scan reads at a time via
+/// `Read::read()`, so a single "line" with no newline anywhere (which
+/// defeated the old `read_until`-based scan -- it read such a line in ONE
+/// unbounded call) can never be consumed in one shot either.
+const TRUNCATION_SCAN_CHUNK_SIZE: usize = 8 * 1024;
+
+/// Bug #1822 Defect 2: scans up to `byte_budget` raw bytes from `reader`,
+/// in fixed `chunk_size` chunks via `Read::read()` (never `BufRead::
+/// read_until`, which can read an arbitrarily large single "line" in one
+/// call), looking for the first non-ASCII-whitespace byte.
+///
+/// Returns:
+///  - `Ok(true)`  if a non-whitespace byte was found within the budget
+///    (real content follows beyond the cap -- truncated).
+///  - `Ok(false)` if EOF was reached within the budget with only
+///    whitespace seen (genuinely exhausted -- not truncated).
+///  - `Err(..)`   if the budget was exhausted before finding either a
+///    non-whitespace byte or EOF -- the scan genuinely cannot tell
+///    whether real content follows, and must say so explicitly rather
+///    than silently assuming `false`.
+///
+/// Content is judged byte-wise via `is_ascii_whitespace()` -- never UTF-8
+/// decoded -- so malformed content beyond the cap can never cause a
+/// decode error, exactly as before this fix.
+///
+/// `chunk_size` MUST be non-zero: `Read::read()` on an empty destination
+/// slice always returns `Ok(0)` per the trait's own documented contract,
+/// which is indistinguishable from a real EOF signal -- a `chunk_size ==
+/// 0` caller would therefore silently misreport `Ok(false)` ("not
+/// truncated") without ever inspecting a single byte or reaching a real
+/// EOF. Guarded explicitly rather than left as a latent trap, even though
+/// every current call site passes the fixed `TRUNCATION_SCAN_CHUNK_SIZE`
+/// constant.
+fn scan_trailing_content_bounded<R: std::io::Read>(
+    reader: &mut R,
+    byte_budget: usize,
+    chunk_size: usize,
+    path: &str,
+) -> Result<bool, String> {
+    if chunk_size == 0 {
+        return Err(format!(
+            "Internal error scanning --files-from list at {}: truncation-scan chunk_size must \
+             be non-zero",
+            path
+        ));
+    }
+    let mut buf = vec![0u8; chunk_size];
+    let mut total_read = 0usize;
+    while total_read < byte_budget {
+        let to_read = (byte_budget - total_read).min(chunk_size);
+        let n = reader
+            .read(&mut buf[..to_read])
+            .map_err(|e| format!("Failed to read --files-from list at {}: {}", path, e))?;
+        if n == 0 {
+            return Ok(false); // genuinely exhausted within budget, not truncated
+        }
+        total_read += n;
+        if buf[..n].iter().any(|b| !b.is_ascii_whitespace()) {
+            return Ok(true);
+        }
+    }
+    Err(format!(
+        "--files-from list at {} has trailing content beyond the configured cap that exceeds \
+         the {}-byte truncation-scan budget; unable to determine whether the list was \
+         truncated without unbounded reading",
+        path, byte_budget
+    ))
+}
+
 /// R3-2 (Codex re-review, ROUND 3): a bounded variant of `read_file_list`
 /// for `--build-graph` specifically. `read_file_list` (above) reads the
 /// ENTIRE file into memory via `read_to_string` before parsing a single
@@ -82,13 +160,27 @@ fn read_file_list(path: &str) -> Result<Vec<PathBuf>, String> {
 /// `BufReader::read_line`, which reads lazily line-by-line, and stops
 /// collecting once `max_lines` valid (non-blank) paths are found.
 ///
-/// Truncation ("were there more lines?") is detected via a RAW BYTE peek
-/// (`BufRead::fill_buf`) on the underlying reader -- deliberately NEVER
+/// Truncation ("was there at least one further real entry?") is detected
+/// via `scan_trailing_content_bounded` -- a fixed-byte-budget, chunked
+/// scan of the underlying reader that checks whether any further
+/// non-ASCII-whitespace byte exists beyond the cap -- deliberately NEVER
 /// UTF-8-decoding anything beyond the cap, so malformed content past the
-/// cap can never cause an error or be interpreted as a path; it can only
-/// be detected as "present" or "absent". A genuine I/O error during that
-/// peek IS propagated as `Err` (never silently treated as "not
-/// truncated") -- only the CONTENT beyond the cap is never inspected.
+/// cap can never cause a decode error; it is only ever classified as
+/// "blank", "non-blank content", or (Bug #1822 Defect 2) "budget
+/// exhausted, unknown". Bug #1814: a naive "any bytes remain" check (the
+/// previous `fill_buf`-based peek) treated trailing blank lines/whitespace
+/// as truncation, falsely downgrading a genuinely complete list. Bug
+/// #1822 Defect 2: the ORIGINAL fix for #1814 used `BufRead::
+/// read_until(b'\n', ..)` in an unbounded loop -- a single trailing "line"
+/// with no newline anywhere (e.g. gigabytes of whitespace) was consumed
+/// ENTIRELY by one `read_until` call before truncation could be decided,
+/// which is unbounded work on adversarial/corrupt input. The scan is now
+/// chunked and budget-bounded (see `scan_trailing_content_bounded`); if
+/// the budget is exhausted before the answer is known, this function
+/// returns an explicit `Err` rather than silently assuming "not
+/// truncated". A genuine I/O error while scanning is likewise always
+/// propagated as `Err` (never silently treated as "not truncated") --
+/// only the CONTENT beyond the cap is never inspected past the budget.
 ///
 /// Left as a SEPARATE function rather than changing `read_file_list`
 /// itself: that function is also used by `--refine` and the legacy
@@ -121,10 +213,12 @@ fn read_file_list_capped(path: &str, max_lines: usize) -> Result<(Vec<PathBuf>, 
             paths.push(PathBuf::from(trimmed));
         }
     }
-    let truncated = !reader
-        .fill_buf()
-        .map_err(|e| format!("Failed to read --files-from list at {}: {}", path, e))?
-        .is_empty();
+    let truncated = scan_trailing_content_bounded(
+        &mut reader,
+        TRUNCATION_SCAN_BYTE_BUDGET,
+        TRUNCATION_SCAN_CHUNK_SIZE,
+        path,
+    )?;
     Ok((paths, truncated))
 }
 
@@ -2421,5 +2515,153 @@ fn analyze_graph(g: &GraphHandle<'_>, facts: &FactsHandle<'_>) -> GraphResult {
             result.expect("must succeed -- the corrupt 3rd line must never be decoded as text");
         assert_eq!(files, vec![PathBuf::from("/a/One.java"), PathBuf::from("/a/Two.java")]);
         assert!(truncated, "must report that more content existed beyond the cap");
+    }
+
+    /// Bug #1814 test helper: writes `content` to a uniquely-named temp
+    /// file, runs `read_file_list_capped` against it with `max_lines`,
+    /// removes the temp file (asserting cleanup itself succeeded, never
+    /// silently discarded), and returns the raw `Result` for the caller
+    /// to assert on.
+    fn read_file_list_capped_via_temp_file(
+        name_suffix: &str,
+        content: &str,
+        max_lines: usize,
+    ) -> Result<(Vec<PathBuf>, bool), String> {
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!(
+            "xray_cli_test_1814_{}_{}.txt",
+            name_suffix,
+            std::process::id()
+        ));
+        std::fs::write(&path, content).expect("failed to write test fixture file");
+        let result = read_file_list_capped(path.to_str().unwrap(), max_lines);
+        std::fs::remove_file(&path).expect("failed to clean up test fixture file");
+        result
+    }
+
+    /// Bug #1814 test helper: `n` synthetic `/a/File{i}.java\n` lines
+    /// concatenated -- the shared fixture-content builder for the
+    /// boundary table below.
+    fn n_valid_path_lines(n: usize) -> String {
+        (0..n).map(|i| format!("/a/File{}.java\n", i)).collect()
+    }
+
+    #[test]
+    fn test_read_file_list_capped_truncation_boundary_pins_real_values() {
+        // Bug #1814: `truncated` must be decided by whether at least one
+        // further NON-BLANK entry exists beyond the cap, not by whether
+        // any bytes remain -- trailing blank lines/whitespace must NOT
+        // report truncation on a genuinely complete list. Every case
+        // pins the REAL expected file count and truncated value, not
+        // merely "a bound exists".
+        let max_lines = GRAPH_INDEX_MAX_FILES;
+        let exact = n_valid_path_lines(max_lines);
+        let exact_with_trailing_blanks = exact.clone() + "\n\n   \n";
+        let exact_no_trailing_newline = exact.trim_end_matches('\n').to_string();
+        let one_over_cap = n_valid_path_lines(max_lines + 1);
+        // Bug #1822 follow-up (b): tab-only and CRLF-only trailing
+        // suffixes must ALSO be classified as blank (not truncated) --
+        // both '\t' and '\r' are ASCII whitespace per
+        // `u8::is_ascii_whitespace()`, so this should already work, but
+        // there was previously zero test proving it.
+        let exact_with_tab_only_trailing = exact.clone() + "\t\t\t\n\t\n";
+        let exact_with_crlf_only_trailing = exact.clone() + "\r\n\r\n";
+
+        // (case name, file content, expected files.len(), expected truncated)
+        let cases: [(&str, &str, usize, bool); 7] = [
+            ("trailing_blank_lines", exact_with_trailing_blanks.as_str(), max_lines, false),
+            ("one_more_real_path", one_over_cap.as_str(), max_lines, true),
+            ("no_trailing_newline", exact_no_trailing_newline.as_str(), max_lines, false),
+            ("fifty_thousand_and_one", one_over_cap.as_str(), max_lines, true),
+            ("empty_file", "", 0, false),
+            ("tab_only_trailing", exact_with_tab_only_trailing.as_str(), max_lines, false),
+            ("crlf_only_trailing", exact_with_crlf_only_trailing.as_str(), max_lines, false),
+        ];
+
+        for (name, content, expected_len, expected_truncated) in cases {
+            let (files, truncated) = read_file_list_capped_via_temp_file(name, content, max_lines)
+                .unwrap_or_else(|e| panic!("case '{}' must succeed: {}", name, e));
+            assert_eq!(files.len(), expected_len, "case '{}': unexpected file count", name);
+            assert_eq!(truncated, expected_truncated, "case '{}': unexpected truncated value", name);
+        }
+    }
+
+    // --- Bug #1822 Defect 2: the post-cap truncation scan must operate
+    // under a FIXED total byte budget via chunked reads, never an
+    // unbounded single `read_until` call. ---
+
+    /// Test-only `Read` wrapper that records the TOTAL number of bytes
+    /// actually pulled from the underlying reader across all `read()`
+    /// calls -- lets a test prove directly (not just infer from an `Err`
+    /// result) that `scan_trailing_content_bounded` never reads past its
+    /// configured byte budget.
+    struct CountingReader<R> {
+        inner: R,
+        total_read: usize,
+    }
+
+    impl<R: std::io::Read> std::io::Read for CountingReader<R> {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            let n = self.inner.read(buf)?;
+            self.total_read += n;
+            Ok(n)
+        }
+    }
+
+    #[test]
+    fn test_scan_trailing_content_bounded_never_reads_past_byte_budget() {
+        // Discriminating construction: the suffix is 5x the budget, is
+        // ALL ASCII whitespace, and contains no newline anywhere -- under
+        // the OLD unbounded `read_until`-based logic this exact shape is
+        // what forced a single call to consume everything in one shot
+        // (the RED baseline observed the unbounded old code read a full
+        // 20MB such suffix in one pass). Here we prove the NEW bounded
+        // scan stops within the budget instead of reading anywhere close
+        // to the full suffix.
+        let budget = 8 * 1024;
+        let chunk = 1024;
+        let suffix = vec![b' '; budget * 5];
+        let mut counting = CountingReader {
+            inner: std::io::Cursor::new(suffix),
+            total_read: 0,
+        };
+
+        let result = scan_trailing_content_bounded(&mut counting, budget, chunk, "/fake/path");
+
+        assert!(
+            result.is_err(),
+            "budget exhausted before EOF or a non-whitespace byte must be an explicit Err, \
+             never a silently-assumed false"
+        );
+        assert!(
+            counting.total_read <= budget,
+            "scan must never read more than the configured byte budget; read {} bytes against \
+             an {}-byte budget",
+            counting.total_read,
+            budget
+        );
+    }
+
+    #[test]
+    fn test_read_file_list_capped_returns_err_when_trailing_scan_exceeds_byte_budget() {
+        // End-to-end through the real public entry point: exactly
+        // `max_lines` valid paths followed by an ALL-WHITESPACE suffix
+        // (no newline) sized well beyond `TRUNCATION_SCAN_BYTE_BUDGET`.
+        // The scan genuinely cannot determine, within its byte budget,
+        // whether real content follows -- it must surface that as an
+        // explicit Err rather than silently reporting truncated=false.
+        let max_lines = 3;
+        let exact = n_valid_path_lines(max_lines);
+        let oversized_whitespace_suffix = " ".repeat(TRUNCATION_SCAN_BYTE_BUDGET * 3);
+        let content = exact + &oversized_whitespace_suffix;
+
+        let result =
+            read_file_list_capped_via_temp_file("over_budget_whitespace", &content, max_lines);
+
+        assert!(
+            result.is_err(),
+            "must return Err when the trailing-content scan exceeds its byte budget, not \
+             silently report truncated=false"
+        );
     }
 }

@@ -712,11 +712,17 @@ def _compute_memory_query_vector(
             no_embedding_cache_shortcut=no_embedding_cache_shortcut,
         )
         # Issue #1159: propagate Voyage embedding cache metadata to SearchEventContext.
+        # Bug #1813 (DEFECT 2): write atomically via record_provider_cache_fields()
+        # -- the single, lock-protected write path (consistency with the omni
+        # fan-out call sites, which DO race on this same shared context).
         _event_ctx = _search_event_ctx.get(None)
         if _event_ctx is not None:
-            _event_ctx.voyage_cache_hit = _embed_meta.key_found
-            _event_ctx.voyage_cache_mode = _embed_meta.cache_mode
-            _event_ctx.voyage_latency_ms = _embed_meta.provider_latency_ms
+            _event_ctx.record_provider_cache_fields(
+                "voyage-ai",
+                cache_hit=_embed_meta.key_found,
+                cache_mode=_embed_meta.cache_mode,
+                latency_ms=_embed_meta.provider_latency_ms,
+            )
         # Story #1293: emit the durable search_embed_event row for this inline
         # MCP call. No-op when meta isn't yet classified (Path A coalescer
         # path — Story #1293 S1b) or when no writer is installed.
@@ -785,11 +791,17 @@ def _compute_shared_query_vector(
             no_embedding_cache_shortcut=no_embedding_cache_shortcut,
         )
         # Issue #1159: propagate Voyage embedding cache metadata to SearchEventContext.
+        # Bug #1813 (DEFECT 2): write atomically via record_provider_cache_fields()
+        # -- the single, lock-protected write path (consistency with the omni
+        # fan-out call sites, which DO race on this same shared context).
         _event_ctx = _search_event_ctx.get(None)
         if _event_ctx is not None:
-            _event_ctx.voyage_cache_hit = _embed_meta.key_found
-            _event_ctx.voyage_cache_mode = _embed_meta.cache_mode
-            _event_ctx.voyage_latency_ms = _embed_meta.provider_latency_ms
+            _event_ctx.record_provider_cache_fields(
+                "voyage-ai",
+                cache_hit=_embed_meta.key_found,
+                cache_mode=_embed_meta.cache_mode,
+                latency_ms=_embed_meta.provider_latency_ms,
+            )
         # Story #1293: emit the durable search_embed_event row for this inline
         # MCP call. No-op when meta isn't yet classified (Path A coalescer
         # path — Story #1293 S1b) or when no writer is installed.

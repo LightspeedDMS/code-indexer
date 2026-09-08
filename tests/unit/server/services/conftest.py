@@ -252,3 +252,46 @@ def non_git_repo_dir(tmp_path_factory):
     nonexistent repository name.
     """
     return str(tmp_path_factory.mktemp("not_a_git_repo"))
+
+
+@pytest.fixture()
+def tiny_fsv_store(tmp_path):
+    """Bug #1822: a FilesystemVectorStore with a small real collection for
+    search() integration, shared by the deep-fidelity audit bounded-capacity
+    tests (test_deep_fidelity_audit_bounded_capacity_1822.py and
+    test_deep_fidelity_audit_failopen_observability_1822.py).
+
+    Defined here (rather than imported from
+    ``_deep_fidelity_audit_test_support_1822.py``) so pytest auto-injects it
+    without any import -- importing a fixture function directly and then
+    using its name as a test-function parameter reads, to ruff/pyflakes, as
+    an unused import "redefined" by that parameter (F811), even though
+    pytest's fixture-injection mechanism genuinely uses it.
+    """
+    from code_indexer.storage.filesystem_vector_store import FilesystemVectorStore
+
+    from _deep_fidelity_audit_test_support_1822 import COLLECTION_NAME, DIM, norm
+
+    store = FilesystemVectorStore(tmp_path, project_root=tmp_path)
+    store.create_collection(COLLECTION_NAME, vector_size=DIM)
+
+    vecs = [
+        norm([1, 0, 0, 0, 0, 0, 0, 0]),
+        norm([0, 1, 0, 0, 0, 0, 0, 0]),
+        norm([0, 0, 1, 0, 0, 0, 0, 0]),
+        norm([0, 0, 0, 1, 0, 0, 0, 0]),
+        norm([0, 0, 0, 0, 1, 0, 0, 0]),
+    ]
+    points = [
+        {
+            "id": f"doc_{i}",
+            "vector": vecs[i],
+            "payload": {"path": f"file_{i}.py", "content": f"content {i}"},
+        }
+        for i in range(len(vecs))
+    ]
+    store.begin_indexing(COLLECTION_NAME)
+    store.upsert_points(COLLECTION_NAME, points)
+    store.end_indexing(COLLECTION_NAME)
+
+    return store, vecs
