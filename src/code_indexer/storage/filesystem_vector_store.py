@@ -17,9 +17,15 @@ from typing import List, Dict, Any, Optional, Tuple, Union, Set, TYPE_CHECKING
 from datetime import datetime
 
 if TYPE_CHECKING:
-    # Imported only for type-checking so the runtime CLI startup import budget
-    # is unaffected (concurrent.futures stays a lazy import inside search()).
+    # `Executor` is imported only for type-checking (used solely in a type
+    # annotation below) so it costs nothing at runtime CLI-startup import.
     from concurrent.futures import Executor
+# Bug #1822 (DEFECT 1): unlike `Executor` above, `ThreadPoolExecutor` IS
+# needed at runtime (not just for type-checking) to construct the
+# module-level dedicated audit executor below. A bare ThreadPoolExecutor()
+# does not spawn threads until first submit(), so this stays cheap at
+# CLI-startup import time.
+from concurrent.futures import ThreadPoolExecutor
 import threading
 import numpy as np
 import logging
@@ -162,6 +168,31 @@ try:
 except ImportError:  # pragma: no cover
     emit_embed_event = None  # type: ignore[assignment]
     emit_embed_error_event = None  # type: ignore[assignment]
+
+# Bug #1822 (DEFECT 1): the deep-fidelity audit (Story #1110 / Bug #1813)
+# dispatched from search() must NEVER share capacity with the caller's
+# shared, long-lived server `parallel_executor` (see search_service.py's
+# _get_query_executor()) -- that executor also serves real request work
+# (the FSV embed||index-load fan-out). At production scale (~900 repos per
+# this project's CLAUDE.md), a multi-repo request can produce hundreds of
+# sampled cache hits; dispatching them onto the SAME executor/queue with no
+# limit lets pure telemetry starve real work. A dedicated, small, bounded
+# executor + a non-blocking gate caps total outstanding (queued + in-flight)
+# audit tasks independent of `parallel_executor`'s presence/size.
+#
+# Construction alone does not spawn threads -- a bare ThreadPoolExecutor is
+# lazy until first submit() -- so module-level construction here is cheap at
+# CLI-startup import time (unlike the heavy-service-singleton anti-pattern
+# documented elsewhere in this project's CLAUDE.md).
+_DEEP_FIDELITY_AUDIT_EXECUTOR_MAX_WORKERS = 4
+_DEEP_FIDELITY_AUDIT_GATE_CAPACITY = 16
+_deep_fidelity_audit_executor = ThreadPoolExecutor(
+    max_workers=_DEEP_FIDELITY_AUDIT_EXECUTOR_MAX_WORKERS,
+    thread_name_prefix="cidx-deep-audit",
+)
+_deep_fidelity_audit_gate = threading.BoundedSemaphore(
+    _DEEP_FIDELITY_AUDIT_GATE_CAPACITY
+)
 
 
 def _write_embed_meta_to_event_ctx(embed_meta: "Any", provider_name: str = "") -> None:
@@ -6702,12 +6733,35 @@ class FilesystemVectorStore:
         # results. Running it synchronously here made a cache HIT cost MORE
         # wall-clock time than a MISS (which never triggers the audit and is
         # naturally coalesced). The audit result has no bearing on this
-        # request's response, so it is dispatched OUT OF BAND on the shared,
-        # long-lived server executor (fire-and-forget, not awaited) instead
-        # of blocking the caller. contextvars.copy_context() captures the
-        # request's correlation_id so the audit's durable stamp
-        # (_record_audit_metrics -> update_audit_by_key) still resolves the
-        # correct search_embed_event row from the background thread.
+        # request's response, so it is dispatched OUT OF BAND (fire-and-
+        # forget, not awaited) instead of blocking the caller.
+        # contextvars.copy_context() captures the request's correlation_id
+        # so the audit's durable stamp (_record_audit_metrics ->
+        # update_audit_by_key) still resolves the correct search_embed_event
+        # row from the background thread.
+        #
+        # Bug #1822 (DEFECT 1): dispatching onto the caller's shared,
+        # long-lived server `parallel_executor` -- the SAME pool that also
+        # serves real request work (the FSV embed||index-load fan-out; see
+        # search_service.py's _get_query_executor()) -- traded a bounded
+        # inline cost for an UNBOUNDED queued one: at production scale
+        # (~900 repos), a multi-repo request can produce hundreds of sampled
+        # cache hits, all queuing on that SAME executor with no limit, so a
+        # later request's real load/embedding work could queue behind pure
+        # telemetry. The audit now dispatches onto its OWN dedicated, small,
+        # bounded-capacity executor (module-level _deep_fidelity_audit_executor),
+        # guarded by a non-blocking gate (_deep_fidelity_audit_gate) so total
+        # outstanding (queued + in-flight) audit tasks is capped -- entirely
+        # independent of `parallel_executor`. When capacity is exhausted the
+        # audit is skipped observably (WARNING) rather than queuing without
+        # limit; the gate is always released in `finally` so capacity frees
+        # up once an audit (or its failure) completes.
+        #
+        # Bug #1822 follow-up (a): the two remaining fail-open swallow sites
+        # (a worker exception during audit execution, and a rejected
+        # executor.submit() call) now log a WARNING -- fail-open is correct
+        # (the audit must never break search), but it must be observable so
+        # a persistently broken audit shows up in log audits.
         #
         # CLI/solo path (parallel_executor is None): the query-embedding
         # cache is server-only (get_query_embedding_cache() returns None
@@ -6735,13 +6789,35 @@ class FilesystemVectorStore:
                 ) -> None:
                     try:
                         _ctx.run(_run_deep_fidelity_audit, **_kwargs)  # type: ignore[misc]
-                    except Exception:  # noqa: BLE001
-                        pass  # fail-open: audit never breaks primary search
+                    except Exception as _audit_exc:  # noqa: BLE001
+                        # fail-open: audit never breaks primary search, but
+                        # the failure must be observable (Bug #1822
+                        # follow-up a).
+                        self.logger.warning(
+                            "deep fidelity audit worker failed (swallowed): %s",
+                            _audit_exc,
+                        )
+                    finally:
+                        _deep_fidelity_audit_gate.release()
 
-                try:
-                    parallel_executor.submit(_run_audit_out_of_band)
-                except Exception:  # noqa: BLE001
-                    pass  # fail-open: a shutting-down executor must never break search
+                if not _deep_fidelity_audit_gate.acquire(blocking=False):
+                    # Bug #1822 (DEFECT 1): bounded capacity exhausted --
+                    # skip observably rather than queue without limit.
+                    self.logger.warning(
+                        "deep fidelity audit skipped: audit capacity exhausted"
+                    )
+                else:
+                    try:
+                        _deep_fidelity_audit_executor.submit(_run_audit_out_of_band)
+                    except Exception as _submit_exc:  # noqa: BLE001
+                        _deep_fidelity_audit_gate.release()
+                        # fail-open: a shutting-down executor must never
+                        # break search, but the rejection must be observable
+                        # (Bug #1822 follow-up a).
+                        self.logger.warning(
+                            "deep fidelity audit skipped: executor unavailable (%s)",
+                            _submit_exc,
+                        )
             else:
                 try:
                     _run_deep_fidelity_audit(**_audit_kwargs)
