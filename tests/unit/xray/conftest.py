@@ -23,8 +23,58 @@ This mirrors the project's existing precedent for this exact class of bug:
 """
 
 import asyncio
+import shutil
+import subprocess
 
 import pytest
+
+# Upper bound on the fallback `cargo build --release` this module runs when
+# the xray-cli binary is missing (Bug #1827, L-5) -- generous enough for a
+# cold build of the small xray-core/xray-cli crates on a slower CI host.
+_XRAY_CLI_BUILD_TIMEOUT_SECONDS = 600
+
+
+def require_xray_cli_binary() -> None:
+    """Ensure the real xray-cli release binary exists, building it if
+    needed, so real-binary acceptance tests never silently skip.
+
+    Bug #1827 remediation (L-5): this test class is the CENTRAL proof
+    that a real rustc compile failure surfaces its diagnostic through
+    xray_search -- the previous behaviour (pytest.skip when the binary
+    was missing) let a fresh checkout's suite read green while
+    contributing nothing (CLAUDE.md's "green suite proves nothing" trap;
+    CI's `test` job is a 3-file smoke that never builds/runs this file
+    either). This project's workflow REQUIRES ./rust-automation.sh
+    (which needs cargo) whenever rust/ is touched, so cargo is expected
+    on PATH in the normal development flow -- attempt a real build when
+    the binary is missing, and skip ONLY when cargo itself is genuinely
+    unavailable (a Rust-less environment). A build that IS attempted but
+    FAILS raises loudly via pytest.fail, never a silent skip.
+    """
+    from code_indexer.xray.rust_backend import _PROJECT_ROOT, _XRAY_CLI_DEFAULT
+
+    if _XRAY_CLI_DEFAULT.exists():
+        return
+
+    if shutil.which("cargo") is None:
+        pytest.skip(
+            "cargo not found on PATH -- install Rust (https://rustup.rs) to "
+            "build xray-cli and enable this test."
+        )
+
+    result = subprocess.run(
+        ["cargo", "build", "--release", "--bin", "xray-cli"],
+        cwd=str(_PROJECT_ROOT / "rust"),
+        capture_output=True,
+        text=True,
+        timeout=_XRAY_CLI_BUILD_TIMEOUT_SECONDS,
+    )
+    if result.returncode != 0 or not _XRAY_CLI_DEFAULT.exists():
+        pytest.fail(
+            "xray-cli release binary is required for this test and the "
+            f"automatic 'cargo build --release' failed (exit "
+            f"{result.returncode}):\n{result.stdout}\n{result.stderr}"
+        )
 
 
 @pytest.fixture(scope="function", autouse=True)

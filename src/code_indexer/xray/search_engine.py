@@ -505,7 +505,24 @@ class XRaySearchEngine:
                 evaluation_errors.extend(file_errors)
                 if file_meta is not None:
                     file_metadata.append(file_meta)
-                files_processed += 1
+                # Bug #1827 (M-2): every batch-level failure run_batch()
+                # can return (compile error, xray-cli invocation error,
+                # JSON parse error) collapses to ONE deduplicated tuple
+                # whose error(s) carry file_path=="" -- the SAME
+                # convention _error_tuple("", ...) uses for every one of
+                # those whole-batch outcomes (rust_backend.py's
+                # invoke_error/parse_error/cli_error branches). No file
+                # was evaluated in ANY of those cases, so this is a
+                # structural discriminator, correct independent of which
+                # diagnostic label (error_type) the failure happens to
+                # carry -- unlike keying off error_type == "CompileError"
+                # alone, which would incorrectly count an XRayCliError
+                # dedup tuple as "1 file processed".
+                is_batch_level_failure = any(
+                    e.get("file_path") == "" for e in file_errors
+                )
+                if not is_batch_level_failure:
+                    files_processed += 1
 
         # Enrich matches with ast_debug and matched_node when requested.
         # Re-parses each matched file once; safe since include_ast_debug is a

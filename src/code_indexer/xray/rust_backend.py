@@ -733,11 +733,22 @@ class RustNativeBackend:
 
         cli_error = output.get("error")
         if cli_error:
-            # Top-level CLI error (e.g. compilation failed) — deduplicate to one entry.
+            # Top-level CLI error (e.g. compilation failed) — deduplicate to
+            # one entry. Bug #1827: xray-cli's own `error_kind` field
+            # ("compile" vs "infrastructure") distinguishes a genuine
+            # problem in the user's evaluator source from an
+            # xray-cli/toolchain/filesystem problem unrelated to it --
+            # never label an infrastructure failure "CompileError" (that
+            # would send an agent to debug perfectly valid Rust). Absent
+            # or unrecognized error_kind conservatively defaults to
+            # "XRayCliError".
+            error_type = (
+                "CompileError"
+                if output.get("error_kind") == "compile"
+                else "XRayCliError"
+            )
             logger.warning("RustNativeBackend: xray-cli error: %s", cli_error)
-            return [
-                _error_tuple("", "XRayCliError", _sanitize_error_message(cli_error))
-            ]
+            return [_error_tuple("", error_type, _sanitize_error_message(cli_error))]
 
         # Cluster post-fill: upload a freshly compiled .so to PG so other nodes
         # can skip compilation. Only fires when: cache is configured, the compile
@@ -1103,17 +1114,8 @@ class RustNativeBackend:
         tmp_file: Optional[Any] = None
         files_tmp: Optional[Any] = None
         try:
-            tmp_file = _write_temp_file(
-                rust_code,
-                suffix=".rs",
-                prefix="xray_eval_",
-                directory=resolved_tmp_dir,
-            )
-            files_tmp = _write_temp_file(
-                "\n".join(abs_paths),
-                suffix=".txt",
-                prefix="xray_files_",
-                directory=resolved_tmp_dir,
+            tmp_file, files_tmp = self._write_invoke_temp_files(
+                rust_code, abs_paths, resolved_tmp_dir
             )
 
             # Cluster pre-fill: if PG has a fresh blob, write it locally so Rust
@@ -1147,6 +1149,31 @@ class RustNativeBackend:
                 Path(tmp_file.name).unlink(missing_ok=True)
             if files_tmp is not None:
                 Path(files_tmp.name).unlink(missing_ok=True)
+
+    @staticmethod
+    def _write_invoke_temp_files(
+        rust_code: str, abs_paths: List[str], directory: Path
+    ) -> Tuple[Any, Any]:
+        """Writes the evaluator .rs and candidate-list .txt temp files for
+        one _invoke_xray_cli call (Bug #1796 tmp_dir contract unchanged).
+        Leak-safe: if writing the SECOND file fails, the first is cleaned
+        up HERE before re-raising, so a partial failure can never leak the
+        first file regardless of how the caller unpacks the return value.
+        """
+        tmp_file = _write_temp_file(
+            rust_code, suffix=".rs", prefix="xray_eval_", directory=directory
+        )
+        try:
+            files_tmp = _write_temp_file(
+                "\n".join(abs_paths),
+                suffix=".txt",
+                prefix="xray_files_",
+                directory=directory,
+            )
+        except Exception:
+            Path(tmp_file.name).unlink(missing_ok=True)
+            raise
+        return tmp_file, files_tmp
 
     def _parse_json_output(self, stdout: str) -> Tuple[Dict[str, Any], Optional[str]]:
         """Parse JSON from xray-cli stdout. Returns (output_dict, error_msg)."""

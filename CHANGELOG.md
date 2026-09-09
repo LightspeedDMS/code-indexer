@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [12.45.0] - 2026-09-09
+
+### Fixed
+
+- X-Ray evaluators that fail to compile now return the real rustc diagnostic instead
+  of `"xray-cli exited with code 1: "` with nothing after the colon. `xray-cli --json`
+  already wrote the full diagnostic to stdout and then exited 1, while its sibling
+  `--compile-only` mode documents exiting 0 for exactly that case; the Python caller
+  built its message from stderr, where the diagnostic never was, and discarded the
+  stdout holding it. `--json` now mirrors the documented contract (human-readable
+  mode keeps its non-zero exit), so the pre-existing error branch surfaces the
+  diagnostic with no new machinery. This matters because the primary author of these
+  evaluators is an agent: without the compiler output it cannot correct its own code,
+  and a genuine engine fault was indistinguishable from a user typo. (#1827)
+
+- Reported line numbers no longer contradict themselves. The PREAMBLE offset was
+  subtracted from the `-->` arrow but not from rustc's numbered gutter rows, so a
+  single diagnostic could read line 9 in one block and 109 in another; the gutter
+  matcher also ignored the `~`, `+` and `-` markers rustc uses in `help:` suggestion
+  blocks. Separately, an evaluator whose own source contained `--> ` had that row
+  swallowed by the arrow branch and its string literal silently rewritten. Arrow and
+  gutter now agree on the user's real line, and user source is left intact. (#1827)
+
+- Compile failures are distinguished from infrastructure failures. Source-read and
+  cache-directory errors were previously reported as `CompileError`, sending an
+  author to debug perfectly valid Rust when the real problem was elsewhere. A
+  `CompileErrorKind` classification is threaded through the JSON contract and only a
+  genuine compiler failure is labelled as one. `files_processed` also no longer
+  credits a build that produced no loadable evaluator. (#1827)
+
 ## [12.44.0] - 2026-09-08
 
 ### Fixed

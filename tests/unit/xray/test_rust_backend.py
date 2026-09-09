@@ -395,6 +395,117 @@ def test_cli_error_json_field_paths_are_sanitized():
     assert meta is None
 
 
+# Sentinel meaning "do not include the error_kind key at all" -- distinct
+# from passing error_kind=None, which produces a JSON `"error_kind": null`.
+_OMIT_ERROR_KIND = object()
+
+
+def _fake_cli_error_json(
+    error_message: str, error_kind: object = _OMIT_ERROR_KIND
+) -> str:
+    """Builds a JSON stdout blob for the cli_error branch (xray-cli exited
+    0 with a top-level `error` field set) -- shared by the error_kind
+    classification tests below."""
+    payload = {
+        "findings": [],
+        "files_parsed": 0,
+        "files_errored": 0,
+        "parse_scan_ms": 0,
+        "compile_ms": 0,
+        "cached": False,
+        "error": error_message,
+    }
+    if error_kind is not _OMIT_ERROR_KIND:
+        payload["error_kind"] = error_kind
+    return json.dumps(payload)
+
+
+def _run_batch_with_fake_cli_error_json(fake_json: str):
+    """Runs run_batch() with subprocess.Popen mocked to return `fake_json`
+    on stdout with exit code 0 -- shared by the error_kind classification
+    tests below. Returns the single deduplicated error dict."""
+    from code_indexer.xray.rust_backend import RustNativeBackend
+
+    backend = RustNativeBackend()
+    specs = [_spec("src/Foo.java", SIMPLE_JAVA, "java")]
+
+    with patch("subprocess.Popen") as mock_popen:
+        mock_proc = MagicMock()
+        mock_proc.communicate.return_value = (fake_json, "")
+        mock_proc.returncode = 0
+        mock_popen.return_value = mock_proc
+
+        results = backend.run_batch(
+            evaluator_code=VALID_EVALUATOR,
+            file_specs=specs,
+            repo_path=str(REPO_ROOT),
+        )
+
+    assert len(results) == 1
+    _matches, errors, _meta = results[0]
+    assert len(errors) == 1
+    return errors[0]
+
+
+def test_cli_error_with_compile_error_kind_classifies_as_compile_error():
+    """Bug #1827 (Codex H2 remediation): the JSON `error_kind: "compile"`
+    field (set by xray-cli when the failure is a genuine problem in the
+    user's evaluator source) must classify the returned error tuple's
+    error_type as "CompileError" -- the ALREADY-EXISTING cli_error branch
+    (run_batch's `output.get("error")` check), not a new code path.
+    """
+    fake_json = _fake_cli_error_json("error[E0308]: mismatched types", "compile")
+    err = _run_batch_with_fake_cli_error_json(fake_json)
+    assert err["error_type"] == "CompileError", (
+        f"error_kind='compile' must classify as CompileError, got {err!r}"
+    )
+
+
+def test_cli_error_with_infrastructure_error_kind_classifies_as_xray_cli_error():
+    """Bug #1827 (Codex H2 remediation): the JSON `error_kind:
+    "infrastructure"` field (set by xray-cli when the failure is an
+    xray-cli/toolchain/filesystem problem unrelated to the user's source)
+    must classify as "XRayCliError", never "CompileError" -- telling an
+    agent "CompileError" for a broken cache directory would send it to
+    debug perfectly valid Rust.
+    """
+    fake_json = _fake_cli_error_json(
+        "Failed to create cache directory: permission denied", "infrastructure"
+    )
+    err = _run_batch_with_fake_cli_error_json(fake_json)
+    assert err["error_type"] == "XRayCliError", (
+        f"error_kind='infrastructure' must classify as XRayCliError, got {err!r}"
+    )
+
+
+def test_cli_error_with_absent_error_kind_classifies_as_xray_cli_error():
+    """Backward-compat / conservative default: when `error_kind` is
+    ENTIRELY ABSENT from the JSON (e.g. an older xray-cli binary), the
+    cli_error branch must default to "XRayCliError", never silently
+    assume "CompileError".
+    """
+    fake_json = _fake_cli_error_json("some unclassified failure")
+    err = _run_batch_with_fake_cli_error_json(fake_json)
+    assert err["error_type"] == "XRayCliError", (
+        f"absent error_kind must default to XRayCliError, got {err!r}"
+    )
+
+
+def test_cli_error_with_null_error_kind_classifies_as_xray_cli_error():
+    """Same conservative default, but for an EXPLICIT JSON `null` (as
+    opposed to the key being entirely absent) -- both must behave
+    identically: default to "XRayCliError", never "CompileError".
+    """
+    fake_json = _fake_cli_error_json("some unclassified failure", None)
+    assert '"error_kind": null' in fake_json, (
+        "test setup sanity: JSON must contain explicit null"
+    )
+    err = _run_batch_with_fake_cli_error_json(fake_json)
+    assert err["error_type"] == "XRayCliError", (
+        f"explicit null error_kind must default to XRayCliError, got {err!r}"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Test 7: Files with no findings get ([], [], None)
 # ---------------------------------------------------------------------------
@@ -1357,6 +1468,64 @@ def test_compile_error_returns_single_error_not_per_file():
     assert meta is None
 
 
+# Rust evaluator with a genuine rustc type mismatch (E0308) -- deliberately
+# non-compiling, used by the Bug #1827 real-compile discrimination tests.
+BROKEN_EVALUATOR_TYPE_MISMATCH = """\
+fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> {
+    let x: i32 = "this is deliberately not an integer";
+    Vec::new()
+}
+"""
+
+
+def test_real_compile_error_returns_compile_error_type_with_real_diagnostic():
+    """Bug #1827 (defect 1, THE discriminating test): a deliberately
+    non-compiling evaluator run through run_batch() -- the SAME legacy
+    path xray_search AND xray_explore share (both MCP handlers call
+    XRaySearchEngine.run(), which calls this method) -- must surface the
+    REAL rustc diagnostic under error_type="CompileError", not the old
+    contentless "xray-cli exited with code 1: ". No mocking: exercises the
+    real xray-cli binary and a real rustc compile failure end to end.
+    """
+    _require_xray_cli_binary()
+    from code_indexer.xray.rust_backend import RustNativeBackend
+
+    backend = RustNativeBackend()
+    specs = [
+        _spec("src/A.java", SIMPLE_JAVA, "java"),
+        _spec("src/B.java", SIMPLE_JAVA, "java"),
+    ]
+
+    results = backend.run_batch(
+        evaluator_code=BROKEN_EVALUATOR_TYPE_MISMATCH,
+        file_specs=specs,
+        repo_path=str(REPO_ROOT),
+    )
+
+    # Compile failure is per-evaluator, not per-file -- ONE deduplicated entry.
+    assert len(results) == 1, f"expected 1 deduplicated result, got {len(results)}"
+    matches, errors, meta = results[0]
+    assert matches == []
+    assert len(errors) == 1
+    err = errors[0]
+
+    assert err["error_type"] == "CompileError", (
+        f"expected CompileError, got {err['error_type']!r}: {err['error_message']!r}"
+    )
+    # A compile error is not a per-file error -- the evaluator is compiled
+    # once, never per file (distinct from a per-file evaluation error).
+    assert err["file_path"] == ""
+    assert err["line_number"] == 0
+    msg = err["error_message"]
+    assert "E0308" in msg, f"expected rustc error code E0308 in message: {msg!r}"
+    assert "mismatched types" in msg, f"expected rustc diagnostic text: {msg!r}"
+    assert msg != "", "error message must not be empty (the original bug)"
+    assert not msg.startswith("xray-cli exited with code"), (
+        f"must not regress to the old contentless message: {msg!r}"
+    )
+    assert meta is None
+
+
 # ---------------------------------------------------------------------------
 # Test C1-a: _build_matches reads line_content from abs_path (not from spec source)
 # ---------------------------------------------------------------------------
@@ -1704,18 +1873,18 @@ _BUG_1796_INVOKE_TIMEOUT_SECONDS = 30
 
 
 def _require_xray_cli_binary() -> None:
-    """Skip this test if the real xray-cli release binary is not built locally.
+    """Ensure the real xray-cli release binary is built and available.
 
     This is a genuine component test (no subprocess mocking) -- it needs the
     real compiled binary to prove the fix works at the OS process-exec layer.
+    Delegates to the shared tests/unit/xray/conftest.py helper (Bug #1827,
+    L-5), which builds the binary on demand and fails loudly (rather than
+    silently skipping) whenever cargo IS available but the build itself
+    fails -- see that helper's own docstring for the full rationale.
     """
-    from code_indexer.xray.rust_backend import _XRAY_CLI_DEFAULT
+    from tests.unit.xray.conftest import require_xray_cli_binary
 
-    if not _XRAY_CLI_DEFAULT.exists():
-        pytest.skip(
-            f"xray-cli binary not built at {_XRAY_CLI_DEFAULT}; "
-            "run 'cargo build --release' inside rust/ to enable this test."
-        )
+    require_xray_cli_binary()
 
 
 def test_python_identity_matches_real_compiled_artifact_filename(tmp_path):

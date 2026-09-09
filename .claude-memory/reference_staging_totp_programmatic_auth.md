@@ -1,5 +1,23 @@
 # Programmatic TOTP / MFA Auth Against a CIDX Server (headless, front-door)
 
+> **STALE AS OF 2026-09-08 — VERIFY BEFORE RELYING ON THIS.** The procedure below depends on a
+> `TOTP_CODE` / `totp` / `secret_key` entry in `.local-testing`. **Those keys no longer exist.** A
+> direct check that day found ONLY `E2E_ADMIN_USERNAME` and `E2E_ADMIN_PASSWORD` (lines 258-259);
+> `grep -nE '^(TOTP_CODE|totp|secret_key)' .local-testing` returns nothing, so `TOTP_CODE` evaluates
+> empty and `/auth/mfa/verify` fails. `.local-testing`'s own section 12 (line ~500) now states the
+> current truth: "REST auth requires MFA/TOTP ... headless `curl` cannot complete a login. Use the
+> MCP front door for cluster work."
+>
+> **What to do instead:** use the `mcp__claude_ai_Neo_Staging__*` MCP tools for all cluster work.
+> If a NEWLY DEPLOYED tool is missing from that tool list, the MCP client bound its list at session
+> start and needs a reconnect — that is a client-session limitation, not a server defect. Confirm
+> the tool really is deployed with `get_tool_categories` before concluding anything is broken.
+>
+> **Do NOT retry-loop the login** trying credential variations: the admin account is MFA-protected
+> and repetition risks lockout. See [[feedback_never_retry_loop_auth_endpoint]]. Keep the rest of
+> this note only as a record of the handshake CONTRACT (it is still accurate about the endpoints
+> and shapes) for whenever a TOTP secret is restored to the file.
+
 **Do this ALWAYS, autonomously — never ask the user to authenticate or run the staging E2E.** The admin account has MFA enabled, so a bare `POST /auth/login` deliberately returns `{"mfa_required": true, "mfa_token": "..."}` with NO access token. You complete a second factor yourself.
 
 ## The credentials file stores the TOTP as a SHELL COMMAND, not a static seed
