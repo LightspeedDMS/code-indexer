@@ -5,8 +5,25 @@ Story: 02_Feat_WatchModeAutoDetection/01_Story_WatchModeAutoUpdatesAllIndexes.md
 """
 
 import subprocess
+from pathlib import Path
 from unittest.mock import Mock, patch
 from code_indexer.cli_temporal_watch_handler import TemporalWatchHandler
+
+
+def _touch_git_refs_file(project_root: Path, branch: str) -> Path:
+    """Create `.git/refs/heads/<branch>` (supporting slash-separated branch
+    names, exactly like git's own on-disk layout) and return its path.
+
+    Bug #1825: tests that construct a real TemporalWatchHandler but are not
+    actually testing the polling fallback must still give it a matching
+    refs file -- otherwise `use_polling` becomes True and a real background
+    thread leaks, spawning a `git rev-parse HEAD` subprocess call every 5s
+    for the rest of the pytest process's life.
+    """
+    refs_file = project_root / ".git" / "refs" / "heads" / branch
+    refs_file.parent.mkdir(parents=True, exist_ok=True)
+    refs_file.touch()
+    return refs_file
 
 
 class TestTemporalWatchHandlerInit:
@@ -56,9 +73,17 @@ class TestTemporalWatchHandlerInit:
 
         # Act
         handler = TemporalWatchHandler(project_root)
-
-        # Assert
-        assert handler.use_polling is True
+        try:
+            # Assert
+            assert handler.use_polling is True
+        finally:
+            # Bug #1825: this genuinely triggers the real polling fallback
+            # (a real, un-mocked background thread) -- it must be stopped,
+            # or it leaks a `git rev-parse HEAD` subprocess call every 5s
+            # for the rest of the pytest process's life, corrupting exact
+            # subprocess-call-count assertions in unrelated tests elsewhere
+            # in the suite.
+            handler.stop()
 
     @patch("code_indexer.cli_temporal_watch_handler.subprocess.run")
     def test_get_current_branch_success(self, mock_run, tmp_path):
@@ -66,6 +91,10 @@ class TestTemporalWatchHandlerInit:
         # Arrange
         project_root = tmp_path / "test_project"
         project_root.mkdir()
+        # Bug #1825: this test is about branch-name detection, not polling
+        # -- give it a matching refs file so it never enters the real
+        # polling fallback and leaks a background thread.
+        _touch_git_refs_file(project_root, "feature/test-branch")
 
         mock_run.side_effect = [
             Mock(
@@ -79,6 +108,7 @@ class TestTemporalWatchHandlerInit:
 
         # Assert
         assert handler.current_branch == "feature/test-branch"
+        assert handler.use_polling is False
 
     @patch("code_indexer.cli_temporal_watch_handler.subprocess.run")
     def test_get_current_branch_detached_head(self, mock_run, tmp_path):
@@ -86,6 +116,10 @@ class TestTemporalWatchHandlerInit:
         # Arrange
         project_root = tmp_path / "test_project"
         project_root.mkdir()
+        # Bug #1825: this test is about the detached-HEAD fallback, not
+        # polling -- give it a matching (if unusual) refs file so it never
+        # enters the real polling fallback and leaks a background thread.
+        _touch_git_refs_file(project_root, "HEAD")
 
         mock_run.side_effect = [
             subprocess.CalledProcessError(
@@ -99,6 +133,7 @@ class TestTemporalWatchHandlerInit:
 
         # Assert
         assert handler.current_branch == "HEAD"
+        assert handler.use_polling is False
 
     @patch("code_indexer.cli_temporal_watch_handler.subprocess.run")
     def test_get_last_commit_hash_success(self, mock_run, tmp_path):
@@ -106,6 +141,10 @@ class TestTemporalWatchHandlerInit:
         # Arrange
         project_root = tmp_path / "test_project"
         project_root.mkdir()
+        # Bug #1825: this test is about commit-hash retrieval, not polling
+        # -- give it a matching refs file so it never enters the real
+        # polling fallback and leaks a background thread.
+        _touch_git_refs_file(project_root, "main")
 
         mock_run.side_effect = [
             Mock(stdout="main\n", returncode=0),  # git rev-parse --abbrev-ref HEAD
@@ -117,6 +156,7 @@ class TestTemporalWatchHandlerInit:
 
         # Assert
         assert handler.last_commit_hash == "deadbeef12345678"
+        assert handler.use_polling is False
 
 
 class TestTemporalWatchHandlerGitRefsMonitoring:

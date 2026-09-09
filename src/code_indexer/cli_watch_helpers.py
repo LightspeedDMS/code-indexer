@@ -295,3 +295,12 @@ def start_watch_mode(
         semantic_handler = handlers[0]
         if hasattr(semantic_handler, "stop_watching"):
             semantic_handler.stop_watching()
+
+    # Bug #1825: observer.stop() only stops the watchdog Observer's inotify-
+    # event thread -- the temporal handler's polling fallback (when active)
+    # runs on its OWN independent thread that observer.stop() never
+    # touches. Without this, a session that fell back to polling leaked
+    # that thread for the rest of the process's life.
+    for handler in handlers:
+        if hasattr(handler, "stop"):
+            handler.stop()
