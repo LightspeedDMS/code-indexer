@@ -108,7 +108,7 @@ Runs a repos x scans matrix: every scan bundle (driver_regex + optional evaluato
 | Multiple expressions | NO (one expression per call) | YES (scans array) |
 | Result tagging | by repo only | by repo + scan + pattern_name |
 | Timeout | [10, 600] | [10, 7200] (wider for matrix) |
-| await_seconds | [0, 120] | [0, 30] (lower; batch rarely inline) |
+| await_seconds | [0, 45] | [0, 30] (lower; batch rarely inline) |
 
 ## Naming Clarification
 

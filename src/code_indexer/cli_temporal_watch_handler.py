@@ -12,8 +12,8 @@ Story: 02_Feat_WatchModeAutoDetection/01_Story_WatchModeAutoUpdatesAllIndexes.md
 import logging
 import subprocess
 import threading
-import time
 from pathlib import Path
+from typing import Optional
 from watchdog.events import FileSystemEventHandler
 
 logger = logging.getLogger(__name__)
@@ -22,6 +22,19 @@ logger = logging.getLogger(__name__)
 # "fatal: not a git repository" → returncode 128. This is an expected fallback case,
 # not an error, when CIDX runs in a non-git directory.
 _GIT_NOT_REPO_RC = 128
+
+# How often the polling-fallback thread re-checks the last commit hash.
+_POLLING_INTERVAL_SECONDS = 5.0
+
+# Extra grace period added on top of one poll interval when joining the
+# polling thread in stop() -- generous enough to absorb one full poll cycle
+# plus scheduling jitter, without blocking indefinitely. Mirrors the
+# established pattern in services/activity_heartbeat_writer.py.
+_POLLING_STOP_JOIN_GRACE_SECONDS = 1.0
+
+# Stable name prefix for the polling thread so it is identifiable in
+# threading.enumerate() -- used by process-wide leak guards (Bug #1825).
+_POLLING_THREAD_NAME = "TemporalWatchHandler-polling"
 
 
 class TemporalWatchHandler(FileSystemEventHandler):
@@ -64,6 +77,12 @@ class TemporalWatchHandler(FileSystemEventHandler):
             )
         else:
             self.completed_commits_set = set()
+
+        # Bug #1825: the polling thread must be stoppable. These are always
+        # set (even when polling is never used) so stop() is a safe no-op
+        # and callers can always check `_polling_thread is None`.
+        self._polling_stop_event = threading.Event()
+        self._polling_thread: Optional[threading.Thread] = None
 
         # Verify git refs file exists
         if not self.git_refs_file.exists():
@@ -171,12 +190,21 @@ class TemporalWatchHandler(FileSystemEventHandler):
             self._handle_branch_switch()
 
     def _start_polling_thread(self):
-        """Fallback: Poll git refs file every 5 seconds."""
+        """Fallback: Poll git refs file every `_POLLING_INTERVAL_SECONDS`
+        until `stop()` is called.
+
+        Bug #1825: this used to be an unconditional `while True: time.sleep(5)`
+        with no way to ever stop it -- any caller that triggered the polling
+        fallback (production `cidx watch`, or a test) leaked this thread for
+        the rest of the process's life, spawning a real `git rev-parse HEAD`
+        subprocess call every interval forever. `_polling_stop_event.wait()`
+        both sleeps AND provides the stop signal in one primitive: it returns
+        True (breaking the loop) the instant stop() sets the event, without
+        waiting for a full interval to elapse.
+        """
 
         def polling_worker():
-            while True:
-                time.sleep(5)
-
+            while not self._polling_stop_event.wait(timeout=_POLLING_INTERVAL_SECONDS):
                 current_hash = self._get_last_commit_hash()
 
                 if current_hash != self.last_commit_hash:
@@ -184,9 +212,33 @@ class TemporalWatchHandler(FileSystemEventHandler):
                     self.last_commit_hash = current_hash
                     self._handle_commit_detected()
 
-        thread = threading.Thread(target=polling_worker, daemon=True)
-        thread.start()
+        self._polling_thread = threading.Thread(
+            target=polling_worker, name=_POLLING_THREAD_NAME, daemon=True
+        )
+        self._polling_thread.start()
         logger.info("Polling thread started (5s interval)")
+
+    def stop(self) -> None:
+        """Stop the polling fallback thread (safe no-op if inotify
+        monitoring was used, i.e. `use_polling` is False and no thread was
+        ever started, and safe to call more than once).
+
+        Bounded join mirrors `ActivityHeartbeatWriter.stop()`'s own
+        contract -- logs a WARNING (never raises) if the thread is still
+        alive after the timeout, since this is a daemon thread and can
+        never block process exit on its own.
+        """
+        self._polling_stop_event.set()
+        if self._polling_thread is not None:
+            self._polling_thread.join(
+                timeout=_POLLING_INTERVAL_SECONDS + _POLLING_STOP_JOIN_GRACE_SECONDS
+            )
+            if self._polling_thread.is_alive():
+                logger.warning(
+                    "TemporalWatchHandler: polling thread for %s did not "
+                    "terminate within the expected join timeout",
+                    self.project_root,
+                )
 
     def _handle_commit_detected(self):
         """Index new commits incrementally when git commit detected.

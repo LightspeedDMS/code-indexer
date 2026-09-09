@@ -724,8 +724,8 @@ async def handle_xray_search(params: Dict[str, Any], user: User) -> Dict[str, An
             }
         )
 
-    # await_seconds accepts int or float in [0.0, 10.0]. Cap lowered from 30
-    # to 10 in v10.3.2 to bound threadpool occupancy (see top-of-file comment).
+    # await_seconds accepts int or float in [0.0, 45.0]. Cap lowered from
+    # 120.0 to 45.0 in v10.98.0 (Bug #1070) -- see top-of-file comment.
     if isinstance(await_seconds_raw, bool) or not isinstance(
         await_seconds_raw, (int, float)
     ):
@@ -747,8 +747,9 @@ async def handle_xray_search(params: Dict[str, Any], user: User) -> Dict[str, An
                 "message": (
                     f"await_seconds must be in "
                     f"[{_AWAIT_SECONDS_MIN}, {_AWAIT_SECONDS_MAX}] "
-                    f"(cap lowered from 30 in v10.3.2 — for longer waits "
-                    f"use the async {{job_id}} path), got {await_seconds}"
+                    f"(cap lowered from 120.0 to 45.0 in v10.98.0 -- Bug "
+                    f"#1070 -- for longer waits use the async {{job_id}} "
+                    f"path), got {await_seconds}"
                 ),
             }
         )
@@ -1439,8 +1440,8 @@ async def handle_xray_explore(params: Dict[str, Any], user: User) -> Dict[str, A
     max_debug_nodes = params.get("max_debug_nodes", _MAX_DEBUG_NODES_DEFAULT)
     await_seconds_raw = params.get("await_seconds", 0)
 
-    # await_seconds accepts int or float in [0.0, 10.0]. Cap lowered from 30
-    # to 10 in v10.3.2 to bound threadpool occupancy (see top-of-file comment).
+    # await_seconds accepts int or float in [0.0, 45.0]. Cap lowered from
+    # 120.0 to 45.0 in v10.98.0 (Bug #1070) -- see top-of-file comment.
     if isinstance(await_seconds_raw, bool) or not isinstance(
         await_seconds_raw, (int, float)
     ):
@@ -1462,8 +1463,9 @@ async def handle_xray_explore(params: Dict[str, Any], user: User) -> Dict[str, A
                 "message": (
                     f"await_seconds must be in "
                     f"[{_AWAIT_SECONDS_MIN}, {_AWAIT_SECONDS_MAX}] "
-                    f"(cap lowered from 30 in v10.3.2 — for longer waits "
-                    f"use the async {{job_id}} path), got {await_seconds}"
+                    f"(cap lowered from 120.0 to 45.0 in v10.98.0 -- Bug "
+                    f"#1070 -- for longer waits use the async {{job_id}} "
+                    f"path), got {await_seconds}"
                 ),
             }
         )

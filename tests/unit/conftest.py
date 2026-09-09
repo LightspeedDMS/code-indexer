@@ -11,6 +11,7 @@ helper functions that actually invoke subprocesses.
 import logging
 import os
 import tempfile
+import threading
 from pathlib import Path
 
 import pytest
@@ -128,4 +129,72 @@ def _guard_no_leaked_identity_queue_handler_1820():
             "async_logging.shutdown_queue_logging()). Removed them to "
             "protect the rest of the suite from a cascading queue-full "
             "stall, but the leak must be fixed at its source."
+        )
+
+
+def _leaked_temporal_watch_polling_threads(pre_existing_ids: set) -> list:
+    """Return alive threads matching TemporalWatchHandler's polling-thread
+    name that were NOT already running before the test.
+
+    Bug #1825: TemporalWatchHandler._start_polling_thread() used to run
+    `while True: time.sleep(5); ...subprocess.run(["git", "rev-parse",
+    "HEAD"], ...)...` with no stop mechanism anywhere in the class. Any
+    test that triggered the polling fallback without calling the (now
+    added) stop() method leaked this thread for the rest of the pytest
+    process's life -- it periodically spawns a real `git rev-parse HEAD`
+    subprocess call that can land inside an UNRELATED test's exact
+    subprocess-call-count assertion elsewhere in the suite (this was the
+    actual root cause of the intermittent +1/+2 failures in
+    tests/unit/services/test_reconcile_batch_content_id_1505.py).
+    """
+    from code_indexer.cli_temporal_watch_handler import _POLLING_THREAD_NAME
+
+    return [
+        t
+        for t in threading.enumerate()
+        if t.is_alive()
+        and t.name.startswith(_POLLING_THREAD_NAME)
+        and id(t) not in pre_existing_ids
+    ]
+
+
+@pytest.fixture(autouse=True)
+def _guard_no_leaked_temporal_watch_polling_thread_1825():
+    """Bug #1825 guard: fail loudly if a test leaks a real
+    TemporalWatchHandler polling thread without stopping it.
+
+    Placed in tests/unit/conftest.py (autouse, applies to the whole
+    tests/unit/ tree) so a leak from ANY test constructing a
+    TemporalWatchHandler is caught regardless of which file introduces it
+    -- the original bug's leak came from four different tests inside a
+    single file, each incidentally missing a matching `.git/refs/heads/`
+    setup.
+
+    Unlike the #1820 IdentityQueueHandler guard above, this CANNOT
+    self-heal: a running Python thread cannot be force-killed from the
+    outside, only the handler's own stop_event (which this guard has no
+    reference to) can signal it to exit cleanly. The thread is
+    `daemon=True` so it will never block process exit, but it WILL keep
+    firing a real subprocess call every poll interval for the rest of this
+    pytest session unless the offending test is fixed. Failing loudly at
+    the exact test that introduced the leak is still a major improvement
+    over the alternative -- silent cross-test pollution discovered only
+    much later, in an unrelated test's exact-call-count assertion, which is
+    exactly how Bug #1825 itself was found.
+    """
+    pre_existing_ids = {id(t) for t in threading.enumerate()}
+    yield
+    leaked = _leaked_temporal_watch_polling_threads(pre_existing_ids)
+    if leaked:
+        raise AssertionError(
+            f"Bug #1825 guard: this test leaked {len(leaked)} "
+            "TemporalWatchHandler polling thread(s) without calling "
+            "stop() on the handler that owns it (or, if the test isn't "
+            "actually testing polling behavior, without giving the "
+            "handler a matching .git/refs/heads/<branch> file so it never "
+            "enters the polling fallback at all). This thread will keep "
+            "spawning a real `git rev-parse HEAD` subprocess call every "
+            "poll interval for the rest of this pytest session, which can "
+            "corrupt exact subprocess-call-count assertions in unrelated "
+            "tests elsewhere in the suite."
         )
