@@ -707,6 +707,137 @@ class TestXRaySearchEngineEvaluationErrors:
         error_types = [e["error_type"] for e in result["evaluation_errors"]]
         assert "UnsupportedLanguage" in error_types
 
+    def test_compile_error_sets_files_processed_to_zero_not_one(
+        self, search_engine, tmp_path
+    ):
+        """Bug #1827: a CompileError-typed batch result is a SINGLE
+        deduplicated tuple standing in for the whole batch -- no file was
+        actually evaluated, so files_processed must be 0, not 1, no matter
+        how many candidate files were selected.
+        """
+        (tmp_path / "file1.py").write_text("prepareStatement()")
+        (tmp_path / "file2.py").write_text("prepareStatement()")
+        compile_error_tuple: "tuple[list[Any], list[dict[str, Any]], None]" = (
+            [],
+            [
+                {
+                    "file_path": "",
+                    "line_number": 0,
+                    "error_type": "CompileError",
+                    "error_message": "error[E0308]: mismatched types",
+                }
+            ],
+            None,
+        )
+
+        with patch.object(
+            search_engine.rust_backend,
+            "run_batch",
+            return_value=[compile_error_tuple],
+        ):
+            result = search_engine.run(
+                repo_path=tmp_path,
+                driver_regex=r"prepareStatement",
+                evaluator_code='return {"matches": [], "value": None}',
+                search_target="content",
+            )
+
+        assert result["files_total"] == 2
+        assert result["files_processed"] == 0, (
+            f"a build that never produced a loadable evaluator must report "
+            f"0 files processed, got {result['files_processed']}"
+        )
+        assert any(
+            e["error_type"] == "CompileError" for e in result["evaluation_errors"]
+        )
+
+    def test_real_compile_failure_sets_files_processed_to_zero_not_one(
+        self, search_engine, tmp_path
+    ):
+        """Bug #1827 (M-2 remediation, THE real end-to-end proof): the
+        sibling test above mocks rust_backend.run_batch entirely, so it
+        never proves the REAL RustNativeBackend/xray-cli JSON plumbing
+        actually produces the file_path=="" batch-level-failure shape the
+        search engine's structural discriminator relies on. No mocking:
+        drives a real, deliberately non-compiling evaluator through
+        search_engine.run() end to end (real xray-cli binary, real rustc
+        compile failure) and asserts files_processed == 0.
+        """
+        from tests.unit.xray.conftest import require_xray_cli_binary
+
+        require_xray_cli_binary()
+
+        (tmp_path / "file1.py").write_text("prepareStatement()")
+        (tmp_path / "file2.py").write_text("prepareStatement()")
+
+        broken_evaluator = (
+            "fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> {\n"
+            '    let x: i32 = "this is deliberately not an integer";\n'
+            "    Vec::new()\n"
+            "}\n"
+        )
+
+        result = search_engine.run(
+            repo_path=tmp_path,
+            driver_regex=r"prepareStatement",
+            evaluator_code=broken_evaluator,
+            search_target="content",
+        )
+
+        assert result["files_total"] == 2
+        assert result["files_processed"] == 0, (
+            f"a real compile failure must report 0 files processed, got "
+            f"{result['files_processed']}"
+        )
+        error_types = [e["error_type"] for e in result["evaluation_errors"]]
+        assert "CompileError" in error_types, error_types
+
+    def test_xray_cli_error_also_sets_files_processed_to_zero_not_one(
+        self, search_engine, tmp_path
+    ):
+        """Bug #1827 (M-2 remediation, THE discriminating test): a
+        batch-level "XRayCliError" (NOT "CompileError") with file_path=="" --
+        the same deduplicated-tuple shape a JSON parse failure or a genuine
+        xray-cli invocation failure produces -- must ALSO report 0 files
+        processed. The correctness invariant is "was any file actually
+        evaluated", not "was the diagnostic specifically labelled
+        CompileError" -- a files_processed count keyed off error_type alone
+        would incorrectly report 1 for this case.
+        """
+        (tmp_path / "file1.py").write_text("prepareStatement()")
+        (tmp_path / "file2.py").write_text("prepareStatement()")
+        xray_cli_error_tuple: "tuple[list[Any], list[dict[str, Any]], None]" = (
+            [],
+            [
+                {
+                    "file_path": "",
+                    "line_number": 0,
+                    "error_type": "XRayCliError",
+                    "error_message": "xray-cli produced non-JSON output",
+                }
+            ],
+            None,
+        )
+
+        with patch.object(
+            search_engine.rust_backend,
+            "run_batch",
+            return_value=[xray_cli_error_tuple],
+        ):
+            result = search_engine.run(
+                repo_path=tmp_path,
+                driver_regex=r"prepareStatement",
+                evaluator_code='return {"matches": [], "value": None}',
+                search_target="content",
+            )
+
+        assert result["files_total"] == 2
+        assert result["files_processed"] == 0, (
+            f"a batch-level failure (file_path=='') must report 0 files "
+            f"processed regardless of error_type, got "
+            f"{result['files_processed']}"
+        )
+
 
 class TestXRaySearchEngineSearchTarget:
     """search_target=filename searches file paths, not content."""

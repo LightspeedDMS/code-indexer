@@ -116,11 +116,33 @@ pub struct CompileResult {
     pub cached: bool,
 }
 
+/// Distinguishes a genuine problem in the USER's evaluator source from a
+/// problem in the xray-cli/toolchain/filesystem infrastructure (Bug #1827,
+/// Codex H2). Labelling EVERY compile-pipeline failure "CompileError"
+/// regardless of cause tells an agent to debug perfectly valid Rust when
+/// the real problem is e.g. a broken cache directory -- defeating the
+/// exact feedback loop the fix exists to restore.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompileErrorKind {
+    /// A genuine problem in the user's evaluator source: a sandbox
+    /// validation rejection, an ambiguous/missing evaluator mode, an
+    /// oversized source, or a real rustc diagnostic. The agent should
+    /// read `details` and fix its own code.
+    Compile,
+    /// A problem in the xray-cli/toolchain/filesystem infrastructure,
+    /// unrelated to the content of the user's source (rustc could not be
+    /// invoked or timed out, the cache/build directory could not be
+    /// created or written, the compiled artifact could not be published
+    /// or loaded). The user's evaluator code is not necessarily at fault.
+    Infrastructure,
+}
+
 /// Error from the compilation pipeline.
 #[derive(Debug)]
 pub struct CompileError {
     pub message: String,
     pub details: Vec<String>,
+    pub kind: CompileErrorKind,
 }
 
 impl std::fmt::Display for CompileError {
@@ -737,6 +759,7 @@ fn run_rustc_with_timeout(
     let mut child = command.spawn().map_err(|e| CompileError {
         message: format!("Failed to invoke rustc: {}", e),
         details: vec!["Is rustc installed and on PATH?".to_string()],
+        kind: CompileErrorKind::Infrastructure,
     })?;
     let pid = child.id() as i32;
     let stdout_rx = spawn_pipe_reader(child.stdout.take().expect("stdout piped above"));
@@ -755,6 +778,12 @@ fn run_rustc_with_timeout(
                             timeout.as_secs()
                         ),
                         details: vec![],
+                        // A genuinely pathological (compile-bomb) payload
+                        // in the USER's own evaluator source is what this
+                        // timeout is designed to catch (see
+                        // RUSTC_COMPILE_TIMEOUT's own doc comment) --
+                        // Compile, not Infrastructure.
+                        kind: CompileErrorKind::Compile,
                     });
                 }
                 std::thread::sleep(RUSTC_POLL_INTERVAL);
@@ -764,6 +793,7 @@ fn run_rustc_with_timeout(
                 return Err(CompileError {
                     message: format!("Failed to wait for rustc: {}", e),
                     details: vec![],
+                    kind: CompileErrorKind::Infrastructure,
                 });
             }
         }
@@ -785,6 +815,7 @@ fn compile_evaluator_impl(user_code: &str, cache_dir: &Path, preamble: &str) -> 
                 user_code.len()
             ),
             details: vec![],
+            kind: CompileErrorKind::Compile,
         });
     }
 
@@ -793,6 +824,7 @@ fn compile_evaluator_impl(user_code: &str, cache_dir: &Path, preamble: &str) -> 
         return Err(CompileError {
             message: "Evaluator validation failed".to_string(),
             details: errors.iter().map(|e| e.to_string()).collect(),
+            kind: CompileErrorKind::Compile,
         });
     }
 
@@ -846,6 +878,7 @@ fn compile_evaluator_impl(user_code: &str, cache_dir: &Path, preamble: &str) -> 
     std::fs::create_dir_all(cache_dir).map_err(|e| CompileError {
         message: format!("Failed to create cache directory '{}': {}", cache_dir.display(), e),
         details: vec![],
+        kind: CompileErrorKind::Infrastructure,
     })?;
 
     // Step 5b: Bug #1425 — isolate this compile into a private, per-invocation
@@ -872,6 +905,7 @@ fn compile_evaluator_impl(user_code: &str, cache_dir: &Path, preamble: &str) -> 
                 e
             ),
             details: vec![],
+            kind: CompileErrorKind::Infrastructure,
         })?;
     let build_rs_path = build_dir.path().join(format!("{}.rs", identity));
     let build_so_path = build_dir.path().join(format!("{}.so", identity));
@@ -879,6 +913,7 @@ fn compile_evaluator_impl(user_code: &str, cache_dir: &Path, preamble: &str) -> 
     std::fs::write(&build_rs_path, &assembled_source).map_err(|e| CompileError {
         message: format!("Failed to write evaluator source: {}", e),
         details: vec![],
+        kind: CompileErrorKind::Infrastructure,
     })?;
 
     // Step 6: Compile — output goes into the isolated build dir, never
@@ -904,6 +939,7 @@ fn compile_evaluator_impl(user_code: &str, cache_dir: &Path, preamble: &str) -> 
         return Err(CompileError {
             message: "Evaluator compilation failed".to_string(),
             details: adjusted,
+            kind: CompileErrorKind::Compile,
         });
     }
 
@@ -918,6 +954,7 @@ fn compile_evaluator_impl(user_code: &str, cache_dir: &Path, preamble: &str) -> 
             e
         ),
         details: vec![],
+        kind: CompileErrorKind::Infrastructure,
     })?;
 
     // Step 7: Write metadata (best-effort — .so already exists, warn but don't fail)
@@ -986,16 +1023,19 @@ pub fn detect_evaluator_mode(source: &str) -> Result<EvaluatorMode, CompileError
                       (collect_facts/analyze_graph) -- exactly one mode family is allowed"
                 .to_string(),
             details: vec![],
+            kind: CompileErrorKind::Compile,
         }),
         (false, true, _, _) => Err(CompileError {
             message: "Graph mode requires BOTH collect_facts and analyze_graph -- one is missing".to_string(),
             details: vec![],
+            kind: CompileErrorKind::Compile,
         }),
         (false, false, _, _) => Err(CompileError {
             message: "Evaluator must define either fn evaluate_node(...) (legacy mode) or both \
                       fn collect_facts(...) and fn analyze_graph(...) (graph mode)"
                 .to_string(),
             details: vec![],
+            kind: CompileErrorKind::Compile,
         }),
     }
 }
@@ -1085,12 +1125,40 @@ pub fn cache_identity_info_graph(user_code: &str) -> CacheIdentityInfo {
 }
 
 /// Adjust rustc error line numbers by subtracting the preamble offset.
+///
+/// Rewrites TWO distinct KINDS of line-number occurrence rustc emits for
+/// the same diagnostic (Bug #1827 -- a gutter row was previously left
+/// unadjusted while the arrow row correctly shifted, diverging by exactly
+/// `preamble_lines`, e.g. an arrow reading ":123:18" next to a gutter
+/// reading "223 |"). NOTE: the arrow row and its OWN matching gutter row
+/// (the row rustc prints for the exact line the arrow points at) must
+/// agree after adjustment -- but a SINGLE diagnostic can carry SEVERAL
+/// gutter rows referencing DIFFERENT source lines (a multi-line span, a
+/// `note:` block, or a `help:` suggestion with several replacement rows),
+/// each of which is adjusted independently and is not expected to equal
+/// the arrow's own line number.
+///  1. The "--> filename.rs:LINE:COL" arrow line -- recognized by its
+///     OWN leading `-->` token (H-2: after trimming leading whitespace,
+///     never by searching for "--> " anywhere in the line, which would
+///     also match a gutter row whose ECHOED USER SOURCE happens to
+///     contain that substring, e.g. a string literal referencing an
+///     arrow -- misclassifying it as an arrow line would both corrupt
+///     the user's own text via the digit-substitution below AND skip
+///     `adjust_gutter_line` for that row entirely).
+///  2. Numbered source-context "gutter" lines rustc prints alongside the
+///     offending code, e.g. "123 |     let x: i32 = ...;" -- see
+///     `adjust_gutter_line` below.
 pub fn adjust_error_lines(stderr: &str, preamble_lines: usize) -> Vec<String> {
     let mut result = Vec::new();
     for line in stderr.lines() {
-        // rustc errors look like: "  --> filename.rs:LINE:COL"
-        if let Some(arrow_pos) = line.find("--> ") {
-            let after = &line[arrow_pos + 4..];
+        // rustc arrow lines look like: "  --> filename.rs:LINE:COL" -- the
+        // "-->" token is ALWAYS the first non-whitespace content on the
+        // line. H-2: anchoring to the line's own leading token (after
+        // trimming) instead of `line.find("--> ")` (which matched ANYWHERE
+        // in the line) makes misclassifying a gutter row as an arrow row
+        // structurally impossible -- a genuine gutter row always starts
+        // with digits/whitespace/a bar character, never literally "-->".
+        if let Some(after) = line.trim_start().strip_prefix("--> ") {
             if let Some(colon1) = after.find(':') {
                 let after_colon1 = &after[colon1 + 1..];
                 if let Some(colon2) = after_colon1.find(':') {
@@ -1108,9 +1176,80 @@ pub fn adjust_error_lines(stderr: &str, preamble_lines: usize) -> Vec<String> {
                 }
             }
         }
+        if let Some(adjusted) = adjust_gutter_line(line, preamble_lines) {
+            result.push(adjusted);
+            continue;
+        }
         result.push(line.to_string());
     }
     result
+}
+
+/// Rewrites a rustc source-context "gutter" line -- a numbered line rustc
+/// prints alongside a "-->" arrow line (or inside a `help:`/`note:` block)
+/// to show real source content, e.g.:
+///
+/// ```text
+/// error[E0308]: mismatched types
+///   --> evaluator.rs:23:18
+///    |
+/// 23 |     let x: i32 = "not an integer";
+///    |                  ^^^^^^^^^^^^^^^^ expected `i32`, found `&str`
+/// help: try using a conversion method
+///    |
+/// 23 -     let x: i32 = "not an integer";
+/// 23 +     let x: i32 = 5;
+///    |
+/// ```
+///
+/// Bug #1827: the arrow line's `23` above is adjusted by the loop in
+/// `adjust_error_lines`, but each numbered gutter line's leading `23 |`/
+/// `23 -`/`23 +` is a SEPARATE occurrence of a (potentially unadjusted,
+/// PREAMBLE-shifted) line number -- left untouched, it disagrees with the
+/// arrow by exactly `preamble_lines`.
+///
+/// H-1: rustc's OWN renderer uses FOUR different bar characters in this
+/// gutter column, not just `|` -- `|` for a plain source-context row, `~`
+/// for a `help:` block's REPLACED row, `+` for an INSERTED row, and `-`
+/// for a REMOVED row (all verified live against the pinned toolchain; see
+/// the real-compile tests in this module). Accepting only `|` left every
+/// `~`/`+`/`-` row at its raw, PREAMBLE-shifted number while the REST of
+/// the same diagnostic correctly adjusted -- an internally
+/// self-contradictory diagnostic.
+///
+/// This recognizes a gutter line as `<leading whitespace><digits><optional
+/// whitespace><bar><rest>` (bar in `['|', '~', '+', '-']`) and rewrites
+/// ONLY the digit run, subtracting `preamble_lines` the same way the arrow
+/// line's number is adjusted. Returns `None` for any line that is not a
+/// genuine numbered gutter row (e.g. the plain `   |` caret/underline
+/// continuation line, which has no leading digits, an unrelated line like
+/// "10 warnings emitted" that has digits but no following bar character,
+/// or a highlight/underline row like `   ++++++++++++` which has a bar
+/// character but no leading digits at all) so the caller leaves it
+/// untouched.
+fn adjust_gutter_line(line: &str, preamble_lines: usize) -> Option<String> {
+    let indent_len = line.len() - line.trim_start().len();
+    let (leading_ws, rest) = line.split_at(indent_len);
+    let digit_len = rest
+        .find(|c: char| !c.is_ascii_digit())
+        .unwrap_or(rest.len());
+    if digit_len == 0 {
+        return None; // no leading digits -- not a gutter row
+    }
+    let digits = &rest[..digit_len];
+    let after_digits = &rest[digit_len..];
+    let gap_len = after_digits.len() - after_digits.trim_start().len();
+    let (gap, remainder) = after_digits.split_at(gap_len);
+    if !matches!(remainder.chars().next(), Some('|' | '~' | '+' | '-')) {
+        return None; // digits not immediately followed by a gutter bar
+    }
+    let orig_line: usize = digits.parse().ok()?;
+    let adjusted = orig_line.saturating_sub(preamble_lines).to_string();
+    // Re-pad the adjusted number to the SAME digit-field width as the
+    // original so the gutter bar column does not visually shift --
+    // adjusted is always <= orig_line, so it never needs MORE digits.
+    let padding = " ".repeat(digits.len().saturating_sub(adjusted.len()));
+    Some(format!("{leading_ws}{padding}{adjusted}{gap}{remainder}"))
 }
 
 /// Simple timestamp without external dependency.
@@ -1429,6 +1568,15 @@ fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> {
             "error must mention unsafe or validation: {}",
             err
         );
+        // Codex H2 (Bug #1827 remediation): a validation rejection is a
+        // genuine problem in the USER's evaluator source (the sandbox
+        // validator is rejecting THEIR code), never an infrastructure
+        // problem -- the agent should read `details` and fix its code.
+        assert_eq!(
+            err.kind,
+            CompileErrorKind::Compile,
+            "validation failure must classify as Compile, not Infrastructure"
+        );
     }
 
     #[test]
@@ -1450,6 +1598,331 @@ fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> {
         assert!(joined.contains(":0:"), "saturate_sub must produce 0: got {}", joined);
     }
 
+    /// Bug #1827 (defect 2): a synthetic rustc-shaped diagnostic block --
+    /// an arrow line AND a numbered gutter row referencing the SAME raw
+    /// (PREAMBLE-shifted) line 223 -- must both adjust to 123, never leave
+    /// the gutter row at the unadjusted 223 while the arrow moves to 123.
+    #[test]
+    fn test_adjust_error_lines_adjusts_gutter_line_to_match_arrow() {
+        let stderr = "error[E0308]: mismatched types\n  \
+            --> evaluator.rs:223:18\n    \
+            |\n\
+            223 |     let x: i32 = \"not an integer\";\n    \
+            |                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ expected `i32`, found `&str`\n";
+        let adjusted = adjust_error_lines(stderr, 100);
+
+        assert!(
+            adjusted.iter().any(|l| l.contains(":123:18")),
+            "arrow line must adjust to 123: got {:?}",
+            adjusted
+        );
+        assert!(
+            !adjusted.iter().any(|l| l.contains(":223:")),
+            "raw arrow line 223 must not survive: got {:?}",
+            adjusted
+        );
+        assert!(
+            adjusted.iter().any(|l| l.trim_start().starts_with("123 |")),
+            "gutter line must be adjusted to 123, matching the arrow: got {:?}",
+            adjusted
+        );
+        assert!(
+            !adjusted.iter().any(|l| l.trim_start().starts_with("223 |")),
+            "raw gutter line 223 must not survive: got {:?}",
+            adjusted
+        );
+    }
+
+    /// Extracts the line number from the FIRST "--> file:LINE:COL" arrow
+    /// line found among `details` (helper for the discriminating test
+    /// below -- keeps the test itself focused on setup/assertions).
+    fn find_arrow_line_number(details: &[String]) -> usize {
+        let arrow_line = details
+            .iter()
+            .find(|d| d.contains("--> "))
+            .unwrap_or_else(|| panic!("expected a '--> ' arrow line in details: {:?}", details));
+        arrow_line
+            .rsplit("--> ")
+            .next()
+            .unwrap()
+            .split(':')
+            .nth(1)
+            .unwrap_or_else(|| panic!("could not parse line number from arrow line: {}", arrow_line))
+            .parse()
+            .unwrap_or_else(|_| panic!("arrow line number not numeric: {}", arrow_line))
+    }
+
+    /// Extracts the line number from the FIRST numbered source-context
+    /// "gutter" row (e.g. "123 |     let x = ...;") found among `details`.
+    fn find_gutter_line_number(details: &[String]) -> usize {
+        let gutter_line = details
+            .iter()
+            .find(|d| {
+                let trimmed = d.trim_start();
+                match trimmed.split_once('|') {
+                    Some((prefix, _)) => {
+                        !prefix.trim().is_empty()
+                            && prefix.trim().chars().all(|c| c.is_ascii_digit())
+                    }
+                    None => false,
+                }
+            })
+            .unwrap_or_else(|| {
+                panic!("expected a numbered gutter line in details: {:?}", details)
+            });
+        gutter_line
+            .trim_start()
+            .split_once('|')
+            .unwrap()
+            .0
+            .trim()
+            .parse()
+            .unwrap_or_else(|_| panic!("gutter line number not numeric: {}", gutter_line))
+    }
+
+    /// Bug #1827 (defect 2, THE discriminating test): a REAL compile
+    /// failure's rustc diagnostic must report the SAME line number in its
+    /// "--> evaluator.rs:LINE:COL" arrow and its numbered source-context
+    /// gutter row -- both must point at the user's own source line, never
+    /// a PREAMBLE-shifted one. Compiles through the REAL compile_evaluator
+    /// pipeline (no mocking) with a deliberately non-compiling evaluator.
+    #[test]
+    fn test_compile_type_mismatch_arrow_and_gutter_line_numbers_agree() {
+        let dir = TempDir::new().unwrap();
+        let user_code = "\nfn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> {\n    let x: i32 = \"this is deliberately not an integer\";\n    Vec::new()\n}\n";
+        // user_code's own line count -- an UPPER bound any correctly
+        // user-relative-adjusted line number must respect. The raw,
+        // PREAMBLE-shifted line number (over 100, since PREAMBLE alone is
+        // ~100 lines) would obviously violate this bound, so this is a
+        // genuine, external proof that adjustment actually happened --
+        // not a hardcoded guess at the exact assembled-source layout.
+        let user_code_line_count = user_code.lines().count();
+
+        let result = compile_evaluator(user_code, dir.path());
+        assert!(result.is_err(), "a type mismatch must fail to compile");
+        let err = result.unwrap_err();
+
+        let arrow_line_number = find_arrow_line_number(&err.details);
+        let gutter_line_number = find_gutter_line_number(&err.details);
+
+        assert_eq!(
+            arrow_line_number, gutter_line_number,
+            "arrow line ({}) and gutter line ({}) must agree -- details: {:?}",
+            arrow_line_number, gutter_line_number, err.details
+        );
+        assert!(
+            arrow_line_number >= 1 && arrow_line_number <= user_code_line_count,
+            "arrow/gutter line number ({}) must point at the user's OWN \
+             source (1..={}), not a PREAMBLE-shifted absolute line: {:?}",
+            arrow_line_number, user_code_line_count, err.details
+        );
+        // Codex H2 (Bug #1827 remediation): a genuine rustc compile
+        // failure is the canonical Compile-kind error -- the agent's
+        // evaluator source really is broken, and `details` carries the
+        // real diagnostic it needs to fix it.
+        assert_eq!(
+            err.kind,
+            CompileErrorKind::Compile,
+            "a real rustc type-mismatch failure must classify as Compile"
+        );
+    }
+
+    /// H-1 (Bug #1827 dual-review remediation): `adjust_gutter_line` must
+    /// recognize EVERY bar character rustc's own renderer uses in the
+    /// gutter column of a numbered source-context row -- not just `|`.
+    /// Real rustc `help:` suggestion blocks use `~` (replace a line),
+    /// `+` (insert a line) and `-` (remove a line) there, verified live
+    /// against the pinned toolchain (see the two real-compile tests
+    /// below). Before the fix, only `|` was accepted, so a `~`/`+`/`-`
+    /// row was left at its raw, PREAMBLE-shifted line number while every
+    /// `|` row in the SAME diagnostic correctly adjusted -- an
+    /// internally self-contradictory diagnostic, worse for the
+    /// agent-feedback loop than the uniform offset it replaced.
+    #[test]
+    fn test_adjust_gutter_line_accepts_tilde_plus_minus_and_pipe_bars() {
+        for marker in ['|', '~', '+', '-'] {
+            let line = format!("223 {}     replacement text", marker);
+            let adjusted = adjust_gutter_line(&line, 100).unwrap_or_else(|| {
+                panic!("marker '{}' must be recognized as a gutter row", marker)
+            });
+            assert!(
+                adjusted.trim_start().starts_with(&format!("123 {}", marker)),
+                "marker '{}': expected line adjusted to 123, got {:?}",
+                marker, adjusted
+            );
+        }
+    }
+
+    /// Finds every numbered gutter-style row in `details` whose bar
+    /// character is `marker` (e.g. '~' or '+'), returning each row's
+    /// (already-adjusted) line number. Generalizes `find_gutter_line_number`
+    /// (which is hardcoded to '|') to any marker, and collects ALL matches
+    /// instead of just the first -- a `help:` block commonly contains
+    /// several numbered replacement rows.
+    fn find_numbered_rows_with_marker(details: &[String], marker: char) -> Vec<usize> {
+        details
+            .iter()
+            .filter_map(|d| {
+                let trimmed = d.trim_start();
+                let (prefix, _rest) = trimmed.split_once(marker)?;
+                let prefix = prefix.trim();
+                if prefix.is_empty() || !prefix.chars().all(|c| c.is_ascii_digit()) {
+                    return None;
+                }
+                prefix.parse().ok()
+            })
+            .collect()
+    }
+
+    /// H-1 (THE discriminating real-compile test for '~'): a genuine
+    /// non-exhaustive `match` (E0004) fails to compile through the REAL
+    /// `compile_evaluator` pipeline (no mocking), and rustc's own
+    /// "ensure that all possible cases are being handled" help: block
+    /// renders its suggested replacement arms with a `~` gutter marker --
+    /// verified live against the pinned toolchain before writing this
+    /// test. Both `~` rows must land inside the user's own source range
+    /// after adjustment, never left at their raw PREAMBLE-shifted value.
+    #[test]
+    fn test_compile_nonexhaustive_match_help_rows_use_tilde_and_are_adjusted() {
+        let dir = TempDir::new().unwrap();
+        let user_code = "\nfn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> {\n    enum Color { Red, Green, Blue }\n    let c = Color::Red;\n    let n = match c {\n        Color::Red => 1,\n    };\n    let _ = (node, n);\n    Vec::new()\n}\n";
+        let user_code_line_count = user_code.lines().count();
+
+        let result = compile_evaluator(user_code, dir.path());
+        assert!(result.is_err(), "a non-exhaustive match must fail to compile");
+        let err = result.unwrap_err();
+
+        let tilde_rows = find_numbered_rows_with_marker(&err.details, '~');
+        assert!(
+            !tilde_rows.is_empty(),
+            "expected at least one '~' gutter row in a real rustc help: \
+             block: {:?}",
+            err.details
+        );
+        for line_number in &tilde_rows {
+            assert!(
+                *line_number >= 1 && *line_number <= user_code_line_count,
+                "tilde row line ({}) must be adjusted into the user's own \
+                 source range (1..={}), not left PREAMBLE-shifted: {:?}",
+                line_number, user_code_line_count, err.details
+            );
+        }
+    }
+
+    /// H-1 (real-compile test for '+' and '-'): calling a trait method
+    /// that is implemented but not imported (E0599, no `mod` needed --
+    /// avoids the sandbox validator's unrelated forbidden-construct ban)
+    /// fails to compile through the REAL compile_evaluator pipeline, and
+    /// rustc's own help: blocks render TWO distinct `+`/`-` shapes,
+    /// verified live against the pinned toolchain:
+    ///  1. "perhaps you want to import it" suggests inserting
+    ///     `use std::fmt::Write;` at absolute line 1 (the very top of the
+    ///     assembled PREAMBLE+user source) via a lone `+` row -- since
+    ///     PREAMBLE alone is ~100 lines, this MUST saturate to 0.
+    ///  2. "there is a method `write_char` with a similar name" renders a
+    ///     full-line REPLACE as a `-` row (old content) paired with a
+    ///     NONZERO `+` row (new content) sharing the SAME real user
+    ///     source line -- both must land inside the user's own range
+    ///     after adjustment.
+    #[test]
+    fn test_compile_missing_trait_method_help_rows_use_plus_and_minus_and_are_adjusted() {
+        let dir = TempDir::new().unwrap();
+        let user_code = "\nfn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> {\n    let mut s = String::new();\n    let _ = s.write_str(\"hi\");\n    let _ = node;\n    Vec::new()\n}\n";
+        let user_code_line_count = user_code.lines().count();
+
+        let result = compile_evaluator(user_code, dir.path());
+        assert!(
+            result.is_err(),
+            "calling an out-of-scope trait method must fail to compile"
+        );
+        let err = result.unwrap_err();
+
+        let plus_rows = find_numbered_rows_with_marker(&err.details, '+');
+        assert!(
+            plus_rows.contains(&0),
+            "expected a '+' row for the suggested import, adjusted to 0 \
+             (absolute line 1, PREAMBLE >> 1 line): {:?}",
+            err.details
+        );
+
+        let minus_rows = find_numbered_rows_with_marker(&err.details, '-');
+        assert!(
+            !minus_rows.is_empty(),
+            "expected at least one '-' gutter row in a real rustc help: \
+             block: {:?}",
+            err.details
+        );
+
+        // The "similar name" suggestion's '-'/'+' rows share the SAME
+        // real user source line (a full-line replace) -- assert that
+        // pairing directly (a nonzero '+' row matching a '-' row's line
+        // number), not just that some '+' and some '-' rows
+        // independently exist anywhere in the diagnostic.
+        let paired_line = minus_rows
+            .iter()
+            .find(|m| plus_rows.contains(m) && **m != 0)
+            .copied();
+        assert!(
+            paired_line.is_some(),
+            "expected a '-' row and a NONZERO '+' row sharing the same \
+             adjusted line number (the 'similar name' full-line replace \
+             pair): plus_rows={:?} minus_rows={:?} details={:?}",
+            plus_rows, minus_rows, err.details
+        );
+        let paired_line = paired_line.unwrap();
+        assert!(
+            paired_line >= 1 && paired_line <= user_code_line_count,
+            "'-'/'+' replacement pair line ({}) must be adjusted into the \
+             user's own source range (1..={}), not left PREAMBLE-shifted: \
+             {:?}",
+            paired_line, user_code_line_count, err.details
+        );
+    }
+
+    /// H-2 (Bug #1827 dual-review remediation, THE discriminating test):
+    /// the user's own evaluator source contains a "--> file:LINE:COL"
+    /// -shaped substring inside a string literal. Verified live against
+    /// the pinned toolchain: rustc echoes the user's source VERBATIM in
+    /// its numbered gutter row, so that row's text itself contains
+    /// "--> evaluator.rs:7:1". The OLD `line.find("--> ")` (matched
+    /// ANYWHERE in the line, not anchored to the line's own leading
+    /// token) misclassified this GUTTER row as an ARROW line: it
+    /// corrupted the embedded ":7" -> ":0" inside the user's own literal
+    /// via `replacen`, AND skipped `adjust_gutter_line` for the row
+    /// entirely -- leaving the real gutter line number PREAMBLE-shifted
+    /// (the Bug #1827 symptom, unfixed for this input). Both must be
+    /// false after the fix: the literal survives verbatim, and the row's
+    /// real line number is adjusted into the user's own source range.
+    #[test]
+    fn test_compile_evaluator_source_containing_arrow_token_is_not_corrupted_and_gutter_is_adjusted(
+    ) {
+        let dir = TempDir::new().unwrap();
+        let user_code = "\nfn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> {\n    let bad: i32 = \"path --> evaluator.rs:7:1 more text\";\n    let _ = (node, bad);\n    Vec::new()\n}\n";
+        let user_code_line_count = user_code.lines().count();
+
+        let result = compile_evaluator(user_code, dir.path());
+        assert!(result.is_err(), "a type mismatch must fail to compile");
+        let err = result.unwrap_err();
+
+        let joined = err.details.join("\n");
+        assert!(
+            joined.contains("evaluator.rs:7:1"),
+            "the user's own string literal must survive verbatim, \
+             unmangled by the arrow-line rewrite: {:?}",
+            err.details
+        );
+
+        let gutter_line_number = find_gutter_line_number(&err.details);
+        assert!(
+            gutter_line_number >= 1 && gutter_line_number <= user_code_line_count,
+            "the gutter row for the user's actual source line must be \
+             adjusted into range 1..={}, not left PREAMBLE-shifted \
+             (H-2 -- the row must never be routed into the arrow branch \
+             just because it CONTAINS '--> ' text): {:?}",
+            user_code_line_count, err.details
+        );
+    }
+
     #[test]
     fn test_compile_missing_evaluate_node_fn() {
         let dir = TempDir::new().unwrap();
@@ -1464,6 +1937,37 @@ fn helper() -> Vec<u8> { vec![] }
             err.message.contains("evaluate_node"),
             "error must mention evaluate_node: {}",
             err.message
+        );
+        // Codex H2 (Bug #1827 remediation): mode-detection rejects the
+        // user's own source shape -- a genuine Compile-kind problem, not
+        // an infrastructure failure.
+        assert_eq!(
+            err.kind,
+            CompileErrorKind::Compile,
+            "missing evaluate_node must classify as Compile"
+        );
+    }
+
+    /// Codex H2 (Bug #1827 remediation, THE discriminating test): a
+    /// genuine subprocess-spawn failure (rustc itself could not be
+    /// invoked -- an infrastructure problem completely unrelated to
+    /// anything in the user's evaluator source) must classify as
+    /// Infrastructure, never Compile. Calls `run_rustc_with_timeout`
+    /// directly with a `Command` pointing at a binary that does not
+    /// exist, forcing the REAL spawn-failure path (no mocking).
+    #[test]
+    fn test_compile_error_kind_is_infrastructure_for_rustc_spawn_failure() {
+        let command = std::process::Command::new("definitely-not-a-real-rustc-binary-xyz-1827");
+        let result = run_rustc_with_timeout(command, std::time::Duration::from_secs(5));
+        assert!(result.is_err(), "spawning a nonexistent binary must fail");
+        let err = result.unwrap_err();
+        assert_eq!(
+            err.kind,
+            CompileErrorKind::Infrastructure,
+            "a genuine spawn failure must classify as Infrastructure, not \
+             Compile -- telling the agent 'CompileError' here would send \
+             it to debug perfectly valid Rust: {}",
+            err
         );
     }
 

@@ -12,6 +12,16 @@ struct JsonOutput {
     compile_ms: u128,
     cached: bool,
     error: Option<String>,
+    /// Bug #1827: `"compile"` when `error` is a genuine problem in the
+    /// USER's evaluator source (a real rustc diagnostic, a sandbox
+    /// validation rejection, an ambiguous/missing mode, or an oversized
+    /// source), `"infrastructure"` when it is an xray-cli/toolchain/
+    /// filesystem problem unrelated to the source's content, `None` when
+    /// `error` itself is `None`. Mirrors `xray_core::compiler::
+    /// CompileErrorKind` -- callers (RustNativeBackend) use this to avoid
+    /// telling an agent "fix your code" when the real problem is e.g. a
+    /// broken cache directory.
+    error_kind: Option<String>,
     /// Debug messages emitted by debug_log() calls in the evaluator.
     /// Empty list when no debug_log() calls were made (zero overhead).
     debug_messages: Vec<String>,
@@ -39,8 +49,10 @@ struct ParsedArgs {
 }
 
 /// Evaluators built, the compile time in ms, and whether the .so was served
-/// from cache, or an `Err(error_message)` on compilation/load failure.
-type EvaluatorsResult = Result<(Vec<Box<dyn Evaluator>>, u128, bool), String>;
+/// from cache, or an `Err(CompileError)` (Bug #1827 -- typed, carrying
+/// `.kind` so main() can classify a legitimate JSON-mode failure as a
+/// Compile vs Infrastructure problem) on read/compilation/load failure.
+type EvaluatorsResult = Result<(Vec<Box<dyn Evaluator>>, u128, bool), xray_core::compiler::CompileError>;
 
 fn default_target() -> String {
     let home = std::env::var("HOME").unwrap_or_else(|_| std::env::current_dir()
@@ -1160,6 +1172,7 @@ fn main() {
                         compile_ms: 0,
                         cached: false,
                         error: Some(msg),
+                        error_kind: None,
                         debug_messages: vec![],
                     });
                 } else {
@@ -1204,8 +1217,12 @@ fn main() {
         };
 
     match evaluators_result {
-        Err(err_msg) => {
+        Err(compile_err) => {
             if json_output {
+                let error_kind = match compile_err.kind {
+                    xray_core::compiler::CompileErrorKind::Compile => "compile",
+                    xray_core::compiler::CompileErrorKind::Infrastructure => "infrastructure",
+                };
                 let out = JsonOutput {
                     findings: vec![],
                     files_parsed: 0,
@@ -1213,12 +1230,34 @@ fn main() {
                     parse_scan_ms: 0,
                     compile_ms: 0,
                     cached: false,
-                    error: Some(err_msg),
+                    error: Some(format!("{}", compile_err)),
+                    error_kind: Some(error_kind.to_string()),
                     debug_messages: vec![],
                 };
                 print_json_output(&out);
+                // Bug #1827 (primary fix): a compile/read/load failure at
+                // this point is a LEGITIMATE terminal outcome, fully
+                // reported via the JSON `error`/`error_kind` fields on
+                // stdout -- mirrors `--compile-only`'s own established
+                // contract (see its doc comment above) exactly: ALWAYS
+                // exits 0 with a JSON report for a legitimate outcome in
+                // JSON mode; exit 1 is reserved for a malformed
+                // invocation, which this branch can never be (it is only
+                // reached once `--dynlib` was successfully parsed and a
+                // genuine read/compile/load attempt was made). Before
+                // this fix, JSON mode unconditionally exited 1 here
+                // regardless of outcome -- the exact self-inflicted
+                // inconsistency between `--json` and `--compile-only`
+                // that caused Bug #1827: the Python caller's H12-safe
+                // "never trust a non-zero exit's stdout" rule (Issue
+                // #1811/Bug #1812) then discarded the real diagnostic
+                // already sitting on stdout, reporting nothing but a
+                // contentless "exited with code 1: ".
+                std::process::exit(0);
             }
-            // Human-readable error already printed inside build_dynlib_evaluators
+            // Human-readable mode keeps its original exit(1) contract --
+            // error already printed inside build_dynlib_evaluators /
+            // read_evaluator_source / compile_and_load_evaluator.
             std::process::exit(1);
         }
         Ok((evaluators, compile_ms, cached)) => {
@@ -1244,6 +1283,7 @@ fn main() {
                     compile_ms,
                     cached,
                     error: None,
+                    error_kind: None,
                     debug_messages: result.debug_messages,
                 };
                 print_json_output(&out);
@@ -1360,14 +1400,27 @@ fn parse_args(args: &[String]) -> ParsedArgs {
 }
 
 /// Validates the evaluator source file exists and reads its contents.
-fn read_evaluator_source(eval_path: &str, json_output: bool) -> Result<String, String> {
+///
+/// Bug #1827: both failure branches here are Infrastructure-kind -- this
+/// path is a per-invocation temp file the SERVER writes (RustNativeBackend's
+/// `_write_invoke_temp_files`) immediately before spawning xray-cli; its
+/// absence or unreadability is a filesystem/process problem, never a fault
+/// in the user's own evaluator source text.
+fn read_evaluator_source(
+    eval_path: &str,
+    json_output: bool,
+) -> Result<String, xray_core::compiler::CompileError> {
     let path = PathBuf::from(eval_path);
     if !path.exists() {
         let msg = format!("Evaluator file not found: {}", eval_path);
         if !json_output {
             eprintln!("Error: {}", msg);
         }
-        return Err(msg);
+        return Err(xray_core::compiler::CompileError {
+            message: msg,
+            details: vec![],
+            kind: xray_core::compiler::CompileErrorKind::Infrastructure,
+        });
     }
 
     match std::fs::read_to_string(&path) {
@@ -1377,7 +1430,11 @@ fn read_evaluator_source(eval_path: &str, json_output: bool) -> Result<String, S
             if !json_output {
                 eprintln!("Error: {}", msg);
             }
-            Err(msg)
+            Err(xray_core::compiler::CompileError {
+                message: msg,
+                details: vec![],
+                kind: xray_core::compiler::CompileErrorKind::Infrastructure,
+            })
         }
     }
 }
@@ -1385,6 +1442,13 @@ fn read_evaluator_source(eval_path: &str, json_output: bool) -> Result<String, S
 /// Compiles `user_code` and loads the resulting dynamic library, printing
 /// progress/timing unless `json_output`. Mirrors the original inline logic
 /// of `build_dynlib_evaluators` before it was split for readability.
+///
+/// Bug #1827: `compile_evaluator`'s own `CompileError` (already carrying
+/// the correct `.kind` -- see compiler.rs) is propagated UNCHANGED, never
+/// re-stringified. A post-compile `DynlibEvaluator::load` failure is
+/// Infrastructure-kind -- the artifact compiled successfully, so a load
+/// failure here means an ABI/toolchain-drift or engine bug, not a problem
+/// in the user's source.
 fn compile_and_load_evaluator(
     user_code: &str,
     eval_path: &str,
@@ -1399,11 +1463,10 @@ fn compile_and_load_evaluator(
     let cr = match xray_core::compiler::compile_evaluator(user_code, &cache_dir) {
         Ok(cr) => cr,
         Err(e) => {
-            let msg = format!("{}", e);
             if !json_output {
-                eprintln!("\n=== Evaluator Error ===\n{}", msg);
+                eprintln!("\n=== Evaluator Error ===\n{}", e);
             }
-            return Err(msg);
+            return Err(e);
         }
     };
     let compile_total_ms = compile_start.elapsed().as_millis();
@@ -1419,7 +1482,11 @@ fn compile_and_load_evaluator(
         if !json_output {
             eprintln!("Error: {}", msg);
         }
-        msg
+        xray_core::compiler::CompileError {
+            message: msg,
+            details: vec![],
+            kind: xray_core::compiler::CompileErrorKind::Infrastructure,
+        }
     })?;
     Ok((vec![Box::new(evaluator)], cr.compile_ms, cr.cached))
 }
@@ -2010,6 +2077,7 @@ fn analyze_graph(g: &GraphHandle<'_>, facts: &FactsHandle<'_>) -> GraphResult {
             compile_ms: 0,
             cached: false,
             error: None,
+            error_kind: None,
             debug_messages: vec!["hello".to_string(), "world".to_string()],
         };
         let json = serde_json::to_string(&out).expect("must serialize");
@@ -2036,6 +2104,7 @@ fn analyze_graph(g: &GraphHandle<'_>, facts: &FactsHandle<'_>) -> GraphResult {
             compile_ms: 0,
             cached: false,
             error: None,
+            error_kind: None,
             debug_messages: vec![],
         };
         let json = serde_json::to_string(&out).expect("must serialize");
@@ -2662,6 +2731,59 @@ fn analyze_graph(g: &GraphHandle<'_>, facts: &FactsHandle<'_>) -> GraphResult {
             result.is_err(),
             "must return Err when the trailing-content scan exceeds its byte budget, not \
              silently report truncated=false"
+        );
+    }
+
+    // --- Bug #1827 primary fix: the legacy default `--json` path's
+    // evaluators_result Err arm must carry a typed CompileError (with
+    // `.kind`) rather than a bare String, so main() can classify a
+    // legitimate compile/read/load failure as Compile vs Infrastructure
+    // and exit 0 for `--json` (mirroring `--compile-only`'s own
+    // contract), instead of the old always-exit-1 + empty-stderr bug.
+
+    /// A missing evaluator source file is an INFRASTRUCTURE problem --
+    /// the server writes this temp file and hands its path to xray-cli;
+    /// a missing/unreadable file at that point is never the user's own
+    /// evaluator code's fault.
+    #[test]
+    fn read_evaluator_source_missing_file_classifies_as_infrastructure() {
+        let result = read_evaluator_source("/nonexistent/path/to/eval_1827.rs", true);
+        assert!(result.is_err(), "a missing file must be an error");
+        let err = result.unwrap_err();
+        assert_eq!(
+            err.kind,
+            xray_core::compiler::CompileErrorKind::Infrastructure,
+            "a missing evaluator file is an infrastructure problem, never \
+             the user's fault: {}",
+            err.message
+        );
+    }
+
+    /// A genuine rustc compile failure (real E0308 type mismatch, no
+    /// mocking) through `compile_and_load_evaluator` must classify as
+    /// Compile and carry the real diagnostic -- THE discriminating proof
+    /// that the typed CompileError plumbing survives this call site.
+    #[test]
+    fn compile_and_load_evaluator_real_compile_failure_classifies_as_compile_with_diagnostic() {
+        let user_code = "fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> {\n    let x: i32 = \"not an integer\";\n    Vec::new()\n}\n";
+        let result = compile_and_load_evaluator(user_code, "eval.rs", true);
+        // Box<dyn Evaluator> (the Ok type) does not implement Debug, so
+        // `.unwrap_err()` cannot be used here -- match instead.
+        let err = match result {
+            Ok(_) => panic!("a type mismatch must fail to compile"),
+            Err(e) => e,
+        };
+        assert_eq!(
+            err.kind,
+            xray_core::compiler::CompileErrorKind::Compile,
+            "a genuine rustc compile failure must classify as Compile: {}",
+            err.message
+        );
+        let rendered = format!("{}", err);
+        assert!(
+            rendered.contains("E0308"),
+            "the real rustc diagnostic must be present, not swallowed: {}",
+            rendered
         );
     }
 }
