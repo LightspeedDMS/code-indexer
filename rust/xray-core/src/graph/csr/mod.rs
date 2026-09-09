@@ -49,6 +49,7 @@ pub use handle::GraphHandle;
 /// than this ABI slice calls for (Rule 9, anti-divergent-creativity).
 pub mod handle {
     use super::code_graph::CodeGraph;
+    use crate::graph::identity::SymbolId;
     use std::marker::PhantomData;
 
     type CtxPtr = *const ();
@@ -65,7 +66,7 @@ pub mod handle {
     /// that type. `Copy`/`Clone` because every field is a plain pointer or
     /// function pointer -- no owned/heap data, so passing it by value never
     /// has drop/double-free concerns the way a mirrored `CodeGraph` would.
-    /// The 7 accessor fields are spelled out with RAW `fn(...)->...` types
+    /// The accessor fields are spelled out with RAW `fn(...)->...` types
     /// here (not via the `type X = ...` aliases above), deliberately --
     /// `preamble_ac18_parity.rs`'s structural comparison diffs each
     /// field's `syn::Type` AST as written, so two sides both writing a
@@ -94,6 +95,8 @@ pub mod handle {
         /// Story #1792 (S3, AC4): cross-file captioning without re-parsing --
         /// see `GraphHandle::signature_for`'s doc comment.
         signature_for_raw_fn: fn(*const (), u32) -> Option<(*const u8, usize)>,
+        symbol_count_fn: fn(*const ()) -> usize,
+        dense_id_for_fn: fn(*const (), u64) -> Option<u32>,
         _graph: PhantomData<&'graph ()>,
     }
 
@@ -163,6 +166,14 @@ pub mod handle {
         graph_from_ctx(ctx).signature_for(dense_id).map(|s| (s.as_ptr(), s.len()))
     }
 
+    fn thunk_symbol_count(ctx: CtxPtr) -> usize {
+        graph_from_ctx(ctx).symbol_count()
+    }
+
+    fn thunk_dense_id_for(ctx: CtxPtr, symbol: u64) -> Option<u32> {
+        graph_from_ctx(ctx).dense_id_for(symbol)
+    }
+
     impl<'graph> GraphHandle<'graph> {
         /// Builds a handle bound to `graph`. The `'graph` lifetime
         /// parameter is what makes the SAFETY contract above a
@@ -181,6 +192,8 @@ pub mod handle {
                 is_symbol_referenced_fn: thunk_is_symbol_referenced,
                 is_definitely_dead_code_fn: thunk_is_definitely_dead_code,
                 signature_for_raw_fn: thunk_signature_for_raw,
+                symbol_count_fn: thunk_symbol_count,
+                dense_id_for_fn: thunk_dense_id_for,
                 _graph: PhantomData,
             }
         }
@@ -207,6 +220,14 @@ pub mod handle {
 
         pub fn resolve_symbol(&self, dense_id: u32) -> Option<u64> {
             (self.resolve_symbol_fn)(self.ctx, dense_id)
+        }
+
+        pub fn symbol_count(&self) -> usize {
+            (self.symbol_count_fn)(self.ctx)
+        }
+
+        pub fn dense_id_for(&self, symbol: SymbolId) -> Option<u32> {
+            (self.dense_id_for_fn)(self.ctx, symbol)
         }
 
         /// Returns a `&str` borrowed from the graph's shared string table,

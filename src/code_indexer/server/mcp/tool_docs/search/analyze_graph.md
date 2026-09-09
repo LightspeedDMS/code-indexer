@@ -160,6 +160,8 @@ pub struct ReduceFinding {
 | `g.shortest_path_to_any(from, targets, max_depth)` | `(u32, &[u32], usize) -> Option<Vec<u32>>` | Shortest call-graph path from `from` to any of `targets` -- use this to report the PATH for a reachability finding (directional asymmetry, see below). |
 | `g.strongly_connected_components()` | `() -> Vec<Vec<u32>>` | Cycle detection -- useful for layering-violation / package-cycle analysis. |
 | `g.resolve_symbol(dense_id)` | `(u32) -> Option<u64>` | Dense id to real global `SymbolId`. |
+| `g.symbol_count()` | `() -> usize` | Exact number of symbols; dense ids are in `0..g.symbol_count()`. |
+| `g.dense_id_for(symbol)` | `(u64) -> Option<u32>` | Reverse lookup from a real global `SymbolId` to its dense id. |
 | `g.resolve_string(string_id)` | `(u32) -> Option<&str>` | Interned string lookup. |
 | `g.is_symbol_referenced(dense_id)` | `(u32) -> bool` | True if ANY inbound edge exists, regardless of graph completeness. |
 | `g.is_definitely_dead_code(dense_id)` | `(u32) -> Option<bool>` | `Some(false)` = referenced (always safe to trust). `Some(true)` = definitely dead (ONLY reported when the graph is fully complete). `None` = unknown/suppressed (an incomplete graph must never claim "dead" with no evidence). |
