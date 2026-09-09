@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [12.44.0] - 2026-09-08
+
+### Fixed
+
+- `cidx watch` no longer leaks an unstoppable background thread. The temporal watch
+  handler's polling fallback ran `while True: sleep(5); git rev-parse HEAD` as a
+  daemon thread with no stop event, no retained handle and no join anywhere in the
+  class, so every watch session left a thread shelling out to git every five seconds
+  for the life of the process. The loop is now stop-event gated, `stop()` performs a
+  bounded join, and it is wired into both real shutdown paths (the `watch` command's
+  finally block and the watch loop helper) -- `observer.stop()` never touched this
+  thread, since it is independent of the filesystem observer. Surfaced by an exact
+  git-subprocess-call-count assertion elsewhere in the suite that the stray ticks
+  were inflating. (#1825)
+
+- X-Ray tool documentation now states one `await_seconds` bound instead of four. The
+  code comment said `[0.0, 10.0]`, the runtime error message cited a superseded
+  "lowered from 30 in v10.3.2", `xray_explore.md` prose claimed 120 seconds while its
+  own schema field said 45, and `xray_search_batch.md`'s comparison table still quoted
+  `[0, 120]` -- against an actually enforced 45.0. The real history is 30, then 10 in
+  v10.3.2, then 120 in v10.5.0, then 45 in v10.98.0 (Bug #1070, because a longer
+  inline wait risks a 504 at the ALB 60s timeout). The enforced constant was already
+  correct and is unchanged; only the four descriptions of it were wrong. A parity test
+  now reads both the published schema maximum and the runtime constant from their real
+  sources so they cannot drift apart again. (#1824)
+
 ## [12.43.0] - 2026-09-08
 
 ### Fixed
