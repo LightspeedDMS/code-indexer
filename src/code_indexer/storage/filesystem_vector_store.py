@@ -12,6 +12,7 @@ import os
 import random
 import subprocess
 import tempfile
+import time
 from pathlib import Path
 from typing import List, Dict, Any, Optional, Tuple, Union, Set, TYPE_CHECKING
 from datetime import datetime
@@ -46,6 +47,14 @@ from code_indexer.storage.shared.hnsw_sync_state import (
     write_hnsw_sync_state,
 )
 from code_indexer.storage.shared.chunk_layout import ChunkLayout
+
+
+# Bug #1829: a fresh ChunkStore connection is opened for every CHUNKS_DB
+# upsert, so concurrent temporal workers can exhaust sqlite3's default busy
+# timeout. Keep retries bounded while allowing transient lock contention to
+# clear. The schedule has one entry for each retry after the first attempt.
+_CHUNKS_DB_WRITE_MAX_ATTEMPTS = 5
+_CHUNKS_DB_WRITE_BACKOFF_SECONDS = (0.5, 1.0, 2.0, 4.0)
 
 
 class LocalIndexNotFoundError(RuntimeError):
@@ -2426,6 +2435,60 @@ class FilesystemVectorStore:
                 )
             return self._temporal_metadata_store
 
+    def _write_chunks_db_with_retry(
+        self,
+        collection_path: Path,
+        records: List[Dict[str, Any]],
+        orphan_ids: List[str],
+        *,
+        max_attempts: int = _CHUNKS_DB_WRITE_MAX_ATTEMPTS,
+        backoff_schedule: Tuple[float, ...] = _CHUNKS_DB_WRITE_BACKOFF_SECONDS,
+    ) -> None:
+        """Write chunk records, retrying only transient store failures.
+
+        A new ChunkStore is deliberately opened for each attempt because a
+        failed open may have no usable connection and a failed write may have
+        left the connection in a transaction state. Fatal errors and retry
+        exhaustion are raised to the caller; temporal indexing must never
+        report success after dropping a commit.
+        """
+        if max_attempts < 1:
+            raise ValueError("max_attempts must be at least 1")
+        if len(backoff_schedule) < max_attempts - 1:
+            raise ValueError("backoff_schedule must have one entry per retry attempt")
+
+        from code_indexer.storage.sqlite_chunk_store import (
+            is_fatal_chunk_store_write_error,
+            open_chunk_store_for_path,
+        )
+
+        chunks_db_path = collection_path / "chunks.db"
+        for attempt in range(max_attempts):
+            chunk_store = None
+            caught_exc: Optional[BaseException] = None
+            try:
+                chunk_store = open_chunk_store_for_path(
+                    chunks_db_path, str(collection_path)
+                )
+                if records:
+                    chunk_store.write_batch(records)
+                if orphan_ids:
+                    chunk_store.delete(orphan_ids)
+            except Exception as exc:
+                caught_exc = exc
+            finally:
+                if chunk_store is not None:
+                    chunk_store.close()
+
+            if caught_exc is None:
+                return
+            if (
+                is_fatal_chunk_store_write_error(caught_exc)
+                or attempt == max_attempts - 1
+            ):
+                raise caught_exc
+            time.sleep(random.uniform(0, backoff_schedule[attempt]))
+
     def _upsert_points_chunks_db(
         self,
         collection_name: str,
@@ -2573,18 +2636,7 @@ class FilesystemVectorStore:
             if collection_name in self._indexing_session_changes:
                 self._indexing_session_changes[collection_name]["added"].add(point_id)
 
-        from code_indexer.storage.sqlite_chunk_store import open_chunk_store_for_path
-
-        chunk_store = open_chunk_store_for_path(
-            collection_path / "chunks.db", str(collection_path)
-        )
-        try:
-            if records:
-                chunk_store.write_batch(records)
-            if orphan_ids:
-                chunk_store.delete(orphan_ids)
-        finally:
-            chunk_store.close()
+        self._write_chunks_db_with_retry(collection_path, records, orphan_ids)
 
         # Bug #1528: the temporal METADATA store is a SEPARATE store from the
         # chunk data (shared temporal_metadata.db in solo mode, PostgreSQL in

@@ -8,7 +8,7 @@ a threshold of consecutive failures (transient network/auth issues).
 Story #295: Auto-Recovery for Corrupted Golden Repo Git Object Database.
 """
 
-from typing import List
+from typing import List, Optional, Sequence, Union
 
 
 class GitFetchError(Exception):
@@ -18,12 +18,36 @@ class GitFetchError(Exception):
     Attributes:
         category: One of "permanent", "corruption", "transient", or "unknown".
         stderr: The raw stderr output from the failed git fetch command.
+        stdout: The raw stdout output from the failed git fetch command, or
+            None if unavailable. Optional (Bug #1832 follow-up) so a
+            stdout-only diagnostic (empty stderr) is still recoverable by
+            consumers such as refresh_scheduler.py.
+        returncode: The process exit code, or None when the fetch was killed
+            by a timeout (there is no exit code in that case) rather than
+            completing with a non-zero one.
+        cmd: The argv of the git command that failed, or None if unknown.
     """
 
-    def __init__(self, message: str, category: str, stderr: str):
+    def __init__(
+        self,
+        message: str,
+        category: str,
+        stderr: str,
+        *,
+        stdout: Optional[str] = None,
+        returncode: Optional[int] = None,
+        cmd: Optional[Union[str, Sequence[str]]] = None,
+    ):
         super().__init__(message)
         self.category = category
+        # stderr keeps its exact prior meaning: the raw, uncapped stderr
+        # string. refresh_scheduler.py reads it directly and
+        # classify_fetch_error() consumes it raw -- neither its semantics
+        # nor its uncapped-ness change with this widening.
         self.stderr = stderr
+        self.stdout = stdout
+        self.returncode = returncode
+        self.cmd = cmd
 
 
 # Patterns indicating a permanent, non-recoverable access/existence failure

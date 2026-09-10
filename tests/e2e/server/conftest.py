@@ -25,6 +25,7 @@ import logging
 import os
 import shutil
 import time
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Callable, Iterator, Optional, Tuple
 
@@ -41,6 +42,22 @@ logger = logging.getLogger(__name__)
 # e2e-automation.sh sets these for all four phases before invoking pytest.
 _ENV_ADMIN_USER = "E2E_ADMIN_USER"
 _ENV_ADMIN_PASS = "E2E_ADMIN_PASS"
+
+
+@contextmanager
+def preserve_root_logging_handlers() -> Iterator[None]:
+    """Restore shared logging after a throwaway in-process app shuts down."""
+    root = logging.getLogger()
+    original_handlers = list(root.handlers)
+    try:
+        yield
+    finally:
+        for handler in list(root.handlers):
+            if handler not in original_handlers:
+                root.removeHandler(handler)
+        for handler in original_handlers:
+            if handler not in root.handlers:
+                root.addHandler(handler)
 
 
 # ---------------------------------------------------------------------------

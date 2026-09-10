@@ -198,30 +198,39 @@ impl CodeGraph {
         self.symbols.dense_id_of(symbol)
     }
 
-    /// AC6 + dual-review defect D1 fix: "the 'no reference at all' finding
-    /// tier is SUPPRESSED whenever this graph is anything other than
-    /// `Complete`". `Some(false)` ("referenced, not dead") is always safe
-    /// to report regardless of completeness -- positive evidence a symbol
-    /// has an inbound edge is never invalidated by a later budget squeeze
-    /// or a repo-level indexing gap. `Some(true)` ("definitely dead: no
-    /// reference anywhere", the strongest dead-code tier) is only ever
-    /// reported when this graph is `Complete`; for EVERY other state
-    /// (`IndexBudgetExceeded`, `RepoIndexIncomplete`, or any future
-    /// variant) the same absence of evidence reports `None` (suppressed /
-    /// unknown) instead of a false-positive dead-code verdict. The guard
-    /// is deliberately an allowlist of the one good state, never a
-    /// denylist of the bad ones -- a denylist silently stops suppressing
-    /// the moment a new degradation variant is introduced and nobody
-    /// remembers to add it here (this is exactly how the pre-fix
-    /// `== IndexBudgetExceeded` guard missed `RepoIndexIncomplete`).
+    /// Bug #1833 fix: this graph carries NO visibility or entry-point
+    /// evidence anywhere in the CSR arena (no modifier bit on `SymbolId`,
+    /// `Candidate`, `Reference`, or `Declaration` -- confirmed by
+    /// inspection, not assumed). `AnalysisCompleteness::Complete` means
+    /// "every file in this repo parsed without degradation"; it does NOT
+    /// mean "no caller exists anywhere" -- a library's entire public API
+    /// has zero IN-REPO callers by construction, since real callers are
+    /// downstream projects outside this repo. The pre-fix code treated
+    /// `Complete` + unreferenced as proof of death, which on a real
+    /// library (jsoup-global, Bug #1833) flagged 1296/3147 symbols
+    /// "definitely dead" -- including documented public API -- purely
+    /// because nothing else in the SAME repo happened to call them.
+    ///
+    /// `Some(false)` ("referenced, not dead") stays unconditional: a real
+    /// inbound edge is positive evidence, never invalidated by budget
+    /// pressure or an indexing gap. But there is currently no in-repo
+    /// signal that can turn an ABSENCE of a reference into a proof of
+    /// unreachability, so `Some(true)` is presently unreachable -- an
+    /// unreferenced symbol always reports `None` ("cannot determine"),
+    /// regardless of `completeness`. This is Epic #1786's mandated
+    /// under-report-never-over-report direction, made structural rather
+    /// than incidental. A future change MAY reintroduce a genuine
+    /// `Some(true)` tier once real evidence (e.g. restricted visibility,
+    /// no entry-point shape) is plumbed end-to-end from the extractors --
+    /// see Bug #1833's discussion for why that plumbing was deferred
+    /// rather than done here, and why inventing a partial signal from
+    /// existing data (e.g. text-sniffing the cached AC2 signature line)
+    /// was rejected as fabricated certainty.
     pub fn is_definitely_dead_code(&self, dense_symbol_id: u32) -> Option<bool> {
         if self.is_symbol_referenced(dense_symbol_id) {
             return Some(false);
         }
-        if self.completeness != AnalysisCompleteness::Complete {
-            return None;
-        }
-        Some(true)
+        None
     }
 
     /// Dual-review defect D1 fix: records that `repo_index::build_repo_graph`
@@ -232,10 +241,15 @@ impl CodeGraph {
     /// is still `Complete`: this never "upgrades" a degraded graph back to
     /// a healthier-looking state, and never clobbers a MORE specific
     /// reason (e.g. the binder ladder's own `IndexBudgetExceeded`) with a
-    /// less specific one -- the first-recorded degradation reason wins,
-    /// and `is_definitely_dead_code`'s `!= Complete` guard suppresses the
-    /// strongest dead-code tier the moment ANY reason is recorded either
-    /// way.
+    /// less specific one -- the first-recorded degradation reason wins.
+    ///
+    /// Bug #1833: `completeness` no longer gates the strongest dead-code
+    /// tier. `is_definitely_dead_code` suppresses `Some(true)`
+    /// unconditionally now (see its doc comment above) because the graph
+    /// carries no visibility/entry-point evidence to back that verdict
+    /// regardless of how complete the indexing pass was. The recorded
+    /// reason still matters for `completeness()`'s other consumers (e.g.
+    /// `repo_index`'s own `fact_graph_complete`/budget-exceeded reporting).
     pub fn downgrade_completeness(&mut self, reason: AnalysisCompleteness) {
         if self.completeness == AnalysisCompleteness::Complete {
             self.completeness = reason;
@@ -443,5 +457,74 @@ mod tests {
 
         assert_eq!(graph.try_resolve_string(foo_name_id), Some("Foo"));
         assert_eq!(graph.try_resolve_string(u32::MAX), None, "an out-of-range string id must return None, never panic");
+    }
+
+    /// Bug #1833 AC1 (discriminating regression test -- MUST fail on
+    /// unmodified code, not just on a contrived input): a `Complete` graph
+    /// carries NO visibility or entry-point data anywhere in the CSR arena
+    /// (`SymbolId`, `Candidate`, `Reference`, `Declaration` all lack any
+    /// modifier field -- verified by inspection before writing this test).
+    /// So an unreferenced symbol here is exactly the shape of a library's
+    /// public API symbol on a real repo: zero in-repo callers BY
+    /// CONSTRUCTION, not because it is provably unreachable. Reporting
+    /// `Some(true)` ("definitely dead") for it is a false certainty the
+    /// graph cannot back up -- confirmed live on jsoup-global (Bug #1833:
+    /// 1296/3147 symbols wrongly flagged, including documented public API
+    /// like `Connection.contentType`). A test using a symbol some OTHER
+    /// signal proves private would pass today on the pre-fix code too and
+    /// prove nothing; this one does not smuggle in any such signal.
+    #[test]
+    fn is_definitely_dead_code_does_not_claim_certainty_for_an_unreferenced_symbol_with_no_visibility_evidence() {
+        let mut builder = CodeGraphBuilder::with_candidate_capacity(0);
+        let library_api_symbol = builder.intern_symbol(make_symbol_id(1, 0));
+        // Completeness defaults to `Complete` -- the exact condition under
+        // which the pre-fix code fell through to `Some(true)`.
+        let graph = builder.build();
+
+        assert_eq!(
+            graph.is_definitely_dead_code(library_api_symbol),
+            None,
+            "an unreferenced symbol on a Complete graph must be reported as undecidable (None) \
+             when the graph holds no evidence the symbol is unreachable from OUTSIDE the repo -- \
+             claiming Some(true) here is exactly Bug #1833's false 'definitely dead' verdict"
+        );
+    }
+
+    /// Bug #1833 AC2/AC3/AC4: on a library-shaped graph, raw reference
+    /// evidence remains queryable independently of the conservative
+    /// definitely-dead verdict. The referenced symbol is still known live,
+    /// while both unreferenced symbols are undecidable rather than falsely
+    /// classified as dead. This makes `definitely_dead < unreferenced`
+    /// structural for the current visibility-blind graph representation.
+    #[test]
+    fn library_graph_under_reports_dead_code_without_aliasing_raw_references() {
+        let mut builder = CodeGraphBuilder::with_candidate_capacity(0);
+        let referenced_symbol = builder.intern_symbol(make_symbol_id(1, 0));
+        let unreferenced_api_a = builder.intern_symbol(make_symbol_id(1, 1));
+        let unreferenced_api_b = builder.intern_symbol(make_symbol_id(1, 2));
+        builder.mark_referenced(referenced_symbol);
+
+        let graph = builder.build();
+
+        let unreferenced = (0..graph.symbol_count() as u32)
+            .filter(|&dense_id| !graph.is_symbol_referenced(dense_id))
+            .count();
+        let definitely_dead = (0..graph.symbol_count() as u32)
+            .filter(|&dense_id| graph.is_definitely_dead_code(dense_id) == Some(true))
+            .count();
+
+        assert_eq!(unreferenced, 2);
+        assert_eq!(definitely_dead, 0);
+        assert!(definitely_dead < unreferenced);
+
+        // AC3: the public raw query still reports the actual reference bit.
+        assert!(graph.is_symbol_referenced(referenced_symbol));
+        assert!(!graph.is_symbol_referenced(unreferenced_api_a));
+        assert!(!graph.is_symbol_referenced(unreferenced_api_b));
+        // AC4: positive in-repo evidence remains Some(false).
+        assert_eq!(graph.is_definitely_dead_code(referenced_symbol), Some(false));
+        // The two queries are deliberately not synonyms for unreferenced API.
+        assert_eq!(graph.is_definitely_dead_code(unreferenced_api_a), None);
+        assert_eq!(graph.is_definitely_dead_code(unreferenced_api_b), None);
     }
 }

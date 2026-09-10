@@ -63,7 +63,10 @@ import pytest
 from fastapi.testclient import TestClient
 
 from code_indexer.server.auth import dependencies as auth_dependencies
-from tests.e2e.server.conftest import AdminTokenProvider
+from tests.e2e.server.conftest import (
+    AdminTokenProvider,
+    preserve_root_logging_handlers,
+)
 from tests.e2e.server.mcp_helpers import call_mcp_tool
 
 _HTTP_OK = 200
@@ -110,12 +113,13 @@ def test_second_create_app_poisons_globals_within_its_own_scope(
 
     with _isolated_server_data_dir(tmp_path / "isolated-data-dir"):
         throwaway_app = create_app()
-        with TestClient(throwaway_app, raise_server_exceptions=False):
-            assert auth_dependencies.jwt_manager is not original_jwt_manager, (
-                "create_app() no longer replaces the shared jwt_manager "
-                "global -- the hazard this regression test guards against "
-                "no longer exists."
-            )
+        with preserve_root_logging_handlers():
+            with TestClient(throwaway_app, raise_server_exceptions=False):
+                assert auth_dependencies.jwt_manager is not original_jwt_manager, (
+                    "create_app() no longer replaces the shared jwt_manager "
+                    "global -- the hazard this regression test guards against "
+                    "no longer exists."
+                )
 
 
 def test_shared_session_auth_survives_a_prior_tests_throwaway_create_app(
@@ -152,8 +156,9 @@ def _fixture_setup_time_throwaway_client(
 
     with _isolated_server_data_dir(tmp_path_factory.mktemp("fixture-setup-poison")):
         throwaway_app = create_app()
-        with TestClient(throwaway_app, raise_server_exceptions=False) as client:
-            yield client
+        with preserve_root_logging_handlers():
+            with TestClient(throwaway_app, raise_server_exceptions=False) as client:
+                yield client
 
 
 def test_module_scoped_fixture_setup_poisoning_is_recorded(

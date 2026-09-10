@@ -61,9 +61,12 @@ pub(super) fn intern_declarations_and_attach_signatures(files: &[FileForBind], b
 /// window; (3) `builder.mark_referenced` is called, per candidate, from
 /// the RAW list BEFORE step 2 ever truncates anything -- decoupled by
 /// construction, not by a check; (4) completeness is set to
-/// `IndexBudgetExceeded`, which is what makes
-/// `CodeGraph::is_definitely_dead_code` suppress the strongest dead-code
-/// tier.
+/// `IndexBudgetExceeded`, which `completeness()` reports to other
+/// consumers (e.g. `repo_index`'s budget-exceeded reporting). Bug #1833:
+/// this no longer affects `CodeGraph::is_definitely_dead_code`, which
+/// suppresses the strongest dead-code tier (`Some(true)`)
+/// unconditionally now, regardless of completeness -- see that method's
+/// doc comment in `code_graph.rs`.
 pub fn bind_with_budget(files: Vec<FileForBind>, budget: &IndexBudget) -> CodeGraph {
     // Story #1787 AC12: re-expressed in terms of the two-step admission
     // split (`super::admission`) so there is exactly ONE copy of the
@@ -256,12 +259,16 @@ mod tests {
         );
     }
 
-    /// AC6: "the 'no reference at all' finding tier is SUPPRESSED under
-    /// IndexBudgetExceeded". A genuinely unreferenced symbol reports
-    /// `Some(true)` (definitely dead) on a `Complete` build, but `None`
-    /// (suppressed) once the SAME kind of build is `IndexBudgetExceeded`.
+    /// Bug #1833: the "no reference at all" finding tier is suppressed
+    /// (`None`) for an unreferenced symbol REGARDLESS of completeness --
+    /// including on a `Complete` build. Before the fix this test asserted
+    /// `Some(true)` for the `Complete` case, which was exactly the false
+    /// certainty Bug #1833 reported live on jsoup-global: a `Complete`
+    /// graph proves every in-repo file parsed cleanly, not that no
+    /// external caller exists, so an unreferenced method here is
+    /// indistinguishable from a library's unreferenced-in-repo public API.
     #[test]
-    fn strongest_dead_code_tier_is_suppressed_under_index_budget_exceeded_but_not_when_complete() {
+    fn strongest_dead_code_tier_is_suppressed_regardless_of_completeness() {
         fn never_called_file() -> LocalIndex {
             let mut index = LocalIndex::new();
             index.declarations.push(method_decl("neverCalled", 1, 0, None));
@@ -270,7 +277,12 @@ mod tests {
 
         let complete_graph = bind_with_budget(vec![file(1, "java", never_called_file())], &IndexBudget::unlimited());
         let dense = complete_graph.dense_id_for(make_symbol_id(1, 0)).unwrap();
-        assert_eq!(complete_graph.is_definitely_dead_code(dense), Some(true));
+        assert_eq!(
+            complete_graph.is_definitely_dead_code(dense),
+            None,
+            "an unreferenced symbol on a Complete graph must be undecidable (None), never a \
+             confident Some(true) -- see Bug #1833"
+        );
 
         let (dup_a, dup_b) = dup_pair();
         let exceeded_graph = bind_with_budget(
@@ -281,7 +293,7 @@ mod tests {
         assert_eq!(
             exceeded_graph.is_definitely_dead_code(dense),
             None,
-            "the 'no reference at all' tier must be suppressed under IndexBudgetExceeded"
+            "the 'no reference at all' tier must also be suppressed under IndexBudgetExceeded"
         );
     }
 

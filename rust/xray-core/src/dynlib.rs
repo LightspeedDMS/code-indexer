@@ -1190,16 +1190,17 @@ fn analyze_graph(g: &GraphHandle<'_>, facts: &FactsHandle<'_>) -> GraphResult {
     }
 
     /// Bug #1816, requirement #3: the FULL six-use-case `analyze_graph`
-    /// evaluator (orphans, unwired components, layering violations, package
-    /// cycles, endpoint-to-sink reachability, blast radius) must complete
+    /// evaluator (conservative dead-code safety, unreferenced symbols,
+    /// layering violations, package cycles, endpoint-to-sink reachability,
+    /// blast radius) must complete
     /// without crashing. Embedded verbatim -- this is the SAME evaluator
     /// already manually verified end to end through the real `xray-cli`
     /// CLI, run from OUTSIDE `rust/` (the condition that reproduced the
     /// original bug), against the real 16-file `xray-graph-fixture` Java
     /// repo (see the bug's investigation notes): `--build-graph` then three
     /// consecutive `--analyze-graph` runs all exited 0 with sane findings
-    /// (uc1_dead_code x43, uc3 layering, uc4 cycles, uc5 reachability +
-    /// negative control) after this fix, and reliably crashed with
+    /// (UC1's conservative dead-code safety probe, UC3 layering, UC4 cycles,
+    /// UC5 reachability + negative control) after this fix, and reliably crashed with
     /// `free(): double free detected in tcache 2` before it.
     ///
     /// This `cargo test` version cannot reproduce that ABI-mismatch
@@ -1231,8 +1232,12 @@ fn analyze_graph(g: &GraphHandle<'_>, facts: &FactsHandle<'_>) -> GraphResult {
 
         let patterns: Vec<&str> = result.findings.iter().map(|f| f.pattern.as_str()).collect();
         assert!(
-            result.findings.iter().any(|f| f.pattern == "uc1_dead_code" && f.message.contains("neverCalled")),
-            "the unreferenced neverCalled symbol must be flagged as UC1 dead code: {patterns:?}"
+            !result.findings.iter().any(|f| f.pattern == "uc1_dead_code" && f.message.contains("neverCalled")),
+            "UC1 must not claim unreferenced neverCalled is definitely dead without visibility evidence: {patterns:?}"
+        );
+        assert!(
+            result.findings.iter().any(|f| f.pattern == "uc1_dead_code_suppressed" && f.message.contains("neverCalled")),
+            "UC1 must report its conservative dead-code decision for neverCalled: {patterns:?}"
         );
         assert!(
             result.findings.iter().any(|f| f.pattern == "uc2_unreferenced" && f.message.contains("neverCalled")),
@@ -1259,7 +1264,7 @@ fn analyze_graph(g: &GraphHandle<'_>, facts: &FactsHandle<'_>) -> GraphResult {
     /// outgoing edges at all (the UC5 negative control -- must reach no
     /// sink), a `getOnce` cache accessor (dense 5, signature contains
     /// "once" -- UC6 blast radius), an unreferenced `neverCalled` symbol
-    /// (dense 6, UC1/UC2 dead code), and a genuine 2-node cycle (dense 7 <->
+    /// (dense 6, UC1 safety probe/UC2 unreferenced), and a genuine 2-node cycle (dense 7 <->
     /// 8, UC4).
     fn six_use_case_test_graph() -> crate::graph::csr::CodeGraph {
         use crate::graph::csr::builder::CodeGraphBuilder;
@@ -1301,7 +1306,8 @@ fn analyze_graph(g: &GraphHandle<'_>, facts: &FactsHandle<'_>) -> GraphResult {
         }
         // ping_check deliberately has NO outgoing references -- the UC5
         // negative control -- and never_called is deliberately never
-        // referenced at all -- the UC1/UC2 dead-code fixture.
+        // referenced at all -- the UC1 conservative safety-probe and UC2
+        // unreferenced-symbol fixture.
         let _ = ping_check;
         let _ = never_called;
 
@@ -1353,7 +1359,7 @@ fn flag(pattern: &str, message: String, sym: u64, sig: String) -> ReduceFinding 
     }
 }
 
-// UC1 dead code, UC2 unreferenced, UC6 blast radius.
+// UC1 conservative dead-code safety, UC2 unreferenced, UC6 blast radius.
 fn uc1_uc2_uc6(g: &GraphHandle<'_>, ids: &Vec<u32>) -> Vec<ReduceFinding> {
     let mut out: Vec<ReduceFinding> = Vec::new();
     let mut missing: usize = 0;
@@ -1370,8 +1376,11 @@ fn uc1_uc2_uc6(g: &GraphHandle<'_>, ids: &Vec<u32>) -> Vec<ReduceFinding> {
                 String::new()
             }
         };
-        if g.is_definitely_dead_code(d) == Some(true) {
-            out.push(flag("uc1_dead_code", sig.clone(), sym, sig.clone()));
+        // The visibility-blind graph cannot prove that an unreferenced symbol
+        // is unreachable from outside the repository. Keep UC1 as an explicit
+        // safety probe: it records suppression, never a false dead-code claim.
+        if !g.is_symbol_referenced(d) && g.is_definitely_dead_code(d) != Some(true) {
+            out.push(flag("uc1_dead_code_suppressed", sig.clone(), sym, sig.clone()));
         }
         if !g.is_symbol_referenced(d) {
             out.push(flag("uc2_unreferenced", sig.clone(), sym, sig.clone()));
