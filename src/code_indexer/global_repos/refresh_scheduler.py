@@ -316,6 +316,30 @@ def _is_git_repo_url(repo_url: str) -> bool:
     return any(repo_url.startswith(prefix) for prefix in _GIT_URL_PREFIXES)
 
 
+def _format_called_process_error_diagnostic(e: subprocess.CalledProcessError) -> str:
+    """Bug #1810: build a diagnostic string that always names the command,
+    exit code, and both captured streams -- never rely on e.stderr alone,
+    which can be empty when the failing command's own diagnostics land on
+    stdout instead (producing a message truncated to "CalledProcessError:"
+    with no cause).
+
+    e.cmd mirrors Popen's args and may be either a str or any non-str/bytes
+    sequence -- only join real sequences, or a str command would be
+    corrupted into space-separated characters.
+    """
+    from collections.abc import Sequence as _Sequence
+
+    cmd_display = (
+        " ".join(str(part) for part in e.cmd)
+        if isinstance(e.cmd, _Sequence) and not isinstance(e.cmd, (str, bytes))
+        else str(e.cmd)
+    )
+    return (
+        f"{type(e).__name__}: command='{cmd_display}' "
+        f"exit_code={e.returncode} stdout={e.stdout!r} stderr={e.stderr!r}"
+    )
+
+
 # TTL for .write_mode/{alias}.json marker files (Bug #240).
 # Markers older than this are treated as orphaned (client disconnected without
 # calling exit_write_mode) and are cleaned up automatically.
@@ -3633,12 +3657,13 @@ class RefreshScheduler:
                     raise RuntimeError(
                         f"Indexing interrupted by server shutdown for {alias_name}"
                     )
+                diagnostic = _format_called_process_error_diagnostic(e)
                 logger.error(
-                    f"SCIP indexing on source failed for {alias_name}: {type(e).__name__}: {e.stderr}",
+                    f"SCIP indexing on source failed for {alias_name}: {diagnostic}",
                     exc_info=True,
                 )
                 raise RuntimeError(
-                    f"SCIP indexing on source failed for {alias_name}: {type(e).__name__}: {e.stderr}"
+                    f"SCIP indexing on source failed for {alias_name}: {diagnostic}"
                 )
 
     def _run_subprocess(self, *args: Any, **kwargs: Any) -> Any:
@@ -3791,12 +3816,13 @@ class RefreshScheduler:
                 )
                 logger.info("cidx fix-config on clone completed successfully")
             except subprocess.CalledProcessError as e:
+                diagnostic = _format_called_process_error_diagnostic(e)
                 logger.error(
-                    f"cidx fix-config failed for {alias_name}: {type(e).__name__}: {e.stderr}",
+                    f"cidx fix-config failed for {alias_name}: {diagnostic}",
                     exc_info=True,
                 )
                 raise RuntimeError(
-                    f"cidx fix-config failed for {alias_name}: {type(e).__name__}: {e.stderr}"
+                    f"cidx fix-config failed for {alias_name}: {diagnostic}"
                 )
             except subprocess.TimeoutExpired as e:
                 logger.error(

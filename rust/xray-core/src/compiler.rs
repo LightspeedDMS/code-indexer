@@ -99,7 +99,12 @@ const MAX_CACHE_ENTRIES: usize = 100;
 /// Bug #1784, the ABI version participates in the compile-cache identity,
 /// so this bump is also what forces a correct cache-identity miss instead
 /// of silently reusing a `.so` compiled against the stale layout.
-pub const XRAY_ABI_VERSION: u64 = 9;
+///
+/// Bug #1828 bumps this AGAIN, 9 -> 10: `GraphHandle` gains exact symbol
+/// enumeration and SymbolId-to-dense-id lookup, making the advertised
+/// dead-code and reachability evaluators expressible without a guessed bound.
+/// An ABI-9 graph artifact must never be loaded as if it matched ABI 10.
+pub const XRAY_ABI_VERSION: u64 = 10;
 
 /// Placeholder token embedded in PREAMBLE in place of a hardcoded ABI
 /// version literal. Substituted with the real `XRAY_ABI_VERSION` value by
@@ -322,6 +327,8 @@ pub struct GraphHandle<'graph> {
     is_symbol_referenced_fn: fn(*const (), u32) -> bool,
     is_definitely_dead_code_fn: fn(*const (), u32) -> Option<bool>,
     signature_for_raw_fn: fn(*const (), u32) -> Option<(*const u8, usize)>,
+    symbol_count_fn: fn(*const ()) -> usize,
+    dense_id_for_fn: fn(*const (), u64) -> Option<u32>,
     _graph: PhantomData<&'graph ()>,
 }
 
@@ -352,6 +359,14 @@ pub(crate) const GRAPH_PREAMBLE_EXTRA_2: &str = r#"
 
     pub fn resolve_symbol(&self, dense_id: u32) -> Option<u64> {
         (self.resolve_symbol_fn)(self.ctx, dense_id)
+    }
+
+    pub fn symbol_count(&self) -> usize {
+        (self.symbol_count_fn)(self.ctx)
+    }
+
+    pub fn dense_id_for(&self, symbol: SymbolId) -> Option<u32> {
+        (self.dense_id_for_fn)(self.ctx, symbol)
     }
 "#;
 
@@ -2070,6 +2085,11 @@ fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> {
         let id_abi1 = compute_cache_identity(source, TEST_ABI_VERSION_A, TEST_RUSTC_VERSION);
         let id_abi2 = compute_cache_identity(source, TEST_ABI_VERSION_B, TEST_RUSTC_VERSION);
         assert_ne!(id_abi1, id_abi2, "identity must change when ONLY abi_version differs");
+    }
+
+    #[test]
+    fn test_graph_handle_accessor_addition_bumps_abi_version() {
+        assert_eq!(XRAY_ABI_VERSION, 10, "adding GraphHandle accessors requires the ABI-10 bump");
     }
 
     #[test]

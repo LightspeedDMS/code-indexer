@@ -74,6 +74,7 @@
 - [feedback_use_code_reviewer.md](feedback_use_code_reviewer.md) - Codex is the PRIMARY reviewer (supersedes the old opus-only rule); green lint + green tests are NEVER a substitute for a review gate
 - [feedback_default_agents_to_sonnet5.md](feedback_default_agents_to_sonnet5.md) - Opus OK for code-reviewer dispatches only; tdd-engineer/implementation dispatches always stay on Sonnet 5 (no model override)
 - [feedback_dual_review_claude_and_codex.md](feedback_dual_review_claude_and_codex.md) - Standing rule: dual review (Claude + independent Codex) for every review gate
+- [feedback_paired_engineer_two_models_for_quality.md](feedback_paired_engineer_two_models_for_quality.md) - Use tdd-paired-engineer for gnarly/ambiguous bugs; operator accepts the higher cost because two differently-trained models cover each other's blind spots
 - [feedback_opus_arbiter_of_codex_nitpicking.md](feedback_opus_arbiter_of_codex_nitpicking.md) - After 2-3 Codex REJECT rounds on the same fix, dispatch Opus to judge materiality before another round
 - [feedback_trust_codex_first_pass.md](feedback_trust_codex_first_pass.md) - When codex flags over-engineering, SIMPLIFY — don't commission counter-reviews
 - [feedback_verify_codex_actually_ran.md](feedback_verify_codex_actually_ran.md) - Codex-wrapper agents fall back to Claude silently — verify a real run via ~/.codex/sessions

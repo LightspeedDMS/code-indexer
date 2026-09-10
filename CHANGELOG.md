@@ -7,6 +7,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [12.46.0] - 2026-09-10
+
+### Fixed
+
+- Two thread pools were deciding when the process could exit. `concurrent.futures`
+  registers `_python_exit` inside `threading._shutdown()`, where it joins every
+  registered worker with no timeout -- so a pool with no disposal path does not
+  merely live as long as the process, it dictates when the process may die. The
+  discovery branch-fetch pool carried that belief as an explicit comment ("never
+  shut down, because it lives exactly as long as the process"), and the
+  deep-fidelity audit pool added in 12.43.0 had the same gap on the solo/CLI path.
+  Both now have explicit shutdown wired into the server lifespan, and a
+  process-wide guard fails any test session that leaks a non-daemon thread. A full
+  server chunk previously ended with 83 threads alive, six of them non-daemon.
+  (#1800)
+
+- Golden-repo refresh failures now report their cause. A failing SCIP subprocess
+  rendered as `CalledProcessError:` with nothing after the colon -- not because
+  stderr was uncaptured, but because the child prints its summary to stdout while
+  the handler interpolated stderr alone, discarding the command, the exit code and
+  the diagnostic itself. Both `CalledProcessError` handlers now surface all of it.
+  No timeout was added; the indexing path remains unbounded by design. (#1810)
+
+- X-Ray graph evaluators can now enumerate the graph. `GraphHandle` exposed no
+  `symbol_count()` and no `dense_id_for()`, so the tool's own advertised use cases
+  -- dead code, unwired components -- could only be written by scanning dense ids
+  against a guessed constant, which silently under-reports if the guess is low.
+  Both accessors already existed one layer down and are now forwarded, with the
+  evaluator ABI version raised so a stale compiled evaluator cannot load against
+  the new table. (#1828)
+
+### Notes
+
+- #1812 and #1816 were verified as already fixed in earlier commits and closed;
+  #1816 gained the end-to-end test its original fix lacked, which spawns a real
+  child process outside the workspace so the toolchain pin it guards can actually
+  fail. #1826 was confirmed resolved by the #1800 executor disposal: the test this
+  report flagged as closest to the timeout ceiling now runs faster under full
+  contention than it previously ran in isolation.
+
 ## [12.45.0] - 2026-09-09
 
 ### Fixed

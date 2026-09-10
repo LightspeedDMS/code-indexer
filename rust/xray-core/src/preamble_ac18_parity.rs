@@ -347,6 +347,9 @@ const MIRRORED_GRAPH_HANDLE_METHODS: &[&str] = &[
     // Story #1792 (S3, AC4): exposes the per-symbol cached signature line
     // for cross-file captioning without re-parsing.
     "signature_for",
+    // Bug #1828: exact graph enumeration and SymbolId reverse lookup.
+    "symbol_count",
+    "dense_id_for",
 ];
 
 /// Compares struct `name` between `real_file` (labeled `real_label` in any
