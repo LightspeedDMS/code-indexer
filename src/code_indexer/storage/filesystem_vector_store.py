@@ -186,10 +186,46 @@ except ImportError:  # pragma: no cover
 # documented elsewhere in this project's CLAUDE.md).
 _DEEP_FIDELITY_AUDIT_EXECUTOR_MAX_WORKERS = 4
 _DEEP_FIDELITY_AUDIT_GATE_CAPACITY = 16
-_deep_fidelity_audit_executor = ThreadPoolExecutor(
-    max_workers=_DEEP_FIDELITY_AUDIT_EXECUTOR_MAX_WORKERS,
-    thread_name_prefix="cidx-deep-audit",
-)
+
+
+def _new_deep_fidelity_audit_executor() -> ThreadPoolExecutor:
+    """Build an audit pool. Spawns no threads until the first submit()."""
+    return ThreadPoolExecutor(
+        max_workers=_DEEP_FIDELITY_AUDIT_EXECUTOR_MAX_WORKERS,
+        thread_name_prefix="cidx-deep-audit",
+    )
+
+
+_deep_fidelity_audit_executor = _new_deep_fidelity_audit_executor()
+
+# Serialises the shutdown swap below against the audit submit site, so a
+# submitter can never be handed an executor that is already being retired.
+_deep_fidelity_audit_executor_lock = threading.Lock()
+
+
+def shutdown_deep_fidelity_audit_executor() -> None:
+    """Retire this pool's worker threads (Bug #1800).
+
+    Once anything has been submitted, the pool holds NON-DAEMON workers that
+    interpreter exit must join, so a process that never disposes it waits at
+    exit for whatever the pool is running -- with no timeout anywhere. That
+    applies to the CLI as much as the server, since this module is on the
+    solo/CLI path too.
+
+    A fresh executor is swapped in rather than the name cleared, because the
+    audit submit site and the Story #1822 tests both reach this module
+    attribute directly and must always find a live pool. Idempotent, and cheap
+    to call when nothing was ever submitted. ``shutdown`` runs outside the lock
+    so disposal never blocks a submitter, and ``cancel_futures`` drops work that
+    has not started rather than making exit wait for it.
+    """
+    global _deep_fidelity_audit_executor
+    with _deep_fidelity_audit_executor_lock:
+        retiring = _deep_fidelity_audit_executor
+        _deep_fidelity_audit_executor = _new_deep_fidelity_audit_executor()
+    retiring.shutdown(wait=False, cancel_futures=True)
+
+
 _deep_fidelity_audit_gate = threading.BoundedSemaphore(
     _DEEP_FIDELITY_AUDIT_GATE_CAPACITY
 )
@@ -6808,7 +6844,11 @@ class FilesystemVectorStore:
                     )
                 else:
                     try:
-                        _deep_fidelity_audit_executor.submit(_run_audit_out_of_band)
+                        # Bug #1800: read + submit under the lock so a
+                        # concurrent shutdown swap can never hand this site an
+                        # executor that is already being retired.
+                        with _deep_fidelity_audit_executor_lock:
+                            _deep_fidelity_audit_executor.submit(_run_audit_out_of_band)
                     except Exception as _submit_exc:  # noqa: BLE001
                         _deep_fidelity_audit_gate.release()
                         # fail-open: a shutting-down executor must never

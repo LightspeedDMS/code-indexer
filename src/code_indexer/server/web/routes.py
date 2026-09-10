@@ -87,8 +87,13 @@ _DISCOVERY_BRANCH_FETCH_MAX_CONCURRENCY = 8
 # The pool size IS the bound: excess work queues inside this pool (never dropped,
 # never widened), the shared default executor is untouched, and no asyncio
 # primitive is involved. Created lazily so importing this module starts no
-# threads; never shut down, because it lives exactly as long as the process and
-# holds at most _DISCOVERY_BRANCH_FETCH_MAX_CONCURRENCY idle threads.
+# threads, and disposed via shutdown_discovery_branch_fetch_executor() above.
+#
+# Bug #1800: this was originally "never shut down, because it lives exactly as
+# long as the process". Wrong, and it wedged the server test gate. The pool's
+# NON-DAEMON workers are registered in concurrent.futures.thread._threads_queues
+# and joined by _python_exit inside threading._shutdown(), so the pool decides
+# when the process may die, waiting out whatever it is running.
 _DISCOVERY_BRANCH_FETCH_EXECUTOR: Optional[ThreadPoolExecutor] = None
 _DISCOVERY_BRANCH_FETCH_EXECUTOR_LOCK = threading.Lock()
 
@@ -123,6 +128,28 @@ def _get_discovery_branch_fetch_executor() -> ThreadPoolExecutor:
                 thread_name_prefix="discovery-branch-fetch",
             )
         return _DISCOVERY_BRANCH_FETCH_EXECUTOR
+
+
+def shutdown_discovery_branch_fetch_executor() -> None:
+    """Dispose the process-wide branch-fetch pool (Bug #1800).
+
+    The pool's workers are non-daemon threads that interpreter exit must join,
+    so an owner that never disposes it makes process exit wait on whatever the
+    pool is running. Whoever owns the process lifecycle calls this: the server
+    calls it from the lifespan shutdown; a test session calls it at session end.
+
+    Idempotent, and a no-op when the pool was never created. The global is
+    cleared so a later caller builds a fresh pool instead of submitting to a
+    dead one. ``shutdown`` runs outside the lock so disposal never blocks a
+    concurrent creator, and ``cancel_futures`` drops work that has not started
+    rather than making exit wait for a queue nobody is going to read.
+    """
+    global _DISCOVERY_BRANCH_FETCH_EXECUTOR
+    with _DISCOVERY_BRANCH_FETCH_EXECUTOR_LOCK:
+        executor = _DISCOVERY_BRANCH_FETCH_EXECUTOR
+        _DISCOVERY_BRANCH_FETCH_EXECUTOR = None
+    if executor is not None:
+        executor.shutdown(wait=False, cancel_futures=True)
 
 
 def _get_discovery_branch_fetch_gate() -> BoundedSubmissionGate:

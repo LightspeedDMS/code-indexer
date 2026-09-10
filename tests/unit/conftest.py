@@ -10,13 +10,20 @@ helper functions that actually invoke subprocesses.
 
 import logging
 import os
+import sys
 import tempfile
 import threading
+import time
 from pathlib import Path
 
 import pytest
 
 from tests.unit.test_cidx_curl_wrapper_helpers import _CFG
+
+# Bug #1800: bounded settle window for disposed non-daemon threads to exit.
+# Bounded on purpose (Messi Rule #14) -- a guard against hangs must not hang.
+_THREAD_EXIT_TIMEOUT_SECONDS = 10.0
+_THREAD_EXIT_POLL_SECONDS = 0.02
 
 
 @pytest.fixture
@@ -129,6 +136,79 @@ def _guard_no_leaked_identity_queue_handler_1820():
             "async_logging.shutdown_queue_logging()). Removed them to "
             "protect the rest of the suite from a cascading queue-full "
             "stall, but the leak must be fixed at its source."
+        )
+
+
+def _surviving_non_daemon_threads(baseline_ids: set) -> list:
+    """Return alive non-daemon threads started during the session (Bug #1800).
+
+    Interpreter exit joins every one of these before the process may exit, so
+    each survivor is time the process must wait out at teardown. Remediation is
+    to give the owning component an explicit shutdown and call it.
+    """
+    main = threading.main_thread()
+    return [
+        t
+        for t in threading.enumerate()
+        if t.is_alive() and not t.daemon and t is not main and id(t) not in baseline_ids
+    ]
+
+
+def _dispose_process_wide_pools() -> None:
+    """Dispose process-wide pools this session created but never shut down.
+
+    The server disposes these from its lifespan shutdown; a test session has no
+    lifespan, so it is the owner here and must do the same, through the same
+    production entry point. Looked up in ``sys.modules`` rather than imported,
+    so a session that never touched a module does not pay to import it here.
+    """
+    routes = sys.modules.get("code_indexer.server.web.routes")
+    if routes is not None:
+        routes.shutdown_discovery_branch_fetch_executor()
+
+    fvs = sys.modules.get("code_indexer.storage.filesystem_vector_store")
+    if fvs is not None:
+        fvs.shutdown_deep_fidelity_audit_executor()
+
+    # Already correct in production -- lifespan calls this same reset on
+    # shutdown. Only the test session, which runs no lifespan, was leaving the
+    # global query-dispatch pool's workers alive.
+    pqe = sys.modules.get("code_indexer.server.query.parallel_query_executor")
+    if pqe is not None:
+        pqe.reset_global_parallel_query_executor()
+
+
+def _settle_non_daemon_threads(baseline_ids: set) -> list:
+    """Wait, bounded, for disposed threads to exit; return whatever survives."""
+    deadline = time.monotonic() + _THREAD_EXIT_TIMEOUT_SECONDS
+    while time.monotonic() < deadline:
+        survivors = _surviving_non_daemon_threads(baseline_ids)
+        if not survivors:
+            return []
+        time.sleep(_THREAD_EXIT_POLL_SECONDS)
+    return _surviving_non_daemon_threads(baseline_ids)
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _guard_no_leaked_non_daemon_threads_1800():
+    """Bug #1800 guard: fail if a non-daemon thread outlives the test session.
+
+    Such a leak is invisible per-test -- every test passes and only the
+    interpreter refuses to die. Cannot self-heal, since a running thread cannot
+    be killed from outside. Remediation: give the owning component an explicit
+    shutdown and call it.
+    """
+    baseline_ids = {id(t) for t in threading.enumerate()}
+    yield
+    _dispose_process_wide_pools()
+    leaked = _settle_non_daemon_threads(baseline_ids)
+    if leaked:
+        described = ", ".join(f"{t.name!r} (class={type(t).__name__})" for t in leaked)
+        raise AssertionError(
+            f"Bug #1800 guard: {len(leaked)} non-daemon thread(s) outlived the "
+            f"test session: {described}. Interpreter exit must join every one "
+            "of these, so the process blocks at exit for as long as they run "
+            "-- forever if they never return."
         )
 
 
