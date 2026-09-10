@@ -16,6 +16,9 @@ from code_indexer.server.storage.shared.snapshot_manager import (
 )
 from code_indexer.server.storage.json_column import parse_json_column
 from code_indexer.utils.subprocess_env import build_cidx_subprocess_env
+from code_indexer.utils.subprocess_diagnostics import (
+    format_completed_process_diagnostic,
+)
 
 import json
 import os
@@ -1323,7 +1326,8 @@ class ActivatedRepoManager:
                     )
                 else:
                     self.logger.warning(
-                        f"Git fetch failed for repository '{user_alias}': {fetch_result.stderr}. "
+                        f"Git fetch failed for repository '{user_alias}': "
+                        f"{format_completed_process_diagnostic(fetch_result)}. "
                         f"Attempting local branch switching as fallback."
                     )
 
@@ -1394,7 +1398,8 @@ class ActivatedRepoManager:
                         )
                     else:
                         self.logger.warning(
-                            f"Failed to create branch '{branch_name}': {create_result.stderr}"
+                            f"Failed to create branch '{branch_name}': "
+                            f"{format_completed_process_diagnostic(create_result)}"
                         )
 
                 except subprocess.TimeoutExpired:
@@ -1575,7 +1580,7 @@ class ActivatedRepoManager:
                 username,
                 user_alias,
                 diff_result.returncode,
-                diff_result.stderr.strip(),
+                format_completed_process_diagnostic(diff_result),
             )
             return None, None
 
@@ -1899,11 +1904,13 @@ class ActivatedRepoManager:
                 # Check if this is a network/access error or missing remote
                 if "not a git repository" in fetch_result.stderr.lower():
                     raise GitOperationError(
-                        f"Golden repository not accessible for sync: {fetch_result.stderr}"
+                        "Golden repository not accessible for sync: "
+                        f"{format_completed_process_diagnostic(fetch_result)}"
                     )
                 else:
                     self.logger.warning(
-                        f"Git fetch failed for repository '{user_alias}': {fetch_result.stderr}"
+                        f"Git fetch failed for repository '{user_alias}': "
+                        f"{format_completed_process_diagnostic(fetch_result)}"
                     )
                     # Continue with local-only sync message
                     return {
@@ -1953,7 +1960,8 @@ class ActivatedRepoManager:
                     )
                 else:
                     raise GitOperationError(
-                        f"Sync failed for repository '{user_alias}': {merge_result.stderr}"
+                        f"Sync failed for repository '{user_alias}': "
+                        f"{format_completed_process_diagnostic(merge_result)}"
                     )
 
             # Step 4: Update metadata timestamp
@@ -2053,7 +2061,8 @@ class ActivatedRepoManager:
 
             if local_branches_result.returncode != 0:
                 raise GitOperationError(
-                    f"Failed to list local branches: {local_branches_result.stderr}"
+                    "Failed to list local branches: "
+                    f"{format_completed_process_diagnostic(local_branches_result)}"
                 )
 
             local_branches = [
@@ -2550,7 +2559,8 @@ class ActivatedRepoManager:
                     # rename-to-trash path does not apply.
                     shutil.rmtree(activated_repo_path, ignore_errors=True)
                     raise GitOperationError(
-                        f"Failed to switch to branch '{branch_name}': {result.stderr}"
+                        f"Failed to switch to branch '{branch_name}': "
+                        f"{format_completed_process_diagnostic(result)}"
                     )
                 update_progress(80, f"Successfully switched to branch '{branch_name}'")
             else:
@@ -2585,7 +2595,8 @@ class ActivatedRepoManager:
                 )
                 if result.returncode != 0:
                     self.logger.warning(
-                        f"Failed to set git config user.email: {result.stderr}"
+                        "Failed to set git config user.email: "
+                        f"{format_completed_process_diagnostic(result)}"
                     )
 
                 # Set git config user.name (generic for all CIDX users)
@@ -2598,7 +2609,8 @@ class ActivatedRepoManager:
                 )
                 if result.returncode != 0:
                     self.logger.warning(
-                        f"Failed to set git config user.name: {result.stderr}"
+                        "Failed to set git config user.name: "
+                        f"{format_completed_process_diagnostic(result)}"
                     )
 
                 self.logger.info(
@@ -3378,7 +3390,8 @@ class ActivatedRepoManager:
             else:
                 # Non-fatal - services might not be running
                 self.logger.debug(
-                    f"Service stop returned non-zero exit code (likely not running): {result.stderr}"
+                    "Service stop returned non-zero exit code (likely not running): "
+                    f"{format_completed_process_diagnostic(result)}"
                 )
 
         except subprocess.TimeoutExpired:
@@ -3728,7 +3741,8 @@ class ActivatedRepoManager:
 
                 if result.returncode != 0:
                     raise ActivatedRepoError(
-                        f"Failed to set core.bare=false: {result.stderr}"
+                        "Failed to set core.bare=false: "
+                        f"{format_completed_process_diagnostic(result)}"
                     )
 
                 # Move git internals to .git subdirectory
@@ -3766,7 +3780,8 @@ class ActivatedRepoManager:
 
                 if result.returncode != 0:
                     self.logger.warning(
-                        f"git checkout -f HEAD failed (non-fatal): {result.stderr}"
+                        "git checkout -f HEAD failed (non-fatal): "
+                        f"{format_completed_process_diagnostic(result)}"
                     )
 
                 self.logger.info(
@@ -3797,7 +3812,7 @@ class ActivatedRepoManager:
                 if checkstat_result.returncode != 0:
                     self.logger.warning(
                         "git config core.checkStat=minimal failed (non-fatal): "
-                        f"{checkstat_result.stderr}"
+                        f"{format_completed_process_diagnostic(checkstat_result)}"
                     )
 
                 # Step 2a: Run git update-index --refresh to sync index with file timestamps
@@ -3814,7 +3829,8 @@ class ActivatedRepoManager:
 
                 if result.returncode != 0:
                     self.logger.warning(
-                        f"git update-index --refresh failed (non-fatal): {result.stderr}"
+                        "git update-index --refresh failed (non-fatal): "
+                        f"{format_completed_process_diagnostic(result)}"
                     )
 
                 # Step 2b (Bug #1343 / AC-6): `git restore .` used to run here
@@ -3875,7 +3891,8 @@ class ActivatedRepoManager:
 
                 if result.returncode != 0:
                     self.logger.warning(
-                        f"cidx fix-config failed (non-fatal): {result.stderr}"
+                        "cidx fix-config failed (non-fatal): "
+                        f"{format_completed_process_diagnostic(result)}"
                     )
 
             # Step 4: Configure git structure if this is a git repository
@@ -3951,7 +3968,8 @@ class ActivatedRepoManager:
                 )
             else:
                 self.logger.warning(
-                    f"Could not verify git remotes for {dest_path}: {result.stderr}"
+                    f"Could not verify git remotes for {dest_path}: "
+                    f"{format_completed_process_diagnostic(result)}"
                 )
 
             # Fetch from origin to ensure all remote branches are available
@@ -3966,7 +3984,8 @@ class ActivatedRepoManager:
 
             if result.returncode != 0:
                 self.logger.warning(
-                    f"Could not fetch from origin in {dest_path}: {result.stderr}"
+                    f"Could not fetch from origin in {dest_path}: "
+                    f"{format_completed_process_diagnostic(result)}"
                 )
 
         except subprocess.TimeoutExpired:
@@ -4013,11 +4032,13 @@ class ActivatedRepoManager:
                 )
                 if result.returncode != 0:
                     raise ActivatedRepoError(
-                        f"Failed to update {remote_name} remote: {result.stderr}"
+                        f"Failed to update {remote_name} remote: "
+                        f"{format_completed_process_diagnostic(result)}"
                     )
             else:
                 raise ActivatedRepoError(
-                    f"Failed to add {remote_name} remote: {result.stderr}"
+                    f"Failed to add {remote_name} remote: "
+                    f"{format_completed_process_diagnostic(result)}"
                 )
 
     def _configure_git_structure(self, source_path: str, dest_path: str) -> None:
@@ -4082,7 +4103,8 @@ class ActivatedRepoManager:
 
             if result.returncode != 0:
                 raise ActivatedRepoError(
-                    f"Failed to fetch from golden remote: {result.stderr}"
+                    "Failed to fetch from golden remote: "
+                    f"{format_completed_process_diagnostic(result)}"
                 )
 
             # Step 5: Verify git structure is working
@@ -4096,7 +4118,8 @@ class ActivatedRepoManager:
 
             if result.returncode != 0:
                 raise ActivatedRepoError(
-                    f"Git repository structure invalid: {result.stderr}"
+                    "Git repository structure invalid: "
+                    f"{format_completed_process_diagnostic(result)}"
                 )
 
             self.logger.info(
@@ -4211,7 +4234,8 @@ class ActivatedRepoManager:
                     )
                     if remove_result.returncode != 0:
                         raise ActivatedRepoError(
-                            f"Failed to remove existing golden remote: {remove_result.stderr}"
+                            "Failed to remove existing golden remote: "
+                            f"{format_completed_process_diagnostic(remove_result)}"
                         )
 
                 # Rename origin to golden
@@ -4225,7 +4249,8 @@ class ActivatedRepoManager:
 
                 if rename_result.returncode != 0:
                     raise ActivatedRepoError(
-                        f"Failed to rename origin to golden: {rename_result.stderr}"
+                        "Failed to rename origin to golden: "
+                        f"{format_completed_process_diagnostic(rename_result)}"
                     )
 
                 # Add new origin pointing to GitHub
@@ -4541,7 +4566,8 @@ class ActivatedRepoManager:
                 return True
             else:
                 self.logger.debug(
-                    f"Failed to switch to remote tracking branch '{branch_name}': {result.stderr}"
+                    f"Failed to switch to remote tracking branch '{branch_name}': "
+                    f"{format_completed_process_diagnostic(result)}"
                 )
                 return False
 

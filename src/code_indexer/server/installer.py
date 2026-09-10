@@ -24,6 +24,9 @@ from .utils.config_manager import ServerConfigManager
 from .utils.jwt_secret_manager import JWTSecretManager
 from .utils.ripgrep_installer import RipgrepInstaller
 from code_indexer.server.logging_utils import format_error_log
+from code_indexer.utils.subprocess_diagnostics import (
+    format_completed_process_diagnostic,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -419,7 +422,8 @@ WantedBy=multi-user.target
                 logger.error(
                     format_error_log(
                         "GIT-GENERAL-039",
-                        f"Claude CLI installation failed: {result.stderr}",
+                        "Claude CLI installation failed: "
+                        f"{format_completed_process_diagnostic(result)}",
                     )
                 )
                 return False
@@ -542,7 +546,8 @@ WantedBy=multi-user.target
                     logger.error(
                         format_error_log(
                             "MCP-GENERAL-002",
-                            f"{indexer_cmd} installation failed: {result.stderr}",
+                            f"{indexer_cmd} installation failed: "
+                            f"{format_completed_process_diagnostic(result)}",
                         )
                     )
                     all_installed = False
@@ -672,7 +677,8 @@ WantedBy=multi-user.target
                 logger.error(
                     format_error_log(
                         "MCP-GENERAL-007",
-                        f"scip-dotnet installation failed: {result.stderr}",
+                        "scip-dotnet installation failed: "
+                        f"{format_completed_process_diagnostic(result)}",
                     )
                 )
                 return False
@@ -794,7 +800,8 @@ WantedBy=multi-user.target
                 logger.error(
                     format_error_log(
                         "MCP-GENERAL-012",
-                        f"scip-go installation failed: {result.stderr}",
+                        "scip-go installation failed: "
+                        f"{format_completed_process_diagnostic(result)}",
                     )
                 )
                 return False

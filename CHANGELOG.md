@@ -7,6 +7,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [12.47.0] - 2026-09-10
+
+### Fixed
+
+- **#1829 Temporal indexing aborted whole runs on transient chunks.db lock contention.**
+  Temporal indexing opens a fresh SQLite connection per commit per worker thread against one
+  `chunks.db` in `journal_mode=DELETE` (whole-file locking) with no explicit busy timeout, so it
+  inherited Python's 5s default and exhausted it under its own self-contention. A single
+  `database is locked` then propagated out of the worker and killed the entire
+  `cidx index --index-commits` run. Fixed with a bounded, jittered retry
+  (`_write_chunks_db_with_retry`) at `_upsert_points_chunks_db` -- the shared dispatch point every
+  CHUNKS_DB writer funnels through -- delegating retryable-vs-fatal classification to the existing
+  `is_fatal_chunk_store_write_error()`. Retry exhaustion still raises: a commit is never silently
+  dropped (Bug #1218).
+- **#1830 A timing-out `git fetch` bypassed error classification entirely.** Only a non-zero fetch
+  exit code was routed through `classify_fetch_error()`; a timeout raised a bare `RuntimeError`, so
+  it never counted toward Story #295's repeated-transient-failure escalation and a repo whose fetch
+  kept timing out never self-healed. Fetch timeouts now raise the typed `GitFetchError`;
+  `symbolic-ref`/`git log` timeouts stay distinct and are not misclassified. Timeout values
+  unchanged.
+- **#1832 / #1836 Subprocess failures were reported with stderr only.** Discarding exit code and
+  stdout meant that when a tool wrote its real error to stdout the message degraded to a bare
+  prefix -- including four user-facing indexing-job `error` fields (`"Temporal indexing failed: "`).
+  Consolidated into one shared `code_indexer.utils.subprocess_diagnostics` helper, now used by seven
+  modules. `GitFetchError` gained `stdout`/`returncode`/`cmd` while `.stderr` keeps its exact prior
+  raw, uncapped semantics. Also fixed `repository_listing_manager`'s `format_error_log` calls, whose
+  literal `{alias}`/`{e}` placeholders were never interpolated.
+- **#1833 `is_definitely_dead_code` claimed certainty from graph completeness alone.** Graph
+  completeness means "every file parsed", not "no caller exists", so on any library the entire
+  public API -- which by construction has no in-repo callers -- was reported as definitely dead
+  (measured live: 1296 of 3147 jsoup symbols, including its public `Connection`/`Response` API).
+  The predicate is now conservative: `Some(false)` when referenced, `None` otherwise. NOTE: this
+  removes false positives at the cost of any true positive; restoring a useful dead-code capability
+  requires visibility plumbing, tracked as #1835.
+- **#1837 E2E Phase 3 failed only in the full sweep.** Two independent cross-test state leaks:
+  a web-session cookie left in the shared client's jar became invalid-but-present once a throwaway
+  `create_app()` rotated the process-wide SessionManager secret (and hybrid auth prioritises a
+  present session cookie over a valid Bearer token); and a throwaway TestClient's lifespan shutdown
+  stripped the shared app's live `IdentityQueueHandler` off the root logger, silently sending later
+  logs nowhere. Fixed in test infrastructure only -- no production code changed.
+
 ## [12.46.0] - 2026-09-10
 
 ### Fixed

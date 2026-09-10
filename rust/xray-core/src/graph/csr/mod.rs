@@ -147,12 +147,13 @@ pub mod handle {
         graph_from_ctx(ctx).is_symbol_referenced(dense_id)
     }
 
-    /// D2 fix: exposes the AC6/D1 completeness-aware dead-code verdict.
-    /// See `CodeGraph::is_definitely_dead_code` -- `Some(false)` for any
-    /// referenced symbol regardless of completeness, `None` (suppressed)
-    /// for an unreferenced symbol on anything other than a `Complete`
-    /// build, `Some(true)` only when both the symbol is unreferenced AND
-    /// the whole graph is `Complete`.
+    /// D2 fix: exposes the dead-code verdict. See
+    /// `CodeGraph::is_definitely_dead_code` -- `Some(false)` for any
+    /// referenced symbol regardless of completeness; `None` for an
+    /// unreferenced symbol, always (Bug #1833: the graph carries no
+    /// visibility/entry-point evidence, so an absent in-repo reference is
+    /// never provable unreachability -- `Some(true)` is presently
+    /// unreachable pending that evidence being plumbed end-to-end).
     fn thunk_is_definitely_dead_code(ctx: CtxPtr, dense_id: u32) -> Option<bool> {
         graph_from_ctx(ctx).is_definitely_dead_code(dense_id)
     }
@@ -253,15 +254,14 @@ pub mod handle {
             (self.is_symbol_referenced_fn)(self.ctx, dense_id)
         }
 
-        /// D2 fix: the completeness-aware dead-code verdict -- see
+        /// D2 fix: the dead-code verdict -- see
         /// `CodeGraph::is_definitely_dead_code`. `Some(false)` means
-        /// referenced (never dead, regardless of completeness);
-        /// `Some(true)` means definitely dead (unreferenced AND the whole
-        /// graph is `Complete`); `None` means suppressed -- unreferenced,
-        /// but under a degraded (non-`Complete`) build, so "dead" cannot
-        /// be claimed with confidence. This is the ONE surface an
-        /// evaluator needs to avoid the exact false-positive AC6/D1 exist
-        /// to prevent.
+        /// referenced (never dead, regardless of completeness); `None`
+        /// means undecidable -- unreferenced, with no in-repo evidence
+        /// this crate can currently use to prove the symbol unreachable
+        /// from outside the repo (Bug #1833). `Some(true)` is presently
+        /// unreachable. This is the ONE surface an evaluator needs to
+        /// avoid claiming a confident "dead" verdict the graph cannot back.
         pub fn is_definitely_dead_code(&self, dense_id: u32) -> Option<bool> {
             (self.is_definitely_dead_code_fn)(self.ctx, dense_id)
         }

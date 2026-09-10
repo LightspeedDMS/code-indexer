@@ -319,22 +319,39 @@ def _set_omni_cap(client: TestClient, key: str, value: int) -> int:
 
     Returns the live config value after the write so callers can assert the
     front-door mutation actually took effect.
+
+    Bug #1837: ``client`` is the session-scoped ``test_client`` shared by the
+    whole Phase 3 sweep. ``_web_login_session`` plants a signed "session"
+    cookie in its persistent cookie jar; every other call in this module
+    (and every later test file in the sweep) authenticates via the JWT
+    Bearer header instead, so the cookie is only ever needed for the single
+    config-mutation POST below. Clearing it unconditionally afterward -- the
+    same pattern test_13's ``depmap_enabled_client`` fixture already applies
+    to its own web-session login -- prevents a later throwaway
+    ``create_app()`` call (e.g. test_20's ``TestLifespanRealStartupWiring``,
+    which reinitializes the process-wide ``SessionManager`` secret via
+    ``init_session_manager``) from turning this now-unused cookie into an
+    invalid-but-present one that shadows a perfectly valid Bearer token in
+    ``_hybrid_auth_impl`` for every sibling test still to come.
     """
-    csrf = _web_login_session(client)
-    resp = client.post(
-        CONFIG_POST_MULTI_SEARCH,
-        data={key: str(value), "csrf_token": csrf},
-        follow_redirects=False,
-    )
-    assert resp.status_code in (200, 302, 303), (
-        f"POST {CONFIG_POST_MULTI_SEARCH} {key}={value}: HTTP {resp.status_code} -- "
-        f"{resp.text[:200]}"
-    )
-    actual = _read_omni_cap(key)
-    assert actual == value, (
-        f"front-door config write did not take effect: {key} expected {value}, got {actual}"
-    )
-    return actual
+    try:
+        csrf = _web_login_session(client)
+        resp = client.post(
+            CONFIG_POST_MULTI_SEARCH,
+            data={key: str(value), "csrf_token": csrf},
+            follow_redirects=False,
+        )
+        assert resp.status_code in (200, 302, 303), (
+            f"POST {CONFIG_POST_MULTI_SEARCH} {key}={value}: HTTP {resp.status_code} -- "
+            f"{resp.text[:200]}"
+        )
+        actual = _read_omni_cap(key)
+        assert actual == value, (
+            f"front-door config write did not take effect: {key} expected {value}, got {actual}"
+        )
+        return actual
+    finally:
+        client.cookies.clear()
 
 
 def _omni_search(client: TestClient, auth_headers: dict, limit: int = 30) -> dict:

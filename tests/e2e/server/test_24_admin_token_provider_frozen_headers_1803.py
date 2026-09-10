@@ -81,6 +81,7 @@ from code_indexer.server.auth import dependencies as auth_dependencies
 from tests.e2e.server.conftest import (
     AdminTokenProvider,
     _require_env,
+    preserve_root_logging_handlers,
     wait_for_terminal_job,
 )
 
@@ -182,26 +183,27 @@ def short_lived_provider(
         # int-typed in production; deliberate fractional override for sub-minute test timing.
         this_jwt_manager.token_expiration_minutes = _SHORT_LIFETIME_MINUTES  # type: ignore[assignment]
         try:
-            with TestClient(app, raise_server_exceptions=False) as client:
-                access, refresh = _do_login(client)
+            with preserve_root_logging_handlers():
+                with TestClient(app, raise_server_exceptions=False) as client:
+                    access, refresh = _do_login(client)
 
-                def _relogin() -> Tuple[str, str | None]:
-                    return _do_login(client)
+                    def _relogin() -> Tuple[str, str | None]:
+                        return _do_login(client)
 
-                def _refresh_via_grant(rt: str):
-                    r = client.post("/api/auth/refresh", json={"refresh_token": rt})
-                    if r.status_code != _HTTP_OK:
-                        return None
-                    b = r.json()
-                    return str(b["access_token"]), b.get("refresh_token")
+                    def _refresh_via_grant(rt: str):
+                        r = client.post("/api/auth/refresh", json={"refresh_token": rt})
+                        if r.status_code != _HTTP_OK:
+                            return None
+                        b = r.json()
+                        return str(b["access_token"]), b.get("refresh_token")
 
-                provider = AdminTokenProvider(
-                    login_fn=_relogin,
-                    initial_access_token=access,
-                    initial_refresh_token=refresh,
-                    refresh_fn=_refresh_via_grant,
-                )
-                yield client, provider
+                    provider = AdminTokenProvider(
+                        login_fn=_relogin,
+                        initial_access_token=access,
+                        initial_refresh_token=refresh,
+                        refresh_fn=_refresh_via_grant,
+                    )
+                    yield client, provider
         finally:
             this_jwt_manager.token_expiration_minutes = previous_lifetime
 

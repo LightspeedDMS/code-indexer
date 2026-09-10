@@ -47,6 +47,10 @@ from .refresh_integrity_gate import (
 )
 from .shared_operations import DEFAULT_REFRESH_INTERVAL, GlobalRepoOperations
 from code_indexer.server.repositories.background_jobs import DuplicateJobError
+from code_indexer.utils.subprocess_diagnostics import (
+    format_called_process_error_diagnostic as _format_called_process_error_diagnostic,
+    format_completed_process_diagnostic,
+)
 from code_indexer.server.repositories.golden_repo_manager import (
     _make_hnsw_orphan_event_logger,
 )
@@ -316,28 +320,12 @@ def _is_git_repo_url(repo_url: str) -> bool:
     return any(repo_url.startswith(prefix) for prefix in _GIT_URL_PREFIXES)
 
 
-def _format_called_process_error_diagnostic(e: subprocess.CalledProcessError) -> str:
-    """Bug #1810: build a diagnostic string that always names the command,
-    exit code, and both captured streams -- never rely on e.stderr alone,
-    which can be empty when the failing command's own diagnostics land on
-    stdout instead (producing a message truncated to "CalledProcessError:"
-    with no cause).
-
-    e.cmd mirrors Popen's args and may be either a str or any non-str/bytes
-    sequence -- only join real sequences, or a str command would be
-    corrupted into space-separated characters.
-    """
-    from collections.abc import Sequence as _Sequence
-
-    cmd_display = (
-        " ".join(str(part) for part in e.cmd)
-        if isinstance(e.cmd, _Sequence) and not isinstance(e.cmd, (str, bytes))
-        else str(e.cmd)
-    )
-    return (
-        f"{type(e).__name__}: command='{cmd_display}' "
-        f"exit_code={e.returncode} stdout={e.stdout!r} stderr={e.stderr!r}"
-    )
+# Bug #1810 / Bug #1832: the diagnostic formatter used to be defined
+# locally here; it is now the SHARED implementation in
+# code_indexer.utils.subprocess_diagnostics (imported above as
+# _format_called_process_error_diagnostic / format_completed_process_diagnostic)
+# so every subprocess-failure call site across the codebase reuses ONE
+# formatter instead of reimplementing this shape per file.
 
 
 # TTL for .write_mode/{alias}.json marker files (Bug #240).
@@ -1184,7 +1172,8 @@ class RefreshScheduler:
 
         if clone_result.returncode != 0:
             logger.critical(
-                f"Auto re-clone FAILED for {alias_name}: {clone_result.stderr}"
+                f"Auto re-clone FAILED for {alias_name}: "
+                f"{format_completed_process_diagnostic(clone_result)}"
             )
             if temp_clone.exists():
                 shutil.rmtree(str(temp_clone))
