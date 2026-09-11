@@ -1044,7 +1044,23 @@ class GoldenRepoManager:
             alias,
             clone_path,
         )
-        shutil.rmtree(clone_path, ignore_errors=True)
+        try:
+            # Never continue into a path whose orphan cleanup was incomplete.
+            # In particular, ignore_errors=True can leave a half-destroyed
+            # .git directory when another worker writes during removal; a
+            # subsequent copy/clone would then create a permanently broken
+            # golden repository.
+            shutil.rmtree(clone_path)
+        except OSError as cleanup_error:
+            raise GitOperationError(
+                f"Failed orphan cleanup for '{alias}' at {clone_path}: {cleanup_error}"
+            ) from cleanup_error
+
+        if os.path.exists(clone_path):
+            raise GitOperationError(
+                f"Failed orphan cleanup for '{alias}' at {clone_path}: "
+                "directory still exists after removal"
+            )
         return True
 
     def _register_lifecycle_after_registration(
