@@ -201,9 +201,9 @@ def _load_fts_config() -> "FTSIndexCacheConfig":
     return config
 
 
-def _resolve_hnsw_lease_kwargs() -> "Dict[str, Any]":
+def _resolve_reader_lease_kwargs(cache_name: str) -> "Dict[str, Any]":
     """Resolve the Bug #1845 remediation round 2 lease-injection kwargs for
-    HNSWIndexCache (Defects 1+3).
+    HNSWIndexCache and FTSIndexCache (Defects 1+3).
 
     Extracted to one place so both initialize_caches() and get_global_cache()
     share it (Messi anti-duplication rule), mirroring _load_hnsw_config()'s
@@ -240,13 +240,28 @@ def _resolve_hnsw_lease_kwargs() -> "Dict[str, Any]":
         logger.warning(
             format_error_log(
                 "GIT-GENERAL-007",
-                f"Failed to resolve HNSW reader-lease coordination root: "
+                f"Failed to resolve {cache_name} reader-lease coordination root: "
                 f"{e}. Reader-lease publication disabled for this cache "
                 f"instance.",
             ),
             extra={"correlation_id": get_correlation_id()},
         )
         return {}
+
+
+def _resolve_hnsw_lease_kwargs() -> "Dict[str, Any]":
+    """Resolve reader-lease kwargs for the HNSW cache."""
+    return _resolve_reader_lease_kwargs("HNSW")
+
+
+def _resolve_fts_lease_kwargs() -> "Dict[str, Any]":
+    """Resolve reader-lease kwargs for the FTS cache."""
+    return _resolve_reader_lease_kwargs("FTS")
+
+
+def _resolve_id_index_lease_kwargs() -> "Dict[str, Any]":
+    """Resolve reader-lease kwargs for the id-index cache."""
+    return _resolve_reader_lease_kwargs("IdIndex")
 
 
 def initialize_caches(worker_count: int) -> None:
@@ -311,7 +326,9 @@ def initialize_caches(worker_count: int) -> None:
             fts_config.max_cache_size_mb,  # type: ignore[arg-type]
             worker_count,
         )
-        _global_fts_cache_instance = FTSIndexCache(config=fts_config)
+        _global_fts_cache_instance = FTSIndexCache(
+            config=fts_config, **_resolve_fts_lease_kwargs()
+        )
         _global_fts_cache_instance.start_background_cleanup()
         logger.info(
             "Story #1166: FTS cache initialized with per-worker cap "
@@ -397,7 +414,9 @@ def get_global_fts_cache() -> FTSIndexCache:
 
     if _global_fts_cache_instance is None:
         config = _load_fts_config()
-        _global_fts_cache_instance = FTSIndexCache(config=config)
+        _global_fts_cache_instance = FTSIndexCache(
+            config=config, **_resolve_fts_lease_kwargs()
+        )
         _global_fts_cache_instance.start_background_cleanup()
 
     return _global_fts_cache_instance

@@ -285,6 +285,7 @@ def snapshot_path(mount_point: Path) -> Path:
     return snapshot
 
 
+@pytest.mark.slow
 class TestSnapshotNotDeletedWhileLiveReaderHoldsItCrossProcess:
     def test_snapshot_survives_cleanup_while_hnsw_reader_on_another_process_holds_it(
         self, tmp_path: Path, mount_point: Path, snapshot_path: Path

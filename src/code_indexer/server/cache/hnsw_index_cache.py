@@ -26,7 +26,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
 from threading import Lock
-from typing import Any, Callable, Dict, Optional, Set, Tuple
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 from code_indexer.server.logging_utils import format_error_log
 from code_indexer.global_repos.snapshot_reader_lease import SnapshotReaderLease
 
@@ -487,6 +487,16 @@ class HNSWIndexCache:
         self._eviction_count = 0
         self._oversized_load_count = 0  # Bug #1377: entries too big to ever cache
         self._reader_leases: Dict[str, SnapshotReaderLease] = {}
+
+        # Bug #1849: leases queued for release/renewal while holding
+        # _cache_lock. Purely in-memory -- appending here does NO
+        # filesystem I/O and spawns NO thread. Drained serially, off
+        # lock, by the already-running background cleanup thread (see
+        # _cleanup_expired_entries / _process_pending_lease_work), and
+        # synchronously on stop_background_cleanup so no lease outlives
+        # the process.
+        self._pending_lease_releases: List[SnapshotReaderLease] = []
+        self._pending_lease_renewals: List[SnapshotReaderLease] = []
 
         # Background cleanup thread (AC2)
         self._cleanup_thread: Optional[threading.Thread] = None
@@ -966,17 +976,21 @@ class HNSWIndexCache:
         return evicted_count
 
     def clear(self) -> None:
-        """Clear all cache entries."""
+        """Clear all cache entries.
+
+        Bug #1849: queues the released leases in-memory instead of
+        spawning a thread per lease -- they are released serially,
+        off-lock, the next time _process_pending_lease_work runs (on
+        the background cleanup thread, or synchronously on
+        stop_background_cleanup).
+        """
         with self._cache_lock:
             evicted = len(self._cache)
             self._cache.clear()
             leases = list(self._reader_leases.values())
             self._reader_leases.clear()
             self._eviction_count += evicted
-            for lease in leases:
-                threading.Thread(
-                    target=self._release_reader_lease, args=(lease,), daemon=True
-                ).start()
+            self._pending_lease_releases.extend(leases)
             logger.info(
                 f"Cleared cache ({evicted} entries)",
                 extra={"correlation_id": get_correlation_id()},
@@ -1073,6 +1087,12 @@ class HNSWIndexCache:
         Clean up expired cache entries (AC2: TTL-based eviction).
 
         Called by background cleanup thread and manual cleanup.
+
+        Bug #1849: lease release/renewal is queued (in-memory only) while
+        holding _cache_lock, then the lock is dropped and every queued
+        lease is released/renewed serially on this thread -- the
+        already-running background cleanup thread -- instead of
+        spawning a new thread per lease.
         """
         with self._cache_lock:
             expired_repos = [
@@ -1100,6 +1120,16 @@ class HNSWIndexCache:
                 if repo_path in self._cache:
                     self._renew_reader_lease_locked(lease)
 
+            # Snapshot + clear the queued work while still holding the
+            # lock, then release the lock before any filesystem I/O.
+            pending_releases = self._pending_lease_releases
+            self._pending_lease_releases = []
+            pending_renewals = self._pending_lease_renewals
+            self._pending_lease_renewals = []
+
+        # --- NO LOCK HELD: serial I/O on the calling (cleanup) thread ---
+        self._process_pending_lease_work(pending_releases, pending_renewals)
+
         # Bug #897 mitigation 1: optionally trim glibc heap after eviction.
         # Feature-flagged so operators can measure RSS recovery on staging
         # before committing. Default ON since v9.23.3; set enable_malloc_trim=false in config.json to disable.
@@ -1107,19 +1137,38 @@ class HNSWIndexCache:
             _maybe_malloc_trim()
 
     def _release_reader_lease_locked(self, repo_path: str) -> None:
-        """Schedule lease release without filesystem I/O under cache lock."""
+        """Queue a reader lease for release. Must be called while holding
+        _cache_lock. Bug #1849: NO filesystem I/O and NO thread spawn
+        here -- the lease is released serially, off-lock, the next time
+        _process_pending_lease_work runs (on the background cleanup
+        thread, or synchronously on stop_background_cleanup).
+        """
         lease = self._reader_leases.pop(repo_path, None)
         if lease is not None:
-            threading.Thread(
-                target=self._release_reader_lease, args=(lease,), daemon=True
-            ).start()
+            self._pending_lease_releases.append(lease)
 
-    @staticmethod
-    def _renew_reader_lease_locked(lease: SnapshotReaderLease) -> None:
-        """Schedule lease renewal without filesystem I/O under cache lock."""
-        threading.Thread(
-            target=HNSWIndexCache._renew_reader_lease, args=(lease,), daemon=True
-        ).start()
+    def _renew_reader_lease_locked(self, lease: SnapshotReaderLease) -> None:
+        """Queue a reader lease for renewal. Must be called while holding
+        _cache_lock. Bug #1849: NO filesystem I/O and NO thread spawn --
+        see _release_reader_lease_locked.
+        """
+        self._pending_lease_renewals.append(lease)
+
+    def _process_pending_lease_work(
+        self,
+        pending_releases: List[SnapshotReaderLease],
+        pending_renewals: List[SnapshotReaderLease],
+    ) -> None:
+        """Release and renew queued leases serially, with NO cache lock
+        held. Bug #1849: replaces the old one-OS-thread-per-lease
+        mechanism. Always runs on the caller's own thread (the
+        background cleanup thread during normal operation, or the
+        calling thread synchronously during stop_background_cleanup).
+        """
+        for lease in pending_releases:
+            self._release_reader_lease(lease)
+        for lease in pending_renewals:
+            self._renew_reader_lease(lease)
 
     @staticmethod
     def _release_reader_lease(lease: SnapshotReaderLease) -> None:
@@ -1180,14 +1229,45 @@ class HNSWIndexCache:
         )
 
     def stop_background_cleanup(self) -> None:
-        """Stop background cleanup thread."""
+        """Stop background cleanup thread.
+
+        Bug #1849: also drains any lease queued for release/renewal
+        synchronously, since the cleanup thread that would normally
+        drain it on its next tick is being stopped here -- a lease must
+        never outlive the process. The drain only runs once the cleanup
+        thread has actually stopped: if join() times out (the thread is
+        genuinely stuck, e.g. blocked on a hard-NFS lease I/O call), that
+        thread could still be mid-drain itself, so draining here too
+        would race it. In that case the pending queues are left for the
+        (still-running) thread to drain on its own -- this call simply
+        does not block waiting for it, matching the original bounded
+        join() semantics.
+        """
+        cleanup_thread_stopped = True
         if self._cleanup_thread and self._cleanup_thread.is_alive():
             self._cleanup_stop_event.set()
             self._cleanup_thread.join(timeout=5)
-            logger.info(
-                "Stopped background cache cleanup thread",
-                extra={"correlation_id": get_correlation_id()},
-            )
+            cleanup_thread_stopped = not self._cleanup_thread.is_alive()
+            if cleanup_thread_stopped:
+                logger.info(
+                    "Stopped background cache cleanup thread",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            else:
+                logger.warning(
+                    "HNSW background cleanup thread did not stop within "
+                    "timeout; skipping synchronous lease drain to avoid "
+                    "racing with it",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+
+        if cleanup_thread_stopped:
+            with self._cache_lock:
+                pending_releases = self._pending_lease_releases
+                self._pending_lease_releases = []
+                pending_renewals = self._pending_lease_renewals
+                self._pending_lease_renewals = []
+            self._process_pending_lease_work(pending_releases, pending_renewals)
 
     def evict_lru_entries(self, n: int) -> int:
         """Evict the n least-recently-used cache entries (YELLOW proactive action).
