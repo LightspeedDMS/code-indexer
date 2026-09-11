@@ -432,7 +432,7 @@ Server-side query-embedding cache (both providers), wraps `coalesced_query_embed
 
 ### Canonical Versioned-Snapshot Convention + Backend-Aware Cleanup (Bug #1084 Phase A)
 
-ONE predicate `is_versioned_snapshot(path, *, mount_point=None)` (`storage/shared/snapshot_paths.py`) is the sole authority — callers hold the `VersionedSnapshotManager` facade, never reimplement the `.versioned` substring test. Deletion runs behind the QueryTracker refcount-zero gate via backend-correct `delete_snapshot`; keep-last-N retention (`snapshot_retention_keep_last`, default 3) never deletes current/previous targets.
+ONE predicate `is_versioned_snapshot(path, *, mount_point=None)` (`src/code_indexer/server/storage/shared/snapshot_paths.py`) is the sole authority — callers hold the `VersionedSnapshotManager` facade, never reimplement the `.versioned` substring test. Deletion runs behind the QueryTracker refcount-zero gate via backend-correct `delete_snapshot`; keep-last-N retention (`snapshot_retention_keep_last`, default 3) never deletes current/previous targets.
 
 -> Detail: docs/architecture-invariants.md#golden-repo-and-versioned-snapshots
 

@@ -114,3 +114,4 @@
 - [reference_reranker_api_signatures.md](reference_reranker_api_signatures.md) - Verified Voyage rerank-2.5 and Cohere rerank API params — no native instruction field
 - [reference_cow_daemon_architecture.md](reference_cow_daemon_architecture.md) - CoW Storage Daemon: REST API for clone lifecycle, NFS for filesystem access
 - [Codex half of the pair cannot run pytest](feedback_codex_interpreter_lacks_project_deps.md) - different interpreter, no project deps; its review degrades to diff-reading, so re-run every quoted test number
+- [Pair driver never gives codex CLAUDE.md](feedback_pair_codex_never_sees_claude_md.md) - claude gets it via --add-dir, codex gets stdin only; always paste the invariants into the mission brief
