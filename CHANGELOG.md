@@ -7,7 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [12.49.0] - 2026-09-11
+## [12.50.0] - 2026-09-11
+
+### Fixed
+
+- Bug #1847: Tantivy FTS, IdIndexCache and chunks.db readers now take a reader
+  lease over the versioned snapshot they hold. Bug #1845 leased only HNSW
+  readers, so a snapshot could still be deleted underneath these three while a
+  query was in flight (ESTALE, or SIGBUS on an mmap'd region).
+- Bug #1847: the cross-node lease root is now derived from a single authority
+  (`get_cidx_meta_path`) on both the reader and cleanup sides. The two sides
+  previously derived it independently; they agreed, but nothing enforced it, so
+  a change to either would have split them and made cross-node liveness fail
+  silently -- the deleter searching one directory while readers wrote to
+  another. An unwired lease root now refuses to delete instead of guessing.
+- Bug #1849: reader-lease renewal and release no longer spawn one OS thread per
+  lease on every cleanup tick. With a 60s tick and a 10 minute TTL, every
+  cached lease spawned a thread on every tick for its entire life -- up to 200
+  threads per minute per worker from IdIndexCache alone, and unbounded from
+  FTSIndexCache, which is capped by bytes rather than entry count. Each thread
+  wrote to the cidx-meta `hard` NFSv3 mount, which can block indefinitely, so a
+  stalled mount accumulated threads without limit. Renewal and release now run
+  serially on the background cleanup thread that was already running.
 
 ### Added
 
