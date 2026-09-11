@@ -148,11 +148,16 @@ lives ONE LAYER UP, in ``server/cache/snapshot_cache_invalidation.py``.
 from __future__ import annotations
 
 import os
+import logging
 import threading
 from collections import OrderedDict
 from pathlib import Path, PurePosixPath
-from typing import List, Optional, Set, Tuple, Union
+from typing import Callable, Dict, List, Optional, Set, Tuple, Union
 
+from code_indexer.global_repos.snapshot_reader_lease import (
+    SNAPSHOT_READER_LEASE_TTL_SECONDS,
+    SnapshotReaderLease,
+)
 from code_indexer.storage.sqlite_chunk_store import (
     ChunkStore,
     open_chunk_store_for_path,
@@ -174,6 +179,8 @@ _MAX_ENTRIES_PER_THREAD = 32
 _MAX_TRACKED_STALE_PREFIXES = 1_000_000
 
 _CacheEntry = Tuple[Optional[int], ChunkStore]
+
+logger = logging.getLogger(__name__)
 
 
 def _safe_close(store: ChunkStore) -> None:
@@ -220,6 +227,9 @@ class ChunkStoreThreadCache:
         self,
         max_entries_per_thread: int = _MAX_ENTRIES_PER_THREAD,
         max_tracked_stale_prefixes: int = _MAX_TRACKED_STALE_PREFIXES,
+        *,
+        lease_root: Optional[Path] = None,
+        is_versioned_snapshot: Optional[Callable[[str], bool]] = None,
     ) -> None:
         if max_entries_per_thread < 1:
             raise ValueError(
@@ -233,6 +243,12 @@ class ChunkStoreThreadCache:
         self._max_entries = max_entries_per_thread
         self._max_tracked_stale_prefixes = max_tracked_stale_prefixes
         self._local = threading.local()
+        self._lease_root = lease_root
+        self._is_versioned_snapshot = is_versioned_snapshot
+        self._reader_leases: Dict[int, SnapshotReaderLease] = {}
+        self._reader_leases_lock = threading.Lock()
+        self._lease_stop_event = threading.Event()
+        self._lease_thread: Optional[threading.Thread] = None
         # Bug #1775: shared, lock-protected. `_stale_prefixes` (a plain
         # set) backs the definitive per-key `_is_stale()` check.
         # `_stale_prefixes_ordered` (append-only, deduped) + `_stale_
@@ -245,6 +261,77 @@ class ChunkStoreThreadCache:
         self._stale_prefixes_ordered: List[str] = []
         self._stale_prefixes_trim_offset = 0
         self._stale_prefixes_lock = threading.Lock()
+
+    def _acquire_reader_lease(
+        self, collection_path: str
+    ) -> Optional[SnapshotReaderLease]:
+        """Best-effort lease publication for a newly opened versioned reader."""
+        if self._is_versioned_snapshot is None:
+            return None
+        try:
+            if not self._is_versioned_snapshot(collection_path):
+                return None
+            if self._lease_root is None:
+                logger.error(
+                    "Snapshot %s is versioned but no lease_root is wired into "
+                    "this ChunkStoreThreadCache; skipping reader-lease "
+                    "publication",
+                    collection_path,
+                )
+                return None
+            lease = SnapshotReaderLease(
+                collection_path,
+                SNAPSHOT_READER_LEASE_TTL_SECONDS,
+                lease_root=self._lease_root,
+            )
+            lease.acquire()
+            self._ensure_lease_renewal_thread()
+            return lease
+        except Exception as exc:
+            logger.warning(
+                "Could not publish snapshot reader lease for %s: %s",
+                collection_path,
+                exc,
+            )
+            return None
+
+    def _ensure_lease_renewal_thread(self) -> None:
+        with self._reader_leases_lock:
+            if self._lease_thread is not None and self._lease_thread.is_alive():
+                return
+            self._lease_stop_event.clear()
+
+            def renew_loop() -> None:
+                while not self._lease_stop_event.wait(
+                    timeout=SNAPSHOT_READER_LEASE_TTL_SECONDS / 3.0
+                ):
+                    with self._reader_leases_lock:
+                        leases = tuple(self._reader_leases.values())
+                    for lease in leases:
+                        try:
+                            lease.renew()
+                        except OSError:
+                            logger.debug(
+                                "Could not renew chunk-store reader lease",
+                                exc_info=True,
+                            )
+
+            self._lease_thread = threading.Thread(
+                target=renew_loop, name="ChunkStoreReaderLeaseRenewal", daemon=True
+            )
+            self._lease_thread.start()
+
+    def _close_store(self, store: ChunkStore) -> None:
+        _safe_close(store)
+        with self._reader_leases_lock:
+            lease = self._reader_leases.pop(id(store), None)
+        if lease is not None:
+            try:
+                lease.release()
+            except OSError:
+                logger.debug(
+                    "Could not release chunk-store reader lease", exc_info=True
+                )
 
     def _entries(self) -> "OrderedDict[Tuple[str, bool], _CacheEntry]":
         entries = getattr(self._local, "entries", None)
@@ -370,7 +457,7 @@ class ChunkStoreThreadCache:
                 cached = entries.pop(pending_key, None)
                 if cached is not None:
                     _mtime, store = cached
-                    _safe_close(store)
+                    self._close_store(store)
             pending.clear()
 
         cursor = getattr(self._local, "stale_cursor", 0)
@@ -385,7 +472,7 @@ class ChunkStoreThreadCache:
         ]
         for key in stale_keys:
             _mtime, store = entries.pop(key)
-            _safe_close(store)
+            self._close_store(store)
         self._local.stale_cursor = new_cursor
 
     def _mark_pending_recheck(self, key: Tuple[str, bool]) -> None:
@@ -441,7 +528,7 @@ class ChunkStoreThreadCache:
             cached = entries.pop(key, None)
             if cached is not None:
                 _mtime, stale_store = cached
-                _safe_close(stale_store)
+                self._close_store(stale_store)
             # Fall through to the normal open+cache path below -- a
             # stale key is now cached normally; the sweep above will
             # proactively re-evict it later if this thread stops using
@@ -471,10 +558,14 @@ class ChunkStoreThreadCache:
             # Underlying file identity changed (e.g. os.replace during a
             # rebuild) -- the cached handle must NEVER be reused to serve
             # stale/invalid data. Close it and fall through to reopen.
-            _safe_close(store)
+            self._close_store(store)
             del entries[key]
 
         store = open_chunk_store_for_path(db_path, collection_path, read_only=read_only)
+        lease = self._acquire_reader_lease(collection_path)
+        if lease is not None:
+            with self._reader_leases_lock:
+                self._reader_leases[id(store)] = lease
         try:
             fresh_mtime: Optional[int] = os.stat(db_path).st_mtime_ns
         except OSError:
@@ -486,7 +577,7 @@ class ChunkStoreThreadCache:
 
         while len(entries) > self._max_entries:
             _, (_, evicted_store) = entries.popitem(last=False)
-            _safe_close(evicted_store)
+            self._close_store(evicted_store)
 
         return store
 
@@ -498,7 +589,7 @@ class ChunkStoreThreadCache:
         """
         entries = self._entries()
         for _key, (_mtime, store) in entries.items():
-            _safe_close(store)
+            self._close_store(store)
         entries.clear()
 
 
@@ -524,14 +615,76 @@ _global_chunk_store_cache_instance: Optional[ChunkStoreThreadCache] = None
 _global_chunk_store_cache_lock = threading.Lock()
 
 
-def get_global_chunk_store_cache() -> ChunkStoreThreadCache:
-    """Get or create the process-wide ChunkStoreThreadCache singleton."""
+class ChunkStoreLeaseConfigurationError(RuntimeError):
+    """Raised by :func:`get_global_chunk_store_cache` when a caller supplies
+    real lease configuration for a process-wide singleton that was already
+    constructed UNLEASED by an earlier, lease-less caller (Bug #1847 round 2,
+    Defect 1).
+
+    Round 1 gave this getter ``lease_root``/``is_versioned_snapshot`` kwargs
+    that are only applied on the FIRST construction of the singleton -- any
+    later call's kwargs are otherwise silently discarded. Two real callers
+    (``FilesystemBackend.get_vector_store_client()`` and
+    ``snapshot_cache_invalidation.py``) pass no lease kwargs at all; if
+    either of them runs before ``server/startup/lifespan.py``'s real, leased
+    call in a server process, the singleton is permanently unleased and
+    chunks.db reader leases are never published in that process -- with no
+    exception and no warning. That silent failure mode is unacceptable
+    inside a server process, so it is surfaced here as a loud error at the
+    moment it would otherwise happen, instead of being allowed to occur
+    silently.
+    """
+
+
+def get_global_chunk_store_cache(
+    *,
+    lease_root: Optional[Path] = None,
+    is_versioned_snapshot: Optional[Callable[[str], bool]] = None,
+) -> ChunkStoreThreadCache:
+    """Get or create the process-wide ChunkStoreThreadCache singleton.
+
+    Lease arguments are injected by the server startup layer; CLI/solo callers
+    leave them unset and retain the pre-existing cache behavior.
+
+    Raises:
+        ChunkStoreLeaseConfigurationError: a non-``None`` ``lease_root`` was
+            supplied but the singleton already exists and was constructed
+            WITHOUT a lease_root -- i.e. a lease-less caller already won the
+            construction race. Silently discarding the supplied lease
+            configuration is exactly the Bug #1847 failure class this
+            module exists to eliminate, so this is rejected loudly instead.
+            A caller supplying no lease kwargs (CLI/solo, or a server caller
+            that only wants the existing instance) never trips this check.
+    """
     global _global_chunk_store_cache_instance
-    if _global_chunk_store_cache_instance is None:
+    existing = _global_chunk_store_cache_instance
+    if existing is None:
         with _global_chunk_store_cache_lock:
-            if _global_chunk_store_cache_instance is None:
-                _global_chunk_store_cache_instance = ChunkStoreThreadCache()
-    return _global_chunk_store_cache_instance
+            existing = _global_chunk_store_cache_instance
+            if existing is None:
+                _global_chunk_store_cache_instance = ChunkStoreThreadCache(
+                    lease_root=lease_root,
+                    is_versioned_snapshot=is_versioned_snapshot,
+                )
+                return _global_chunk_store_cache_instance
+
+    if lease_root is not None and existing._lease_root is None:
+        raise ChunkStoreLeaseConfigurationError(
+            f"get_global_chunk_store_cache() was called with lease_root="
+            f"{lease_root!r}, but the process-wide ChunkStoreThreadCache "
+            "singleton already exists and was constructed WITHOUT a "
+            "lease_root -- a lease-less caller (e.g. FilesystemBackend."
+            "get_vector_store_client() or snapshot_cache_invalidation.py) "
+            "won the singleton construction race ahead of this call. "
+            "Silently discarding this lease configuration would leave "
+            "chunks.db reader leases unpublished in this process while "
+            "snapshot cleanup proceeds as if no reader existed (Bug "
+            "#1847). Fix the startup ordering so the leased caller "
+            "constructs the singleton first (e.g. server/startup/"
+            "lifespan.py's call), or call reset_global_chunk_store_cache() "
+            "before this point in tests."
+        )
+    return existing
 
 
 def reset_global_chunk_store_cache() -> None:

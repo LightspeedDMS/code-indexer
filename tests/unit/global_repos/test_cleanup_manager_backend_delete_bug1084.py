@@ -12,10 +12,20 @@ CRITICAL invariant preserved: deletion NEVER happens while QueryTracker holds a
 non-zero refcount; backoff + circuit breaker stay intact.
 """
 
+from pathlib import Path
 from unittest.mock import MagicMock
 
 from code_indexer.global_repos.cleanup_manager import CleanupManager
 from code_indexer.global_repos.query_tracker import QueryTracker
+
+#: Bug #1845 remediation round 2 (Defect 3): these tests exercise backend
+#: deletion classification, not reader-lease behavior -- no real lease is
+#: ever acquired against this path (only snapshot_has_live_reader's glob,
+#: which tolerates a nonexistent directory and returns False). Production
+#: always wires set_snapshot_manager and set_lease_root together
+#: (global_repos_lifecycle.py), so these mock-snapshot-manager tests must
+#: too, or CleanupManager correctly refuses to guess reader liveness.
+_UNUSED_LEASE_ROOT = Path("/nonexistent-bug1084-test-lease-root")
 
 
 def _make_snapshot_manager(is_snapshot_for=None):
@@ -33,6 +43,7 @@ class TestSnapshotManagerWiring:
         cm = CleanupManager(query_tracker=QueryTracker())
         sm = _make_snapshot_manager()
         cm.set_snapshot_manager(sm)
+        cm.set_lease_root(_UNUSED_LEASE_ROOT)
         assert cm._snapshot_manager is sm
 
 
@@ -45,6 +56,7 @@ class TestBackendDeletionBehindRefcountGate:
 
         cm = CleanupManager(query_tracker=qt, min_retention_age_seconds=0.0)
         cm.set_snapshot_manager(sm)
+        cm.set_lease_root(_UNUSED_LEASE_ROOT)
         cm.schedule_cleanup(cow_path)
 
         # Hold a reference — simulates an in-flight NFS query.
@@ -65,6 +77,7 @@ class TestBackendDeletionBehindRefcountGate:
 
         cm = CleanupManager(query_tracker=qt, min_retention_age_seconds=0.0)
         cm.set_snapshot_manager(sm)
+        cm.set_lease_root(_UNUSED_LEASE_ROOT)
         cm.schedule_cleanup(cow_path)
 
         # Hold then release.
@@ -110,6 +123,7 @@ class TestBackendDeletionBehindRefcountGate:
 
         cm = CleanupManager(query_tracker=qt, min_retention_age_seconds=0.0)
         cm.set_snapshot_manager(sm)
+        cm.set_lease_root(_UNUSED_LEASE_ROOT)
         cm.schedule_cleanup(local_path)
 
         cm._process_cleanup_queue()
@@ -146,6 +160,7 @@ class TestBackendDeletionFailureBackoff:
 
         cm = CleanupManager(query_tracker=qt, min_retention_age_seconds=0.0)
         cm.set_snapshot_manager(sm)
+        cm.set_lease_root(_UNUSED_LEASE_ROOT)
         cm.schedule_cleanup(cow_path)
 
         cm._process_cleanup_queue()

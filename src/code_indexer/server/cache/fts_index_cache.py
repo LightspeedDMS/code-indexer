@@ -25,8 +25,9 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
 from threading import Lock
-from typing import Any, Callable, Dict, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 from code_indexer.server.logging_utils import format_error_log
+from code_indexer.global_repos.snapshot_reader_lease import SnapshotReaderLease
 
 logger = logging.getLogger(__name__)
 
@@ -231,14 +232,26 @@ class FTSIndexCache:
     Expected speedup: 5-50x for repeated FTS queries.
     """
 
-    def __init__(self, config: Optional[FTSIndexCacheConfig] = None):
+    def __init__(
+        self,
+        config: Optional[FTSIndexCacheConfig] = None,
+        *,
+        lease_root: Optional[Path] = None,
+        is_versioned_snapshot: Optional[Callable[[str], bool]] = None,
+    ):
         """
         Initialize FTS index cache.
 
         Args:
             config: Cache configuration (defaults to standard config if None)
+            lease_root: Shared cross-node reader-lease root, resolved and
+                injected by the server cache construction layer.
+            is_versioned_snapshot: Canonical versioned-snapshot predicate,
+                injected by the server cache construction layer.
         """
         self.config = config or FTSIndexCacheConfig()
+        self._lease_root = lease_root
+        self._is_versioned_snapshot = is_versioned_snapshot
 
         # Per-repository cache (AC4)
         self._cache: Dict[str, FTSIndexCacheEntry] = {}
@@ -259,6 +272,17 @@ class FTSIndexCache:
         self._eviction_count = 0
         self._reload_count = 0
         self._oversized_load_count = 0  # Bug #1377: entries too big to ever cache
+        self._reader_leases: Dict[str, SnapshotReaderLease] = {}
+
+        # Bug #1849: leases queued for release/renewal while holding
+        # _cache_lock. Purely in-memory -- appending here does NO
+        # filesystem I/O and spawns NO thread. Drained serially, off
+        # lock, by the already-running background cleanup thread (see
+        # _cleanup_expired_entries / _process_pending_lease_work), and
+        # synchronously on stop_background_cleanup so no lease outlives
+        # the process.
+        self._pending_lease_releases: List[SnapshotReaderLease] = []
+        self._pending_lease_renewals: List[SnapshotReaderLease] = []
 
         # Background cleanup thread (AC2)
         self._cleanup_thread: Optional[threading.Thread] = None
@@ -324,6 +348,7 @@ class FTSIndexCache:
                             extra={"correlation_id": get_correlation_id()},
                         )
                         del self._cache[index_dir]
+                        self._release_reader_lease_locked(index_dir)
                         self._eviction_count += 1
                         # Fall through (no return here)
                     else:
@@ -396,6 +421,32 @@ class FTSIndexCache:
                 )
 
             # Store result in cache (acquire lock for dict write)
+            reader_lease = None
+            if self._is_versioned_snapshot is not None and self._is_versioned_snapshot(
+                index_dir
+            ):
+                if self._lease_root is None:
+                    logger.error(
+                        "Snapshot %s is versioned but no lease_root is wired "
+                        "into this FTSIndexCache instance; skipping reader-lease "
+                        "publication",
+                        index_dir,
+                    )
+                else:
+                    try:
+                        reader_lease = SnapshotReaderLease(
+                            index_dir,
+                            self.config.ttl_minutes * 60.0,
+                            lease_root=self._lease_root,
+                        )
+                        reader_lease.acquire()
+                    except OSError as exc:
+                        logger.warning(
+                            "Could not publish snapshot reader lease for %s: %s",
+                            index_dir,
+                            exc,
+                        )
+
             with self._cache_lock:
                 entry = FTSIndexCacheEntry(
                     tantivy_index=tantivy_index,
@@ -406,6 +457,8 @@ class FTSIndexCache:
                 )
                 entry.record_access()
                 self._cache[index_dir] = entry
+                if reader_lease is not None:
+                    self._reader_leases[index_dir] = reader_lease
                 # Enforce size limit while holding lock (as documented)
                 self._enforce_size_limit()
 
@@ -435,6 +488,7 @@ class FTSIndexCache:
         with self._cache_lock:
             if index_dir in self._cache:
                 del self._cache[index_dir]
+                self._release_reader_lease_locked(index_dir)
                 self._eviction_count += 1
                 logger.info(
                     f"Invalidated FTS cache for {index_dir}",
@@ -445,6 +499,8 @@ class FTSIndexCache:
         """Clear all cache entries."""
         with self._cache_lock:
             evicted = len(self._cache)
+            for index_dir in tuple(self._cache):
+                self._release_reader_lease_locked(index_dir)
             self._cache.clear()
             self._eviction_count += evicted
             logger.info(
@@ -466,6 +522,7 @@ class FTSIndexCache:
         ]
         for key in oversized_keys:
             entry = self._cache.pop(key)
+            self._release_reader_lease_locked(key)
             self._eviction_count += 1
             self._oversized_load_count += 1
             logger.warning(
@@ -498,6 +555,7 @@ class FTSIndexCache:
             )
 
             del self._cache[lru_index_dir]
+            self._release_reader_lease_locked(lru_index_dir)
             self._eviction_count += 1
             logger.debug(
                 f"Evicted LRU FTS cache entry to enforce size limit: {lru_index_dir}",
@@ -541,6 +599,12 @@ class FTSIndexCache:
         Clean up expired cache entries (AC2: TTL-based eviction).
 
         Called by background cleanup thread and manual cleanup.
+
+        Bug #1849: lease release/renewal is queued (in-memory only) while
+        holding _cache_lock, then the lock is dropped and every queued
+        lease is released/renewed serially on this thread -- the
+        already-running background cleanup thread -- instead of
+        spawning a new thread per lease.
         """
         with self._cache_lock:
             expired_dirs = [
@@ -551,6 +615,7 @@ class FTSIndexCache:
 
             for index_dir in expired_dirs:
                 del self._cache[index_dir]
+                self._release_reader_lease_locked(index_dir)
                 self._eviction_count += 1
                 logger.debug(
                     f"Evicted expired FTS cache entry: {index_dir}",
@@ -562,6 +627,68 @@ class FTSIndexCache:
                     f"Evicted {len(expired_dirs)} expired FTS cache entries",
                     extra={"correlation_id": get_correlation_id()},
                 )
+
+            for index_dir, lease in self._reader_leases.items():
+                if index_dir in self._cache:
+                    self._renew_reader_lease_locked(lease)
+
+            # Snapshot + clear the queued work while still holding the
+            # lock, then release the lock before any filesystem I/O.
+            pending_releases = self._pending_lease_releases
+            self._pending_lease_releases = []
+            pending_renewals = self._pending_lease_renewals
+            self._pending_lease_renewals = []
+
+        # --- NO LOCK HELD: serial I/O on the calling (cleanup) thread ---
+        self._process_pending_lease_work(pending_releases, pending_renewals)
+
+    def _release_reader_lease_locked(self, index_dir: str) -> None:
+        """Queue a reader lease for release. Must be called while holding
+        _cache_lock. Bug #1849: NO filesystem I/O and NO thread spawn
+        here -- the lease is released serially, off-lock, the next time
+        _process_pending_lease_work runs (on the background cleanup
+        thread, or synchronously on stop_background_cleanup).
+        """
+        lease = self._reader_leases.pop(index_dir, None)
+        if lease is not None:
+            self._pending_lease_releases.append(lease)
+
+    @staticmethod
+    def _release_reader_lease(lease: SnapshotReaderLease) -> None:
+        try:
+            lease.release()
+        except OSError:
+            logger.debug("Could not release snapshot reader lease", exc_info=True)
+
+    def _renew_reader_lease_locked(self, lease: SnapshotReaderLease) -> None:
+        """Queue a reader lease for renewal. Must be called while holding
+        _cache_lock. Bug #1849: NO filesystem I/O and NO thread spawn --
+        see _release_reader_lease_locked.
+        """
+        self._pending_lease_renewals.append(lease)
+
+    def _process_pending_lease_work(
+        self,
+        pending_releases: List[SnapshotReaderLease],
+        pending_renewals: List[SnapshotReaderLease],
+    ) -> None:
+        """Release and renew queued leases serially, with NO cache lock
+        held. Bug #1849: replaces the old one-OS-thread-per-lease
+        mechanism. Always runs on the caller's own thread (the
+        background cleanup thread during normal operation, or the
+        calling thread synchronously during stop_background_cleanup).
+        """
+        for lease in pending_releases:
+            self._release_reader_lease(lease)
+        for lease in pending_renewals:
+            self._renew_reader_lease(lease)
+
+    @staticmethod
+    def _renew_reader_lease(lease: SnapshotReaderLease) -> None:
+        try:
+            lease.renew()
+        except OSError:
+            logger.debug("Could not renew snapshot reader lease", exc_info=True)
 
     def start_background_cleanup(self) -> None:
         """
@@ -608,14 +735,45 @@ class FTSIndexCache:
         )
 
     def stop_background_cleanup(self) -> None:
-        """Stop background cleanup thread."""
+        """Stop background cleanup thread.
+
+        Bug #1849: also drains any lease queued for release/renewal
+        synchronously, since the cleanup thread that would normally
+        drain it on its next tick is being stopped here -- a lease must
+        never outlive the process. The drain only runs once the cleanup
+        thread has actually stopped: if join() times out (the thread is
+        genuinely stuck, e.g. blocked on a hard-NFS lease I/O call), that
+        thread could still be mid-drain itself, so draining here too
+        would race it. In that case the pending queues are left for the
+        (still-running) thread to drain on its own -- this call simply
+        does not block waiting for it, matching the original bounded
+        join() semantics.
+        """
+        cleanup_thread_stopped = True
         if self._cleanup_thread and self._cleanup_thread.is_alive():
             self._cleanup_stop_event.set()
             self._cleanup_thread.join(timeout=5)
-            logger.info(
-                "Stopped FTS background cache cleanup thread",
-                extra={"correlation_id": get_correlation_id()},
-            )
+            cleanup_thread_stopped = not self._cleanup_thread.is_alive()
+            if cleanup_thread_stopped:
+                logger.info(
+                    "Stopped FTS background cache cleanup thread",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            else:
+                logger.warning(
+                    "FTS background cleanup thread did not stop within "
+                    "timeout; skipping synchronous lease drain to avoid "
+                    "racing with it",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+
+        if cleanup_thread_stopped:
+            with self._cache_lock:
+                pending_releases = self._pending_lease_releases
+                self._pending_lease_releases = []
+                pending_renewals = self._pending_lease_renewals
+                self._pending_lease_renewals = []
+            self._process_pending_lease_work(pending_releases, pending_renewals)
 
     def get_stats(self) -> FTSIndexCacheStats:
         """

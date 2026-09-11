@@ -26,8 +26,9 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
 from threading import Lock
-from typing import Any, Callable, Dict, Optional, Set, Tuple
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 from code_indexer.server.logging_utils import format_error_log
+from code_indexer.global_repos.snapshot_reader_lease import SnapshotReaderLease
 
 logger = logging.getLogger(__name__)
 
@@ -428,14 +429,37 @@ class HNSWIndexCache:
     Performance improvement: ~277ms → <1ms for repeated queries (1800x faster).
     """
 
-    def __init__(self, config: Optional[HNSWIndexCacheConfig] = None):
+    def __init__(
+        self,
+        config: Optional[HNSWIndexCacheConfig] = None,
+        *,
+        lease_root: Optional[Path] = None,
+        is_versioned_snapshot: Optional[Callable[[str], bool]] = None,
+    ):
         """
         Initialize HNSW index cache.
 
         Args:
             config: Cache configuration (defaults to standard config if None)
+            lease_root: Bug #1845 remediation round 2 (Defect 3) -- the
+                shared cross-node lease-coordination root
+                (golden_repos_dir / "cidx-meta"), resolved and injected by
+                the server-layer construction site (server/cache/__init__.py)
+                via get_cidx_meta_path(). None (default) means "leasing not
+                configured" -- correct for CLI/solo/test construction that
+                never touches a real versioned snapshot.
+            is_versioned_snapshot: Bug #1845 remediation round 2 (Defect 1)
+                -- the canonical is_versioned_snapshot predicate, injected
+                by the same server-layer construction site rather than
+                imported here. Importing it directly was measured to pull
+                214 extra modules into this otherwise-lean module (see
+                snapshot_reader_lease.py's module docstring for the
+                evidence), so it travels as an injected callable instead.
+                None (default) disables reader-lease publication entirely.
         """
         self.config = config or HNSWIndexCacheConfig()
+        self._lease_root = lease_root
+        self._is_versioned_snapshot = is_versioned_snapshot
 
         # Per-repository cache (AC4)
         self._cache: Dict[str, HNSWIndexCacheEntry] = {}
@@ -462,6 +486,17 @@ class HNSWIndexCache:
         self._miss_count = 0
         self._eviction_count = 0
         self._oversized_load_count = 0  # Bug #1377: entries too big to ever cache
+        self._reader_leases: Dict[str, SnapshotReaderLease] = {}
+
+        # Bug #1849: leases queued for release/renewal while holding
+        # _cache_lock. Purely in-memory -- appending here does NO
+        # filesystem I/O and spawns NO thread. Drained serially, off
+        # lock, by the already-running background cleanup thread (see
+        # _cleanup_expired_entries / _process_pending_lease_work), and
+        # synchronously on stop_background_cleanup so no lease outlives
+        # the process.
+        self._pending_lease_releases: List[SnapshotReaderLease] = []
+        self._pending_lease_renewals: List[SnapshotReaderLease] = []
 
         # Background cleanup thread (AC2)
         self._cleanup_thread: Optional[threading.Thread] = None
@@ -550,6 +585,7 @@ class HNSWIndexCache:
                             extra={"correlation_id": get_correlation_id()},
                         )
                         del self._cache[repo_path]
+                        self._release_reader_lease_locked(repo_path)
                         self._eviction_count += 1
                         # Fall through (no return here)
                     elif entry.hnsw_index is None:
@@ -562,6 +598,7 @@ class HNSWIndexCache:
                             extra={"correlation_id": get_correlation_id()},
                         )
                         del self._cache[repo_path]
+                        self._release_reader_lease_locked(repo_path)
                         self._eviction_count += 1
                         # Fall through (no return here)
                     elif (
@@ -581,6 +618,16 @@ class HNSWIndexCache:
                         # Cache hit - refresh TTL (AC3). Reached when the check
                         # is not yet due, is already in flight on another
                         # thread, or is disabled (index_file is None).
+                        #
+                        # Bug #1845 remediation round 2 (Defect 2): reader-
+                        # lease renewal is intentionally NOT done here. It
+                        # used to spawn a daemon threading.Thread on every
+                        # single cache hit (unbounded thread churn plus a
+                        # shared-storage os.replace write on the hottest
+                        # path in the product). Liveness is maintained
+                        # entirely by the periodic background cleanup pass
+                        # (_cleanup_expired_entries) instead -- see its
+                        # renewal loop below for the TTL-vs-interval margin.
                         entry.record_access()
                         self._hit_count += 1
                         logger.debug(
@@ -680,6 +727,45 @@ class HNSWIndexCache:
                 )
             index_size_bytes += sys.getsizeof(id_mapping)
 
+            reader_lease = None
+            if self._is_versioned_snapshot is not None and self._is_versioned_snapshot(
+                repo_path
+            ):
+                lease_root = self._lease_root
+                if lease_root is None:
+                    # Bug #1845 remediation round 2 (Defect 3): a genuine
+                    # wiring bug (is_versioned_snapshot injected without
+                    # lease_root) -- logged loudly (ERROR, so the mandatory
+                    # E2E log-audit gate catches it) but NOT raised. Unlike
+                    # the CleanupManager read side, this is the query hot
+                    # path: crashing get_or_load() over a leasing
+                    # misconfiguration would break query serving itself,
+                    # which the "Query Is Everything" project invariant
+                    # forbids. Degrading to "no lease published" is the
+                    # same accepted risk shape the OSError catch below
+                    # already uses for lease-acquisition failures.
+                    logger.error(
+                        "Snapshot %s is versioned but no lease_root is "
+                        "wired into this HNSWIndexCache instance; "
+                        "skipping reader-lease publication",
+                        repo_path,
+                    )
+                else:
+                    try:
+                        reader_lease = SnapshotReaderLease(
+                            repo_path,
+                            self.config.ttl_minutes * 60.0,
+                            lease_root=lease_root,
+                        )
+                        reader_lease.acquire()
+                    except OSError as exc:
+                        logger.warning(
+                            "Could not publish snapshot reader lease for %s: %s",
+                            repo_path,
+                            exc,
+                        )
+                        reader_lease = None
+
             # Store result in cache (acquire lock for dict write)
             with self._cache_lock:
                 entry = HNSWIndexCacheEntry(
@@ -692,6 +778,8 @@ class HNSWIndexCache:
                 )
                 entry.record_access()
                 self._cache[repo_path] = entry
+                if reader_lease is not None:
+                    self._reader_leases[repo_path] = reader_lease
                 # Enforce size limit while holding lock (as documented)
                 self._enforce_size_limit()
 
@@ -807,6 +895,7 @@ class HNSWIndexCache:
                 extra={"correlation_id": get_correlation_id()},
             )
             del self._cache[repo_path]
+            self._release_reader_lease_locked(repo_path)
             self._eviction_count += 1
             return None
 
@@ -814,6 +903,11 @@ class HNSWIndexCache:
         """Record a HIT and return the entry's payload.
 
         The caller MUST already hold ``_cache_lock``.
+
+        Bug #1845 remediation round 2 (Defect 2): no per-hit reader-lease
+        renewal here either -- same reasoning as the get_or_load hit branch
+        above. Liveness is maintained entirely by the periodic background
+        cleanup pass.
         """
         entry.record_access()
         self._hit_count += 1
@@ -831,6 +925,7 @@ class HNSWIndexCache:
         with self._cache_lock:
             if repo_path in self._cache:
                 del self._cache[repo_path]
+                self._release_reader_lease_locked(repo_path)
                 self._eviction_count += 1
                 logger.info(
                     f"Invalidated cache for {repo_path}",
@@ -870,6 +965,7 @@ class HNSWIndexCache:
             ]
             for key in stale_keys:
                 del self._cache[key]
+                self._release_reader_lease_locked(key)
                 self._eviction_count += 1
 
         evicted_count = len(stale_keys)
@@ -880,11 +976,21 @@ class HNSWIndexCache:
         return evicted_count
 
     def clear(self) -> None:
-        """Clear all cache entries."""
+        """Clear all cache entries.
+
+        Bug #1849: queues the released leases in-memory instead of
+        spawning a thread per lease -- they are released serially,
+        off-lock, the next time _process_pending_lease_work runs (on
+        the background cleanup thread, or synchronously on
+        stop_background_cleanup).
+        """
         with self._cache_lock:
             evicted = len(self._cache)
             self._cache.clear()
+            leases = list(self._reader_leases.values())
+            self._reader_leases.clear()
             self._eviction_count += evicted
+            self._pending_lease_releases.extend(leases)
             logger.info(
                 f"Cleared cache ({evicted} entries)",
                 extra={"correlation_id": get_correlation_id()},
@@ -904,6 +1010,7 @@ class HNSWIndexCache:
         ]
         for key in oversized_keys:
             entry = self._cache.pop(key)
+            self._release_reader_lease_locked(key)
             self._eviction_count += 1
             self._oversized_load_count += 1
             logger.warning(
@@ -936,6 +1043,7 @@ class HNSWIndexCache:
             )
 
             del self._cache[lru_repo_path]
+            self._release_reader_lease_locked(lru_repo_path)
             self._eviction_count += 1
             logger.debug(
                 f"Evicted LRU cache entry to enforce size limit: {lru_repo_path}",
@@ -979,6 +1087,12 @@ class HNSWIndexCache:
         Clean up expired cache entries (AC2: TTL-based eviction).
 
         Called by background cleanup thread and manual cleanup.
+
+        Bug #1849: lease release/renewal is queued (in-memory only) while
+        holding _cache_lock, then the lock is dropped and every queued
+        lease is released/renewed serially on this thread -- the
+        already-running background cleanup thread -- instead of
+        spawning a new thread per lease.
         """
         with self._cache_lock:
             expired_repos = [
@@ -989,6 +1103,7 @@ class HNSWIndexCache:
 
             for repo_path in expired_repos:
                 del self._cache[repo_path]
+                self._release_reader_lease_locked(repo_path)
                 self._eviction_count += 1
                 logger.debug(
                     f"Evicted expired cache entry: {repo_path}",
@@ -1001,11 +1116,73 @@ class HNSWIndexCache:
                     extra={"correlation_id": get_correlation_id()},
                 )
 
+            for repo_path, lease in self._reader_leases.items():
+                if repo_path in self._cache:
+                    self._renew_reader_lease_locked(lease)
+
+            # Snapshot + clear the queued work while still holding the
+            # lock, then release the lock before any filesystem I/O.
+            pending_releases = self._pending_lease_releases
+            self._pending_lease_releases = []
+            pending_renewals = self._pending_lease_renewals
+            self._pending_lease_renewals = []
+
+        # --- NO LOCK HELD: serial I/O on the calling (cleanup) thread ---
+        self._process_pending_lease_work(pending_releases, pending_renewals)
+
         # Bug #897 mitigation 1: optionally trim glibc heap after eviction.
         # Feature-flagged so operators can measure RSS recovery on staging
         # before committing. Default ON since v9.23.3; set enable_malloc_trim=false in config.json to disable.
         if _feature_flag_enabled("enable_malloc_trim"):
             _maybe_malloc_trim()
+
+    def _release_reader_lease_locked(self, repo_path: str) -> None:
+        """Queue a reader lease for release. Must be called while holding
+        _cache_lock. Bug #1849: NO filesystem I/O and NO thread spawn
+        here -- the lease is released serially, off-lock, the next time
+        _process_pending_lease_work runs (on the background cleanup
+        thread, or synchronously on stop_background_cleanup).
+        """
+        lease = self._reader_leases.pop(repo_path, None)
+        if lease is not None:
+            self._pending_lease_releases.append(lease)
+
+    def _renew_reader_lease_locked(self, lease: SnapshotReaderLease) -> None:
+        """Queue a reader lease for renewal. Must be called while holding
+        _cache_lock. Bug #1849: NO filesystem I/O and NO thread spawn --
+        see _release_reader_lease_locked.
+        """
+        self._pending_lease_renewals.append(lease)
+
+    def _process_pending_lease_work(
+        self,
+        pending_releases: List[SnapshotReaderLease],
+        pending_renewals: List[SnapshotReaderLease],
+    ) -> None:
+        """Release and renew queued leases serially, with NO cache lock
+        held. Bug #1849: replaces the old one-OS-thread-per-lease
+        mechanism. Always runs on the caller's own thread (the
+        background cleanup thread during normal operation, or the
+        calling thread synchronously during stop_background_cleanup).
+        """
+        for lease in pending_releases:
+            self._release_reader_lease(lease)
+        for lease in pending_renewals:
+            self._renew_reader_lease(lease)
+
+    @staticmethod
+    def _release_reader_lease(lease: SnapshotReaderLease) -> None:
+        try:
+            lease.release()
+        except OSError:
+            logger.debug("Could not release snapshot reader lease", exc_info=True)
+
+    @staticmethod
+    def _renew_reader_lease(lease: SnapshotReaderLease) -> None:
+        try:
+            lease.renew()
+        except OSError:
+            logger.debug("Could not renew snapshot reader lease", exc_info=True)
 
     def start_background_cleanup(self) -> None:
         """
@@ -1052,14 +1229,45 @@ class HNSWIndexCache:
         )
 
     def stop_background_cleanup(self) -> None:
-        """Stop background cleanup thread."""
+        """Stop background cleanup thread.
+
+        Bug #1849: also drains any lease queued for release/renewal
+        synchronously, since the cleanup thread that would normally
+        drain it on its next tick is being stopped here -- a lease must
+        never outlive the process. The drain only runs once the cleanup
+        thread has actually stopped: if join() times out (the thread is
+        genuinely stuck, e.g. blocked on a hard-NFS lease I/O call), that
+        thread could still be mid-drain itself, so draining here too
+        would race it. In that case the pending queues are left for the
+        (still-running) thread to drain on its own -- this call simply
+        does not block waiting for it, matching the original bounded
+        join() semantics.
+        """
+        cleanup_thread_stopped = True
         if self._cleanup_thread and self._cleanup_thread.is_alive():
             self._cleanup_stop_event.set()
             self._cleanup_thread.join(timeout=5)
-            logger.info(
-                "Stopped background cache cleanup thread",
-                extra={"correlation_id": get_correlation_id()},
-            )
+            cleanup_thread_stopped = not self._cleanup_thread.is_alive()
+            if cleanup_thread_stopped:
+                logger.info(
+                    "Stopped background cache cleanup thread",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            else:
+                logger.warning(
+                    "HNSW background cleanup thread did not stop within "
+                    "timeout; skipping synchronous lease drain to avoid "
+                    "racing with it",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+
+        if cleanup_thread_stopped:
+            with self._cache_lock:
+                pending_releases = self._pending_lease_releases
+                self._pending_lease_releases = []
+                pending_renewals = self._pending_lease_renewals
+                self._pending_lease_renewals = []
+            self._process_pending_lease_work(pending_releases, pending_renewals)
 
     def evict_lru_entries(self, n: int) -> int:
         """Evict the n least-recently-used cache entries (YELLOW proactive action).
@@ -1087,6 +1295,7 @@ class HNSWIndexCache:
                     key=lambda path: self._cache[path].last_accessed,
                 )
                 del self._cache[lru_path]
+                self._release_reader_lease_locked(lru_path)
                 self._eviction_count += 1
                 evicted_count += 1
                 logger.debug(

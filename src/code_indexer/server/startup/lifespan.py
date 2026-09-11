@@ -1511,6 +1511,12 @@ def make_lifespan(
             from code_indexer.storage.shared.chunk_store_cache import (
                 get_global_chunk_store_cache,
             )
+            from code_indexer.server.services.cidx_meta_backup import (
+                get_cidx_meta_path,
+            )
+            from code_indexer.server.storage.shared.snapshot_paths import (
+                is_versioned_snapshot,
+            )
             from code_indexer.storage.shared.chunk_store_cache_cross_process import (
                 ChunkStoreCrossProcessPoller,
                 register_payload_cache,
@@ -1518,7 +1524,12 @@ def make_lifespan(
 
             register_payload_cache(payload_cache)
             chunk_store_cross_process_poller = ChunkStoreCrossProcessPoller(
-                chunk_store_cache=get_global_chunk_store_cache(),
+                chunk_store_cache=get_global_chunk_store_cache(
+                    lease_root=get_cidx_meta_path(
+                        config_service.config_manager.server_dir
+                    ),
+                    is_versioned_snapshot=is_versioned_snapshot,
+                ),
                 payload_cache=payload_cache,
             )
             chunk_store_cross_process_poller.start()

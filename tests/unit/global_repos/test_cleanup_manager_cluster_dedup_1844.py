@@ -147,6 +147,11 @@ def cluster_node_worker(
         persistence_backend=backend,
     )
     manager.set_snapshot_manager(AuditingSnapshotManager(versioned_base, audit_path))
+    # Bug #1845 remediation round 2 (Defect 3): production always wires
+    # set_snapshot_manager and set_lease_root together (see
+    # global_repos_lifecycle.py); this test's fake snapshot manager reports
+    # is_versioned_snapshot=True for its fixture path, so it must too.
+    manager.set_lease_root(Path(versioned_base) / "cidx-meta")
 
     # Both nodes must have hydrated the shared durable row BEFORE either
     # starts processing -- otherwise the winner could remove the row before
@@ -240,6 +245,9 @@ def _run_one_cleanup_cycle_against_daemon(
         manager.set_snapshot_manager(
             VersionedSnapshotManager(versioned_base=mount_point, clone_backend=backend)
         )
+        # Bug #1845 remediation round 2 (Defect 3): wire together with
+        # set_snapshot_manager, matching global_repos_lifecycle.py.
+        manager.set_lease_root(Path(mount_point) / "cidx-meta")
         manager.schedule_cleanup(snapshot_path)
         with caplog.at_level(logging.DEBUG, logger=CLEANUP_LOGGER):
             manager._process_cleanup_queue()
@@ -435,6 +443,9 @@ class TestFailedLocalDeleteIsNotSilentlyTreatedAsSuccess:
                     clone_backend=LocalCloneBackend(versioned_base=mount_point),
                 )
             )
+            # Bug #1845 remediation round 2 (Defect 3): wire together with
+            # set_snapshot_manager, matching global_repos_lifecycle.py.
+            manager.set_lease_root(Path(mount_point) / "cidx-meta")
             manager.schedule_cleanup(snapshot_path)
             manager._process_cleanup_queue()
 
