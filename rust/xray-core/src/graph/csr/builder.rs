@@ -11,6 +11,7 @@ use super::reference::Reference;
 use super::symbol_table::SymbolTable;
 use crate::graph::bind::depth::BinderDepth;
 use crate::graph::budget::{AnalysisCompleteness, ReferencedBits};
+use crate::graph::extract::local_index::Visibility;
 use crate::graph::string_table::StringTable;
 use std::collections::HashMap;
 
@@ -36,6 +37,16 @@ pub struct CodeGraphBuilder {
     /// snippets "presentation only, no analytical loss": nothing here
     /// feeds resolution or the referenced-bit.
     signatures: HashMap<u32, String>,
+    /// Story #1835 (AC1/AC2): per-symbol declared `Visibility`, mirroring
+    /// `signatures`'s sparse-map-keyed-by-dense-id shape exactly. Unlike
+    /// `signatures`, this IS analytical data (`is_definitely_dead_code`
+    /// depends on it directly) rather than presentation-only, so callers
+    /// MUST attach it unconditionally regardless of budget pressure -- see
+    /// `bind::budget_bind::intern_declarations_and_attach_signatures`,
+    /// which calls `add_visibility` outside the `exceeded` early-return
+    /// that gates `add_signature`. A dense id absent from this map reads
+    /// back as `Visibility::Unknown` via `CodeGraph::visibility_for`.
+    visibilities: HashMap<u32, Visibility>,
 }
 
 #[cfg(test)]
@@ -87,6 +98,7 @@ impl CodeGraphBuilder {
             completeness: AnalysisCompleteness::Complete,
             referenced: ReferencedBits::new(),
             signatures: HashMap::new(),
+            visibilities: HashMap::new(),
         }
     }
 
@@ -115,6 +127,14 @@ impl CodeGraphBuilder {
     /// exceeded -- that omission IS the "drop snippets first" step.
     pub fn add_signature(&mut self, dense_symbol_id: u32, signature: String) {
         self.signatures.insert(dense_symbol_id, signature);
+    }
+
+    /// Story #1835 (AC1/AC2): attaches `dense_symbol_id`'s extracted
+    /// `Visibility`. Unlike `add_signature`, callers MUST call this
+    /// unconditionally regardless of budget pressure -- see the field doc
+    /// on `visibilities` above for why.
+    pub fn add_visibility(&mut self, dense_symbol_id: u32, visibility: Visibility) {
+        self.visibilities.insert(dense_symbol_id, visibility);
     }
 
     /// Interns a symbol NAME string, returning its dense id in the shared
@@ -159,6 +179,7 @@ impl CodeGraphBuilder {
             self.completeness,
             self.referenced,
             self.signatures,
+            self.visibilities,
         )
     }
 }
