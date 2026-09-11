@@ -11,6 +11,8 @@ configuration on disk omits the size cap. Dataclass defaults remain
 Test coverage: tests/unit/server/cache/test_size_cap_defaults.py.
 """
 
+from typing import Any, Dict
+
 from code_indexer.server.middleware.correlation import get_correlation_id
 from .hnsw_index_cache import (
     HNSWIndexCache,
@@ -199,6 +201,54 @@ def _load_fts_config() -> "FTSIndexCacheConfig":
     return config
 
 
+def _resolve_hnsw_lease_kwargs() -> "Dict[str, Any]":
+    """Resolve the Bug #1845 remediation round 2 lease-injection kwargs for
+    HNSWIndexCache (Defects 1+3).
+
+    Extracted to one place so both initialize_caches() and get_global_cache()
+    share it (Messi anti-duplication rule), mirroring _load_hnsw_config()'s
+    own extraction immediately above for the identical reason.
+
+    server/cache/__init__.py is server-only (every get_global_cache() /
+    initialize_caches() caller lives under code_indexer.server.*), so
+    importing get_config_service() and the canonical is_versioned_snapshot
+    predicate here is layering-safe -- unlike snapshot_reader_lease.py,
+    this module has no CLI-reachable import graph to protect.
+
+    Fail-soft (mirrors _load_hnsw_config()'s established try/except
+    pattern): construction of the cache singleton must never fail because
+    config resolution hiccuped (e.g. in a unit test with no real server
+    config on disk). A resolution failure logs a WARNING and returns empty
+    kwargs, which HNSWIndexCache treats as "leasing not configured" --
+    functionally identical to this feature's pre-existing absence.
+    """
+    import logging
+
+    logger = logging.getLogger(__name__)
+    try:
+        from ..services.config_service import get_config_service
+        from ..services.cidx_meta_backup import get_cidx_meta_path
+        from ..storage.shared.snapshot_paths import is_versioned_snapshot
+
+        server_dir = get_config_service().config_manager.server_dir
+        lease_root = get_cidx_meta_path(server_dir)
+        return {
+            "lease_root": lease_root,
+            "is_versioned_snapshot": is_versioned_snapshot,
+        }
+    except Exception as e:
+        logger.warning(
+            format_error_log(
+                "GIT-GENERAL-007",
+                f"Failed to resolve HNSW reader-lease coordination root: "
+                f"{e}. Reader-lease publication disabled for this cache "
+                f"instance.",
+            ),
+            extra={"correlation_id": get_correlation_id()},
+        )
+        return {}
+
+
 def initialize_caches(worker_count: int) -> None:
     """
     Eagerly initialize HNSW and FTS index-cache singletons with a per-worker
@@ -238,7 +288,9 @@ def initialize_caches(worker_count: int) -> None:
             hnsw_config.max_cache_size_mb,  # type: ignore[arg-type]
             worker_count,
         )
-        _global_cache_instance = HNSWIndexCache(config=hnsw_config)
+        _global_cache_instance = HNSWIndexCache(
+            config=hnsw_config, **_resolve_hnsw_lease_kwargs()
+        )
         _global_cache_instance.start_background_cleanup()
         logger.info(
             "Story #1166: HNSW cache initialized with per-worker cap "
@@ -299,7 +351,9 @@ def get_global_cache() -> HNSWIndexCache:
 
     if _global_cache_instance is None:
         config = _load_hnsw_config()
-        _global_cache_instance = HNSWIndexCache(config=config)
+        _global_cache_instance = HNSWIndexCache(
+            config=config, **_resolve_hnsw_lease_kwargs()
+        )
         _global_cache_instance.start_background_cleanup()
 
     return _global_cache_instance

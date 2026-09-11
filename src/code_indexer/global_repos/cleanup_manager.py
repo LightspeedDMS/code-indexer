@@ -19,6 +19,7 @@ from typing import Any, Callable, Dict, Optional, Set
 
 from .query_tracker import QueryTracker
 from .snapshot_deletion_errors import SnapshotDeleteError, SnapshotInUseError
+from .snapshot_reader_lease import snapshot_has_live_reader
 
 
 logger = logging.getLogger(__name__)
@@ -156,6 +157,13 @@ class CleanupManager:
         # gate in _process_cleanup_queue is unchanged — deletion still only fires
         # once QueryTracker reports zero active queries for the path.
         self._snapshot_manager: Optional[object] = None
+        # Bug #1845 remediation round 2 (Defect 3): the shared cross-node
+        # lease-coordination root (golden_repos_dir / "cidx-meta"), wired
+        # post-construction exactly like _snapshot_manager below -- see
+        # set_lease_root(). None until wired means "no lease protection
+        # configured", the correct state for CLI/solo/test construction
+        # that never touches a real versioned snapshot.
+        self._lease_root: Optional[Path] = None
         # Bug #1567: durable pending-deletion queue backend.
         self._persistence_backend: Optional[Any] = None
         if persistence_backend is not None:
@@ -169,6 +177,25 @@ class CleanupManager:
         versioned snapshots; deletion still occurs only behind the refcount gate.
         """
         self._snapshot_manager = snapshot_manager
+
+    def set_lease_root(self, lease_root: Path) -> None:
+        """Wire the shared cross-node lease-coordination root (Bug #1845
+        remediation round 2, Defect 3).
+
+        Mirrors set_snapshot_manager's post-hoc wiring pattern -- the real
+        root (``golden_repos_dir / "cidx-meta"``) is known at lifecycle
+        construction time in ``global_repos_lifecycle.py``, same as
+        ``golden_repos_dir`` itself, so it is wired there immediately
+        after construction. This module never imports
+        ``get_cidx_meta_path`` or the canonical ``is_versioned_snapshot``
+        predicate directly -- both live in server-only modules whose
+        import graphs are proven too heavy for this CLI-reachable module
+        (see snapshot_reader_lease.py's module docstring for the measured
+        evidence).
+        """
+        if lease_root is None:
+            raise ValueError("set_lease_root requires a non-None lease_root")
+        self._lease_root = lease_root
 
     def set_persistence_backend(self, persistence_backend: Any) -> None:
         """Wire the durable pending-deletion backend, post-construction or
@@ -665,6 +692,49 @@ class CleanupManager:
             if ref_count != 0:
                 logger.debug(f"Skipping cleanup for {path}: {ref_count} active queries")
                 continue
+
+            # Bug #1845: QueryTracker ends with the request, but cache/index
+            # handles can remain open on another node.  A live per-reader
+            # lease is the handle-lifetime signal; stale leases expire after
+            # a bounded interval when the owning process has crashed.
+            #
+            # Remediation round 2 (Defects 1+3): classification ("is this a
+            # real versioned snapshot at all") is delegated to the already-
+            # wired VersionedSnapshotManager facade (same facade _delete_index
+            # uses below), never re-derived locally. When it IS versioned we
+            # must know for certain whether a reader lease exists -- an
+            # unwired lease_root here is a genuine misconfiguration, and
+            # silently treating it as "no live reader" would resurrect the
+            # exact data-loss bug this file exists to close, so it raises
+            # loudly instead of guessing.
+            #
+            # self._snapshot_manager is typed Optional[object] (not the
+            # concrete VersionedSnapshotManager) so this CLI-reachable
+            # module never imports the server-only type -- the same
+            # layering reason documented on set_lease_root() above. The
+            # `# type: ignore[attr-defined]` mirrors the identical,
+            # pre-existing pattern already used on
+            # sm.is_versioned_snapshot(index_path) in _delete_index above.
+            sm = self._snapshot_manager
+            if sm is not None and sm.is_versioned_snapshot(path):  # type: ignore[attr-defined]
+                lease_root = self._lease_root
+                if lease_root is None:
+                    raise RuntimeError(
+                        f"CleanupManager: {path!r} is a versioned snapshot "
+                        "but no lease_root has been wired via "
+                        "set_lease_root(); refusing to guess reader "
+                        "liveness rather than risk deleting a snapshot a "
+                        "live reader still holds"
+                    )
+                if snapshot_has_live_reader(path, lease_root=lease_root):
+                    logger.debug("Skipping cleanup for %s: live snapshot reader", path)
+                    self._defer_in_use(
+                        path,
+                        SnapshotInUseError(
+                            "snapshot has a live reader lease", detail="reader lease"
+                        ),
+                    )
+                    continue
 
             # Story #1457 AC13: minimum-retention-age floor, ADDED IN
             # ADDITION TO the refcount-zero gate above. Closes the

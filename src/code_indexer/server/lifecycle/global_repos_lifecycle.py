@@ -96,6 +96,15 @@ class GlobalReposLifecycleManager:
             ),
         )
 
+        # Bug #1845 remediation round 2 (Defect 3): wire the shared cross-node
+        # lease-coordination root so CleanupManager can safely check for live
+        # snapshot readers before deleting. golden_repos_dir is already the
+        # exact value get_cidx_meta_path(server_data_dir) would derive (both
+        # equal server_data_dir / "data" / "golden-repos"), and this
+        # constructor already receives golden_repos_dir directly -- no
+        # server_data_dir/config lookup is needed here.
+        self.cleanup_manager.set_lease_root(self.golden_repos_dir / "cidx-meta")
+
         # Bug #1084 Phase A5: hand the snapshot manager to the CleanupManager so
         # versioned-snapshot deletion is backend-correct (cow-daemon DELETE /
         # FlexClone free / local rmtree) instead of rmtree-only — which leaks the
