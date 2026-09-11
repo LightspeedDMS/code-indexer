@@ -7,6 +7,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [12.48.0] - 2026-09-10
+
+### Fixed
+
+- **#1839 The distributed job worker failed every refresh it claimed, and always had.**
+  `DistributedJobWorkerService` claims a `global_repo_refresh` job -- which flips its row to
+  `running` and so occupies the `idx_active_job_per_repo` dedup slot -- then called
+  `RefreshScheduler.trigger_refresh_for_repo()`, a SUBMISSION entry point. That submitted a
+  SECOND job for the same repo, which the uniqueness guard correctly rejected, citing the
+  worker's own claimed job id; the worker then failed the job it had just claimed. Introduced
+  by commit `29668fdf` (2026-03-30, first released in v9.7.0, ironically titled "Distributed
+  job worker re-executes reclaimed jobs") and never functional since. Fixed by adding
+  `RefreshScheduler.execute_refresh_for_claimed_job()`, which performs the refresh WORK under
+  the already-held slot via `_execute_refresh(..., tracked_by_caller=True)` -- the contract
+  EVO-64385 introduced for exactly this situation. The dedup guard is untouched. A
+  `{"success": False}` result that does not raise is converted to a raise so completion is
+  recorded exactly once. Only reachable in cluster mode on the elected leader, and only when a
+  node lapses mid-refresh, so solo/SQLite deployments were never affected.
+- **#1841 A failed cleanup was followed by a clone into the wreckage.** When the orphan-clone
+  removal on the `add_golden_repo` retry path hit `OSError: [Errno 39] Directory not empty` on
+  `.git`, `shutil.rmtree(..., ignore_errors=True)` swallowed it and execution fell through to
+  `_clone_repository`, producing a golden repo whose `.git` was broken and which answered
+  `fatal: not a git repository` to every subsequent operation, permanently. Now fail-closed:
+  the error propagates as `GitOperationError` and the path is re-checked, so no clone is ever
+  attempted over a partially-deleted directory and the remains are left intact for inspection.
+  The concurrent writer that creates entries during teardown is still unidentified -- tracked
+  as #1843 rather than papered over.
+- **#1842 A pre-claimed dep-map sentinel leaked for up to four hours.**
+  `dependency_map_routes.py` claims the analysis `SharedJobSentinel` synchronously before
+  spawning the worker thread, but three early-return branches in `run_full_analysis` /
+  `_run_delta_analysis_impl` returned before the sentinel object existed, stranding the claim.
+  `cancel_running_analysis()` consulted only the in-process lock -- free by then -- so a cancel
+  could not clear it. Sentinel construction is hoisted and released on every early-exit path,
+  and cancel now also inspects the sentinel. Lock diagnostics additionally name the real holder
+  and hold duration instead of echoing the failed caller's own identity. The coarse
+  `cidx-meta` lock scope was deliberately NOT narrowed: doing so would reopen the corruption
+  race Bug #1506 addressed. No change to Claude CLI invocation mechanics, counts or timeouts.
+
 ## [12.47.0] - 2026-09-10
 
 ### Fixed

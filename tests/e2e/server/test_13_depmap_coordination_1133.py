@@ -608,7 +608,8 @@ async def test_ac1_concurrent_triggers_single_winner(
     assert service_available, (
         "dep_map_service.is_available() still False after bounded wait and cancel — "
         "analysis sentinel or threading.Lock is stuck; cannot establish zero-contention "
-        "baseline for concurrent-triggers test"
+        "baseline for concurrent-triggers test. Diagnostic (Bug #1842 AC4): "
+        f"{_dep_map_service(depmap_enabled_client).describe_unavailable_reason()}"
     )
 
     # Extract the session cookie that _enable_dependency_map() set on the

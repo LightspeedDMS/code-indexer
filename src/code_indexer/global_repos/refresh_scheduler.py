@@ -1612,6 +1612,57 @@ class RefreshScheduler:
             self._execute_refresh(global_alias, force_reset=force_reset)
             return None
 
+    def execute_refresh_for_claimed_job(
+        self,
+        alias_name: str,
+        progress_callback: Optional[Callable[..., None]] = None,
+    ) -> Dict[str, Any]:
+        """
+        Perform the refresh WORK for a job that has ALREADY been claimed and
+        is occupying the idx_active_job_per_repo dedup slot (Bug #1839).
+
+        Used exclusively by DistributedJobWorkerService for a reclaimed
+        'global_repo_refresh'/'refresh_golden_repo' background_jobs row: the
+        claim itself (DistributedJobClaimer.claim_next_job's UPDATE, which
+        marks the row 'running') already IS the active job for
+        (operation_type, repo_alias), so this method must run the refresh
+        directly instead of going through trigger_refresh_for_repo() ->
+        _submit_refresh_job(), which would try to register a SECOND row for
+        the same pair via BackgroundJobManager.submit_job() and collide with
+        the caller's own claimed row -- producing a DuplicateJobError whose
+        existing_job_id is the caller's own job id.
+
+        Mirrors exactly what the BackgroundJobManager worker closure inside
+        _submit_refresh_job() runs for a normally-submitted job:
+        _execute_refresh(global_alias, tracked_by_caller=True). The caller
+        (DistributedJobWorkerService) owns completion/failure bookkeeping via
+        its own complete_job()/fail_job() calls -- this method neither
+        registers nor completes any JobTracker/BackgroundJob row itself, and
+        never calls submit_job().
+
+        Args:
+            alias_name: Bare or global alias (resolved the same way
+                trigger_refresh_for_repo() resolves it).
+            progress_callback: Optional callback(progress, phase=None,
+                detail=None) forwarded into _execute_refresh() so progress is
+                visible the same way a normally-submitted refresh job's
+                progress is.
+
+        Returns:
+            The same result dict _execute_refresh() returns
+            ({"success": bool, ...}).
+
+        Raises:
+            ValueError: If alias is not found in the global registry.
+        """
+        global_alias = self._resolve_global_alias(alias_name)
+        return self._execute_refresh(
+            global_alias,
+            force_reset=False,
+            progress_callback=progress_callback,
+            tracked_by_caller=True,
+        )
+
     def get_refresh_interval(self) -> int:
         """
         Get the configured refresh interval.

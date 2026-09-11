@@ -118,6 +118,54 @@ class DistributedJobWorkerService:
         if op_type in ("global_repo_refresh", "refresh_golden_repo"):
             if not repo_alias:
                 raise ValueError(f"Job {job_id}: repo_alias is required for {op_type}")
-            self._refresh_scheduler.trigger_refresh_for_repo(repo_alias)
+            # Bug #1839: the claim itself (claim_next_job's UPDATE) already
+            # occupies this job's idx_active_job_per_repo dedup slot. Calling
+            # trigger_refresh_for_repo() here would re-enter the SUBMISSION
+            # path (BackgroundJobManager.submit_job), which tries to
+            # register a SECOND row for the same (operation_type,
+            # repo_alias) pair and collides with our own claimed row --
+            # DuplicateJobError naming job_id itself. execute_refresh_for_
+            # claimed_job() performs the refresh WORK directly instead,
+            # exactly like a normally-submitted job's worker closure does.
+            result = self._refresh_scheduler.execute_refresh_for_claimed_job(
+                repo_alias,
+                progress_callback=self._make_progress_callback(job_id),
+            )
+            # Mirror BackgroundJobManager._execute_job's own interpretation
+            # of the refresh result dict (Story #1586 Finding 2): a real
+            # failure can return {"success": False, ...} WITHOUT raising
+            # (e.g. an integrity-gate skip). Raise here so _process_one_job's
+            # existing except block marks the job failed exactly once.
+            if isinstance(result, dict) and result.get("success") is False:
+                failure_detail = result.get("message") or result.get("error")
+                raise RuntimeError(failure_detail or f"Refresh failed for {repo_alias}")
         else:
             raise ValueError(f"Unknown retryable job type: {op_type}")
+
+    def _make_progress_callback(self, job_id: str) -> Optional[Any]:
+        """Build a progress_callback forwarding into the claimer's shared DB
+        row, so a claimed refresh job's progress is visible on the dashboard
+        the same way a normally-submitted refresh job's progress is.
+
+        Returns None when the claimer has no update_progress (e.g. a
+        minimal test double) so RefreshScheduler treats it as "no callback".
+        """
+        update_progress = getattr(self._claimer, "update_progress", None)
+        if update_progress is None:
+            return None
+
+        def _progress_callback(
+            progress: int,
+            phase: Optional[str] = None,
+            detail: Optional[str] = None,
+        ) -> None:
+            try:
+                update_progress(job_id, progress, phase=phase, detail=detail)
+            except Exception:
+                logger.debug(
+                    "DistributedJobWorkerService: progress update failed for %s",
+                    job_id,
+                    exc_info=True,
+                )
+
+        return _progress_callback
