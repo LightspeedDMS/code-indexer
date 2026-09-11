@@ -7,6 +7,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [12.49.0] - 2026-09-11
+
+### Added
+
+- **#1593 Group-scoped MCP tool access enforcement** (story 1 of 5, epic #1592). Per-tool,
+  per-group access control as the live mechanism for MCP tool visibility and dispatch, backed by
+  a new `tool_group_access` table on both backends (migration 052, `CREATE TABLE/INDEX IF NOT
+  EXISTS` only so rolling restarts are safe). Wired into all FIVE enforcement sites through one
+  shared `ToolAccessMemo.is_allowed()` and one shared `resolve_effective_user()`. Cluster-aware
+  by construction: no module-level dict, no class-level dict, no `ContextVar`, no cross-request
+  cache -- the memo is built per request and passed explicitly, which is what keeps it correct
+  across this project's executor-dispatched sync-handler boundary. Revocation takes effect on
+  the next request with no restart. The single hardcoded exception
+  (`_ALWAYS_AVAILABLE_TOOLS = frozenset({"authenticate"})`) is pinned by SET EQUALITY, so adding
+  a second member fails a test by construction. Enforcement stays dormant behind story 2's
+  readiness marker, so no user loses access before grants are seeded.
+
+### Fixed
+
+- **#1835 Dead-code detection can produce a true positive again.** #1833 made
+  `is_definitely_dead_code` fully conservative to stop it declaring 41% of jsoup dead; that was
+  correct but removed every true positive too, leaving the predicate informationally empty while
+  the tool still advertised dead-code detection. Java visibility now flows extractor ->
+  `LocalIndex` -> CSR arena -> predicate via a side-table mirroring the existing `signatures`
+  map. Crucially, "no explicit modifier" means package-private for a class member but implicitly
+  PUBLIC for an interface member, and the extractor cannot tell them apart -- so `Unknown` is the
+  only outcome without an explicit keyword and `Some(true)` requires an explicit `private`.
+  Defaulting otherwise would have re-condemned exactly jsoup's `Connection`/`Response` methods.
+  No ABI bump (FFI signature unchanged); wire MAGIC `XRAYGRF1` -> `XRAYGRF2` so stale graph files
+  fail loud rather than misparse a positional format.
+- **#1844 CoW snapshot cleanup is cluster-safe.** `list_cleanup_pending_deletions()` had no node
+  predicate in either backend, so every node and every `uvicorn` worker hydrated the whole fleet
+  queue and independently issued the same DELETE, sequenced only by per-process RAM. Deletion is
+  now claimed fleet-wide via the existing `register_job_if_no_conflict` arbiter. The daemon now
+  distinguishes `409 CLONE_IN_USE` from `500 CLONE_DELETE_FAILED` and carries the real errno, so
+  the cause reaches our own logs instead of requiring host access. In-use is deferred on a
+  bounded schedule instead of burning the failure budget. The NFS silly-rename hypothesis was
+  refuted from the daemon's own source (it uses `cp --reflink` on local XFS); the inverted
+  concern that a reader can have its data deleted underneath it is filed separately as #1845.
+  Also fixes a silent failure found along the way: `LocalCloneBackend.delete_clone` returned
+  `False` on `OSError` while `_delete_index` discarded the result, recording a failed deletion
+  as success.
+
 ## [12.48.0] - 2026-09-10
 
 ### Fixed
