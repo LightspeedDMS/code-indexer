@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import List, Dict, Any
 
 from code_indexer.server.auth.user_manager import User
+from .tool_access import _ALWAYS_AVAILABLE_TOOLS
 
 
 # =============================================================================
@@ -79,7 +80,13 @@ def _build_registry() -> Dict[str, Dict[str, Any]]:
 TOOL_REGISTRY: Dict[str, Dict[str, Any]] = _build_registry()
 
 
-def filter_tools_by_role(user: User, config=None) -> List[Dict[str, Any]]:
+def filter_tools_by_role(
+    user: User,
+    config=None,
+    *,
+    session_state=None,
+    tool_access_memo=None,
+) -> List[Dict[str, Any]]:
     """
     Filter tools based on user role, permissions, and configuration requirements.
 
@@ -94,11 +101,25 @@ def filter_tools_by_role(user: User, config=None) -> List[Dict[str, Any]]:
     Returns:
         List of MCP-compliant tool definitions (name, description, inputSchema only)
     """
+    from .tool_access import ToolAccessMemo, resolve_effective_user
+
+    if tool_access_memo is None:
+        tool_access_memo = ToolAccessMemo()
+    effective_user = resolve_effective_user(user, session_state)
     filtered_tools = []
 
     for tool_name, tool_def in TOOL_REGISTRY.items():
         required_permission = tool_def["required_permission"]
-        if not user.has_permission(required_permission):
+        group_decision = (
+            True
+            if tool_name in _ALWAYS_AVAILABLE_TOOLS
+            else tool_access_memo.is_allowed(tool_name, effective_user)
+        )
+        if group_decision is False:
+            continue
+        if group_decision is None and not effective_user.has_permission(
+            required_permission
+        ):
             continue
 
         # Story #185: Check if tool requires specific configuration

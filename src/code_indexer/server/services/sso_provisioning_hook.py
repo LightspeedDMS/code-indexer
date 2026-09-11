@@ -165,25 +165,25 @@ class SSOProvisioningHook:
                         "Run database initialization to create default groups."
                     )
 
-            # AC1: Assign new user to determined group
-            self.group_manager.assign_user_to_group(
-                user_id=user_id,
-                group_id=target_group.id,
-                assigned_by=SSO_PROVISIONING_ASSIGNED_BY,
-            )
-
-            # AC7 (Story #710): Log to audit trail for administrative actions
+            # AC1: Assign new user to determined group.
+            # Story #1593 AC7: routed through the shared
+            # GroupAccessManager.ensure_user_group_membership() primitive
+            # instead of an independent inline assign+audit
+            # implementation. Safe to call here even though
+            # `existing_group is None` was already confirmed above --
+            # the primitive's own idempotency check is a harmless
+            # redundant read in that case, not a behavior change.
             mapping_info = (
                 f" (mapped from external groups: {external_groups})"
                 if external_groups and target_group_name != DEFAULT_GROUP_USERS
                 else ""
             )
-            self.group_manager.log_audit(
-                admin_id=SSO_PROVISIONING_ASSIGNED_BY,
+            self.group_manager.ensure_user_group_membership(
+                user_id,
+                target_group,
+                assigned_by=SSO_PROVISIONING_ASSIGNED_BY,
                 action_type="user_assign",
-                target_type="user",
-                target_id=user_id,
-                details={
+                audit_details={
                     "group": target_group_name,
                     "source": "sso_auto_provision",
                     "external_groups": (

@@ -1711,7 +1711,10 @@ def create_user(
     try:
         user_manager.create_user(new_username, new_password, role_enum)
 
-        # Auto-assign new user to appropriate group based on role
+        # Auto-assign new user to appropriate group based on role.
+        # Story #1593 AC7: routed through the shared
+        # GroupAccessManager.ensure_user_group_membership() primitive
+        # instead of an independent inline assign+audit implementation.
         try:
             from ..services.constants import DEFAULT_GROUP_ADMINS, DEFAULT_GROUP_USERS
 
@@ -1722,15 +1725,12 @@ def create_user(
                 target_group = group_manager.get_group_by_name(DEFAULT_GROUP_USERS)
 
             if target_group:
-                group_manager.assign_user_to_group(
-                    new_username, target_group.id, session.username
-                )
-                group_manager.log_audit(
-                    admin_id=session.username,
+                group_manager.ensure_user_group_membership(
+                    new_username,
+                    target_group,
+                    assigned_by=session.username,
                     action_type="user_group_assign",
-                    target_type="user",
-                    target_id=new_username,
-                    details={
+                    audit_details={
                         "group": target_group.name,
                         "reason": "auto_assign_on_creation",
                     },

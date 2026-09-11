@@ -11,7 +11,7 @@ Story #705: Default Group Bootstrap and User Assignment Infrastructure
 """
 
 import logging
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Response, status
 from pydantic import BaseModel, Field, model_validator
@@ -27,6 +27,8 @@ from ..services.group_access_manager import (
     GroupHasUsersError,
     CidxMetaCannotBeRevokedError,
 )
+from ..mcp.tools import TOOL_REGISTRY
+from ..mcp.tool_access import _ALWAYS_AVAILABLE_TOOLS
 
 logger = logging.getLogger(__name__)
 
@@ -146,6 +148,44 @@ class BulkRemoveReposResponse(BaseModel):
     message: str
 
 
+def _audit_tool_mutation(
+    group_manager: GroupAccessManager,
+    admin_id: str,
+    action_type: str,
+    tool_name: str,
+    group: Optional[Group],
+) -> None:
+    """Record tool mutation audit without blocking the authoritative write."""
+    try:
+        group_manager.log_audit(
+            admin_id=admin_id,
+            action_type=action_type,
+            target_type="tool",
+            target_id=tool_name,
+            details={
+                "tool": tool_name,
+                "group": group.name if group is not None else None,
+                "group_id": group.id if group is not None else None,
+            },
+        )
+    except Exception:
+        logger.exception(
+            "Tool access mutation succeeded but audit write failed: "
+            "action=%s tool=%s group=%s",
+            action_type,
+            tool_name,
+            group.id if group is not None else None,
+        )
+
+
+def _reject_always_available_tool(tool_name: str) -> None:
+    if tool_name in _ALWAYS_AVAILABLE_TOOLS:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Tool '{tool_name}' is always available and cannot be mutated",
+        )
+
+
 class CreateGroupRequest(BaseModel):
     """Request model for creating a custom group."""
 
@@ -206,6 +246,146 @@ def _group_to_response(group: Group) -> GroupResponse:
         is_default=group.is_default,
         created_at=group.created_at.isoformat(),
     )
+
+
+# =========================================================================
+# Tool Access Endpoints (Story #1593, AC5/AC6)
+#
+# Registered BEFORE the generic "/{group_id}"-pattern routes below.
+# FastAPI/Starlette matches routes in registration order: a route whose
+# path is a bare parameter (e.g. "/{group_id}") structurally matches ANY
+# single-segment path, including the literal "/tool-access" -- if that
+# generic route were registered first, "/tool-access" would be captured
+# as group_id, fail int coercion, and 422 before ever reaching the
+# intended handler below. Within this block, the literal
+# "/tool-access/{tool_name}/bulk-disable" route is likewise registered
+# BEFORE the generic "/tool-access/{group_id}/{tool_name}" route, for
+# the identical reason (both are 3-segment patterns after "tool-access").
+# =========================================================================
+
+
+@router.get(
+    "/tool-access",
+    dependencies=[Depends(dependencies.require_elevation())],
+)
+def get_tool_access(
+    current_user: User = Depends(get_current_admin_user),
+    group_manager: GroupAccessManager = Depends(get_group_manager),
+) -> Dict[str, Any]:
+    """Return every registered tool's state for every group."""
+    del current_user  # dependency enforces the admin guard
+    groups = group_manager.get_all_groups()
+    tools = []
+    for tool_name, tool_definition in TOOL_REGISTRY.items():
+        tools.append(
+            {
+                "tool_name": tool_name,
+                "description": tool_definition.get("description", ""),
+                "groups": [
+                    {
+                        "group_id": group.id,
+                        "group_name": group.name,
+                        "allowed": (
+                            tool_name in _ALWAYS_AVAILABLE_TOOLS
+                            or group_manager.is_tool_allowed(tool_name, group.id)
+                        ),
+                    }
+                    for group in groups
+                ],
+            }
+        )
+    return {"tools": tools}
+
+
+@router.post(
+    "/tool-access/{tool_name}/bulk-disable",
+    dependencies=[Depends(dependencies.require_elevation())],
+)
+def bulk_disable_tool_access(
+    tool_name: str,
+    current_user: User = Depends(get_current_admin_user),
+    group_manager: GroupAccessManager = Depends(get_group_manager),
+) -> Dict[str, Any]:
+    """Atomically disable one tool for all groups existing at call time."""
+    _reject_always_available_tool(tool_name)
+    if tool_name not in TOOL_REGISTRY:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Tool '{tool_name}' not found",
+        )
+    affected_group_ids = group_manager.set_tool_access_all_groups(
+        tool_name, False, current_user.username
+    )
+    groups_by_id = {group.id: group for group in group_manager.get_all_groups()}
+    for group_id in affected_group_ids:
+        _audit_tool_mutation(
+            group_manager,
+            current_user.username,
+            "tool_access_bulk_disable",
+            tool_name,
+            groups_by_id.get(group_id),
+        )
+    return {"tool_name": tool_name, "affected_group_ids": affected_group_ids}
+
+
+@router.post(
+    "/tool-access/{group_id}/{tool_name}",
+    dependencies=[Depends(dependencies.require_elevation())],
+)
+def grant_tool_access(
+    group_id: int,
+    tool_name: str,
+    current_user: User = Depends(get_current_admin_user),
+    group_manager: GroupAccessManager = Depends(get_group_manager),
+) -> Dict[str, Any]:
+    """Grant one registered MCP tool to a group."""
+    _reject_always_available_tool(tool_name)
+    if tool_name not in TOOL_REGISTRY:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Tool '{tool_name}' not found",
+        )
+    group = group_manager.get_group(group_id)
+    if group is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Group with ID {group_id} not found",
+        )
+    group_manager.set_tool_access(tool_name, group_id, True, current_user.username)
+    _audit_tool_mutation(
+        group_manager, current_user.username, "tool_access_grant", tool_name, group
+    )
+    return {"tool_name": tool_name, "group_id": group_id, "allowed": True}
+
+
+@router.delete(
+    "/tool-access/{group_id}/{tool_name}",
+    dependencies=[Depends(dependencies.require_elevation())],
+)
+def revoke_tool_access(
+    group_id: int,
+    tool_name: str,
+    current_user: User = Depends(get_current_admin_user),
+    group_manager: GroupAccessManager = Depends(get_group_manager),
+) -> Dict[str, Any]:
+    """Revoke one registered MCP tool from a group."""
+    _reject_always_available_tool(tool_name)
+    if tool_name not in TOOL_REGISTRY:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Tool '{tool_name}' not found",
+        )
+    group = group_manager.get_group(group_id)
+    if group is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Group with ID {group_id} not found",
+        )
+    group_manager.set_tool_access(tool_name, group_id, False, current_user.username)
+    _audit_tool_mutation(
+        group_manager, current_user.username, "tool_access_revoke", tool_name, group
+    )
+    return {"tool_name": tool_name, "group_id": group_id, "allowed": False}
 
 
 @router.get("", response_model=List[GroupResponse])
