@@ -17,7 +17,7 @@
 use super::local_index::{
     AnnotationRecord, ArgShape, ConstructionSite, Declaration, DeclarationKind, ImportKind, ImportRecord,
     InheritanceKind, InheritanceRecord, InvocationSite, LocalIndex, MethodOwnerRecord, MethodReturnTypeRecord,
-    NameScope, TypeReferenceRecord, TypedNameRecord,
+    NameScope, TypeReferenceRecord, TypedNameRecord, Visibility,
 };
 use super::LanguageExtractor;
 use crate::graph::identity::{make_symbol_id, SymbolId};
@@ -207,6 +207,7 @@ fn extract_type_declaration(
 
     let signature = format!("{} {}", type_keyword(&node.kind), name);
     index.signatures.insert(symbol, signature);
+    index.visibilities.insert(symbol, visibility_of_modifiers(node));
     index.declarations.push(Declaration {
         kind: DeclarationKind::Type,
         name,
@@ -374,6 +375,7 @@ fn extract_method_declaration(
     let (param_types, is_varargs) =
         formal_parameters.map(extract_param_types_and_varargs).unwrap_or_default();
     index.signatures.insert(symbol, format!("{name}({param_count} params)"));
+    index.visibilities.insert(symbol, visibility_of_modifiers(node));
 
     index.declarations.push(Declaration {
         kind: DeclarationKind::Method,
@@ -425,6 +427,30 @@ fn has_modifier(modifiers: &OwnedNode, keyword: &str) -> bool {
     modifiers.children.iter().any(|c| c.kind == keyword)
 }
 
+/// Story #1835 AC1: resolves a declaration's explicit Java access
+/// modifier off its own `modifiers` node, reusing the exact
+/// child-node-kind check `field_declaration_kind` already relies on for
+/// `static`/`final`. Absent modifiers (no `modifiers` node at all, or one
+/// present but carrying none of `public`/`protected`/`private`) map to
+/// `Visibility::Unknown`, NEVER to a restricted default -- see
+/// `Visibility`'s own doc comment (`local_index.rs`) for why: an
+/// interface/annotation-type member with no explicit modifier is
+/// implicitly `public`, and this extractor does not track "is the
+/// enclosing type an interface" context to tell that apart from a real
+/// class member's package-private default.
+fn visibility_of_modifiers(node: &OwnedNode) -> Visibility {
+    let Some(modifiers) = node.child_by_kind("modifiers") else { return Visibility::Unknown };
+    if has_modifier(modifiers, "private") {
+        Visibility::Private
+    } else if has_modifier(modifiers, "protected") {
+        Visibility::Protected
+    } else if has_modifier(modifiers, "public") {
+        Visibility::Public
+    } else {
+        Visibility::Unknown
+    }
+}
+
 fn field_declaration_kind(node: &OwnedNode) -> DeclarationKind {
     let is_constant = node
         .child_by_kind("modifiers")
@@ -454,6 +480,7 @@ fn extract_field_declaration(
         let name = name_node.text().to_string();
         let symbol = next_symbol(file_id, next_local);
         index.signatures.insert(symbol, format!("{keyword} {name}"));
+        index.visibilities.insert(symbol, visibility_of_modifiers(node));
         index.declarations.push(Declaration {
             kind,
             name,
@@ -647,6 +674,53 @@ mod tests {
         assert_eq!(field.kind, DeclarationKind::Field);
         let constant = index.declaration_named("MAX").unwrap();
         assert_eq!(constant.kind, DeclarationKind::Constant);
+    }
+
+    /// Story #1835 AC1 (RED against unmodified code -- `index.visibilities`
+    /// exists but nothing populates it yet, so every lookup here falls back
+    /// to `Unknown` and the `Private`/`Public` assertions fail): explicit
+    /// `private`/`public` modifiers on a method, a field, and a type
+    /// declaration must be recorded faithfully, and a package declaration
+    /// (no visibility concept at all) plus an UNMARKED method (no explicit
+    /// modifier keyword) must both read back as `Unknown` -- never silently
+    /// defaulted to a restricted visibility (AC1's explicit requirement;
+    /// see `Visibility`'s doc comment on why absent-modifier package-default
+    /// semantics are deliberately not inferred).
+    #[test]
+    fn extracts_visibility_from_explicit_modifiers_and_unknown_when_absent() {
+        let index = extract_source(
+            "package com.example;\n\
+             public class First {\n\
+             \x20   private void hidden() {}\n\
+             \x20   public void exposed() {}\n\
+             \x20   void packageScoped() {}\n\
+             \x20   private int secretField;\n\
+             \x20   public int openField;\n\
+             }\n",
+        );
+
+        let visibility_of = |name: &str| -> Visibility {
+            let decl = index.declaration_named(name).unwrap();
+            index.visibilities.get(&decl.symbol).copied().unwrap_or(Visibility::Unknown)
+        };
+
+        assert_eq!(visibility_of("First"), Visibility::Public);
+        assert_eq!(visibility_of("hidden"), Visibility::Private);
+        assert_eq!(visibility_of("exposed"), Visibility::Public);
+        assert_eq!(
+            visibility_of("packageScoped"),
+            Visibility::Unknown,
+            "an unmarked method must be Unknown, never silently inferred as a restricted visibility"
+        );
+        assert_eq!(visibility_of("secretField"), Visibility::Private);
+        assert_eq!(visibility_of("openField"), Visibility::Public);
+
+        let pkg = index.declaration_named("com.example").unwrap();
+        assert_eq!(
+            index.visibilities.get(&pkg.symbol).copied().unwrap_or(Visibility::Unknown),
+            Visibility::Unknown,
+            "a package declaration has no visibility concept and must read back Unknown"
+        );
     }
 
     #[test]

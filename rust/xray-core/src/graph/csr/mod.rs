@@ -149,11 +149,11 @@ pub mod handle {
 
     /// D2 fix: exposes the dead-code verdict. See
     /// `CodeGraph::is_definitely_dead_code` -- `Some(false)` for any
-    /// referenced symbol regardless of completeness; `None` for an
-    /// unreferenced symbol, always (Bug #1833: the graph carries no
-    /// visibility/entry-point evidence, so an absent in-repo reference is
-    /// never provable unreachability -- `Some(true)` is presently
-    /// unreachable pending that evidence being plumbed end-to-end).
+    /// referenced symbol regardless of completeness; `Some(true)` (Story
+    /// #1835) for an unreferenced symbol PROVABLY not externally visible
+    /// (Java `private`); `None` for every other unreferenced symbol (Bug
+    /// #1833: `Public`/`Protected`/`Unknown` visibility carries no in-repo
+    /// evidence that can prove unreachability from outside the repo).
     fn thunk_is_definitely_dead_code(ctx: CtxPtr, dense_id: u32) -> Option<bool> {
         graph_from_ctx(ctx).is_definitely_dead_code(dense_id)
     }
@@ -256,12 +256,15 @@ pub mod handle {
 
         /// D2 fix: the dead-code verdict -- see
         /// `CodeGraph::is_definitely_dead_code`. `Some(false)` means
-        /// referenced (never dead, regardless of completeness); `None`
-        /// means undecidable -- unreferenced, with no in-repo evidence
-        /// this crate can currently use to prove the symbol unreachable
-        /// from outside the repo (Bug #1833). `Some(true)` is presently
-        /// unreachable. This is the ONE surface an evaluator needs to
-        /// avoid claiming a confident "dead" verdict the graph cannot back.
+        /// referenced (never dead, regardless of completeness);
+        /// `Some(true)` (Story #1835) means unreferenced AND PROVABLY not
+        /// externally visible (Java `private`) -- a real dead-code
+        /// verdict; `None` means undecidable -- unreferenced with no
+        /// in-repo evidence this crate can use to prove the symbol
+        /// unreachable from outside the repo (`Public`/`Protected`/
+        /// `Unknown` visibility, Bug #1833). This is the ONE surface an
+        /// evaluator needs to avoid claiming a confident "dead" verdict
+        /// the graph cannot back.
         pub fn is_definitely_dead_code(&self, dense_id: u32) -> Option<bool> {
             (self.is_definitely_dead_code_fn)(self.ctx, dense_id)
         }

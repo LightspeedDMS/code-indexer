@@ -1231,13 +1231,31 @@ fn analyze_graph(g: &GraphHandle<'_>, facts: &FactsHandle<'_>) -> GraphResult {
         );
 
         let patterns: Vec<&str> = result.findings.iter().map(|f| f.pattern.as_str()).collect();
+        // Story #1835 AC6: `neverCalled` is now fixture-marked PRIVATE, so
+        // UC1 must restore a REAL dead-code finding for it -- the true
+        // positive Bug #1833's fix gave up on -- instead of the merely
+        // suppressed/undecidable finding this test asserted pre-#1835.
         assert!(
-            !result.findings.iter().any(|f| f.pattern == "uc1_dead_code" && f.message.contains("neverCalled")),
-            "UC1 must not claim unreferenced neverCalled is definitely dead without visibility evidence: {patterns:?}"
+            result.findings.iter().any(|f| f.pattern == "uc1_dead_code" && f.message.contains("neverCalled")),
+            "UC1 must report a real dead-code finding for the unreferenced PRIVATE neverCalled \
+             symbol: {patterns:?}"
         );
         assert!(
-            result.findings.iter().any(|f| f.pattern == "uc1_dead_code_suppressed" && f.message.contains("neverCalled")),
-            "UC1 must report its conservative dead-code decision for neverCalled: {patterns:?}"
+            !result.findings.iter().any(|f| f.pattern == "uc1_dead_code_suppressed" && f.message.contains("neverCalled")),
+            "neverCalled now has real visibility evidence, so it must NOT fall into the \
+             suppressed/undecidable branch any more: {patterns:?}"
+        );
+        // AC4's dual-direction spirit, restated at this real-dylib
+        // integration level too: an unreferenced PUBLIC symbol in the SAME
+        // graph must stay suppressed, never a false dead-code claim.
+        assert!(
+            !result.findings.iter().any(|f| f.pattern == "uc1_dead_code" && f.message.contains("publicApi")),
+            "UC1 must NOT claim the unreferenced PUBLIC publicApiMethod is definitely dead: {patterns:?}"
+        );
+        assert!(
+            result.findings.iter().any(|f| f.pattern == "uc1_dead_code_suppressed" && f.message.contains("publicApi")),
+            "UC1 must still report its conservative suppressed decision for the unreferenced \
+             PUBLIC publicApiMethod: {patterns:?}"
         );
         assert!(
             result.findings.iter().any(|f| f.pattern == "uc2_unreferenced" && f.message.contains("neverCalled")),
@@ -1263,12 +1281,17 @@ fn analyze_graph(g: &GraphHandle<'_>, facts: &FactsHandle<'_>) -> GraphResult {
     /// health endpoint (dense 4, signature contains "ping") with NO
     /// outgoing edges at all (the UC5 negative control -- must reach no
     /// sink), a `getOnce` cache accessor (dense 5, signature contains
-    /// "once" -- UC6 blast radius), an unreferenced `neverCalled` symbol
-    /// (dense 6, UC1 safety probe/UC2 unreferenced), and a genuine 2-node cycle (dense 7 <->
-    /// 8, UC4).
+    /// "once" -- UC6 blast radius), an unreferenced, PRIVATE `neverCalled`
+    /// symbol (dense 6, Story #1835's restored real UC1 dead-code
+    /// finding/UC2 unreferenced), a genuine 2-node cycle (dense 7 <-> 8,
+    /// UC4), and an unreferenced, PUBLIC `publicApiMethod` symbol (dense
+    /// 9, UC1's still-conservative suppressed finding -- the AC4
+    /// discriminating counterpart to `neverCalled`, restated here at the
+    /// real-dylib level).
     fn six_use_case_test_graph() -> crate::graph::csr::CodeGraph {
         use crate::graph::csr::builder::CodeGraphBuilder;
         use crate::graph::csr::candidate::Candidate;
+        use crate::graph::extract::local_index::Visibility;
         use crate::graph::identity::make_symbol_id;
         use crate::graph::reasons;
 
@@ -1282,6 +1305,11 @@ fn analyze_graph(g: &GraphHandle<'_>, facts: &FactsHandle<'_>) -> GraphResult {
         let never_called = builder.intern_symbol(make_symbol_id(5, 0));
         let cycle_a = builder.intern_symbol(make_symbol_id(6, 0));
         let cycle_b = builder.intern_symbol(make_symbol_id(6, 1));
+        // Story #1835 AC6: a second unreferenced symbol, PUBLIC this time,
+        // so UC1's restored real finding and its still-live conservative
+        // suppression both fire in the SAME graph -- the discriminating
+        // pair AC4 requires, restated at this real-dylib level.
+        let public_api_symbol = builder.intern_symbol(make_symbol_id(7, 0));
 
         builder.add_signature(order_controller, "class OrderController".to_string());
         builder.add_signature(delete_user_account, "deleteUserAccount() deleteUser".to_string());
@@ -1292,6 +1320,13 @@ fn analyze_graph(g: &GraphHandle<'_>, facts: &FactsHandle<'_>) -> GraphResult {
         builder.add_signature(never_called, "neverCalled()".to_string());
         builder.add_signature(cycle_a, "methodA()".to_string());
         builder.add_signature(cycle_b, "methodB()".to_string());
+        builder.add_signature(public_api_symbol, "publicApiMethod()".to_string());
+        // Story #1835: `neverCalled` is a PRIVATE helper -- provably not
+        // externally visible, so unreferenced really does mean dead.
+        // `publicApiMethod` is PUBLIC -- exactly jsoup's Connection/
+        // Response shape (Bug #1833) -- so it must stay undecidable.
+        builder.add_visibility(never_called, Visibility::Private);
+        builder.add_visibility(public_api_symbol, Visibility::Public);
 
         // UC3: controller calls repository directly.
         builder.add_reference(order_controller, 1, 1, 0, &[Candidate::new(order_repository, reasons::SAME_FILE)]);
@@ -1305,11 +1340,13 @@ fn analyze_graph(g: &GraphHandle<'_>, facts: &FactsHandle<'_>) -> GraphResult {
             builder.mark_referenced(referenced);
         }
         // ping_check deliberately has NO outgoing references -- the UC5
-        // negative control -- and never_called is deliberately never
-        // referenced at all -- the UC1 conservative safety-probe and UC2
-        // unreferenced-symbol fixture.
+        // negative control -- and never_called/public_api_symbol are
+        // deliberately never referenced at all -- the UC1 real-finding and
+        // still-conservative-suppression fixture pair, and UC2's
+        // unreferenced-symbol demonstration.
         let _ = ping_check;
         let _ = never_called;
+        let _ = public_api_symbol;
 
         builder.build()
     }
@@ -1376,13 +1413,19 @@ fn uc1_uc2_uc6(g: &GraphHandle<'_>, ids: &Vec<u32>) -> Vec<ReduceFinding> {
                 String::new()
             }
         };
-        // The visibility-blind graph cannot prove that an unreferenced symbol
-        // is unreachable from outside the repository. Keep UC1 as an explicit
-        // safety probe: it records suppression, never a false dead-code claim.
-        if !g.is_symbol_referenced(d) && g.is_definitely_dead_code(d) != Some(true) {
-            out.push(flag("uc1_dead_code_suppressed", sig.clone(), sym, sig.clone()));
-        }
+        // Story #1835: is_definitely_dead_code now returns Some(true) for a
+        // symbol that is BOTH unreferenced AND provably not externally
+        // visible (Java `private`) -- a real, restored UC1 finding. Every
+        // other unreferenced case (Public/Protected/Unknown visibility)
+        // stays the conservative suppressed/undecidable finding UC1 has
+        // reported since Bug #1833: the graph cannot prove those are
+        // unreachable from outside the repository.
         if !g.is_symbol_referenced(d) {
+            if g.is_definitely_dead_code(d) == Some(true) {
+                out.push(flag("uc1_dead_code", sig.clone(), sym, sig.clone()));
+            } else {
+                out.push(flag("uc1_dead_code_suppressed", sig.clone(), sym, sig.clone()));
+            }
             out.push(flag("uc2_unreferenced", sig.clone(), sym, sig.clone()));
         }
         if sig.contains("format") || sig.contains("once") {

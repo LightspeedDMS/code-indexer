@@ -11,6 +11,7 @@ use super::reference::Reference;
 use super::symbol_table::SymbolTable;
 use crate::graph::bind::depth::BinderDepth;
 use crate::graph::budget::{AnalysisCompleteness, ReferencedBits};
+use crate::graph::extract::local_index::Visibility;
 use crate::graph::identity::SymbolId;
 use crate::graph::string_table::StringTable;
 use std::collections::HashMap;
@@ -33,6 +34,11 @@ pub struct CodeGraph {
     /// AC6 step 1: per-symbol cached signature lines, dropped entirely on
     /// a budget-exceeded build.
     signatures: HashMap<u32, String>,
+    /// Story #1835 (AC2): per-symbol declared `Visibility`, attached
+    /// unconditionally (never dropped under budget pressure -- see
+    /// `CodeGraphBuilder::visibilities`'s doc comment). A dense id absent
+    /// here reads back as `Visibility::Unknown` via `visibility_for`.
+    visibilities: HashMap<u32, Visibility>,
     /// Dual-review defect M2 fix: CSR forward adjacency (callees), built
     /// ONCE here rather than re-scanned per query -- see `super::adjacency`
     /// module docs for why `callees_of`/`strongly_connected_components`
@@ -60,6 +66,7 @@ impl CodeGraph {
         completeness: AnalysisCompleteness,
         referenced: ReferencedBits,
         signatures: HashMap<u32, String>,
+        visibilities: HashMap<u32, Visibility>,
     ) -> Self {
         let forward_index = super::adjacency::AdjacencyIndex::build_forward(symbols.len(), &references, &candidates);
         let reverse_index = super::adjacency::AdjacencyIndex::build_reverse(symbols.len(), &references, &candidates);
@@ -72,6 +79,7 @@ impl CodeGraph {
             completeness,
             referenced,
             signatures,
+            visibilities,
             forward_index,
             reverse_index,
         }
@@ -87,6 +95,15 @@ impl CodeGraph {
     /// symbol id as its target.
     pub fn is_symbol_referenced(&self, dense_symbol_id: u32) -> bool {
         self.referenced.is_referenced(dense_symbol_id)
+    }
+
+    /// Story #1835 (AC2/AC3): this symbol's declared `Visibility`, or
+    /// `Visibility::Unknown` if the extractor never recorded one (no
+    /// modifier evidence, an unsupported declaration shape, or a language
+    /// with no extractor at all -- see `Visibility`'s own doc comment for
+    /// why `Unknown` is always the safe default, never a restricted one).
+    pub fn visibility_for(&self, dense_symbol_id: u32) -> Visibility {
+        self.visibilities.get(&dense_symbol_id).copied().unwrap_or(Visibility::Unknown)
     }
 
     /// AC6 step 1: this symbol's cached AC2 signature line, or `None` if
@@ -198,37 +215,62 @@ impl CodeGraph {
         self.symbols.dense_id_of(symbol)
     }
 
-    /// Bug #1833 fix: this graph carries NO visibility or entry-point
-    /// evidence anywhere in the CSR arena (no modifier bit on `SymbolId`,
-    /// `Candidate`, `Reference`, or `Declaration` -- confirmed by
-    /// inspection, not assumed). `AnalysisCompleteness::Complete` means
-    /// "every file in this repo parsed without degradation"; it does NOT
-    /// mean "no caller exists anywhere" -- a library's entire public API
-    /// has zero IN-REPO callers by construction, since real callers are
-    /// downstream projects outside this repo. The pre-fix code treated
+    /// Bug #1833 fix + Story #1835 restoration: this graph originally
+    /// carried NO visibility or entry-point evidence anywhere in the CSR
+    /// arena. `AnalysisCompleteness::Complete` means "every file in this
+    /// repo parsed without degradation"; it does NOT mean "no caller
+    /// exists anywhere" -- a library's entire public API has zero IN-REPO
+    /// callers by construction, since real callers are downstream
+    /// projects outside this repo. The pre-#1833-fix code treated
     /// `Complete` + unreferenced as proof of death, which on a real
     /// library (jsoup-global, Bug #1833) flagged 1296/3147 symbols
     /// "definitely dead" -- including documented public API -- purely
     /// because nothing else in the SAME repo happened to call them.
     ///
+    /// Story #1835 restores a real `Some(true)` tier on top of that fix,
+    /// scoped to EXACTLY the one case that is decidable without
+    /// whole-program analysis: a symbol whose declared `Visibility` is
+    /// PROVABLY not externally visible (`Visibility::is_provably_not_
+    /// externally_visible`, currently `Private` only -- see that type's
+    /// doc comment in `graph::extract::local_index`) cannot be called from
+    /// outside this repository BY DEFINITION, so "unreferenced" for it
+    /// really does mean dead. Every other case -- `Public`/`Protected`
+    /// (externally reachable) or `Unknown` (no modifier evidence, or a
+    /// declaration shape/language the extractor does not classify) --
+    /// stays `None`, exactly Bug #1833's conservative behavior. This
+    /// intentionally does NOT chase reflection, service loaders,
+    /// annotation-driven invocation, dependency injection, or JNI: those
+    /// mechanisms can make even a `private` symbol reachable in ways
+    /// static analysis cannot see, but they operate through Java's
+    /// reflection API (`Class`/`Method`/`Field` with `setAccessible`),
+    /// which bypasses the language's OWN compile-time visibility
+    /// enforcement entirely -- there is no local syntactic signal in the
+    /// callee's own declaration that a caller will do this, so no
+    /// visibility-based rule could soundly detect it without either
+    /// tracking every such call site symbolically (out of scope here,
+    /// full data-flow analysis) or refusing to trust `private` at all
+    /// (which would forgo the capability this story exists to restore).
+    /// The risk is bounded to genuinely `private`-declared symbols only
+    /// (never `Public`/`Protected`/`Unknown`), matching the story's
+    /// explicit scope.
+    ///
     /// `Some(false)` ("referenced, not dead") stays unconditional: a real
     /// inbound edge is positive evidence, never invalidated by budget
-    /// pressure or an indexing gap. But there is currently no in-repo
-    /// signal that can turn an ABSENCE of a reference into a proof of
-    /// unreachability, so `Some(true)` is presently unreachable -- an
-    /// unreferenced symbol always reports `None` ("cannot determine"),
-    /// regardless of `completeness`. This is Epic #1786's mandated
-    /// under-report-never-over-report direction, made structural rather
-    /// than incidental. A future change MAY reintroduce a genuine
-    /// `Some(true)` tier once real evidence (e.g. restricted visibility,
-    /// no entry-point shape) is plumbed end-to-end from the extractors --
-    /// see Bug #1833's discussion for why that plumbing was deferred
-    /// rather than done here, and why inventing a partial signal from
-    /// existing data (e.g. text-sniffing the cached AC2 signature line)
-    /// was rejected as fabricated certainty.
+    /// pressure, an indexing gap, or visibility. `completeness` plays no
+    /// role in this decision (and never has for the `Some(false)` case):
+    /// a `Declaration`'s visibility is a per-file syntactic fact read
+    /// directly off its own modifiers, independent of whether the whole
+    /// repository indexed completely -- if extraction of a file panicked
+    /// entirely, that file contributes zero declarations at all (see
+    /// `repo_index`), so a `Declaration` existing in this graph at all
+    /// already implies its own file's extraction succeeded far enough to
+    /// read its modifiers.
     pub fn is_definitely_dead_code(&self, dense_symbol_id: u32) -> Option<bool> {
         if self.is_symbol_referenced(dense_symbol_id) {
             return Some(false);
+        }
+        if self.visibility_for(dense_symbol_id).is_provably_not_externally_visible() {
+            return Some(true);
         }
         None
     }
@@ -487,6 +529,42 @@ mod tests {
             "an unreferenced symbol on a Complete graph must be reported as undecidable (None) \
              when the graph holds no evidence the symbol is unreachable from OUTSIDE the repo -- \
              claiming Some(true) here is exactly Bug #1833's false 'definitely dead' verdict"
+        );
+    }
+
+    /// Story #1835 AC4 (RED against unmodified code -- `CodeGraphBuilder`
+    /// has no `add_visibility` method yet, so this fails to compile): the
+    /// CENTRAL discriminating test for the whole story. On a SINGLE
+    /// `Complete` graph, an unreferenced PRIVATE symbol must yield
+    /// `Some(true)` (a real, provable dead-code verdict) while an
+    /// unreferenced PUBLIC symbol in that SAME graph must stay `None`
+    /// (Bug #1833's conservative behavior, unchanged for anything the
+    /// visibility bit cannot prove safe). A test exercising only one of
+    /// the two directions would prove nothing -- the whole point of this
+    /// story is that the function now tells them apart.
+    #[test]
+    fn is_definitely_dead_code_distinguishes_unreferenced_private_from_unreferenced_public_on_a_complete_graph() {
+        use crate::graph::extract::local_index::Visibility;
+
+        let mut builder = CodeGraphBuilder::with_candidate_capacity(0);
+        let unreferenced_private = builder.intern_symbol(make_symbol_id(1, 0));
+        let unreferenced_public = builder.intern_symbol(make_symbol_id(1, 1));
+        builder.add_visibility(unreferenced_private, Visibility::Private);
+        builder.add_visibility(unreferenced_public, Visibility::Public);
+        // Completeness defaults to `Complete`.
+        let graph = builder.build();
+
+        assert_eq!(
+            graph.is_definitely_dead_code(unreferenced_private),
+            Some(true),
+            "an unreferenced PRIVATE symbol is provably unreachable from outside the repo -- \
+             this is the true positive Bug #1833's fix gave up and this story restores"
+        );
+        assert_eq!(
+            graph.is_definitely_dead_code(unreferenced_public),
+            None,
+            "an unreferenced PUBLIC symbol stays undecidable -- external callers are invisible \
+             to this repo's graph by construction, exactly Bug #1833's jsoup Connection/Response case"
         );
     }
 

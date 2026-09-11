@@ -26,6 +26,7 @@ import uuid
 import json
 import logging
 from code_indexer import __version__
+from .tool_access import ToolAccessMemo, resolve_effective_user
 
 logger = logging.getLogger(__name__)
 
@@ -301,7 +302,32 @@ def create_jsonrpc_error(
     return {"jsonrpc": "2.0", "error": error_obj, "id": request_id}
 
 
-def handle_tools_list(params: Dict[str, Any], user: User) -> Dict[str, Any]:
+def _new_tool_access_memo() -> ToolAccessMemo:
+    """Build one authorization memo for the current top-level request."""
+    try:
+        from code_indexer.server import app as app_module
+
+        manager = getattr(getattr(app_module.app, "state", None), "group_manager", None)
+    except Exception:
+        manager = None
+    return ToolAccessMemo(manager)
+
+
+def _get_session_state(session_id: Optional[str], user: Optional[User]) -> Any:
+    if not session_id or user is None:
+        return None
+    from .session_registry import get_session_registry
+
+    return get_session_registry().get_or_create_session(session_id, user)
+
+
+def handle_tools_list(
+    params: Dict[str, Any],
+    user: User,
+    *,
+    session_state: Any = None,
+    tool_access_memo: Optional[ToolAccessMemo] = None,
+) -> Dict[str, Any]:
     """
     Handle tools/list method.
 
@@ -316,7 +342,12 @@ def handle_tools_list(params: Dict[str, Any], user: User) -> Dict[str, Any]:
 
     # Story #185: Pass config to filter tools based on configuration requirements
     config = get_config_service().get_config()
-    tools = filter_tools_by_role(user, config=config)
+    tools = filter_tools_by_role(
+        user,
+        config=config,
+        session_state=session_state,
+        tool_access_memo=tool_access_memo,
+    )
     return {"tools": tools}
 
 
@@ -333,6 +364,7 @@ async def _invoke_handler(
     http_request: Optional[Request] = None,
     http_response: Optional[Response] = None,
     tool_name: Optional[str] = None,
+    tool_access_memo: Optional[ToolAccessMemo] = None,
 ) -> Any:
     """
     Invoke handler with appropriate parameters.
@@ -373,6 +405,8 @@ async def _invoke_handler(
 
     if "session_state" in sig.parameters:
         extra_kwargs["session_state"] = session_state
+    if tool_access_memo is not None and "tool_access_memo" in sig.parameters:
+        extra_kwargs["tool_access_memo"] = tool_access_memo
 
     # Inject session_key ONLY from the canonical elevation_key (JWT jti for Bearer auth,
     # cookie jti for Web UI). session_id (MCP transport UUID) is intentionally NOT
@@ -729,6 +763,8 @@ async def handle_tools_call(
     elevation_key: Optional[str] = None,
     http_request: Optional[Request] = None,
     http_response: Optional[Response] = None,
+    session_state: Any = None,
+    tool_access_memo: Optional[ToolAccessMemo] = None,
 ) -> Dict[str, Any]:
     """
     Handle tools/call method - dispatches to actual tool handlers.
@@ -754,7 +790,6 @@ async def handle_tools_call(
     """
     from .handlers import HANDLER_REGISTRY
     from .tools import TOOL_REGISTRY
-    from .session_registry import get_session_registry
     from code_indexer.server.services.langfuse_service import get_langfuse_service
 
     # Validate required 'name' parameter
@@ -768,22 +803,27 @@ async def handle_tools_call(
     if tool_name not in TOOL_REGISTRY:
         raise ValueError(f"Unknown tool: {tool_name}")
 
-    # Get or create session state if session_id is provided
-    session_state = None
-    if session_id:
-        registry = get_session_registry()
-        session_state = registry.get_or_create_session(session_id, user)
+    # Get or create session state if session_id is provided.
+    if session_state is None:
+        session_state = _get_session_state(session_id, user)
 
     # Determine effective user for permission checks (CRITICAL 2 fix)
     # When impersonating, use the impersonated user's permissions
-    effective_user = user
-    if session_state and session_state.is_impersonating:
-        effective_user = session_state.effective_user
+    effective_user = resolve_effective_user(user, session_state)
+
+    if tool_access_memo is None:
+        tool_access_memo = _new_tool_access_memo()
+
+    group_decision = tool_access_memo.is_allowed(tool_name, effective_user)
+    if group_decision is False:
+        raise ValueError(f"Permission denied: tool access denied for {tool_name}")
 
     # Check if user has permission for this tool
     tool_def = TOOL_REGISTRY[tool_name]
     required_permission = tool_def["required_permission"]
-    if not effective_user.has_permission(required_permission):
+    if group_decision is None and not effective_user.has_permission(
+        required_permission
+    ):
         raise ValueError(
             f"Permission denied: {required_permission} required for tool {tool_name}"
         )
@@ -895,7 +935,7 @@ async def handle_tools_call(
             return await _invoke_handler(
                 handler,
                 arguments,
-                user,
+                effective_user,
                 session_state,
                 sig,
                 is_async,
@@ -904,6 +944,7 @@ async def handle_tools_call(
                 timeout_seconds=handler_timeout,
                 http_request=http_request,
                 http_response=http_response,
+                tool_access_memo=tool_access_memo,
             )
 
         # Execute through span interceptor
@@ -928,7 +969,7 @@ async def handle_tools_call(
         result = await _invoke_handler(
             handler,
             arguments,
-            user,
+            effective_user,
             session_state,
             sig,
             is_async,
@@ -938,6 +979,7 @@ async def handle_tools_call(
             http_request=http_request,
             http_response=http_response,
             tool_name=tool_name,
+            tool_access_memo=tool_access_memo,
         )
 
     # Bug #350: Protocol-level API metrics tracking.
@@ -986,6 +1028,8 @@ async def process_jsonrpc_request(
 
     method = request["method"]
     params = request.get("params") or {}
+    session_state = _get_session_state(session_id, user)
+    tool_access_memo = _new_tool_access_memo()
 
     # Route to appropriate handler
     try:
@@ -1018,7 +1062,12 @@ async def process_jsonrpc_request(
             # Return empty result (FastAPI will use 202 if we set it in route)
             return create_jsonrpc_response(None, request_id)
         elif method == "tools/list":
-            result = handle_tools_list(params, user)
+            result = handle_tools_list(
+                params,
+                user,
+                session_state=session_state,
+                tool_access_memo=tool_access_memo,
+            )
             return create_jsonrpc_response(result, request_id)
         elif method == "prompts/list":
             # Per losvedir line 97-106 and README line 275
@@ -1038,6 +1087,8 @@ async def process_jsonrpc_request(
                 elevation_key=elevation_key,
                 http_request=http_request,
                 http_response=http_response,
+                session_state=session_state,
+                tool_access_memo=tool_access_memo,
             )
             return create_jsonrpc_response(result, request_id)
         else:
@@ -1346,7 +1397,12 @@ def get_optional_user_from_cookie(request: Request) -> Optional[User]:
         return None
 
 
-def handle_public_tools_list(user: Optional[User]) -> Dict[str, Any]:
+def handle_public_tools_list(
+    user: Optional[User],
+    *,
+    session_state: Any = None,
+    tool_access_memo: Optional[ToolAccessMemo] = None,
+) -> Dict[str, Any]:
     """Handle tools/list for /mcp-public endpoint."""
     if user is None:
         return {
@@ -1372,7 +1428,14 @@ def handle_public_tools_list(user: Optional[User]) -> Dict[str, Any]:
 
     # Story #185: Pass config to filter tools based on configuration requirements
     config = get_config_service().get_config()
-    return {"tools": filter_tools_by_role(user, config=config)}
+    return {
+        "tools": filter_tools_by_role(
+            user,
+            config=config,
+            session_state=session_state,
+            tool_access_memo=tool_access_memo,
+        )
+    }
 
 
 async def process_public_jsonrpc_request(
@@ -1393,6 +1456,8 @@ async def process_public_jsonrpc_request(
 
     method = request_data["method"]
     params = request_data.get("params") or {}
+    session_state = _get_session_state(session_id, user)
+    tool_access_memo = _new_tool_access_memo()
 
     if not isinstance(params, dict):
         return create_jsonrpc_error(
@@ -1425,7 +1490,11 @@ async def process_public_jsonrpc_request(
             return create_jsonrpc_response(None, request_id)
 
         elif method == "tools/list":
-            result = handle_public_tools_list(user)
+            result = handle_public_tools_list(
+                user,
+                session_state=session_state,
+                tool_access_memo=tool_access_memo,
+            )
             return create_jsonrpc_response(result, request_id)
 
         elif method == "prompts/list":
@@ -1483,7 +1552,12 @@ async def process_public_jsonrpc_request(
                 )
 
             result = await handle_tools_call(
-                params, user, session_id=session_id, elevation_key=elevation_key
+                params,
+                user,
+                session_id=session_id,
+                elevation_key=elevation_key,
+                session_state=session_state,
+                tool_access_memo=tool_access_memo,
             )
             return create_jsonrpc_response(result, request_id)
 

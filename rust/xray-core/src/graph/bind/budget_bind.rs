@@ -39,6 +39,14 @@ pub(super) fn intern_declarations_and_attach_signatures(files: &[FileForBind], b
     for file in files {
         for declaration in &file.index.declarations {
             let dense = builder.intern_symbol(declaration.symbol);
+            // Story #1835: visibility is ANALYTICAL data `is_definitely_
+            // dead_code` depends on directly, not presentation-only like
+            // `signatures` -- it MUST survive budget pressure, so this
+            // runs unconditionally, before the `exceeded` early return
+            // below (which gates only the signature cache).
+            if let Some(&visibility) = file.index.visibilities.get(&declaration.symbol) {
+                builder.add_visibility(dense, visibility);
+            }
             if exceeded {
                 continue;
             }
@@ -210,6 +218,34 @@ mod tests {
                 "a referenced symbol must never be reported as (even possibly) dead"
             );
         }
+    }
+
+    /// Story #1835 AC2 (RED against unmodified code --
+    /// `intern_declarations_and_attach_signatures` never calls
+    /// `add_visibility`, so the `LocalIndex.visibilities` entry set here
+    /// never reaches the built graph and this stays `None`): proves
+    /// visibility survives the FULL extraction-to-CSR pipeline, not just
+    /// the isolated `CodeGraphBuilder` unit tested in `code_graph.rs`.
+    #[test]
+    fn unreferenced_private_declaration_reports_definitely_dead_after_binding_end_to_end() {
+        use crate::graph::extract::local_index::Visibility;
+
+        let mut index = LocalIndex::new();
+        let symbol = make_symbol_id(1, 0);
+        index.declarations.push(method_decl("hidden", 1, 0, None));
+        index.visibilities.insert(symbol, Visibility::Private);
+
+        let files = vec![file(1, "java", index)];
+        let graph = bind_with_budget(files, &IndexBudget::unlimited());
+
+        let dense = graph.dense_id_for(symbol).expect("declared symbol must be interned");
+        assert!(!graph.is_symbol_referenced(dense), "fixture sanity: hidden() must have zero callers");
+        assert_eq!(
+            graph.is_definitely_dead_code(dense),
+            Some(true),
+            "an unreferenced PRIVATE declaration's visibility must survive end-to-end from \
+             LocalIndex.visibilities through the builder into a real dead-code verdict"
+        );
     }
 
     fn solo_declared_symbol_with_signature() -> LocalIndex {

@@ -89,6 +89,60 @@ def list_users(params: Dict[str, Any], user: User) -> Dict[str, Any]:
         )
 
 
+def _assign_new_user_to_default_group(
+    username: str, role: UserRole, assigned_by: str
+) -> None:
+    """
+    Story #1593 AC7: auto-assign a freshly created user to a default
+    group so fail-closed tool-access enforcement never strands them.
+    Non-fatal: a group-assignment failure must not undo the
+    already-created user account, so any error is logged and swallowed.
+    """
+    try:
+        from ....services.constants import DEFAULT_GROUP_ADMINS, DEFAULT_GROUP_USERS
+
+        group_manager = _get_group_manager()
+        if group_manager is None:
+            logger.warning(
+                format_error_log(
+                    "MCP-GENERAL-176",
+                    f"Group manager not configured -- skipping auto-assignment "
+                    f"for user '{username}'",
+                )
+            )
+            return
+        target_group_name = (
+            DEFAULT_GROUP_ADMINS if role == UserRole.ADMIN else DEFAULT_GROUP_USERS
+        )
+        target_group = group_manager.get_group_by_name(target_group_name)
+        if target_group is None:
+            logger.warning(
+                format_error_log(
+                    "MCP-GENERAL-177",
+                    f"Default group '{target_group_name}' not found for "
+                    f"user '{username}' -- skipping auto-assignment",
+                )
+            )
+            return
+        group_manager.ensure_user_group_membership(
+            username,
+            target_group,
+            assigned_by=assigned_by,
+            audit_details={
+                "group": target_group.name,
+                "reason": "auto_assign_on_creation",
+                "source": "mcp",
+            },
+        )
+    except Exception as group_error:
+        logger.warning(
+            format_error_log(
+                "MCP-GENERAL-178",
+                f"Failed to auto-assign user '{username}' to group: {group_error}",
+            )
+        )
+
+
 @require_mcp_elevation()
 def create_user(params: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Create a new user (admin only)."""
@@ -100,6 +154,9 @@ def create_user(params: Dict[str, Any], user: User) -> Dict[str, Any]:
         new_user = _utils.app_module.user_manager.create_user(
             username=username, password=password, role=role
         )
+
+        _assign_new_user_to_default_group(username, role, user.username)
+
         return _mcp_response(  # type: ignore[no-any-return]
             {
                 "success": True,

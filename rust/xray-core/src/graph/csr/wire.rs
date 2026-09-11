@@ -24,10 +24,22 @@ use super::candidate::Candidate;
 use super::code_graph::CodeGraph;
 use super::wire_cursor::{invalid, read_count_capped, take};
 use crate::graph::budget::AnalysisCompleteness;
+use crate::graph::extract::local_index::Visibility;
 use std::io::{self, Write};
 use std::path::Path;
 
-const MAGIC: &[u8; 8] = b"XRAYGRF1";
+/// Story #1835: bumped from `XRAYGRF1` to `XRAYGRF2` because this format
+/// gained a new mandatory section (per-symbol visibility) between
+/// signatures and the completeness byte -- a POSITIONAL format cannot add
+/// a section without invalidating every file written by the old writer.
+/// This is the "version strategy" documented at the top of this module:
+/// any graph file written by pre-#1835 code now fails the magic-number
+/// check below and is reported as `AnalyzeStatus::GraphInvalid` (see
+/// `xray-cli::run_analyze_graph`) rather than being silently misparsed.
+/// Safe in practice because this file is a same-invocation parent/child
+/// handoff (`--graph-out` written and `--graph-in` read by the SAME `cidx`
+/// command), never a cross-run persistent cache -- see module docs.
+const MAGIC: &[u8; 8] = b"XRAYGRF2";
 /// `from`(4) + `file`(4) + `line`(4) + `kind`(1) + `cand_start`(4) + `cand_len`(2).
 const REFERENCE_RECORD_MIN_BYTES: usize = 19;
 /// `symbol`(4) + `reasons`(2).
@@ -38,12 +50,15 @@ const STRING_RECORD_MIN_BYTES: usize = 4;
 const SYMBOL_RECORD_MIN_BYTES: usize = 9;
 /// `dense_id`(4) + `len`(4) prefix; the signature text itself is additional.
 const SIGNATURE_RECORD_MIN_BYTES: usize = 8;
+/// `dense_id`(4) + `visibility`(1).
+const VISIBILITY_RECORD_MIN_BYTES: usize = 5;
 
 /// Writes `graph` to `path` in the AC7 wire format. Sections, in order:
 /// magic, references, candidates (recomputed from `candidates_for` in
 /// reference order -- see module docs on why that reconstructs the exact
 /// original flat arena), interned strings, interned symbols, referenced
-/// bits, per-symbol cached signatures, completeness byte.
+/// bits, per-symbol cached signatures, per-symbol visibility (Story
+/// #1835), completeness byte.
 pub fn write_graph_file(graph: &CodeGraph, path: &Path) -> io::Result<()> {
     let mut w = io::BufWriter::new(std::fs::File::create(path)?);
     w.write_all(MAGIC)?;
@@ -51,6 +66,7 @@ pub fn write_graph_file(graph: &CodeGraph, path: &Path) -> io::Result<()> {
     write_strings(&mut w, graph)?;
     write_symbols_and_referenced_bits(&mut w, graph)?;
     write_signatures(&mut w, graph)?;
+    write_visibilities(&mut w, graph)?;
     w.write_all(&[completeness_to_byte(graph.completeness())])?;
     w.flush()
 }
@@ -115,6 +131,36 @@ fn write_signatures(w: &mut impl Write, graph: &CodeGraph) -> io::Result<()> {
         w.write_all(sig.as_bytes())?;
     }
     Ok(())
+}
+
+/// Story #1835: mirrors `write_signatures` exactly, but only ever writes
+/// entries whose `Visibility` is NOT `Unknown` -- a dense id absent from
+/// this section decodes back to `Unknown` via `CodeGraph::visibility_for`
+/// on read, the identical "absent means the safe default" contract
+/// `signature_for` already uses for missing signatures.
+fn write_visibilities(w: &mut impl Write, graph: &CodeGraph) -> io::Result<()> {
+    let mut present: Vec<(u32, Visibility)> = Vec::new();
+    for id in 0..graph.symbol_count() as u32 {
+        let visibility = graph.visibility_for(id);
+        if visibility != Visibility::Unknown {
+            present.push((id, visibility));
+        }
+    }
+    w.write_all(&(present.len() as u64).to_le_bytes())?;
+    for (id, visibility) in present {
+        w.write_all(&id.to_le_bytes())?;
+        w.write_all(&[visibility_to_byte(visibility)])?;
+    }
+    Ok(())
+}
+
+fn visibility_to_byte(v: Visibility) -> u8 {
+    match v {
+        Visibility::Public => 0,
+        Visibility::Protected => 1,
+        Visibility::Private => 2,
+        Visibility::Unknown => 3,
+    }
 }
 
 /// One decoded reference record, not yet placed through
@@ -205,7 +251,38 @@ fn read_strings_symbols_and_signatures(data: &[u8], pos: &mut usize, builder: &m
         let sig = std::str::from_utf8(take(data, pos, len)?).map_err(|e| invalid(&e.to_string()))?;
         builder.add_signature(dense_id, sig.to_string());
     }
+    read_visibilities(data, pos, builder, symbol_count)?;
     Ok(symbol_count)
+}
+
+/// Story #1835: mirrors the signature-reading loop directly above, but for
+/// the visibility section `write_visibilities` appends right after
+/// signatures. Rejects a `visibility` byte outside `visibility_from_byte`'s
+/// known range and a `dense_id` outside the decoded symbol table -- the
+/// same two corruption checks the signature loop already applies.
+fn read_visibilities(data: &[u8], pos: &mut usize, builder: &mut CodeGraphBuilder, symbol_count: usize) -> io::Result<()> {
+    use std::mem::size_of;
+    let visibility_count = read_count_capped(data, pos, VISIBILITY_RECORD_MIN_BYTES)?;
+    for _ in 0..visibility_count {
+        let dense_id = u32::from_le_bytes(take(data, pos, size_of::<u32>())?.try_into().unwrap());
+        if dense_id as usize >= symbol_count {
+            return Err(invalid("visibility dense_id outside decoded symbol table"));
+        }
+        let byte = take(data, pos, size_of::<u8>())?[0];
+        let visibility = visibility_from_byte(byte).ok_or_else(|| invalid(&format!("corrupt visibility byte: {byte}")))?;
+        builder.add_visibility(dense_id, visibility);
+    }
+    Ok(())
+}
+
+fn visibility_from_byte(b: u8) -> Option<Visibility> {
+    match b {
+        0 => Some(Visibility::Public),
+        1 => Some(Visibility::Protected),
+        2 => Some(Visibility::Private),
+        3 => Some(Visibility::Unknown),
+        _ => None,
+    }
 }
 
 /// Reads a graph previously written by `write_graph_file` back into a
@@ -336,5 +413,45 @@ mod tests {
         assert_eq!(reloaded.signature_for(foo_dense), Some("foo()"));
         assert!(reloaded.is_symbol_referenced(bar_dense));
         assert_eq!(reloaded.completeness(), AnalysisCompleteness::IndexBudgetExceeded);
+    }
+
+    /// Story #1835 (RED against unmodified code -- the wire format has no
+    /// visibility section yet, so `visibility_for` silently defaults to
+    /// `Unknown` after a round trip and `is_definitely_dead_code` reports
+    /// `None` instead of the original `Some(true)`): the `--graph-out`/
+    /// `--graph-in` parent/child handoff (`xray-cli`'s `run_analyze_graph`)
+    /// is the ONLY place `analyze_graph` ever actually reads a `CodeGraph`
+    /// from in production -- if visibility silently disappeared across
+    /// this file boundary, the dead-code capability this story restores
+    /// would work in every unit test and still be dead on arrival for any
+    /// real CLI invocation.
+    #[test]
+    fn visibility_round_trips_through_a_real_file_via_mmap() {
+        use crate::graph::extract::local_index::Visibility;
+
+        let mut builder = CodeGraphBuilder::with_candidate_capacity(0);
+        let unreferenced_private = builder.intern_symbol(make_symbol_id(2, 0));
+        let unreferenced_public = builder.intern_symbol(make_symbol_id(2, 1));
+        builder.add_visibility(unreferenced_private, Visibility::Private);
+        builder.add_visibility(unreferenced_public, Visibility::Public);
+        let original = builder.build();
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("graph_visibility.bin");
+        write_graph_file(&original, &path).expect("write must succeed");
+        let reloaded = read_graph_file(&path).expect("read must succeed");
+
+        let private_dense = reloaded.dense_id_for(make_symbol_id(2, 0)).unwrap();
+        let public_dense = reloaded.dense_id_for(make_symbol_id(2, 1)).unwrap();
+        assert_eq!(
+            reloaded.is_definitely_dead_code(private_dense),
+            Some(true),
+            "a Private symbol's dead-code verdict must survive the wire round trip"
+        );
+        assert_eq!(
+            reloaded.is_definitely_dead_code(public_dense),
+            None,
+            "a Public symbol must stay undecidable after the wire round trip too"
+        );
     }
 }

@@ -21,6 +21,56 @@ pub enum DeclarationKind {
     Package,
 }
 
+/// Story #1835: a declaration's ACCESS visibility, captured from the real
+/// Java modifier keywords the extractor already walks past (see
+/// `java.rs`'s `visibility_of_modifiers`) -- never inferred from anything
+/// else. Stored SEPARATELY from `Declaration` (see `LocalIndex::visibilities`
+/// below), mirroring the existing `signatures`/`MethodOwnerRecord` pattern
+/// of keeping optional, symbol-keyed side-data off the shared `Declaration`
+/// struct every `DeclarationKind` uses.
+///
+/// `Unknown` is the ONLY variant produced when no explicit `public`/
+/// `protected`/`private` keyword is present on a declaration's modifiers
+/// (or the declaration has no `modifiers` node at all, e.g. a package
+/// declaration). This is a deliberate policy choice (AC1): Java's
+/// no-explicit-modifier default is REAL package-private access for an
+/// ordinary class member, but it means something entirely different for
+/// an interface method/field or an annotation-type element, which are
+/// implicitly `public` despite carrying no explicit modifier keyword. This
+/// extractor does not track "is the enclosing type an interface" context,
+/// so it cannot safely tell those two cases apart -- silently defaulting
+/// absent modifiers to a restricted visibility would misclassify a public
+/// interface method (exactly jsoup's `Connection`/`Response` API shape,
+/// Bug #1833) as dead-code-eligible. `Unknown` costs some real
+/// package-private detections but can never manufacture a false "dead"
+/// verdict, which is the only property this predicate promises. A future
+/// language extractor that tracks richer context MAY safely add a real
+/// `PackagePrivate` variant; until then `Unknown` is required for every
+/// absent/ambiguous case (AC1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Visibility {
+    Public,
+    Protected,
+    Private,
+    /// No explicit modifier evidence was available, or the extractor does
+    /// not (yet) understand this declaration shape well enough to judge
+    /// visibility. NEVER treated as restricted -- see the type doc above.
+    Unknown,
+}
+
+impl Visibility {
+    /// True ONLY for `Private`: the sole visibility this extractor can
+    /// PROVE cannot be invoked from outside the repository. `Protected`
+    /// is reachable via subclassing from another package/module and
+    /// `Public` is reachable from anywhere, so both count as externally
+    /// visible here; `Unknown` carries no evidence either way and must
+    /// stay conservative. This is the single predicate
+    /// `CodeGraph::is_definitely_dead_code` (Story #1835) consults.
+    pub fn is_provably_not_externally_visible(self) -> bool {
+        matches!(self, Visibility::Private)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Declaration {
     pub kind: DeclarationKind,
@@ -262,6 +312,14 @@ pub struct LocalIndex {
     pub constructions: Vec<ConstructionSite>,
     /// AC2: "a short cached signature line per symbol".
     pub signatures: HashMap<SymbolId, String>,
+    /// Story #1835 (AC1/AC2): one `Visibility` per declared symbol that has
+    /// modifier evidence, populated alongside `signatures` at the SAME
+    /// four extraction sites in `java.rs`. A symbol absent from this map
+    /// (rather than defaulting it to `Visibility::Unknown` explicitly at
+    /// insertion time) is read back as `Unknown` by every consumer -- see
+    /// `crate::graph::bind::budget_bind::intern_declarations_and_attach_signatures`
+    /// and `CodeGraph::visibility_for`.
+    pub visibilities: HashMap<SymbolId, Visibility>,
     /// AC1 (Story #1793, S4): one record per method declaration in this
     /// file whose immediately enclosing type is known (top-level methods
     /// with no enclosing type produce no record here).
@@ -297,6 +355,26 @@ mod tests {
     use super::*;
     use crate::graph::identity::make_symbol_id;
 
+    /// Story #1835 AC1/AC3 (RED against unmodified code -- `Visibility`
+    /// does not exist yet, so this fails to compile): the whole dead-code
+    /// capability this story restores hinges on exactly one predicate --
+    /// "is this visibility PROVABLY not callable from outside the
+    /// repository". Only `Private` can answer yes. `Public`/`Protected`
+    /// are externally visible by definition; `Unknown` means the
+    /// extractor could not determine an explicit modifier at all (see
+    /// `java.rs`'s `visibility_of_modifiers`) and must never be silently
+    /// treated as restricted (AC1's explicit requirement).
+    #[test]
+    fn visibility_private_is_provably_not_externally_visible_but_others_are_not() {
+        assert!(Visibility::Private.is_provably_not_externally_visible());
+        assert!(!Visibility::Public.is_provably_not_externally_visible());
+        assert!(!Visibility::Protected.is_provably_not_externally_visible());
+        assert!(
+            !Visibility::Unknown.is_provably_not_externally_visible(),
+            "unknown visibility must never be treated as provably restricted"
+        );
+    }
+
     #[test]
     fn new_local_index_is_empty() {
         let index = LocalIndex::new();
@@ -308,6 +386,7 @@ mod tests {
         assert!(index.type_references.is_empty());
         assert!(index.constructions.is_empty());
         assert!(index.signatures.is_empty());
+        assert!(index.visibilities.is_empty());
         assert!(index.method_owners.is_empty());
         assert!(index.method_return_types.is_empty());
         assert!(index.typed_names.is_empty());

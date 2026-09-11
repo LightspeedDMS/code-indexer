@@ -10,6 +10,7 @@ Mocking policy:
 
 from __future__ import annotations
 
+import errno
 import subprocess
 import sys
 from pathlib import Path
@@ -992,20 +993,54 @@ class TestPathTraversalValidation:
 
 
 class TestLocalCloneBackendDeleteErrors:
-    """LocalCloneBackend.delete_clone returns False on OSError."""
+    """LocalCloneBackend.delete_clone RAISES a classified error on OSError.
 
-    def test_delete_clone_returns_false_on_os_error(self, tmp_path: Path):
-        """delete_clone returns False when shutil.rmtree raises OSError."""
+    Bug #1844: this used to return False, and the one real caller
+    (``CleanupManager._delete_index``) discarded the result -- so a failed
+    deletion was recorded as a success, the path left the cleanup queue and
+    its durable pending-deletion row was deleted. That is a permanent,
+    invisible disk leak (Messi Rule #13), so a failure is now loud and
+    carries the kernel errno.
+    """
+
+    def test_delete_clone_raises_classified_error_on_os_error(self, tmp_path: Path):
+        """A non-retryable OSError raises SnapshotDeleteError, not False."""
+        from code_indexer.global_repos.snapshot_deletion_errors import (
+            SnapshotDeleteError,
+        )
         from code_indexer.server.storage.shared.clone_backend import LocalCloneBackend
 
         clone_dir = tmp_path / ".versioned" / "ns" / "clone"
         clone_dir.mkdir(parents=True)
 
         backend = LocalCloneBackend(versioned_base=str(tmp_path))
-        with patch("shutil.rmtree", side_effect=OSError("permission denied")):
-            result = backend.delete_clone(str(clone_dir))
+        with patch(
+            "shutil.rmtree", side_effect=OSError(errno.EACCES, "permission denied")
+        ):
+            with pytest.raises(SnapshotDeleteError) as caught:
+                backend.delete_clone(str(clone_dir))
 
-        assert result is False
+        assert caught.value.errno_name == "EACCES"
+
+    def test_delete_clone_raises_in_use_error_when_the_tree_is_still_held(
+        self, tmp_path: Path
+    ):
+        """ENOTEMPTY means 'something still holds this' -- a retryable
+        condition the old False return could not express at all."""
+        from code_indexer.global_repos.snapshot_deletion_errors import (
+            SnapshotInUseError,
+        )
+        from code_indexer.server.storage.shared.clone_backend import LocalCloneBackend
+
+        clone_dir = tmp_path / ".versioned" / "ns" / "clone"
+        clone_dir.mkdir(parents=True)
+
+        backend = LocalCloneBackend(versioned_base=str(tmp_path))
+        with patch("shutil.rmtree", side_effect=OSError(errno.ENOTEMPTY, "not empty")):
+            with pytest.raises(SnapshotInUseError) as caught:
+                backend.delete_clone(str(clone_dir))
+
+        assert caught.value.errno_name == "ENOTEMPTY"
 
 
 # ---------------------------------------------------------------------------
