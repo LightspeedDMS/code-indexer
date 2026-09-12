@@ -3,6 +3,7 @@
 ## Safety Rules (prevent recurring mistakes)
 - [feedback_never_ship_unwired_work.md](feedback_never_ship_unwired_work.md) - NEVER build work that is not wired to a user-reachable front door; unit tests over an unreachable capability are not "done" (Epic #1786)
 - [feedback_never_claim_ready_without_staging_e2e.md](feedback_never_claim_ready_without_staging_e2e.md) - NEVER say ready/complete/promoted without driving the NEW capability through the staging front door; green gates are not evidence
+- [feedback_everything_always_ends_with_staging.md](feedback_everything_always_ends_with_staging.md) - STANDING RULE: "everything. always. ends with staging" — broken staging access is a blocker to raise, never a reason to finish on local gates
 - [feedback_grep_absence_is_not_evidence.md](feedback_grep_absence_is_not_evidence.md) - A grep returning zero proves one spelling absent, NOT a capability missing; prove wiring by runtime introspection or a real call
 - [feedback_never_reindex_evolution.md](feedback_never_reindex_evolution.md) - NEVER full-re-index evolution (hours + embedder $$); repairs keep worktree bit-identical, temporal OFF, restore from copies
 - [feedback_verify_zero_json_chunks_on_indexing.md](feedback_verify_zero_json_chunks_on_indexing.md) - Before chunk-storage/temporal work, verify zero vector_*.json created on all 3 envs — Bug #1528
