@@ -32,6 +32,9 @@ from pathlib import Path
 from threading import Lock
 from typing import Any, Callable, Dict, List, Optional
 from code_indexer.global_repos.snapshot_reader_lease import SnapshotReaderLease
+from code_indexer.server.storage.shared.snapshot_paths import (
+    resolve_versioned_snapshot_root,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -255,28 +258,37 @@ class IdIndexCache:
         try:
             id_index = loader()
             reader_lease = None
-            if self._is_versioned_snapshot is not None and self._is_versioned_snapshot(
-                collection_path
-            ):
+            snapshot_root = None
+            if self._is_versioned_snapshot is not None:
+                # Bug #1850: collection_path is a descendant of the
+                # snapshot root; resolve it via ancestor walk before
+                # leasing.
+                snapshot_root = resolve_versioned_snapshot_root(
+                    collection_path, predicate=self._is_versioned_snapshot
+                )
+            if snapshot_root is not None:
                 if self._lease_root is None:
                     logger.error(
-                        "Snapshot %s is versioned but no lease_root is wired "
-                        "into this IdIndexCache instance; skipping reader-lease "
-                        "publication",
+                        "Snapshot %s (root=%s) is versioned but no "
+                        "lease_root is wired into this IdIndexCache "
+                        "instance; skipping reader-lease publication",
                         collection_path,
+                        snapshot_root,
                     )
                 else:
                     try:
                         reader_lease = SnapshotReaderLease(
-                            collection_path,
+                            snapshot_root,
                             self.config.ttl_minutes * 60.0,
                             lease_root=self._lease_root,
                         )
                         reader_lease.acquire()
                     except OSError as exc:
                         logger.warning(
-                            "Could not publish snapshot reader lease for %s: %s",
+                            "Could not publish snapshot reader lease for "
+                            "%s (root=%s): %s",
                             collection_path,
+                            snapshot_root,
                             exc,
                         )
 
