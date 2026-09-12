@@ -39,3 +39,14 @@ value is not zero. But do not assume both halves are executing tests.
 See [[feedback_paired_engineer_two_models_for_quality]] for why the pair is used at all, and
 [[feedback_verify_codex_actually_ran]] for the related failure where codex-wrapper agents fall
 back silently.
+
+**UPDATE 2026-09-12 -- NO LONGER RELIABLY TRUE, verify per run.** On the Bug #1834 pair run,
+codex DID execute pytest in this project: it reported `1808 passed, 17 skipped` for
+`tests/unit/storage/`, and an independent re-run by the orchestrator produced the identical
+1808/17. So the interpreter/deps gap has been closed at least on some runs.
+
+**How to apply now:** do NOT tell the pair "codex cannot run tests" as a fact -- that framing
+caused a brief to hand codex a reduced role it did not need. Instead require per-number
+attribution ("state WHICH agent ran this and the exact command") and let the split fall out of
+what each side can actually do that run. The attribution requirement is the durable rule; the
+capability claim is not.

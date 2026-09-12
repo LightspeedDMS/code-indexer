@@ -1615,11 +1615,85 @@ class GoldenRepoManager:
             # Filesystem cleanup happens LAST -- after the registry row is
             # confirmed removed (Bug #1317) and after every satellite-state
             # detach above (Bug #1523).
-            if repo_exists_on_disk:
-                assert actual_path is not None
-                cleanup_successful = self._cleanup_repository_files(actual_path)
-            else:
-                cleanup_successful = True
+            #
+            # Bug #1843: remove_golden_repo was the one golden-repo mutation
+            # that skipped the write-lock protocol its siblings (branch_change,
+            # add_index) observe, so a concurrent refresh could write into
+            # `.git` (FETCH_HEAD/refs/objects) while _cleanup_filesystem's
+            # rmtree walked it, producing Errno 39. A write lock alone is not
+            # sufficient: RefreshScheduler's own refresh only CHECKS
+            # is_write_locked() before starting, it never HOLDS the lock
+            # during its fetch/checkout phase (Bug #1393) -- only the later
+            # index/snapshot phase is lock-protected (Bug #1506). The
+            # JobTracker "global_repo_refresh" registration, in contrast,
+            # spans the ENTIRE refresh including that fetch/checkout window,
+            # so check_refresh_not_in_progress() is the correct signal for
+            # "a refresh is currently executing". Both checks run here, after
+            # the registry row is already gone (ordering unchanged) and
+            # before any file is touched -- a failure leaves the clone
+            # directory fully intact, degrading to the pre-existing, already
+            # self-healing registry-orphan case (row gone, clone present).
+            scheduler = getattr(self, "_refresh_scheduler", None)
+            lock_acquired = False
+            if scheduler is not None:
+                try:
+                    scheduler.check_refresh_not_in_progress(alias)
+                except DuplicateJobError as refresh_error:
+                    raise GitOperationError(
+                        f"Cannot remove golden repository '{alias}': a "
+                        f"refresh is currently in progress ({refresh_error}). "
+                        "Try again after the refresh completes."
+                    )
+
+                if not scheduler.acquire_write_lock(alias, owner_name="remove_repo"):
+                    raise GitOperationError(
+                        f"Cannot remove golden repository '{alias}': failed "
+                        "to acquire the write lock (held by another "
+                        "operation). Try again later."
+                    )
+                lock_acquired = True
+
+            try:
+                if repo_exists_on_disk:
+                    assert actual_path is not None
+                    cleanup_successful = self._cleanup_repository_files(actual_path)
+                else:
+                    cleanup_successful = True
+
+                # Bug #1843 gap 2: a half-deleted directory must never
+                # permanently block a later add_golden_repo for this alias.
+                # The registry row is already gone (Bug #1317), so quarantine
+                # the remains to a clearly-marked sibling -- never
+                # ignore_errors=True (the exact anti-pattern Bug #1841
+                # removed) -- leaving a clean target for the next add. This
+                # MUST happen before the write lock is released below (codex
+                # review, turn 11): releasing first would open a window for a
+                # new refresh to write into the still-unquarantined wreckage.
+                if (
+                    not cleanup_successful
+                    and repo_exists_on_disk
+                    and actual_path
+                    and os.path.exists(actual_path)
+                ):
+                    quarantine_path = (
+                        f"{actual_path}.corrupt-"
+                        f"{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%f')}"
+                    )
+                    try:
+                        os.rename(actual_path, quarantine_path)
+                        logging.error(
+                            f"Cleanup incomplete for '{alias}': moved remains "
+                            f"to {quarantine_path} so a future add_golden_repo "
+                            "is not blocked."
+                        )
+                    except OSError as quarantine_error:
+                        logging.error(
+                            f"Failed to quarantine incomplete cleanup remains "
+                            f"for '{alias}' at {actual_path}: {quarantine_error}"
+                        )
+            finally:
+                if lock_acquired:
+                    scheduler.release_write_lock(alias, owner_name="remove_repo")
 
             # ANTI-FALLBACK RULE: Fail operation when cleanup is incomplete
             # Per MESSI Rule 2: "Graceful failure over forced success"

@@ -2592,6 +2592,7 @@ class FilesystemVectorStore:
                     path_index.add_point(file_path, point_id)
 
         records: List[Dict[str, Any]] = []
+        pending_added_ids: List[str] = []
         for idx, point in enumerate(points, 1):
             point_id = point["id"]
             vector = np.array(point["vector"])
@@ -2634,9 +2635,14 @@ class FilesystemVectorStore:
             # add_or_update_vector() call downstream, so this only affects
             # cosmetic added/updated counts in logs, never correctness.
             if collection_name in self._indexing_session_changes:
-                self._indexing_session_changes[collection_name]["added"].add(point_id)
+                pending_added_ids.append(point_id)
 
         self._write_chunks_db_with_retry(collection_path, records, orphan_ids)
+
+        if collection_name in self._indexing_session_changes:
+            self._indexing_session_changes[collection_name]["added"].update(
+                pending_added_ids
+            )
 
         # Bug #1528: the temporal METADATA store is a SEPARATE store from the
         # chunk data (shared temporal_metadata.db in solo mode, PostgreSQL in
