@@ -7,7 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [12.51.0] - 2026-09-11
+## [12.52.0] - 2026-09-12
+
+### Fixed
+
+- Bug #1834: a `point_id` was recorded in the indexing session's "added" set
+  while the record list was being built, before any attempt to persist it to
+  `chunks.db`. A failed write therefore left the set claiming a point was added
+  that never reached disk, and that set drives the HNSW incremental-update path
+  -- producing a searchable vector whose content does not exist. Re-rated P4 to
+  P2 first: the original rating assumed Epic #1333's orphan repair covered this,
+  but that pass detects graph-internal HNSW orphans and never cross-checks the
+  index against the chunk store, so nothing converged the divergence away. Ids
+  now fold into the session set only after the write returns without raising.
+- Bug #1843: `remove_golden_repo` was the only golden-repo mutation that skipped
+  the write-lock protocol its siblings follow, so a scheduled refresh could write
+  into `.git` while cleanup's `rmtree` walked it (`Errno 39`). A lock alone is
+  insufficient -- `RefreshScheduler` only checks the lock before starting and
+  does not hold it during fetch/checkout -- so removal now checks the JobTracker
+  refresh registration (which spans that window) AND takes the write lock
+  non-blocking. On incomplete cleanup the remains are quarantined to a marked
+  sibling path so the alias stays re-addable without human intervention, rather
+  than being left as wreckage. Bug #1317's registry-row-before-files ordering is
+  preserved.
 
 ### Fixed
 

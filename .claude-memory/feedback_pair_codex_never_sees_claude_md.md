@@ -56,3 +56,28 @@ know it was an invariant rather than a preference.
 Compounds with [[feedback_codex_interpreter_lacks_project_deps]]: codex also cannot run pytest
 here, so without CLAUDE.md its review is diff-reading with no conventions to review against.
 See [[feedback_paired_engineer_two_models_for_quality]] for why the pair is used at all.
+
+**SUPERSEDED 2026-09-12 -- THE DRIVER NOW FIXES THIS. Verify before acting on the rest of this note.**
+
+`~/.claude/scripts/pair/lib/pair-rulebook.sh` (added 2026-09-11) implements deterministic
+project-rulebook injection: `pair_inject_rulebook` prepends the project's CLAUDE.md chain into
+the codex prompt before codex ever sees it. Its own header documents this exact defect and names
+the same three #1845 violations (duplicated sole-authority predicate, violated concurrency
+budget, hand-rolled path walk).
+
+Properties worth knowing:
+- codex-only by design; the claude turn skips it because Claude Code already auto-loads CLAUDE.md
+- bounded walk, PAIR_RULEBOOK_MAX_DEPTH=32, citing Rule 14
+- a failed injection ABORTS the turn loudly -- codex never runs on an unprepared prompt
+- byte-identical to the manual relay contract in prompts/project-rulebook-injection.md
+- run.log records `RULEBOOK injected: <paths>` or `RULEBOOK: none found under <cwd>` per turn
+
+**How to apply now:** do NOT paste CLAUDE.md invariants into pair mission briefs -- that is
+redundant with the driver and wastes prompt space on a weaker paraphrase of the authoritative
+injected text. Instead CHECK the run.log for the `RULEBOOK injected` line to confirm it fired,
+and only intervene if it says `none found`.
+
+**Lesson about the error itself:** I kept prescribing the manual workaround, saw `RULEBOOK
+injected` in the logs, and credited my own briefs for it -- attributing a tool's fix to my
+intervention. When a note says "the permanent fix is X", re-read the code before assuming X is
+still undone.
