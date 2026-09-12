@@ -29,6 +29,9 @@ from threading import Lock
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 from code_indexer.server.logging_utils import format_error_log
 from code_indexer.global_repos.snapshot_reader_lease import SnapshotReaderLease
+from code_indexer.server.storage.shared.snapshot_paths import (
+    resolve_versioned_snapshot_root,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -728,9 +731,15 @@ class HNSWIndexCache:
             index_size_bytes += sys.getsizeof(id_mapping)
 
             reader_lease = None
-            if self._is_versioned_snapshot is not None and self._is_versioned_snapshot(
-                repo_path
-            ):
+            snapshot_root = None
+            if self._is_versioned_snapshot is not None:
+                # Bug #1850: repo_path is the INDEX DIRECTORY (a descendant
+                # of the snapshot root); the predicate only matches at the
+                # root itself, so it must be resolved via ancestor walk.
+                snapshot_root = resolve_versioned_snapshot_root(
+                    repo_path, predicate=self._is_versioned_snapshot
+                )
+            if snapshot_root is not None:
                 lease_root = self._lease_root
                 if lease_root is None:
                     # Bug #1845 remediation round 2 (Defect 3): a genuine
@@ -745,23 +754,26 @@ class HNSWIndexCache:
                     # same accepted risk shape the OSError catch below
                     # already uses for lease-acquisition failures.
                     logger.error(
-                        "Snapshot %s is versioned but no lease_root is "
-                        "wired into this HNSWIndexCache instance; "
-                        "skipping reader-lease publication",
+                        "Snapshot %s (root=%s) is versioned but no "
+                        "lease_root is wired into this HNSWIndexCache "
+                        "instance; skipping reader-lease publication",
                         repo_path,
+                        snapshot_root,
                     )
                 else:
                     try:
                         reader_lease = SnapshotReaderLease(
-                            repo_path,
+                            snapshot_root,
                             self.config.ttl_minutes * 60.0,
                             lease_root=lease_root,
                         )
                         reader_lease.acquire()
                     except OSError as exc:
                         logger.warning(
-                            "Could not publish snapshot reader lease for %s: %s",
+                            "Could not publish snapshot reader lease for "
+                            "%s (root=%s): %s",
                             repo_path,
+                            snapshot_root,
                             exc,
                         )
                         reader_lease = None

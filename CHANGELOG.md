@@ -7,7 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [12.50.0] - 2026-09-11
+## [12.51.0] - 2026-09-11
+
+### Fixed
+
+- Bug #1850: snapshot reader leases were never published, making the protection
+  added by #1845 and #1847 inert in production. Every cache is keyed by the
+  index directory (`.../v_<ts>/.code-indexer/index/<model>:chunks_db`), but the
+  lease guard called the canonical `is_versioned_snapshot()` predicate, which
+  matches only when a path ENDS at the `v_<digits>` snapshot leaf. The guard was
+  therefore always False and publication was skipped silently -- no lease file,
+  no warning. Found on staging v12.50.0 via real `/api/query` calls, not by any
+  local gate. Fixed with `resolve_versioned_snapshot_root()`, which walks
+  ancestors and delegates to the unchanged canonical predicate; all four readers
+  (HNSW, Tantivy FTS, IdIndexCache, chunks.db) now lease the snapshot ROOT --
+  the same identity `CleanupManager` deletes and passes to
+  `snapshot_has_live_reader()`, so the write and read sides finally agree.
+
+### Note on 12.50.0
+
+The #1845 and #1847 entries in 12.50.0 described the intended behaviour, but the
+mechanism did not function at runtime until this release. Snapshots could still
+be deleted out from under live cross-node readers in 12.50.0 and earlier.
 
 ### Fixed
 

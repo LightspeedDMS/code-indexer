@@ -269,18 +269,33 @@ class ChunkStoreThreadCache:
         if self._is_versioned_snapshot is None:
             return None
         try:
-            if not self._is_versioned_snapshot(collection_path):
+            # Bug #1850: collection_path is a descendant of the snapshot
+            # root (the chunks.db index directory); resolve it via
+            # ancestor walk before leasing. Deferred import: this module
+            # is CLI-reachable (storage/shared), and this server-layer
+            # helper's parent packages are heavy to import eagerly --
+            # only paid when a lease-configured (server) instance actually
+            # opens a versioned-snapshot reader.
+            from code_indexer.server.storage.shared.snapshot_paths import (
+                resolve_versioned_snapshot_root,
+            )
+
+            snapshot_root = resolve_versioned_snapshot_root(
+                collection_path, predicate=self._is_versioned_snapshot
+            )
+            if snapshot_root is None:
                 return None
             if self._lease_root is None:
                 logger.error(
-                    "Snapshot %s is versioned but no lease_root is wired into "
-                    "this ChunkStoreThreadCache; skipping reader-lease "
-                    "publication",
+                    "Snapshot %s (root=%s) is versioned but no lease_root "
+                    "is wired into this ChunkStoreThreadCache; skipping "
+                    "reader-lease publication",
                     collection_path,
+                    snapshot_root,
                 )
                 return None
             lease = SnapshotReaderLease(
-                collection_path,
+                snapshot_root,
                 SNAPSHOT_READER_LEASE_TTL_SECONDS,
                 lease_root=self._lease_root,
             )
