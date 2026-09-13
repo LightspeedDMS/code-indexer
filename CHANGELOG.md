@@ -7,7 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [12.52.0] - 2026-09-12
+## [12.53.0] - 2026-09-12
+
+### Fixed
+
+- Bug #1848 (test quality, no production change): the Bug #1799 regression test
+  asserted that `self._writer` transiently becomes `None` during `commit()` by
+  racing a poller thread against that window, so it went red on correct product
+  code whenever the full suite starved the poller of scheduling. The observation
+  is now structural: a spy stands in for the test's own `manager._index` and
+  intercepts only `.writer()` -- the single statement inside the window --
+  recording the attribute synchronously before forwarding to the real Tantivy
+  call. It stays discriminating by construction (the pre-#1799 code holds the
+  old writer at that instant), and `tantivy_index_manager.py` is unchanged.
 
 ### Fixed
 
