@@ -1,200 +1,95 @@
 # X-Ray Evaluator Cookbook
 
-Practical evaluator patterns for the X-Ray AST-aware code search engine.
-Each pattern includes the MCP `xray_search` parameters and a complete evaluator script.
+This phase of the cookbook provides routing and contract guidance, not evaluator
+recipes; evaluator templates are deliberately deferred to Phase 2 (story
+#1854). The current MCP and REST evaluator contract is Rust-based and is
+documented by the live tool documentation for
+[xray_search](../src/code_indexer/server/mcp/tool_docs/search/xray_search.md).
+The examples below are request shapes and contract guidance only.
 
----
+## Reusing a stored pattern
 
-## Java try-with-resources Leak Detection
+Before writing `evaluator_code` inline, check the stored pattern library. Use
+`browse_directory('cidx-meta-global', path='xray-patterns')` to list available
+patterns, then pass the selected name as `pattern_name` in the MCP request.
+Stored patterns avoid repeating evaluator code and may define typed parameters
+through `pattern_params`.
 
-Finds resource acquisitions (`getConnection`, `getSession`, `openStream`) that are
-NOT wrapped in a `try-with-resources` block -- potential resource leaks.
+## Single-file structural search
 
-Uses `is_in_try_resources()` (walks the AST parent chain for `resource_specification`)
-and `enclosing_method_body()` (resolves the enclosing method for context).
+Use MCP `xray_search` when the question can be answered by inspecting one
+candidate file at a time. Phase 1 selects candidate files with a regular
+expression. The Rust evaluator then runs once for each candidate file and
+receives its root `OwnedNode`.
 
-### MCP Parameters
+The evaluator entry point is `fn evaluate_node(node: &OwnedNode) ->
+Vec<EvalFinding>`. `OwnedNode` and `EvalFinding` are supplied by the compiler;
+do not define them in the evaluator. `kind` and `start_line` are fields on an
+owned node. `EvalFinding` contains `pattern`, `line`, and `snippet`; it does
+not contain a `message` field.
 
-```json
-{
-  "repository_alias": "my-java-repo-global",
-  "driver_regex": "getConnection|getSession|openStream",
-  "search_target": "content",
-  "evaluator_code": "... (see below) ..."
-}
-```
+An empty `Vec<EvalFinding>` means that the file matched Phase 1 but the
+evaluator found nothing to report. The evaluator is file-as-unit: it does not
+receive a separate callback for every regular-expression match.
 
-### Evaluator Code
+## MCP request fields
 
-```python
-def get_method_name(node):
-    """Walk to enclosing method and extract its name."""
-    body = node.enclosing_method_body()
-    if body and body.parent:
-        name_node = body.parent.child_by_field_name("name")
-        if name_node:
-            return name_node.text
-    return "unknown"
+MCP requests use `repository_alias`, `pattern`, `search_target`, and optional
+`evaluator_code`. For a first call, omit `evaluator_code`; the server supplies
+the default evaluator. Use `max_results` to cap the number of candidate files.
+Begin with a small `max_results` value while checking a search, then increase
+it when the result shape is understood. Include and exclude patterns,
+language-specific paths, and `context_lines` can further focus the search.
 
-leaks = []
-for pos in match_positions:
-    hit_node = pos.get("ast_node")
-    if hit_node is None:
-        continue
-    # Skip hits already inside a try-with-resources resource declaration
-    if hit_node.is_in_try_resources():
-        continue
-    # Not wrapped -- potential leak
-    leaks.append({
-        "line_number": pos["line_number"],
-        "method": get_method_name(hit_node),
-        "reason": "resource acquired outside try-with-resources",
-    })
-return {"matches": leaks, "value": {"leak_count": len(leaks)}}
-```
+The full MCP schema, evaluator rules, output fields, timeout behavior, and
+security restrictions are maintained in the [xray_search tool
+documentation](../src/code_indexer/server/mcp/tool_docs/search/xray_search.md).
 
-### What it detects
+## REST field names
 
-Source:
-```java
-public class UserDao {
-    Connection getConn() {
-        // FLAGGED: bare getConnection, no try-with-resources
-        return pool.getConnection();
-    }
+The REST endpoint `POST /api/xray/search` exposes the same single-file
+capability but retains its REST field names. Send `driver_regex` instead of
+the MCP `pattern`, and `max_files` instead of the MCP `max_results`. Do not
+copy REST field names into an MCP request. Refer to the [REST section of the
+live xray_search contract](../src/code_indexer/server/mcp/tool_docs/search/xray_search.md)
+when building an HTTP request.
 
-    void safe() throws Exception {
-        // NOT flagged: wrapped in try-with-resources
-        try (Connection c = pool.getConnection()) {
-            c.execute("SELECT 1");
-        }
-    }
-}
-```
+## Graph mode
 
-Output: one match for line 4 (`getConn` method), zero matches inside `safe`.
+Use [analyze_graph](../src/code_indexer/server/mcp/tool_docs/search/analyze_graph.md)
+for questions that require relationships among files, such as reachability,
+dead code, layering, or blast radius. Graph mode builds a cross-file reference
+graph and is a different execution mode from single-file `xray_search`.
 
----
+Graph mode requires both `fn collect_facts` and `fn analyze_graph`; neither is
+optional. A graph evaluator must not define `fn evaluate_node`. `collect_facts`
+runs per file to collect auxiliary evidence, while `analyze_graph` reduces the
+completed graph. The graph extractor currently supports Java only.
 
-## Kotlin .use {} Detection
+Always inspect `fact_graph_complete` and the degradation counters before
+treating an empty `findings` list as a verified negative. When
+`fact_graph_complete` is false, an empty result means that the graph was too
+incomplete to trust as a clean bill of health.
 
-Finds resource acquisitions in Kotlin code that are NOT followed by `.use { }`,
-the idiomatic Kotlin resource management pattern (equivalent to Java
-try-with-resources).
+Read the [graph-mode tool documentation](../src/code_indexer/server/mcp/tool_docs/search/analyze_graph.md)
+for the `UserFact`, `GraphResult`, `ReduceFinding`, graph-handle, and
+completeness contracts.
 
-This pattern uses line-content heuristics rather than AST node traversal,
-since Kotlin `.use {}` is a stdlib extension function (not a language construct
-visible in the AST grammar).
+## Choosing the mode
 
-### MCP Parameters
+Choose single-file mode when the evidence is local to each file and the
+question is naturally expressed as findings attached to syntax nodes. Choose
+graph mode when the answer depends on callers, callees, symbol identity, or a
+path spanning multiple files. Both modes use the Rust evaluator engine, but
+their required function contracts must not be mixed.
 
-```json
-{
-  "repository_alias": "my-kotlin-repo-global",
-  "driver_regex": "getConnection|openStream|createStatement",
-  "search_target": "content",
-  "evaluator_code": "... (see below) ..."
-}
-```
+## Related documentation
 
-### Evaluator Code
-
-```python
-leaks = []
-for pos in match_positions:
-    line = pos.get("line_content", "")
-    # Kotlin idiomatic resource management uses .use { }
-    if ".use " not in line and ".use{" not in line:
-        leaks.append({
-            "line_number": pos["line_number"],
-            "line_content": line.strip(),
-            "reason": "resource acquired without .use {} block",
-        })
-return {"matches": leaks, "value": None}
-```
-
-### What it detects
-
-Source:
-```kotlin
-fun fetchData() {
-    // FLAGGED: no .use {}
-    val conn = dataSource.getConnection()
-    conn.close()
-
-    // NOT flagged: idiomatic .use {} pattern
-    dataSource.getConnection().use { conn ->
-        conn.prepareStatement("SELECT 1").execute()
-    }
-}
-```
-
-Output: one match for line 3 (bare `getConnection`), zero for the `.use {}` block.
-
----
-
-## Pattern Template
-
-Use this skeleton when writing new evaluator patterns:
-
-```python
-# Phase 1 driver_regex selects candidate files; evaluator refines per-file.
-# match_positions[i]["ast_node"] is the smallest named AST node at the hit.
-# Return {"matches": [...], "value": <per-file-summary>}
-# Return {"skip": True} to bail out early (file counts as processed, no matches).
-
-results = []
-for pos in match_positions:
-    node = pos.get("ast_node")
-    if node is None:
-        continue
-    # Your filtering logic here
-    results.append({"line_number": pos["line_number"]})
-return {"matches": results, "value": None}
-```
-
-### Available globals in evaluator
-
-| Global | Type | Description |
-|--------|------|-------------|
-| `node` | XRayNode | File root AST node |
-| `root` | XRayNode | Alias for `node` |
-| `source` | str | Full file source text |
-| `lang` | str | Language identifier (java, python, kotlin, ...) |
-| `file_path` | str | Absolute file path |
-| `match_positions` | list[dict] | Phase 1 hits with `line_number`, `byte_offset`, `ast_node`, ... |
-
-### XRayNode helpers
-
-| Method | Returns | Description |
-|--------|---------|-------------|
-| `.type` | str | Grammar node type (e.g. `method_invocation`) |
-| `.text` | str | Node source text (UTF-8 decoded) |
-| `.children` | list[XRayNode] | All children |
-| `.named_children` | list[XRayNode] | Named children only |
-| `.parent` | XRayNode or None | Parent node |
-| `.child_by_field_name(name)` | XRayNode or None | Child with grammar field name |
-| `.descendants_of_type(name)` | list[XRayNode] | All descendants matching type |
-| `.enclosing(type_name)` | XRayNode or None | Walk parent chain for type |
-| `.is_in_try_resources()` | bool | Inside Java try-with-resources |
-| `.enclosing_method_body()` | XRayNode or None | Body block of enclosing method |
-| `.node_at_byte_offset(off)` | XRayNode or None | Smallest named node at offset |
-| `.start_byte` / `.end_byte` | int | Byte range |
-| `.start_point` / `.end_point` | tuple[int,int] | (row, column) |
-
-### Available built-ins
-
-Evaluators cannot import any modules. The sandbox blocks all `import` and
-`from ... import` statements. Use only the provided globals (listed above) and
-the following eight safe built-ins:
-
-`len`, `any`, `all`, `range`, `enumerate`, `sorted`, `min`, `max`
-
-No other built-ins or standard library modules are available.
-
-### Evaluator return contract
-
-Must return `{"matches": [{"line_number": int, ...}, ...], "value": <any>}`.
-
-Optional keys: `"file_role": str` (surfaced in `file_metadata[]`),
-`"skip": True` (early bail-out, no matches contributed).
+- [X-Ray Architecture](xray-architecture.md) describes the engine and its two
+  execution modes.
+- [X-Ray Sandbox](xray-sandbox.md) describes the retained internal Python
+  module and its non-contract status.
+- [xray_search MCP contract](../src/code_indexer/server/mcp/tool_docs/search/xray_search.md)
+  defines the single-file request and evaluator schema.
+- [analyze_graph MCP contract](../src/code_indexer/server/mcp/tool_docs/search/analyze_graph.md)
+  defines graph extraction, reduction, and completeness semantics.
