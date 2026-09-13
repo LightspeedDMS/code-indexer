@@ -244,3 +244,5 @@ This tool runs SYNCHRONOUSLY within `timeout_seconds` (off the server's event lo
 
 - See `xray_search` for single-file AST pattern matching (regex-driven candidate selection, one evaluator call per file).
 - See `xray_explore` for AST structure discovery to help craft `collect_facts`/`analyze_graph` logic.
+- See the [X-Ray Cookbook](../../../../../../docs/xray-cookbook.md) for guidance on choosing between single-file and graph mode.
+- See [X-Ray Architecture](../../../../../../docs/xray-architecture.md) for how graph mode fits into the overall search engine.

@@ -36,7 +36,7 @@ Deepest references: `docs/xray-architecture.md`, `docs/xray-sandbox.md`.
 **CI gate**: `tests/unit/xray/test_lazy_load.py` -- SUBPROCESS test asserting tree-sitter absent from `sys.modules` after CLI import. BLOCKING.
 
 **Key invariants**:
-- Raw `tree_sitter.Node` NEVER exposed to evaluator code -- always wrapped in `XRayNode` (`__slots__ = ("_node",)`, normal assignment, NO `object.__setattr__`).
+- Raw `tree_sitter.Node` is NEVER exposed to evaluator code -- AST nodes are wrapped in `XRayNode` (`__slots__ = ("_node",)`, normal assignment, NO `object.__setattr__`). **Historical Python evaluator reference:** Python evaluators received that `XRayNode`; the current MCP/REST evaluator contract receives Rust `OwnedNode`.
 - `supported_languages`/`extension_map` are INSTANCE-level (conditional `terraform`/`.tf` when HCL grammar present in Python; mandatory in Rust).
 - 17 mandatory languages in Rust xray-core: java, kotlin, go, python, typescript, javascript, bash, csharp, html, css, hcl/terraform, yaml, sql, xml, groovy, c, cpp. Python xray supports 12 (hcl conditional via `_hcl_available()`; c, cpp added in Story #1077). Extensions mjs/cjs map to the javascript grammar; c uses `.c`/`.h`, cpp uses `.cc`/`.cpp`/`.cxx`/`.c++`/`.hpp`/`.hh`/`.hxx`/`.h++` (a `.h` C++ header parses under the C grammar and may emit ERROR nodes on C++-only syntax).
 - **Dependency**: `tree-sitter>=0.21,<0.22` and `tree-sitter-languages==1.10.2` -- CORE deps since v10.2.1.
@@ -49,24 +49,24 @@ Three defense layers: AST whitelist (Layer 1) + stripped builtins (Layer 2) + mu
 
 ### X-Ray Search Engine and MCP Tool (Epic #968 / Story #972)
 
-Two-phase pipeline: Phase 1 regex walk -> Phase 2 sandboxed evaluator over `XRayNode` ASTs.
+**Historical Python evaluator reference:** Two-phase pipeline: Phase 1 regex walk -> Phase 2 sandboxed evaluator over `XRayNode` ASTs. This is not the current MCP/REST evaluator path.
 
 **Key invariants**:
-- Evaluator contract: 6 globals (`node`, `root`, `source`, `lang`, `file_path`, `match_positions`). Must return `{"matches": [...], "value": <any>}` -- bool REJECTED. Legacy `match_byte_offset`/`match_line_number`/`match_line_content` always `None`.
-- Allowed nodes: Groups C (If/For/While/Break/Continue/Pass), E (BinOp/operator), G (FunctionDef/arguments/arg -- no Lambda), B comprehensions (ListComp/GeneratorExp/IfExp -- no SetComp/DictComp). Groups D (Try/ExceptHandler/Raise) and F (Import/ImportFrom) are BANNED. Still banned: `class`/`lambda`/`with`/`global`/`nonlocal`/`async`/`await`/`yield`/`try`/`import`. SAFE_BUILTIN_NAMES: 8 entries: `len, any, all, range, enumerate, sorted, min, max`. Structured `ValidationResult` fields: `error_code`, `offending_construct`, `offending_line`.
+- **Historical Python evaluator reference:** Evaluator contract: 6 globals (`node`, `root`, `source`, `lang`, `file_path`, `match_positions`). Must return `{"matches": [...], "value": <any>}` -- bool REJECTED. Legacy `match_byte_offset`/`match_line_number`/`match_line_content` always `None`. The current MCP/REST evaluator uses Rust `fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding>`.
+- **Historical Python evaluator reference:** Allowed nodes: Groups C (If/For/While/Break/Continue/Pass), E (BinOp/operator), G (FunctionDef/arguments/arg -- no Lambda), B comprehensions (ListComp/GeneratorExp/IfExp -- no SetComp/DictComp). Groups D (Try/ExceptHandler/Raise) and F (Import/ImportFrom) are BANNED. Still banned: `class`/`lambda`/`with`/`global`/`nonlocal`/`async`/`await`/`yield`/`try`/`import`. SAFE_BUILTIN_NAMES: 8 entries: `len, any, all, range, enumerate, sorted, min, max`. Structured `ValidationResult` fields: `error_code`, `offending_construct`, `offending_line`.
 - Omni multi-repo: `repository_alias` accepts string, list-of-strings, or JSON array. Multi-repo returns `{job_ids, errors}`.
-- Async job pattern: returns `job_id`, clients poll `GET /api/jobs/{job_id}`. Pre-flight `sandbox.validate()` before job submission. `await_seconds` in [0.0, 120.0] (warning logged at >30.0).
-- v10.5.0 evaluator extensions: `match_positions[i]["ast_node"]` (XRayNode at byte offset), `{"skip": True}` early bail-out, `{"file_role": str}` in return dict surfaced in `file_metadata[]`. XRayNode helpers: `is_in_try_resources()`, `enclosing_method_body()`, `node_at_byte_offset()`.
+- Async job pattern: returns `job_id`, clients poll `GET /api/jobs/{job_id}`. Pre-flight `validate_rust_evaluator()` before job submission. `await_seconds` in [0.0, 45.0] (warning logged at >30.0).
+- **Historical Python evaluator reference:** v10.5.0 evaluator extensions: `match_positions[i]["ast_node"]` (XRayNode at byte offset), `{"skip": True}` early bail-out, `{"file_role": str}` in return dict surfaced in `file_metadata[]`. XRayNode helpers: `is_in_try_resources()`, `enclosing_method_body()`, `node_at_byte_offset()`. These names are not current MCP/REST inputs.
 
 -> Full reference: `docs/xray-architecture.md`
 
 ### X-Ray Spawn-Driver Architecture (Bug #994)
 
-`XRaySearchEngine.run()` delegates Phase 2 evaluator execution to `PythonEvaluatorSandbox.run_batch()`, which spawns a clean driver process via `multiprocessing.get_context("spawn")`. The driver imports tree-sitter once, then forks per-file evaluators via `sandbox.run()` (inheriting the driver's clean ~50MB state, not the parent's potentially 2GB+ state).
+**Historical Python evaluator reference:** `XRaySearchEngine.run()` delegated Phase 2 evaluator execution to `PythonEvaluatorSandbox.run_batch()`, which spawned a clean driver process via `multiprocessing.get_context("spawn")`. The current MCP/REST evaluator path uses the Rust engine.
 
 **Key invariants**:
 - Parent (main process): validates evaluator code, reads files, detects languages, builds file_specs -- NO tree-sitter in this path (just extension mapping).
-- Driver (spawn'd): imports tree-sitter + AstSearchEngine, creates PythonEvaluatorSandbox, processes files via ThreadPoolExecutor, each file fork-evaluated from driver state.
+- **Historical Python evaluator reference:** Driver (spawn'd): imported tree-sitter + AstSearchEngine, created PythonEvaluatorSandbox, and processed files via ThreadPoolExecutor, each file fork-evaluated from driver state.
 - Results pipe back as `List[Tuple[matches, errors, meta]]`.
 - `_evaluate_file()` kept as lower-level test API -- existing unit tests call it directly.
 - `_run_inline_batch()` path still exists (activated by passing `ast_engine` to `run_batch`) -- reserved for in-process testing.

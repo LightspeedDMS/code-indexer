@@ -1,6 +1,6 @@
 # X-Ray Search Engine and MCP Tool
 
-This document captures the X-Ray search engine architecture and MCP handler shim invariants extracted from project CLAUDE.md. It defines the two-phase orchestration (regex driver → sandboxed evaluator) and the async job submission pattern.
+This document captures the X-Ray search engine architecture and MCP handler shim invariants extracted from project CLAUDE.md. It defines the two-phase orchestration (regex driver -> Rust evaluator) and the async job submission pattern.
 
 ## Supported Languages
 
@@ -17,26 +17,19 @@ C and C++ extensions and verified node kinds (confirmed against tree-sitter-c 0.
 
 - **Phase 1 (driver, regex)**: regex walk over `repo_path` via `_run_phase1_driver`. Applies the `pattern` regex to file content (`search_target='content'`) or relative path (`search_target='filename'`). Honors `path`, `include_patterns` / `exclude_patterns` (fnmatch / ripgrep glob), `case_sensitive`, `multiline`, `pcre2`, and `context_lines`. Content searches delegate to `RegexSearchService` (ripgrep-backed). Returns a sorted, deduplicated list of candidate `Path` objects together with their per-file Phase 1 hit list, stored in `self._last_phase1_positions[path]` as a list of dicts: `{line_number, line_content, column, byte_offset, context_before, context_after}`.
 
-- **Phase 2 (evaluator, AST — file-as-unit contract, v10.4.0)**: for each candidate file, `AstSearchEngine.parse()` produces a root `XRayNode` ONCE per file, then `PythonEvaluatorSandbox.run()` evaluates `evaluator_code` ONCE per file. The sandbox passes 6 active globals plus 3 legacy compatibility globals:
-  - `node` — the file root XRayNode (always — file-as-unit).
-  - `root` — alias for `node` (same object).
-  - `source` — full file content as UTF-8 string.
-  - `lang` — tree-sitter language name.
-  - `file_path` — absolute path of the file being evaluated.
-  - `match_positions` — list of dicts, one per Phase 1 hit for this file. Each dict: `{line_number, line_content, column, byte_offset, context_before, context_after}`. Empty list in `search_target='filename'` mode.
-  - Legacy compat (always `None` under file-as-unit): `match_byte_offset`, `match_line_number`, `match_line_content`. New evaluators should ignore these and use `match_positions`.
+- **Phase 2, single-file mode (evaluator, current Rust contract)**: for each candidate file, a Rust evaluator compiled from caller-supplied source runs once against that file's root `OwnedNode`. The entry point is `fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding>`. `kind` and `start_line` are FIELDS on `OwnedNode`, not methods. `EvalFinding` is `{ pattern: String, line: usize, snippet: String }` -- there is no `message` field. An empty `Vec<EvalFinding>` means the file matched Phase 1 but the evaluator found nothing to report; the evaluator is file-as-unit, not a separate callback per regex match. This is compiled and executed by `xray-core`/`xray-cli`; it is not the retained internal Python module described in [X-Ray Sandbox](xray-sandbox.md), which is not on this evaluation path.
 
-  The evaluator MUST return a dict with shape `{"matches": [...], "value": <any>}`:
-  - `matches` — list of dicts. Each match dict requires `line_number: int`. May carry any open keys (`column`, `line_content`, `context_before`, `context_after`, plus arbitrary application-specific fields).
-  - `value` — open-typed per-file payload. When non-None, collected into the response `file_metadata[]` list as `{file_path, value}`.
+  MCP requests to `xray_search` use `pattern` (the Phase 1 regex) and `max_results` (candidate-file cap). The REST endpoint `POST /api/xray/search` exposes the same capability under its own field names, `driver_regex` and `max_files` -- do not mix MCP and REST field names in one request. See the [xray_search tool documentation](../src/code_indexer/server/mcp/tool_docs/search/xray_search.md) for the full schema, timeout behavior, and security restrictions.
 
-  The server (`_evaluate_file` in `XRaySearchEngine`) then enriches each match dict before returning:
-  - `file_path` (always added) — overrides any value the evaluator wrote there.
-  - `language` (always added) — tree-sitter language name.
-  - `line_content` (added only when the evaluator omitted it) — derived from `source` using `line_number` (1-based). Empty string if `line_number` is out of range.
-  - For `xray_explore` only: `matched_node` (compact root description) and `ast_debug` (BFS-serialised AST tree).
+  The server (`_build_matches` in `rust_backend.py:1583-1596`) then adds these fields to every match dict; the Rust `EvalFinding` the evaluator returns is exactly `{pattern, line, snippet}` and cannot supply any of them:
+  - `file_path` (always added by the server).
+  - `language` (always added by the server) — tree-sitter language name.
+  - `line_content` (always added by the server) — derived from `source` using `line_number` (1-based). Empty string if `line_number` is out of range.
+  - For `xray_explore` only: `matched_node` (compact root description) and `ast_debug` (BFS-serialised AST tree), added separately in `search_engine.py:722-724`.
 
-  Failure modes (`UnsupportedLanguage`, `EvaluatorTimeout`, `EvaluatorCrash`, `InvalidEvaluatorReturn`, `ValidationFailed`, generic file IO errors) append to `evaluation_errors[]` without failing the job.
+  Failure modes on this path (`UnsupportedLanguage`, `EvaluatorTimeout`, `ValidationError` (evaluator code rejected by `validate_rust_evaluator`), `BinaryNotFound` (missing `xray-cli`), `XRayCliError` (subprocess/JSON failure), generic file IO errors, or the raw exception type name) append to `evaluation_errors[]` without failing the job. `EvaluatorCrash`, `InvalidEvaluatorReturn`, and `ValidationFailed` are Python-only names produced by the retained Python evaluator module's own engine layer (`sandbox.py:858-917`), described in [X-Ray Sandbox](xray-sandbox.md); they are not emitted on this Rust path.
+
+- **Phase 2, graph mode (`analyze_graph`, cross-file)**: a different execution mode from single-file `xray_search`. It requires both `fn collect_facts` (runs per file to collect auxiliary evidence) and `fn analyze_graph` (reduces the completed cross-file graph); a graph evaluator must not define `evaluate_node`. Graph extraction currently supports Java only. Always check `fact_graph_complete` and the degradation counters before treating an empty `findings` list as a verified negative. See the [analyze_graph tool documentation](../src/code_indexer/server/mcp/tool_docs/search/analyze_graph.md) for the `UserFact`, `GraphResult`, `ReduceFinding`, graph-handle, and completeness contracts.
 
 - **`max_results` cap**: when provided, only the first N candidates are evaluated; result includes `partial=True` and `max_files_reached=True`. Job-level timeout takes precedence over the cap (`partial=True`, `timeout=True`).
 
@@ -53,13 +46,13 @@ C and C++ extensions and verified node kinds (confirmed against tree-sitter-c 0.
   - `context_lines` in `[0, 10]`.
   - `max_results` >= 1 when provided.
   - `timeout_seconds` in `[10, 600]`.
-  - `await_seconds` in `[0.0, 120.0]` (maximum defined by `_AWAIT_SECONDS_MAX`). Values above 30.0 cause a warning to be logged, as long polls consume FastAPI threadpool capacity.
+  - `await_seconds` in `[0.0, 45.0]` (maximum defined by `_AWAIT_SECONDS_MAX`). Values above 30.0 cause a warning to be logged, as long polls consume FastAPI threadpool capacity.
 - **Repository alias resolution — omni-aware (string OR list)**:
   - `repository_alias` accepts a single string, a list of strings, or a JSON-encoded string array (e.g. `'["repo-a", "repo-b"]'`). The handler parses the JSON-encoded form via `_parse_json_string_array`.
   - Single-repo path: returns `{"job_id": "<uuid>"}`.
   - Multi-repo path: submits one background job per resolved alias and returns `{"job_ids": [...], "errors": [...]}`. Per-alias resolution errors (unknown repo) are appended to `errors[]`; the batch continues for resolvable aliases.
   - Empty list returns `alias_required`.
-- **Pre-flight**: `XRaySearchEngine()` instantiation (tree-sitter is a core dependency since v10.2.1, so this no longer raises a missing-deps error) then `sandbox.validate(evaluator_code)` (fast rejection without subprocess). Pre-flight runs ONCE for the multi-repo path before any job is submitted.
+- **Pre-flight**: `XRaySearchEngine()` instantiation (tree-sitter is a core dependency since v10.2.1, so this no longer raises a missing-deps error) then `validate_rust_evaluator(evaluator_code)` (fast rejection without subprocess). Pre-flight runs ONCE for the multi-repo path before any job is submitted.
 - **Job submission**: `background_job_manager.submit_job(operation_type="xray_search", func=job_fn, ...)` — the job function closes over all validated params.
 - **Optional inline await**: when `await_seconds > 0`, the handler polls `BackgroundJobManager.get_job_status(job_id, username)` for up to `await_seconds` and returns the inline result if the job completes; otherwise falls back to `{job_id}`.
 - **Response**: `{"job_id": "<uuid>"}` (single repo) or `{"job_ids": [...], "errors": [...]}` (multi-repo). Clients poll `GET /api/jobs/{job_id}`.
@@ -127,15 +120,8 @@ Tool doc: `src/code_indexer/server/mcp/tool_docs/search/xray_search_batch.md`. R
 
 **Files**: `src/code_indexer/server/mcp/handlers/xray_batch.py`, `src/code_indexer/server/routes/xray_routes.py`. Tests: `tests/unit/server/mcp/test_xray_search_batch_handler.py`.
 
-## Sandbox: current allowed nodes
+## Evaluator security model
 
-The `PythonEvaluatorSandbox.ALLOWED_NODES` whitelist admits statement-level control flow, arithmetic, list comprehensions, and function definitions. The allowed groups:
+The current MCP/REST evaluator contract runs the caller-supplied Rust source through `xray-core`/`xray-cli`'s own compile-and-execute pipeline (`fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding>` for single-file mode, `fn collect_facts` + `fn analyze_graph` for graph mode). See the [xray_search tool documentation](../src/code_indexer/server/mcp/tool_docs/search/xray_search.md) for its compile step and security restrictions.
 
-- **Group C — statement-level control flow**: `If` (statement-level if/elif/else), `For` (statement-level for-loop), `While` (statement-level while-loop), `Break`, `Continue`, `Pass`. Iteration is bounded by the subprocess HARD_TIMEOUT_SECONDS (5.0 s) — infinite loops surface as `EvaluatorTimeout`, not validation rejection.
-- **Group E — arithmetic binary ops**: `BinOp` plus `operator` abstract base (covers Add, Sub, Mult, Div, Mod, etc.).
-- **Group G — function definitions**: `FunctionDef`, `arguments`, `arg`. Lambda is NOT allowed.
-- **Group B — comprehensions**: `comprehension, GeneratorExp, ListComp, IfExp`. SetComp and DictComp are NOT allowed.
-
-**SAFE_BUILTIN_NAMES** (8 total): `len, any, all, range, enumerate, sorted, min, max`. Type constructors (str, int, bool, list, dict, etc.), introspection (isinstance, hasattr, type), and exception types are NOT available.
-
-Still banned at validation time (rejected before any subprocess is spawned): `class`, `async def`, `lambda`, `with`, `async with`, `global`, `nonlocal`, `async`, `await`, `yield`, `yield from`, `try`/`except`/`raise`, all imports (`import X`, `from X import Y`), `SetComp`, `DictComp`. Plus dunder Attribute and Subscript access (`__class__`, `__globals__`, `__import__`, etc. — see `DUNDER_ATTR_BLOCKLIST` in `sandbox.py`).
+The codebase also retains an internal Python AST whitelist (an allow-listed node set, a small safe-builtins list, and a matching set of banned constructs) belonging to a prior evaluator generation. That module still exists in-tree but is not on the evaluation path for `xray_search`/`xray_explore` and is not the MCP/REST contract. See [X-Ray Sandbox](xray-sandbox.md) for its class name and retained internals.
