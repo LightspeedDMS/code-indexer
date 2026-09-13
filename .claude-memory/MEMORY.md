@@ -114,5 +114,6 @@
 - [reference_staging_nfs_wedge_recovery.md](reference_staging_nfs_wedge_recovery.md) - Recover wedged cow-storage NFS mount: nfsd per-client force-expire, vers=4.1 pin when 4.2 hangs
 - [reference_reranker_api_signatures.md](reference_reranker_api_signatures.md) - Verified Voyage rerank-2.5 and Cohere rerank API params — no native instruction field
 - [reference_cow_daemon_architecture.md](reference_cow_daemon_architecture.md) - CoW Storage Daemon: REST API for clone lifecycle, NFS for filesystem access
+- [reference_gemini_and_agy_relays_dead_on_this_host.md](reference_gemini_and_agy_relays_dead_on_this_host.md) - gemini-* (tier revoked) and agy-* (CPU lacks pclmulqdq) relays cannot run here; use codex or software-architect/opus
 - [Codex half of the pair cannot run pytest](feedback_codex_interpreter_lacks_project_deps.md) - different interpreter, no project deps; its review degrades to diff-reading, so re-run every quoted test number
 - [Pair driver never gives codex CLAUDE.md](feedback_pair_codex_never_sees_claude_md.md) - claude gets it via --add-dir, codex gets stdin only; always paste the invariants into the mission brief

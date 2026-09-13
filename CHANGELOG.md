@@ -7,7 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [12.53.0] - 2026-09-12
+## [12.54.0] - 2026-09-13
+
+### Fixed
+
+- Story #1853: the discoverable X-Ray documentation taught a retired Python
+  evaluator API while the MCP tool docs taught the current Rust one.
+  `README.md:156` advertised "sandboxed Python evaluators" and linked to a
+  cookbook whose every evaluator block was Python, so a user following the
+  documented path received a Rust `CompileError` -- confirmed on staging
+  v12.53.0 through a real MCP call. README, cookbook, architecture, sandbox and
+  architecture-invariants now state the Rust contract
+  (`fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding>`; `kind` and
+  `start_line` are fields; `EvalFinding` is `{pattern, line, snippet}`), and
+  `analyze_graph.md` is reachable from the human documentation path for the
+  first time. Two stale facts were corrected in passing: `sandbox.validate()`
+  was documented as the live MCP pre-flight when the real call is
+  `validate_rust_evaluator()`, and `await_seconds` was documented as
+  `[0.0, 120.0]` when the live cap has been 45.0 since Bug #1070. Evaluator
+  templates are deliberately not shipped here; they arrive with the gate that
+  compiles and executes them (#1854).
 
 ### Fixed
 
