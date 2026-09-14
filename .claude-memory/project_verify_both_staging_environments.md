@@ -8,8 +8,10 @@ metadata:
 
 The user explicitly established this as a standing process rule (2026-07-19), not a one-time request: whenever verifying a code-indexer release against staging, ALWAYS check both environments, going forward, every time:
 
-1. The 3-node clustered staging environment (`192.168.60.20`/`.22`/`.23`, HAProxy-fronted, PostgreSQL-backed, `storage_mode: postgres`) -- see [[reference_staging_totp_programmatic_auth]] and the cluster topology notes in this project's `.local-testing`.
-2. The solo SQLite production-replica (`192.168.68.167`, `storage_mode: sqlite`, no cluster/HAProxy) -- built specifically to catch solo/SQLite-only bugs the cluster can never surface (e.g. #1444's health-check bug only manifested in solo mode; #1442's CLI dependency-staleness gap was deliberately reproduced there too).
+1. The multi-node clustered staging environment (HAProxy-fronted, PostgreSQL-backed, `storage_mode: postgres`). Its admin account is MFA-protected -- see [[project_staging_cluster_mfa_is_self_serviceable]].
+2. The solo SQLite production-replica (`storage_mode: sqlite`, no cluster/HAProxy) -- built specifically to catch solo/SQLite-only bugs the cluster can never surface (e.g. #1444's health-check bug only manifested in solo mode; #1442's CLI dependency-staleness gap was deliberately reproduced there too).
+
+Addresses and credentials for both live in the operator's gitignored local configuration; never record them here.
 
 **Why**: production is a solo/SQLite deployment, not a cluster. Bugs that only manifest in solo mode (confirmed real example: #1444, permanently-unhealthy `/healthz` on solo installs) are invisible on the cluster nodes alone. Verifying only the cluster gives false confidence that doesn't transfer to what's actually running in production.
 

@@ -7,7 +7,7 @@ metadata:
   modified: 2026-08-25T18:13:53.180Z
 ---
 
-`code_indexer` is installed editable, pinned to `/home/jsbattig/Dev/code-indexer/src`. Inside a `git worktree` checkout, the `src.code_indexer.*` import path resolves to files IN the worktree, but the bare `code_indexer.*` import path (which several modules, e.g. `telemetry/__init__.py`, use internally) still resolves back to the MAIN tree's editable install. Every worktree-based test run is therefore a silently mixed tree — some imports see the worktree's code, others see whatever is currently on `development` in the main checkout.
+`code_indexer` is installed editable, pinned to `~/Dev/code-indexer/src`. Inside a `git worktree` checkout, the `src.code_indexer.*` import path resolves to files IN the worktree, but the bare `code_indexer.*` import path (which several modules, e.g. `telemetry/__init__.py`, use internally) still resolves back to the MAIN tree's editable install. Every worktree-based test run is therefore a silently mixed tree — some imports see the worktree's code, others see whatever is currently on `development` in the main checkout.
 
 **Why**: Discovered during code review of #1676 AC7 (dead span-utility code removal). The reviewer tried to isolate the commit under review in a throwaway `git worktree` at the parent commit, expecting `import traced` to raise `ImportError` there (since the parent commit predates AC7's deletion). Instead got misleading phantom results (6 unrelated `ImportError: cannot import name 'traced'` failures) because the worktree's `src.code_indexer` and the main tree's `code_indexer` disagreed on what `spans.py` contained.
 

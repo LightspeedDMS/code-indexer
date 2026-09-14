@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [12.55.0] - 2026-09-14
+
+### Added
+
+- **X-Ray template library that the build actually executes (#1854).** Eight evaluator templates ship as real `.rs` files under `docs/xray-templates/`, bound into the Rust gate by `include_str!` so a deleted or renamed template breaks the build instead of silently emptying the test set; the cookbook carries a byte-identical copy of each, asserted equal. Five graph-mode templates execute against a fixture graph with asserted true positives and negative controls, and six negative-control tests prove the gate genuinely fails on invalid syntax, an unavailable injected method, a mixed evaluator mode, a missing graph callback, a deleted template and a drifted doc copy. Every graph template emits its self-report FIRST: `analyze_graph` truncates the inline response to `findings[:3]` once the payload exceeds `payload_preview_size_chars`, so a census emitted last is unreachable on a real repo -- confirmed on staging, where jsoup's census landed on page 97 of 97. Template semantics were corrected against the engine rather than assumed: the dead-code census counts the PRE-CAP `referenced` bit (a referenced symbol may have zero post-cap callers) and `undecidable` covers `Public`, `Protected` and `Unknown` with `Unknown` dominant on real Java; SCCs over candidate edges are reported as `possible_candidate_cycle` rather than confirmed cycles; self-recursive singletons are counted instead of dropped while claiming they were acyclic; traversals bound by `symbol_count()` instead of a hardcoded depth; signature matching documented in-file as text matching that over- and under-matches.
+
+### Security
+
+- **Documentation disclosure audit across all 384 tracked markdown files.** Removed a complete MCP `client_id`/`client_secret` pair from `docs/mcp-registration-guide.md` (verified not live against both credential stores, but indistinguishable from a real one to a reader), the real internal storage-node address from `docs/cluster-setup.md`, and a design document's combination of real staging hostname, default credentials and credentials-file location. A corporate email address that is also a live admin account username was removed from `CHANGELOG.md`. Added a "First Start -- Change the Seeded Admin Password" section to `docs/server-deployment.md`: the server seeds a default administrator on first start and no operator-facing document had ever said so.
+
+### Fixed
+
+- Sanitized the version-controlled memory notes of operator usernames and internal IP addresses, and removed a note whose incorrect claim (that headless MFA login against clustered staging was impossible) had caused a verification step to be wrongly reported as blocked.
+
+### Known Issues
+
+- **#1856** -- the server seeds a well-known default administrator account and never forces rotation. The documentation warning above is a mitigation, not a fix.
+- **#1855** -- running the Rust suite from the repository root uses an unpinned toolchain and aborts with a glibc double-free. Both real gates are structurally immune.
+
 ## [12.54.0] - 2026-09-13
 
 ### Fixed
@@ -4629,7 +4648,7 @@ Plus pre-existing lint debt cleanup (16 ruff format violations + 6 mypy errors t
 
 ### Fixed
 
-- **`list_global_repos` returned only 1 of N repos for admin users** (HIGH severity, pre-existing — discovered during v10.4.1 staging test setup): `handle_list_global_repos` (`src/code_indexer/server/mcp/handlers/repos.py`) applied `AccessFilteringService.filter_repo_listing` to all callers including admins. The filter checks group membership; admins by role (e.g. `Seba.Battig@lightspeeddms.com` with `role='admin'`) but not yet assigned to an explicit "admins group" saw only `cidx-meta-global` despite 8 repos existing. Fix: bypass the access filter when `user.role == UserRole.ADMIN`. Bug dates back to commit `6b914ab73` (Story #496 handler refactor, 2026-04-14) but was dormant until today's OAuth-authenticated admin-role testing surfaced it.
+- **`list_global_repos` returned only 1 of N repos for admin users** (HIGH severity, pre-existing — discovered during v10.4.1 staging test setup): `handle_list_global_repos` (`src/code_indexer/server/mcp/handlers/repos.py`) applied `AccessFilteringService.filter_repo_listing` to all callers including admins. The filter checks group membership; admins by role (e.g. an admin account with `role='admin'`) but not yet assigned to an explicit "admins group" saw only `cidx-meta-global` despite 8 repos existing. Fix: bypass the access filter when `user.role == UserRole.ADMIN`. Bug dates back to commit `6b914ab73` (Story #496 handler refactor, 2026-04-14) but was dormant until today's OAuth-authenticated admin-role testing surfaced it.
 
 - **`activate_repository` denied access to `user_alias` before creating it** (HIGH severity, pre-existing): `_check_repository_access` (`src/code_indexer/server/mcp/protocol.py`) extracted the repository identifier from `user_alias` (the NEW alias being created — doesn't exist yet) instead of `golden_repo_alias` (the existing source repo to activate from). Result: every activation attempt returned `Access denied: repository '<user_alias>' is not accessible to user '<username>'`. Fix: the access check now correctly extracts `golden_repo_aliases` (composite form, list — each entry checked individually), `golden_repo_alias` (single form, str), or falls through to `repository_alias`/`alias`/`user_alias`/`repo_alias` for tools that operate on existing repos. The `user_alias` is the new alias being CREATED in `activate_repository` and must NOT be checked.
 
@@ -9371,7 +9390,7 @@ See [Migration Guide](docs/migration-to-v8.md) for complete instructions.
 
 ### Contributors
 
-- Seba Battig <seba.battig@lightspeeddms.com>
+- Seba Battig
 - Claude (AI Assistant) <noreply@anthropic.com>
 
 ### Links
@@ -9742,7 +9761,7 @@ Watch Mode:       < 50ms per file
 - FTS updates: **10-60x faster** for typical change sets
 
 ### Contributors
-- Seba Battig <seba.battig@lightspeeddms.com>
+- Seba Battig
 - Claude (AI Assistant) <noreply@anthropic.com>
 
 ### Links
@@ -10223,7 +10242,7 @@ results = store.search(
 ```
 
 ### Contributors
-- Seba Battig <seba.battig@lightspeeddms.com>
+- Seba Battig
 - Claude (AI Assistant) <noreply@anthropic.com>
 
 ### Links
