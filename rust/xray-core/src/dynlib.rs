@@ -256,6 +256,7 @@ impl GraphDynlibEvaluator {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::graph::analyze::ReduceFinding;
 
     /// RED phase (AC8): `GraphDynlibEvaluator` does not exist yet. This
     /// proves what its GREEN implementation must do -- load a LEGACY-mode
@@ -1361,20 +1362,15 @@ fn collect_facts(node: &OwnedNode, file: &str) -> Vec<UserFact> {
     Vec::new()
 }
 
-// Bounded enumeration of dense ids. Returns (ids, truncated).
-// truncated=true means we hit the ceiling, so absent findings are NOT trustworthy.
-fn enumerate_ids(g: &GraphHandle<'_>) -> (Vec<u32>, bool) {
-    let max_scan: u32 = 20000;
+// Exact enumeration of the graph's dense ids.
+fn enumerate_ids(g: &GraphHandle<'_>) -> Vec<u32> {
     let mut ids: Vec<u32> = Vec::new();
     let mut i: u32 = 0;
-    while i < max_scan {
-        if g.resolve_symbol(i).is_none() {
-            return (ids, false);
-        }
+    while (i as usize) < g.symbol_count() {
         ids.push(i);
         i += 1;
     }
-    (ids, true)
+    ids
 }
 
 // Explicit signature lookup. Deliberately returns None rather than "" so a
@@ -1410,7 +1406,7 @@ fn uc1_uc2_uc6(g: &GraphHandle<'_>, ids: &Vec<u32>) -> Vec<ReduceFinding> {
             Some(s) => s,
             None => {
                 missing += 1;
-                String::new()
+                String::from("<no-signature>")
             }
         };
         // Story #1835: is_definitely_dead_code now returns Some(true) for a
@@ -1600,7 +1596,7 @@ fn uc5_reachability(g: &GraphHandle<'_>, ids: &Vec<u32>) -> Vec<ReduceFinding> {
 
 fn analyze_graph(g: &GraphHandle<'_>, facts: &FactsHandle<'_>) -> GraphResult {
     let mut result = GraphResult::default();
-    let (ids, truncated) = enumerate_ids(g);
+    let ids = enumerate_ids(g);
 
     result.findings.push(ReduceFinding {
         pattern: "uc0_graph_size".to_string(),
@@ -1608,15 +1604,6 @@ fn analyze_graph(g: &GraphHandle<'_>, facts: &FactsHandle<'_>) -> GraphResult {
         involved: Vec::new(),
         signatures: Vec::new(),
     });
-    if truncated {
-        result.findings.push(ReduceFinding {
-            pattern: "uc0_scan_truncated".to_string(),
-            message: "hit max_scan ceiling; absent findings are NOT trustworthy".to_string(),
-            involved: Vec::new(),
-            signatures: Vec::new(),
-        });
-    }
-
     let mut p1 = uc1_uc2_uc6(g, &ids);
     result.findings.append(&mut p1);
     let mut p2 = uc3_layering(g, &ids);
@@ -1629,5 +1616,740 @@ fn analyze_graph(g: &GraphHandle<'_>, facts: &FactsHandle<'_>) -> GraphResult {
     result
 }
 "#
+    }
+
+    // Story #1854 Step 1: legacy (single-file) template gate. Templates are
+    // real `.rs` files under `docs/xray-templates/`, loaded by `include_str!`
+    // so a renamed/deleted template is a BUILD ERROR, never a silently empty
+    // test set. The cookbook doc copy is checked byte-for-byte against the
+    // `.rs` file via the anchor extractor below -- it never compiles the
+    // extracted text, it only proves the two copies have not drifted.
+
+    const LEGACY_TEMPLATES: &[&str] =
+        &["find-function-definitions", "find-calls-containing-text", "find-node-kind"];
+
+    fn template_source(name: &str) -> &'static str {
+        match name {
+            "find-function-definitions" => {
+                include_str!("../../../docs/xray-templates/find-function-definitions.rs")
+            }
+            "find-calls-containing-text" => {
+                include_str!("../../../docs/xray-templates/find-calls-containing-text.rs")
+            }
+            "find-node-kind" => include_str!("../../../docs/xray-templates/find-node-kind.rs"),
+            "find-definitely-dead-symbols" => {
+                include_str!("../../../docs/xray-templates/find-definitely-dead-symbols.rs")
+            }
+            "find-reference-cycles" => {
+                include_str!("../../../docs/xray-templates/find-reference-cycles.rs")
+            }
+            "report-reachable-symbols-from-dense-id" => include_str!(
+                "../../../docs/xray-templates/report-reachable-symbols-from-dense-id.rs"
+            ),
+            "find-path-to-dense-sink" => {
+                include_str!("../../../docs/xray-templates/find-path-to-dense-sink.rs")
+            }
+            "callers-of-symbols-matching-signature-text" => include_str!(
+                "../../../docs/xray-templates/callers-of-symbols-matching-signature-text.rs"
+            ),
+            other => panic!("template_source: unknown template '{}'", other),
+        }
+    }
+
+    const GRAPH_TEMPLATES: &[&str] = &[
+        "find-definitely-dead-symbols",
+        "find-reference-cycles",
+        "report-reachable-symbols-from-dense-id",
+        "find-path-to-dense-sink",
+        "callers-of-symbols-matching-signature-text",
+    ];
+
+    fn cookbook_source() -> &'static str {
+        include_str!("../../../docs/xray-cookbook.md")
+    }
+
+    /// Extracts the byte content of the `rust` fence that immediately
+    /// follows `<!-- template:NAME -->` (at most one newline between anchor
+    /// and fence). Fails loudly on a missing anchor, a duplicated anchor, a
+    /// fence that isn't immediately adjacent, or a missing closing fence --
+    /// silently accepting a later, unrelated block would defeat the point of
+    /// this check.
+    fn extract_cookbook_template_copy(cookbook: &str, name: &str) -> String {
+        let anchor = format!("<!-- template:{} -->", name);
+        let first = cookbook
+            .find(&anchor)
+            .unwrap_or_else(|| panic!("cookbook is missing the anchor for template '{}'", name));
+        let rest_after_first = &cookbook[first + anchor.len()..];
+        assert!(
+            !rest_after_first.contains(&anchor),
+            "cookbook has a DUPLICATE anchor for template '{}' -- exactly one is required",
+            name
+        );
+        let after_newline = rest_after_first.strip_prefix('\n').unwrap_or(rest_after_first);
+        let body = after_newline.strip_prefix("```rust\n").unwrap_or_else(|| {
+            panic!("template '{}' anchor must be followed immediately by a ```rust fence", name)
+        });
+        let fence_close = body
+            .find("```")
+            .unwrap_or_else(|| panic!("no closing fence found for template '{}'", name));
+        body[..fence_close].to_string()
+    }
+
+    /// Extracts a template's cookbook PROSE section, bounded between its
+    /// own `<!-- template:NAME -->` anchor and the NEXT `<!-- template:`
+    /// anchor (or the next `## ` heading, or end of file if neither
+    /// exists) -- never end-of-file unconditionally (Story #1854 F5). An
+    /// unbounded slice let a needle satisfied by a LATER template's
+    /// paragraph pass silently even when the CURRENT template's own
+    /// paragraph was deleted entirely -- see
+    /// `cookbook_prose_gate_proves_a_deleted_paragraph_is_detected` for
+    /// the regression this guards. The fenced ```rust code block
+    /// immediately following the anchor is stripped from the returned
+    /// text, so a needle appearing only inside example code cannot
+    /// satisfy a prose requirement.
+    fn extract_cookbook_prose_section(cookbook: &str, name: &str) -> String {
+        let anchor = format!("<!-- template:{} -->", name);
+        let start = cookbook
+            .find(&anchor)
+            .unwrap_or_else(|| panic!("cookbook is missing the anchor for template '{}'", name));
+        let rest = &cookbook[start + anchor.len()..];
+        let next_anchor_offset = rest.find("<!-- template:");
+        let next_heading_offset = rest.find("\n## ");
+        let end_offset = match (next_anchor_offset, next_heading_offset) {
+            (Some(a), Some(h)) => a.min(h),
+            (Some(a), None) => a,
+            (None, Some(h)) => h,
+            (None, None) => rest.len(),
+        };
+        let section = &rest[..end_offset];
+        match (section.find("```"), section.rfind("```")) {
+            (Some(fence_start), Some(fence_end)) if fence_end > fence_start => {
+                let mut prose = String::new();
+                prose.push_str(&section[..fence_start]);
+                prose.push_str(&section[fence_end + 3..]);
+                prose
+            }
+            _ => section.to_string(),
+        }
+    }
+
+    #[test]
+    fn legacy_template_cookbook_copies_match_their_rs_files_byte_for_byte() {
+        for name in LEGACY_TEMPLATES {
+            let doc_copy = extract_cookbook_template_copy(cookbook_source(), name);
+            assert_eq!(
+                doc_copy,
+                template_source(name),
+                "docs/xray-cookbook.md's copy of '{}' has drifted from docs/xray-templates/{}.rs",
+                name,
+                name
+            );
+        }
+    }
+
+    #[test]
+    fn graph_template_cookbook_copies_match_their_rs_files_byte_for_byte() {
+        for name in GRAPH_TEMPLATES {
+            let doc_copy = extract_cookbook_template_copy(cookbook_source(), name);
+            assert_eq!(
+                doc_copy,
+                template_source(name),
+                "docs/xray-cookbook.md's copy of '{}' has drifted from docs/xray-templates/{}.rs",
+                name,
+                name
+            );
+        }
+    }
+
+    #[test]
+    fn legacy_templates_classify_as_legacy_mode_and_compile_through_compile_evaluator() {
+        use crate::compiler::{self, EvaluatorMode};
+        use tempfile::TempDir;
+
+        for name in LEGACY_TEMPLATES {
+            let source = template_source(name);
+            assert_eq!(
+                compiler::detect_evaluator_mode(source)
+                    .unwrap_or_else(|e| panic!("template '{}' failed mode detection: {:?}", name, e)),
+                EvaluatorMode::Legacy,
+                "template '{}' must classify as legacy (single-file) mode",
+                name
+            );
+
+            let dir = TempDir::new().unwrap();
+            let result = compiler::compile_evaluator(source, dir.path());
+            assert!(
+                result.is_ok(),
+                "template '{}' must compile through the real compile_evaluator: {:?}",
+                name,
+                result.err()
+            );
+        }
+    }
+
+    #[test]
+    fn graph_templates_classify_compile_and_export_both_graph_callbacks() {
+        use crate::compiler::{self, EvaluatorMode};
+        use tempfile::TempDir;
+
+        for name in GRAPH_TEMPLATES {
+            let source = template_source(name);
+            assert_eq!(
+                compiler::detect_evaluator_mode(source)
+                    .unwrap_or_else(|e| panic!("template '{}' failed mode detection: {:?}", name, e)),
+                EvaluatorMode::Graph,
+                "template '{}' must classify as graph mode",
+                name
+            );
+            assert!(source.contains("fn collect_facts"), "{} must define collect_facts", name);
+            assert!(source.contains("fn analyze_graph"), "{} must define analyze_graph", name);
+            assert!(!source.contains("fn evaluate_node"), "{} must not define evaluate_node", name);
+            let dir = TempDir::new().unwrap();
+            let evaluator = compile_and_load_graph(source, dir.path());
+            assert!(evaluator.has_collect_facts(), "{} must export collect_facts", name);
+            assert!(evaluator.has_analyze_graph(), "{} must export analyze_graph", name);
+        }
+    }
+
+    // F8: the per-symbol `dead_code_not_definite` negative was deliberately
+    // removed; the census counter is a strictly stronger control than a
+    // pattern-presence check.
+    fn assert_dead_code_controls(findings: &[ReduceFinding]) {
+        let census = findings
+            .iter()
+            .find(|f| f.pattern == "dead_code_scan_census")
+            .expect("must emit dead_code_scan_census");
+        assert_eq!(parse_template_counter(&census.message, "definitely_dead"), 1);
+        assert_eq!(parse_template_counter(&census.message, "undecidable"), 5);
+        assert_eq!(parse_template_counter(&census.message, "referenced"), 4);
+        assert_eq!(parse_template_counter(&census.message, "unresolved"), 0);
+        assert!(
+            findings.iter().any(|f| f.pattern == "definitely_dead_symbol"),
+            "missing true positive definitely_dead_symbol: {:?}", findings
+        );
+    }
+
+    fn assert_reference_cycle_controls(findings: &[ReduceFinding]) {
+        let control = findings
+            .iter()
+            .find(|f| f.pattern == "reference_cycle_negative_control")
+            .expect("must emit reference_cycle_negative_control");
+        assert_eq!(parse_template_counter(&control.message, "acyclic_singletons_suppressed"), 8);
+        assert_eq!(parse_template_counter(&control.message, "self_loop_singletons"), 0);
+        let cycle = findings
+            .iter()
+            .find(|f| f.pattern == "possible_candidate_cycle")
+            .expect("must report the true 2-node cycle");
+        assert_eq!(parse_template_counter(&cycle.message, "component_size"), 2);
+        assert_eq!(parse_template_counter(&cycle.message, "unresolved_drop_count"), 0);
+    }
+
+    fn assert_reachable_controls(findings: &[ReduceFinding]) {
+        assert!(
+            findings.iter().any(|f| f.pattern == "reachable_root_out_of_range"),
+            "missing the constructed out-of-range root finding: {:?}", findings
+        );
+        let find_root = |root: usize| {
+            findings
+                .iter()
+                .find(|f| f.pattern == "reachable_symbols" && parse_template_counter(&f.message, "root_dense_id") == root)
+                .unwrap_or_else(|| panic!("missing reachable_symbols for root {}: {:?}", root, findings))
+        };
+        assert_eq!(parse_template_counter(&find_root(0).message, "reached_total"), 2);
+        assert_eq!(parse_template_counter(&find_root(4).message, "reached_total"), 1);
+        assert!(
+            findings.iter().any(|f| f.pattern == "reachable_negative_control"),
+            "missing negative/control reachable_negative_control: {:?}", findings
+        );
+    }
+
+    #[test]
+    fn graph_templates_execute_with_positive_and_negative_controls() {
+        use tempfile::TempDir;
+
+        let graph = six_use_case_test_graph();
+        let facts = crate::graph::user_facts::FactIndex::new();
+        let graph_handle = crate::graph::csr::handle::GraphHandle::from_graph(&graph);
+        let facts_handle = crate::graph::user_facts::FactsHandle::from_facts(&facts);
+        fn assert_path_to_sink_controls(findings: &[ReduceFinding]) {
+            let census = findings
+                .iter()
+                .find(|f| f.pattern == "dense_sink_path_census")
+                .expect("must emit dense_sink_path_census");
+            assert_eq!(parse_template_counter(&census.message, "sources_scanned"), 9);
+            assert_eq!(parse_template_counter(&census.message, "paths_found"), 1);
+            assert_eq!(parse_template_counter(&census.message, "no_path"), 8);
+        }
+
+        fn assert_caller_signature_controls(findings: &[ReduceFinding]) {
+            let census = findings
+                .iter()
+                .find(|f| f.pattern == "signature_match_census")
+                .expect("must emit signature_match_census");
+            assert_eq!(parse_template_counter(&census.message, "matched"), 1);
+            assert_eq!(parse_template_counter(&census.message, "callers"), 1);
+            assert!(
+                findings.iter().any(|f| f.pattern == "caller_of_signature_match"),
+                "missing true positive caller_of_signature_match: {:?}", findings
+            );
+        }
+
+        let names = [
+            "find-definitely-dead-symbols",
+            "find-reference-cycles",
+            "report-reachable-symbols-from-dense-id",
+            "find-path-to-dense-sink",
+            "callers-of-symbols-matching-signature-text",
+        ];
+        for name in names {
+            let dir = TempDir::new().unwrap();
+            let evaluator = compile_and_load_graph(template_source(name), dir.path());
+            let result = evaluator
+                .call_analyze_graph(&graph_handle, &facts_handle)
+                .expect("graph callback must be exported")
+                .expect("template must execute without panic");
+            match name {
+                "find-definitely-dead-symbols" => assert_dead_code_controls(&result.findings),
+                "find-reference-cycles" => assert_reference_cycle_controls(&result.findings),
+                "report-reachable-symbols-from-dense-id" => assert_reachable_controls(&result.findings),
+                "find-path-to-dense-sink" => assert_path_to_sink_controls(&result.findings),
+                "callers-of-symbols-matching-signature-text" => assert_caller_signature_controls(&result.findings),
+                _ => unreachable!("unexpected template name {}", name),
+            }
+        }
+    }
+
+    fn parse_template_counter(message: &str, key: &str) -> usize {
+        let needle = format!("{}=", key);
+        let token = message
+            .split_whitespace()
+            .find(|token| token.starts_with(&needle))
+            .unwrap_or_else(|| panic!("missing {} in {:?}", key, message));
+        token[needle.len()..]
+            .parse()
+            .unwrap_or_else(|_| panic!("non-numeric {} in {:?}", key, message))
+    }
+
+    #[test]
+    fn graph_template_honesty_controls_are_in_the_inline_prefix() {
+        use tempfile::TempDir;
+
+        let graph = six_use_case_test_graph();
+        let facts = crate::graph::user_facts::FactIndex::new();
+        let graph_handle = crate::graph::csr::handle::GraphHandle::from_graph(&graph);
+        let facts_handle = crate::graph::user_facts::FactsHandle::from_facts(&facts);
+        let controls = [
+            ("find-definitely-dead-symbols", "dead_code_scan_census"),
+            ("find-reference-cycles", "reference_cycle_negative_control"),
+            ("report-reachable-symbols-from-dense-id", "reachable_root_out_of_range"),
+        ];
+        for (name, control) in controls {
+            let dir = TempDir::new().unwrap();
+            let evaluator = compile_and_load_graph(template_source(name), dir.path());
+            let result = evaluator
+                .call_analyze_graph(&graph_handle, &facts_handle)
+                .unwrap()
+                .unwrap();
+            let index = result
+                .findings
+                .iter()
+                .position(|finding| finding.pattern == control)
+                .unwrap_or_else(|| panic!("{} did not emit {}", name, control));
+            assert!(index < 3, "{} control {} was emitted at {}", name, control, index);
+        }
+    }
+
+    #[test]
+    fn path_template_reports_real_census_numbers() {
+        use tempfile::TempDir;
+
+        let graph = six_use_case_test_graph();
+        let facts = crate::graph::user_facts::FactIndex::new();
+        let graph_handle = crate::graph::csr::handle::GraphHandle::from_graph(&graph);
+        let facts_handle = crate::graph::user_facts::FactsHandle::from_facts(&facts);
+        let dir = TempDir::new().unwrap();
+        let evaluator = compile_and_load_graph(template_source("find-path-to-dense-sink"), dir.path());
+        let result = evaluator.call_analyze_graph(&graph_handle, &facts_handle).unwrap().unwrap();
+        let census = result
+            .findings
+            .iter()
+            .find(|finding| finding.pattern == "dense_sink_path_census")
+            .expect("path template must emit a census");
+        assert_eq!(parse_template_counter(&census.message, "sources_scanned"), 9);
+        assert_eq!(parse_template_counter(&census.message, "paths_found"), 1);
+        assert_eq!(parse_template_counter(&census.message, "no_path"), 8);
+        assert_eq!(result.findings[0].pattern, "dense_sink_path_census");
+    }
+
+    #[test]
+    fn caller_template_reports_real_census_numbers() {
+        use tempfile::TempDir;
+
+        let graph = six_use_case_test_graph();
+        let facts = crate::graph::user_facts::FactIndex::new();
+        let graph_handle = crate::graph::csr::handle::GraphHandle::from_graph(&graph);
+        let facts_handle = crate::graph::user_facts::FactsHandle::from_facts(&facts);
+        let dir = TempDir::new().unwrap();
+        let evaluator = compile_and_load_graph(
+            template_source("callers-of-symbols-matching-signature-text"),
+            dir.path(),
+        );
+        let result = evaluator.call_analyze_graph(&graph_handle, &facts_handle).unwrap().unwrap();
+        let census = result
+            .findings
+            .iter()
+            .find(|finding| finding.pattern == "signature_match_census")
+            .expect("caller template must emit a census");
+        assert_eq!(result.findings[0].pattern, "signature_match_census");
+        assert_eq!(parse_template_counter(&census.message, "scanned"), 10);
+        assert_eq!(parse_template_counter(&census.message, "matched"), 1);
+        assert_eq!(parse_template_counter(&census.message, "missing_signature"), 0);
+        assert_eq!(parse_template_counter(&census.message, "matched_with_zero_callers"), 0);
+        assert_eq!(parse_template_counter(&census.message, "unresolved_targets"), 0);
+        assert_eq!(parse_template_counter(&census.message, "unresolved_callers"), 0);
+        assert_eq!(parse_template_counter(&census.message, "callers"), 1);
+    }
+
+    #[test]
+    fn reference_cycle_template_counts_self_loop_singletons() {
+        let source = template_source("find-reference-cycles");
+        assert!(source.contains("self_loop_singletons"));
+        assert!(source.contains("callees_of(*dense_id).contains(dense_id)"));
+        assert!(!source.contains("acyclic singleton components were evaluated and suppressed"));
+        assert!(source.contains("possible_candidate_cycle"));
+    }
+
+    #[test]
+    fn dead_code_template_does_not_emit_per_symbol_negative_noise() {
+        let source = template_source("find-definitely-dead-symbols");
+        assert!(!source.contains("dead_code_not_definite"));
+        assert!(source.contains("referenced="));
+        assert!(source.contains("pre-cap referenced bit"));
+        assert!(source.contains("reflection"));
+    }
+
+    #[test]
+    fn reachable_and_path_templates_use_graph_bounded_depth_and_generic_control() {
+        let reachable = template_source("report-reachable-symbols-from-dense-id");
+        assert!(reachable.contains("let out_of_range_root: u32 = g.symbol_count() as u32"));
+        assert!(reachable.contains("reached.len() == 1"));
+        assert!(!reachable.contains("root == 4 && reached.len() == 1"));
+        assert!(reachable.contains("g.symbol_count()"));
+
+        let paths = template_source("find-path-to-dense-sink");
+        assert!(!paths.contains("NO_PATH_SOURCE"));
+        assert!(paths.contains("g.symbol_count()"));
+    }
+
+    #[test]
+    fn cookbook_prose_gate_must_not_search_past_the_current_template() {
+        let cookbook = cookbook_source();
+        let cycles = "<!-- template:find-reference-cycles -->";
+        let next = "<!-- template:report-reachable-symbols-from-dense-id -->";
+        let start = cookbook.find(cycles).unwrap();
+        let end = cookbook[start..]
+            .find(next)
+            .map(|offset| start + offset)
+            .unwrap();
+        let section = &cookbook[start..end];
+        assert!(section.contains("unresolved"));
+        assert!(!section.contains("out-of-range"));
+        let gate_source = include_str!("dynlib.rs");
+        // Built from two literals, never one contiguous string: a single
+        // literal here would make this file contain its own needle (via
+        // this very assertion), so the check could never pass.
+        let vulnerable_pattern = format!("{}{}", "let section = &cookbook[start", "..];");
+        assert!(
+            !gate_source.contains(&vulnerable_pattern),
+            "the prose gate must bound each template section"
+        );
+    }
+
+    #[test]
+    fn template_inventory_cross_check_covers_every_rs_file() {
+        use std::fs;
+        let directory = fs::read_dir("../../docs/xray-templates")
+            .expect("template directory must be readable");
+        for entry in directory {
+            let entry = entry.unwrap();
+            let path = entry.path();
+            if path.extension().and_then(|extension| extension.to_str()) != Some("rs") {
+                continue;
+            }
+            let name = path.file_stem().unwrap().to_str().unwrap();
+            assert!(
+                LEGACY_TEMPLATES.contains(&name) || GRAPH_TEMPLATES.contains(&name),
+                "template {} is not listed in a mode inventory",
+                name
+            );
+        }
+    }
+
+    #[test]
+    fn gate_negative_control_invalid_syntax_fails() {
+        use crate::compiler::compile_evaluator;
+        use tempfile::TempDir;
+        let result = compile_evaluator("fn evaluate_node( {", TempDir::new().unwrap().path());
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn gate_negative_control_unavailable_type_or_method_fails() {
+        use crate::compiler::compile_evaluator;
+        use tempfile::TempDir;
+        let source = "fn evaluate_node(node: &XRayNode<'_>, file: &str) -> Vec<ReduceFinding> { vec![ReduceFinding { pattern: node.child_by_field_name(\"x\"), message: file.to_string(), involved: Vec::new(), signatures: Vec::new() }] }";
+        assert!(compile_evaluator(source, TempDir::new().unwrap().path()).is_err());
+    }
+
+    #[test]
+    fn gate_negative_control_mixed_mode_fails() {
+        use crate::compiler::detect_evaluator_mode;
+        let source = "fn evaluate_node(node: &XRayNode<'_>, file: &str) -> Vec<ReduceFinding> { Vec::new() } fn collect_facts(node: &OwnedNode, file: &str) -> Vec<UserFact> { Vec::new() } fn analyze_graph(g: &GraphHandle<'_>, facts: &FactsHandle<'_>) -> GraphResult { GraphResult::default() }";
+        assert!(detect_evaluator_mode(source).is_err());
+    }
+
+    #[test]
+    fn gate_negative_control_missing_graph_callback_fails() {
+        use crate::compiler::detect_evaluator_mode;
+        let source = "fn collect_facts(node: &OwnedNode, file: &str) -> Vec<UserFact> { Vec::new() }";
+        assert!(detect_evaluator_mode(source).is_err());
+    }
+
+    #[test]
+    fn gate_negative_control_deleted_template_name_fails() {
+        let result = std::panic::catch_unwind(|| template_source("deleted-template"));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn gate_negative_control_drifted_doc_copy_fails() {
+        let mut cookbook = cookbook_source().to_string();
+        cookbook = cookbook.replacen(
+            template_source("find-function-definitions"),
+            "fn drifted_collect_facts(node: &OwnedNode, file: &str) -> Vec<UserFact> { Vec::new() }",
+            1,
+        );
+        let result = std::panic::catch_unwind(|| {
+            assert_eq!(
+                extract_cookbook_template_copy(&cookbook, "find-function-definitions"),
+                template_source("find-function-definitions")
+            );
+        });
+        assert!(result.is_err());
+    }
+
+    /// Standalone RED/GREEN discriminator for the find-definitely-dead-symbols
+    /// census counter (Story #1854 pair-fix). The loop test above only checks
+    /// pattern PRESENCE and passes identically before and after this fix; this
+    /// test asserts on the actual census message content so a mislabeled
+    /// counter is caught. Reuses `six_use_case_test_graph()` UNCHANGED: of its
+    /// 10 interned symbols, `never_called` (private, unreferenced) is the one
+    /// `Some(true)` (definitely dead); `order_repository`, `raw_delete_row`,
+    /// `cycle_a`, `cycle_b` (all `mark_referenced`) are `Some(false)`
+    /// (referenced -- 4 of them); the remaining 5 are unreferenced with
+    /// non-private visibility, i.e. `None` (undecidable).
+    #[test]
+    fn find_definitely_dead_symbols_census_counters_are_independent() {
+        use tempfile::TempDir;
+
+        /// Parses `key=N` out of the real census message. Panics (never
+        /// defaults to 0) when the key is absent or its value is not a
+        /// valid `usize`, so a census that stops carrying real numbers
+        /// fails loudly instead of passing on a silently-defaulted count.
+        fn parse_census_counter(message: &str, key: &str) -> usize {
+            let needle = format!("{}=", key);
+            let value_start = message
+                .find(&needle)
+                .unwrap_or_else(|| panic!("census message missing key {:?}: {}", key, message))
+                + needle.len();
+            let value_end = message[value_start..]
+                .find(|c: char| !c.is_ascii_digit())
+                .map(|offset| value_start + offset)
+                .unwrap_or(message.len());
+            let digits = &message[value_start..value_end];
+            digits.parse::<usize>().unwrap_or_else(|e| {
+                panic!("census key {:?} has unparseable value {:?}: {}", key, digits, e)
+            })
+        }
+
+        let graph = six_use_case_test_graph();
+        let facts = crate::graph::user_facts::FactIndex::new();
+        let graph_handle = crate::graph::csr::handle::GraphHandle::from_graph(&graph);
+        let facts_handle = crate::graph::user_facts::FactsHandle::from_facts(&facts);
+
+        let dir = TempDir::new().unwrap();
+        let evaluator =
+            compile_and_load_graph(template_source("find-definitely-dead-symbols"), dir.path());
+        let result = evaluator
+            .call_analyze_graph(&graph_handle, &facts_handle)
+            .expect("graph callback must be exported")
+            .expect("template must execute without panic");
+
+        let census = result
+            .findings
+            .iter()
+            .find(|f| f.pattern == "dead_code_scan_census")
+            .expect("template must emit a dead_code_scan_census finding");
+
+        let definitely_dead = parse_census_counter(&census.message, "definitely_dead");
+        let undecidable = parse_census_counter(&census.message, "undecidable");
+        let referenced = parse_census_counter(&census.message, "referenced");
+        let unresolved = parse_census_counter(&census.message, "unresolved");
+
+        assert_eq!(
+            definitely_dead, 1,
+            "census must report exactly 1 definitely-dead symbol (never_called): {}",
+            census.message
+        );
+        assert_eq!(
+            undecidable, 5,
+            "census must report exactly 5 undecidable symbols: {}",
+            census.message
+        );
+        assert_eq!(
+            referenced, 4,
+            "census must count the 4 referenced (Some(false)) symbols under `referenced`, \
+             not duplicate the undecidable count: {}",
+            census.message
+        );
+        assert_eq!(
+            unresolved, 0,
+            "every interned symbol in this fixture must resolve: {}",
+            census.message
+        );
+        assert_ne!(
+            referenced, undecidable,
+            "referenced and undecidable must be independently derived counters, not duplicates"
+        );
+
+        assert_eq!(
+            definitely_dead + undecidable + referenced + unresolved,
+            graph.symbol_count(),
+            "the four parsed census counters must account for every dense id scanned"
+        );
+    }
+
+    #[test]
+    fn graph_template_cookbook_prose_contains_required_honesty_tripwires() {
+        let cookbook = cookbook_source();
+        let required: &[(&str, &[&str])] = &[
+            ("find-definitely-dead-symbols", &["is_definitely_dead_code", "None", "not a completeness signal", "text matching", "not name resolution"]),
+            ("find-reference-cycles", &["fact_graph_complete", "caller-supplied dense IDs", "is_definitely_dead_code", "not a completeness signal", "text matching", "not name resolution", "unresolved"]),
+            ("report-reachable-symbols-from-dense-id", &["fact_graph_complete", "caller-supplied dense IDs", "is_definitely_dead_code", "not a completeness signal", "text matching", "not name resolution", "symbol_count", "out-of-range"]),
+            ("find-path-to-dense-sink", &["fact_graph_complete", "caller-supplied dense IDs", "is_definitely_dead_code", "not a completeness signal", "text matching", "not name resolution", "no path"]),
+            ("callers-of-symbols-matching-signature-text", &["fact_graph_complete", "caller-supplied dense IDs", "is_definitely_dead_code", "not a completeness signal", "text matching", "not name resolution"]),
+        ];
+        for (name, needles) in required {
+            let section = extract_cookbook_prose_section(cookbook, name);
+            for needle in *needles {
+                assert!(section.contains(needle), "{} cookbook section must mention {:?}", name, needle);
+            }
+        }
+    }
+
+    /// Builds an interior node whose `text()` is exactly `text` -- derives
+    /// `end_byte` from `text.len()` instead of a hand-counted literal, so a
+    /// mismatched byte count can never silently truncate `text()` to "" via
+    /// `new_node_for_test`'s own out-of-bounds `unwrap_or("")` fallback.
+    fn node_with_text(kind: &str, text: &str, line: usize, children: Vec<OwnedNode>) -> OwnedNode {
+        OwnedNode::new_node_for_test(kind, text, line, 0, text.len(), children, true)
+    }
+
+    /// True positive: `computeTotal` (method_declaration) with calls to
+    /// `rawDeleteRow` (contains "rawDelete") and `safeUpdate` (does not).
+    /// Negative controls: the `total` field_declaration (never a function
+    /// definition) and the `safeUpdate` call (never matches "rawDelete").
+    fn method_body_children() -> Vec<OwnedNode> {
+        vec![
+            OwnedNode::new_leaf_for_test("identifier", "computeTotal", 3, true),
+            node_with_text("method_invocation", "rawDeleteRow(id)", 4, vec![]),
+            node_with_text("method_invocation", "safeUpdate(id)", 5, vec![]),
+        ]
+    }
+
+    /// The find-node-kind true positive is the `class_declaration`; its
+    /// negative control is the enclosing `program` root, which must not
+    /// itself be reported.
+    fn legacy_template_fixture_tree() -> OwnedNode {
+        let method_decl = node_with_text(
+            "method_declaration",
+            "void computeTotal() { rawDeleteRow(id); safeUpdate(id); }",
+            3,
+            method_body_children(),
+        );
+        let field_decl = OwnedNode::new_leaf_for_test("field_declaration", "int total;", 2, true);
+        let class_decl = node_with_text(
+            "class_declaration",
+            "class Order { int total; void computeTotal() { ... } }",
+            1,
+            vec![field_decl, method_decl],
+        );
+        node_with_text("program", "", 1, vec![class_decl])
+    }
+
+    fn compile_and_load_legacy(source: &str, dir: &std::path::Path) -> DynlibEvaluator {
+        let cr = crate::compiler::compile_evaluator(source, dir)
+            .unwrap_or_else(|e| panic!("template must compile: {:?}", e));
+        DynlibEvaluator::load(&cr.so_path)
+            .unwrap_or_else(|e| panic!("compiled template .so must load: {}", e))
+    }
+
+    #[test]
+    fn find_function_definitions_template_reports_methods_not_fields() {
+        use tempfile::TempDir;
+        let dir = TempDir::new().unwrap();
+        let evaluator =
+            compile_and_load_legacy(template_source("find-function-definitions"), dir.path());
+        let findings = evaluator.evaluate_node(&legacy_template_fixture_tree());
+        assert!(
+            findings.iter().any(|f| f.snippet.contains("computeTotal")),
+            "must report the method_declaration as a function definition: {:?}",
+            findings
+        );
+        assert!(
+            !findings.iter().any(|f| f.snippet.contains("total;")),
+            "must NOT report the field_declaration as a function definition: {:?}",
+            findings
+        );
+    }
+
+    #[test]
+    fn find_calls_containing_text_template_matches_sink_not_safe_call() {
+        use tempfile::TempDir;
+        let dir = TempDir::new().unwrap();
+        let evaluator =
+            compile_and_load_legacy(template_source("find-calls-containing-text"), dir.path());
+        let findings = evaluator.evaluate_node(&legacy_template_fixture_tree());
+        assert!(
+            findings.iter().any(|f| f.snippet.contains("rawDeleteRow")),
+            "must report the call containing the target text: {:?}",
+            findings
+        );
+        assert!(
+            !findings.iter().any(|f| f.snippet.contains("safeUpdate")),
+            "must NOT report a call that does not contain the target text: {:?}",
+            findings
+        );
+    }
+
+    #[test]
+    fn find_node_kind_template_matches_class_not_program() {
+        use tempfile::TempDir;
+        let dir = TempDir::new().unwrap();
+        let evaluator = compile_and_load_legacy(template_source("find-node-kind"), dir.path());
+        let findings = evaluator.evaluate_node(&legacy_template_fixture_tree());
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.pattern == "node_kind_match" && f.snippet.contains("class Order")),
+            "must report the class_declaration node: {:?}",
+            findings
+        );
+        assert_eq!(
+            findings.len(),
+            1,
+            "must not report the enclosing program node or anything else: {:?}",
+            findings
+        );
     }
 }
