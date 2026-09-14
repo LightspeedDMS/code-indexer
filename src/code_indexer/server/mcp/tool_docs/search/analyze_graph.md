@@ -17,7 +17,7 @@ inputSchema:
       type: array
       items:
         type: string
-      description: 'Glob patterns for files to include in the graph (e.g. ["*.java", "*.kt"]). Empty list means include all files in the repository (the WHOLE repo is indexed into the graph regardless of these patterns -- see "Indexing scope vs finding scope" below).'
+      description: 'Glob patterns for files to include in the graph (e.g. ["*.java"]). These patterns DO narrow what is read into the graph. PASS ["*.java"] -- the graph extractor is Java-only, so on any mixed-language repository an empty list pulls in every other file, inflates the files_with_unsupported_language degradation counter, and makes fact_graph_complete: true unreachable. Empty list means include all files.'
       default: []
     exclude_patterns:
       type: array
@@ -164,7 +164,7 @@ pub struct ReduceFinding {
 | `g.dense_id_for(symbol)` | `(u64) -> Option<u32>` | Reverse lookup from a real global `SymbolId` to its dense id. |
 | `g.resolve_string(string_id)` | `(u32) -> Option<&str>` | Interned string lookup. |
 | `g.is_symbol_referenced(dense_id)` | `(u32) -> bool` | True if ANY inbound edge exists, regardless of graph completeness. |
-| `g.is_definitely_dead_code(dense_id)` | `(u32) -> Option<bool>` | `Some(false)` = referenced (always safe to trust). `Some(true)` = definitely dead (ONLY reported when the graph is fully complete). `None` = unknown/suppressed (an incomplete graph must never claim "dead" with no evidence). |
+| `g.is_definitely_dead_code(dense_id)` | `(u32) -> Option<bool>` | `Some(false)` = the symbol has an inbound reference edge. `Some(true)` = unreferenced AND explicitly `private`. `None` = any other visibility (`Public`, `Protected`, or `Unknown`). **This predicate does NOT consult `fact_graph_complete`** -- it returns `Some(true)` on an incomplete graph exactly as it would on a complete one. **It is also blind to field and constant reads**: the Java extractor creates reference edges only from `method_invocation`, `object_creation_expression` and `type_identifier`, so a `private` field or constant that is read normally still reports `Some(true)`. Treat `Some(true)` on a `field` or `constant` as unreliable, and every `Some(true)` as falsifiable by reflection, JNI or DI. |
 | `g.signature_for(dense_id)` | `(u32) -> Option<&str>` | Cached declaration signature line, for reporting. |
 
 ### FactsHandle reference
@@ -176,7 +176,7 @@ pub struct ReduceFinding {
 
 ## AnalysisCompleteness: the honesty contract
 
-The whole point of this tool is that a caller can tell "no findings" apart from "the index was too incomplete to trust a negative". **Always check `fact_graph_complete` and `degradation` before treating an empty `findings[]` as a clean result** -- especially for dead-code-style analyses, where `is_definitely_dead_code` itself returns `None` (never `Some(true)`) whenever the graph is not fully complete, so a naive evaluator that only checks `== Some(true)` will correctly report NOTHING rather than a false positive, but your CALLING code must still surface `fact_graph_complete=false` to the human reading the result rather than silently presenting an empty list as "verified clean".
+The whole point of this tool is that a caller can tell "no findings" apart from "the index was too incomplete to trust a negative". **Always check `fact_graph_complete` and `degradation` before treating an empty `findings[]` as a clean result** -- especially for dead-code-style analyses. **`is_definitely_dead_code` does NOT gate itself on completeness** -- it returns `Some(true)` on a degraded graph exactly as it would on a complete one, so an evaluator that only checks `== Some(true)` WILL emit false positives when the graph is incomplete. The completeness check is yours to apply: read `fact_graph_complete` and `degradation` yourself, and surface `fact_graph_complete=false` to the human rather than presenting either an empty list as "verified clean" or a populated list as "verified dead".
 
 ```json
 {
@@ -201,7 +201,7 @@ The response above means "your evaluator found nothing dead, but 2 files had rea
 
 ## Directional asymmetry (dead-code vs reachability)
 
-Per the epic's design: **dead-code analysis must UNDER-report (safe)** -- `is_definitely_dead_code` already enforces this by returning `None` instead of `Some(true)` under any incompleteness. **Reachability analysis must OVER-report (unsafe in the other direction)** -- when your evaluator reports that endpoint X can reach sink Y, it must ship the PATH (`involved`) and identify the weakest link's confidence, since a caller relying on a reachability claim needs to audit exactly how strong that claim is rather than trusting a bare boolean.
+Per the epic's design: **dead-code analysis must UNDER-report (safe)** -- but the engine does NOT enforce this for you. `is_definitely_dead_code` returns `Some(true)` regardless of `fact_graph_complete`, and cannot see field or constant reads at all. Your evaluator is what makes the analysis safe: check `fact_graph_complete` before trusting any `Some(true)`, and do not report `Some(true)` on `field` or `constant` declarations as dead. **Reachability analysis must OVER-report (unsafe in the other direction)** -- when your evaluator reports that endpoint X can reach sink Y, it must ship the PATH (`involved`) and identify the weakest link's confidence, since a caller relying on a reachability claim needs to audit exactly how strong that claim is rather than trusting a bare boolean.
 
 ```rust
 fn analyze_graph(g: &GraphHandle<'_>, facts: &FactsHandle<'_>) -> GraphResult {
