@@ -5,8 +5,67 @@ use libloading::{Library, Symbol};
 use std::path::Path;
 
 type EvaluateNodeFn = fn(&OwnedNode) -> Vec<EvalFinding>;
-type AbiVersionFn = fn() -> u64;
+/// Bug #1855 (H1): `extern "C"` -- this is the FIRST symbol the loader
+/// calls, before compatibility between host and evaluator has been
+/// established, so it cannot rely on the plain Rust ABI happening to match
+/// (that match is exactly the precondition this probe exists to prove).
+/// Contrast with `EvaluateNodeFn`/`DrainDebugLogFn` above/below, which are
+/// data-carrying callbacks that only ever run AFTER this probe succeeds and
+/// legitimately keep the plain Rust ABI.
+type AbiVersionFn = extern "C" fn() -> u64;
 type DrainDebugLogFn = fn() -> Vec<String>;
+/// The evaluator `.so` exports its embedded rustc version as a raw
+/// pointer/length pair of plain scalars. This avoids crossing the dynamic
+/// library boundary with a Rust-owned String or Vec before compatibility has
+/// been established.
+///
+/// Bug #1855 (H1): `extern "C"` for the same reason as `AbiVersionFn` above
+/// -- these two are read immediately after `xray_abi_version` and still
+/// before rustc-version compatibility itself has been confirmed.
+type RustcVersionPtrFn = extern "C" fn() -> u64;
+type RustcVersionLenFn = extern "C" fn() -> u64;
+
+const HOST_RUSTC_VERSION: &str = env!("CIDX_HOST_RUSTC_VERSION");
+
+fn verify_rustc_version_match(host: &str, evaluator: &str) -> Result<(), String> {
+    if host == evaluator {
+        Ok(())
+    } else {
+        Err(format!(
+            "rustc version mismatch: host binary was built with '{}', but evaluator .so was built with '{}'. Recompile the evaluator with the host toolchain.",
+            host, evaluator
+        ))
+    }
+}
+
+unsafe fn evaluator_rustc_version(lib: &Library) -> Result<String, String> {
+    let ptr_fn: Symbol<RustcVersionPtrFn> = lib
+        .get(b"xray_rustc_version_ptr")
+        .map_err(|e| format!("Symbol xray_rustc_version_ptr not found: {}", e))?;
+    let len_fn: Symbol<RustcVersionLenFn> = lib
+        .get(b"xray_rustc_version_len")
+        .map_err(|e| format!("Symbol xray_rustc_version_len not found: {}", e))?;
+    let ptr = ptr_fn();
+    let len = len_fn();
+    if ptr == 0 {
+        return Err("Evaluator rustc version export returned a null pointer".to_string());
+    }
+    if len == 0 || len > 4096 {
+        return Err(format!(
+            "Evaluator rustc version export returned invalid length {}",
+            len
+        ));
+    }
+    let bytes = std::slice::from_raw_parts(ptr as *const u8, len as usize);
+    let version = std::str::from_utf8(bytes)
+        .map_err(|e| format!("Evaluator rustc version export is not valid UTF-8: {}", e))?;
+    Ok(version.to_owned())
+}
+
+fn verify_loaded_rustc_version(lib: &Library) -> Result<(), String> {
+    let evaluator_version = unsafe { evaluator_rustc_version(lib)? };
+    verify_rustc_version_match(HOST_RUSTC_VERSION, &evaluator_version)
+}
 
 pub struct DynlibEvaluator {
     _lib: Library,
@@ -46,6 +105,8 @@ impl DynlibEvaluator {
                 crate::compiler::XRAY_ABI_VERSION
             ));
         }
+
+        verify_loaded_rustc_version(&lib)?;
 
         let evaluate_fn: EvaluateNodeFn = unsafe {
             let sym: Symbol<EvaluateNodeFn> = lib
@@ -177,6 +238,8 @@ impl GraphDynlibEvaluator {
                 crate::compiler::XRAY_ABI_VERSION
             ));
         }
+
+        verify_loaded_rustc_version(&lib)?;
 
         let collect_facts_fn: Option<CollectFactsFn> =
             unsafe { lib.get::<CollectFactsFn>(b"xray_collect_facts").ok().map(|sym| *sym) };
@@ -780,6 +843,52 @@ fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> {
         assert!(evaluator.is_ok(), "load must succeed with matching ABI version: {:?}", evaluator.err());
     }
 
+    /// Bug #1855 (Layer 1): this is the pure, discriminating half of the
+    /// mismatch guard -- no compiled `.so` needed -- proving the intended
+    /// comparison accepts identical host/evaluator rustc version strings.
+    /// Discriminating together with the rejection test immediately below:
+    /// this one alone proves nothing (a stub that always returns `Ok`
+    /// would pass it too).
+    #[test]
+    fn verify_rustc_version_match_accepts_identical_versions() {
+        let version = "rustc 1.98.0 (aaaaaaaaa 2026-01-01)";
+        let result = verify_rustc_version_match(version, version);
+        assert!(
+            result.is_ok(),
+            "identical host/evaluator rustc versions must be accepted: {:?}",
+            result.err()
+        );
+    }
+
+    /// Bug #1855 (Layer 1, RED phase): proves the comparison actually
+    /// REJECTS a divergent host/evaluator pairing -- the double-free
+    /// scenario from the mission repro (host 1.91.0, evaluator .so
+    /// 1.98.0) -- and that the resulting diagnostic names BOTH versions,
+    /// per acceptance criterion 5 and mandatory rule 4. A guard that
+    /// merely logs a warning or silently accepts is a FAIL, not a pass
+    /// with a caveat (Messi Rule 2/13).
+    #[test]
+    fn verify_rustc_version_match_rejects_divergent_versions_naming_both() {
+        let host_version = "rustc 1.91.0 (bbbbbbbbb 2025-10-28)";
+        let evaluator_version = "rustc 1.98.0 (ccccccccc 2026-06-01)";
+        let result = verify_rustc_version_match(host_version, evaluator_version);
+        assert!(
+            result.is_err(),
+            "divergent host/evaluator rustc versions must be rejected"
+        );
+        let err = result.unwrap_err();
+        assert!(
+            err.contains(host_version),
+            "error must name the HOST rustc version so a developer can diagnose: {}",
+            err
+        );
+        assert!(
+            err.contains(evaluator_version),
+            "error must name the EVALUATOR .so's rustc version so a developer can diagnose: {}",
+            err
+        );
+    }
+
     #[test]
     fn test_compiled_evaluator_exports_abi_version_matching_single_source_of_truth() {
         // Bug #1784 review MAJOR-3: after centralizing XRAY_ABI_VERSION to
@@ -814,6 +923,46 @@ fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> {
             abi_version,
             compiler::XRAY_ABI_VERSION,
             "compiled evaluator's exported ABI version must equal the single source of truth"
+        );
+    }
+
+    /// Bug #1855 (Layer 1): mirrors
+    /// `test_compiled_evaluator_exports_abi_version_matching_single_source_of_truth`
+    /// exactly: compiles a REAL evaluator through the real pipeline, loads
+    /// the REAL `.so` directly, and proves its exported rustc version
+    /// equals `cache::get_rustc_version()` -- the existing pinned-toolchain
+    /// probe that already feeds `compute_cache_identity` -- not merely
+    /// that a source-text placeholder was substituted somewhere. Reading
+    /// the two symbols as `u64` scalars (never a `String`/`Vec<u8>`) keeps
+    /// this call safe to make on a `.so` that has NOT yet been proven to
+    /// share the host's rustc, which is exactly the state this loader is
+    /// in immediately after `Library::new` succeeds.
+    #[test]
+    fn test_compiled_evaluator_exports_rustc_version_matching_single_source_of_truth() {
+        use crate::cache;
+        use crate::compiler;
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let user_code = r#"
+fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> {
+    Vec::new()
+}
+"#;
+        let cr = compiler::compile_evaluator(user_code, dir.path()).expect("compile must succeed");
+
+        let lib = unsafe { Library::new(&cr.so_path) }.expect("must load compiled .so directly");
+        let exported_version = unsafe {
+            super::evaluator_rustc_version(&lib)
+                .expect("freshly compiled evaluator must expose a valid rustc version")
+        };
+
+        assert_eq!(
+            exported_version,
+            cache::get_rustc_version(),
+            "compiled evaluator's exported rustc version must equal the pinned-toolchain probe \
+             (cache::get_rustc_version) -- the single source of truth the evaluator was actually \
+             compiled under"
         );
     }
 

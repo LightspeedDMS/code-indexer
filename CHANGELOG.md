@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [12.56.0] - 2026-09-14
+
+### Fixed
+
+- **Host/evaluator rustc mismatch corrupted the heap instead of being detected (#1855).** Running the Rust suite from the repository root aborted with `free(): double free detected in tcache 2` (SIGABRT); the identical test passed from `rust/`. Bug #1816 had pinned the evaluator `.so` build (`evaluator_rustc_command` sets `RUSTUP_TOOLCHAIN` from an `include_str!`-embedded channel, so the `.so` is always the pinned toolchain), but the HOST binary was pinned only by working directory -- there was no workspace-root `rust-toolchain.toml` -- so a root-cwd `cargo` built it with the rustup default. Two different `std` layouts then met across the `GraphHandle` FFI boundary. The compile cache could not detect it, because `compute_cache_identity`'s `rustc_version` probe is pinned to the same channel and reads the identical value on both sides of a genuine mismatch.
+
+  Fixed in two layers. The compiled `.so` now exports the rustc version it was built with and the loader compares it against the host's, failing loudly with both versions named; the host value is captured at build time from cargo's own `RUSTC`, never by a runtime shell-out that would reintroduce the same cwd dependency. The probe symbols are `extern "C"` -- the previous justification for the plain Rust ABI at this boundary was circular, arguing the convention was safe *because* compatibility had been verified while being the mechanism that verifies it. Data-carrying callbacks remain on the plain Rust ABI, now honestly justified: they are reached only after that probe passes. A workspace-root `rust-toolchain.toml` prevents the situation, and a drift guard asserts the root pin, the `rust/` pin and CI's `dtolnay/rust-toolchain` ref all agree, collecting every CI match so a divergent second job fails the gate rather than hiding behind the first.
+
+  Operational note: a deployed node whose `xray-cli` was built by a different rustc than the server resolves at runtime will now hard-fail evaluator loads with a named diagnostic, where it previously appeared to work while corrupting memory. That is the intended outcome.
+
+### Changed
+
+- `cache::get_rustc_version` is memoized behind a `OnceLock`. Evaluator assembly now needs the value and runs before the cache check, so an unmemoized probe would have made even a cache hit spawn a `rustc --version` subprocess -- on the `--print-cache-identity` path whose budget is clamped to the caller's remaining deadline.
+
 ## [12.55.0] - 2026-09-14
 
 ### Added
@@ -23,8 +37,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Known Issues
 
-- **#1856** -- the server seeds a well-known default administrator account and never forces rotation. The documentation warning above is a mitigation, not a fix.
-- **#1855** -- running the Rust suite from the repository root uses an unpinned toolchain and aborts with a glibc double-free. Both real gates are structurally immune.
+- **#1856** -- the server seeds a well-known default administrator account and never forces rotation. Reviewed and closed as intended behaviour for this deployment model; the documentation warning above is the response.
+- **#1855** -- running the Rust suite from the repository root uses an unpinned toolchain and aborts with a glibc double-free. Both real gates are structurally immune. Fixed in 12.56.0.
 
 ## [12.54.0] - 2026-09-13
 

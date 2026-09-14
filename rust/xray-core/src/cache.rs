@@ -3,6 +3,19 @@
 /// Cache directory: ~/.cidx-server/xray-cache/
 /// Each entry: {hash}.so + {hash}.meta (key=value text)
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
+
+#[cfg(test)]
+use std::sync::atomic::{AtomicUsize, Ordering};
+#[cfg(test)]
+use std::sync::Mutex;
+
+static RUSTC_VERSION: OnceLock<String> = OnceLock::new();
+
+#[cfg(test)]
+static RUSTC_VERSION_PROBE_COUNT: AtomicUsize = AtomicUsize::new(0);
+#[cfg(test)]
+static RUSTC_VERSION_TEST_MUTEX: Mutex<()> = Mutex::new(());
 
 /// Metadata stored alongside each cached .so file.
 #[derive(Debug, Clone, PartialEq)]
@@ -138,10 +151,12 @@ pub(crate) fn rustc_version_command() -> std::process::Command {
     command
 }
 
-/// Returns the current rustc version string by running `rustc --version`
-/// under the pinned toolchain (`rustc_version_command`). Falls back to
-/// "unknown" if rustc is not on PATH.
-pub fn get_rustc_version() -> String {
+/// Runs the one real `rustc --version` probe. Falls back to "unknown" if
+/// rustc is not on PATH.
+fn probe_rustc_version() -> String {
+    #[cfg(test)]
+    RUSTC_VERSION_PROBE_COUNT.fetch_add(1, Ordering::Relaxed);
+
     let output = rustc_version_command().output();
     match output {
         Ok(o) if o.status.success() => {
@@ -149,6 +164,32 @@ pub fn get_rustc_version() -> String {
         }
         _ => "unknown".to_string(),
     }
+}
+
+/// Returns the current rustc version string by running `rustc --version`
+/// under the pinned toolchain (`rustc_version_command`). The value is a
+/// process-lifetime constant, so repeated cache hits do not spawn another
+/// subprocess.
+pub fn get_rustc_version() -> String {
+    RUSTC_VERSION.get_or_init(probe_rustc_version).clone()
+}
+
+#[cfg(test)]
+fn uncached_rustc_version_probe() -> String {
+    probe_rustc_version()
+}
+
+#[cfg(test)]
+fn rustc_version_probe_count() -> usize {
+    RUSTC_VERSION_PROBE_COUNT.load(Ordering::Relaxed)
+}
+
+#[cfg(test)]
+fn with_exclusive_rustc_probes<T>(f: impl FnOnce() -> T) -> T {
+    let _guard = RUSTC_VERSION_TEST_MUTEX
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    f()
 }
 
 /// TTL for local cached .so files (seconds).
@@ -530,10 +571,45 @@ mod tests {
 
     #[test]
     fn test_get_rustc_version_returns_nonempty_string() {
-        let v = get_rustc_version();
-        assert!(!v.is_empty());
-        // Should contain "rustc" or fall back to "unknown"
-        assert!(v.starts_with("rustc") || v == "unknown");
+        with_exclusive_rustc_probes(|| {
+            let v = get_rustc_version();
+            assert!(!v.is_empty());
+            // Should contain "rustc" or fall back to "unknown"
+            assert!(v.starts_with("rustc") || v == "unknown");
+        });
+    }
+
+    /// Bug #1855 (H5): the process-lifetime memo must avoid paying for a
+    /// second rustc subprocess on every cache hit, without making this test
+    /// depend on whether another parallel test warmed the OnceLock first.
+    #[test]
+    fn memoized_rustc_version_uses_at_most_one_probe() {
+        // Resolve the process-lifetime OnceLock before taking the test mutex.
+        // This prevents a concurrent initializer from ever needing a mutex
+        // held by this test while this test waits for OnceLock completion.
+        get_rustc_version();
+        with_exclusive_rustc_probes(|| {
+            let before_uncached = rustc_version_probe_count();
+            for _ in 0..3 {
+                uncached_rustc_version_probe();
+            }
+            assert_eq!(
+                rustc_version_probe_count() - before_uncached,
+                3,
+                "the uncached seam must account for each real rustc probe"
+            );
+
+            let before_memoized = rustc_version_probe_count();
+            for _ in 0..3 {
+                get_rustc_version();
+            }
+            let memoized_delta = rustc_version_probe_count() - before_memoized;
+            assert!(
+                memoized_delta <= 1,
+                "memoized rustc version must trigger zero or one probe, got {}",
+                memoized_delta
+            );
+        });
     }
 
     /// Bug #1816: `pinned_toolchain_channel()` must parse the EXACT channel
