@@ -107,13 +107,14 @@
 - [project_backlog_clear_ends_with_staging_e2e.md](project_backlog_clear_ends_with_staging_e2e.md) - Once bugs converge to priority-4-only, raise staging E2E testing as the saga's closing step (discuss first, don't launch unilaterally)
 - [project_backlog_session_paused_2026_08_27.md](project_backlog_session_paused_2026_08_27.md) - Exact resume state for /implement-backlog sweep paused 2026-08-27 by user "stop the agents" -- read this one first
 - [project_backlog_session_paused_for_vm_migration.md](project_backlog_session_paused_for_vm_migration.md) - Exact resume state for /implement-backlog sweep paused 2026-08-26 for VM host migration (superseded by next entry)
-- [project_pytest_tmp_accumulates_unbounded.md](project_pytest_tmp_accumulates_unbounded.md) - /tmp/pytest-of-jsbattig grows unbounded (70+ GB seen) on this dev box from heavy TDD/review testing — safe to clean dirs >15min old, excluding the live run
+- [project_pytest_tmp_accumulates_unbounded.md](project_pytest_tmp_accumulates_unbounded.md) - /tmp/pytest-of-$USER grows unbounded (70+ GB seen) on this dev box from heavy TDD/review testing — safe to clean dirs >15min old, excluding the live run
 
 ## External References
-- [reference_staging_totp_programmatic_auth.md](reference_staging_totp_programmatic_auth.md) - Headless MFA: `.local-testing` TOTP is a shell command, eval for live code, then two-step login
+- [project_staging_cluster_mfa_is_self_serviceable.md](project_staging_cluster_mfa_is_self_serviceable.md) - Cluster staging MFA is ours to complete via the server's shared cluster key store; NEVER escalate it to the operator as a blocker
 - [reference_staging_nfs_wedge_recovery.md](reference_staging_nfs_wedge_recovery.md) - Recover wedged cow-storage NFS mount: nfsd per-client force-expire, vers=4.1 pin when 4.2 hangs
 - [reference_reranker_api_signatures.md](reference_reranker_api_signatures.md) - Verified Voyage rerank-2.5 and Cohere rerank API params — no native instruction field
 - [reference_cow_daemon_architecture.md](reference_cow_daemon_architecture.md) - CoW Storage Daemon: REST API for clone lifecycle, NFS for filesystem access
 - [reference_gemini_and_agy_relays_dead_on_this_host.md](reference_gemini_and_agy_relays_dead_on_this_host.md) - gemini-* (tier revoked) and agy-* (CPU lacks pclmulqdq) relays cannot run here; use codex or software-architect/opus
 - [Codex half of the pair cannot run pytest](feedback_codex_interpreter_lacks_project_deps.md) - different interpreter, no project deps; its review degrades to diff-reading, so re-run every quoted test number
-- [Pair driver never gives codex CLAUDE.md](feedback_pair_codex_never_sees_claude_md.md) - claude gets it via --add-dir, codex gets stdin only; always paste the invariants into the mission brief
+- [Pair driver DOES inject CLAUDE.md now](feedback_pair_codex_never_sees_claude_md.md) - fixed by pair-rulebook.sh; check run.log for "RULEBOOK injected", don't paste invariants into briefs
+- [feedback_pair_driver_rundir_conflicts_with_sandbox_rule.md](feedback_pair_driver_rundir_conflicts_with_sandbox_rule.md) - RUN_DIR under /tmp vs the sandbox rule: codex may refuse WORKING_AGREEMENT.md; read the turn-6 handoff, not a failure
