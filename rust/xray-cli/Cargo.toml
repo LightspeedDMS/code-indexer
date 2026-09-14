@@ -11,3 +11,6 @@ path = "src/main.rs"
 xray-core = { path = "../xray-core" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+
+[dev-dependencies]
+tempfile = "3"

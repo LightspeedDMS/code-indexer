@@ -5136,6 +5136,15 @@ def watch(ctx, debounce: float, batch_size: int, initial_sync: bool, fts: bool):
             if semantic_handler:
                 semantic_handler.stop_watching()
 
+            # Bug #1825: observer.stop() only stops the watchdog Observer's
+            # inotify-event thread -- the temporal handler's polling
+            # fallback (when active) runs on its OWN independent thread
+            # that observer.stop() never touches. Without this, a session
+            # that fell back to polling leaked that thread for the rest of
+            # the process's life.
+            if temporal_watch_handler:
+                temporal_watch_handler.stop()
+
             observer.stop()
             observer.join()
 

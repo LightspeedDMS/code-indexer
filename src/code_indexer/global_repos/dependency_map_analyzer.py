@@ -30,6 +30,9 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, cast
 
 from code_indexer.global_repos.yaml_emitter_utils import yaml_quote_if_unsafe
+from code_indexer.utils.subprocess_diagnostics import (
+    format_completed_process_diagnostic,
+)
 
 # Story #848: lazy server imports for Pass 2 CliDispatcher wiring.
 # These are None in pure CLI contexts (no server package) and populated when
@@ -2818,7 +2821,9 @@ Rules:
             logger.debug(f"Claude CLI stdout (first 500 chars): {result.stdout[:500]}")
 
         if result.returncode != 0:
-            logger.error(f"Claude CLI failed: {result.stderr}")
+            logger.error(
+                f"Claude CLI failed: {format_completed_process_diagnostic(result)}"
+            )
             raise subprocess.CalledProcessError(
                 result.returncode, cmd, result.stdout, result.stderr
             )

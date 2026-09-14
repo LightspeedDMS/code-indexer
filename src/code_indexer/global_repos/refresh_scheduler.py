@@ -47,6 +47,10 @@ from .refresh_integrity_gate import (
 )
 from .shared_operations import DEFAULT_REFRESH_INTERVAL, GlobalRepoOperations
 from code_indexer.server.repositories.background_jobs import DuplicateJobError
+from code_indexer.utils.subprocess_diagnostics import (
+    format_called_process_error_diagnostic as _format_called_process_error_diagnostic,
+    format_completed_process_diagnostic,
+)
 from code_indexer.server.repositories.golden_repo_manager import (
     _make_hnsw_orphan_event_logger,
 )
@@ -314,6 +318,14 @@ def _is_git_repo_url(repo_url: str) -> bool:
     if not repo_url:
         return False
     return any(repo_url.startswith(prefix) for prefix in _GIT_URL_PREFIXES)
+
+
+# Bug #1810 / Bug #1832: the diagnostic formatter used to be defined
+# locally here; it is now the SHARED implementation in
+# code_indexer.utils.subprocess_diagnostics (imported above as
+# _format_called_process_error_diagnostic / format_completed_process_diagnostic)
+# so every subprocess-failure call site across the codebase reuses ONE
+# formatter instead of reimplementing this shape per file.
 
 
 # TTL for .write_mode/{alias}.json marker files (Bug #240).
@@ -1160,7 +1172,8 @@ class RefreshScheduler:
 
         if clone_result.returncode != 0:
             logger.critical(
-                f"Auto re-clone FAILED for {alias_name}: {clone_result.stderr}"
+                f"Auto re-clone FAILED for {alias_name}: "
+                f"{format_completed_process_diagnostic(clone_result)}"
             )
             if temp_clone.exists():
                 shutil.rmtree(str(temp_clone))
@@ -1598,6 +1611,57 @@ class RefreshScheduler:
         else:
             self._execute_refresh(global_alias, force_reset=force_reset)
             return None
+
+    def execute_refresh_for_claimed_job(
+        self,
+        alias_name: str,
+        progress_callback: Optional[Callable[..., None]] = None,
+    ) -> Dict[str, Any]:
+        """
+        Perform the refresh WORK for a job that has ALREADY been claimed and
+        is occupying the idx_active_job_per_repo dedup slot (Bug #1839).
+
+        Used exclusively by DistributedJobWorkerService for a reclaimed
+        'global_repo_refresh'/'refresh_golden_repo' background_jobs row: the
+        claim itself (DistributedJobClaimer.claim_next_job's UPDATE, which
+        marks the row 'running') already IS the active job for
+        (operation_type, repo_alias), so this method must run the refresh
+        directly instead of going through trigger_refresh_for_repo() ->
+        _submit_refresh_job(), which would try to register a SECOND row for
+        the same pair via BackgroundJobManager.submit_job() and collide with
+        the caller's own claimed row -- producing a DuplicateJobError whose
+        existing_job_id is the caller's own job id.
+
+        Mirrors exactly what the BackgroundJobManager worker closure inside
+        _submit_refresh_job() runs for a normally-submitted job:
+        _execute_refresh(global_alias, tracked_by_caller=True). The caller
+        (DistributedJobWorkerService) owns completion/failure bookkeeping via
+        its own complete_job()/fail_job() calls -- this method neither
+        registers nor completes any JobTracker/BackgroundJob row itself, and
+        never calls submit_job().
+
+        Args:
+            alias_name: Bare or global alias (resolved the same way
+                trigger_refresh_for_repo() resolves it).
+            progress_callback: Optional callback(progress, phase=None,
+                detail=None) forwarded into _execute_refresh() so progress is
+                visible the same way a normally-submitted refresh job's
+                progress is.
+
+        Returns:
+            The same result dict _execute_refresh() returns
+            ({"success": bool, ...}).
+
+        Raises:
+            ValueError: If alias is not found in the global registry.
+        """
+        global_alias = self._resolve_global_alias(alias_name)
+        return self._execute_refresh(
+            global_alias,
+            force_reset=False,
+            progress_callback=progress_callback,
+            tracked_by_caller=True,
+        )
 
     def get_refresh_interval(self) -> int:
         """
@@ -3633,12 +3697,13 @@ class RefreshScheduler:
                     raise RuntimeError(
                         f"Indexing interrupted by server shutdown for {alias_name}"
                     )
+                diagnostic = _format_called_process_error_diagnostic(e)
                 logger.error(
-                    f"SCIP indexing on source failed for {alias_name}: {type(e).__name__}: {e.stderr}",
+                    f"SCIP indexing on source failed for {alias_name}: {diagnostic}",
                     exc_info=True,
                 )
                 raise RuntimeError(
-                    f"SCIP indexing on source failed for {alias_name}: {type(e).__name__}: {e.stderr}"
+                    f"SCIP indexing on source failed for {alias_name}: {diagnostic}"
                 )
 
     def _run_subprocess(self, *args: Any, **kwargs: Any) -> Any:
@@ -3791,12 +3856,13 @@ class RefreshScheduler:
                 )
                 logger.info("cidx fix-config on clone completed successfully")
             except subprocess.CalledProcessError as e:
+                diagnostic = _format_called_process_error_diagnostic(e)
                 logger.error(
-                    f"cidx fix-config failed for {alias_name}: {type(e).__name__}: {e.stderr}",
+                    f"cidx fix-config failed for {alias_name}: {diagnostic}",
                     exc_info=True,
                 )
                 raise RuntimeError(
-                    f"cidx fix-config failed for {alias_name}: {type(e).__name__}: {e.stderr}"
+                    f"cidx fix-config failed for {alias_name}: {diagnostic}"
                 )
             except subprocess.TimeoutExpired as e:
                 logger.error(

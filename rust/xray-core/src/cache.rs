@@ -3,12 +3,31 @@
 /// Cache directory: ~/.cidx-server/xray-cache/
 /// Each entry: {hash}.so + {hash}.meta (key=value text)
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
+
+#[cfg(test)]
+use std::sync::atomic::{AtomicUsize, Ordering};
+#[cfg(test)]
+use std::sync::Mutex;
+
+static RUSTC_VERSION: OnceLock<String> = OnceLock::new();
+
+#[cfg(test)]
+static RUSTC_VERSION_PROBE_COUNT: AtomicUsize = AtomicUsize::new(0);
+#[cfg(test)]
+static RUSTC_VERSION_TEST_MUTEX: Mutex<()> = Mutex::new(());
 
 /// Metadata stored alongside each cached .so file.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CacheMetadata {
     pub source_hash: String,
     pub rustc_version: String,
+    /// Bug #1784: the XRAY_ABI_VERSION the compiled .so was built against.
+    /// Recorded explicitly (not just folded into an opaque combined hash) so
+    /// a stale artifact's metadata is human-readable/debuggable. A .meta file
+    /// missing this field (written before this fix) fails to parse -- see
+    /// parse_metadata() -- which is always treated as a cache MISS.
+    pub abi_version: u64,
     pub compiled_at: String, // ISO 8601
     pub compile_ms: u128,
 }
@@ -65,18 +84,112 @@ pub fn write_metadata(meta_path: &Path, meta: &CacheMetadata) -> Result<(), std:
     Ok(())
 }
 
-/// Returns the current rustc version string by running `rustc --version`.
-/// Falls back to "unknown" if rustc is not on PATH.
-pub fn get_rustc_version() -> String {
-    let output = std::process::Command::new("rustc")
-        .arg("--version")
-        .output();
+/// Bug #1816: the exact Rust toolchain channel this workspace is pinned to
+/// (`rust/rust-toolchain.toml`'s `channel` field), embedded at BUILD TIME
+/// via `include_str!` so a fully-deployed `xray-cli` binary carries the
+/// value with no runtime file dependency -- the same `include_str!` pattern
+/// `preamble_ac18_parity.rs` already establishes elsewhere in this crate
+/// for pulling a real source file's content into the binary.
+///
+/// WHY THIS EXISTS: every `rustc` subprocess this crate spawns (this
+/// module's own `rustc --version` probe below, and `compiler.rs`'s
+/// evaluator-compiling `rustc` invocation) previously ran with NO explicit
+/// toolchain selection, so rustup resolved a toolchain by walking UP from
+/// the CALLING PROCESS's own current working directory looking for a
+/// `rust-toolchain.toml`. That resolution is correct only when `xray-cli`
+/// happens to be invoked from inside this repository's `rust/` tree (true
+/// for `cargo test`/manual dev-shell runs) -- production invokes `xray-cli`
+/// from wherever the MCP server process itself runs, which has no such file
+/// above it, so rustup silently fell back to `rustup default`, a version
+/// that can differ from whatever toolchain actually compiled the
+/// statically-linked `xray-cli` binary (via `cargo build`, which DOES honor
+/// this same `rust-toolchain.toml`).
+///
+/// Bug #1816's root cause: a `.so` compiled by a DIFFERENT rustc/LLVM
+/// version than the one that built `xray-cli` corrupted the heap across the
+/// `GraphHandle` FFI boundary the moment `analyze_graph` called both
+/// `signature_for` and `shortest_path_to_any` in the same evaluator
+/// (`free(): double free detected in tcache 2` / SIGSEGV depending on call
+/// order) -- reproduced directly by compiling the SAME two-call evaluator
+/// once from inside `rust/` (no crash: both sides land on the SAME pinned
+/// toolchain) and once from `/tmp` (crashes every time: the evaluator
+/// compiles under whatever `rustup default` resolves to, while the release
+/// `xray-cli` binary itself was built with the pinned channel). Plain Rust
+/// `fn` pointers have an explicitly UNSPECIFIED ABI across compiler
+/// versions (see the `graph::csr::handle` module doc comment's own defense
+/// of using them, which assumes -- and this fix now GUARANTEES -- "both
+/// sides are compiled by the identical rustc invocation"); no change to the
+/// FFI thunk code itself is needed once that assumption is actually true.
+const RUST_TOOLCHAIN_TOML: &str = include_str!("../../rust-toolchain.toml");
+
+/// Extracts the `channel = "..."` value from `RUST_TOOLCHAIN_TOML`. A
+/// deliberately narrow, single-purpose parse (Rule 3, KISS) rather than a
+/// full TOML parser dependency: this file has exactly one meaningful line
+/// and is fully controlled by this repository.
+pub(crate) fn pinned_toolchain_channel() -> &'static str {
+    RUST_TOOLCHAIN_TOML
+        .lines()
+        .find_map(|line| {
+            let (key, rest) = line.trim().split_once('=')?;
+            if key.trim() != "channel" {
+                return None;
+            }
+            rest.trim().strip_prefix('"')?.split('"').next()
+        })
+        .unwrap_or_else(|| panic!("rust-toolchain.toml has no parsable `channel = \"...\"` line"))
+}
+
+/// Builds the `rustc --version` probe `Command`, pinned via
+/// `RUSTUP_TOOLCHAIN` to `pinned_toolchain_channel()` -- see that function's
+/// doc comment for why this must never be left to rustup's own cwd-based
+/// resolution. Extracted from `get_rustc_version()` so the pinning itself
+/// (not just the version string it produces) is directly, deterministically
+/// testable via `Command::get_envs()`.
+pub(crate) fn rustc_version_command() -> std::process::Command {
+    let mut command = std::process::Command::new("rustc");
+    command.arg("--version").env("RUSTUP_TOOLCHAIN", pinned_toolchain_channel());
+    command
+}
+
+/// Runs the one real `rustc --version` probe. Falls back to "unknown" if
+/// rustc is not on PATH.
+fn probe_rustc_version() -> String {
+    #[cfg(test)]
+    RUSTC_VERSION_PROBE_COUNT.fetch_add(1, Ordering::Relaxed);
+
+    let output = rustc_version_command().output();
     match output {
         Ok(o) if o.status.success() => {
             String::from_utf8_lossy(&o.stdout).trim().to_string()
         }
         _ => "unknown".to_string(),
     }
+}
+
+/// Returns the current rustc version string by running `rustc --version`
+/// under the pinned toolchain (`rustc_version_command`). The value is a
+/// process-lifetime constant, so repeated cache hits do not spawn another
+/// subprocess.
+pub fn get_rustc_version() -> String {
+    RUSTC_VERSION.get_or_init(probe_rustc_version).clone()
+}
+
+#[cfg(test)]
+fn uncached_rustc_version_probe() -> String {
+    probe_rustc_version()
+}
+
+#[cfg(test)]
+fn rustc_version_probe_count() -> usize {
+    RUSTC_VERSION_PROBE_COUNT.load(Ordering::Relaxed)
+}
+
+#[cfg(test)]
+fn with_exclusive_rustc_probes<T>(f: impl FnOnce() -> T) -> T {
+    let _guard = RUSTC_VERSION_TEST_MUTEX
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    f()
 }
 
 /// TTL for local cached .so files (seconds).
@@ -158,14 +271,15 @@ pub fn evict_lru(cache_dir: &Path, max_entries: usize) {
 
 fn format_metadata(meta: &CacheMetadata) -> String {
     format!(
-        "source_hash={}\nrustc_version={}\ncompiled_at={}\ncompile_ms={}\n",
-        meta.source_hash, meta.rustc_version, meta.compiled_at, meta.compile_ms
+        "source_hash={}\nrustc_version={}\nabi_version={}\ncompiled_at={}\ncompile_ms={}\n",
+        meta.source_hash, meta.rustc_version, meta.abi_version, meta.compiled_at, meta.compile_ms
     )
 }
 
 fn parse_metadata(content: &str) -> Option<CacheMetadata> {
     let mut source_hash = None;
     let mut rustc_version = None;
+    let mut abi_version = None;
     let mut compiled_at = None;
     let mut compile_ms = None;
 
@@ -174,6 +288,7 @@ fn parse_metadata(content: &str) -> Option<CacheMetadata> {
             match key {
                 "source_hash" => source_hash = Some(value.to_string()),
                 "rustc_version" => rustc_version = Some(value.to_string()),
+                "abi_version" => abi_version = value.parse::<u64>().ok(),
                 "compiled_at" => compiled_at = Some(value.to_string()),
                 "compile_ms" => compile_ms = value.parse::<u128>().ok(),
                 _ => {}
@@ -184,6 +299,10 @@ fn parse_metadata(content: &str) -> Option<CacheMetadata> {
     Some(CacheMetadata {
         source_hash: source_hash?,
         rustc_version: rustc_version?,
+        // Missing/unparseable abi_version -> None here -> the whole
+        // Option<CacheMetadata> short-circuits to None via `?` -- a legacy
+        // .meta file (pre-Bug-#1784) is always a MISS, never a silent match.
+        abi_version: abi_version?,
         compiled_at: compiled_at?,
         compile_ms: compile_ms?,
     })
@@ -309,12 +428,32 @@ mod tests {
         let meta = CacheMetadata {
             source_hash: "abc123".to_string(),
             rustc_version: "rustc 1.91.0".to_string(),
+            abi_version: 2,
             compiled_at: "2025-01-01T00:00:00Z".to_string(),
             compile_ms: 252,
         };
         write_metadata(&meta_path, &meta).expect("write_metadata must succeed");
         let read_back = read_metadata(&meta_path);
         assert_eq!(read_back, Some(meta));
+    }
+
+    #[test]
+    fn test_metadata_missing_abi_version_field_is_none() {
+        // Bug #1784: a pre-fix .meta file (written before abi_version existed)
+        // must parse as None -- never silently default to a value that could
+        // spuriously match the current ABI. A missing field is ALWAYS a MISS.
+        let dir = TempDir::new().unwrap();
+        let meta_path = dir.path().join("legacy.meta");
+        std::fs::write(
+            &meta_path,
+            "source_hash=abc123\nrustc_version=rustc 1.91.0\ncompiled_at=2025-01-01T00:00:00Z\ncompile_ms=252\n",
+        )
+        .unwrap();
+        let read_back = read_metadata(&meta_path);
+        assert_eq!(
+            read_back, None,
+            "a .meta file missing abi_version must fail to parse (forces a MISS), not default"
+        );
     }
 
     #[test]
@@ -336,6 +475,7 @@ mod tests {
             .map(|i| CacheMetadata {
                 source_hash: "concurrent1425".to_string(),
                 rustc_version: "rustc 1.91.0".to_string(),
+                abi_version: 2,
                 compiled_at: format!("{}s-since-epoch", 1_700_000_000 + i),
                 compile_ms: 100 + i as u128,
             })
@@ -383,6 +523,7 @@ mod tests {
         let meta = CacheMetadata {
             source_hash: "deadbeef".to_string(),
             rustc_version: "rustc 1.91.0".to_string(),
+            abi_version: 2,
             compiled_at: "2025-01-01T00:00:00Z".to_string(),
             compile_ms: 100,
         };
@@ -430,10 +571,84 @@ mod tests {
 
     #[test]
     fn test_get_rustc_version_returns_nonempty_string() {
-        let v = get_rustc_version();
-        assert!(!v.is_empty());
-        // Should contain "rustc" or fall back to "unknown"
-        assert!(v.starts_with("rustc") || v == "unknown");
+        with_exclusive_rustc_probes(|| {
+            let v = get_rustc_version();
+            assert!(!v.is_empty());
+            // Should contain "rustc" or fall back to "unknown"
+            assert!(v.starts_with("rustc") || v == "unknown");
+        });
+    }
+
+    /// Bug #1855 (H5): the process-lifetime memo must avoid paying for a
+    /// second rustc subprocess on every cache hit, without making this test
+    /// depend on whether another parallel test warmed the OnceLock first.
+    #[test]
+    fn memoized_rustc_version_uses_at_most_one_probe() {
+        // Resolve the process-lifetime OnceLock before taking the test mutex.
+        // This prevents a concurrent initializer from ever needing a mutex
+        // held by this test while this test waits for OnceLock completion.
+        get_rustc_version();
+        with_exclusive_rustc_probes(|| {
+            let before_uncached = rustc_version_probe_count();
+            for _ in 0..3 {
+                uncached_rustc_version_probe();
+            }
+            assert_eq!(
+                rustc_version_probe_count() - before_uncached,
+                3,
+                "the uncached seam must account for each real rustc probe"
+            );
+
+            let before_memoized = rustc_version_probe_count();
+            for _ in 0..3 {
+                get_rustc_version();
+            }
+            let memoized_delta = rustc_version_probe_count() - before_memoized;
+            assert!(
+                memoized_delta <= 1,
+                "memoized rustc version must trigger zero or one probe, got {}",
+                memoized_delta
+            );
+        });
+    }
+
+    /// Bug #1816: `pinned_toolchain_channel()` must parse the EXACT channel
+    /// this workspace is pinned to out of the real, `include_str!`-embedded
+    /// `rust/rust-toolchain.toml` -- not a hardcoded duplicate. This test
+    /// intentionally hardcodes the current pin value: if the pin is ever
+    /// bumped, this test must be updated in the SAME commit, which is
+    /// exactly the kind of drift-detector this bug fix exists to prevent
+    /// (see the sync-constraint-3 note in the project's own CLAUDE.md about
+    /// keeping this file and CI's toolchain action in lockstep).
+    #[test]
+    fn pinned_toolchain_channel_matches_the_workspace_pin() {
+        assert_eq!(pinned_toolchain_channel(), "1.98.0");
+    }
+
+    /// Bug #1816 (THE fix's discriminating test): the `rustc --version`
+    /// probe `Command` must carry `RUSTUP_TOOLCHAIN` pinned to
+    /// `pinned_toolchain_channel()`. Before this fix, `get_rustc_version()`
+    /// spawned a bare `rustc --version` with no env override, so its
+    /// reported version silently tracked whatever toolchain rustup resolved
+    /// from the CALLING PROCESS's current working directory -- correct only
+    /// by coincidence when that cwd happened to sit under this workspace's
+    /// `rust-toolchain.toml`. Production invokes `xray-cli` from directories
+    /// with no such file above them, so the resolved toolchain there
+    /// silently drifted from whatever toolchain actually compiled the
+    /// `xray-cli` binary itself. Inspecting `Command::get_envs()` proves the
+    /// mechanism directly and deterministically, without spawning a second
+    /// real toolchain (which the CI machine is not guaranteed to have
+    /// installed) or mutating the test process's own working directory
+    /// (unsafe under `cargo test`'s parallel execution).
+    #[test]
+    fn rustc_version_command_pins_rustup_toolchain_env_var() {
+        let command = rustc_version_command();
+        let envs: std::collections::HashMap<_, _> = command.get_envs().collect();
+        assert_eq!(
+            envs.get(std::ffi::OsStr::new("RUSTUP_TOOLCHAIN")),
+            Some(&Some(std::ffi::OsStr::new(pinned_toolchain_channel()))),
+            "the rustc --version probe command must pin RUSTUP_TOOLCHAIN to the workspace channel"
+        );
     }
 
     #[test]

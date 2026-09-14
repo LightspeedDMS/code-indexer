@@ -71,13 +71,13 @@ inputSchema:
       minimum: 1
     await_seconds:
       type: number
-      description: 'Optional server-side polling window in seconds. Accepts floats (e.g. 2.5). When 0 (default), returns {job_id} immediately. When > 0, the server polls the background job for up to await_seconds and returns the inline result if the job completes; otherwise falls back to {job_id}. Range 0.0..120.0 (raised from 10.0 in v10.5.0). Values > 30.0 emit a server-side warning. Error code await_seconds_invalid if out of range or wrong type.'
+      description: 'Optional server-side polling window in seconds. Accepts floats (e.g. 2.5). When 0 (default), returns {job_id} immediately. When > 0, the server polls the background job for up to await_seconds and returns the inline result if the job completes; otherwise falls back to {job_id}. Range 0.0..45.0 -- LOWERED from 120.0 by Bug #1070 because handlers are async and a longer inline wait risks a 504 at the ALB 60s hard timeout; the server enforces 45.0 (_AWAIT_SECONDS_MAX in handlers/xray.py). Values > 30.0 emit a server-side warning. Error code await_seconds_invalid if out of range or wrong type.'
       minimum: 0
-      maximum: 120.0
+      maximum: 45.0
       default: 0
     pattern_name:
       type: string
-      description: "Before writing evaluator_code inline, check the pattern library — a pattern for your use case may already exist. Use browse_directory('cidx-meta-global', path='xray-patterns') to list available patterns. Name of a stored xray evaluator pattern to use (from the cidx-meta pattern library). Mutually exclusive with evaluator_code — provide one or the other, not both. When provided, the server loads the pattern YAML, resolves typed parameter defaults, applies any pattern_params overrides, and uses the resulting evaluator code. Seed patterns catch-rethrow and deep-nesting are created automatically in __any__/ scope on first use. Use store_xray_pattern to add custom patterns. Before ending a session where you developed a new evaluator, if it took iteration, call store_xray_pattern so the work survives session restart and reaches all users."
+      description: "Before writing evaluator_code inline, check the pattern library: a pattern for your use case may already exist. Use browse_directory('cidx-meta-global', path='xray-patterns') to list available patterns. Name of a stored xray evaluator pattern to use (from the cidx-meta pattern library). Mutually exclusive with evaluator_code: provide one or the other, not both. When provided, the server loads the pattern YAML, resolves typed parameter defaults, applies any pattern_params overrides, and uses the resulting evaluator code. Seed patterns catch-rethrow and deep-nesting are created automatically in __any__/ scope on first use. Use store_xray_pattern to add custom patterns. Before ending a session where you developed a new evaluator, if it took iteration, call store_xray_pattern so the work survives session restart and reaches all users."
     pattern_params:
       type: object
       description: 'JSON object of parameter overrides for the resolved pattern. Only valid when pattern_name is provided. Keys must match parameter names declared in the pattern YAML (UPPER_SNAKE_CASE). Values must be compatible with the declared parameter type (usize, i64, f64, bool, or str). Unknown keys return invalid_parameter error; type-incompatible values return invalid_parameter_type error.'
@@ -133,7 +133,7 @@ PHASE 1 (driver, regex): the `pattern` regex narrows the file set. For `search_t
 
 PHASE 2 (evaluator, AST): for each candidate file, tree-sitter parses the file once, then your `evaluator_code` runs as a Rust native evaluator (compiled to a dynamic library). The evaluator receives the file root AST node as an `OwnedNode` and returns `Vec<EvalFinding>` -- a list of findings, each with a pattern name, line number, and code snippet. The server enriches each finding with `file_path` and `language`.
 
-Returns `{job_id}` (single repo) or `{job_ids, errors}` (multi-repo) immediately; poll `GET /api/jobs/{job_id}` for results, or set `await_seconds > 0` to inline-wait up to 120 seconds (v10.5.0).
+Returns `{job_id}` (single repo) or `{job_ids, errors}` (multi-repo) immediately; poll `GET /api/jobs/{job_id}` for results, or set `await_seconds > 0` to inline-wait up to 45 seconds (lowered from 120.0 by Bug #1070 -- see the `await_seconds` parameter description below).
 
 ## Quick Start
 
@@ -174,7 +174,7 @@ Key points:
 | pcre2 | bool | no | false | PCRE2 engine for the content driver (lookahead/lookbehind). |
 | timeout_seconds | int | no | 120 | Per-job wall-clock cap. Range 10..600. |
 | max_results | int | no | null | Cap on candidate files evaluated. When hit: `partial=true`, `max_files_reached=true`. Renamed from `max_files` in v10.3.x. |
-| await_seconds | float | no | 0 | Server-side inline-wait window. 0 = return job id immediately. Range 0.0..120.0 (v10.5.0). Values > 30.0 emit a server warning. |
+| await_seconds | float | no | 0 | Server-side inline-wait window. 0 = return job id immediately. Range 0.0..45.0 (lowered from 120.0 by Bug #1070 -- async handlers risk a 504 at the ALB 60s timeout). Values > 30.0 emit a server warning. |
 | pattern_name | str | no | null | Name of a stored xray evaluator pattern (from the cidx-meta library). Mutually exclusive with `evaluator_code`. When provided, the server loads and resolves the pattern, applying `pattern_params` overrides. Error `mutually_exclusive_params` if both are provided. |
 | pattern_params | object | no | null | Parameter overrides for the resolved pattern. Only valid when `pattern_name` is provided. Keys must match declared parameter names (UPPER_SNAKE_CASE); values must be type-compatible. |
 

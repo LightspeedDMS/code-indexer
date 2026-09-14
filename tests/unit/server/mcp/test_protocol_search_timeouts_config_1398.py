@@ -364,5 +364,76 @@ class TestRegexSearchIndependentOfSearchTimeoutsConfig:
         assert "timed out" in result["error"]
 
 
+_ANALYZE_GRAPH_SLEEP_SECONDS = 0.1
+
+
+class TestAnalyzeGraphIsDeadlineExempt:
+    """C1 (consolidated review, Issue #1811/Bug #1812): analyze_graph's own
+    handler validates and clamps timeout_seconds to [10, 600]
+    (mcp/handlers/xray_graph.py's _TIMEOUT_MIN/_TIMEOUT_MAX) and runs the
+    whole pipeline off the event loop via anyio.to_thread.run_sync with
+    abandon_on_cancel=False (the default) -- so an outer asyncio.wait_for
+    wrapped around it cannot actually cancel the worker thread on expiry.
+    It can only abandon the awaiting coroutine while the real work keeps
+    running to completion in the background, unobserved, discarding the
+    result and reporting a timeout the caller cannot recover from (no
+    job_id, no BackgroundJobManager wiring). Being absent from
+    _ASYNC_DISPATCH_TIMEOUT_EXEMPT_TOOLS means every value above the
+    generic default_handler_timeout_seconds (60s) in the tool's advertised
+    10..600s range is unreachable in practice."""
+
+    def test_analyze_graph_is_a_member_of_the_exempt_set(self) -> None:
+        from code_indexer.server.mcp.protocol import (
+            _ASYNC_DISPATCH_TIMEOUT_EXEMPT_TOOLS,
+        )
+
+        assert "analyze_graph" in _ASYNC_DISPATCH_TIMEOUT_EXEMPT_TOOLS, (
+            "analyze_graph must be exempt from the generic MCP dispatch "
+            "deadline -- it owns and validates its own [10, 600]s "
+            "timeout_seconds bound (mcp/handlers/xray_graph.py), and an "
+            "outer wait_for cannot cancel its anyio.to_thread.run_sync "
+            "worker anyway (abandon_on_cancel defaults to False)"
+        )
+
+    @pytest.mark.asyncio
+    async def test_analyze_graph_dispatch_returns_real_result_past_generic_timeout(
+        self,
+    ) -> None:
+        """Discriminating test: dispatches a handler named "analyze_graph"
+        that sleeps LONGER than the (short) generic timeout_seconds passed
+        to _invoke_handler. Before the C1 fix, this handler is NOT in the
+        exempt set, so asyncio.wait_for fires at timeout_seconds and the
+        real result (computed by the handler and returned) is discarded in
+        favor of a synthetic timeout envelope -- exactly the C1 defect."""
+
+        async def slow_analyze_graph_handler(arguments, user):
+            await asyncio.sleep(_ANALYZE_GRAPH_SLEEP_SECONDS)
+            return {"ok": True, "findings": [], "fact_graph_complete": True}
+
+        user = _make_user()
+        sig = inspect.signature(slow_analyze_graph_handler)
+
+        result = await _invoke_handler(
+            handler=slow_analyze_graph_handler,
+            arguments={},
+            user=user,
+            session_state=None,
+            sig=sig,
+            is_async=True,
+            timeout_seconds=_SHORT_ASYNC_DEADLINE_SECONDS,
+            tool_name="analyze_graph",
+        )
+
+        assert result == {
+            "ok": True,
+            "findings": [],
+            "fact_graph_complete": True,
+        }, (
+            "analyze_graph must be exempt from the generic async deadline -- "
+            "a real, slow-but-legitimate whole-repo analysis must return its "
+            "actual computed result, never a discarded/timed-out envelope."
+        )
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

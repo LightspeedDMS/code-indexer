@@ -6,7 +6,6 @@ modularization (Story #496).
 
 from __future__ import annotations
 
-import json
 import logging
 import threading
 import uuid
@@ -29,6 +28,7 @@ from code_indexer.server.mcp.handlers._utils import (
     _get_golden_repos_dir,
 )
 from code_indexer.server.mcp.auth.elevation_decorator import require_mcp_elevation
+from code_indexer.server.storage.json_column import parse_json_column
 from . import elevate_session as _elevate_session_module
 from .mcp_credentials import (
     handle_list_mcp_credentials,
@@ -89,6 +89,60 @@ def list_users(params: Dict[str, Any], user: User) -> Dict[str, Any]:
         )
 
 
+def _assign_new_user_to_default_group(
+    username: str, role: UserRole, assigned_by: str
+) -> None:
+    """
+    Story #1593 AC7: auto-assign a freshly created user to a default
+    group so fail-closed tool-access enforcement never strands them.
+    Non-fatal: a group-assignment failure must not undo the
+    already-created user account, so any error is logged and swallowed.
+    """
+    try:
+        from ....services.constants import DEFAULT_GROUP_ADMINS, DEFAULT_GROUP_USERS
+
+        group_manager = _get_group_manager()
+        if group_manager is None:
+            logger.warning(
+                format_error_log(
+                    "MCP-GENERAL-176",
+                    f"Group manager not configured -- skipping auto-assignment "
+                    f"for user '{username}'",
+                )
+            )
+            return
+        target_group_name = (
+            DEFAULT_GROUP_ADMINS if role == UserRole.ADMIN else DEFAULT_GROUP_USERS
+        )
+        target_group = group_manager.get_group_by_name(target_group_name)
+        if target_group is None:
+            logger.warning(
+                format_error_log(
+                    "MCP-GENERAL-177",
+                    f"Default group '{target_group_name}' not found for "
+                    f"user '{username}' -- skipping auto-assignment",
+                )
+            )
+            return
+        group_manager.ensure_user_group_membership(
+            username,
+            target_group,
+            assigned_by=assigned_by,
+            audit_details={
+                "group": target_group.name,
+                "reason": "auto_assign_on_creation",
+                "source": "mcp",
+            },
+        )
+    except Exception as group_error:
+        logger.warning(
+            format_error_log(
+                "MCP-GENERAL-178",
+                f"Failed to auto-assign user '{username}' to group: {group_error}",
+            )
+        )
+
+
 @require_mcp_elevation()
 def create_user(params: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Create a new user (admin only)."""
@@ -100,6 +154,9 @@ def create_user(params: Dict[str, Any], user: User) -> Dict[str, Any]:
         new_user = _utils.app_module.user_manager.create_user(
             username=username, password=password, role=role
         )
+
+        _assign_new_user_to_default_group(username, role, user.username)
+
         return _mcp_response(  # type: ignore[no-any-return]
             {
                 "success": True,
@@ -957,7 +1014,11 @@ def handle_create_group(args: Dict[str, Any], user: User) -> Dict[str, Any]:
                 action_type="group_create",
                 target_type="group",
                 target_id=str(group.id),
-                details=f"Created group '{group.name}' via MCP",
+                details={
+                    "name": group.name,
+                    "description": group.description,
+                    "source": "mcp",
+                },
             )
             return _mcp_response(  # type: ignore[no-any-return]
                 {"success": True, "group_id": group.id, "name": group.name}
@@ -1038,7 +1099,11 @@ def handle_update_group(args: Dict[str, Any], user: User) -> Dict[str, Any]:
                 action_type="group_update",
                 target_type="group",
                 target_id=str(group_id),
-                details=f"Updated group '{updated_group.name}' via MCP",
+                details={
+                    "name": updated_group.name,
+                    "description": updated_group.description,
+                    "source": "mcp",
+                },
             )
             return _mcp_response({"success": True})  # type: ignore[no-any-return]
         except ValueError as e:
@@ -1084,7 +1149,7 @@ def handle_delete_group(args: Dict[str, Any], user: User) -> Dict[str, Any]:
                 action_type="group_delete",
                 target_type="group",
                 target_id=str(group_id),
-                details=f"Deleted group '{group_name}' via MCP",
+                details={"name": group_name, "source": "mcp"},
             )
             return _mcp_response({"success": True})  # type: ignore[no-any-return]
         except (DefaultGroupCannotBeDeletedError, GroupHasUsersError) as e:
@@ -1127,7 +1192,7 @@ def _add_member(args: Dict[str, Any], user: User, **kwargs: Any) -> Dict[str, An
             action_type="user_group_change",
             target_type="user",
             target_id=user_id,
-            details=f"Assigned user '{user_id}' to group '{group.name}' via MCP",
+            details={"user_id": user_id, "group": group.name, "source": "mcp"},
         )
         return _mcp_response({"success": True})  # type: ignore[no-any-return]
     except Exception as e:
@@ -1166,7 +1231,11 @@ def _remove_member(args: Dict[str, Any], user: User, **kwargs: Any) -> Dict[str,
             action_type="user_group_change",
             target_type="user",
             target_id=user_id,
-            details=f"Removed user '{user_id}' from group '{group.name}' via MCP",
+            details={
+                "user_id": user_id,
+                "removed_from_group": group.name,
+                "source": "mcp",
+            },
         )
         return _mcp_response({"success": True})  # type: ignore[no-any-return]
     except Exception as e:
@@ -1210,7 +1279,11 @@ def _add_repos(args: Dict[str, Any], user: User, **kwargs: Any) -> Dict[str, Any
                     action_type="repo_access_grant",
                     target_type="repo",
                     target_id=repo_name,
-                    details=f"Granted access to '{repo_name}' for group '{group.name}' via MCP",
+                    details={
+                        "repo": repo_name,
+                        "group": group.name,
+                        "source": "mcp",
+                    },
                 )
         return _mcp_response({"success": True, "added_count": added_count})  # type: ignore[no-any-return]
     except Exception as e:
@@ -1260,7 +1333,7 @@ def _remove_repo(args: Dict[str, Any], user: User, **kwargs: Any) -> Dict[str, A
                 action_type="repo_access_revoke",
                 target_type="repo",
                 target_id=repo_name,
-                details=f"Revoked access to '{repo_name}' from group '{group.name}' via MCP",
+                details={"repo": repo_name, "group": group.name, "source": "mcp"},
             )
             return _mcp_response({"success": True})  # type: ignore[no-any-return]
         except CidxMetaCannotBeRevokedError:
@@ -1319,7 +1392,11 @@ def _bulk_remove_repos(
                         action_type="repo_access_revoke",
                         target_type="repo",
                         target_id=repo_name,
-                        details=f"Revoked access to '{repo_name}' from group '{group.name}' via MCP",
+                        details={
+                            "repo": repo_name,
+                            "group": group.name,
+                            "source": "mcp",
+                        },
                     )
             except CidxMetaCannotBeRevokedError:
                 continue
@@ -1460,22 +1537,22 @@ def _get_audit_service() -> Any:
 
 
 def _decode_audit_log_details(row: Dict[str, Any]) -> Dict[str, Any]:
-    """Decode an audit_logs row's `details` JSON column, logging on failure."""
-    details_str = row.get("details") or "{}"
-    try:
-        details_obj = (
-            json.loads(details_str) if isinstance(details_str, str) else details_str
-        )
-    except (ValueError, TypeError) as e:
-        logger.warning(
-            "handle_query_audit_logs: malformed details JSON on audit_logs "
-            "row id=%s action_type=%s: %s",
-            row.get("id"),
-            row.get("action_type"),
-            e,
-        )
+    """Decode an audit_logs row's `details` column.
+
+    Bug #1802: every writer (GroupAccessManager.log_audit, and direct
+    AuditLogService.log() callers such as PasswordChangeAuditLogger) now
+    stores a JSON object. Rows written before that fix may still hold
+    legacy free text -- those are surfaced as {"raw": <original text>}
+    instead of being silently treated as empty, so recorded content is
+    never discarded, only left unstructured.
+    """
+    details_raw = row.get("details")
+    if details_raw is None:
         return {}
-    return details_obj if isinstance(details_obj, dict) else {}
+    decoded = parse_json_column(details_raw, dict, "audit_logs.details")
+    if decoded is not None:
+        return decoded
+    return {"raw": details_raw} if isinstance(details_raw, str) else {}
 
 
 def _build_audit_log_entry(row: Dict[str, Any]) -> Dict[str, Any]:

@@ -12,7 +12,8 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime, timezone
-from typing import Any, Optional
+from pathlib import Path
+from typing import Any, Dict, Optional, cast
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -474,6 +475,349 @@ class TestMalformedBody:
             app.dependency_overrides.clear()
 
         assert resp.status_code in (400, 422)
+
+
+# ---------------------------------------------------------------------------
+# Bug #1812: pattern_name support on the single-search REST endpoint
+#
+# XRaySearchRequest previously required evaluator_code and had no
+# pattern_name/pattern_params — this asymmetry is fixed by resolving
+# through the SAME shared helper the MCP xray_search handler already uses
+# (handlers.xray._resolve_evaluator_code -> XrayPatternService), never a
+# second, parallel implementation.
+# ---------------------------------------------------------------------------
+
+
+def _make_cidx_meta_1812(tmp_path: Path) -> Path:
+    """Create a throwaway cidx-meta directory for XrayPatternService."""
+    cidx_meta = tmp_path / "data" / "golden-repos" / "cidx-meta"
+    cidx_meta.mkdir(parents=True, exist_ok=True)
+    return cidx_meta
+
+
+# Consolidated review finding H4: this evaluator's finding `pattern` field
+# ("bug1812-marker") is DELIBERATELY DISTINCT from
+# `handlers.xray._DEFAULT_EVALUATOR_CODE`'s own pattern value ("match"). The
+# original fixture built its body FROM `_DEFAULT_EVALUATOR_CODE` verbatim --
+# byte-identical to the exact constant `_resolve_evaluator_code` silently
+# falls back to when both `pattern_name` and `evaluator_code` are absent
+# (handlers/xray.py:211-213). That made the parity test below unable to
+# fail for precisely the Bug #1812 regression it claimed to guard against:
+# a REST implementation that silently ignored `pattern_name` and used the
+# default evaluator instead would produce byte-identical `matches` and the
+# test would still pass. Using a distinct marker here means a real pattern
+# resolution produces `pattern: "bug1812-marker"` while a silent
+# default-evaluator fallback produces `pattern: "match"` -- genuinely
+# different output the equality/marker assertions below can catch.
+_PARITY_FIXTURE_EVALUATOR_CODE = (
+    "fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> {\n"
+    "    vec![EvalFinding {\n"
+    '        pattern: "bug1812-marker".to_string(),\n'
+    "        line: node.start_line,\n"
+    "        snippet: String::new(),\n"
+    "    }]\n"
+    "}"
+)
+
+
+def _store_test_finder_pattern(cidx_meta: Path, name: str = "test-finder-1812") -> None:
+    """Store a real pattern whose finding `pattern` field
+    ("bug1812-marker") is BEHAVIORALLY DISTINCT from
+    `handlers.xray._DEFAULT_EVALUATOR_CODE`'s own output ("match") -- see
+    `_PARITY_FIXTURE_EVALUATOR_CODE`'s module-level comment for why this
+    distinction is the whole point: a stub silently ignoring pattern_name
+    and falling back to the default evaluator produces a different pattern
+    value here, which the parity test's equality/marker assertions catch.
+    """
+    from code_indexer.server.services.xray_pattern_service import XrayPatternService
+
+    pattern_yaml = (
+        f"name: {name}\n"
+        'description: "Bug #1812 REST/MCP parity fixture"\n'
+        "language: java\n"
+        "evaluator_code: |\n"
+        + "".join(f"  {line}\n" for line in _PARITY_FIXTURE_EVALUATOR_CODE.splitlines())
+    )
+
+    svc = XrayPatternService(cidx_meta)
+    with patch.object(svc, "_git_commit"):
+        svc.store_xray_pattern(scope="__any__", pattern_yaml=pattern_yaml)
+
+
+def _patch_cidx_meta_1812(cidx_meta: Path):
+    """Patch the cidx-meta path resolver used by handlers.xray._resolve_evaluator_code."""
+    return patch(
+        "code_indexer.server.mcp.handlers.xray._get_cidx_meta_path",
+        return_value=cidx_meta,
+    )
+
+
+class TestPatternNameValidation:
+    """Bug #1812: pattern_name field validation on POST /api/xray/search."""
+
+    def test_pattern_name_without_evaluator_code_returns_202(
+        self, app, client, tmp_path
+    ):
+        """pattern_name alone (no evaluator_code) is accepted -> 202."""
+        app.dependency_overrides[get_current_user] = lambda: NORMAL_USER
+        cidx_meta = _make_cidx_meta_1812(tmp_path)
+        _store_test_finder_pattern(cidx_meta)
+
+        body = {
+            "repository_alias": "myrepo-global",
+            "driver_regex": "class ",
+            "search_target": "content",
+            "pattern_name": "test-finder-1812",
+        }
+
+        bjm_patch, mock_bjm = _patch_bjm("job-pattern")
+        try:
+            with _patch_repo_found(), bjm_patch, _patch_cidx_meta_1812(cidx_meta):
+                resp = client.post("/api/xray/search", json=body)
+        finally:
+            app.dependency_overrides.clear()
+
+        assert resp.status_code == 202
+        assert resp.json()["job_id"] == "job-pattern"
+
+    def test_both_pattern_name_and_evaluator_code_returns_422_mutually_exclusive(
+        self, app, client, tmp_path
+    ):
+        """Both fields supplied -> 422 mutually_exclusive_params; job never submitted."""
+        app.dependency_overrides[get_current_user] = lambda: NORMAL_USER
+        cidx_meta = _make_cidx_meta_1812(tmp_path)
+
+        body = {**VALID_BODY, "pattern_name": "test-finder-1812"}
+
+        bjm_patch, mock_bjm = _patch_bjm()
+        try:
+            with _patch_repo_found(), bjm_patch, _patch_cidx_meta_1812(cidx_meta):
+                resp = client.post("/api/xray/search", json=body)
+        finally:
+            app.dependency_overrides.clear()
+
+        assert resp.status_code == 422
+        assert _err_code(resp.json()) == "mutually_exclusive_params"
+        mock_bjm.submit_job.assert_not_called()
+
+    def test_neither_pattern_name_nor_evaluator_code_returns_422(self, app, client):
+        """Neither field supplied -> clean 422 naming what is required (no silent default)."""
+        app.dependency_overrides[get_current_user] = lambda: NORMAL_USER
+        body = {
+            "repository_alias": "myrepo-global",
+            "driver_regex": "class ",
+            "search_target": "content",
+        }
+
+        bjm_patch, mock_bjm = _patch_bjm()
+        try:
+            with _patch_repo_found(), bjm_patch:
+                resp = client.post("/api/xray/search", json=body)
+        finally:
+            app.dependency_overrides.clear()
+
+        assert resp.status_code == 422
+        assert _err_code(resp.json()) == "evaluator_code_required"
+        mock_bjm.submit_job.assert_not_called()
+
+
+class TestPatternParamsTypeValidation:
+    """Consolidated review finding H3 (Issue #1811/Bug #1812): pattern_params
+    typed as Optional[Any] on XRaySearchRequest lets a non-dict (e.g. a
+    list) through Pydantic validation, crashing deep inside
+    XrayPatternService._resolve_params with an unhandled AttributeError
+    (list has no .get) instead of a clean 422. REPRODUCED by the review
+    with exactly {"pattern_name":"catch-rethrow","pattern_params":
+    ["SNIPPET_MAX"]}; mirrored here against the stored test-finder-1812
+    fixture.
+    """
+
+    def test_list_pattern_params_returns_422_not_500(self, app, tmp_path):
+        """A list pattern_params must produce a structured 422 whose body
+        names the offending field, never an unhandled 500. Uses
+        raise_server_exceptions=False so a real crash surfaces as an
+        actual HTTP 500 response object instead of propagating as a raw
+        Python exception out of the test client."""
+        from fastapi.testclient import TestClient
+
+        client = TestClient(app, raise_server_exceptions=False)
+        app.dependency_overrides[get_current_user] = lambda: NORMAL_USER
+        cidx_meta = _make_cidx_meta_1812(tmp_path)
+        _store_test_finder_pattern(cidx_meta)
+
+        body = {
+            "repository_alias": "myrepo-global",
+            "driver_regex": "class ",
+            "search_target": "content",
+            "pattern_name": "test-finder-1812",
+            "pattern_params": ["SNIPPET_MAX"],
+        }
+
+        bjm_patch, mock_bjm = _patch_bjm()
+        try:
+            with _patch_repo_found(), bjm_patch, _patch_cidx_meta_1812(cidx_meta):
+                resp = client.post("/api/xray/search", json=body)
+        finally:
+            app.dependency_overrides.clear()
+
+        assert resp.status_code == 422, (
+            f"a non-dict pattern_params must be rejected with 422, "
+            f"got {resp.status_code}: {resp.text}"
+        )
+        response_body = resp.json()
+        detail = response_body.get("detail")
+        assert detail is not None, (
+            f"422 response must carry a detail body: {response_body}"
+        )
+        assert "pattern_params" in str(detail), (
+            f"the 422 detail must name the offending field pattern_params: {detail}"
+        )
+        mock_bjm.submit_job.assert_not_called()
+
+
+class TestPatternNameResolutionAndRegression:
+    """Bug #1812: resolution-error propagation and backward compatibility."""
+
+    def test_unknown_pattern_name_returns_422_pattern_not_found(
+        self, app, client, tmp_path
+    ):
+        """Unknown pattern_name propagates the SAME pattern_not_found error MCP raises."""
+        app.dependency_overrides[get_current_user] = lambda: NORMAL_USER
+        cidx_meta = _make_cidx_meta_1812(tmp_path)
+
+        body = {
+            "repository_alias": "myrepo-global",
+            "driver_regex": "class ",
+            "search_target": "content",
+            "pattern_name": "does-not-exist-1812",
+        }
+
+        bjm_patch, mock_bjm = _patch_bjm()
+        try:
+            with _patch_repo_found(), bjm_patch, _patch_cidx_meta_1812(cidx_meta):
+                resp = client.post("/api/xray/search", json=body)
+        finally:
+            app.dependency_overrides.clear()
+
+        assert resp.status_code == 422
+        assert _err_code(resp.json()) == "pattern_not_found"
+        mock_bjm.submit_job.assert_not_called()
+
+    def test_evaluator_code_only_regression_unaffected(self, app, client):
+        """Existing callers passing evaluator_code with no pattern_name are unaffected."""
+        app.dependency_overrides[get_current_user] = lambda: NORMAL_USER
+
+        bjm_patch, mock_bjm = _patch_bjm("job-regression")
+        try:
+            with _patch_repo_found(), bjm_patch:
+                resp = client.post("/api/xray/search", json=VALID_BODY)
+        finally:
+            app.dependency_overrides.clear()
+
+        assert resp.status_code == 202
+        assert resp.json()["job_id"] == "job-regression"
+
+
+def _build_parity_repo(tmp_path: Path) -> Path:
+    """Create a tiny real repo directory for the parity search."""
+    repo_dir = tmp_path / "repo"
+    repo_dir.mkdir()
+    (repo_dir / "Sample.java").write_text("class Sample {}\n")
+    return repo_dir
+
+
+def _resolve_mcp_side_evaluator_code(cidx_meta: Path) -> str:
+    """Resolve evaluator_code via the exact function handle_xray_search calls."""
+    from code_indexer.server.mcp.handlers.xray import _resolve_evaluator_code
+
+    with _patch_cidx_meta_1812(cidx_meta):
+        evaluator_code, err = _resolve_evaluator_code(
+            {"pattern_name": "test-finder-1812"}, "myrepo-global"
+        )
+    assert err is None
+    return evaluator_code
+
+
+def _run_rest_side_job(app, client, cidx_meta: Path, repo_dir: Path) -> Dict[str, Any]:
+    """Submit through the real HTTP route and execute the captured job
+    function for real (no engine mocking) — returns the XRaySearchEngine result.
+    """
+    app.dependency_overrides[get_current_user] = lambda: NORMAL_USER
+    captured: dict = {}
+
+    def _fake_submit_job(**kwargs):
+        captured["func"] = kwargs["func"]
+        return "job-parity"
+
+    mock_bjm = MagicMock()
+    mock_bjm.submit_job.side_effect = _fake_submit_job
+
+    body = {
+        "repository_alias": "myrepo-global",
+        "driver_regex": "class ",
+        "search_target": "content",
+        "pattern_name": "test-finder-1812",
+    }
+
+    try:
+        with (
+            _patch_repo_found(str(repo_dir)),
+            patch(
+                "code_indexer.server.routes.xray_routes._get_background_job_manager",
+                return_value=mock_bjm,
+            ),
+            _patch_cidx_meta_1812(cidx_meta),
+        ):
+            resp = client.post("/api/xray/search", json=body)
+    finally:
+        app.dependency_overrides.clear()
+
+    assert resp.status_code == 202
+    return cast(Dict[str, Any], captured["func"](None))  # job_fn(progress_callback)
+
+
+class TestPatternNameParity:
+    """Bug #1812 parity proof: REST and MCP resolve pattern_name identically."""
+
+    def test_pattern_name_findings_match_mcp_resolution_path(
+        self, app, client, tmp_path
+    ):
+        """REST's resolved evaluator_code and resulting findings must match
+        the MCP resolution path exactly -- not merely return a non-error
+        status. H4 fix: the fixture's finding pattern ("bug1812-marker") is
+        deliberately distinct from the default evaluator's own output
+        ("match"), so a REST implementation that silently ignored
+        pattern_name and fell back to the default evaluator would produce a
+        DIFFERENT pattern value here -- both the equality check and the
+        explicit marker assertions below would then fail.
+        """
+        from code_indexer.xray.search_engine import XRaySearchEngine
+
+        cidx_meta = _make_cidx_meta_1812(tmp_path)
+        _store_test_finder_pattern(cidx_meta)
+        repo_dir = _build_parity_repo(tmp_path)
+
+        mcp_evaluator_code = _resolve_mcp_side_evaluator_code(cidx_meta)
+        mcp_result = XRaySearchEngine().run(
+            repo_path=repo_dir,
+            driver_regex="class ",
+            evaluator_code=mcp_evaluator_code,
+            search_target="content",
+        )
+        assert len(mcp_result["matches"]) > 0
+        assert all(m["pattern"] == "bug1812-marker" for m in mcp_result["matches"]), (
+            f"MCP-side resolution must use the real stored pattern, not the "
+            f"default evaluator's 'match' pattern: {mcp_result['matches']}"
+        )
+
+        rest_result = _run_rest_side_job(app, client, cidx_meta, repo_dir)
+
+        assert rest_result["matches"] == mcp_result["matches"]
+        assert all(m["pattern"] == "bug1812-marker" for m in rest_result["matches"]), (
+            f"REST-side resolution must use the real stored pattern, not "
+            f"silently fall back to the default evaluator: {rest_result['matches']}"
+        )
+        assert len(rest_result["matches"]) > 0
 
 
 # ---------------------------------------------------------------------------

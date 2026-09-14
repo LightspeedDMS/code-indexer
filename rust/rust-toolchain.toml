@@ -1,0 +1,36 @@
+# Pins the exact Rust toolchain used for this workspace (rust/xray-core,
+# rust/xray-cli). rustup auto-detects this file for any cargo/rustc/clippy
+# invocation whose working directory is here or below, and auto-installs the
+# pinned toolchain+components on first use if not already present.
+#
+# WHY THIS EXISTS: without a pin, `cargo`/`cargo clippy` on a developer
+# machine floats to whatever toolchain `rustup default` happens to be, while
+# CI's `dtolnay/rust-toolchain@1.98.0` step (.github/workflows/main.yml,
+# `rust` job) installs an explicit version. Before this file existed, CI run
+# 34135704952 failed `cargo clippy -D warnings` (clippy::filter_next) on a
+# tree where local `./rust-automation.sh` had just reported a clean pass --
+# because local clippy was 0.1.91 (rustc 1.91.0, 2025-10-28) while CI's
+# floating "stable" toolchain action had drifted to 1.98.0's clippy, which
+# added/tightened lint behavior in between. This is the identical failure
+# mode CLAUDE.md's "Lint and CI" section already documents for ruff/mypy
+# (pyproject's dev extra only FLOORS their versions, so an unpinned CI
+# install can pick up a newer linter that disagrees with every developer's
+# local one) -- the rust job had the same hole, just via a floating toolchain
+# action instead of an unpinned pip install.
+#
+# Pinned to 1.98.0 deliberately: that is the version CI's clippy gate was
+# actually enforcing when it caught the filter_next violation, so pinning to
+# it (rather than to the older local 1.91.0) keeps the gate's real behavior
+# and makes local `./rust-automation.sh` a faithful mirror of CI again. This
+# does mean a fresh `./rust-automation.sh` run downloads the 1.98.0 toolchain
+# once via rustup before it can pass.
+#
+# Keep this version in sync with `dtolnay/rust-toolchain@<version>` in the
+# `rust` job of .github/workflows/main.yml -- that step pins the toolchain
+# dtolnay's action itself installs; this file is what rustup's override
+# mechanism uses for the `cargo`/`cargo clippy` invocations that follow it
+# (in CI and locally). Both must name the same version or the two toolchains
+# can drift apart again.
+[toolchain]
+channel = "1.98.0"
+components = ["clippy"]

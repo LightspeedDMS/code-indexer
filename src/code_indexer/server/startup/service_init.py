@@ -27,6 +27,13 @@ logger = logging.getLogger(__name__)
 _postgres_pools_for_cleanup: List[Any] = []
 _postgres_pools_lock = threading.Lock()
 
+# Story #1787 S2 amendment AC16: node-local TTL for the K-calibration read
+# cache -- keeps calibration reads off any future admission hot path
+# without ever letting nodes diverge (the underlying store is always the
+# same cluster-shared database; this only bounds how often each node
+# re-reads it). See TTLCachedKProvider's own docstring for the rationale.
+_XRAY_K_CALIBRATION_TTL_SECONDS = 300.0
+
 
 def _cleanup_postgres_pools() -> None:
     """Close all PostgreSQL connection pools on process exit (Bug #567).
@@ -147,6 +154,7 @@ def initialize_services() -> Dict[str, Any]:
     # Web UI config on each tick (hot-reload, no server restart required).
     from code_indexer.server.services.config_service import get_config_service
     from code_indexer.server.services.memory_governor import (
+        YELLOW_LRU_FLOOR,
         build_memory_governor,
         set_memory_governor,
     )
@@ -165,8 +173,28 @@ def initialize_services() -> Dict[str, Any]:
         f"HNSW index cache initialized (TTL: {_server_hnsw_cache.config.ttl_minutes}min)",
         extra={"correlation_id": get_correlation_id()},
     )
-    # Story 4: wire HNSW cache into governor for YELLOW proactive LRU eviction.
-    _memory_governor.attach_cache(_server_hnsw_cache)
+
+    # Story #1787 S2 amendment AC14 (dual-review defect H4/H6): the X-Ray
+    # graph-build wire-file cache must ALSO be governor-visible for YELLOW
+    # proactive eviction. attach_cache() is single-slot -- a second,
+    # unguarded call here would silently REPLACE the HNSW registration, so
+    # both caches are composed behind ONE CompositeLRUCache before the
+    # sole attach_cache() call (ADR-003 Decision 4).
+    from code_indexer.server.services.xray_graph_governor.cache_proxy import (
+        XrayGraphCacheProxy,
+        set_xray_graph_cache,
+    )
+    from code_indexer.server.services.xray_graph_governor.cache_governor_bridge import (
+        CompositeLRUCache,
+    )
+
+    _xray_graph_cache = XrayGraphCacheProxy()
+    _xray_composite_cache = CompositeLRUCache(
+        [_server_hnsw_cache, _xray_graph_cache], floor_per_cache=YELLOW_LRU_FLOOR
+    )
+    set_xray_graph_cache(_xray_graph_cache)
+    # Story 4: wire caches into governor for YELLOW proactive LRU eviction.
+    _memory_governor.attach_cache(_xray_composite_cache)
 
     # Initialize server-side FTS cache for FTS query performance
     _server_fts_cache = get_global_fts_cache()
@@ -380,6 +408,22 @@ def initialize_services() -> Dict[str, Any]:
             "Storage mode: SQLite (standalone)",
             extra={"correlation_id": get_correlation_id()},
         )
+
+    # Story #1787 S2 amendment AC16 (dual-review defect H4/H6): construct
+    # the TTL-cached K-calibration provider now that the storage-mode-
+    # appropriate backend (SQLite or PostgreSQL) is known. Installed as a
+    # process-level singleton (mirroring set_memory_governor()) so a
+    # future graph-build call site retrieves this SAME instance.
+    from code_indexer.server.services.xray_graph_governor.k_calibration_store import (
+        TTLCachedKProvider,
+        set_xray_k_provider,
+    )
+
+    _xray_k_ttl_provider = TTLCachedKProvider(
+        store=_backend_registry.xray_k_calibration,
+        ttl_seconds=_XRAY_K_CALIBRATION_TTL_SECONDS,
+    )
+    set_xray_k_provider(_xray_k_ttl_provider)
 
     # Bug #575: Wire session manager to DB backend (SQLite or PG) for cluster support.
     # The module-level singleton starts in JSON file mode; set_backend() switches it

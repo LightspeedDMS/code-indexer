@@ -7,6 +7,9 @@ Handles both golden repositories and user activated repositories.
 
 from code_indexer.server.logging_utils import format_error_log, get_log_extra
 from code_indexer.server.git.git_subprocess_env import build_non_interactive_git_env
+from code_indexer.utils.subprocess_diagnostics import (
+    format_completed_process_diagnostic,
+)
 
 import os
 import subprocess
@@ -283,7 +286,8 @@ class RepositoryListingManager:
 
             if result.returncode != 0:
                 raise RepositoryListingError(
-                    f"Failed to get branches for repository {alias}: {result.stderr}"
+                    "Failed to get branches for repository "
+                    f"{alias}: {format_completed_process_diagnostic(result)}"
                 )
 
             # Parse branch names from ls-remote output
@@ -299,16 +303,20 @@ class RepositoryListingManager:
         except subprocess.TimeoutExpired:
             logger.warning(
                 format_error_log(
-                    "REPO-MIGRATE-003", "Git ls-remote timed out for repository {alias}"
+                    "REPO-MIGRATE-003",
+                    "Git ls-remote timed out for repository",
+                    alias=alias,
                 ),
                 extra=get_log_extra("REPO-MIGRATE-003"),
             )
             return [golden_repo["default_branch"]]
-        except Exception:
+        except Exception as e:
             logger.warning(
                 format_error_log(
                     "REPO-MIGRATE-004",
-                    "Failed to get branches for repository {alias}: {e}",
+                    "Failed to get branches for repository",
+                    alias=alias,
+                    error=str(e),
                 ),
                 extra=get_log_extra("REPO-MIGRATE-004"),
             )

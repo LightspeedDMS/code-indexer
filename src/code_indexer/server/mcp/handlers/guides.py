@@ -208,7 +208,13 @@ def _wiki_analytics_build_articles(all_views: list, wiki_alias: str) -> list:
 # ---------------------------------------------------------------------------
 
 
-def quick_reference(params: Dict[str, Any], user: User) -> Dict[str, Any]:
+def quick_reference(
+    params: Dict[str, Any],
+    user: User,
+    *,
+    session_state: Any = None,
+    tool_access_memo: Any = None,
+) -> Dict[str, Any]:
     """
     Generate quick reference documentation for available MCP tools.
 
@@ -222,12 +228,29 @@ def quick_reference(params: Dict[str, Any], user: User) -> Dict[str, Any]:
     try:
         from ..tools import TOOL_REGISTRY
         from ..tool_doc_loader import _get_tool_doc_loader
+        from ..tool_access import ToolAccessMemo, resolve_effective_user
+
+        if tool_access_memo is None:
+            tool_access_memo = ToolAccessMemo()
+        effective_user = resolve_effective_user(user, session_state)
 
         category_filter = params.get("category")
 
         # Story #987 AC6: 'tool' parameter takes precedence over 'category'
         requested_tool = params.get("tool")
         if requested_tool:
+            decision = tool_access_memo.is_allowed(requested_tool, effective_user)
+            tool_def = TOOL_REGISTRY.get(requested_tool)
+            if decision is False or (
+                decision is None
+                and tool_def is not None
+                and not effective_user.has_permission(
+                    tool_def.get("required_permission", "query_repos")
+                )
+            ):
+                return _mcp_response(
+                    {"success": False, "error": f"Tool '{requested_tool}' not found"}
+                )
             loader = _get_tool_doc_loader()
             body = loader.get_extended_description(requested_tool)
             if body is None:
@@ -248,8 +271,12 @@ def quick_reference(params: Dict[str, Any], user: User) -> Dict[str, Any]:
 
         for tool_name, tool_def in TOOL_REGISTRY.items():
             # Check permission
+            decision = tool_access_memo.is_allowed(tool_name, effective_user)
             required_permission = tool_def.get("required_permission", "query_repos")
-            if not user.has_permission(required_permission):
+            if decision is False or (
+                decision is None
+                and not effective_user.has_permission(required_permission)
+            ):
                 continue
 
             # Get category and tl_dr from frontmatter; fallback for undocumented tools
@@ -444,13 +471,25 @@ def first_time_user_guide(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     return _mcp_response({"success": True, "guide": guide})
 
 
-def get_tool_categories(args: Dict[str, Any], user: User) -> Dict[str, Any]:
+def get_tool_categories(
+    args: Dict[str, Any],
+    user: User,
+    *,
+    session_state: Any = None,
+    tool_access_memo: Any = None,
+) -> Dict[str, Any]:
     """Handler for get_tool_categories tool - returns tools organized by category.
 
     Uses ToolDocLoader singleton to build categories from markdown documentation
     files without per-call disk I/O (Story #222 code review Finding 1).
     """
     from ..tool_doc_loader import _get_tool_doc_loader
+    from ..tools import TOOL_REGISTRY
+    from ..tool_access import ToolAccessMemo, resolve_effective_user
+
+    if tool_access_memo is None:
+        tool_access_memo = ToolAccessMemo()
+    effective_user = resolve_effective_user(user, session_state)
 
     # Use singleton to avoid per-call disk I/O
     loader = _get_tool_doc_loader()
@@ -465,8 +504,18 @@ def get_tool_categories(args: Dict[str, Any], user: User) -> Dict[str, Any]:
         display_name = category_name.upper()
         category_tools = []
         for tool_info in tools:
+            tool_name = tool_info["name"]
+            decision = tool_access_memo.is_allowed(tool_name, effective_user)
+            tool_def = TOOL_REGISTRY.get(tool_name, {})
+            if decision is False or (
+                decision is None
+                and not effective_user.has_permission(
+                    tool_def.get("required_permission", "query_repos")
+                )
+            ):
+                continue
             # Format as "tool_name - tl_dr description"
-            category_tools.append(f"{tool_info['name']} - {tool_info['tl_dr']}")
+            category_tools.append(f"{tool_name} - {tool_info['tl_dr']}")
             total_tools += 1
         if category_tools:
             categories[display_name] = category_tools

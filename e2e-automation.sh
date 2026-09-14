@@ -97,20 +97,13 @@ fi
 # ---------------------------------------------------------------------------
 # Required credentials — no built-in defaults; must come from .e2e-automation
 # or the environment. Script exits immediately if either is missing.
+#
+# NOTE: this check is deliberately NOT executed here at top level — it lives
+# inside the "${BASH_SOURCE[0]}" == "${0}" main guard below so the script
+# stays source-safe (tests source this file to reuse wait_for_server without
+# supplying credentials). Direct execution (./e2e-automation.sh) still fails
+# immediately and loudly when credentials are missing.
 # ---------------------------------------------------------------------------
-if [[ -z "${E2E_ADMIN_USER:-}" ]]; then
-    echo "ERROR: E2E_ADMIN_USER is not set." >&2
-    echo "       Set it in .e2e-automation or export it in your environment." >&2
-    echo "       See .e2e-automation.template for the full configuration reference." >&2
-    exit 1
-fi
-
-if [[ -z "${E2E_ADMIN_PASS:-}" ]]; then
-    echo "ERROR: E2E_ADMIN_PASS is not set." >&2
-    echo "       Set it in .e2e-automation or export it in your environment." >&2
-    echo "       See .e2e-automation.template for the full configuration reference." >&2
-    exit 1
-fi
 
 # ---------------------------------------------------------------------------
 # VoyageAI key — intentionally optional at the script level.
@@ -293,11 +286,19 @@ reset_test_environment() {
 # Single composite EXIT trap — bash EXIT traps are global, not per-phase.
 # Calls reset_test_environment so THIS run's daemons are reaped on exit,
 # preventing accumulation for the next run.
+#
+# NOTE: the `trap ... EXIT` REGISTRATION deliberately does NOT happen here at
+# top level — it lives inside the "${BASH_SOURCE[0]}" == "${0}" main guard
+# below, armed only on direct execution. Arming it unconditionally at source
+# time would fire reset_test_environment (which reaps OTHER processes'
+# /tmp-path daemons and prunes pytest temp dirs) when the sourcing bash
+# subprocess exits -- corrupting sibling tests that merely source this file
+# to reuse wait_for_server. This function definition itself stays at top
+# level so it remains reusable by anything that sources the script.
 cleanup_all_servers_and_reset() {
     cleanup_all_servers
     reset_test_environment
 }
-trap cleanup_all_servers_and_reset EXIT
 
 # ---------------------------------------------------------------------------
 # Helper: clone seed repo into cache (idempotent — skips if .git exists)
@@ -851,6 +852,31 @@ PHASE_DEFS=(
 # (lets tests source wait_for_server); the suite runs only on direct execution.
 # ---------------------------------------------------------------------------
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+# Arm the composite cleanup trap FIRST, before anything else in the executed
+# path (including the credential checks below), so reap/reset-on-exit still
+# fires even on an early credential-missing exit — matching the pre-existing
+# "runs on EXIT" guarantee (see cleanup_all_servers_and_reset definition
+# above) for every exit path of a direct execution, not just the phase loop.
+trap cleanup_all_servers_and_reset EXIT
+
+# ---------------------------------------------------------------------------
+# Required credentials — no built-in defaults; must come from .e2e-automation
+# or the environment. Script exits immediately if either is missing.
+# ---------------------------------------------------------------------------
+if [[ -z "${E2E_ADMIN_USER:-}" ]]; then
+    echo "ERROR: E2E_ADMIN_USER is not set." >&2
+    echo "       Set it in .e2e-automation or export it in your environment." >&2
+    echo "       See .e2e-automation.template for the full configuration reference." >&2
+    exit 1
+fi
+
+if [[ -z "${E2E_ADMIN_PASS:-}" ]]; then
+    echo "ERROR: E2E_ADMIN_PASS is not set." >&2
+    echo "       Set it in .e2e-automation or export it in your environment." >&2
+    echo "       See .e2e-automation.template for the full configuration reference." >&2
+    exit 1
+fi
+
 _bold "======================================"
 _bold " CIDX E2E Automation Suite"
 _bold "======================================"

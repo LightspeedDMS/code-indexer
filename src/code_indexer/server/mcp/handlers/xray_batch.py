@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, cast
 
 from code_indexer.server.auth.user_manager import User
+from code_indexer.xray.rust_backend import SharedIdentityCache
 from code_indexer.xray.sandbox import validate_rust_evaluator
 from code_indexer.xray.search_engine import XRaySearchEngine
 
@@ -263,6 +264,37 @@ def _await_job_result(
 # ---------------------------------------------------------------------------
 
 
+def _resolve_batch_evaluators(
+    resolved_repos: List[Dict[str, Any]],
+    scans: List[Dict[str, Any]],
+    cidx_meta_path: Path,
+) -> Dict[Tuple[str, int], Tuple[str, Optional[Dict[str, Any]]]]:
+    """Pre-resolve resolve_batch_evaluator() for every (repo, scan) cell.
+
+    Bug #1784 review blocker (sizing-dimension mismatch): SharedIdentityCache
+    is keyed on resolved evaluator SOURCE TEXT, but resolve_batch_evaluator()
+    checks {repo-alias}/{name}.yaml BEFORE __any__/{name}.yaml — a
+    repo-scoped pattern override means one scan can resolve to a DIFFERENT
+    source per repo. Distinct sources can therefore reach
+    len(resolved_repos) x len(scans), not len(scans) alone. Resolving every
+    cell up front (cheap: a YAML file read, never a subprocess) lets the
+    caller (_run_xray_batch_job) size the identity cache to the ACTUAL
+    distinct-source count, and means the main execution loop never
+    re-resolves a cell it already resolved here.
+
+    Returns:
+        Dict keyed by (repository_alias, scan_index) -> (evaluator_code, err),
+        same (code, err) semantics as resolve_batch_evaluator().
+    """
+    resolved: Dict[Tuple[str, int], Tuple[str, Optional[Dict[str, Any]]]] = {}
+    for repo in resolved_repos:
+        for scan_index, scan in enumerate(scans):
+            resolved[(repo["alias"], scan_index)] = resolve_batch_evaluator(
+                scan, repo["alias"], cidx_meta_path
+            )
+    return resolved
+
+
 def _run_xray_batch_job(
     resolved_repos: List[Dict[str, Any]],
     scans: List[Dict[str, Any]],
@@ -302,6 +334,32 @@ def _run_xray_batch_job(
     cancelled = False
     deadline = time.monotonic() + timeout_seconds
 
+    # Bug #1784 review blocker: share ONE identity cache across the WHOLE
+    # batch operation instead of a fresh, empty cache per cell. Each cell
+    # constructs its own XRaySearchEngine/RustNativeBackend below, but the
+    # evaluator source is constant across every repo for a given scan
+    # (structural fact of the repos x scans matrix), so a batch-scoped
+    # shared cache collapses up to _MAX_REPOS x _MAX_SCANS identity
+    # subprocess calls down to the number of DISTINCT evaluator sources.
+    #
+    # Sizing-dimension-mismatch fix (final review round): "one entry per
+    # scan" is FALSE when repo-scoped pattern overrides exist --
+    # resolve_batch_evaluator() checks {repo-alias}/{name}.yaml BEFORE
+    # __any__/{name}.yaml, so a single scan can resolve to a DIFFERENT
+    # source per repo. Distinct sources can therefore reach
+    # len(resolved_repos) x len(scans), not len(scans) alone. Pre-resolving
+    # every cell up front and sizing to the ACTUAL distinct-source count
+    # (rather than guessing from scan count) guarantees no eviction can
+    # occur before every cell has been processed, regardless of how many
+    # repos carry their own pattern override.
+    resolved_evaluators = _resolve_batch_evaluators(
+        resolved_repos, scans, cidx_meta_path
+    )
+    distinct_sources = {
+        code for code, cell_err in resolved_evaluators.values() if cell_err is None
+    }
+    identity_cache = SharedIdentityCache(max_entries=max(1, len(distinct_sources)))
+
     outer_break = False
     for repo in resolved_repos:
         # Between-repo cancellation check.
@@ -328,10 +386,9 @@ def _run_xray_batch_job(
                 outer_break = True
                 break
 
-            # Resolve evaluator (pure, repo-scoped).
-            eval_code, err = resolve_batch_evaluator(
-                scan, repo["alias"], cidx_meta_path
-            )
+            # Evaluator already resolved up front by _resolve_batch_evaluators()
+            # (pure, repo-scoped) -- looked up here, never re-resolved.
+            eval_code, err = resolved_evaluators[(repo["alias"], scan_index)]
             if err is not None:
                 errors.append(
                     {
@@ -367,7 +424,7 @@ def _run_xray_batch_job(
                     if _jid:
                         bjm.register_child_process(_jid, proc)
 
-                cell = XRaySearchEngine().run(
+                cell = XRaySearchEngine(identity_cache=identity_cache).run(
                     repo_path=repo["path"],
                     driver_regex=scan["driver_regex"],
                     evaluator_code=eval_code,

@@ -32,8 +32,13 @@ from typing import TYPE_CHECKING, List, Optional, Tuple
 # Story #1586 AC5: custom span around golden-repo CoW snapshot creation.
 # create_span() no-ops (yields a _NoOpSpan) when OTEL tracing is
 # unavailable/uninitialized.
+from code_indexer.global_repos.snapshot_deletion_errors import (
+    SnapshotDeleteError,
+    SnapshotInUseError,
+)
 from code_indexer.server.telemetry.spans import create_span
 
+from .clone_backend import _RETRYABLE_DELETE_ERRNOS
 from .snapshot_paths import is_versioned_snapshot as _is_versioned_snapshot
 
 if TYPE_CHECKING:
@@ -636,7 +641,15 @@ class VersionedSnapshotManager:
         return str(versioned_path)
 
     def _delete_cow_snapshot(self, version_path: str) -> bool:
-        """Remove a CoW snapshot directory tree."""
+        """Remove a CoW snapshot directory tree.
+
+        Bug #1844: an OSError here is classified exactly as the two
+        CloneBackend implementations classify theirs, so all three deletion
+        branches hand ``CleanupManager`` the same vocabulary. Leaving this
+        one raising a bare OSError would make "still in use" retryable on
+        the backend paths and a hard failure on the fallback path.
+        """
+        import errno  # noqa: PLC0415
         import shutil  # noqa: PLC0415
 
         path = Path(version_path)
@@ -648,6 +661,21 @@ class VersionedSnapshotManager:
             return True
 
         logger.info("Deleting CoW snapshot at '%s'", version_path)
-        shutil.rmtree(str(path))
+        try:
+            shutil.rmtree(str(path))
+        except OSError as exc:
+            errno_name = (
+                errno.errorcode.get(exc.errno, str(exc.errno))
+                if exc.errno is not None
+                else type(exc).__name__
+            )
+            message = f"Failed to delete CoW snapshot '{version_path}': {exc}"
+            if exc.errno in _RETRYABLE_DELETE_ERRNOS:
+                raise SnapshotInUseError(
+                    message, errno_name=errno_name, detail=str(exc)
+                ) from exc
+            raise SnapshotDeleteError(
+                message, errno_name=errno_name, detail=str(exc)
+            ) from exc
         logger.info("CoW snapshot deleted: '%s'", version_path)
         return True

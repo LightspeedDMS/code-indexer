@@ -28,6 +28,7 @@ from ...global_repos.query_tracker import QueryTracker
 from ...global_repos.cleanup_manager import CleanupManager
 from ...global_repos.refresh_scheduler import RefreshScheduler
 from ...global_repos.shared_operations import GlobalRepoOperations
+from ..services.cidx_meta_backup import get_cidx_meta_path
 from ..services.config_service import get_config_service
 
 
@@ -95,6 +96,25 @@ class GlobalReposLifecycleManager:
                 .snapshot_min_retention_age_seconds
             ),
         )
+
+        # Bug #1845 remediation round 2 (Defect 3): use the same canonical
+        # cidx-meta resolver as reader-side lease publication. This keeps the
+        # cleanup and reader lease roots from silently diverging.
+        config_service = get_config_service()
+        config_manager = getattr(config_service, "config_manager", None)
+        if config_manager is None:
+            # Keep construction compatible with lightweight config-service
+            # adapters used by existing lifecycle tests. CleanupManager will
+            # refuse to guess liveness if a versioned snapshot is later
+            # processed without a wired root.
+            logger.warning(
+                "Config service has no config_manager; snapshot-reader lease "
+                "root remains unwired"
+            )
+        else:
+            self.cleanup_manager.set_lease_root(
+                get_cidx_meta_path(config_manager.server_dir)
+            )
 
         # Bug #1084 Phase A5: hand the snapshot manager to the CleanupManager so
         # versioned-snapshot deletion is backend-correct (cow-daemon DELETE /

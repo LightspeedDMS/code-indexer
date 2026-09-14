@@ -87,8 +87,13 @@ _DISCOVERY_BRANCH_FETCH_MAX_CONCURRENCY = 8
 # The pool size IS the bound: excess work queues inside this pool (never dropped,
 # never widened), the shared default executor is untouched, and no asyncio
 # primitive is involved. Created lazily so importing this module starts no
-# threads; never shut down, because it lives exactly as long as the process and
-# holds at most _DISCOVERY_BRANCH_FETCH_MAX_CONCURRENCY idle threads.
+# threads, and disposed via shutdown_discovery_branch_fetch_executor() above.
+#
+# Bug #1800: this was originally "never shut down, because it lives exactly as
+# long as the process". Wrong, and it wedged the server test gate. The pool's
+# NON-DAEMON workers are registered in concurrent.futures.thread._threads_queues
+# and joined by _python_exit inside threading._shutdown(), so the pool decides
+# when the process may die, waiting out whatever it is running.
 _DISCOVERY_BRANCH_FETCH_EXECUTOR: Optional[ThreadPoolExecutor] = None
 _DISCOVERY_BRANCH_FETCH_EXECUTOR_LOCK = threading.Lock()
 
@@ -123,6 +128,28 @@ def _get_discovery_branch_fetch_executor() -> ThreadPoolExecutor:
                 thread_name_prefix="discovery-branch-fetch",
             )
         return _DISCOVERY_BRANCH_FETCH_EXECUTOR
+
+
+def shutdown_discovery_branch_fetch_executor() -> None:
+    """Dispose the process-wide branch-fetch pool (Bug #1800).
+
+    The pool's workers are non-daemon threads that interpreter exit must join,
+    so an owner that never disposes it makes process exit wait on whatever the
+    pool is running. Whoever owns the process lifecycle calls this: the server
+    calls it from the lifespan shutdown; a test session calls it at session end.
+
+    Idempotent, and a no-op when the pool was never created. The global is
+    cleared so a later caller builds a fresh pool instead of submitting to a
+    dead one. ``shutdown`` runs outside the lock so disposal never blocks a
+    concurrent creator, and ``cancel_futures`` drops work that has not started
+    rather than making exit wait for a queue nobody is going to read.
+    """
+    global _DISCOVERY_BRANCH_FETCH_EXECUTOR
+    with _DISCOVERY_BRANCH_FETCH_EXECUTOR_LOCK:
+        executor = _DISCOVERY_BRANCH_FETCH_EXECUTOR
+        _DISCOVERY_BRANCH_FETCH_EXECUTOR = None
+    if executor is not None:
+        executor.shutdown(wait=False, cancel_futures=True)
 
 
 def _get_discovery_branch_fetch_gate() -> BoundedSubmissionGate:
@@ -1684,7 +1711,10 @@ def create_user(
     try:
         user_manager.create_user(new_username, new_password, role_enum)
 
-        # Auto-assign new user to appropriate group based on role
+        # Auto-assign new user to appropriate group based on role.
+        # Story #1593 AC7: routed through the shared
+        # GroupAccessManager.ensure_user_group_membership() primitive
+        # instead of an independent inline assign+audit implementation.
         try:
             from ..services.constants import DEFAULT_GROUP_ADMINS, DEFAULT_GROUP_USERS
 
@@ -1695,15 +1725,15 @@ def create_user(
                 target_group = group_manager.get_group_by_name(DEFAULT_GROUP_USERS)
 
             if target_group:
-                group_manager.assign_user_to_group(
-                    new_username, target_group.id, session.username
-                )
-                group_manager.log_audit(
-                    admin_id=session.username,
+                group_manager.ensure_user_group_membership(
+                    new_username,
+                    target_group,
+                    assigned_by=session.username,
                     action_type="user_group_assign",
-                    target_type="user",
-                    target_id=new_username,
-                    details=f"Auto-assigned to '{target_group.name}' group on creation",
+                    audit_details={
+                        "group": target_group.name,
+                        "reason": "auto_assign_on_creation",
+                    },
                 )
                 logger.info(
                     f"Auto-assigned new user '{new_username}' to '{target_group.name}' group"
@@ -2265,7 +2295,7 @@ def create_group(
             action_type="group_create",
             target_type="group",
             target_id=str(group.id),
-            details=json.dumps({"name": group.name, "description": group.description}),
+            details={"name": group.name, "description": group.description},
         )
 
         return _create_groups_page_response(
@@ -2315,14 +2345,12 @@ def update_group(
                 action_type="group_update",
                 target_type="group",
                 target_id=str(group_id),
-                details=json.dumps(
-                    {
-                        "old_name": old_group.name,
-                        "new_name": name,
-                        "old_description": old_group.description,
-                        "new_description": description,
-                    }
-                ),
+                details={
+                    "old_name": old_group.name,
+                    "new_name": name,
+                    "old_description": old_group.description,
+                    "new_description": description,
+                },
             )
             return _create_groups_page_response(
                 request, session, success_message=f"Group '{name}' updated successfully"
@@ -2372,7 +2400,7 @@ def delete_group(
                 action_type="group_delete",
                 target_type="group",
                 target_id=str(group_id),
-                details=json.dumps({"name": group_name}),
+                details={"name": group_name},
             )
             return _create_groups_page_response(
                 request,
@@ -2429,12 +2457,10 @@ def assign_user_to_group(
             action_type="user_group_change",
             target_type="user",
             target_id=user_id,
-            details=json.dumps(
-                {
-                    "old_group": old_group_name,
-                    "new_group": new_group.name,
-                }
-            ),
+            details={
+                "old_group": old_group_name,
+                "new_group": new_group.name,
+            },
         )
 
         return _create_groups_page_response(
@@ -2773,7 +2799,7 @@ async def grant_repo_access(
                 action_type="repo_access_grant",
                 target_type="repo",
                 target_id=repo_name,
-                details=f"Granted access to group '{group.name}'",
+                details={"repo": repo_name, "group": group.name},
             )
 
         message = (
@@ -2856,7 +2882,7 @@ async def revoke_repo_access(
                 action_type="repo_access_revoke",
                 target_type="repo",
                 target_id=repo_name,
-                details=f"Revoked access from group '{group.name}'",
+                details={"repo": repo_name, "group": group.name},
             )
 
         message = (

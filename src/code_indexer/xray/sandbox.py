@@ -1230,6 +1230,11 @@ _RUST_FORBIDDEN_PATTERNS: list[tuple[str, str, str]] = [
     ("forbidden_extern", "extern", r"\bextern\b"),
     ("forbidden_mod", "mod", r"\bmod\b"),
     ("forbidden_static", "static", r"^\s*(pub\b[^;\"']*?)?\bstatic\b"),
+    # R2-2 (Codex re-review): macro_rules! DEFINITIONS are banned outright,
+    # regardless of body contents -- mirrors validator.rs's visit_item_macro
+    # ("never selectively whitelist macro_rules! bodies", since a
+    # definition's expansion body is opaque to structural inspection).
+    ("forbidden_macro", "macro_rules!", r"\bmacro_rules\s*!"),
     # Forbidden macros (macro invocation: name followed by !)
     ("forbidden_macro", "include!", r"\binclude\s*!"),
     ("forbidden_macro", "env!", r"\benv\s*!"),
@@ -1251,29 +1256,226 @@ _RUST_COMPILED_PATTERNS: list[tuple[str, str, "_re.Pattern[str]"]] = [
     for error_code, construct, pattern in _RUST_FORBIDDEN_PATTERNS
 ]
 
+# R2-2 (Codex re-review): the named blocklist above only rejects macros it
+# happens to enumerate -- an arbitrary UNLISTED macro name (assert!,
+# write!, dbg!, a user-defined name, etc.) sailed through here even though
+# Rust's validator.rs::visit_macro is an authoritative FAIL-CLOSED
+# ALLOWLIST rejecting anything not explicitly vec!/format!/matches!. This
+# generic check closes that gap so Python is never MORE PERMISSIVE than
+# Rust on macro NAMES -- a request must never pass this pre-flight only to
+# fail late and confusingly at Rust's compile step.
+#
+# This is a "fast subset pre-flight" (regex, not a full parser): it does
+# NOT inspect an allowed macro's own argument tokens the way Rust's
+# AST-based validator does -- that inspection is Rust's job alone (Python
+# = fast subset pre-flight, Rust = authoritative). It also rejects a
+# QUALIFIED invocation of an otherwise-allowed name (e.g. `evil::vec!`),
+# mirroring validator.rs's exact-path-match fix -- captures an optional
+# leading `::` so a qualified path is never mistaken for the bare form.
+_ALLOWED_MACRO_NAMES = frozenset({"vec", "format", "matches"})
+_MACRO_INVOCATION_PATTERN = _re.compile(r"(::)?\b([A-Za-z_][A-Za-z0-9_]*)\s*!\s*[(\[{]")
+
+# R3-1 (Codex re-review, ROUND 3): Rust's boolean negation operator `!` is
+# a PREFIX operator applying to an expression -- `if !(x)`, `while !done`,
+# `return !ok` -- and reads identically to a bare macro invocation to a
+# regex that only looks at "identifier, optional space, !, optional space,
+# opening delimiter". Since a macro name can NEVER legitimately be a Rust
+# keyword, excluding keywords from the captured "macro name" closes this
+# specific false-positive class (e.g. "if !(expr)" no longer misreads
+# "if" as macro name "if!") without weakening real macro-name detection
+# at all (no genuine macro is named after a keyword).
+_RUST_KEYWORDS = frozenset(
+    {
+        "as",
+        "async",
+        "await",
+        "break",
+        "const",
+        "continue",
+        "crate",
+        "dyn",
+        "else",
+        "enum",
+        "extern",
+        "false",
+        "fn",
+        "for",
+        "if",
+        "impl",
+        "in",
+        "let",
+        "loop",
+        "match",
+        "mod",
+        "move",
+        "mut",
+        "pub",
+        "ref",
+        "return",
+        "self",
+        "Self",
+        "static",
+        "struct",
+        "super",
+        "trait",
+        "true",
+        "try",
+        "type",
+        "unsafe",
+        "use",
+        "where",
+        "while",
+    }
+)
+
+
+def _find_disallowed_macro_invocation(line: str) -> Optional[str]:
+    """Return the offending macro name if `line` contains a macro
+    invocation that is either unqualified-but-unlisted or qualified
+    (regardless of name); return None if every invocation on `line` is a
+    bare, unqualified, allowlisted one, or is a Rust keyword (never a
+    real macro name -- see _RUST_KEYWORDS, R3-1).
+
+    Callers MUST pass a line that has already had string/char literals
+    and comments blanked out (see `_blank_out_strings_and_comments`) --
+    this function does no such stripping itself, so a macro-name-shaped
+    substring inside a string literal or comment would otherwise be
+    misread as real code.
+    """
+    for match in _MACRO_INVOCATION_PATTERN.finditer(line):
+        qualifier, name = match.group(1), match.group(2)
+        if name in _RUST_KEYWORDS:
+            continue
+        if qualifier or name not in _ALLOWED_MACRO_NAMES:
+            return name
+    return None
+
+
+def _skip_delimited_region(code: str, start: int) -> Optional[int]:
+    """Index right after the comment/string/char-literal starting at
+    `start` (block comments handle NESTING -- Rust's `/* /* */ */`
+    otherwise leaks trailing text as real code), or None if `start`
+    begins none of those (R3-1, Codex re-review ROUND 3: one dispatcher
+    rather than several top-level skip functions)."""
+    n = len(code)
+    c = code[start]
+    nxt = code[start + 1] if start + 1 < n else ""
+    if c == "/" and nxt == "/":
+        j = code.find("\n", start)
+        return n if j == -1 else j
+    if c == "/" and nxt == "*":
+        depth, i = 1, start + 2
+        while i < n and depth > 0:
+            two = code[i : i + 2]
+            if two == "/*":
+                depth += 1
+                i += 2
+            elif two == "*/":
+                depth -= 1
+                i += 2
+            else:
+                i += 1
+        return i
+    if c == "r" and nxt in ('"', "#"):
+        k = start + 1
+        while k < n and code[k] == "#":
+            k += 1
+        if k < n and code[k] == '"':
+            closer = '"' + ("#" * (k - start - 1))
+            end = code.find(closer, k + 1)
+            return n if end == -1 else end + len(closer)
+        return None
+    if c == '"':
+        j = start + 1
+        while j < n:
+            if code[j] == "\\" and j + 1 < n:
+                j += 2
+                continue
+            if code[j] == '"':
+                return j + 1
+            j += 1
+        return j
+    if c == "'":
+        if nxt == "\\" and start + 3 < n and code[start + 3] == "'":
+            return start + 4
+        if start + 2 < n and code[start + 2] == "'" and nxt != "'":
+            return start + 3
+    return None
+
+
+def _blank_out_strings_and_comments(code: str) -> str:
+    """Replace string/char literal and comment CONTENTS with spaces,
+    preserving newlines (line numbers stay correct), so per-line
+    regex-based checks never mistake text inside a string/comment for
+    real code (R3-1). Favors UNDER-stripping when ambiguous: a Python
+    false NEGATIVE is safe (Rust's validator remains authoritative); a
+    false POSITIVE breaks a legitimate user -- the bug this fixes."""
+    out: List[str] = []
+    i = 0
+    n = len(code)
+    while i < n:
+        j = _skip_delimited_region(code, i)
+        if j is None:
+            out.append(code[i])
+            i += 1
+            continue
+        out.extend("\n" if ch == "\n" else " " for ch in code[i:j])
+        i = j
+    return "".join(out)
+
 
 def validate_rust_evaluator(code: str) -> ValidationResult:
     """Statically validate Rust evaluator code for required signature and forbidden constructs.
 
-    Checks that the code contains ``fn evaluate_node`` and rejects any
-    forbidden Rust construct (unsafe, dangerous std namespaces, raw pointers,
-    extern blocks, mod declarations, static mut, forbidden macros).
+    Story #1811 (AC2): ADR-001 fixes execution modes at exactly two --
+    legacy (``fn evaluate_node``) and graph (``fn collect_facts`` + ``fn
+    analyze_graph`` together, both required). Accepts a source satisfying
+    EITHER mode's complete entry-point set; rejects a source satisfying
+    NEITHER (including incomplete graph mode -- only one of the two
+    required graph functions present) as ``missing_entry_point`` right
+    here, without ever reaching the Rust compiler. This intentionally does
+    NOT reimplement Rust's full mode-detection/mixed-mode-rejection logic
+    (``compiler::detect_evaluator_mode`` in rust/xray-core/src/compiler.rs,
+    Rule 4 anti-duplication): a source that satisfies one mode's complete
+    entry-point set while ALSO defining the other mode's function(s) (a
+    genuine mixed-mode source) passes this gate and is rejected later, with
+    the real ``CompileError``, by Rust's own authoritative check -- this
+    Python-side gate exists only to stop obviously-incomplete code before a
+    compile is attempted, never to be the final authority on mode validity.
+
+    Also rejects any forbidden Rust construct (unsafe, dangerous std
+    namespaces, raw pointers, extern blocks, mod declarations, static mut,
+    forbidden macros) -- unchanged by this story.
 
     Returns:
         ValidationResult with ``ok=True`` when the code is acceptable, or
         ``ok=False`` with ``error_code``, ``reason``, ``offending_construct``,
         and ``offending_line`` describing the first violation found.
     """
-    if not _re.search(r"\bfn\s+evaluate_node\b", code):
+    has_legacy_entry_point = bool(_re.search(r"\bfn\s+evaluate_node\b", code))
+    has_graph_entry_point = bool(_re.search(r"\bfn\s+collect_facts\b", code)) and bool(
+        _re.search(r"\bfn\s+analyze_graph\b", code)
+    )
+    if not has_legacy_entry_point and not has_graph_entry_point:
         return ValidationResult(
             ok=False,
-            reason="missing required 'fn evaluate_node' function signature",
+            reason=(
+                "missing required entry point: 'fn evaluate_node' (legacy "
+                "mode) or both 'fn collect_facts' and 'fn analyze_graph' "
+                "(graph mode)"
+            ),
             error_code="missing_entry_point",
             offending_construct="evaluate_node",
             offending_line=None,
         )
 
-    for lineno, line in enumerate(code.splitlines(), start=1):
+    # R3-1 (Codex re-review, ROUND 3): scan the BLANKED-OUT text (string/
+    # char literal contents and comments replaced with spaces) instead of
+    # raw source -- otherwise a forbidden-construct-shaped substring
+    # inside a string literal or comment is misread as real code. Line
+    # numbers stay correct: blanking preserves every newline.
+    scannable_code = _blank_out_strings_and_comments(code)
+    for lineno, line in enumerate(scannable_code.splitlines(), start=1):
         for error_code, construct, pattern in _RUST_COMPILED_PATTERNS:
             if pattern.search(line):
                 return ValidationResult(
@@ -1283,5 +1485,19 @@ def validate_rust_evaluator(code: str) -> ValidationResult:
                     offending_construct=construct,
                     offending_line=lineno,
                 )
+
+        disallowed_macro = _find_disallowed_macro_invocation(line)
+        if disallowed_macro is not None:
+            return ValidationResult(
+                ok=False,
+                reason=(
+                    f"macro invocation '{disallowed_macro}!' is not allowed in "
+                    "Rust evaluator code (only a bare, unqualified vec!/format!/"
+                    "matches! is permitted)"
+                ),
+                error_code="forbidden_macro",
+                offending_construct=disallowed_macro,
+                offending_line=lineno,
+            )
 
     return ValidationResult(ok=True)

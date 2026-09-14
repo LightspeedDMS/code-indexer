@@ -35,15 +35,33 @@ class FakeClaimer:
         return True
 
 
+class FakeClaimerWithProgress(FakeClaimer):
+    """Fake DistributedJobClaimer that additionally supports update_progress,
+    mirroring the real DistributedJobClaimer's shared-DB-row progress API."""
+
+    def __init__(self):
+        super().__init__()
+        self.progress_updates = []
+
+    def update_progress(self, job_id, progress, phase=None, detail=None):
+        self.progress_updates.append((job_id, progress, phase, detail))
+        return True
+
+
 class FakeRefreshScheduler:
-    """Fake RefreshScheduler that records trigger_refresh_for_repo calls."""
+    """Fake RefreshScheduler that records execute_refresh_for_claimed_job calls.
+
+    Bug #1839: the worker must call execute_refresh_for_claimed_job() (the
+    execution-only entry point), never trigger_refresh_for_repo() (which
+    re-submits a new job and collides with the worker's own claimed row).
+    """
 
     def __init__(self):
         self.refreshed_repos = []
 
-    def trigger_refresh_for_repo(self, alias, submitter_username="system"):
-        self.refreshed_repos.append((alias, submitter_username))
-        return "fake-job-id"
+    def execute_refresh_for_claimed_job(self, alias, progress_callback=None):
+        self.refreshed_repos.append(alias)
+        return {"success": True, "alias": alias}
 
 
 class TestProcessOneJob:
@@ -83,7 +101,7 @@ class TestProcessOneJob:
         worker._process_one_job()
 
         assert len(scheduler.refreshed_repos) == 1
-        assert scheduler.refreshed_repos[0] == ("my-repo-global", "system")
+        assert scheduler.refreshed_repos[0] == "my-repo-global"
         assert len(claimer.completed_jobs) == 1
         assert claimer.completed_jobs[0][0] == "job-123"
         assert len(claimer.failed_jobs) == 0
@@ -124,7 +142,7 @@ class TestProcessOneJob:
         )
 
         class FailingScheduler:
-            def trigger_refresh_for_repo(self, alias, submitter_username="system"):
+            def execute_refresh_for_claimed_job(self, alias, progress_callback=None):
                 raise RuntimeError("git pull failed")
 
         worker = DistributedJobWorkerService(
@@ -220,7 +238,7 @@ class TestStartStop:
         worker._process_one_job()
 
         assert len(scheduler.refreshed_repos) == 1
-        assert scheduler.refreshed_repos[0][0] == "other-repo-global"
+        assert scheduler.refreshed_repos[0] == "other-repo-global"
         assert len(claimer.completed_jobs) == 1
         assert len(claimer.failed_jobs) == 0
 
@@ -272,3 +290,94 @@ class TestExecuteRetryableJobDirect:
 
         with pytest.raises(ValueError, match="Unknown retryable job type"):
             worker._execute_retryable_job("job-x", "weird_type", "repo")
+
+
+class TestRefreshResultInterpretation:
+    """Bug #1839: refresh execution can return {"success": False, ...}
+    WITHOUT raising (Story #1586 AC4 lesson) -- the worker must treat that
+    the same as an exception: mark failed, never completed."""
+
+    def test_success_false_result_marks_failed_not_completed(self):
+        claimer = FakeClaimer()
+        claimer.jobs_to_return.append(
+            {
+                "job_id": "job-quarantined",
+                "operation_type": "global_repo_refresh",
+                "repo_alias": "quarantined-repo-global",
+            }
+        )
+
+        class QuarantinedScheduler:
+            def execute_refresh_for_claimed_job(self, alias, progress_callback=None):
+                return {"success": False, "message": "integrity gate quarantined"}
+
+        worker = DistributedJobWorkerService(
+            claimer=claimer,
+            refresh_scheduler=QuarantinedScheduler(),
+        )
+
+        worker._process_one_job()
+
+        assert len(claimer.failed_jobs) == 1
+        assert claimer.failed_jobs[0][0] == "job-quarantined"
+        assert "integrity gate quarantined" in claimer.failed_jobs[0][1]
+        assert len(claimer.completed_jobs) == 0
+
+    def test_progress_callback_forwards_to_claimer_update_progress(self):
+        """When the claimer supports update_progress, the callback passed to
+        execute_refresh_for_claimed_job must forward into it."""
+        claimer = FakeClaimerWithProgress()
+        claimer.jobs_to_return.append(
+            {
+                "job_id": "job-progress",
+                "operation_type": "global_repo_refresh",
+                "repo_alias": "progress-repo-global",
+            }
+        )
+
+        class ProgressReportingScheduler:
+            def execute_refresh_for_claimed_job(self, alias, progress_callback=None):
+                assert progress_callback is not None
+                progress_callback(42, phase="scip", detail="halfway")
+                return {"success": True}
+
+        worker = DistributedJobWorkerService(
+            claimer=claimer,
+            refresh_scheduler=ProgressReportingScheduler(),
+        )
+
+        worker._process_one_job()
+
+        assert claimer.progress_updates == [("job-progress", 42, "scip", "halfway")]
+        assert len(claimer.completed_jobs) == 1
+
+    def test_progress_callback_is_none_when_claimer_lacks_update_progress(self):
+        """FakeClaimer has no update_progress -- _make_progress_callback must
+        degrade to None rather than raising AttributeError."""
+        claimer = FakeClaimer()
+        claimer.jobs_to_return.append(
+            {
+                "job_id": "job-no-progress-support",
+                "operation_type": "global_repo_refresh",
+                "repo_alias": "no-progress-repo-global",
+            }
+        )
+
+        class RecordingScheduler:
+            def __init__(self):
+                self.seen_callback = "unset"
+
+            def execute_refresh_for_claimed_job(self, alias, progress_callback=None):
+                self.seen_callback = progress_callback
+                return {"success": True}
+
+        scheduler = RecordingScheduler()
+        worker = DistributedJobWorkerService(
+            claimer=claimer,
+            refresh_scheduler=scheduler,
+        )
+
+        worker._process_one_job()
+
+        assert scheduler.seen_callback is None
+        assert len(claimer.completed_jobs) == 1

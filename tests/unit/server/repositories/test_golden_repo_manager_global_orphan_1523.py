@@ -150,14 +150,38 @@ class TestGlobalDeactivationNotGatedOnCleanupBug1523:
             with pytest.raises(GitOperationError) as exc_info:
                 background_worker()
         finally:
-            os.chmod(clone_path, stat.S_IRWXU)
+            # Bug #1843: a genuine cleanup failure now quarantines clone_path
+            # to a `.corrupt-*` sibling, so the original path may no longer
+            # exist -- restore permissions on whichever path actually holds
+            # the directory now, so tmp_path's own teardown can remove it.
+            restore_target = clone_path
+            if not os.path.exists(restore_target):
+                parent = os.path.dirname(clone_path)
+                siblings = [
+                    os.path.join(parent, name)
+                    for name in os.listdir(parent)
+                    if name.startswith(f"{os.path.basename(clone_path)}.corrupt-")
+                ]
+                if siblings:
+                    restore_target = siblings[0]
+            if os.path.exists(restore_target):
+                os.chmod(restore_target, stat.S_IRWXU)
 
         # The resource-leak signal is PRESERVED -- this fix changes ordering,
         # not the failure reporting.
         assert "Resource leak detected" in str(exc_info.value)
 
-        # The leak is real: the clone directory genuinely survived.
-        assert os.path.exists(clone_path)
+        # The leak is real -- but Bug #1843 now quarantines it instead of
+        # leaving it at the original path: the original clone_path is gone
+        # (renamed aside) and exactly one `.corrupt-*` sibling exists in its
+        # place, so a later add_golden_repo for this alias is never blocked.
+        assert not os.path.exists(clone_path)
+        quarantined = list(
+            os.path.join(os.path.dirname(clone_path), name)
+            for name in os.listdir(os.path.dirname(clone_path))
+            if name.startswith(f"{os.path.basename(clone_path)}.corrupt-")
+        )
+        assert len(quarantined) == 1
 
         # Local half: row gone from both the shared backend and the cache.
         assert manager._sqlite_backend.get_repo(alias) is None

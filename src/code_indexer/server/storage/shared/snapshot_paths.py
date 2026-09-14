@@ -33,7 +33,7 @@ from __future__ import annotations
 
 import re
 from pathlib import PurePosixPath
-from typing import Optional
+from typing import Callable, Optional
 
 #: A snapshot leaf is exactly ``v_`` followed by one or more digits.
 _V_TIMESTAMP_RE = re.compile(r"^v_\d+$")
@@ -119,3 +119,36 @@ def is_versioned_snapshot(path: str, *, mount_point: Optional[str] = None) -> bo
             return True
 
     return False
+
+
+def _default_predicate(mount_point: Optional[str]) -> Callable[[str], bool]:
+    def check(candidate: str) -> bool:
+        return is_versioned_snapshot(candidate, mount_point=mount_point)
+
+    return check
+
+
+def resolve_versioned_snapshot_root(
+    path: str,
+    *,
+    mount_point: Optional[str] = None,
+    predicate: Optional[Callable[[str], bool]] = None,
+) -> Optional[str]:
+    """Bug #1850: bridge an index-dir cache key to its snapshot root.
+
+    Reader-lease caches key their guard by the index directory, a
+    descendant of the real snapshot root that ``is_versioned_snapshot()``
+    recognizes. This walks ancestors of *path*, delegating each check to
+    the canonical predicate (never reimplementing its matching logic), and
+    returns the nearest matching ancestor or ``None``. ``predicate`` lets
+    CLI-reachable callers pass an already-injected ``is_versioned_snapshot``
+    callable instead of importing this (server-only) module directly.
+    """
+    if not path:
+        return None
+    check = predicate if predicate is not None else _default_predicate(mount_point)
+    pure = PurePosixPath(path)
+    for candidate in (pure, *pure.parents):
+        if check(str(candidate)):
+            return str(candidate)
+    return None

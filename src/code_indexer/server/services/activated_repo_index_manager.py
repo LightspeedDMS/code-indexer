@@ -24,6 +24,9 @@ from ..repositories.activated_repo_manager import ActivatedRepoManager
 from .config_service import get_config_service
 from .repository_health_aggregator import discover_health_collections
 from code_indexer.utils.subprocess_env import build_cidx_subprocess_env
+from code_indexer.utils.subprocess_diagnostics import (
+    format_completed_process_diagnostic,
+)
 from ..utils.cancellable_subprocess import (
     SHORT_POLL_SECONDS,
     SubprocessCancelledError,
@@ -730,7 +733,10 @@ class ActivatedRepoIndexManager:
             if result.returncode != 0:
                 return {
                     "success": False,
-                    "error": f"Semantic indexing failed: {result.stderr}",
+                    "error": (
+                        "Semantic indexing failed: "
+                        f"{format_completed_process_diagnostic(result)}"
+                    ),
                 }
 
             return {"success": True, "message": "Semantic indexing completed"}
@@ -810,7 +816,10 @@ class ActivatedRepoIndexManager:
             if result.returncode != 0:
                 return {
                     "success": False,
-                    "error": f"FTS indexing failed: {result.stderr}",
+                    "error": (
+                        "FTS indexing failed: "
+                        f"{format_completed_process_diagnostic(result)}"
+                    ),
                 }
 
             return {"success": True, "message": "FTS indexing completed"}
@@ -865,7 +874,10 @@ class ActivatedRepoIndexManager:
             if result.returncode != 0:
                 return {
                     "success": False,
-                    "error": f"Temporal indexing failed: {result.stderr}",
+                    "error": (
+                        "Temporal indexing failed: "
+                        f"{format_completed_process_diagnostic(result)}"
+                    ),
                 }
 
             return {"success": True, "message": "Temporal indexing completed"}
@@ -891,7 +903,10 @@ class ActivatedRepoIndexManager:
             if result.returncode != 0:
                 return {
                     "success": False,
-                    "error": f"SCIP generation failed: {result.stderr}",
+                    "error": (
+                        "SCIP generation failed: "
+                        f"{format_completed_process_diagnostic(result)}"
+                    ),
                 }
 
             return {"success": True, "message": "SCIP generation completed"}

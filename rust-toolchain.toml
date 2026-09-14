@@ -1,0 +1,7 @@
+# Pins repository-root Cargo invocations to the same toolchain used by the
+# Rust workspace and its CI clippy gate. Keep this channel synchronized with
+# rust/rust-toolchain.toml and the dtolnay/rust-toolchain ref in
+# .github/workflows/main.yml; the Rust drift test enforces all three values.
+[toolchain]
+channel = "1.98.0"
+components = ["clippy"]

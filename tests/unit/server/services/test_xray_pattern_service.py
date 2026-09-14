@@ -9,6 +9,7 @@ Git operations are mocked because they require a real git repo.
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 from unittest.mock import patch
 
 import pytest
@@ -360,6 +361,88 @@ class TestPatternNameResolution:
 
 
 # ---------------------------------------------------------------------------
+# Consolidated review (Issue #1811/Bug #1812, new finding #5, Codex):
+# a malformed repo-specific pattern must surface a structured parse error,
+# never silently fall through to the __any__ global pattern.
+# ---------------------------------------------------------------------------
+
+
+class TestMalformedRepoSpecificPatternDoesNotFallThrough:
+    """A repo-specific pattern that fails YAML parsing must raise a
+    structured pattern_parse_error, not silently resolve to the __any__
+    global pattern of the same name."""
+
+    def test_malformed_repo_specific_pattern_raises_instead_of_using_any_fallback(
+        self, tmp_path: Path
+    ) -> None:
+        XrayPatternService = _import_service()
+        cidx_meta = _make_cidx_meta(tmp_path)
+        service = XrayPatternService(cidx_meta)
+
+        # A valid __any__ pattern exists under the SAME name.
+        with patch.object(service, "_git_commit"):
+            service.store_xray_pattern(
+                scope="__any__", pattern_yaml=MINIMAL_PATTERN_YAML
+            )
+
+        # The repo-specific pattern of the SAME name is malformed YAML
+        # (unterminated flow mapping -- guaranteed yaml.YAMLError).
+        repo_specific_path = service._patterns_root / "my-repo" / "my-pattern.yaml"
+        repo_specific_path.parent.mkdir(parents=True, exist_ok=True)
+        repo_specific_path.write_text(
+            "name: my-pattern\ndescription: [unterminated\n", encoding="utf-8"
+        )
+
+        with pytest.raises(ValueError, match="pattern_parse_error"):
+            service.resolve_and_prepare_pattern(
+                repo_alias="my-repo",
+                pattern_name="my-pattern",
+            )
+
+
+class TestSchemaInvalidPatternFilesRaisePatternParseError:
+    """R2-5 (Codex re-review): a schema-invalid pattern file must convert
+    into ONE explicit pattern_parse_error -- never pattern_not_found
+    (which hides the real cause), never an uncaught AttributeError/
+    KeyError, and never a silent proceed with an invalid evaluator_code
+    value. Covers the 4 concrete probes from the review: empty file
+    (currently masqueraded as pattern_not_found), list-shaped YAML
+    (currently AttributeError), missing evaluator_code key (currently
+    KeyError), and wrong-typed evaluator_code (currently silently
+    proceeds with an invalid value)."""
+
+    @pytest.mark.parametrize(
+        "case_id,yaml_text",
+        [
+            ("empty_file", ""),
+            ("list_shaped", "- a\n- b\n"),
+            ("missing_evaluator_code", "name: my-pattern\n"),
+            ("wrong_type_evaluator_code", "name: my-pattern\nevaluator_code: 42\n"),
+        ],
+    )
+    def test_schema_invalid_pattern_raises_pattern_parse_error(
+        self, tmp_path: Path, case_id: str, yaml_text: str
+    ) -> None:
+        XrayPatternService = _import_service()
+        cidx_meta = _make_cidx_meta(tmp_path)
+        service = XrayPatternService(cidx_meta)
+
+        pattern_path = service._patterns_root / "__any__" / "my-pattern.yaml"
+        pattern_path.parent.mkdir(parents=True, exist_ok=True)
+        pattern_path.write_text(yaml_text, encoding="utf-8")
+
+        with pytest.raises(ValueError, match="pattern_parse_error") as exc_info:
+            service.resolve_and_prepare_pattern(
+                repo_alias="some-repo",
+                pattern_name="my-pattern",
+            )
+        assert "pattern_not_found" not in str(exc_info.value), (
+            f"[{case_id}] a schema-invalid file must not be reported as "
+            "pattern_not_found -- that hides the real cause"
+        )
+
+
+# ---------------------------------------------------------------------------
 # AC6 — Seed Patterns
 # ---------------------------------------------------------------------------
 
@@ -556,6 +639,54 @@ class TestInvalidParameter:
 # ---------------------------------------------------------------------------
 # AC10 — Type Validation
 # ---------------------------------------------------------------------------
+
+
+class TestNonDictPatternParamsRejected:
+    """Consolidated review finding H3 (Issue #1811/Bug #1812): a
+    ``pattern_params`` that is not a dict must fail cleanly with a
+    structured ValueError, never an unhandled AttributeError from
+    ``overrides.get(name, default)`` (neither a list nor a string has
+    ``.get``). REPRODUCED by the review with
+    ``{"pattern_name":"catch-rethrow", "pattern_params":["SNIPPET_MAX"]}``
+    -- mirrored here against deep-nesting's own SNIPPET_MAX-declaring
+    fixture. Both parametrized cases pass a deliberately wrong runtime type
+    (bypassing normal type checking via ``# type: ignore[arg-type]``)
+    specifically to exercise this runtime validation, which is exactly
+    what a REST caller sending malformed JSON can trigger: a list is
+    iterable via ``for key in overrides`` (yielding elements as if they
+    were dict keys) before ``.get(...)`` raises AttributeError; a string
+    is also iterable (would silently iterate per CHARACTER, producing
+    nonsensical single-character "keys").
+    """
+
+    @pytest.mark.parametrize(
+        "bad_pattern_params",
+        [
+            ["SNIPPET_MAX"],
+            "SNIPPET_MAX",
+        ],
+        ids=["list", "string"],
+    )
+    def test_non_dict_pattern_params_raises_structured_value_error(
+        self, tmp_path: Path, bad_pattern_params: Any
+    ) -> None:
+        XrayPatternService = _import_service()
+        cidx_meta = _make_cidx_meta(tmp_path)
+        service = XrayPatternService(cidx_meta)
+
+        with patch.object(service, "_git_commit"):
+            service.store_xray_pattern(
+                scope="__any__",
+                pattern_yaml=PATTERN_WITH_PARAMS_YAML,
+            )
+
+        with pytest.raises(ValueError, match=r"^invalid_pattern_params: .+"):
+            service.resolve_and_prepare_pattern(
+                repo_alias="any-repo",
+                pattern_name="deep-nesting",
+                # deliberately wrong runtime type under test
+                pattern_params=bad_pattern_params,  # type: ignore[arg-type]
+            )
 
 
 class TestTypeValidation:

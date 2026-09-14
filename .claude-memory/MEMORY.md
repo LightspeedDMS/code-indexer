@@ -1,6 +1,10 @@
 # Memory Index
 
 ## Safety Rules (prevent recurring mistakes)
+- [feedback_never_ship_unwired_work.md](feedback_never_ship_unwired_work.md) - NEVER build work that is not wired to a user-reachable front door; unit tests over an unreachable capability are not "done" (Epic #1786)
+- [feedback_never_claim_ready_without_staging_e2e.md](feedback_never_claim_ready_without_staging_e2e.md) - NEVER say ready/complete/promoted without driving the NEW capability through the staging front door; green gates are not evidence
+- [feedback_everything_always_ends_with_staging.md](feedback_everything_always_ends_with_staging.md) - STANDING RULE: "everything. always. ends with staging" — broken staging access is a blocker to raise, never a reason to finish on local gates
+- [feedback_grep_absence_is_not_evidence.md](feedback_grep_absence_is_not_evidence.md) - A grep returning zero proves one spelling absent, NOT a capability missing; prove wiring by runtime introspection or a real call
 - [feedback_never_reindex_evolution.md](feedback_never_reindex_evolution.md) - NEVER full-re-index evolution (hours + embedder $$); repairs keep worktree bit-identical, temporal OFF, restore from copies
 - [feedback_verify_zero_json_chunks_on_indexing.md](feedback_verify_zero_json_chunks_on_indexing.md) - Before chunk-storage/temporal work, verify zero vector_*.json created on all 3 envs — Bug #1528
 - [feedback_never_touch_other_repos.md](feedback_never_touch_other_repos.md) - NEVER modify files outside the assigned working directory
@@ -22,6 +26,7 @@
 - [feedback_reliability_over_dependency_purity.md](feedback_reliability_over_dependency_purity.md) - Install-footprint purity vs reliability: default to installing the dependency
 - [feedback_no_subagent_to_subagent_delegation.md](feedback_no_subagent_to_subagent_delegation.md) - Dispatched subagents must act directly — NEVER spawn nested Task/Agent calls
 - [feedback_subagent_committed_against_explicit_instruction.md](feedback_subagent_committed_against_explicit_instruction.md) - A subagent committed+pushed to development despite explicit "Do NOT commit" — always verify via git log, never trust self-report
+- [feedback_parallel_dispatch_cap_4_on_20x.md](feedback_parallel_dispatch_cap_4_on_20x.md) - User on 20x subscription — parallel subagent dispatch cap raised from 2 to 4
 
 ## Quality Standards
 - [feedback_zero_failures_no_excuses.md](feedback_zero_failures_no_excuses.md) - NEVER dismiss test failures as "pre-existing" — zero failures means zero
@@ -45,6 +50,8 @@
 - [feedback_review_local_and_staging_logs_after_testing.md](feedback_review_local_and_staging_logs_after_testing.md) - After testing, audit BOTH local and staging logs; file AND fix any pattern found
 - [feedback_holistic_anomaly_scan_every_loop.md](feedback_holistic_anomaly_scan_every_loop.md) - Every loop, scan jobs/logs/health-UI/on-disk artifacts holistically, not just the narrow change
 - [feedback_tdd_red_must_be_discriminating.md](feedback_tdd_red_must_be_discriminating.md) - TDD RED must genuinely fail on the buggy code — test the discriminating/boundary input, never the uniform happy case
+- [feedback_mtime_not_valid_isolation_proof.md](feedback_mtime_not_valid_isolation_proof.md) - mtime/md5 on the live server DB is NOT valid proof a test never touched it — use strace/open-tracing instead
+- [feedback_git_worktree_isolation_invalid_dual_import_path.md](feedback_git_worktree_isolation_invalid_dual_import_path.md) - NEVER use git worktree for commit isolation here — editable-install dual import path (src.code_indexer vs code_indexer) silently mixes trees
 
 ## Workflow Preferences
 - [feedback_autonomous_overnight_file_fix_iterate.md](feedback_autonomous_overnight_file_fix_iterate.md) - Work autonomously; every defect = file + fix + iterate until clean
@@ -61,12 +68,14 @@
 - [feedback_no_unnecessary_questions.md](feedback_no_unnecessary_questions.md) - Never stop for obvious next steps — only stop if genuinely blocked
 - [feedback_work_agentically_to_staging_no_questions.md](feedback_work_agentically_to_staging_no_questions.md) - During an active mission, don't ask process/workflow questions (commit timing, sequencing) — only stop for irreversible/destructive actions or genuine no-default forks
 - [feedback_no_confirmation_on_commands.md](feedback_no_confirmation_on_commands.md) - Direct commands are instructions to execute, not proposals
+- [feedback_no_permission_asking_local_machine_work.md](feedback_no_permission_asking_local_machine_work.md) - Never ask permission for routine local-machine work (isolated test servers, local runs) — just do it and report
 - [feedback_implement_story_agentic_no_stops.md](feedback_implement_story_agentic_no_stops.md) - /implement-story-spec runs non-stop — no pre-flight questions
 - [feedback_progress_reporting_delicate.md](feedback_progress_reporting_delicate.md) - Ask confirmation before ANY changes to progress reporting
 - [feedback_targeted_scope_discipline.md](feedback_targeted_scope_discipline.md) - Targeted requests must NOT trigger UI rewrites or unrelated styling changes
-- [feedback_use_code_reviewer.md](feedback_use_code_reviewer.md) - Use code-reviewer (opus) for all reviews — Codex credits running low
+- [feedback_use_code_reviewer.md](feedback_use_code_reviewer.md) - Codex is the PRIMARY reviewer (supersedes the old opus-only rule); green lint + green tests are NEVER a substitute for a review gate
 - [feedback_default_agents_to_sonnet5.md](feedback_default_agents_to_sonnet5.md) - Opus OK for code-reviewer dispatches only; tdd-engineer/implementation dispatches always stay on Sonnet 5 (no model override)
 - [feedback_dual_review_claude_and_codex.md](feedback_dual_review_claude_and_codex.md) - Standing rule: dual review (Claude + independent Codex) for every review gate
+- [feedback_paired_engineer_two_models_for_quality.md](feedback_paired_engineer_two_models_for_quality.md) - Use tdd-paired-engineer for gnarly/ambiguous bugs; operator accepts the higher cost because two differently-trained models cover each other's blind spots
 - [feedback_opus_arbiter_of_codex_nitpicking.md](feedback_opus_arbiter_of_codex_nitpicking.md) - After 2-3 Codex REJECT rounds on the same fix, dispatch Opus to judge materiality before another round
 - [feedback_trust_codex_first_pass.md](feedback_trust_codex_first_pass.md) - When codex flags over-engineering, SIMPLIFY — don't commission counter-reviews
 - [feedback_verify_codex_actually_ran.md](feedback_verify_codex_actually_ran.md) - Codex-wrapper agents fall back to Claude silently — verify a real run via ~/.codex/sessions
@@ -94,9 +103,18 @@
 - [project_chunk_storage_write_mode_context.md](project_chunk_storage_write_mode_context.md) - Chunk-storage write mode is context-dependent (server=sqlite, CLI/daemon=json); conversion always explicit
 - [project_shadow_mode_not_used_in_production.md](project_shadow_mode_not_used_in_production.md) - query-embedding cache "shadow" mode is NOT what production runs — assume `on` semantics
 - [project_staging_solo_concurrent_chaos_test.md](project_staging_solo_concurrent_chaos_test.md) - Another agent chaos-testing staging solo concurrently (as of 2026-08-18) — check before assuming clean baseline
+- [project_backlog_clear_to_zero_mandate.md](project_backlog_clear_to_zero_mandate.md) - STANDING GOAL: clear entire GitHub bug backlog to zero/low-priority, running discovered-vs-closed tally
+- [project_backlog_clear_ends_with_staging_e2e.md](project_backlog_clear_ends_with_staging_e2e.md) - Once bugs converge to priority-4-only, raise staging E2E testing as the saga's closing step (discuss first, don't launch unilaterally)
+- [project_backlog_session_paused_2026_08_27.md](project_backlog_session_paused_2026_08_27.md) - Exact resume state for /implement-backlog sweep paused 2026-08-27 by user "stop the agents" -- read this one first
+- [project_backlog_session_paused_for_vm_migration.md](project_backlog_session_paused_for_vm_migration.md) - Exact resume state for /implement-backlog sweep paused 2026-08-26 for VM host migration (superseded by next entry)
+- [project_pytest_tmp_accumulates_unbounded.md](project_pytest_tmp_accumulates_unbounded.md) - /tmp/pytest-of-$USER grows unbounded (70+ GB seen) on this dev box from heavy TDD/review testing — safe to clean dirs >15min old, excluding the live run
 
 ## External References
-- [reference_staging_totp_programmatic_auth.md](reference_staging_totp_programmatic_auth.md) - Headless MFA: `.local-testing` TOTP is a shell command, eval for live code, then two-step login
+- [project_staging_cluster_mfa_is_self_serviceable.md](project_staging_cluster_mfa_is_self_serviceable.md) - Cluster staging MFA is ours to complete via the server's shared cluster key store; NEVER escalate it to the operator as a blocker
 - [reference_staging_nfs_wedge_recovery.md](reference_staging_nfs_wedge_recovery.md) - Recover wedged cow-storage NFS mount: nfsd per-client force-expire, vers=4.1 pin when 4.2 hangs
 - [reference_reranker_api_signatures.md](reference_reranker_api_signatures.md) - Verified Voyage rerank-2.5 and Cohere rerank API params — no native instruction field
 - [reference_cow_daemon_architecture.md](reference_cow_daemon_architecture.md) - CoW Storage Daemon: REST API for clone lifecycle, NFS for filesystem access
+- [reference_gemini_and_agy_relays_dead_on_this_host.md](reference_gemini_and_agy_relays_dead_on_this_host.md) - gemini-* (tier revoked) and agy-* (CPU lacks pclmulqdq) relays cannot run here; use codex or software-architect/opus
+- [Codex half of the pair cannot run pytest](feedback_codex_interpreter_lacks_project_deps.md) - different interpreter, no project deps; its review degrades to diff-reading, so re-run every quoted test number
+- [Pair driver DOES inject CLAUDE.md now](feedback_pair_codex_never_sees_claude_md.md) - fixed by pair-rulebook.sh; check run.log for "RULEBOOK injected", don't paste invariants into briefs
+- [feedback_pair_driver_rundir_conflicts_with_sandbox_rule.md](feedback_pair_driver_rundir_conflicts_with_sandbox_rule.md) - RUN_DIR under /tmp vs the sandbox rule: codex may refuse WORKING_AGREEMENT.md; read the turn-6 handoff, not a failure

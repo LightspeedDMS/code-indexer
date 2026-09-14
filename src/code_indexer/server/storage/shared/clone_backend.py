@@ -12,6 +12,7 @@ Story #510 — CloneBackend Abstraction and CoW Daemon Integration.
 
 from __future__ import annotations
 
+import errno
 import logging
 import os
 import re
@@ -19,8 +20,12 @@ import shutil
 import subprocess
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING, Callable, List, Optional
+from typing import TYPE_CHECKING, Callable, List, Optional, Tuple
 
+from code_indexer.global_repos.snapshot_deletion_errors import (
+    SnapshotDeleteError,
+    SnapshotInUseError,
+)
 from code_indexer.server.storage.shared.nfs_visibility import (
     _configured_visibility_timeout,
     wait_for_nfs_visibility,
@@ -32,6 +37,8 @@ from code_indexer.server.utils.cancellable_subprocess import (
 )
 
 if TYPE_CHECKING:
+    from requests import Response  # pragma: no cover
+
     from code_indexer.server.utils.config_manager import (
         CowDaemonConfig,
         OntapConfig,
@@ -52,6 +59,15 @@ _MAX_COW_DAEMON_POLL_INTERVAL_SECONDS = 30
 
 # Allowed characters for namespace and name path components (no traversal chars)
 _SAFE_PATH_COMPONENT_RE = re.compile(r"^[A-Za-z0-9._-]+$")
+
+#: Bug #1844: errnos meaning "the tree could not be removed because something
+#: still holds it", as opposed to "this delete is broken". ENOTEMPTY is the
+#: shape an NFS silly-rename leaves behind (unlinking a file the client still
+#: holds open renames it to .nfsXXXX, so the parent is not empty at rmdir
+#: time); EBUSY and ETXTBSY are the local equivalents. Deliberately identical
+#: to the CoW daemon's own _RETRYABLE_DELETE_ERRNOS so both ends of the REST
+#: call agree on what "still in use" means.
+_RETRYABLE_DELETE_ERRNOS = frozenset({errno.ENOTEMPTY, errno.EBUSY, errno.ETXTBSY})
 
 
 def _validate_path_component(value: str, field: str) -> None:
@@ -211,7 +227,13 @@ class LocalCloneBackend:
         """Remove the clone directory tree.
 
         Returns True when deletion succeeded or the path did not exist.
-        Returns False when an OSError other than ENOENT occurs.
+
+        Bug #1844: an OSError is RAISED (classified), never reported by
+        returning False. The old falsey return was discarded by
+        ``CleanupManager._delete_index``, so a failed deletion was recorded
+        as a success -- the path left the cleanup queue and its durable
+        pending-deletion row was deleted, leaking the directory permanently
+        and silently. Messi Rule #13.
         """
         path = Path(clone_path)
         if not path.exists():
@@ -225,7 +247,19 @@ class LocalCloneBackend:
                 clone_path,
                 exc,
             )
-            return False
+            errno_name = (
+                errno.errorcode.get(exc.errno, str(exc.errno))
+                if exc.errno is not None
+                else type(exc).__name__
+            )
+            message = f"Failed to delete clone '{clone_path}': {exc}"
+            if exc.errno in _RETRYABLE_DELETE_ERRNOS:
+                raise SnapshotInUseError(
+                    message, errno_name=errno_name, detail=str(exc)
+                ) from exc
+            raise SnapshotDeleteError(
+                message, errno_name=errno_name, detail=str(exc)
+            ) from exc
 
     def list_clones(self, namespace: str) -> List[dict]:
         """Return one dict per subdirectory of ``.versioned/{namespace}/``."""
@@ -718,10 +752,45 @@ class CowDaemonBackend:
             headers=self._headers(),
             timeout=self._request_timeout,
         )
-        if resp.status_code == 404:
+        if resp.status_code == 404 or resp.ok:
             return True
-        resp.raise_for_status()
-        return True
+
+        # Bug #1844: classify instead of raise_for_status(). That call
+        # produced an HTTPError carrying only the status line and the URL,
+        # so the daemon's real cause never left the daemon host -- which is
+        # why this bug's root cause could not be established from here at
+        # all -- and a transient "still in use" was indistinguishable from a
+        # permanently broken delete, so both got the same five-attempt
+        # budget and the snapshot was abandoned either way.
+        errno_name, detail = self._parse_daemon_error(resp)
+        message = (
+            f"CoW daemon refused DELETE of clone '{namespace}/{name}' "
+            f"(HTTP {resp.status_code}, errno={errno_name}): {detail}"
+        )
+        if resp.status_code == 409:
+            raise SnapshotInUseError(message, errno_name=errno_name, detail=detail)
+        raise SnapshotDeleteError(message, errno_name=errno_name, detail=detail)
+
+    @staticmethod
+    def _parse_daemon_error(resp: "Response") -> Tuple[Optional[str], str]:
+        """Extract ``(errno_name, detail)`` from a CoW daemon error response.
+
+        The daemon's ``http_exception_handler`` returns ``exc.detail`` as the
+        WHOLE body when it is a dict, so an error body is flat:
+        ``{"error", "code", "errno", "detail"}``. A body that is not JSON (a
+        reverse proxy's HTML error page, say) must still yield something
+        actionable rather than be swallowed, so the raw text is used as the
+        detail in that case.
+        """
+        try:
+            body = resp.json()
+        except ValueError:
+            body = None
+        if not isinstance(body, dict):
+            return None, (resp.text or "").strip()[:500]
+        errno_name = body.get("errno")
+        detail = body.get("detail") or body.get("error") or str(body)
+        return errno_name, str(detail)
 
     def list_clones(self, namespace: str) -> List[dict]:
         """GET /api/v1/clones?namespace={namespace}. Returns list of clone dicts.

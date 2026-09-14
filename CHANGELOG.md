@@ -7,6 +7,574 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [12.56.0] - 2026-09-14
+
+### Fixed
+
+- **Host/evaluator rustc mismatch corrupted the heap instead of being detected (#1855).** Running the Rust suite from the repository root aborted with `free(): double free detected in tcache 2` (SIGABRT); the identical test passed from `rust/`. Bug #1816 had pinned the evaluator `.so` build (`evaluator_rustc_command` sets `RUSTUP_TOOLCHAIN` from an `include_str!`-embedded channel, so the `.so` is always the pinned toolchain), but the HOST binary was pinned only by working directory -- there was no workspace-root `rust-toolchain.toml` -- so a root-cwd `cargo` built it with the rustup default. Two different `std` layouts then met across the `GraphHandle` FFI boundary. The compile cache could not detect it, because `compute_cache_identity`'s `rustc_version` probe is pinned to the same channel and reads the identical value on both sides of a genuine mismatch.
+
+  Fixed in two layers. The compiled `.so` now exports the rustc version it was built with and the loader compares it against the host's, failing loudly with both versions named; the host value is captured at build time from cargo's own `RUSTC`, never by a runtime shell-out that would reintroduce the same cwd dependency. The probe symbols are `extern "C"` -- the previous justification for the plain Rust ABI at this boundary was circular, arguing the convention was safe *because* compatibility had been verified while being the mechanism that verifies it. Data-carrying callbacks remain on the plain Rust ABI, now honestly justified: they are reached only after that probe passes. A workspace-root `rust-toolchain.toml` prevents the situation, and a drift guard asserts the root pin, the `rust/` pin and CI's `dtolnay/rust-toolchain` ref all agree, collecting every CI match so a divergent second job fails the gate rather than hiding behind the first.
+
+  Operational note: a deployed node whose `xray-cli` was built by a different rustc than the server resolves at runtime will now hard-fail evaluator loads with a named diagnostic, where it previously appeared to work while corrupting memory. That is the intended outcome.
+
+### Changed
+
+- `cache::get_rustc_version` is memoized behind a `OnceLock`. Evaluator assembly now needs the value and runs before the cache check, so an unmemoized probe would have made even a cache hit spawn a `rustc --version` subprocess -- on the `--print-cache-identity` path whose budget is clamped to the caller's remaining deadline.
+
+## [12.55.0] - 2026-09-14
+
+### Added
+
+- **X-Ray template library that the build actually executes (#1854).** Eight evaluator templates ship as real `.rs` files under `docs/xray-templates/`, bound into the Rust gate by `include_str!` so a deleted or renamed template breaks the build instead of silently emptying the test set; the cookbook carries a byte-identical copy of each, asserted equal. Five graph-mode templates execute against a fixture graph with asserted true positives and negative controls, and six negative-control tests prove the gate genuinely fails on invalid syntax, an unavailable injected method, a mixed evaluator mode, a missing graph callback, a deleted template and a drifted doc copy. Every graph template emits its self-report FIRST: `analyze_graph` truncates the inline response to `findings[:3]` once the payload exceeds `payload_preview_size_chars`, so a census emitted last is unreachable on a real repo -- confirmed on staging, where jsoup's census landed on page 97 of 97. Template semantics were corrected against the engine rather than assumed: the dead-code census counts the PRE-CAP `referenced` bit (a referenced symbol may have zero post-cap callers) and `undecidable` covers `Public`, `Protected` and `Unknown` with `Unknown` dominant on real Java; SCCs over candidate edges are reported as `possible_candidate_cycle` rather than confirmed cycles; self-recursive singletons are counted instead of dropped while claiming they were acyclic; traversals bound by `symbol_count()` instead of a hardcoded depth; signature matching documented in-file as text matching that over- and under-matches.
+
+### Security
+
+- **Documentation disclosure audit across all 384 tracked markdown files.** Removed a complete MCP `client_id`/`client_secret` pair from `docs/mcp-registration-guide.md` (verified not live against both credential stores, but indistinguishable from a real one to a reader), the real internal storage-node address from `docs/cluster-setup.md`, and a design document's combination of real staging hostname, default credentials and credentials-file location. A corporate email address that is also a live admin account username was removed from `CHANGELOG.md`. Added a "First Start -- Change the Seeded Admin Password" section to `docs/server-deployment.md`: the server seeds a default administrator on first start and no operator-facing document had ever said so.
+
+### Fixed
+
+- Sanitized the version-controlled memory notes of operator usernames and internal IP addresses, and removed a note whose incorrect claim (that headless MFA login against clustered staging was impossible) had caused a verification step to be wrongly reported as blocked.
+
+### Known Issues
+
+- **#1856** -- the server seeds a well-known default administrator account and never forces rotation. Reviewed and closed as intended behaviour for this deployment model; the documentation warning above is the response.
+- **#1855** -- running the Rust suite from the repository root uses an unpinned toolchain and aborts with a glibc double-free. Both real gates are structurally immune. Fixed in 12.56.0.
+
+## [12.54.0] - 2026-09-13
+
+### Fixed
+
+- Story #1853: the discoverable X-Ray documentation taught a retired Python
+  evaluator API while the MCP tool docs taught the current Rust one.
+  `README.md:156` advertised "sandboxed Python evaluators" and linked to a
+  cookbook whose every evaluator block was Python, so a user following the
+  documented path received a Rust `CompileError` -- confirmed on staging
+  v12.53.0 through a real MCP call. README, cookbook, architecture, sandbox and
+  architecture-invariants now state the Rust contract
+  (`fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding>`; `kind` and
+  `start_line` are fields; `EvalFinding` is `{pattern, line, snippet}`), and
+  `analyze_graph.md` is reachable from the human documentation path for the
+  first time. Two stale facts were corrected in passing: `sandbox.validate()`
+  was documented as the live MCP pre-flight when the real call is
+  `validate_rust_evaluator()`, and `await_seconds` was documented as
+  `[0.0, 120.0]` when the live cap has been 45.0 since Bug #1070. Evaluator
+  templates are deliberately not shipped here; they arrive with the gate that
+  compiles and executes them (#1854).
+
+### Fixed
+
+- Bug #1848 (test quality, no production change): the Bug #1799 regression test
+  asserted that `self._writer` transiently becomes `None` during `commit()` by
+  racing a poller thread against that window, so it went red on correct product
+  code whenever the full suite starved the poller of scheduling. The observation
+  is now structural: a spy stands in for the test's own `manager._index` and
+  intercepts only `.writer()` -- the single statement inside the window --
+  recording the attribute synchronously before forwarding to the real Tantivy
+  call. It stays discriminating by construction (the pre-#1799 code holds the
+  old writer at that instant), and `tantivy_index_manager.py` is unchanged.
+
+### Fixed
+
+- Bug #1834: a `point_id` was recorded in the indexing session's "added" set
+  while the record list was being built, before any attempt to persist it to
+  `chunks.db`. A failed write therefore left the set claiming a point was added
+  that never reached disk, and that set drives the HNSW incremental-update path
+  -- producing a searchable vector whose content does not exist. Re-rated P4 to
+  P2 first: the original rating assumed Epic #1333's orphan repair covered this,
+  but that pass detects graph-internal HNSW orphans and never cross-checks the
+  index against the chunk store, so nothing converged the divergence away. Ids
+  now fold into the session set only after the write returns without raising.
+- Bug #1843: `remove_golden_repo` was the only golden-repo mutation that skipped
+  the write-lock protocol its siblings follow, so a scheduled refresh could write
+  into `.git` while cleanup's `rmtree` walked it (`Errno 39`). A lock alone is
+  insufficient -- `RefreshScheduler` only checks the lock before starting and
+  does not hold it during fetch/checkout -- so removal now checks the JobTracker
+  refresh registration (which spans that window) AND takes the write lock
+  non-blocking. On incomplete cleanup the remains are quarantined to a marked
+  sibling path so the alias stays re-addable without human intervention, rather
+  than being left as wreckage. Bug #1317's registry-row-before-files ordering is
+  preserved.
+
+### Fixed
+
+- Bug #1850: snapshot reader leases were never published, making the protection
+  added by #1845 and #1847 inert in production. Every cache is keyed by the
+  index directory (`.../v_<ts>/.code-indexer/index/<model>:chunks_db`), but the
+  lease guard called the canonical `is_versioned_snapshot()` predicate, which
+  matches only when a path ENDS at the `v_<digits>` snapshot leaf. The guard was
+  therefore always False and publication was skipped silently -- no lease file,
+  no warning. Found on staging v12.50.0 via real `/api/query` calls, not by any
+  local gate. Fixed with `resolve_versioned_snapshot_root()`, which walks
+  ancestors and delegates to the unchanged canonical predicate; all four readers
+  (HNSW, Tantivy FTS, IdIndexCache, chunks.db) now lease the snapshot ROOT --
+  the same identity `CleanupManager` deletes and passes to
+  `snapshot_has_live_reader()`, so the write and read sides finally agree.
+
+### Note on 12.50.0
+
+The #1845 and #1847 entries in 12.50.0 described the intended behaviour, but the
+mechanism did not function at runtime until this release. Snapshots could still
+be deleted out from under live cross-node readers in 12.50.0 and earlier.
+
+### Fixed
+
+- Bug #1847: Tantivy FTS, IdIndexCache and chunks.db readers now take a reader
+  lease over the versioned snapshot they hold. Bug #1845 leased only HNSW
+  readers, so a snapshot could still be deleted underneath these three while a
+  query was in flight (ESTALE, or SIGBUS on an mmap'd region).
+- Bug #1847: the cross-node lease root is now derived from a single authority
+  (`get_cidx_meta_path`) on both the reader and cleanup sides. The two sides
+  previously derived it independently; they agreed, but nothing enforced it, so
+  a change to either would have split them and made cross-node liveness fail
+  silently -- the deleter searching one directory while readers wrote to
+  another. An unwired lease root now refuses to delete instead of guessing.
+- Bug #1849: reader-lease renewal and release no longer spawn one OS thread per
+  lease on every cleanup tick. With a 60s tick and a 10 minute TTL, every
+  cached lease spawned a thread on every tick for its entire life -- up to 200
+  threads per minute per worker from IdIndexCache alone, and unbounded from
+  FTSIndexCache, which is capped by bytes rather than entry count. Each thread
+  wrote to the cidx-meta `hard` NFSv3 mount, which can block indefinitely, so a
+  stalled mount accumulated threads without limit. Renewal and release now run
+  serially on the background cleanup thread that was already running.
+
+### Added
+
+- **#1593 Group-scoped MCP tool access enforcement** (story 1 of 5, epic #1592). Per-tool,
+  per-group access control as the live mechanism for MCP tool visibility and dispatch, backed by
+  a new `tool_group_access` table on both backends (migration 052, `CREATE TABLE/INDEX IF NOT
+  EXISTS` only so rolling restarts are safe). Wired into all FIVE enforcement sites through one
+  shared `ToolAccessMemo.is_allowed()` and one shared `resolve_effective_user()`. Cluster-aware
+  by construction: no module-level dict, no class-level dict, no `ContextVar`, no cross-request
+  cache -- the memo is built per request and passed explicitly, which is what keeps it correct
+  across this project's executor-dispatched sync-handler boundary. Revocation takes effect on
+  the next request with no restart. The single hardcoded exception
+  (`_ALWAYS_AVAILABLE_TOOLS = frozenset({"authenticate"})`) is pinned by SET EQUALITY, so adding
+  a second member fails a test by construction. Enforcement stays dormant behind story 2's
+  readiness marker, so no user loses access before grants are seeded.
+
+### Fixed
+
+- **#1835 Dead-code detection can produce a true positive again.** #1833 made
+  `is_definitely_dead_code` fully conservative to stop it declaring 41% of jsoup dead; that was
+  correct but removed every true positive too, leaving the predicate informationally empty while
+  the tool still advertised dead-code detection. Java visibility now flows extractor ->
+  `LocalIndex` -> CSR arena -> predicate via a side-table mirroring the existing `signatures`
+  map. Crucially, "no explicit modifier" means package-private for a class member but implicitly
+  PUBLIC for an interface member, and the extractor cannot tell them apart -- so `Unknown` is the
+  only outcome without an explicit keyword and `Some(true)` requires an explicit `private`.
+  Defaulting otherwise would have re-condemned exactly jsoup's `Connection`/`Response` methods.
+  No ABI bump (FFI signature unchanged); wire MAGIC `XRAYGRF1` -> `XRAYGRF2` so stale graph files
+  fail loud rather than misparse a positional format.
+- **#1844 CoW snapshot cleanup is cluster-safe.** `list_cleanup_pending_deletions()` had no node
+  predicate in either backend, so every node and every `uvicorn` worker hydrated the whole fleet
+  queue and independently issued the same DELETE, sequenced only by per-process RAM. Deletion is
+  now claimed fleet-wide via the existing `register_job_if_no_conflict` arbiter. The daemon now
+  distinguishes `409 CLONE_IN_USE` from `500 CLONE_DELETE_FAILED` and carries the real errno, so
+  the cause reaches our own logs instead of requiring host access. In-use is deferred on a
+  bounded schedule instead of burning the failure budget. The NFS silly-rename hypothesis was
+  refuted from the daemon's own source (it uses `cp --reflink` on local XFS); the inverted
+  concern that a reader can have its data deleted underneath it is filed separately as #1845.
+  Also fixes a silent failure found along the way: `LocalCloneBackend.delete_clone` returned
+  `False` on `OSError` while `_delete_index` discarded the result, recording a failed deletion
+  as success.
+
+## [12.48.0] - 2026-09-10
+
+### Fixed
+
+- **#1839 The distributed job worker failed every refresh it claimed, and always had.**
+  `DistributedJobWorkerService` claims a `global_repo_refresh` job -- which flips its row to
+  `running` and so occupies the `idx_active_job_per_repo` dedup slot -- then called
+  `RefreshScheduler.trigger_refresh_for_repo()`, a SUBMISSION entry point. That submitted a
+  SECOND job for the same repo, which the uniqueness guard correctly rejected, citing the
+  worker's own claimed job id; the worker then failed the job it had just claimed. Introduced
+  by commit `29668fdf` (2026-03-30, first released in v9.7.0, ironically titled "Distributed
+  job worker re-executes reclaimed jobs") and never functional since. Fixed by adding
+  `RefreshScheduler.execute_refresh_for_claimed_job()`, which performs the refresh WORK under
+  the already-held slot via `_execute_refresh(..., tracked_by_caller=True)` -- the contract
+  EVO-64385 introduced for exactly this situation. The dedup guard is untouched. A
+  `{"success": False}` result that does not raise is converted to a raise so completion is
+  recorded exactly once. Only reachable in cluster mode on the elected leader, and only when a
+  node lapses mid-refresh, so solo/SQLite deployments were never affected.
+- **#1841 A failed cleanup was followed by a clone into the wreckage.** When the orphan-clone
+  removal on the `add_golden_repo` retry path hit `OSError: [Errno 39] Directory not empty` on
+  `.git`, `shutil.rmtree(..., ignore_errors=True)` swallowed it and execution fell through to
+  `_clone_repository`, producing a golden repo whose `.git` was broken and which answered
+  `fatal: not a git repository` to every subsequent operation, permanently. Now fail-closed:
+  the error propagates as `GitOperationError` and the path is re-checked, so no clone is ever
+  attempted over a partially-deleted directory and the remains are left intact for inspection.
+  The concurrent writer that creates entries during teardown is still unidentified -- tracked
+  as #1843 rather than papered over.
+- **#1842 A pre-claimed dep-map sentinel leaked for up to four hours.**
+  `dependency_map_routes.py` claims the analysis `SharedJobSentinel` synchronously before
+  spawning the worker thread, but three early-return branches in `run_full_analysis` /
+  `_run_delta_analysis_impl` returned before the sentinel object existed, stranding the claim.
+  `cancel_running_analysis()` consulted only the in-process lock -- free by then -- so a cancel
+  could not clear it. Sentinel construction is hoisted and released on every early-exit path,
+  and cancel now also inspects the sentinel. Lock diagnostics additionally name the real holder
+  and hold duration instead of echoing the failed caller's own identity. The coarse
+  `cidx-meta` lock scope was deliberately NOT narrowed: doing so would reopen the corruption
+  race Bug #1506 addressed. No change to Claude CLI invocation mechanics, counts or timeouts.
+
+## [12.47.0] - 2026-09-10
+
+### Fixed
+
+- **#1829 Temporal indexing aborted whole runs on transient chunks.db lock contention.**
+  Temporal indexing opens a fresh SQLite connection per commit per worker thread against one
+  `chunks.db` in `journal_mode=DELETE` (whole-file locking) with no explicit busy timeout, so it
+  inherited Python's 5s default and exhausted it under its own self-contention. A single
+  `database is locked` then propagated out of the worker and killed the entire
+  `cidx index --index-commits` run. Fixed with a bounded, jittered retry
+  (`_write_chunks_db_with_retry`) at `_upsert_points_chunks_db` -- the shared dispatch point every
+  CHUNKS_DB writer funnels through -- delegating retryable-vs-fatal classification to the existing
+  `is_fatal_chunk_store_write_error()`. Retry exhaustion still raises: a commit is never silently
+  dropped (Bug #1218).
+- **#1830 A timing-out `git fetch` bypassed error classification entirely.** Only a non-zero fetch
+  exit code was routed through `classify_fetch_error()`; a timeout raised a bare `RuntimeError`, so
+  it never counted toward Story #295's repeated-transient-failure escalation and a repo whose fetch
+  kept timing out never self-healed. Fetch timeouts now raise the typed `GitFetchError`;
+  `symbolic-ref`/`git log` timeouts stay distinct and are not misclassified. Timeout values
+  unchanged.
+- **#1832 / #1836 Subprocess failures were reported with stderr only.** Discarding exit code and
+  stdout meant that when a tool wrote its real error to stdout the message degraded to a bare
+  prefix -- including four user-facing indexing-job `error` fields (`"Temporal indexing failed: "`).
+  Consolidated into one shared `code_indexer.utils.subprocess_diagnostics` helper, now used by seven
+  modules. `GitFetchError` gained `stdout`/`returncode`/`cmd` while `.stderr` keeps its exact prior
+  raw, uncapped semantics. Also fixed `repository_listing_manager`'s `format_error_log` calls, whose
+  literal `{alias}`/`{e}` placeholders were never interpolated.
+- **#1833 `is_definitely_dead_code` claimed certainty from graph completeness alone.** Graph
+  completeness means "every file parsed", not "no caller exists", so on any library the entire
+  public API -- which by construction has no in-repo callers -- was reported as definitely dead
+  (measured live: 1296 of 3147 jsoup symbols, including its public `Connection`/`Response` API).
+  The predicate is now conservative: `Some(false)` when referenced, `None` otherwise. NOTE: this
+  removes false positives at the cost of any true positive; restoring a useful dead-code capability
+  requires visibility plumbing, tracked as #1835.
+- **#1837 E2E Phase 3 failed only in the full sweep.** Two independent cross-test state leaks:
+  a web-session cookie left in the shared client's jar became invalid-but-present once a throwaway
+  `create_app()` rotated the process-wide SessionManager secret (and hybrid auth prioritises a
+  present session cookie over a valid Bearer token); and a throwaway TestClient's lifespan shutdown
+  stripped the shared app's live `IdentityQueueHandler` off the root logger, silently sending later
+  logs nowhere. Fixed in test infrastructure only -- no production code changed.
+
+## [12.46.0] - 2026-09-10
+
+### Fixed
+
+- Two thread pools were deciding when the process could exit. `concurrent.futures`
+  registers `_python_exit` inside `threading._shutdown()`, where it joins every
+  registered worker with no timeout -- so a pool with no disposal path does not
+  merely live as long as the process, it dictates when the process may die. The
+  discovery branch-fetch pool carried that belief as an explicit comment ("never
+  shut down, because it lives exactly as long as the process"), and the
+  deep-fidelity audit pool added in 12.43.0 had the same gap on the solo/CLI path.
+  Both now have explicit shutdown wired into the server lifespan, and a
+  process-wide guard fails any test session that leaks a non-daemon thread. A full
+  server chunk previously ended with 83 threads alive, six of them non-daemon.
+  (#1800)
+
+- Golden-repo refresh failures now report their cause. A failing SCIP subprocess
+  rendered as `CalledProcessError:` with nothing after the colon -- not because
+  stderr was uncaptured, but because the child prints its summary to stdout while
+  the handler interpolated stderr alone, discarding the command, the exit code and
+  the diagnostic itself. Both `CalledProcessError` handlers now surface all of it.
+  No timeout was added; the indexing path remains unbounded by design. (#1810)
+
+- X-Ray graph evaluators can now enumerate the graph. `GraphHandle` exposed no
+  `symbol_count()` and no `dense_id_for()`, so the tool's own advertised use cases
+  -- dead code, unwired components -- could only be written by scanning dense ids
+  against a guessed constant, which silently under-reports if the guess is low.
+  Both accessors already existed one layer down and are now forwarded, with the
+  evaluator ABI version raised so a stale compiled evaluator cannot load against
+  the new table. (#1828)
+
+### Notes
+
+- #1812 and #1816 were verified as already fixed in earlier commits and closed;
+  #1816 gained the end-to-end test its original fix lacked, which spawns a real
+  child process outside the workspace so the toolchain pin it guards can actually
+  fail. #1826 was confirmed resolved by the #1800 executor disposal: the test this
+  report flagged as closest to the timeout ceiling now runs faster under full
+  contention than it previously ran in isolation.
+
+## [12.45.0] - 2026-09-09
+
+### Fixed
+
+- X-Ray evaluators that fail to compile now return the real rustc diagnostic instead
+  of `"xray-cli exited with code 1: "` with nothing after the colon. `xray-cli --json`
+  already wrote the full diagnostic to stdout and then exited 1, while its sibling
+  `--compile-only` mode documents exiting 0 for exactly that case; the Python caller
+  built its message from stderr, where the diagnostic never was, and discarded the
+  stdout holding it. `--json` now mirrors the documented contract (human-readable
+  mode keeps its non-zero exit), so the pre-existing error branch surfaces the
+  diagnostic with no new machinery. This matters because the primary author of these
+  evaluators is an agent: without the compiler output it cannot correct its own code,
+  and a genuine engine fault was indistinguishable from a user typo. (#1827)
+
+- Reported line numbers no longer contradict themselves. The PREAMBLE offset was
+  subtracted from the `-->` arrow but not from rustc's numbered gutter rows, so a
+  single diagnostic could read line 9 in one block and 109 in another; the gutter
+  matcher also ignored the `~`, `+` and `-` markers rustc uses in `help:` suggestion
+  blocks. Separately, an evaluator whose own source contained `--> ` had that row
+  swallowed by the arrow branch and its string literal silently rewritten. Arrow and
+  gutter now agree on the user's real line, and user source is left intact. (#1827)
+
+- Compile failures are distinguished from infrastructure failures. Source-read and
+  cache-directory errors were previously reported as `CompileError`, sending an
+  author to debug perfectly valid Rust when the real problem was elsewhere. A
+  `CompileErrorKind` classification is threaded through the JSON contract and only a
+  genuine compiler failure is labelled as one. `files_processed` also no longer
+  credits a build that produced no loadable evaluator. (#1827)
+
+## [12.44.0] - 2026-09-08
+
+### Fixed
+
+- `cidx watch` no longer leaks an unstoppable background thread. The temporal watch
+  handler's polling fallback ran `while True: sleep(5); git rev-parse HEAD` as a
+  daemon thread with no stop event, no retained handle and no join anywhere in the
+  class, so every watch session left a thread shelling out to git every five seconds
+  for the life of the process. The loop is now stop-event gated, `stop()` performs a
+  bounded join, and it is wired into both real shutdown paths (the `watch` command's
+  finally block and the watch loop helper) -- `observer.stop()` never touched this
+  thread, since it is independent of the filesystem observer. Surfaced by an exact
+  git-subprocess-call-count assertion elsewhere in the suite that the stray ticks
+  were inflating. (#1825)
+
+- X-Ray tool documentation now states one `await_seconds` bound instead of four. The
+  code comment said `[0.0, 10.0]`, the runtime error message cited a superseded
+  "lowered from 30 in v10.3.2", `xray_explore.md` prose claimed 120 seconds while its
+  own schema field said 45, and `xray_search_batch.md`'s comparison table still quoted
+  `[0, 120]` -- against an actually enforced 45.0. The real history is 30, then 10 in
+  v10.3.2, then 120 in v10.5.0, then 45 in v10.98.0 (Bug #1070, because a longer
+  inline wait risks a 504 at the ALB 60s timeout). The enforced constant was already
+  correct and is unchanged; only the four descriptions of it were wrong. A parity test
+  now reads both the published schema maximum and the runtime constant from their real
+  sources so they cannot drift apart again. (#1824)
+
+## [12.43.0] - 2026-09-08
+
+### Fixed
+
+- Omni/single-repo semantic search: a cache HIT no longer performs an uncoalesced
+  re-embed on the request path. The deep-fidelity audit is dispatched off the hot
+  path to a dedicated, bounded executor (4 workers) behind a 16-slot semaphore, so
+  audit work can never queue without limit onto the pool that serves requests. When
+  capacity is exhausted the audit is skipped and logged rather than silently
+  dropped -- it is advisory telemetry and never affects the response. (#1813, #1822)
+
+- `read_file_list_capped` no longer reports `truncated=true` for a file list of
+  exactly the cap followed only by blank lines. The trailing-content scan that
+  fixed the false positive is now bounded by a 64 KiB budget read in fixed chunks,
+  so a multi-gigabyte whitespace suffix (or one enormous unterminated line) cannot
+  be consumed in full. Budget exhaustion is an explicit error rather than an
+  assumption of completeness. (#1814, #1822)
+
+- Bound tests now pin the actual limit values instead of merely asserting that some
+  limit exists, so a regression that widens a bound is detectable. (#1815)
+
+- X-Ray unit tests no longer leak a closed event loop into sibling suites.
+  `asyncio.run()` clears the loop in its `finally` while leaving `_set_called`
+  true, which made 16 `regex_search` tests fail only in the combined
+  xray+mcp run. Fixed at the leak with an autouse fixture. (#1817)
+
+- The killpg `PermissionError` reaping test is no longer flaky or vacuous: it polls
+  to a bounded deadline instead of asserting immediately, and distinguishes a
+  fully-reaped pid from an unreaped ZOMBIE -- `os.kill(pid, 0)` succeeds against
+  both, so the previous check could not detect a missing `proc.wait()`. Also cut
+  from 30.08s to ~3s. (#1818, #1819)
+
+- The server/services test suite no longer stalls for ~50 minutes on 266 CPU
+  seconds. A leaked `IdentityQueueHandler` left the async log queue undrained, so
+  every ERROR record paid the full 2s high-severity timeout before being dropped.
+  Runtime for the affected selection went from ~50min to 3.31s. (#1820)
+
+- `SearchEventContext` provider cache fields are written through the lock-guarded
+  recorder in the temporal query path, closing an unsynchronized write. (#1821)
+
+### Changed
+
+- Storage concurrency guards are now deterministic rather than slow and lucky.
+  These tests previously hoped real threads would collide in a narrow window;
+  measurement showed thread count is not the lever, because SQLite's exclusive
+  write lock serializes threads through schema-init's own commit before most reach
+  the window. The Bug #1585 migration TOCTOU and the Bug #1575 ABBA lock-order race
+  are now constructed explicitly -- a real second connection commits the `ALTER`
+  between the probe and the retry, and a rendezvous handshake forces opposite lock
+  acquisition order. Detection went from roughly 33% probabilistic to 100%
+  deterministic, and the five affected files went from ~68s to ~13s with the 24.58s
+  tail (which had been flaking `fast-automation.sh` red) eliminated.
+
+  Two of these tests were found to have never discriminated at all, each
+  documenting its own blindness in its comments while its docstring claimed
+  otherwise; those claims are corrected and the guards made real. Coverage was also
+  added for two previously untested branches, including the non-duplicate
+  `OperationalError` re-raise, where the recovery could have been widened to
+  swallow every error without any test noticing. No production behavior changed --
+  lock-contention semantics remain as established in #1746. (#1823)
+
+## [12.42.0] - 2026-09-08
+
+### Fixed
+
+- X-Ray graph mode: evaluators are now compiled by the SAME rustc toolchain that
+  built xray-cli. rustup resolves the toolchain from the calling process's
+  working directory, so an evaluator compiled at runtime by the server picked up
+  `rustup default` instead of the pinned channel. GraphHandle crosses the dylib
+  boundary as plain Rust fn pointers, whose ABI is unspecified across compiler
+  versions, so a mismatch corrupted the heap -- observed as a double free or
+  SIGSEGV when signature_for and shortest_path_to_any were used together
+  (#1816).
+
+## [12.41.0] - 2026-09-08
+
+### Security
+
+- X-Ray evaluator sandbox: closed an escape where forbidden constructs
+  (std::process, std::fs, unsafe, include!) hidden inside a user-defined or
+  allowlisted macro body passed validation and were expanded by rustc
+  afterwards. The validator inspected only a macro's name, never its token
+  stream. Since the server compiles and dlopen()s evaluator code, this was
+  arbitrary code execution on the X-Ray host. The validator now rejects
+  macro_rules! definitions, requires an exact bare single-segment macro path
+  (closing the qualified `evil::vec!` bypass), recursively re-validates the
+  token streams of the allowlisted macros, applies a fail-closed attribute
+  allowlist permitting only `doc`, and bounds macro recursion depth.
+
+### Added
+
+- `analyze_graph` MCP tool (#1811): whole-repository, multi-file graph
+  analysis answering cross-file questions single-file AST search cannot --
+  dead code, unwired components, layering violations, endpoint-to-sink
+  reachability and blast radius. Epic #1786 had built the underlying graph
+  engine with no user-reachable path to it; this wires it through a real
+  front door.
+- `files_with_unsupported_language` degradation counter, surfaced through the
+  existing completeness path.
+
+### Fixed
+
+- `fact_graph_complete` no longer reports `true` for repositories the graph
+  extractor never analyzed. The extractor supports Java only, and
+  LanguageNotSupported was produced but never counted, so a Python or
+  TypeScript repository returned an empty findings list with all-zero
+  degradation -- which the tool's own documentation describes as a
+  verified-clean result.
+- `analyze_graph` added to the MCP dispatcher's timeout-exempt set; a generic
+  60s cap made its advertised 10..600s range unreachable, and the completed
+  work was computed then discarded.
+- Graph-mode compile cache identity now derives from the graph assembly
+  rather than the legacy one, so compiled artifacts are actually reusable.
+- Graph candidate collection stops during the filesystem walk instead of
+  collecting everything and slicing afterwards; skipped subtrees are never
+  descended.
+- Finite index budget and file cap, surfaced honestly through
+  `truncated_by_max_files` -> `fact_graph_complete`.
+- Concurrency admission for graph analyses via the shared X-Ray cell limiter,
+  plus a bounded compile semaphore.
+- Malformed facts input, missing required CLI JSON fields, and non-zero
+  subprocess exits now fail loudly instead of returning empty-but-successful
+  results.
+- X-Ray subprocesses spawn in their own session and are killed by process
+  group, so a timeout no longer leaves orphaned rustc descendants.
+- Pattern seeding and resolution moved off the event loop; they performed
+  filesystem writes and git subprocesses on the request thread, where the
+  hard NFS mount can block indefinitely.
+- A malformed repository-specific pattern now raises `pattern_parse_error`
+  instead of silently falling through to the global pattern and running
+  different evaluator code than requested.
+- REST `POST /api/xray/search` accepts `pattern_name`/`pattern_params`
+  (#1812), resolving through the same helper the MCP handler uses. The stored
+  pattern library was previously unreachable from this endpoint.
+
+## [12.40.0] - 2026-09-07
+
+Note: 12.39.0 carried this same content but was never released. Its push failed CI's
+`rust` job on a `clippy::filter_next` error, which skipped `create-tag`/`create-release`,
+so no v12.39.0 tag exists. Rather than rewrite pushed history or move a tag -- both
+prohibited -- the fix landed on top and the version was bumped again. See the toolchain-pin
+entry below for why a locally-green tree failed CI.
+
+### Added
+
+- **Epic #1786 -- X-Ray repository code graph**. X-Ray could previously answer questions about
+  one file at a time; any question whose answer is a RELATIONSHIP BETWEEN FILES was structurally
+  unanswerable. This epic adds a whole-repository graph substrate under the existing two-phase
+  engine, delivered across eight stories:
+  - **#1789 (S0a)** live-path regression floor: forbidden-construct matrix, language round-trips.
+  - **#1787 (S2)** the substrate itself -- fused single-walk extract+collect, a CSR candidate arena
+    with interned ids and path-derived (never positional) `SymbolId`s, a confidence-scored binder,
+    a fail-closed budget ladder that never silently drops an edge, `analyze_graph` in a killable
+    process with mmap handoff, an in-process graph cache, and memory-governor integration.
+    Four dual-review remediation rounds resolved 11 defects, two of them genuine undefined
+    behaviour (a missing `catch_unwind` on `xray_collect_facts`, and host thunks able to panic
+    across the dylib boundary).
+  - **#1806 (S2b)** receiver-type and return-type-chaining resolution. Ambiguity on Keycloak
+    (8,404 files) fell 71.36% -> 54.64%, and Tier C (blind, name-only candidates) 47.88% -> 28.53%,
+    a 40% relative drop, with elapsed time improving 87.3s -> 77.7s and no peak-RSS regression.
+  - **#1792 (S3)** per-file refine pass with the graph in hand.
+  - **#1793 (S4)** Java binder depth: inheritance families and overload discrimination.
+  - **#1790 (S0b)** retired 287 dead-path tests asserting a Python AST whitelist the engine no
+    longer enforces, after proving deadness rather than assuming it.
+  - **#1785 (S1)** non-symbol fact keys wired end to end.
+  Output is tiered A/B/C with an explicit `AnalysisCompleteness`, so a negative result can be
+  distinguished from an incomplete index -- the epic exists to eliminate confidently-wrong
+  verdicts, not merely to answer more questions.
+
+- **`rust-automation.sh`** and a matching CI `rust` job: `cargo test --workspace` plus
+  `cargo clippy --workspace --all-targets -- -D warnings`. Before this, no gate anywhere ran the
+  Rust suite -- including the AC18 structural-parity check that guards against a repeat of Bug
+  #1795's memory-unsafe PREAMBLE/type divergence. The job now gates tag and release creation.
+
+- **`slow-automation.sh`** (Bug #1798): the lane `@pytest.mark.slow` routes into. Both fast gates
+  exclude `slow` and `e2e-automation.sh` selects by path, so 266 files carrying 447 marks had
+  accumulated under `tests/unit/` with ZERO execution. Its first run found 18 real failures.
+
+### Fixed
+
+- **CI Rust toolchain drift**: `./rust-automation.sh` could pass locally on a tree CI rejected,
+  because the two ran different compilers -- local `clippy 0.1.91` (2025-10-28) against CI's
+  `0.1.98` (2026-08-18), since the workflow used `dtolnay/rust-toolchain@stable` and nothing in
+  the repo pinned a toolchain. A newer clippy then failed `-D warnings` on
+  `clippy::filter_next` in `evaluators.rs` (fixed with `.rfind(..)`, plus a regression test that
+  fails if the "last match" semantics degrade to "first match"). Now pinned at BOTH ends --
+  `@1.98.0` in the workflow and a new `rust/rust-toolchain.toml` -- which is not redundant:
+  `dtolnay/rust-toolchain@stable` hardcodes its toolchain input and never reads
+  `rust-toolchain.toml`, so a toolchain file alone fixes only local runs while pinning only the
+  action leaves every developer on a different compiler. This is the same class of defect
+  CLAUDE.md already documents for the ruff/mypy pinning in the `lint` job; the claim that
+  `rust-automation.sh` was a faithful local mirror of the CI gate was false until this release.
+- **Bug #1798**: `@pytest.mark.slow` silently deleted coverage rather than deferring it. Both
+  phases now run clean (Phase 1 579 passed, Phase 2 1,499 passed).
+- **Bug #1807**: the repo-categories endpoints declare TWO admin-auth dependencies; tests overrode
+  only one, so the un-overridden hybrid dependency ran real auth and returned 401 before the
+  handler. Fourteen tests had been asserting nothing -- including five `requires_admin_role` tests
+  that passed trivially on the uniform 401, meaning a real authorization regression would also have
+  gone undetected. A new fixture now fails loudly when a test overrides a callable no route declares.
+- **Bug #1808**: JWT-persistence tests patched `Path.home()` while production resolves
+  `CIDX_SERVER_DATA_DIR` first, so they could only pass in the one environment the server test lane
+  must never run in. Fixed via the mechanism production actually uses, preserving the isolation that
+  keeps tests out of the live server's data directory.
+- **Bug #1801**: `ConfigService.get_config()`'s unlocked check-then-act let a concurrent READER's
+  stale load complete after a write and overwrite it (3 failures in 3000 iterations; 0 after).
+  Reported as a test-isolation leak; there was no leaking test.
+- **Bug #1803**: poll helpers captured auth headers once before a bounded loop, so a token valid at
+  capture expired mid-loop and every later poll silently 401'd. Fixed as a class across seven
+  offenders and consolidated into one shared helper, the worst being a 900s poll that exceeded the
+  entire token lifetime.
+- **Bug #1805**: `cidx xray search`/`explore` validated Rust evaluators with the Python AST sandbox
+  and rejected every valid input.
+- **Bug #1804**: MCP parallel search returned a bare failure when every provider was dead; it now
+  carries an explicit degraded state, so callers can distinguish "nothing matched" from
+  "we could not look".
+- **Bug #1802**: `log_audit` now takes a structured payload and serializes internally, so a caller
+  cannot pass free text the reader cannot parse.
+- **Bug #1799**: the Tantivy commit path now releases the writer reference deterministically before
+  re-acquiring, closing an intermittent `LockBusy` window.
+- **Bug #1784**: the X-Ray compile-cache identity now covers the assembled PREAMBLE/EPILOGUE and ABI
+  version, so a preamble change can no longer silently reuse a `.so` built against a stale layout.
+
 ## [12.38.0] - 2026-09-03
 
 ### Fixed
@@ -4094,7 +4662,7 @@ Plus pre-existing lint debt cleanup (16 ruff format violations + 6 mypy errors t
 
 ### Fixed
 
-- **`list_global_repos` returned only 1 of N repos for admin users** (HIGH severity, pre-existing — discovered during v10.4.1 staging test setup): `handle_list_global_repos` (`src/code_indexer/server/mcp/handlers/repos.py`) applied `AccessFilteringService.filter_repo_listing` to all callers including admins. The filter checks group membership; admins by role (e.g. `Seba.Battig@lightspeeddms.com` with `role='admin'`) but not yet assigned to an explicit "admins group" saw only `cidx-meta-global` despite 8 repos existing. Fix: bypass the access filter when `user.role == UserRole.ADMIN`. Bug dates back to commit `6b914ab73` (Story #496 handler refactor, 2026-04-14) but was dormant until today's OAuth-authenticated admin-role testing surfaced it.
+- **`list_global_repos` returned only 1 of N repos for admin users** (HIGH severity, pre-existing — discovered during v10.4.1 staging test setup): `handle_list_global_repos` (`src/code_indexer/server/mcp/handlers/repos.py`) applied `AccessFilteringService.filter_repo_listing` to all callers including admins. The filter checks group membership; admins by role (e.g. an admin account with `role='admin'`) but not yet assigned to an explicit "admins group" saw only `cidx-meta-global` despite 8 repos existing. Fix: bypass the access filter when `user.role == UserRole.ADMIN`. Bug dates back to commit `6b914ab73` (Story #496 handler refactor, 2026-04-14) but was dormant until today's OAuth-authenticated admin-role testing surfaced it.
 
 - **`activate_repository` denied access to `user_alias` before creating it** (HIGH severity, pre-existing): `_check_repository_access` (`src/code_indexer/server/mcp/protocol.py`) extracted the repository identifier from `user_alias` (the NEW alias being created — doesn't exist yet) instead of `golden_repo_alias` (the existing source repo to activate from). Result: every activation attempt returned `Access denied: repository '<user_alias>' is not accessible to user '<username>'`. Fix: the access check now correctly extracts `golden_repo_aliases` (composite form, list — each entry checked individually), `golden_repo_alias` (single form, str), or falls through to `repository_alias`/`alias`/`user_alias`/`repo_alias` for tools that operate on existing repos. The `user_alias` is the new alias being CREATED in `activate_repository` and must NOT be checked.
 
@@ -8836,7 +9404,7 @@ See [Migration Guide](docs/migration-to-v8.md) for complete instructions.
 
 ### Contributors
 
-- Seba Battig <seba.battig@lightspeeddms.com>
+- Seba Battig
 - Claude (AI Assistant) <noreply@anthropic.com>
 
 ### Links
@@ -9207,7 +9775,7 @@ Watch Mode:       < 50ms per file
 - FTS updates: **10-60x faster** for typical change sets
 
 ### Contributors
-- Seba Battig <seba.battig@lightspeeddms.com>
+- Seba Battig
 - Claude (AI Assistant) <noreply@anthropic.com>
 
 ### Links
@@ -9688,7 +10256,7 @@ results = store.search(
 ```
 
 ### Contributors
-- Seba Battig <seba.battig@lightspeeddms.com>
+- Seba Battig
 - Claude (AI Assistant) <noreply@anthropic.com>
 
 ### Links

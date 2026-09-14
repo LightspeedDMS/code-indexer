@@ -1511,6 +1511,12 @@ def make_lifespan(
             from code_indexer.storage.shared.chunk_store_cache import (
                 get_global_chunk_store_cache,
             )
+            from code_indexer.server.services.cidx_meta_backup import (
+                get_cidx_meta_path,
+            )
+            from code_indexer.server.storage.shared.snapshot_paths import (
+                is_versioned_snapshot,
+            )
             from code_indexer.storage.shared.chunk_store_cache_cross_process import (
                 ChunkStoreCrossProcessPoller,
                 register_payload_cache,
@@ -1518,7 +1524,12 @@ def make_lifespan(
 
             register_payload_cache(payload_cache)
             chunk_store_cross_process_poller = ChunkStoreCrossProcessPoller(
-                chunk_store_cache=get_global_chunk_store_cache(),
+                chunk_store_cache=get_global_chunk_store_cache(
+                    lease_root=get_cidx_meta_path(
+                        config_service.config_manager.server_dir
+                    ),
+                    is_versioned_snapshot=is_versioned_snapshot,
+                ),
                 payload_cache=payload_cache,
             )
             chunk_store_cross_process_poller.start()
@@ -5144,6 +5155,25 @@ def make_lifespan(
         _xray_executor.shutdown(wait=False)
         # perf: Shut down the shared query executor (mirror of the two above).
         _query_executor.shutdown(wait=False)
+        # Bug #1800: dispose the discovery branch-fetch pool -- the one
+        # process-wide pool that had no shutdown at all. Its workers are
+        # non-daemon, so leaving them alive makes interpreter exit join them and
+        # stalls `systemctl restart cidx-server` behind in-flight git ls-remote
+        # work. Imported function-locally to keep routes off this module's
+        # import path.
+        from code_indexer.server.web.routes import (
+            shutdown_discovery_branch_fetch_executor,
+        )
+
+        shutdown_discovery_branch_fetch_executor()
+
+        # Bug #1800: same defect class, second pool -- the deep-fidelity audit
+        # executor in the storage layer also had no disposal anywhere.
+        from code_indexer.storage.filesystem_vector_store import (
+            shutdown_deep_fidelity_audit_executor,
+        )
+
+        shutdown_deep_fidelity_audit_executor()
 
         # Story #1079 Phase E: clear the process-level coalescer registry so a
         # subsequent lifespan cycle in the same process does not inherit a stale

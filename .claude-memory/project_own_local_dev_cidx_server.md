@@ -1,14 +1,14 @@
 ---
 name: project-own-local-dev-cidx-server
 description: "I own and am responsible for maintaining the local dev machine's cidx-server installation and its systemd service"
-metadata: 
+metadata:
   node_type: memory
   type: project
   originSessionId: bf453024-c658-4c98-bc2d-eebbb3ac44f3
   modified: 2026-08-12T13:12:06.045Z
 ---
 
-I (the agent) own and am responsible for the systemd-managed `cidx-server.service` running on this local development machine, and for the code-indexer checkout it runs from (`/home/jsbattig/code-indexer` -- separate from the interactive session working directory `/home/jsbattig/Dev/code-indexer`).
+I (the agent) own and am responsible for the systemd-managed `cidx-server.service` running on this local development machine, and for the code-indexer checkout it runs from (`~/code-indexer` -- separate from the interactive session working directory `~/Dev/code-indexer`).
 
 **Standing requirements for this local install:**
 - Track the `development` branch only -- never leave it on an epic/feature branch or any other ref.
@@ -19,7 +19,7 @@ I (the agent) own and am responsible for the systemd-managed `cidx-server.servic
 
 **Known failure mode -- server running OUT-OF-BAND from the working tree (seen 2026-08-09):**
 The port was held by a manually-started uvicorn with PPID 1 (orphaned to init, so `systemctl stop`
-could not reach it), loading `PYTHONPATH=/home/jsbattig/Dev/code-indexer/src` -- i.e. the INTERACTIVE
+could not reach it), loading `PYTHONPATH=~/Dev/code-indexer/src` -- i.e. the INTERACTIVE
 WORKING TREE, not the dedicated checkout. Two consequences, both bad: (1) every source edit made
 during development was one restart away from becoming the live server's behaviour; (2) the systemd
 unit could never bind, so `Restart=always` spun ~6,000 doomed processes in a day, each running the
@@ -30,7 +30,7 @@ Tell-tales: `systemctl is-active` says `activating`/`inactive` while port 8000 i
 in the thousands; the reported server `version` matches NEITHER checkout's current version (it matches
 whatever the working tree held when the process started).
 
-Recovery (safe order): confirm `active_jobs == 0` via `/health` FIRST, `git -C /home/jsbattig/code-indexer
+Recovery (safe order): confirm `active_jobs == 0` via `/health` FIRST, `git -C ~/code-indexer
 pull --ff-only origin development`, `kill -TERM <out-of-band pid>`, wait for the port to free, then
 `sudo systemctl start cidx-server`. Verify `version`, `NRestarts=0`, and that jobs created AFTER
 startup complete rather than being marked restart-orphaned.

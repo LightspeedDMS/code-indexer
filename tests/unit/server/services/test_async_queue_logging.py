@@ -325,6 +325,54 @@ def test_get_active_listener_and_shutdown_queue_logging() -> None:
         root.handlers = saved
 
 
+def test_shutdown_queue_logging_detaches_installed_handler_from_target_logger() -> None:
+    """Bug #1820: shutdown_queue_logging() must detach the IdentityQueueHandler
+    install_queue_logging() attached to the target logger, not merely stop the
+    listener thread.
+
+    Confirmed root cause of Bug #1820's ~50-minute test-suite near-stall: a
+    caller that pairs install_queue_logging()+shutdown_queue_logging() (the
+    intended API contract) but never explicitly removes the handler ends up
+    with a permanently-attached IdentityQueueHandler on the real process root
+    logger once the listener has stopped draining its queue. Every subsequent
+    logger.x() call anywhere in the same process propagates into that dead
+    queue; once it fills to DEFAULT_QUEUE_MAXSIZE, every ERROR/CRITICAL log
+    pays the full _HIGH_SEVERITY_QUEUE_TIMEOUT_S (2s) bounded blocking put.
+    Empirically reproduced: running just
+    tests/unit/server/services/test_async_logging_additional_handler_registration_1676_ac3.py
+    (which calls install_queue_logging()+listener.stop() without detaching)
+    left 4 leaked IdentityQueueHandler instances on the real root logger.
+    """
+    from code_indexer.server.services.async_logging import (
+        IdentityQueueHandler,
+        install_queue_logging,
+        shutdown_queue_logging,
+    )
+
+    root = logging.getLogger()
+    saved = list(root.handlers)
+    real = _RecordingHandler()
+    try:
+        root.handlers = [real]
+        install_queue_logging([real])
+        assert any(isinstance(h, IdentityQueueHandler) for h in root.handlers), (
+            "install_queue_logging() must attach an IdentityQueueHandler to "
+            "the target logger"
+        )
+
+        shutdown_queue_logging()
+
+        leaked = [h for h in root.handlers if isinstance(h, IdentityQueueHandler)]
+        assert not leaked, (
+            f"shutdown_queue_logging() left {len(leaked)} IdentityQueueHandler(s) "
+            "attached to the target logger -- these point at a queue nothing "
+            "drains anymore, and every subsequent ERROR/CRITICAL log through "
+            "this logger will pay the bounded 2s blocking put (Bug #1820)."
+        )
+    finally:
+        root.handlers = saved
+
+
 def test_flush_surfaces_handler_failure_but_drains_remaining(capsys) -> None:
     """A failing handler.flush() must not abort the drain of the others, and the
     failure must be surfaced (stderr), not silently swallowed (Messi #13)."""

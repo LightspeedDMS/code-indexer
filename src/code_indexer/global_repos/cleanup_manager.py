@@ -18,9 +18,26 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Optional, Set
 
 from .query_tracker import QueryTracker
+from .snapshot_deletion_errors import SnapshotDeleteError, SnapshotInUseError
+from .snapshot_reader_lease import snapshot_has_live_reader
 
 
 logger = logging.getLogger(__name__)
+
+
+def _is_duplicate_job_error(exc: BaseException) -> bool:
+    """True when *exc* is JobTracker's ``DuplicateJobError`` (Bug #1844).
+
+    Matched by class NAME rather than by importing the exception, because
+    this module is CLI-reachable and must not pull the server-only
+    ``code_indexer.server.services.job_tracker`` (and through it the whole
+    storage/telemetry stack) into its import graph -- the regression class
+    Bug #1468 exists to prevent. That same module's
+    ``is_active_job_unique_violation`` already classifies driver exceptions
+    by class name for exactly this reason, so the pattern is established
+    rather than invented here.
+    """
+    return type(exc).__name__ == "DuplicateJobError"
 
 
 class CleanupManager:
@@ -39,6 +56,22 @@ class CleanupManager:
     MAX_BACKOFF_DELAY = 60.0  # seconds
     BASE_BACKOFF_DELAY = 1.0  # seconds
     FD_USAGE_THRESHOLD = 0.80  # 80%
+
+    #: Bug #1844: a snapshot the storage backend refuses to delete because
+    #: something still HOLDS it is not a failure, it is "not yet" -- the
+    #: identical delete succeeds once the holder lets go. Such an attempt is
+    #: retried on this flat cadence instead of the failure backoff, and
+    #: without charging the failure budget: charging it is precisely what
+    #: burned all five attempts in ~16 seconds and abandoned the snapshot,
+    #: leaking its disk permanently.
+    IN_USE_RETRY_DELAY_SECONDS = 300.0  # 5 minutes
+
+    #: Hard ceiling on consecutive "still in use" deferrals for one path
+    #: (~1 hour at the cadence above). Past it the path is escalated to the
+    #: ordinary failure path so the circuit breaker still applies. Without
+    #: this bound a permanently-held snapshot would be retried forever --
+    #: a failed delete must never become an unbounded wait (Messi Rule #14).
+    MAX_IN_USE_DEFERRALS = 12
 
     #: Story #1457 AC13: default minimum retention age (seconds) a
     #: superseded versioned snapshot must remain undeleted after being
@@ -110,6 +143,11 @@ class CleanupManager:
         # Per-path failure tracking for backoff and circuit breaker
         self._failure_counts: Dict[str, int] = {}
         self._next_retry_times: Dict[str, float] = {}
+        # Bug #1844: consecutive "the snapshot is still held" deferrals per
+        # path, bounded by MAX_IN_USE_DEFERRALS. Deliberately SEPARATE from
+        # _failure_counts so a transient "not yet" can never consume the
+        # circuit-breaker budget reserved for genuine failures.
+        self._in_use_deferrals: Dict[str, int] = {}
         self._stats_lock = threading.Lock()
         self._job_tracker = job_tracker  # Story #314: dashboard visibility
         # Bug #1084 Phase A5: backend-aware deletion. When set, snapshot-shaped
@@ -119,6 +157,13 @@ class CleanupManager:
         # gate in _process_cleanup_queue is unchanged — deletion still only fires
         # once QueryTracker reports zero active queries for the path.
         self._snapshot_manager: Optional[object] = None
+        # Bug #1845 remediation round 2 (Defect 3): the shared cross-node
+        # lease-coordination root (golden_repos_dir / "cidx-meta"), wired
+        # post-construction exactly like _snapshot_manager below -- see
+        # set_lease_root(). None until wired means "no lease protection
+        # configured", the correct state for CLI/solo/test construction
+        # that never touches a real versioned snapshot.
+        self._lease_root: Optional[Path] = None
         # Bug #1567: durable pending-deletion queue backend.
         self._persistence_backend: Optional[Any] = None
         if persistence_backend is not None:
@@ -132,6 +177,25 @@ class CleanupManager:
         versioned snapshots; deletion still occurs only behind the refcount gate.
         """
         self._snapshot_manager = snapshot_manager
+
+    def set_lease_root(self, lease_root: Path) -> None:
+        """Wire the shared cross-node lease-coordination root (Bug #1845
+        remediation round 2, Defect 3).
+
+        Mirrors set_snapshot_manager's post-hoc wiring pattern -- the real
+        root (``golden_repos_dir / "cidx-meta"``) is known at lifecycle
+        construction time in ``global_repos_lifecycle.py``, same as
+        ``golden_repos_dir`` itself, so it is wired there immediately
+        after construction. This module never imports
+        ``get_cidx_meta_path`` or the canonical ``is_versioned_snapshot``
+        predicate directly -- both live in server-only modules whose
+        import graphs are proven too heavy for this CLI-reachable module
+        (see snapshot_reader_lease.py's module docstring for the measured
+        evidence).
+        """
+        if lease_root is None:
+            raise ValueError("set_lease_root requires a non-None lease_root")
+        self._lease_root = lease_root
 
     def set_persistence_backend(self, persistence_backend: Any) -> None:
         """Wire the durable pending-deletion backend, post-construction or
@@ -267,10 +331,18 @@ class CleanupManager:
             return self._failure_counts.get(index_path, 0)
 
     def _reset_failure_count(self, index_path: str) -> None:
-        """Clear failure count and retry time for path after successful deletion."""
+        """Clear failure count, deferral count and retry time for path after
+        successful deletion.
+
+        Bug #1844: the in-use deferral counter is cleared here too -- this is
+        the single post-success cleanup point for per-path retry state, and a
+        surviving counter would both leak an entry per snapshot ever deferred
+        and make a later deferral inherit a stale count and escalate early.
+        """
         with self._stats_lock:
             self._failure_counts.pop(index_path, None)
             self._next_retry_times.pop(index_path, None)
+            self._in_use_deferrals.pop(index_path, None)
 
     def _get_backoff_delay(self, index_path: str) -> float:
         """Return backoff delay in seconds for current failure count (capped at MAX_BACKOFF_DELAY)."""
@@ -411,7 +483,18 @@ class CleanupManager:
             # version_path is the authoritative identifier; backend implementations
             # derive (namespace, name) from the path. alias is unused in the
             # CloneBackend-delegated path, so pass empty string.
-            sm.delete_snapshot("", index_path)  # type: ignore[attr-defined]
+            deleted = sm.delete_snapshot("", index_path)  # type: ignore[attr-defined]
+            # Bug #1844: the return value used to be DISCARDED. A backend that
+            # reports failure by returning False was therefore read as success,
+            # so the caller dropped the path from the queue AND deleted its
+            # durable pending-deletion row -- a permanent, invisible disk leak
+            # (Messi Rule #13). Fail loudly instead; the caller's handler keeps
+            # the path queued for a later retry.
+            if not deleted:
+                raise SnapshotDeleteError(
+                    f"Snapshot backend reported failure deleting "
+                    f"'{index_path}' (returned {deleted!r})"
+                )
             return
 
         path = Path(index_path)
@@ -423,6 +506,113 @@ class CleanupManager:
             return
         self._robust_delete(path)
         logger.debug(f"Removed directory: {index_path}")
+
+    # ------------------------------------------------------------------
+    # Cluster-atomic claim + bounded "still in use" deferral (Bug #1844)
+    # ------------------------------------------------------------------
+
+    def _claim_path_for_deletion(self, index_path: str) -> "tuple[bool, Optional[str]]":
+        """Claim ``index_path`` fleet-wide before deleting it.
+
+        Args:
+            index_path: the snapshot path this process wants to delete.
+
+        Returns:
+            ``(claimed, tracked_job_id)``. ``claimed`` is False ONLY when a
+            peer node/worker already holds the claim, in which case the
+            caller must skip this path for this cycle. ``tracked_job_id`` is
+            None when no job was registered (no tracker wired, or a
+            non-duplicate registration failure); the caller proceeds anyway,
+            since losing dashboard visibility must never stop a deletion.
+        """
+        if self._job_tracker is None:
+            return True, None
+        register = getattr(self._job_tracker, "register_job_if_no_conflict", None)
+        if register is None:
+            return True, None
+
+        tracked_job_id = f"index-cleanup-{uuid.uuid4().hex[:8]}"
+        try:
+            register(
+                tracked_job_id,
+                "index_cleanup",
+                username="system",
+                repo_alias=index_path,
+            )
+        except Exception as exc:
+            if _is_duplicate_job_error(exc):
+                logger.debug(
+                    f"Skipping cleanup for {index_path}: another node or "
+                    f"worker already holds the deletion claim ({exc})"
+                )
+                return False, None
+            logger.debug(f"Failed to register index_cleanup job: {exc}")
+            return True, None
+
+        try:
+            self._job_tracker.update_status(tracked_job_id, status="running")
+        except Exception as exc:
+            logger.debug(f"Failed to mark index_cleanup job running: {exc}")
+        return True, tracked_job_id
+
+    def _defer_in_use(self, index_path: str, exc: SnapshotInUseError) -> bool:
+        """Record a bounded "the snapshot is still held" deferral.
+
+        Args:
+            index_path: the snapshot whose deletion was refused.
+            exc: the classified refusal, carrying the backend's errno.
+
+        Returns:
+            True when the path was deferred -- leave it queued and do NOT
+            charge the failure budget. False once the budget is exhausted
+            (``MAX_IN_USE_DEFERRALS`` deferrals already granted), meaning the
+            caller must escalate to the ordinary failure path; that ceiling
+            is what keeps this terminating (Messi Rule #14).
+        """
+        with self._stats_lock:
+            granted = self._in_use_deferrals.get(index_path, 0)
+            if granted >= self.MAX_IN_USE_DEFERRALS:
+                return False
+            deferrals = granted + 1
+            self._in_use_deferrals[index_path] = deferrals
+            self._next_retry_times[index_path] = (
+                time.monotonic() + self.IN_USE_RETRY_DELAY_SECONDS
+            )
+
+        logger.info(
+            f"Deferring cleanup of {index_path}: still in use "
+            f"(errno={exc.errno_name}, {exc.detail}). Deferral "
+            f"{deferrals}/{self.MAX_IN_USE_DEFERRALS}, retrying in "
+            f"{self.IN_USE_RETRY_DELAY_SECONDS:.0f}s."
+        )
+        return True
+
+    def _handle_cleanup_failure(
+        self,
+        index_path: str,
+        error: BaseException,
+        tracked_job_id: Optional[str],
+    ) -> None:
+        """Record a genuine cleanup failure: log it loudly, charge the
+        failure budget, and mark the tracked job failed.
+
+        Extracted (Bug #1844) because it is now reached from two places --
+        the generic handler, and the escalation branch when a path exhausts
+        its in-use deferral budget -- so "this cleanup failed" has exactly
+        one definition. Behaviour is unchanged from the previous inline
+        version.
+        """
+        logger.error(f"Failed to clean up {index_path}: {error}", exc_info=True)
+        self._record_failure(index_path)
+
+        if tracked_job_id and self._job_tracker is not None:
+            try:
+                self._job_tracker.fail_job(tracked_job_id, error=str(error))
+            except Exception as exc:
+                logger.debug(
+                    f"Failed to mark index_cleanup job {tracked_job_id} "
+                    f"as failed: {exc}"
+                )
 
     # ------------------------------------------------------------------
     # Background loop
@@ -503,6 +693,49 @@ class CleanupManager:
                 logger.debug(f"Skipping cleanup for {path}: {ref_count} active queries")
                 continue
 
+            # Bug #1845: QueryTracker ends with the request, but cache/index
+            # handles can remain open on another node.  A live per-reader
+            # lease is the handle-lifetime signal; stale leases expire after
+            # a bounded interval when the owning process has crashed.
+            #
+            # Remediation round 2 (Defects 1+3): classification ("is this a
+            # real versioned snapshot at all") is delegated to the already-
+            # wired VersionedSnapshotManager facade (same facade _delete_index
+            # uses below), never re-derived locally. When it IS versioned we
+            # must know for certain whether a reader lease exists -- an
+            # unwired lease_root here is a genuine misconfiguration, and
+            # silently treating it as "no live reader" would resurrect the
+            # exact data-loss bug this file exists to close, so it raises
+            # loudly instead of guessing.
+            #
+            # self._snapshot_manager is typed Optional[object] (not the
+            # concrete VersionedSnapshotManager) so this CLI-reachable
+            # module never imports the server-only type -- the same
+            # layering reason documented on set_lease_root() above. The
+            # `# type: ignore[attr-defined]` mirrors the identical,
+            # pre-existing pattern already used on
+            # sm.is_versioned_snapshot(index_path) in _delete_index above.
+            sm = self._snapshot_manager
+            if sm is not None and sm.is_versioned_snapshot(path):  # type: ignore[attr-defined]
+                lease_root = self._lease_root
+                if lease_root is None:
+                    raise RuntimeError(
+                        f"CleanupManager: {path!r} is a versioned snapshot "
+                        "but no lease_root has been wired via "
+                        "set_lease_root(); refusing to guess reader "
+                        "liveness rather than risk deleting a snapshot a "
+                        "live reader still holds"
+                    )
+                if snapshot_has_live_reader(path, lease_root=lease_root):
+                    logger.debug("Skipping cleanup for %s: live snapshot reader", path)
+                    self._defer_in_use(
+                        path,
+                        SnapshotInUseError(
+                            "snapshot has a live reader lease", detail="reader lease"
+                        ),
+                    )
+                    continue
+
             # Story #1457 AC13: minimum-retention-age floor, ADDED IN
             # ADDITION TO the refcount-zero gate above. Closes the
             # cross-process residual a process-local QueryTracker cannot
@@ -533,21 +766,13 @@ class CleanupManager:
                 )
                 continue
 
-            # Story #314: Register index_cleanup job for dashboard visibility
-            tracked_job_id = None
-            if self._job_tracker is not None:
-                try:
-                    tracked_job_id = f"index-cleanup-{uuid.uuid4().hex[:8]}"
-                    self._job_tracker.register_job(
-                        tracked_job_id,
-                        "index_cleanup",
-                        username="system",
-                        repo_alias="server",
-                    )
-                    self._job_tracker.update_status(tracked_job_id, status="running")
-                except Exception as e:
-                    logger.debug(f"Failed to register index_cleanup job: {e}")
-                    tracked_job_id = None
+            # Story #314: index_cleanup job for dashboard visibility, which
+            # Bug #1844 also makes the CLUSTER-ATOMIC claim on this path --
+            # the durable pending-deletion queue is shared and unfiltered, so
+            # without a claim every node issues this same DELETE.
+            claimed, tracked_job_id = self._claim_path_for_deletion(path)
+            if not claimed:
+                continue
 
             try:
                 self._delete_index(path)
@@ -567,14 +792,41 @@ class CleanupManager:
                         logger.debug(
                             f"Failed to complete index_cleanup job {tracked_job_id}: {e}"
                         )
+            except SnapshotInUseError as in_use:
+                # Bug #1844: MUST precede the generic handler below --
+                # SnapshotInUseError subclasses SnapshotDeleteError. A
+                # snapshot a holder still has open is "not yet", not a
+                # failure: charging it to the five-attempt budget is exactly
+                # what abandoned the path after ~16 seconds and leaked the
+                # disk forever. Deferring keeps the path queued and its
+                # durable row intact; once the bounded deferral budget is
+                # exhausted _defer_in_use returns False and it falls through
+                # to the ordinary failure path below.
+                if self._defer_in_use(path, in_use):
+                    if tracked_job_id and self._job_tracker is not None:
+                        try:
+                            # Completing releases the cluster claim; the
+                            # result says plainly that nothing was deleted.
+                            self._job_tracker.complete_job(
+                                tracked_job_id,
+                                result={
+                                    "deleted": False,
+                                    "deferred": "snapshot_in_use",
+                                    "errno": in_use.errno_name,
+                                },
+                            )
+                        except Exception as e2:
+                            logger.debug(
+                                f"Failed to complete deferred index_cleanup "
+                                f"job {tracked_job_id}: {e2}"
+                            )
+                    continue
+                logger.warning(
+                    f"Snapshot {path} has been reported still-in-use for "
+                    f"{self.MAX_IN_USE_DEFERRALS} consecutive deferrals "
+                    f"(errno={in_use.errno_name}); escalating to the normal "
+                    f"failure path so the circuit breaker applies."
+                )
+                self._handle_cleanup_failure(path, in_use, tracked_job_id)
             except Exception as e:
-                logger.error(f"Failed to clean up {path}: {e}", exc_info=True)
-                self._record_failure(path)
-
-                if tracked_job_id and self._job_tracker is not None:
-                    try:
-                        self._job_tracker.fail_job(tracked_job_id, error=str(e))
-                    except Exception as e2:
-                        logger.debug(
-                            f"Failed to mark index_cleanup job {tracked_job_id} as failed: {e2}"
-                        )
+                self._handle_cleanup_failure(path, e, tracked_job_id)

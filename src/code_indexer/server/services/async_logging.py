@@ -269,6 +269,19 @@ class DrainableQueueListener(logging.handlers.QueueListener):
 # the lifespan singleton-wiring patterns elsewhere in the server).
 _active_listener: Optional[DrainableQueueListener] = None
 
+# Module-level handles to the IdentityQueueHandler install_queue_logging()
+# attached and the logger it attached it to. Bug #1820: shutdown_queue_logging()
+# used to stop the listener thread WITHOUT detaching this handler, so once the
+# listener stopped draining, the handler stayed permanently attached -- every
+# subsequent logger.x() call on the target logger (or any descendant that
+# propagates to it) enqueued into a queue nothing drains anymore. In a test
+# process sharing one root logger across thousands of tests, that queue
+# eventually saturates and every ERROR/CRITICAL log pays the full
+# _HIGH_SEVERITY_QUEUE_TIMEOUT_S bounded blocking put. Tracked here so
+# shutdown_queue_logging() can remove exactly the handler it installed.
+_active_queue_handler: Optional["IdentityQueueHandler"] = None
+_active_target_logger: Optional[logging.Logger] = None
+
 
 def install_queue_logging(
     real_handlers: List[logging.Handler],
@@ -292,7 +305,7 @@ def install_queue_logging(
         The started :class:`DrainableQueueListener`. The caller MUST ``stop()``
         it on shutdown (the lifespan does this) to drain queued records.
     """
-    global _active_listener
+    global _active_listener, _active_queue_handler, _active_target_logger
 
     target = root if root is not None else logging.getLogger()
 
@@ -310,6 +323,8 @@ def install_queue_logging(
     target.addHandler(queue_handler)
 
     _active_listener = listener
+    _active_queue_handler = queue_handler
+    _active_target_logger = target
     return listener
 
 
@@ -388,19 +403,55 @@ def unregister_additional_listener_handler(
         return True
 
 
+def _report_shutdown_failure(context: str, exc: BaseException) -> None:
+    """Best-effort stderr report that itself never raises.
+
+    We are inside the logging shutdown path here, so we cannot go through
+    ``logging`` (it would recurse); ``sys.stderr.write`` is the same
+    non-recursive-reporting convention already used elsewhere in this module
+    (e.g. ``DrainableQueueListener.flush()``, ``IdentityQueueHandler._record_drop``).
+    A broken/replaced stderr stream must not itself violate this function's
+    documented "never raises" contract, so the write is guarded too.
+    """
+    try:
+        sys.stderr.write(
+            f"[async_logging] shutdown_queue_logging: {context}: {exc!r}\n"
+        )
+    except Exception:  # pragma: no cover - reporting is best-effort only
+        pass
+
+
 def shutdown_queue_logging(timeout: float = 5.0) -> None:
     """Stop the active listener (drains the queue) and clear the module handle.
+
+    Bug #1820: also detaches the IdentityQueueHandler install_queue_logging()
+    attached to its target logger. Stopping the listener alone leaves that
+    handler permanently attached -- it points at a queue nothing drains
+    anymore, so every subsequent logger.x() call on the target logger (or a
+    descendant that propagates to it) keeps enqueuing into it. Once the queue
+    saturates, every ERROR/CRITICAL record pays the bounded
+    _HIGH_SEVERITY_QUEUE_TIMEOUT_S blocking put -- this is the exact
+    mechanism behind Bug #1820's ~50-minute test-suite near-stall.
 
     Non-fatal: never raises -- mirrors the lifespan belt-and-suspenders shutdown
     discipline so a logging-shutdown error cannot abort the remaining chain.
     """
-    global _active_listener
+    global _active_listener, _active_queue_handler, _active_target_logger
+
     listener = _active_listener
-    if listener is None:
-        return
-    try:
-        listener.stop()
-    except Exception:  # pragma: no cover - shutdown best-effort
-        pass
-    finally:
-        _active_listener = None
+    _active_listener = None
+    if listener is not None:
+        try:
+            listener.stop()
+        except Exception as exc:  # pragma: no cover - shutdown best-effort
+            _report_shutdown_failure("listener.stop() failed", exc)
+
+    queue_handler = _active_queue_handler
+    target = _active_target_logger
+    _active_queue_handler = None
+    _active_target_logger = None
+    if queue_handler is not None and target is not None:
+        try:
+            target.removeHandler(queue_handler)
+        except Exception as exc:  # pragma: no cover - shutdown best-effort
+            _report_shutdown_failure("removeHandler() failed", exc)

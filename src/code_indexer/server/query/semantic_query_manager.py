@@ -724,9 +724,17 @@ class SemanticQueryManager:
         no_embedding_cache_shortcut: bool = False,
         # Story #1291 AC7/AC8: explicit embedder override for recall selection.
         temporal_embedder: Optional[str] = None,
+        # Bug #1804: out-param forwarded to _perform_search -- see
+        # _search_single_repository's docstring for why a mutable out-param
+        # is required instead of an exception attribute. None (default,
+        # every caller that does not opt in) preserves today's behavior.
+        _provider_completeness_out: Optional[Dict[str, Any]] = None,
         # Story #883 Phase C: reuse a pre-computed Voyage vector so the handler
         # makes exactly ONE embedding API call per request (shared with memory retrieval).
-        # MUST remain the LAST parameter to preserve positional-arg compatibility.
+        # MUST remain the LAST parameter any existing caller passes
+        # positionally, to preserve positional-arg compatibility -- no
+        # caller in this codebase passes anything positionally beyond it
+        # today, so a new default-None param appended after it is safe.
         precomputed_query_vector: Optional[List[float]] = None,
     ) -> Dict[str, Any]:
         """
@@ -908,6 +916,8 @@ class SemanticQueryManager:
                 # Bug #1767: collect degraded repo aliases from a partial
                 # multi-repo fan-out failure, if any
                 _degraded_repos_out=_degraded_repos_out,
+                # Bug #1804: relay the completeness out-param
+                _provider_completeness_out=_provider_completeness_out,
             )
             # Unpack (results, effective_strategy) tuple; fall back gracefully if
             # a test patches _perform_search to return a plain list.
@@ -1162,6 +1172,10 @@ class SemanticQueryManager:
         # repo was skipped due to a real error. Per-request, no shared
         # state.
         _degraded_repos_out: Optional[List[str]] = None,
+        # Bug #1804: out-param forwarded straight through to
+        # _search_single_repository -- see its docstring for why this must
+        # be a mutable out-param rather than an exception attribute.
+        _provider_completeness_out: Optional[Dict[str, Any]] = None,
     ) -> "Tuple[List[QueryResult], str]":
         """
         Perform the actual search across user repositories.
@@ -1378,6 +1392,8 @@ class SemanticQueryManager:
                         golden_repo_alias=golden_repo_alias_for_temporal,
                         # Story #1458 AC11: forward the per-clone generation token.
                         activation_id=activation_id,
+                        # Bug #1804: relay the completeness out-param
+                        _provider_completeness_out=_provider_completeness_out,
                     )
                 # AC7: capture routing decision from the first resolved repo
                 if _strat_out and _effective_strategy == (
@@ -1631,6 +1647,14 @@ class SemanticQueryManager:
         # FSV cache-key construction. None (golden/-global repos, CLI/solo)
         # preserves today's pure path-derived cache key.
         activation_id: Optional[str] = None,
+        # Bug #1804: out-param recording a completeness marker + per-
+        # provider error detail when the "parallel" strategy's total-
+        # failure guards below are about to raise. Populated BEFORE the
+        # raise so it survives the exception being re-wrapped by
+        # _perform_search's per-repo loop and by query_user_repositories'
+        # own except block -- neither of which preserves attributes set on
+        # the original exception object. Per-request, no shared state.
+        _provider_completeness_out: Optional[Dict[str, Any]] = None,
     ) -> List[QueryResult]:
         """
         Search a single repository using the appropriate search service.
@@ -2002,6 +2026,15 @@ class SemanticQueryManager:
             # here instead of falling through silently.
             if _all_providers and _unhealthy_pre_skip_count == len(_all_providers):
                 _skip_summary = ", ".join(_degraded_in_query)
+                # Bug #1804: record the completeness marker BEFORE raising --
+                # see the out-param's docstring above for why this cannot be
+                # an attribute on the exception instead.
+                if _provider_completeness_out is not None:
+                    _provider_completeness_out["completeness"] = "providers_unavailable"
+                    _provider_completeness_out["provider_errors"] = {
+                        name: "provider unavailable (down or sin-binned)"
+                        for name in _degraded_in_query
+                    }
                 raise SemanticQueryError(
                     f"Semantic search failed for repository "
                     f"'{repository_alias}' -- every configured embedding "
@@ -2167,6 +2200,14 @@ class SemanticQueryManager:
                 _failure_summary = "; ".join(
                     f"{name}: {exc}" for name, exc in _hard_failures.items()
                 )
+                # Bug #1804: record the completeness marker BEFORE raising --
+                # see the out-param's docstring above for why this cannot be
+                # an attribute on the exception instead.
+                if _provider_completeness_out is not None:
+                    _provider_completeness_out["completeness"] = "providers_unavailable"
+                    _provider_completeness_out["provider_errors"] = {
+                        name: str(exc) for name, exc in _hard_failures.items()
+                    }
                 raise SemanticQueryError(
                     f"Semantic search failed for repository "
                     f"'{repository_alias}' -- every dispatched embedding "

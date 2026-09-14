@@ -4,6 +4,7 @@ Stores vectors in filesystem with path-as-vector quantization and git-aware chun
 Following Story 2 requirements.
 """
 
+import contextvars
 import fcntl
 import hashlib
 import json
@@ -11,14 +12,21 @@ import os
 import random
 import subprocess
 import tempfile
+import time
 from pathlib import Path
 from typing import List, Dict, Any, Optional, Tuple, Union, Set, TYPE_CHECKING
 from datetime import datetime
 
 if TYPE_CHECKING:
-    # Imported only for type-checking so the runtime CLI startup import budget
-    # is unaffected (concurrent.futures stays a lazy import inside search()).
+    # `Executor` is imported only for type-checking (used solely in a type
+    # annotation below) so it costs nothing at runtime CLI-startup import.
     from concurrent.futures import Executor
+# Bug #1822 (DEFECT 1): unlike `Executor` above, `ThreadPoolExecutor` IS
+# needed at runtime (not just for type-checking) to construct the
+# module-level dedicated audit executor below. A bare ThreadPoolExecutor()
+# does not spawn threads until first submit(), so this stays cheap at
+# CLI-startup import time.
+from concurrent.futures import ThreadPoolExecutor
 import threading
 import numpy as np
 import logging
@@ -39,6 +47,14 @@ from code_indexer.storage.shared.hnsw_sync_state import (
     write_hnsw_sync_state,
 )
 from code_indexer.storage.shared.chunk_layout import ChunkLayout
+
+
+# Bug #1829: a fresh ChunkStore connection is opened for every CHUNKS_DB
+# upsert, so concurrent temporal workers can exhaust sqlite3's default busy
+# timeout. Keep retries bounded while allowing transient lock contention to
+# clear. The schedule has one entry for each retry after the first attempt.
+_CHUNKS_DB_WRITE_MAX_ATTEMPTS = 5
+_CHUNKS_DB_WRITE_BACKOFF_SECONDS = (0.5, 1.0, 2.0, 4.0)
 
 
 class LocalIndexNotFoundError(RuntimeError):
@@ -162,6 +178,67 @@ except ImportError:  # pragma: no cover
     emit_embed_event = None  # type: ignore[assignment]
     emit_embed_error_event = None  # type: ignore[assignment]
 
+# Bug #1822 (DEFECT 1): the deep-fidelity audit (Story #1110 / Bug #1813)
+# dispatched from search() must NEVER share capacity with the caller's
+# shared, long-lived server `parallel_executor` (see search_service.py's
+# _get_query_executor()) -- that executor also serves real request work
+# (the FSV embed||index-load fan-out). At production scale (~900 repos per
+# this project's CLAUDE.md), a multi-repo request can produce hundreds of
+# sampled cache hits; dispatching them onto the SAME executor/queue with no
+# limit lets pure telemetry starve real work. A dedicated, small, bounded
+# executor + a non-blocking gate caps total outstanding (queued + in-flight)
+# audit tasks independent of `parallel_executor`'s presence/size.
+#
+# Construction alone does not spawn threads -- a bare ThreadPoolExecutor is
+# lazy until first submit() -- so module-level construction here is cheap at
+# CLI-startup import time (unlike the heavy-service-singleton anti-pattern
+# documented elsewhere in this project's CLAUDE.md).
+_DEEP_FIDELITY_AUDIT_EXECUTOR_MAX_WORKERS = 4
+_DEEP_FIDELITY_AUDIT_GATE_CAPACITY = 16
+
+
+def _new_deep_fidelity_audit_executor() -> ThreadPoolExecutor:
+    """Build an audit pool. Spawns no threads until the first submit()."""
+    return ThreadPoolExecutor(
+        max_workers=_DEEP_FIDELITY_AUDIT_EXECUTOR_MAX_WORKERS,
+        thread_name_prefix="cidx-deep-audit",
+    )
+
+
+_deep_fidelity_audit_executor = _new_deep_fidelity_audit_executor()
+
+# Serialises the shutdown swap below against the audit submit site, so a
+# submitter can never be handed an executor that is already being retired.
+_deep_fidelity_audit_executor_lock = threading.Lock()
+
+
+def shutdown_deep_fidelity_audit_executor() -> None:
+    """Retire this pool's worker threads (Bug #1800).
+
+    Once anything has been submitted, the pool holds NON-DAEMON workers that
+    interpreter exit must join, so a process that never disposes it waits at
+    exit for whatever the pool is running -- with no timeout anywhere. That
+    applies to the CLI as much as the server, since this module is on the
+    solo/CLI path too.
+
+    A fresh executor is swapped in rather than the name cleared, because the
+    audit submit site and the Story #1822 tests both reach this module
+    attribute directly and must always find a live pool. Idempotent, and cheap
+    to call when nothing was ever submitted. ``shutdown`` runs outside the lock
+    so disposal never blocks a submitter, and ``cancel_futures`` drops work that
+    has not started rather than making exit wait for it.
+    """
+    global _deep_fidelity_audit_executor
+    with _deep_fidelity_audit_executor_lock:
+        retiring = _deep_fidelity_audit_executor
+        _deep_fidelity_audit_executor = _new_deep_fidelity_audit_executor()
+    retiring.shutdown(wait=False, cancel_futures=True)
+
+
+_deep_fidelity_audit_gate = threading.BoundedSemaphore(
+    _DEEP_FIDELITY_AUDIT_GATE_CAPACITY
+)
+
 
 def _write_embed_meta_to_event_ctx(embed_meta: "Any", provider_name: str = "") -> None:
     """Story #1159: write embedding-cache metadata to the active SearchEventContext.
@@ -180,14 +257,17 @@ def _write_embed_meta_to_event_ctx(embed_meta: "Any", provider_name: str = "") -
 
         event_ctx = _search_event_ctx.get(None)
         if event_ctx is not None:
-            if "cohere" in provider_name.lower():
-                event_ctx.cohere_cache_hit = embed_meta.key_found
-                event_ctx.cohere_cache_mode = embed_meta.cache_mode
-                event_ctx.cohere_latency_ms = embed_meta.provider_latency_ms
-            else:
-                event_ctx.voyage_cache_hit = embed_meta.key_found
-                event_ctx.voyage_cache_mode = embed_meta.cache_mode
-                event_ctx.voyage_latency_ms = embed_meta.provider_latency_ms
+            # Bug #1813 (DEFECT 2): write the triple atomically -- omni
+            # fan-out workers share this SAME context instance
+            # (contextvars.copy_context() is a shallow copy), so three
+            # separate unsynchronized assignments here could interleave
+            # with a concurrent repo's write and produce a torn triple.
+            event_ctx.record_provider_cache_fields(
+                provider_name,
+                cache_hit=embed_meta.key_found,
+                cache_mode=embed_meta.cache_mode,
+                latency_ms=embed_meta.provider_latency_ms,
+            )
     except Exception as _exc:  # noqa: BLE001
         import logging
 
@@ -2355,6 +2435,60 @@ class FilesystemVectorStore:
                 )
             return self._temporal_metadata_store
 
+    def _write_chunks_db_with_retry(
+        self,
+        collection_path: Path,
+        records: List[Dict[str, Any]],
+        orphan_ids: List[str],
+        *,
+        max_attempts: int = _CHUNKS_DB_WRITE_MAX_ATTEMPTS,
+        backoff_schedule: Tuple[float, ...] = _CHUNKS_DB_WRITE_BACKOFF_SECONDS,
+    ) -> None:
+        """Write chunk records, retrying only transient store failures.
+
+        A new ChunkStore is deliberately opened for each attempt because a
+        failed open may have no usable connection and a failed write may have
+        left the connection in a transaction state. Fatal errors and retry
+        exhaustion are raised to the caller; temporal indexing must never
+        report success after dropping a commit.
+        """
+        if max_attempts < 1:
+            raise ValueError("max_attempts must be at least 1")
+        if len(backoff_schedule) < max_attempts - 1:
+            raise ValueError("backoff_schedule must have one entry per retry attempt")
+
+        from code_indexer.storage.sqlite_chunk_store import (
+            is_fatal_chunk_store_write_error,
+            open_chunk_store_for_path,
+        )
+
+        chunks_db_path = collection_path / "chunks.db"
+        for attempt in range(max_attempts):
+            chunk_store = None
+            caught_exc: Optional[BaseException] = None
+            try:
+                chunk_store = open_chunk_store_for_path(
+                    chunks_db_path, str(collection_path)
+                )
+                if records:
+                    chunk_store.write_batch(records)
+                if orphan_ids:
+                    chunk_store.delete(orphan_ids)
+            except Exception as exc:
+                caught_exc = exc
+            finally:
+                if chunk_store is not None:
+                    chunk_store.close()
+
+            if caught_exc is None:
+                return
+            if (
+                is_fatal_chunk_store_write_error(caught_exc)
+                or attempt == max_attempts - 1
+            ):
+                raise caught_exc
+            time.sleep(random.uniform(0, backoff_schedule[attempt]))
+
     def _upsert_points_chunks_db(
         self,
         collection_name: str,
@@ -2458,6 +2592,7 @@ class FilesystemVectorStore:
                     path_index.add_point(file_path, point_id)
 
         records: List[Dict[str, Any]] = []
+        pending_added_ids: List[str] = []
         for idx, point in enumerate(points, 1):
             point_id = point["id"]
             vector = np.array(point["vector"])
@@ -2500,20 +2635,14 @@ class FilesystemVectorStore:
             # add_or_update_vector() call downstream, so this only affects
             # cosmetic added/updated counts in logs, never correctness.
             if collection_name in self._indexing_session_changes:
-                self._indexing_session_changes[collection_name]["added"].add(point_id)
+                pending_added_ids.append(point_id)
 
-        from code_indexer.storage.sqlite_chunk_store import open_chunk_store_for_path
+        self._write_chunks_db_with_retry(collection_path, records, orphan_ids)
 
-        chunk_store = open_chunk_store_for_path(
-            collection_path / "chunks.db", str(collection_path)
-        )
-        try:
-            if records:
-                chunk_store.write_batch(records)
-            if orphan_ids:
-                chunk_store.delete(orphan_ids)
-        finally:
-            chunk_store.close()
+        if collection_name in self._indexing_session_changes:
+            self._indexing_session_changes[collection_name]["added"].update(
+                pending_added_ids
+            )
 
         # Bug #1528: the temporal METADATA store is a SEPARATE store from the
         # chunk data (shared temporal_metadata.db in solo mode, PostgreSQL in
@@ -6691,21 +6820,107 @@ class FilesystemVectorStore:
         # Fires only when the coalesced embedding path sampled this request.
         # _run_deep_fidelity_audit is already fail-open internally; we also
         # guard externally so a bug in the import or the call never breaks search.
+        #
+        # Bug #1813 (DEFECT 1): an on-mode sampled audit performs a REAL,
+        # un-coalesced provider re-embed call plus a second HNSW search --
+        # pure telemetry (top10_overlap) that never influences the returned
+        # results. Running it synchronously here made a cache HIT cost MORE
+        # wall-clock time than a MISS (which never triggers the audit and is
+        # naturally coalesced). The audit result has no bearing on this
+        # request's response, so it is dispatched OUT OF BAND (fire-and-
+        # forget, not awaited) instead of blocking the caller.
+        # contextvars.copy_context() captures the request's correlation_id
+        # so the audit's durable stamp (_record_audit_metrics ->
+        # update_audit_by_key) still resolves the correct search_embed_event
+        # row from the background thread.
+        #
+        # Bug #1822 (DEFECT 1): dispatching onto the caller's shared,
+        # long-lived server `parallel_executor` -- the SAME pool that also
+        # serves real request work (the FSV embed||index-load fan-out; see
+        # search_service.py's _get_query_executor()) -- traded a bounded
+        # inline cost for an UNBOUNDED queued one: at production scale
+        # (~900 repos), a multi-repo request can produce hundreds of sampled
+        # cache hits, all queuing on that SAME executor with no limit, so a
+        # later request's real load/embedding work could queue behind pure
+        # telemetry. The audit now dispatches onto its OWN dedicated, small,
+        # bounded-capacity executor (module-level _deep_fidelity_audit_executor),
+        # guarded by a non-blocking gate (_deep_fidelity_audit_gate) so total
+        # outstanding (queued + in-flight) audit tasks is capped -- entirely
+        # independent of `parallel_executor`. When capacity is exhausted the
+        # audit is skipped observably (WARNING) rather than queuing without
+        # limit; the gate is always released in `finally` so capacity frees
+        # up once an audit (or its failure) completes.
+        #
+        # Bug #1822 follow-up (a): the two remaining fail-open swallow sites
+        # (a worker exception during audit execution, and a rejected
+        # executor.submit() call) now log a WARNING -- fail-open is correct
+        # (the audit must never break search), but it must be observable so
+        # a persistently broken audit shows up in log audits.
+        #
+        # CLI/solo path (parallel_executor is None): the query-embedding
+        # cache is server-only (get_query_embedding_cache() returns None
+        # there), so audit_ctx["sampled"] is never True in practice on this
+        # branch -- kept synchronous+fail-open as a defensive fallback since
+        # there is no shared long-lived executor to dispatch onto safely.
         if audit_ctx.get("sampled") and _run_deep_fidelity_audit is not None:
-            try:
-                _run_deep_fidelity_audit(
-                    audit_ctx=audit_ctx,
-                    hnsw_index=hnsw_index,
-                    hnsw_manager=hnsw_manager,
-                    collection_path=collection_path,
-                    ef=ef,
-                    primary_candidate_ids=candidate_ids,
-                    embedding_provider=embedding_provider,
-                    query=query,
-                    embed_key=_embed_meta.embed_key,
-                )
-            except Exception:  # noqa: BLE001
-                pass  # fail-open: audit never breaks primary search
+            _audit_kwargs: Dict[str, Any] = dict(
+                audit_ctx=audit_ctx,
+                hnsw_index=hnsw_index,
+                hnsw_manager=hnsw_manager,
+                collection_path=collection_path,
+                ef=ef,
+                primary_candidate_ids=candidate_ids,
+                embedding_provider=embedding_provider,
+                query=query,
+                embed_key=_embed_meta.embed_key,
+            )
+            if parallel_executor is not None:
+                _audit_run_ctx = contextvars.copy_context()
+
+                def _run_audit_out_of_band(
+                    _ctx: "contextvars.Context" = _audit_run_ctx,
+                    _kwargs: Dict[str, Any] = _audit_kwargs,
+                ) -> None:
+                    try:
+                        _ctx.run(_run_deep_fidelity_audit, **_kwargs)  # type: ignore[misc]
+                    except Exception as _audit_exc:  # noqa: BLE001
+                        # fail-open: audit never breaks primary search, but
+                        # the failure must be observable (Bug #1822
+                        # follow-up a).
+                        self.logger.warning(
+                            "deep fidelity audit worker failed (swallowed): %s",
+                            _audit_exc,
+                        )
+                    finally:
+                        _deep_fidelity_audit_gate.release()
+
+                if not _deep_fidelity_audit_gate.acquire(blocking=False):
+                    # Bug #1822 (DEFECT 1): bounded capacity exhausted --
+                    # skip observably rather than queue without limit.
+                    self.logger.warning(
+                        "deep fidelity audit skipped: audit capacity exhausted"
+                    )
+                else:
+                    try:
+                        # Bug #1800: read + submit under the lock so a
+                        # concurrent shutdown swap can never hand this site an
+                        # executor that is already being retired.
+                        with _deep_fidelity_audit_executor_lock:
+                            _deep_fidelity_audit_executor.submit(_run_audit_out_of_band)
+                    except Exception as _submit_exc:  # noqa: BLE001
+                        _deep_fidelity_audit_gate.release()
+                        # fail-open: a shutting-down executor must never
+                        # break search, but the rejection must be observable
+                        # (Bug #1822 follow-up a).
+                        self.logger.warning(
+                            "deep fidelity audit skipped: executor unavailable (%s)",
+                            _submit_exc,
+                        )
+            else:
+                try:
+                    _run_deep_fidelity_audit(**_audit_kwargs)
+                except Exception:  # noqa: BLE001
+                    pass  # fail-open: audit never breaks primary search
 
         # ID index already loaded in parallel section
         # Re-acquire lock for thread-safe reference assignment

@@ -10,6 +10,7 @@ import logging
 import os
 import tempfile
 import threading
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
@@ -17,12 +18,70 @@ from typing import Any, Optional
 import yaml
 
 from code_indexer.global_repos.repo_analyzer import RepoAnalyzer
+from code_indexer.global_repos.write_lock_manager import (
+    describe_scheduler_lock_holder,
+)
 from code_indexer.server.services.claude_cli_manager import (
     ClaudeCliManager,
     get_claude_cli_manager,
 )
 
 logger = logging.getLogger(__name__)
+
+# Bug #1842 AC3: small, FIXED retry bound for transient cidx-meta
+# write-lock micro-contention -- never unbounded (Messi Rule #14). See
+# _acquire_cidx_meta_lock_with_bounded_retry's docstring for the
+# rationale and its explicit scope limits.
+_LOCK_ACQUIRE_MAX_ATTEMPTS = 3
+_LOCK_ACQUIRE_RETRY_DELAY_SECONDS = 0.05
+
+
+def _describe_cidx_meta_holder(refresh_scheduler: Optional[Any]) -> str:
+    """
+    Best-effort description of who REALLY holds the 'cidx-meta' write
+    lock, for use in contention diagnostics (Bug #1842 AC4).
+
+    Before this helper existed, both atomic_write_description()'s
+    LifecycleLockUnavailableError and on_repo_removed()'s "write lock not
+    acquired" warning hardcoded "(owner='lifecycle_writer')" -- the
+    FAILED CALLER's own attempted identity, not the actual holder (e.g.
+    'dependency_map_service' running a real multi-domain Claude CLI
+    analysis). Delegates to the shared describe_scheduler_lock_holder()
+    (write_lock_manager.py) for the real owner + hold duration -- never
+    raises.
+    """
+    return describe_scheduler_lock_holder(refresh_scheduler, "cidx-meta")
+
+
+def _acquire_cidx_meta_lock_with_bounded_retry(
+    refresh_scheduler: Any, owner_name: str
+) -> bool:
+    """
+    Attempt to acquire the 'cidx-meta' write lock, retrying a SMALL,
+    FIXED number of times on failure (Bug #1842 AC3).
+
+    Scope: this addresses transient MICRO-contention -- two callers
+    racing to acquire the same lock within a fraction of a second (e.g.
+    two on_repo_added() calls in rapid succession), where the real
+    holder releases well within this bound. It does NOT and cannot help
+    with the dominant AC3 scenario (a genuinely long hold, e.g. the
+    lifecycle preflight's real Claude CLI calls, which can run for
+    minutes) -- that case correctly exhausts this bound and returns
+    False exactly as before, now with an honest diagnostic (AC4) naming
+    the real holder. This is a fixed attempt count with a short fixed
+    delay between attempts -- never an unbounded or time-based wait
+    (Messi Rule #14). Deliberately does NOT narrow any lock's hold
+    window elsewhere in the system (see dependency_map_service.py and
+    the bug's final report for why that would reopen the
+    RefreshScheduler/cidx-meta race Bug #1506 fixed).
+    """
+    for attempt in range(_LOCK_ACQUIRE_MAX_ATTEMPTS):
+        if refresh_scheduler.acquire_write_lock("cidx-meta", owner_name=owner_name):
+            return True
+        if attempt < _LOCK_ACQUIRE_MAX_ATTEMPTS - 1:
+            time.sleep(_LOCK_ACQUIRE_RETRY_DELAY_SECONDS)
+    return False
+
 
 # README file detection order
 README_NAMES = [
@@ -245,14 +304,14 @@ def atomic_write_description(
 
     lock_acquired = False
     if refresh_scheduler is not None:
-        lock_acquired = refresh_scheduler.acquire_write_lock(
-            "cidx-meta", owner_name="lifecycle_writer"
+        lock_acquired = _acquire_cidx_meta_lock_with_bounded_retry(
+            refresh_scheduler, "lifecycle_writer"
         )
         if not lock_acquired:
             raise LifecycleLockUnavailableError(
                 "Could not acquire write lock for 'cidx-meta' "
-                "(owner='lifecycle_writer'); another writer holds it -- "
-                "retry later"
+                "(attempted as owner='lifecycle_writer'); "
+                f"{_describe_cidx_meta_holder(refresh_scheduler)} -- retry later"
             )
 
     try:
@@ -516,8 +575,8 @@ def on_repo_removed(repo_name: str, golden_repos_dir: str) -> None:
         _lock_acquired = False
         if _refresh_scheduler is not None:
             try:
-                _lock_acquired = _refresh_scheduler.acquire_write_lock(
-                    "cidx-meta", owner_name="lifecycle_writer"
+                _lock_acquired = _acquire_cidx_meta_lock_with_bounded_retry(
+                    _refresh_scheduler, "lifecycle_writer"
                 )
             except Exception as _lock_err:
                 logger.warning(
@@ -525,8 +584,10 @@ def on_repo_removed(repo_name: str, golden_repos_dir: str) -> None:
                 )
             if not _lock_acquired:
                 logger.warning(
-                    "on_repo_removed: write lock not acquired, skipping deletion of %s",
+                    "on_repo_removed: write lock not acquired, skipping "
+                    "deletion of %s -- %s",
                     md_file,
+                    _describe_cidx_meta_holder(_refresh_scheduler),
                 )
                 return
         try:

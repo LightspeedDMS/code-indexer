@@ -52,6 +52,26 @@ pip install git+https://github.com/LightspeedDMS/code-indexer.git@<latest-tag>
 cidx --version
 ```
 
+## First Start -- Change the Seeded Admin Password
+
+SECURITY: on its first start against an empty user store, the server seeds a single
+administrator account with a well-known default password (`UserManager.seed_initial_admin`).
+This exists so a fresh install is reachable at all; it is NOT safe to leave in place.
+
+Change it before the server is reachable from any untrusted network:
+
+1. Start the server and log in as the seeded administrator.
+2. Immediately set a new password for that account (Web UI user settings, or
+   `PUT /api/users/change-password`).
+3. Confirm the old password no longer authenticates.
+
+Treat a server that still accepts the seeded password as unauthenticated: the account holds the
+`admin` role, which can register golden repositories, read every indexed repository, and manage
+users. If the deployment is internet-facing, do this before opening the firewall, not after.
+
+Consider also enabling TOTP MFA on the administrator account -- the server supports step-up
+elevation for sensitive admin operations (see `docs/totp-elevation.md`).
+
 ## Configuration
 
 ### Environment Variables

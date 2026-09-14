@@ -37,7 +37,7 @@ import os
 from fastapi.testclient import TestClient
 
 from code_indexer.server.app import create_app
-from tests.e2e.server.conftest import AdminTokenProvider
+from tests.e2e.server.conftest import AdminTokenProvider, preserve_root_logging_handlers
 from tests.e2e.server.mcp_helpers import call_mcp_tool
 from tests.unit.server.telemetry.otel_test_support import (
     active_application_metrics_singleton,
@@ -118,18 +118,19 @@ class TestLifespanRealStartupWiring:
             with active_application_metrics_singleton() as (app_metrics, _areader):
                 with active_job_metrics_singleton() as (job_metrics, _jreader):
                     fresh_app = create_app()
-                    with TestClient(fresh_app, raise_server_exceptions=False):
-                        assert fresh_app.state.application_metrics is app_metrics, (
-                            "lifespan.py must assign the REAL ApplicationMetrics "
-                            "singleton it resolves from actual startup config -- "
-                            "not a private test-injected replacement"
-                        )
-                        assert fresh_app.state.application_metrics.is_active is True
-                        assert fresh_app.state.job_metrics is job_metrics, (
-                            "lifespan.py must assign the REAL JobMetrics "
-                            "singleton it resolves from actual startup config"
-                        )
-                        assert fresh_app.state.job_metrics.is_active is True
+                    with preserve_root_logging_handlers():
+                        with TestClient(fresh_app, raise_server_exceptions=False):
+                            assert fresh_app.state.application_metrics is app_metrics, (
+                                "lifespan.py must assign the REAL ApplicationMetrics "
+                                "singleton it resolves from actual startup config -- "
+                                "not a private test-injected replacement"
+                            )
+                            assert fresh_app.state.application_metrics.is_active is True
+                            assert fresh_app.state.job_metrics is job_metrics, (
+                                "lifespan.py must assign the REAL JobMetrics "
+                                "singleton it resolves from actual startup config"
+                            )
+                            assert fresh_app.state.job_metrics.is_active is True
         finally:
             if previous_data_dir is None:
                 os.environ.pop("CIDX_SERVER_DATA_DIR", None)

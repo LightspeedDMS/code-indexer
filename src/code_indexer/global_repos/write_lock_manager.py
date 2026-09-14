@@ -580,3 +580,88 @@ class WriteLockManager:
             return True
 
         return False
+
+
+def describe_lock_holder(lock_manager: Any, alias: str) -> str:
+    """
+    Format a human-readable description of who currently holds the write
+    lock for *alias* (Bug #1842 AC4).
+
+    Before this fix, contention diagnostics (meta_description_hook.py's
+    LifecycleLockUnavailableError text, dependency_map_service.py's
+    "held by another writer" skip logs) named only the FAILED CALLER's
+    own hardcoded owner_name (e.g. "(owner='lifecycle_writer')")
+    regardless of who actually held the lock -- actively misleading when
+    the real holder was a different owner (e.g.
+    'dependency_map_service' running a real multi-domain Claude CLI
+    analysis). This helper reads the REAL current holder via
+    ``lock_manager.get_lock_info(alias)`` and renders owner + hold
+    duration (when available) instead.
+
+    Duck-typed against any object exposing ``get_lock_info(alias) ->
+    Optional[Dict]`` -- both ``WriteLockManager`` (file-based; includes
+    "pid" and "acquired_at") and ``AliasLockCoordinator`` (may be
+    DB-backed and omit both) satisfy this.
+
+    Never raises -- safe to interpolate directly into a log message or
+    exception text.
+    """
+    try:
+        info = lock_manager.get_lock_info(alias)
+    except Exception as exc:  # defensive: get_lock_info should not raise
+        return f"lock holder for {alias!r} could not be determined: {exc}"
+
+    if info is None:
+        return f"no live holder found for {alias!r} (lock recently released or expired)"
+
+    owner = info.get("owner", "unknown")
+    pid = info.get("pid")
+    acquired_at_str = info.get("acquired_at")
+
+    duration_str: Optional[str] = None
+    if acquired_at_str:
+        try:
+            acquired_at = datetime.fromisoformat(acquired_at_str)
+            if acquired_at.tzinfo is None:
+                acquired_at = acquired_at.replace(tzinfo=timezone.utc)
+            elapsed = (datetime.now(timezone.utc) - acquired_at).total_seconds()
+            duration_str = f"{elapsed:.1f}s"
+        except (ValueError, TypeError):
+            duration_str = None
+
+    parts = [f"held by owner={owner!r}"]
+    if duration_str is not None:
+        parts.append(f"for {duration_str}")
+    else:
+        parts.append("(hold duration unknown)")
+    if pid is not None:
+        parts.append(f"(pid={pid})")
+
+    return " ".join(parts)
+
+
+def describe_scheduler_lock_holder(scheduler: Any, alias: str) -> str:
+    """
+    Best-effort description of who holds the write lock for *alias*, via a
+    RefreshScheduler-like object (Bug #1842 AC4).
+
+    Callers that acquire/release locks through
+    scheduler.acquire_write_lock()/release_write_lock() (rather than
+    holding a direct reference to the underlying lock manager) use this to
+    build an honest contention diagnostic naming the REAL holder, instead
+    of only their own attempted owner_name. Resolves
+    scheduler.write_lock_manager (the actual WriteLockManager /
+    AliasLockCoordinator instance a RefreshScheduler wraps) and delegates
+    to describe_lock_holder().
+
+    Never raises -- returns a generic message when *scheduler* exposes no
+    write_lock_manager attribute, or when resolving the holder itself
+    fails for any reason (including a raising attribute lookup).
+    """
+    try:
+        write_lock_manager = getattr(scheduler, "write_lock_manager", None)
+        if write_lock_manager is None:
+            return "holder unknown (scheduler exposes no write_lock_manager)"
+        return describe_lock_holder(write_lock_manager, alias)
+    except Exception as exc:  # defensive: resolving the holder should not raise
+        return f"lock holder for {alias!r} could not be determined: {exc}"

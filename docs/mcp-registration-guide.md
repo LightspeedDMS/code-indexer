@@ -56,8 +56,8 @@ Response:
 ```json
 {
   "credential_id": "cred-abc123",
-  "client_id": "mcp_de387f5e1139f53414a1ff56c68f476f",
-  "client_secret": "mcp_sec_8db2b89ab1d01eb898874af8d26c30c154c1bb...",
+  "client_id": "mcp_<32-hex-characters>",
+  "client_secret": "mcp_sec_<64-hex-characters>",
   "name": "my-workstation",
   "created_at": "2026-03-02T10:00:00Z"
 }
@@ -184,7 +184,7 @@ The header value is `Basic ` followed by a base64 encoding of
 `CLIENT_ID:CLIENT_SECRET`:
 
 ```bash
-echo -n "mcp_de387f5e1139f53414a1ff56c68f476f:mcp_sec_8db2b89ab1d01eb898874af8d26c30c154c1bb3b9d56dafe11fff7c33afad39b" | base64
+echo -n "$CLIENT_ID:$CLIENT_SECRET" | base64
 ```
 
 The output is a single base64 string (no newlines) that goes into the
