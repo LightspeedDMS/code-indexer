@@ -40,11 +40,28 @@ pub use handle::GraphHandle;
 /// Plain Rust `fn` pointers (not `extern "C"`/`#[repr(C)]`) deliberately
 /// continue the SAME calling convention `dynlib.rs`'s
 /// `EvaluateNodeFn = fn(&OwnedNode) -> Vec<EvalFinding>` already uses at
-/// this crate's one existing dylib boundary: both sides are compiled by the
-/// identical rustc invocation (verified via `XRAY_ABI_VERSION` and the
-/// recorded `rustc_version`, Bug #1784), so the plain Rust ABI is already a
-/// proven-safe convention here. Introducing a second, C-shaped convention
-/// alongside it would duplicate that safety reasoning for no new guarantee
+/// this crate's one existing dylib boundary. This is NOT because "both
+/// sides are compiled by the identical rustc invocation, verified via
+/// `XRAY_ABI_VERSION` and the recorded `rustc_version`" -- that reasoning
+/// is circular (Bug #1855 review): the probe that is supposed to ESTABLISH
+/// compatibility cannot itself presume compatibility, and re-checking
+/// `XRAY_ABI_VERSION`/`rustc_version` cannot rescue it either, since
+/// `compute_cache_identity`'s `rustc_version` is pinned to the toolchain
+/// channel and therefore reads the identical value on both sides of a
+/// genuine host/evaluator mismatch -- it structurally cannot detect the
+/// failure mode this doc comment used to claim it ruled out.
+///
+/// The real reason the plain Rust ABI is safe here: `GraphHandle`/
+/// `FactsHandle` accessors, like every data-carrying dylib callback, are
+/// only ever reached AFTER `dynlib.rs`'s loader has ALREADY verified
+/// compatibility through a probe (`xray_abi_version`, then
+/// `xray_rustc_version_ptr`/`_len`) that is itself `extern "C"` -- a fixed,
+/// documented calling convention chosen (Bug #1855, H1) specifically so
+/// that probe does not need to presume the very compatibility it exists to
+/// prove. Once that probe passes, the plain Rust ABI is a proven-safe
+/// convention for THIS SPECIFIC loaded `.so`, not an assumed one.
+/// Introducing a second, C-shaped convention for these accessors
+/// themselves would duplicate that safety reasoning for no new guarantee
 /// (Rule 4, anti-duplication) and would be a larger, unrequested redesign
 /// than this ABI slice calls for (Rule 9, anti-divergent-creativity).
 pub mod handle {

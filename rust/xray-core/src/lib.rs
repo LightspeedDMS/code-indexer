@@ -14,3 +14,9 @@ pub mod dynlib;
 // ship in the production binary.
 #[cfg(test)]
 mod preamble_ac18_parity;
+// Bug #1855: fails `cargo test` loudly if the three-way rustc toolchain pin
+// (root rust-toolchain.toml, rust/rust-toolchain.toml, CI's
+// dtolnay/rust-toolchain ref) ever drifts apart. Test-only, same rationale
+// as preamble_ac18_parity above.
+#[cfg(test)]
+mod toolchain_sync_parity;

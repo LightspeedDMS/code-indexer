@@ -112,6 +112,7 @@ pub const XRAY_ABI_VERSION: u64 = 10;
 /// what makes `XRAY_ABI_VERSION` the ONE source of truth instead of a value
 /// duplicated as text inside PREAMBLE (Bug #1784 review MAJOR-3).
 const ABI_VERSION_PLACEHOLDER: &str = "__XRAY_ABI_VERSION_PLACEHOLDER__";
+const RUSTC_VERSION_PLACEHOLDER: &str = "__XRAY_RUSTC_VERSION_PLACEHOLDER__";
 
 /// Result of a successful compilation.
 #[derive(Debug)]
@@ -173,6 +174,7 @@ pub(crate) const PREAMBLE: &str = r#"
 /// (compiler::XRAY_ABI_VERSION) by assemble_evaluator_source_with_preamble
 /// before every compile (Bug #1784 review MAJOR-3).
 const XRAY_ABI_VERSION: u64 = __XRAY_ABI_VERSION_PLACEHOLDER__;
+const XRAY_RUSTC_VERSION: &[u8] = b"__XRAY_RUSTC_VERSION_PLACEHOLDER__";
 
 use std::sync::Arc;
 
@@ -275,9 +277,36 @@ pub fn xray_evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> {
     evaluate_node(node)
 }
 
+/// Bug #1855 (H1): the compatibility probe itself must be ABI-stable BY
+/// CONSTRUCTION, not by convention. These three exports are the ONLY
+/// symbols the dynlib loader calls before compatibility between the host
+/// and this compiled evaluator has been established (xray_abi_version
+/// first, then the rustc_version ptr/len pair) -- so they cannot rely on
+/// "both sides happened to use the same rustc" the way the DATA-carrying
+/// callbacks below (xray_evaluate_node above; xray_collect_facts/
+/// xray_analyze_graph/xray_refine in GRAPH_EPILOGUE) legitimately can,
+/// since those only ever run AFTER this probe has already proven it. Using
+/// `extern "C"` pins a fixed, documented calling convention across the
+/// dylib boundary instead of Rust's own unstable-across-compiler-versions
+/// ABI, removing the one case where this codebase asked the plain Rust ABI
+/// to prove its own precondition.
 #[no_mangle]
-pub fn xray_abi_version() -> u64 {
+pub extern "C" fn xray_abi_version() -> u64 {
     XRAY_ABI_VERSION
+}
+
+/// Raw pointer half of the evaluator's embedded rustc version string,
+/// read by the host loader BEFORE compatibility is established (H1).
+#[no_mangle]
+pub extern "C" fn xray_rustc_version_ptr() -> u64 {
+    XRAY_RUSTC_VERSION.as_ptr() as u64
+}
+
+/// Length half of the evaluator's embedded rustc version string,
+/// read by the host loader BEFORE compatibility is established (H1).
+#[no_mangle]
+pub extern "C" fn xray_rustc_version_len() -> u64 {
+    XRAY_RUSTC_VERSION.len() as u64
 }
 
 #[no_mangle]
@@ -504,9 +533,27 @@ pub fn xray_analyze_graph(g: &GraphHandle<'_>, facts: &FactsHandle<'_>) -> Optio
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| analyze_graph(g, facts))).ok()
 }
 
+/// Bug #1855 (H1): same rationale as EPILOGUE's identical trio -- see that
+/// doc comment. Duplicated (not shared) because EPILOGUE and GRAPH_EPILOGUE
+/// are independent string constants assembled into disjoint evaluator
+/// sources.
 #[no_mangle]
-pub fn xray_abi_version() -> u64 {
+pub extern "C" fn xray_abi_version() -> u64 {
     XRAY_ABI_VERSION
+}
+
+/// Raw pointer half of the evaluator's embedded rustc version string,
+/// read by the host loader BEFORE compatibility is established (H1).
+#[no_mangle]
+pub extern "C" fn xray_rustc_version_ptr() -> u64 {
+    XRAY_RUSTC_VERSION.as_ptr() as u64
+}
+
+/// Length half of the evaluator's embedded rustc version string,
+/// read by the host loader BEFORE compatibility is established (H1).
+#[no_mangle]
+pub extern "C" fn xray_rustc_version_len() -> u64 {
+    XRAY_RUSTC_VERSION.len() as u64
 }
 
 #[no_mangle]
@@ -561,7 +608,11 @@ fn assemble_evaluator_source_with_preamble(preamble: &str, user_code: &str) -> S
 /// `ABI_VERSION_PLACEHOLDER` in `preamble`, then wraps `user_code` between
 /// `preamble` and the caller-selected `epilogue`.
 fn assemble_with_epilogue(preamble: &str, user_code: &str, epilogue: &str) -> String {
-    let resolved_preamble = preamble.replace(ABI_VERSION_PLACEHOLDER, &XRAY_ABI_VERSION.to_string());
+    let rustc_version = cache::get_rustc_version();
+    let escaped_rustc_version = rustc_version.escape_default().to_string();
+    let resolved_preamble = preamble
+        .replace(ABI_VERSION_PLACEHOLDER, &XRAY_ABI_VERSION.to_string())
+        .replace(RUSTC_VERSION_PLACEHOLDER, &escaped_rustc_version);
     format!("{}\n// ---- USER CODE ----\n{}\n// ---- END USER CODE ----\n{}", resolved_preamble, user_code, epilogue)
 }
 
@@ -1100,6 +1151,11 @@ pub struct CacheIdentityInfo {
 /// Compute identity info from an already-assembled source string (avoids
 /// re-assembling when the caller already has it, e.g. compile_evaluator).
 pub fn cache_identity_info_from_source(assembled_source: &str) -> CacheIdentityInfo {
+    // Deliberately identify the evaluator artifact with the pinned compiler
+    // that builds it. Host compatibility is checked separately by the loader
+    // against the build-time host version exported by build.rs; mixing that
+    // host value into this artifact identity would not replace the required
+    // hard loader check.
     let rustc_version = cache::get_rustc_version();
     let source_hash = sha256_hex(assembled_source);
     let identity = compute_cache_identity(assembled_source, XRAY_ABI_VERSION, &rustc_version);
