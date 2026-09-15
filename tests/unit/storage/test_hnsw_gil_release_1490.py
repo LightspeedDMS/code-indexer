@@ -53,6 +53,7 @@ HNSW/BF indexes) and therefore excluded from fast-automation.sh by its
 `PYTHONPATH=./src pytest tests/unit/storage/test_hnsw_gil_release_1490.py -v`.
 """
 
+import sys
 import threading
 import time
 from pathlib import Path
@@ -251,16 +252,26 @@ _HELPER_TEST_PROPAGATE_MAX_ATTEMPTS = 3
 
 
 class TestCalibrateAndMeasureHelperRetryBehavior:
-    def test_grows_target_and_retries_until_min_call_seconds_met(self):
+    def test_grows_target_and_retries_until_min_call_seconds_met(self, monkeypatch):
         attempted_targets = []
 
         def _build(target):
             attempted_targets.append(target)
 
             def _do():
-                time.sleep(target * _HELPER_TEST_SLEEP_SECONDS_PER_TARGET_UNIT)
+                pass
 
             return _do
+
+        def _deterministic_measure(blocking_fn, *, min_call_seconds):
+            del blocking_fn, min_call_seconds
+            if attempted_targets[-1] == _HELPER_TEST_INITIAL_TARGET:
+                raise AssertionError("too fast to meaningfully exercise")
+            return 0.001, 0.04
+
+        monkeypatch.setattr(
+            sys.modules[__name__], "_max_recorder_gap", _deterministic_measure
+        )
 
         max_gap, call_duration = _calibrate_and_measure(
             _build,
@@ -274,12 +285,12 @@ class TestCalibrateAndMeasureHelperRetryBehavior:
         assert isinstance(max_gap, float)
         assert isinstance(call_duration, float)
         assert call_duration >= _HELPER_TEST_RETRY_MIN_CALL_SECONDS
-        assert len(attempted_targets) >= 2, (
-            "expected at least one retry with a grown target since the "
-            "initial target is under the floor"
-        )
-        assert all(b > a for a, b in zip(attempted_targets, attempted_targets[1:])), (
-            "target must grow strictly on every retry"
+        assert attempted_targets == [
+            _HELPER_TEST_INITIAL_TARGET,
+            int(_HELPER_TEST_INITIAL_TARGET * _HELPER_TEST_GROWTH_FACTOR),
+        ], (
+            "every target that is too small must be followed by one grown "
+            "target before calibration returns"
         )
 
     def test_succeeds_on_first_attempt_without_retry_when_already_slow_enough(self):

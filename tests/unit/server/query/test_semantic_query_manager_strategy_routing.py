@@ -20,6 +20,7 @@ import os
 import pytest
 import tempfile
 import shutil
+import threading
 from datetime import datetime, timezone
 from unittest.mock import MagicMock, patch
 
@@ -1218,6 +1219,31 @@ class TestHealthGatedParallelDispatch:
 # Story #619 Gap 3: as_completed timeout handling tests
 # ---------------------------------------------------------------------------
 
+# Bug #1866: generous bound for release_event.wait() in _make_blocked_search
+# -- never expected to actually elapse (the event is always set in a
+# `finally`), just a safety net against a hung test.
+_PROVIDER_RELEASE_TIMEOUT_SECONDS = 10.0
+
+
+def _timeout_raising_as_completed(futures, timeout=None):
+    """Bug #1866: raises TimeoutError unconditionally -- stands in for a
+    real as_completed() deadline without waiting out the real timeout."""
+    import concurrent.futures
+
+    raise concurrent.futures.TimeoutError("simulated timeout")
+
+
+def _make_blocked_search(release_event: threading.Event):
+    """Bug #1866: provider fn that never returns until release_event is
+    set, so a caller can deterministically keep futures unfinished."""
+
+    def blocked_search(**kwargs):
+        finished = release_event.wait(timeout=_PROVIDER_RELEASE_TIMEOUT_SECONDS)
+        assert finished, "test bug: release_event was never set"
+        return []
+
+    return blocked_search
+
 
 class TestAsCompletedTimeout:
     """Tests that TimeoutError from as_completed is handled gracefully (Story #619 Gap 3)."""
@@ -1235,44 +1261,45 @@ class TestAsCompletedTimeout:
         ProviderHealthMonitor.reset_instance()
 
     def test_as_completed_timeout_with_all_providers_unfinished_raises(self):
-        """TimeoutError from as_completed, with every dispatched provider
-        still unfinished, must surface as a real error (Bug #1760) --
-        NOT be silently swallowed into an empty-but-"successful" result.
-        A total dispatch failure (every provider timed out, none produced
-        results) is indistinguishable from a genuine zero-match query
-        unless it raises."""
-        import concurrent.futures
-
+        """TimeoutError from as_completed, with every provider still
+        unfinished, must surface as a real error (Bug #1760), never a
+        silent empty "successful" result. Bug #1866: providers are
+        blocked on an Event so this is deterministic, not a scheduler
+        race (future.cancel() is a no-op on an already-running future,
+        so the blocked worker must be released in `finally` or it leaks
+        into later tests)."""
         from code_indexer.server.query.semantic_query_manager import (
             SemanticQueryError,
         )
 
         manager = _make_manager()
+        release_providers = threading.Event()
 
-        def fake_search(**kwargs):
-            return []
-
-        def raising_as_completed(futures, timeout=None):
-            raise concurrent.futures.TimeoutError("simulated timeout")
-
-        with (
-            patch.object(manager, "_search_with_provider", side_effect=fake_search),
-            patch.object(manager, "_both_providers_configured", return_value=True),
-            patch(
-                "code_indexer.server.query.semantic_query_manager.as_completed",
-                side_effect=raising_as_completed,
-            ),
-        ):
-            with pytest.raises(SemanticQueryError):
-                manager._search_single_repository(
-                    repo_path=self.repo_path,
-                    repository_alias="test-repo",
-                    query_text="auth",
-                    limit=10,
-                    min_score=None,
-                    file_extensions=None,
-                    query_strategy="parallel",
-                )
+        try:
+            with (
+                patch.object(
+                    manager,
+                    "_search_with_provider",
+                    side_effect=_make_blocked_search(release_providers),
+                ),
+                patch.object(manager, "_both_providers_configured", return_value=True),
+                patch(
+                    "code_indexer.server.query.semantic_query_manager.as_completed",
+                    side_effect=_timeout_raising_as_completed,
+                ),
+            ):
+                with pytest.raises(SemanticQueryError):
+                    manager._search_single_repository(
+                        repo_path=self.repo_path,
+                        repository_alias="test-repo",
+                        query_text="auth",
+                        limit=10,
+                        min_score=None,
+                        file_extensions=None,
+                        query_strategy="parallel",
+                    )
+        finally:
+            release_providers.set()
 
 
 # ---------------------------------------------------------------------------

@@ -125,6 +125,19 @@ class ProgressiveMetadata:
         )
         self._save_metadata()
 
+    def start_fresh_indexing(
+        self, provider_name: str, model_name: str, git_status: Dict[str, Any]
+    ):
+        """Start a new run after discarding the prior run's file tracking.
+
+        Resume has a separate ``resume_indexing`` transition because it must
+        retain the prior run's file list and cursor.  Fresh runs use this
+        transition explicitly so a completed status can never be persisted
+        alongside another run's resumability fields.
+        """
+        self._reset_file_tracking()
+        self.start_indexing(provider_name, model_name, git_status)
+
     def update_progress(
         self, files_processed: int = 0, chunks_added: int = 0, failed_files: int = 0
     ):
@@ -282,6 +295,18 @@ class ProgressiveMetadata:
             "last_commit_check_timestamp": 0.0,
         }
         self._save_metadata()
+
+    def _reset_file_tracking(self) -> None:
+        """Discard file tracking belonging to a prior indexing run."""
+        self.metadata.update(
+            {
+                "total_files_to_index": 0,
+                "files_to_index": [],
+                "completed_files": [],
+                "failed_file_paths": [],
+                "current_file_index": 0,
+            }
+        )
 
     def set_files_to_index(self, file_paths: list) -> None:
         """Set the complete list of files to be indexed for resumability.
