@@ -31,7 +31,7 @@ from code_indexer.xray.search_engine import XRaySearchEngine
 
 from . import _utils
 from ._utils import _mcp_response, _parse_json_string_array
-from .xray import _lazy_singleton_app_or_none
+from .xray import _lazy_singleton_app_or_none, _resolve_evaluator_code
 from code_indexer.server.services.query_admission_gate import (
     check_query_admission,
     memory_pressure_mcp_payload,
@@ -91,35 +91,38 @@ def resolve_batch_evaluator(
     raw_code: str = (scan.get("evaluator_code") or "").strip()
     pattern_name: Optional[str] = scan.get("pattern_name") or None
 
-    if raw_code:
-        return (raw_code, None)
-
-    if pattern_name:
-        from code_indexer.server.services.xray_pattern_service import XrayPatternService
-
-        # Build a service that reads from the captured cidx_meta_path.
-        # Pass refresh_scheduler=None so no live scheduler dependency.
-        svc = XrayPatternService(cidx_meta_path, refresh_scheduler=None)
-        try:
-            evaluator_code, _ = svc.resolve_and_prepare_pattern(
-                repo_alias=repo_alias,
-                pattern_name=pattern_name,
-                pattern_params=scan.get("pattern_params") or None,
-            )
-            return (evaluator_code, None)
-        except ValueError as exc:
-            error_key = str(exc).split(":")[0]
-            return (
-                "",
-                {"error": error_key, "message": str(exc)},
-            )
-        except Exception as exc:  # noqa: BLE001
-            return (
-                "",
-                {"error": "pattern_load_error", "message": str(exc)},
-            )
-
-    return (_DEFAULT_EVALUATOR_CODE, None)
+    # Keep batch pattern resolution on the same resolver as xray_search and
+    # xray_explore. The explicit cidx_meta_path preserves this helper's
+    # captured-worker-path contract while the shared resolver owns the
+    # ADR-001 legacy-mode check and all pattern lookup/error mapping.
+    params = {
+        "evaluator_code": raw_code or None,
+        "pattern_name": pattern_name,
+        "pattern_params": scan.get("pattern_params") or None,
+    }
+    try:
+        evaluator_code, error_response = _resolve_evaluator_code(
+            params,
+            repo_alias,
+            allow_default_evaluator=True,
+            expected_execution_mode="legacy",
+            cidx_meta_path=cidx_meta_path,
+        )
+    except Exception as exc:  # noqa: BLE001
+        return (
+            "",
+            {"error": "pattern_load_error", "message": str(exc)},
+        )
+    if error_response is None:
+        return (evaluator_code, None)
+    try:
+        error_payload = json.loads(error_response["content"][0]["text"])
+    except (KeyError, IndexError, TypeError, json.JSONDecodeError) as exc:
+        return (
+            "",
+            {"error": "pattern_load_error", "message": str(exc)},
+        )
+    return ("", cast(Dict[str, Any], error_payload))
 
 
 # ---------------------------------------------------------------------------

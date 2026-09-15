@@ -24,7 +24,7 @@ use super::candidate::Candidate;
 use super::code_graph::CodeGraph;
 use super::wire_cursor::{invalid, read_count_capped, take};
 use crate::graph::budget::AnalysisCompleteness;
-use crate::graph::extract::local_index::Visibility;
+use crate::graph::extract::local_index::{DeclarationKind, Visibility};
 use std::io::{self, Write};
 use std::path::Path;
 
@@ -39,7 +39,15 @@ use std::path::Path;
 /// Safe in practice because this file is a same-invocation parent/child
 /// handoff (`--graph-out` written and `--graph-in` read by the SAME `cidx`
 /// command), never a cross-run persistent cache -- see module docs.
-const MAGIC: &[u8; 8] = b"XRAYGRF2";
+///
+/// Bug #1858: bumped again, `XRAYGRF2` -> `XRAYGRF3`, for the identical
+/// reason -- a new mandatory section (per-symbol `DeclarationKind`) is
+/// added between visibility and the completeness byte, so a
+/// pre-#1858-written file must fail the magic check below rather than be
+/// silently misparsed (its bytes would otherwise be read as if they were
+/// the completeness byte). Same safety argument as the #1835 bump: this
+/// is a same-invocation parent/child handoff, never a persistent cache.
+const MAGIC: &[u8; 8] = b"XRAYGRF3";
 /// `from`(4) + `file`(4) + `line`(4) + `kind`(1) + `cand_start`(4) + `cand_len`(2).
 const REFERENCE_RECORD_MIN_BYTES: usize = 19;
 /// `symbol`(4) + `reasons`(2).
@@ -52,13 +60,15 @@ const SYMBOL_RECORD_MIN_BYTES: usize = 9;
 const SIGNATURE_RECORD_MIN_BYTES: usize = 8;
 /// `dense_id`(4) + `visibility`(1).
 const VISIBILITY_RECORD_MIN_BYTES: usize = 5;
+/// `dense_id`(4) + `kind`(1).
+const KIND_RECORD_MIN_BYTES: usize = 5;
 
 /// Writes `graph` to `path` in the AC7 wire format. Sections, in order:
 /// magic, references, candidates (recomputed from `candidates_for` in
 /// reference order -- see module docs on why that reconstructs the exact
 /// original flat arena), interned strings, interned symbols, referenced
 /// bits, per-symbol cached signatures, per-symbol visibility (Story
-/// #1835), completeness byte.
+/// #1835), per-symbol declaration kind (Bug #1858), completeness byte.
 pub fn write_graph_file(graph: &CodeGraph, path: &Path) -> io::Result<()> {
     let mut w = io::BufWriter::new(std::fs::File::create(path)?);
     w.write_all(MAGIC)?;
@@ -67,6 +77,7 @@ pub fn write_graph_file(graph: &CodeGraph, path: &Path) -> io::Result<()> {
     write_symbols_and_referenced_bits(&mut w, graph)?;
     write_signatures(&mut w, graph)?;
     write_visibilities(&mut w, graph)?;
+    write_kinds(&mut w, graph)?;
     w.write_all(&[completeness_to_byte(graph.completeness())])?;
     w.flush()
 }
@@ -163,6 +174,36 @@ fn visibility_to_byte(v: Visibility) -> u8 {
     }
 }
 
+/// Bug #1858: mirrors `write_visibilities` exactly, but for `kind_for` --
+/// only writes entries with a KNOWN kind. A dense id absent from this
+/// section decodes back to `None` via `CodeGraph::kind_for` on read, the
+/// identical "absent means the safe default" contract `signature_for` and
+/// `write_visibilities` already use.
+fn write_kinds(w: &mut impl Write, graph: &CodeGraph) -> io::Result<()> {
+    let mut present: Vec<(u32, DeclarationKind)> = Vec::new();
+    for id in 0..graph.symbol_count() as u32 {
+        if let Some(kind) = graph.kind_for(id) {
+            present.push((id, kind));
+        }
+    }
+    w.write_all(&(present.len() as u64).to_le_bytes())?;
+    for (id, kind) in present {
+        w.write_all(&id.to_le_bytes())?;
+        w.write_all(&[kind_to_byte(kind)])?;
+    }
+    Ok(())
+}
+
+fn kind_to_byte(k: DeclarationKind) -> u8 {
+    match k {
+        DeclarationKind::Type => 0,
+        DeclarationKind::Method => 1,
+        DeclarationKind::Field => 2,
+        DeclarationKind::Constant => 3,
+        DeclarationKind::Package => 4,
+    }
+}
+
 /// One decoded reference record, not yet placed through
 /// `CodeGraphBuilder::add_reference` (which recomputes `cand_start`/
 /// `cand_len` for the NEW arena) -- `cand_start`/`cand_len` here only
@@ -252,6 +293,7 @@ fn read_strings_symbols_and_signatures(data: &[u8], pos: &mut usize, builder: &m
         builder.add_signature(dense_id, sig.to_string());
     }
     read_visibilities(data, pos, builder, symbol_count)?;
+    read_kinds(data, pos, builder, symbol_count)?;
     Ok(symbol_count)
 }
 
@@ -281,6 +323,37 @@ fn visibility_from_byte(b: u8) -> Option<Visibility> {
         1 => Some(Visibility::Protected),
         2 => Some(Visibility::Private),
         3 => Some(Visibility::Unknown),
+        _ => None,
+    }
+}
+
+/// Bug #1858: mirrors the visibility-reading loop directly above, but for
+/// the kind section `write_kinds` appends right after visibility. Rejects
+/// a `kind` byte outside `kind_from_byte`'s known range and a `dense_id`
+/// outside the decoded symbol table -- the same two corruption checks the
+/// visibility loop already applies.
+fn read_kinds(data: &[u8], pos: &mut usize, builder: &mut CodeGraphBuilder, symbol_count: usize) -> io::Result<()> {
+    use std::mem::size_of;
+    let kind_count = read_count_capped(data, pos, KIND_RECORD_MIN_BYTES)?;
+    for _ in 0..kind_count {
+        let dense_id = u32::from_le_bytes(take(data, pos, size_of::<u32>())?.try_into().unwrap());
+        if dense_id as usize >= symbol_count {
+            return Err(invalid("kind dense_id outside decoded symbol table"));
+        }
+        let byte = take(data, pos, size_of::<u8>())?[0];
+        let kind = kind_from_byte(byte).ok_or_else(|| invalid(&format!("corrupt kind byte: {byte}")))?;
+        builder.add_kind(dense_id, kind);
+    }
+    Ok(())
+}
+
+fn kind_from_byte(b: u8) -> Option<DeclarationKind> {
+    match b {
+        0 => Some(DeclarationKind::Type),
+        1 => Some(DeclarationKind::Method),
+        2 => Some(DeclarationKind::Field),
+        3 => Some(DeclarationKind::Constant),
+        4 => Some(DeclarationKind::Package),
         _ => None,
     }
 }
@@ -427,13 +500,17 @@ mod tests {
     /// real CLI invocation.
     #[test]
     fn visibility_round_trips_through_a_real_file_via_mmap() {
-        use crate::graph::extract::local_index::Visibility;
+        use crate::graph::extract::local_index::{DeclarationKind, Visibility};
 
         let mut builder = CodeGraphBuilder::with_candidate_capacity(0);
         let unreferenced_private = builder.intern_symbol(make_symbol_id(2, 0));
         let unreferenced_public = builder.intern_symbol(make_symbol_id(2, 1));
         builder.add_visibility(unreferenced_private, Visibility::Private);
         builder.add_visibility(unreferenced_public, Visibility::Public);
+        // Bug #1858: attach the tracked-reference kind real production
+        // always writes, so the dead-code verdict below isn't suppressed.
+        builder.add_kind(unreferenced_private, DeclarationKind::Method);
+        builder.add_kind(unreferenced_public, DeclarationKind::Method);
         let original = builder.build();
 
         let dir = tempfile::tempdir().unwrap();
@@ -452,6 +529,43 @@ mod tests {
             reloaded.is_definitely_dead_code(public_dense),
             None,
             "a Public symbol must stay undecidable after the wire round trip too"
+        );
+    }
+
+    /// Bug #1858: mirrors `visibility_round_trips_through_a_real_file_via_mmap`
+    /// exactly, but for `kind_for` -- the same `--graph-out`/`--graph-in`
+    /// parent/child handoff is the ONLY place `analyze_graph` ever actually
+    /// reads a `CodeGraph` from in production, so if declaration kind
+    /// silently disappeared across this file boundary, the Bug #1858 fix
+    /// would work in every in-process unit test and still be dead on
+    /// arrival for any real CLI invocation.
+    #[test]
+    fn kind_round_trips_through_a_real_file_via_mmap() {
+        use crate::graph::extract::local_index::DeclarationKind;
+
+        let mut builder = CodeGraphBuilder::with_candidate_capacity(0);
+        let field_symbol = builder.intern_symbol(make_symbol_id(3, 0));
+        let method_symbol = builder.intern_symbol(make_symbol_id(3, 1));
+        builder.add_kind(field_symbol, DeclarationKind::Field);
+        builder.add_kind(method_symbol, DeclarationKind::Method);
+        let original = builder.build();
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("graph_kind.bin");
+        write_graph_file(&original, &path).expect("write must succeed");
+        let reloaded = read_graph_file(&path).expect("read must succeed");
+
+        let field_dense = reloaded.dense_id_for(make_symbol_id(3, 0)).unwrap();
+        let method_dense = reloaded.dense_id_for(make_symbol_id(3, 1)).unwrap();
+        assert_eq!(
+            reloaded.kind_for(field_dense),
+            Some(DeclarationKind::Field),
+            "a Field symbol's declaration kind must survive the wire round trip"
+        );
+        assert_eq!(
+            reloaded.kind_for(method_dense),
+            Some(DeclarationKind::Method),
+            "a Method symbol's declaration kind must survive the wire round trip too"
         );
     }
 }

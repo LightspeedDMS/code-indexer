@@ -81,6 +81,7 @@ async def test_xray_search_pattern_resolution_runs_on_the_dedicated_xray_executo
         repo_alias: str,
         default_evaluator: str = "",
         allow_default_evaluator: bool = False,
+        expected_execution_mode: str = "",
     ):
         captured["thread_name"] = threading.current_thread().name
         # Short-circuit the handler immediately after this call via a real
@@ -134,6 +135,12 @@ async def test_ensure_seed_patterns_and_pattern_resolution_run_off_the_event_loo
     def _fake_ensure_seed_patterns(self: XrayPatternService) -> None:
         captured["ensure_seed_patterns"] = threading.current_thread().name
 
+    def _fake_get_pattern_execution_mode(
+        self: XrayPatternService, repo_alias: str, pattern_name: str
+    ) -> str:
+        captured["get_pattern_execution_mode"] = threading.current_thread().name
+        return "legacy"
+
     def _fake_resolve_and_prepare_pattern(
         self: XrayPatternService,
         repo_alias: str,
@@ -150,6 +157,11 @@ async def test_ensure_seed_patterns_and_pattern_resolution_run_off_the_event_loo
         with (
             patch.object(
                 XrayPatternService, "ensure_seed_patterns", _fake_ensure_seed_patterns
+            ),
+            patch.object(
+                XrayPatternService,
+                "get_pattern_execution_mode",
+                _fake_get_pattern_execution_mode,
             ),
             patch.object(
                 XrayPatternService,
@@ -170,7 +182,11 @@ async def test_ensure_seed_patterns_and_pattern_resolution_run_off_the_event_loo
     finally:
         real_executor.shutdown(wait=True)
 
-    for label in ("ensure_seed_patterns", "resolve_and_prepare_pattern"):
+    for label in (
+        "ensure_seed_patterns",
+        "get_pattern_execution_mode",
+        "resolve_and_prepare_pattern",
+    ):
         assert label in captured, f"expected {label} to be called"
         _assert_offloaded_to_dedicated_executor(
             captured[label], main_thread_name, label

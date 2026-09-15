@@ -41,7 +41,13 @@ from code_indexer.server.auth.user_manager import User
 from code_indexer.xray.sandbox import validate_rust_evaluator
 
 from ._utils import _mcp_response
-from .xray import _get_xray_cell_limiter, _resolve_repo_path, _truncate_graph_result
+from .xray import (
+    _get_xray_cell_limiter,
+    _pattern_scope_alias,
+    _resolve_evaluator_code_off_loop,
+    _resolve_repo_path,
+    _truncate_graph_result,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -265,7 +271,12 @@ def _parse_analyze_graph_request(
 
     repo_alias = params.get("repository_alias", "")
     evaluator_code = params.get("evaluator_code", "")
-    if not isinstance(evaluator_code, str) or not isinstance(repo_alias, str):
+    pattern_name = params.get("pattern_name")
+    if (
+        not isinstance(evaluator_code, str)
+        or not isinstance(repo_alias, str)
+        or (pattern_name is not None and not isinstance(pattern_name, str))
+    ):
         return (
             "",
             "",
@@ -277,7 +288,7 @@ def _parse_analyze_graph_request(
                 "message": "repository_alias and evaluator_code must be strings",
             },
         )
-    if not evaluator_code:
+    if not evaluator_code and not pattern_name:
         return "", "", [], [], 0, {"error": "evaluator_code_required"}
     if not repo_alias:
         return "", "", [], [], 0, {"error": "repository_alias_required"}
@@ -391,6 +402,50 @@ async def _run_analyze_graph_pipeline(
         result = dict(result)
         result["truncated_by_max_files"] = True
         result["fact_graph_complete"] = False
+
+    # Bug #1860 (C2 remediation, #1858/#1859/#1860/#1861 changeset): an
+    # ok=true, status="ran_ok", findings=[] response reads as a clean bill
+    # of health, but when no candidate file ever reached a real extractor
+    # with a supported language, the analysis had nothing to analyse at
+    # all. Signal that distinctly via `status`, never via `ok` (nothing
+    # failed -- Rule: no conflating a degraded-but-successful run with an
+    # error).
+    #
+    # `files_with_unsupported_language` (recognized extension, no
+    # LanguageExtractor implemented -- e.g. `main.py`, since only Java has
+    # one) and `unreadable_or_unsupported_files` (genuinely unrecognized
+    # extension or an escaped path -- e.g. `README.md`) are DISJOINT
+    # per-file counters: `repo_index.rs::process_one_file` routes each
+    # candidate into at most one of them. The original condition compared
+    # only the first counter against the total file count, so it never
+    # fired once a repo contained files from BOTH buckets (#1860's own
+    # repro: files_with_unsupported_language=41,
+    # unreadable_or_unsupported_files=11, neither equal to the file
+    # count) -- exactly the shape almost every real repo has (source
+    # files alongside READMEs, configs, etc). The fix sums both buckets:
+    # "zero files reached the extractor with a supported language" is
+    # true precisely when every candidate file landed in one of the two.
+    #
+    # Genuine read/parse failures (`files_with_read_errors`,
+    # `files_with_parse_errors`, `files_with_extractor_panics`) are
+    # deliberately EXCLUDED from this sum -- those files have a
+    # recognized, supported-language extension (only Java has one, and
+    # only Java files can produce these) and did reach the extractor;
+    # their failure is a different, already independently signaled
+    # degradation, not "no supported files". A broken-but-Java repo is
+    # therefore never mislabelled `no_supported_files`.
+    if result.get("ok") is True and result.get("status") == "ran_ok" and file_paths:
+        degradation = result.get("degradation") or {}
+        unsupported_language_count = (
+            degradation.get("files_with_unsupported_language") or 0
+        )
+        unrecognized_extension_count = (
+            degradation.get("unreadable_or_unsupported_files") or 0
+        )
+        if unsupported_language_count + unrecognized_extension_count == len(file_paths):
+            result = dict(result)
+            result["status"] = "no_supported_files"
+
     return result
 
 
@@ -412,6 +467,9 @@ async def handle_analyze_graph(params: Dict[str, Any], user: User) -> Dict[str, 
         include_patterns_invalid /
         exclude_patterns_invalid         -- not a list of strings.
         timeout_seconds_invalid          -- not a finite number.
+        mutually_exclusive_params        -- evaluator_code and pattern_name
+                                             were supplied together.
+        pattern_mode_mismatch             -- stored pattern is not graph mode.
         xray_evaluator_validation_failed -- forbidden construct or missing entry point.
         repository_not_found             -- alias cannot be resolved.
         no_candidate_files               -- include/exclude patterns matched nothing.
@@ -429,6 +487,15 @@ async def handle_analyze_graph(params: Dict[str, Any], user: User) -> Dict[str, 
     ) = _parse_analyze_graph_request(params)
     if error is not None:
         return _mcp_response(error)
+
+    evaluator_code, resolution_error = await _resolve_evaluator_code_off_loop(
+        params,
+        _pattern_scope_alias(repo_alias),
+        allow_default_evaluator=False,
+        expected_execution_mode="graph",
+    )
+    if resolution_error is not None:
+        return resolution_error
 
     result = await _run_analyze_graph_pipeline(
         evaluator_code, repo_alias, include_patterns, exclude_patterns, timeout_seconds

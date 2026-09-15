@@ -11,7 +11,7 @@ use super::reference::Reference;
 use super::symbol_table::SymbolTable;
 use crate::graph::bind::depth::BinderDepth;
 use crate::graph::budget::{AnalysisCompleteness, ReferencedBits};
-use crate::graph::extract::local_index::Visibility;
+use crate::graph::extract::local_index::{DeclarationKind, Visibility};
 use crate::graph::identity::SymbolId;
 use crate::graph::string_table::StringTable;
 use std::collections::HashMap;
@@ -39,6 +39,13 @@ pub struct CodeGraph {
     /// `CodeGraphBuilder::visibilities`'s doc comment). A dense id absent
     /// here reads back as `Visibility::Unknown` via `visibility_for`.
     visibilities: HashMap<u32, Visibility>,
+    /// Bug #1858: per-symbol declared `DeclarationKind`, attached
+    /// unconditionally (never dropped under budget pressure, mirroring
+    /// `visibilities` exactly -- see `CodeGraphBuilder::kinds`'s doc
+    /// comment). A dense id absent here has no known kind at all -- see
+    /// `kind_for`'s doc comment for why that MUST be treated as unproven,
+    /// never as license to report a symbol dead.
+    kinds: HashMap<u32, DeclarationKind>,
     /// Dual-review defect M2 fix: CSR forward adjacency (callees), built
     /// ONCE here rather than re-scanned per query -- see `super::adjacency`
     /// module docs for why `callees_of`/`strongly_connected_components`
@@ -67,6 +74,7 @@ impl CodeGraph {
         referenced: ReferencedBits,
         signatures: HashMap<u32, String>,
         visibilities: HashMap<u32, Visibility>,
+        kinds: HashMap<u32, DeclarationKind>,
     ) -> Self {
         let forward_index = super::adjacency::AdjacencyIndex::build_forward(symbols.len(), &references, &candidates);
         let reverse_index = super::adjacency::AdjacencyIndex::build_reverse(symbols.len(), &references, &candidates);
@@ -80,6 +88,7 @@ impl CodeGraph {
             referenced,
             signatures,
             visibilities,
+            kinds,
             forward_index,
             reverse_index,
         }
@@ -104,6 +113,20 @@ impl CodeGraph {
     /// why `Unknown` is always the safe default, never a restricted one).
     pub fn visibility_for(&self, dense_symbol_id: u32) -> Visibility {
         self.visibilities.get(&dense_symbol_id).copied().unwrap_or(Visibility::Unknown)
+    }
+
+    /// Bug #1858: this symbol's extracted `DeclarationKind`, or `None` if
+    /// the extractor never recorded one. Unlike `visibility_for`, there is
+    /// no safe non-`Option` default to return here: `DeclarationKind` has
+    /// no `Unknown`/catch-all variant, and fabricating one (e.g. defaulting
+    /// to `Method`) would silently misclassify an absent entry as a
+    /// tracked-reference kind, letting `is_definitely_dead_code` report a
+    /// symbol of truly unknown kind as `Some(true)` on no evidence at all --
+    /// exactly the false-certainty failure mode this bug is about. `None`
+    /// here must be read the same way `is_definitely_dead_code` already
+    /// reads `Visibility::Unknown`: no evidence, so no confident verdict.
+    pub fn kind_for(&self, dense_symbol_id: u32) -> Option<DeclarationKind> {
+        self.kinds.get(&dense_symbol_id).copied()
     }
 
     /// AC6 step 1: this symbol's cached AC2 signature line, or `None` if
@@ -265,9 +288,23 @@ impl CodeGraph {
     /// `repo_index`), so a `Declaration` existing in this graph at all
     /// already implies its own file's extraction succeeded far enough to
     /// read its modifiers.
+    ///
+    /// Bug #1858 soundness floor: `Field` and `Constant` declarations are
+    /// deliberately never classified as definitely dead here. The current
+    /// extractor does not emit reference edges for their reads, so absence
+    /// of an inbound edge is not evidence that either declaration is dead.
+    /// Extracting field/constant references is deliberate future work: it
+    /// requires scope-aware handling of locals, parameters, implicit
+    /// `this`-field reads, and static imports, and is outside this narrowing.
     pub fn is_definitely_dead_code(&self, dense_symbol_id: u32) -> Option<bool> {
         if self.is_symbol_referenced(dense_symbol_id) {
             return Some(false);
+        }
+        // Only Method and Type references are currently tracked well enough
+        // for the visibility-based dead-code proof. Unknown kinds must remain
+        // undecidable rather than defaulting to a tracked kind.
+        if !matches!(self.kind_for(dense_symbol_id), Some(DeclarationKind::Method | DeclarationKind::Type)) {
+            return None;
         }
         if self.visibility_for(dense_symbol_id).is_provably_not_externally_visible() {
             return Some(true);
@@ -544,13 +581,20 @@ mod tests {
     /// story is that the function now tells them apart.
     #[test]
     fn is_definitely_dead_code_distinguishes_unreferenced_private_from_unreferenced_public_on_a_complete_graph() {
-        use crate::graph::extract::local_index::Visibility;
+        use crate::graph::extract::local_index::{DeclarationKind, Visibility};
 
         let mut builder = CodeGraphBuilder::with_candidate_capacity(0);
         let unreferenced_private = builder.intern_symbol(make_symbol_id(1, 0));
         let unreferenced_public = builder.intern_symbol(make_symbol_id(1, 1));
         builder.add_visibility(unreferenced_private, Visibility::Private);
         builder.add_visibility(unreferenced_public, Visibility::Public);
+        // Bug #1858: both symbols here represent methods, so they carry a
+        // tracked-reference kind -- real production code always attaches
+        // one (see `budget_bind::intern_declarations_and_attach_signatures`),
+        // and without it `is_definitely_dead_code` now correctly stays
+        // undecidable regardless of visibility.
+        builder.add_kind(unreferenced_private, DeclarationKind::Method);
+        builder.add_kind(unreferenced_public, DeclarationKind::Method);
         // Completeness defaults to `Complete`.
         let graph = builder.build();
 
@@ -565,6 +609,109 @@ mod tests {
             None,
             "an unreferenced PUBLIC symbol stays undecidable -- external callers are invisible \
              to this repo's graph by construction, exactly Bug #1833's jsoup Connection/Response case"
+        );
+    }
+
+    /// Bug #1858: field reads are not represented by inbound reference edges,
+    /// so an unreferenced private field must not be classified as definitely
+    /// dead. Keep the unreferenced private method in the same test so this
+    /// remains discriminating: tracked declaration kinds still get the dead
+    /// verdict. Turn 7 (codex) proved this RED against unmodified code using
+    /// only `add_visibility` -- `add_kind` did not exist yet. Turn 8 (claude)
+    /// extends it in place with real `add_kind` calls now that the
+    /// declaration-kind channel exists; this must STILL be red at this point
+    /// (`is_definitely_dead_code` does not consult kind yet -- that is turn
+    /// 9's job), for the identical reason as before.
+    #[test]
+    fn is_definitely_dead_code_does_not_claim_unreferenced_private_field_is_dead() {
+        use crate::graph::extract::local_index::{DeclarationKind, Visibility};
+
+        let mut builder = CodeGraphBuilder::with_candidate_capacity(0);
+        // Intended field: its source-level read cannot become an inbound edge
+        // with the current extractor, so the graph sees no reference here.
+        let private_field = builder.intern_symbol(make_symbol_id(1, 0));
+        // Intended method: genuinely unreferenced and tracked by the graph.
+        let private_method = builder.intern_symbol(make_symbol_id(1, 1));
+        builder.add_visibility(private_field, Visibility::Private);
+        builder.add_visibility(private_method, Visibility::Private);
+        builder.add_kind(private_field, DeclarationKind::Field);
+        builder.add_kind(private_method, DeclarationKind::Method);
+        let graph = builder.build();
+
+        assert_eq!(graph.is_definitely_dead_code(private_field), None);
+        assert_eq!(graph.is_definitely_dead_code(private_method), Some(true));
+    }
+
+    /// Bug #1858: `kind_for` must report back exactly the `DeclarationKind`
+    /// attached via `add_kind` on a normal (non-degraded) build -- the
+    /// baseline round trip every other `kind_for` test builds on.
+    #[test]
+    fn kind_for_returns_the_declared_kind_after_a_normal_build() {
+        use crate::graph::extract::local_index::DeclarationKind;
+
+        let mut builder = CodeGraphBuilder::with_candidate_capacity(0);
+        let field_symbol = builder.intern_symbol(make_symbol_id(1, 0));
+        let method_symbol = builder.intern_symbol(make_symbol_id(1, 1));
+        builder.add_kind(field_symbol, DeclarationKind::Field);
+        builder.add_kind(method_symbol, DeclarationKind::Method);
+        let graph = builder.build();
+
+        assert_eq!(graph.kind_for(field_symbol), Some(DeclarationKind::Field));
+        assert_eq!(graph.kind_for(method_symbol), Some(DeclarationKind::Method));
+    }
+
+    /// Bug #1858 safe-default contract, half 1: a genuinely BUDGET-EXCEEDED
+    /// build must still retain declaration kinds, exactly like
+    /// `visibilities` (never dropped like `signatures`) -- otherwise a
+    /// degraded build would silently lose the evidence that keeps a
+    /// tracked-reference kind (e.g. Method) eligible for its existing
+    /// `Some(true)` verdict, an unrelated regression this bug must not
+    /// introduce. `set_completeness` here simulates the degraded state
+    /// directly on the builder, mirroring
+    /// `budget_outcome_fields_round_trip_through_the_builder` above --
+    /// `kinds` has no separate "drop under budget" code path to simulate
+    /// (unlike `signatures`, which `bind_with_budget` explicitly skips
+    /// writing), so retention is verified as a direct, unconditional
+    /// consequence of `add_kind` always being called.
+    #[test]
+    fn kind_for_is_retained_under_a_simulated_budget_exceeded_build() {
+        use crate::graph::extract::local_index::DeclarationKind;
+
+        let mut builder = CodeGraphBuilder::with_candidate_capacity(0);
+        let method_symbol = builder.intern_symbol(make_symbol_id(1, 0));
+        builder.add_kind(method_symbol, DeclarationKind::Method);
+        builder.set_completeness(crate::graph::budget::AnalysisCompleteness::IndexBudgetExceeded);
+        let graph = builder.build();
+
+        assert_eq!(
+            graph.completeness(),
+            crate::graph::budget::AnalysisCompleteness::IndexBudgetExceeded
+        );
+        assert_eq!(
+            graph.kind_for(method_symbol),
+            Some(DeclarationKind::Method),
+            "declaration kind must survive a budget-exceeded build, mirroring visibility \
+             retention, so a degraded build never loses the evidence a tracked-reference kind \
+             needs to keep its existing dead-code verdict"
+        );
+    }
+
+    /// Bug #1858 safe-default contract, half 2: a symbol with NO kind
+    /// evidence at all (never passed to `add_kind`) must read back as
+    /// `None`, never fabricate a kind. This is the entry-absent case,
+    /// distinct from the budget-exceeded-but-present case above --
+    /// `is_definitely_dead_code` must treat this exactly as "unproven",
+    /// never as license to report `Some(true)`.
+    #[test]
+    fn kind_for_returns_none_for_a_symbol_with_no_kind_evidence() {
+        let mut builder = CodeGraphBuilder::with_candidate_capacity(0);
+        let unknown_kind_symbol = builder.intern_symbol(make_symbol_id(1, 0));
+        let graph = builder.build();
+
+        assert_eq!(
+            graph.kind_for(unknown_kind_symbol),
+            None,
+            "a symbol never passed to add_kind must read back as None, never a fabricated kind"
         );
     }
 
