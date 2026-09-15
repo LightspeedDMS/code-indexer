@@ -86,14 +86,17 @@ This is the mechanism pip actually resolves on any `pip install .` / `pip instal
 
 ### Custom Commit
 
-The submodule points to commit `878cfbe5` (`878cfbe585395a8bdd95f593d071f778d2fac457`), which includes fork patches on top of upstream (descended from the earlier `57e9453`/`8972063` patches):
+The submodule points to commit `8155cfc9` (`8155cfc9d02a5a46528a3faab697555952ed40c6`), the tip of a five-patch fork stack on top of upstream (newest first):
 
 ```
-8972063 feat: Expose checkIntegrity() method to Python bindings
+8155cfc feat(#1490): release GIL in remaining Index/BFIndex bindings
+e03aa23 fix: release GIL during Index save_index()/load_index() native calls
+878cfbe fix: Add bounds-check guards to try_connect in repairOrphans()
 57e9453 feat: Add repair_orphans() method to Python bindings for deterministic HNSW orphan repair
+8972063 feat: Expose checkIntegrity() method to Python bindings
 ```
 
-`8972063` adds `check_integrity()`; `57e9453` adds `repair_orphans()` (Story #1358 / Epic #1333) — both Python bindings not present in the upstream PyPI release. This commit MUST always match `pyproject.toml`'s `hnswlib @ git+...@<commit-sha>` dependency pin (see "pyproject.toml" above) and the informational `EXPECTED_HNSWLIB_FORK_COMMIT` constant in `src/code_indexer/storage/hnsw_index_manager.py` (Bug #1392) — keep all three in sync manually.
+`8972063` adds `check_integrity()`; `57e9453` adds `repair_orphans()` (Story #1358 / Epic #1333) — both Python bindings not present in the upstream PyPI release — and `878cfbe` hardens the latter. `e03aa23` and `8155cfc` release the GIL around the native calls so a long index save/load/query does not stall every other thread in the process for its whole duration (#1490). The tip commit MUST always match `pyproject.toml`'s `hnswlib @ git+...@<commit-sha>` dependency pin (see "pyproject.toml" above) and the informational `EXPECTED_HNSWLIB_FORK_COMMIT` constant in `src/code_indexer/storage/hnsw_index_manager.py` (Bug #1392) — keep all three in sync manually. This doc is the site that has drifted before: verify it against the other two rather than trusting it.
 
 ### Verifying Submodule
 
@@ -101,7 +104,7 @@ The submodule points to commit `878cfbe5` (`878cfbe585395a8bdd95f593d071f778d2fa
 cd third_party/hnswlib
 git log -1 --oneline
 git rev-parse HEAD
-# HEAD should be 878cfbe585395a8bdd95f593d071f778d2fac457
+# HEAD should be 8155cfc9d02a5a46528a3faab697555952ed40c6
 ```
 
 ## Troubleshooting
@@ -189,7 +192,7 @@ If integration tests fail with "Submodule not on custom commit":
 ```bash
 cd third_party/hnswlib
 git fetch origin
-git checkout 878cfbe585395a8bdd95f593d071f778d2fac457  # The custom commit (repair_orphans + checkIntegrity)
+git checkout 8155cfc9d02a5a46528a3faab697555952ed40c6  # The custom commit (repair_orphans + checkIntegrity + GIL release)
 cd ../..
 git add third_party/hnswlib
 ```
@@ -309,5 +312,5 @@ If upgrading from a version that used PyPI hnswlib:
 ## References
 
 - hnswlib GitHub: https://github.com/nmslib/hnswlib
-- Custom commits: 8972063 (checkIntegrity method), 57e9453 (repair_orphans method, Story #1358 / Epic #1333); current submodule/pyproject.toml pin: 878cfbe585395a8bdd95f593d071f778d2fac457
+- Custom commits: 8972063 (checkIntegrity method), 57e9453 (repair_orphans method, Story #1358 / Epic #1333), 878cfbe (repairOrphans bounds-check guards), e03aa23 + 8155cfc (GIL release in native calls, #1490); current submodule/pyproject.toml pin: 8155cfc9d02a5a46528a3faab697555952ed40c6
 - Orphan repair background: `docs/research/hnsw-temporal-orphans-1330.md`

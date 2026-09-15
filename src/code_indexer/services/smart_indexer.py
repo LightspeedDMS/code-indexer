@@ -2109,6 +2109,15 @@ class SmartIndexer(HighThroughputProcessor):
     ) -> ProcessingStats:
         """Resume a previously interrupted indexing operation."""
 
+        # Bug #1862 follow-up: resuming a "failed" run (Bug #467's
+        # can_resume_interrupted_operation() explicitly accepts it) is one
+        # of the run transitions covered by the error_message invariant
+        # stated on ProgressiveMetadata.start_indexing() -- neither
+        # start_indexing() nor complete_indexing() run on this path below,
+        # so drop the PRIOR run's error here now, or it sits next to this
+        # run's fresh progress counters indefinitely.
+        self.progressive_metadata.resume_indexing()
+
         # Ensure provider-aware collection exists for resuming
         self.vector_store_client.ensure_provider_aware_collection(
             self.config, self.embedding_provider, quiet
