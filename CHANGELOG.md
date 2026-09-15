@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [12.58.0] - 2026-09-15
+
+### Fixed
+
+- **Indexing metadata never cleared `error_message`, so a fixed bug looked live for months (#1862).** `fail_indexing()` wrote the field and nothing ever removed it; every later run merged new fields over the old dict, so the string survived indefinitely and ended up sitting beside `"status": "completed"`. This manufactured a false production incident: an operator found a months-old hnswlib `AttributeError` (Bug #1415, filed 2026-07-15 and already fixed) in a completed run's metadata and reported it as live, and two agents were spent proving the environment was healthy. The field turns out to have zero readers anywhere in `src/` -- `get_stats()` does not expose it and `metadata_reader.py` reads only `status`/`current_commit` -- so it was effectively write-only, which is why the staleness went unnoticed. That also settles removing the key over setting it to `None`: no consumer can distinguish absent from null, and a null would have been planted permanently in every metadata file on the fleet.
+
+  The invariant is now stated rather than enumerated: `error_message` describes only the run whose metadata it sits in, so any transition that starts, resumes, records new work for, or completes a run drops the previous run's error. Four call sites enforce it -- `start_indexing()`, `set_files_to_index()`, `resume_indexing()` (new) and `complete_indexing()`. The last two exist because dual review found two *distinct* exits that "start and complete are the only transitions" does not cover. `_do_resume_interrupted` calls neither, yet is entered on `status == "failed"` (Bug #467), rewrites the document with fresh timestamps and counters, and on its cancelled and re-interrupted branches never reaches `complete_indexing()`; `start_indexing()` could not be reused there because it resets `files_processed`/`chunks_indexed` to 0 and would corrupt resume accounting. Separately, incremental and reconcile guard `start_indexing()` behind `if status != "in_progress"`, so the pop was skipped for metadata already on disk holding `{"status": "in_progress", "error_message": ...}` -- a state only pre-fix code could write, left behind by a run killed mid-flight and read back unchanged on upgrade. Placing the pop in `set_files_to_index()`, the fresh-work boundary shared by all three producers of a files list, closes both paths without touching the orchestrator.
+
 ## [12.57.0] - 2026-09-14
 
 ### Fixed
