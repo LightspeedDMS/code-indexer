@@ -47,6 +47,17 @@ pub(super) fn intern_declarations_and_attach_signatures(files: &[FileForBind], b
             if let Some(&visibility) = file.index.visibilities.get(&declaration.symbol) {
                 builder.add_visibility(dense, visibility);
             }
+            // Bug #1858: declaration kind is likewise ANALYTICAL data
+            // `is_definitely_dead_code` depends on directly (it is what
+            // lets the predicate tell a Field/Constant, whose reads never
+            // become graph edges, apart from a Method/Type, whose
+            // references ARE tracked) -- it MUST survive budget pressure,
+            // so this too runs unconditionally, before the `exceeded`
+            // early return. Unlike `visibilities`, `declaration.kind` is a
+            // mandatory field on every `Declaration` (never a sparse,
+            // possibly-absent map lookup), so there is no `Option` to
+            // unwrap here.
+            builder.add_kind(dense, declaration.kind);
             if exceeded {
                 continue;
             }
@@ -245,6 +256,67 @@ mod tests {
             Some(true),
             "an unreferenced PRIVATE declaration's visibility must survive end-to-end from \
              LocalIndex.visibilities through the builder into a real dead-code verdict"
+        );
+    }
+
+    /// Bug #1858: proves `DeclarationKind` survives the FULL
+    /// extraction-to-CSR pipeline (not just the isolated
+    /// `CodeGraphBuilder` unit tests in `code_graph.rs`), on BOTH a normal
+    /// and a genuinely budget-exceeded real `bind_with_budget` call --
+    /// mirroring `unreferenced_private_declaration_reports_definitely_dead_after_binding_end_to_end`
+    /// (visibility's end-to-end proof) and reusing `dup_pair`'s
+    /// budget-overage shape from
+    /// `signatures_are_present_when_budget_is_not_exceeded_and_dropped_when_it_is`.
+    /// Unlike that signature test, kind must NOT be dropped under budget
+    /// pressure -- it must behave like visibility, not like signatures.
+    #[test]
+    fn declaration_kind_is_retained_end_to_end_through_the_real_extraction_to_csr_pipeline_regardless_of_budget_pressure() {
+        use crate::graph::extract::local_index::{Declaration, DeclarationKind};
+
+        fn field_decl(name: &str, file_id: u32, local: u32) -> Declaration {
+            Declaration {
+                kind: DeclarationKind::Field,
+                name: name.to_string(),
+                line: 1,
+                symbol: make_symbol_id(file_id, local),
+                param_count: None,
+                param_types: Vec::new(),
+                is_varargs: false,
+            }
+        }
+
+        let mut index = LocalIndex::new();
+        let field_symbol = make_symbol_id(1, 0);
+        let method_symbol = make_symbol_id(1, 1);
+        index.declarations.push(field_decl("count", 1, 0));
+        index.declarations.push(method_decl("hidden", 1, 1, None));
+
+        let unlimited_graph = bind_with_budget(vec![file(1, "java", index)], &IndexBudget::unlimited());
+        assert_eq!(unlimited_graph.completeness(), AnalysisCompleteness::Complete);
+        let field_dense = unlimited_graph.dense_id_for(field_symbol).expect("field must be interned");
+        let method_dense = unlimited_graph.dense_id_for(method_symbol).expect("method must be interned");
+        assert_eq!(
+            unlimited_graph.kind_for(field_dense),
+            Some(DeclarationKind::Field),
+            "a Field declaration's kind must survive end-to-end from LocalIndex.declarations \
+             through the builder into a real CodeGraph"
+        );
+        assert_eq!(unlimited_graph.kind_for(method_dense), Some(DeclarationKind::Method));
+
+        let mut index_for_exceeded = LocalIndex::new();
+        index_for_exceeded.declarations.push(field_decl("count", 1, 0));
+        let (dup_a, dup_b) = dup_pair();
+        let exceeded_graph = bind_with_budget(
+            vec![file(1, "java", index_for_exceeded), file(2, "java", dup_a), file(3, "java", dup_b)],
+            &IndexBudget::new(0, 5),
+        );
+        assert_eq!(exceeded_graph.completeness(), AnalysisCompleteness::IndexBudgetExceeded);
+        let field_dense_exceeded = exceeded_graph.dense_id_for(field_symbol).expect("field must be interned");
+        assert_eq!(
+            exceeded_graph.kind_for(field_dense_exceeded),
+            Some(DeclarationKind::Field),
+            "declaration kind must survive a genuinely budget-exceeded real bind, mirroring \
+             visibility retention -- it must never be dropped like signatures are"
         );
     }
 

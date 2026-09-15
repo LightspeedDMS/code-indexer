@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [12.57.0] - 2026-09-14
+
+### Fixed
+
+- **Graph mode reported read fields and constants as definitely dead (#1858).** The Java extractor emits reference edges from exactly three node kinds (`method_invocation`, `object_creation_expression`, `type_identifier`); `field_access` appears nowhere in it. Fields and constants were therefore unreferenced by construction, so every `private` one satisfied "unreferenced AND private". On a production Java repository this reported 892 dead symbols whose first entries were `constant serialVersionUID` and `constant LOGGER` -- the former consumed by Java serialization and never referenced from source by design. `DeclarationKind` had never been carried into the CSR graph (only `Visibility` was), so a per-symbol kind channel now mirrors Story #1835's visibility path, and `is_definitely_dead_code` became an allowlist: only `Method` and `Type` can reach `Some(true)`; `Field`, `Constant`, `Package` and unknown kind return `None`. Extracting field references remains deliberate future work -- the bare-identifier case needs scope tracking (local vs parameter vs implicit `this` vs static import) the extractor does not have.
+
+- **`analyze_graph` on a repository with no Java returned a clean-looking empty result (#1860).** `ok: true`, `status: "ran_ok"`, empty `findings` -- indistinguishable from "nothing found", and the default experience for most repositories. Now `status: "no_supported_files"`, with `ok` left `true` because nothing failed. Note the counters involved are disjoint per file: an unrecognized extension increments `unreadable_or_unsupported_files`, not `files_with_unsupported_language`, so the condition sums both and excludes genuine read/parse failures.
+
+- **The served `analyze_graph` tool doc described the pre-#1858 predicate** and contradicted the new architecture section, with the served contract being the wrong one.
+
+### Added
+
+- **Graph-mode pattern reuse (#1859).** `execution_mode` in the pattern service per ADR-001, defaulting to `legacy` when absent so existing stored patterns keep working; `pattern_name`/`pattern_params` on `analyze_graph`. The mode gate lives in the shared resolver, so `analyze_graph` asks for `graph` while `xray_search`, `xray_explore`, the REST route and `xray_search_batch` all ask for `legacy` through one authority -- a legacy front door handed a graph pattern now fails with `pattern_mode_mismatch` instead of an opaque compile error. `store_xray_pattern` rejects a declared mode contradicting the callback family present.
+
+- **Graph-mode documentation reshelved and completed (#1861).** Five of eight cookbook templates are graph mode but sat under a single-file heading; the tool doc's cross-references were repo-relative paths an MCP client cannot resolve. The library is now split by mode, references are `get_file_content` calls naming each template, and `docs/xray-architecture.md` gains a "Graph Mode: Node and Edge Model" section stating what is a node, what is an edge, and what is invisible -- field and constant reads, reflection, JNI, DI, Lombok, JPA. Writing that section is what would have surfaced #1858 before release.
+
+### Changed
+
+- **Graph wire format `XRAYGRF2` -> `XRAYGRF3`** to carry the per-symbol declaration-kind channel. No stranded artifacts: the graph is a per-invocation temp file, a stale magic fails loud, and `XRAY_ABI_VERSION` is deliberately unchanged -- no `GraphHandle` accessor or layout changed, so a pre-existing `.so` served from the compile cache transparently calls the new host-side predicate and the fix reaches users with no cache flush.
+
 ## [12.56.0] - 2026-09-14
 
 ### Fixed

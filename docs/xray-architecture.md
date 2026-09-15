@@ -29,7 +29,7 @@ C and C++ extensions and verified node kinds (confirmed against tree-sitter-c 0.
 
   Failure modes on this path (`UnsupportedLanguage`, `EvaluatorTimeout`, `ValidationError` (evaluator code rejected by `validate_rust_evaluator`), `BinaryNotFound` (missing `xray-cli`), `XRayCliError` (subprocess/JSON failure), generic file IO errors, or the raw exception type name) append to `evaluation_errors[]` without failing the job. `EvaluatorCrash`, `InvalidEvaluatorReturn`, and `ValidationFailed` are Python-only names produced by the retained Python evaluator module's own engine layer (`sandbox.py:858-917`), described in [X-Ray Sandbox](xray-sandbox.md); they are not emitted on this Rust path.
 
-- **Phase 2, graph mode (`analyze_graph`, cross-file)**: a different execution mode from single-file `xray_search`. It requires both `fn collect_facts` (runs per file to collect auxiliary evidence) and `fn analyze_graph` (reduces the completed cross-file graph); a graph evaluator must not define `evaluate_node`. Graph extraction currently supports Java only. Always check `fact_graph_complete` and the degradation counters before treating an empty `findings` list as a verified negative. See the [analyze_graph tool documentation](../src/code_indexer/server/mcp/tool_docs/search/analyze_graph.md) for the `UserFact`, `GraphResult`, `ReduceFinding`, graph-handle, and completeness contracts.
+- **Phase 2, graph mode (`analyze_graph`, cross-file)**: a different execution mode from single-file `xray_search`. It requires both `fn collect_facts` (runs per file to collect auxiliary evidence) and `fn analyze_graph` (reduces the completed cross-file graph); a graph evaluator must not define `evaluate_node`. Graph extraction currently supports Java only. Always check `fact_graph_complete` and the degradation counters before treating an empty `findings` list as a verified negative. See "Graph Mode: Node and Edge Model" below for what becomes a node, what becomes an edge, and what is invisible. For the `UserFact`, `GraphResult`, `ReduceFinding`, graph-handle, and completeness contracts, fetch the full tool documentation: `get_file_content(repository_alias='code-indexer-global', file_path='src/code_indexer/server/mcp/tool_docs/search/analyze_graph.md')`.
 
 - **`max_results` cap**: when provided, only the first N candidates are evaluated; result includes `partial=True` and `max_files_reached=True`. Job-level timeout takes precedence over the cap (`partial=True`, `timeout=True`).
 
@@ -64,6 +64,54 @@ C and C++ extensions and verified node kinds (confirmed against tree-sitter-c 0.
 Tool docs: `src/code_indexer/server/mcp/tool_docs/search/xray_search.md`, `src/code_indexer/server/mcp/tool_docs/search/xray_explore.md`. Registered in `HANDLER_REGISTRY` via `_legacy.py` (`_xray_register`).
 
 **Files**: `src/code_indexer/xray/search_engine.py`, `src/code_indexer/xray/sandbox.py`, `src/code_indexer/server/mcp/handlers/xray.py`. Tests: `tests/unit/xray/test_search_engine.py`, `tests/unit/xray/test_sandbox*.py`, `tests/unit/server/mcp/test_xray_search_handler.py`.
+
+## Graph Mode: Node and Edge Model
+
+Graph mode (`analyze_graph`) builds one cross-file `CodeGraph` per repository via `CodeGraphBuilder::build` (`rust/xray-core/src/graph/csr/builder.rs`, `code_graph.rs`). This section documents what becomes a node, what becomes an edge, and what the graph cannot see -- the precondition every dead-code or reachability claim from this tool rests on. Java is the only language with a graph extractor today (`rust/xray-core/src/graph/extract/java.rs`).
+
+### What is a node
+
+A graph node is a declaration recorded by the language extractor -- distinct from a tree-sitter parse-tree node (`OwnedNode`), which is what the extractor walks to PRODUCE declarations. Every declaration has a `DeclarationKind`: `Type`, `Method`, `Field`, `Constant`, or `Package` (`rust/xray-core/src/graph/extract/local_index.rs`). Once bound into the whole-repository graph, each symbol gets a dense `u32` id and optionally carries a declared `Visibility` (`Public`, `Protected`, `Private`, or `Unknown` when no modifier evidence exists) and its `DeclarationKind`, both attached unconditionally and never dropped under budget pressure.
+
+Not every node kind participates equally in analysis. `CodeGraph::is_definitely_dead_code` returns a confident `Some(true)` only for a symbol whose kind is `Method` or `Type` AND whose visibility is provably `Private`. A `Field`, `Constant`, `Package`, or unknown-kind symbol -- or a `Public`/`Protected`/`Unknown`-visibility `Method`/`Type` -- always returns `None` (undecidable), never a false "definitely dead" claim.
+
+### What becomes an edge
+
+An edge (a `Reference` in the CSR arena) is produced by exactly three tree-sitter node kinds, dispatched in `java.rs`'s node-walk:
+
+- `method_invocation` -- a method call.
+- `object_creation_expression` -- a `new` expression.
+- `type_identifier` -- a bare type reference.
+
+No other syntax construct produces a reference edge. In particular, `field_access` is not handled anywhere in the graph extraction code -- reading or writing a field or a constant never creates an inbound edge to that field's or constant's declaration, regardless of how many places in the codebase touch it.
+
+### What is invisible to the graph
+
+Because edges come from exactly the three syntactic constructs above, the following are structurally invisible, not merely unhandled:
+
+- Field and constant reads/writes (no `field_access` edge exists at all).
+- Reflection (`Class.forName`, method-handle invocation, dynamic proxies) -- these are string values or runtime API calls, not `method_invocation`/`object_creation_expression`/`type_identifier` nodes naming the target.
+- JNI-bound native methods -- the native implementation is outside any parsed Java source the extractor walks.
+- Dependency-injection wiring -- an injected field is an ordinary field declaration, and its DI-driven construction happens outside any `object_creation_expression` this repository's source contains.
+- Lombok-generated members (e.g. `@Data`-generated getters/setters/constructors) -- the extractor walks the tree-sitter parse of the source AS WRITTEN; Lombok's annotation processor generates bytecode the parser never sees, so a call to a Lombok-generated method has no corresponding declaration node to resolve against in the first place.
+- JPA and other annotation-driven use (e.g. an entity field read only through reflection-backed ORM mapping). Annotations are captured by the extractor as metadata attached to a declaration, but no annotation node dispatches to a reference-producing code path -- annotations never create edges.
+
+A symbol reachable only through any of the above shows zero inbound edges and, if it is an unreferenced private `Method` or `Type`, WILL be reported as `is_definitely_dead_code == Some(true)` even though it has a real, live caller the graph cannot see. Fields, constants, packages, and unknown-kind symbols remain `None` under the allowlist regardless of visibility. This is a hard boundary of this tool to design around, not a defect to file.
+
+### CSR arena layout
+
+`CodeGraph` stores the whole repository's references and candidates in two pre-reserved arenas (`Vec<Reference>`, `Vec<Candidate>`), each allocated to its final size once so a full repository's data lives in one heap allocation per arena. A `Reference` is a fixed 19-byte record (`from`(4) + `file`(4) + `line`(4) + `kind`(1) + `cand_start`(4) + `cand_len`(2)) that windows into the shared `candidates` arena rather than owning its own storage; ambiguity (`cand_len > 1`) and unresolved (`cand_len == 0`) are read directly off that window, never a separate enum. A `Candidate`'s wire record is 6 bytes (`symbol`(4) + `reasons`(2)): a dense interned `u32` symbol id and a `u16` bitflag set of resolution evidence. The in-memory `Candidate` also carries a `confidence` byte, but it is never serialized -- it is recomputed from `reasons` via `Confidence::derive` every time a `Candidate` is constructed, both when originally built and when decoded back from a graph file, so there is no path to a `Candidate` whose confidence disagrees with its evidence. This wire format is versioned (`XRAYGRF3`, `rust/xray-core/src/graph/csr/wire.rs`): the magic bytes were bumped from `XRAYGRF2` when Bug #1858 added a mandatory per-symbol `DeclarationKind` section to the binary layout, so a graph file written by older code fails the magic check rather than being silently misparsed.
+
+### Receiver-type resolution and inheritance-family expansion
+
+Candidate resolution is evidence-based: each `Candidate` carries a `reasons` bitflag set (`rust/xray-core/src/graph/reasons.rs`), and confidence is derived from whichever flags are set. Two evidence paths matter for understanding what the graph can and cannot resolve confidently:
+
+- **Receiver-type resolution**: for a `receiver.method(...)` call, if the receiver's declared type can be determined within the SAME FILE (a local variable's, field's, or parameter's declared type, or a chained call's declared return type -- no build, no classpath, no generics resolution), and a candidate's enclosing type equals that type or one of its transitive supertypes, the candidate is narrowed to that match. This is a same-file, syntactic inference, not real type-checking.
+- **Inheritance-family expansion**: once a call resolves to an interface or supertype method, every implementor's override of that same method is added to the candidate set as a family member at high confidence. This only ever WIDENS a candidate set, never narrows it. If the true family exceeds the configured maximum size, expansion is capped and the truncation is recorded as a separate, visible flag rather than silently dropped.
+
+Both mechanisms operate purely on syntactic evidence recorded by the extractor -- neither performs full type inference, and neither can see across a compiled dependency boundary the extractor never parsed.
+
+For ready-to-adapt graph-mode evaluator templates exercising this model, fetch the X-Ray Cookbook: `get_file_content(repository_alias='code-indexer-global', file_path='docs/xray-cookbook.md')`.
 
 ## xray_search_batch MCP Tool
 

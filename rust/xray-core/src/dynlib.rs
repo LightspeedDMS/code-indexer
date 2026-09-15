@@ -1441,7 +1441,7 @@ fn analyze_graph(g: &GraphHandle<'_>, facts: &FactsHandle<'_>) -> GraphResult {
     fn six_use_case_test_graph() -> crate::graph::csr::CodeGraph {
         use crate::graph::csr::builder::CodeGraphBuilder;
         use crate::graph::csr::candidate::Candidate;
-        use crate::graph::extract::local_index::Visibility;
+        use crate::graph::extract::local_index::{DeclarationKind, Visibility};
         use crate::graph::identity::make_symbol_id;
         use crate::graph::reasons;
 
@@ -1477,6 +1477,23 @@ fn analyze_graph(g: &GraphHandle<'_>, facts: &FactsHandle<'_>) -> GraphResult {
         // Response shape (Bug #1833) -- so it must stay undecidable.
         builder.add_visibility(never_called, Visibility::Private);
         builder.add_visibility(public_api_symbol, Visibility::Public);
+        // Bug #1858: `is_definitely_dead_code` now requires tracked-kind
+        // evidence (Method/Type) before it will even consult visibility --
+        // real production always attaches this via
+        // `budget_bind::intern_declarations_and_attach_signatures`. Every
+        // symbol in this fixture is narratively a class or a method (never
+        // a field/constant), so attach the matching kind for each so this
+        // fixture keeps representing real declared code.
+        builder.add_kind(order_controller, DeclarationKind::Type);
+        builder.add_kind(delete_user_account, DeclarationKind::Method);
+        builder.add_kind(order_repository, DeclarationKind::Type);
+        builder.add_kind(raw_delete_row, DeclarationKind::Method);
+        builder.add_kind(ping_check, DeclarationKind::Method);
+        builder.add_kind(get_once, DeclarationKind::Method);
+        builder.add_kind(never_called, DeclarationKind::Method);
+        builder.add_kind(cycle_a, DeclarationKind::Method);
+        builder.add_kind(cycle_b, DeclarationKind::Method);
+        builder.add_kind(public_api_symbol, DeclarationKind::Method);
 
         // UC3: controller calls repository directly.
         builder.add_reference(order_controller, 1, 1, 0, &[Candidate::new(order_repository, reasons::SAME_FILE)]);
