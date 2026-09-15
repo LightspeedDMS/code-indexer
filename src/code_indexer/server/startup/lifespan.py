@@ -453,6 +453,98 @@ def _log_vsr_guard_skip(
     )
 
 
+def _construct_hnsw_orphan_repair_sweep_scheduler(
+    golden_repo_manager: Any,  # Any: duck-typed, never imported here.
+    backend_registry: Any,  # Any: may be None -- guarded below.
+    background_job_manager: Any,  # Any: duck-typed, never imported here.
+) -> Any:
+    """Validate dependencies and build the sweep scheduler (Story #1360).
+
+    Raises:
+        RuntimeError: if either required collaborator is unavailable.
+    """
+    from code_indexer.server.services.hnsw_orphan_sweep.scheduler import (
+        HNSWOrphanRepairSweepScheduler as _HNSWOrphanRepairSweepScheduler,
+    )
+    from code_indexer.server.services.config_service import get_config_service
+
+    if backend_registry is None:
+        raise RuntimeError("backend_registry is not available")
+    if not (
+        hasattr(golden_repo_manager, "activated_repo_manager")
+        and golden_repo_manager.activated_repo_manager is not None
+    ):
+        raise RuntimeError(
+            "golden_repo_manager.activated_repo_manager is not available"
+        )
+
+    return _HNSWOrphanRepairSweepScheduler(
+        golden_repo_manager=golden_repo_manager,
+        activated_repo_manager=golden_repo_manager.activated_repo_manager,
+        state_backend=backend_registry.hnsw_orphan_sweep_state,
+        background_job_manager=background_job_manager,
+        config_service=get_config_service(),
+    )
+
+
+def _record_hnsw_orphan_repair_sweep_failure(app: Any, error: Exception) -> None:
+    """Bug #1864: make a sweep startup failure outlive the boot log.
+
+    The reason is stored on ``app.state`` (set explicitly, never left unset,
+    so the stats endpoint can tell "started cleanly" from "never reached this
+    block") and logged at ERROR -- the level ``admin_logs_query`` and the
+    Post-E2E log-audit gate select on -- instead of a WARNING that scrolls
+    away while the node boots reporting healthy.
+    """
+    app.state.hnsw_orphan_repair_sweep_scheduler = None
+    app.state.hnsw_orphan_repair_sweep_startup_error = str(error)
+    logger.error(
+        format_error_log(
+            "APP-GENERAL-090",
+            f"Failed to initialize HNSW orphan repair sweep scheduler: {error} "
+            "-- this node will NOT repair orphaned HNSW indexes; see "
+            "GET /api/admin/hnsw-orphan-sweep/stats -> local_scheduler",
+        ),
+        exc_info=True,
+    )
+
+
+def _start_hnsw_orphan_repair_sweep_scheduler(
+    app: Any,  # Any: FastAPI at runtime, but only `app.state` is touched.
+    *,
+    golden_repo_manager: Any,  # Any: duck-typed, never imported here.
+    backend_registry: Any,  # Any: may be None -- see the constructor guard.
+    background_job_manager: Any,  # Any: duck-typed, never imported here.
+) -> Optional[Any]:
+    """Start the HNSW orphan repair fleet sweep (Story #1360), recording the
+    outcome on ``app.state``. A failure DEGRADES the node rather than killing
+    boot -- but is never silent (Bug #1864).
+
+    Returns:
+        The started scheduler, or None when startup failed.
+    """
+    logger.info(
+        "Server startup: Initializing HNSW orphan repair sweep scheduler",
+        extra={"correlation_id": get_correlation_id()},
+    )
+    try:
+        scheduler = _construct_hnsw_orphan_repair_sweep_scheduler(
+            golden_repo_manager, backend_registry, background_job_manager
+        )
+        scheduler.start()
+    except Exception as e:
+        _record_hnsw_orphan_repair_sweep_failure(app, e)
+        return None
+
+    app.state.hnsw_orphan_repair_sweep_scheduler = scheduler
+    app.state.hnsw_orphan_repair_sweep_startup_error = None
+    logger.info(
+        "HNSW orphan repair sweep scheduler started",
+        extra={"correlation_id": get_correlation_id()},
+    )
+    return scheduler
+
+
 def make_lifespan(
     background_job_manager: Any,
     job_tracker: Any,
@@ -2361,49 +2453,15 @@ def make_lifespan(
 
         # Startup: Initialize HNSW Orphan Repair Fleet Sweep Scheduler
         # (Story #1360, Epic #1333 S3)
-        hnsw_orphan_repair_sweep_scheduler = None
-        logger.info(
-            "Server startup: Initializing HNSW orphan repair sweep scheduler",
-            extra={"correlation_id": get_correlation_id()},
+        # The started scheduler is stored on `app.state` by the helper (which
+        # is where the admin stats endpoint reads it from); no local binding
+        # is needed here.
+        _start_hnsw_orphan_repair_sweep_scheduler(
+            app,
+            golden_repo_manager=golden_repo_manager,
+            backend_registry=backend_registry,
+            background_job_manager=background_job_manager,
         )
-        try:
-            from code_indexer.server.services.hnsw_orphan_sweep.scheduler import (
-                HNSWOrphanRepairSweepScheduler as _HNSWOrphanRepairSweepScheduler,
-            )
-            from code_indexer.server.services.config_service import get_config_service
-
-            if backend_registry is None:
-                raise RuntimeError("backend_registry is not available")
-            if not (
-                hasattr(golden_repo_manager, "activated_repo_manager")
-                and golden_repo_manager.activated_repo_manager is not None
-            ):
-                raise RuntimeError(
-                    "golden_repo_manager.activated_repo_manager is not available"
-                )
-
-            hnsw_orphan_repair_sweep_scheduler = _HNSWOrphanRepairSweepScheduler(
-                golden_repo_manager=golden_repo_manager,
-                activated_repo_manager=golden_repo_manager.activated_repo_manager,
-                state_backend=backend_registry.hnsw_orphan_sweep_state,
-                background_job_manager=background_job_manager,
-                config_service=get_config_service(),
-            )
-            hnsw_orphan_repair_sweep_scheduler.start()
-            app.state.hnsw_orphan_repair_sweep_scheduler = (
-                hnsw_orphan_repair_sweep_scheduler
-            )
-            logger.info(
-                "HNSW orphan repair sweep scheduler started",
-                extra={"correlation_id": get_correlation_id()},
-            )
-        except Exception as e:
-            logger.warning(
-                format_error_log(
-                    "APP-GENERAL-090",
-                    f"Failed to initialize HNSW orphan repair sweep scheduler: {e}",
-                )
-            )
 
         # Startup: Initialize Fleet Migration Scheduler (Story #1458,
         # Epic #1454). Ships DISABLED by default (fleet_migration_config.
