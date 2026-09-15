@@ -5,7 +5,7 @@ metadata:
   node_type: memory
   type: project
   originSessionId: 9f3e846a-213a-4733-9159-8696ede6081c
-  modified: 2026-09-15T05:28:25.372Z
+  modified: 2026-09-15T08:29:58.579Z
 ---
 
 `fast-automation.sh` and `server-fast-automation.sh` flake when run while other heavy work (subagents, parallel pytest chunks, a just-finished sibling suite) competes for CPU. Observed signatures of LOAD (not real defects):
@@ -18,6 +18,14 @@ metadata:
 **The one-command diagnostic:** `grep -c "from pytest-timeout" .test-telemetry/*.log`. Nonzero means load, full stop — no isolation re-run needed to know. The per-chunk logs under `.test-telemetry/` persist across runs and carry a `slowest N durations` table, so the same test's duration can be compared green-run vs red-run directly. Check this BEFORE spending a 13-minute re-roll.
 
 **"Alone" is not the same as "idle" — check the MACHINE, not just your own work.** A gate can be the only thing you are running and still be starved by a runaway left behind by an EARLIER session. Real instance (2026-09-08): an orphaned `/bin/bash -c ... eval 'until false; do :; done ... &'` — a backgrounded no-op infinite loop from a shell snapshot 5.5 days old, reparented to systemd (PPID 1), cwd in a *different* repo — had been burning a full core at 99.6% CPU (~470,600s of user time) for the entire session. It was invisible to "run the gate alone" because it was nobody's current work. Two timing-sensitive gate failures being chased that night ([[feedback_tdd_red_must_be_discriminating]]-adjacent, exact-call-count and thread-join-deadline assertions) were both load-sensitive, and `kill` dropped load average 4.00 -> 2.95 instantly.
+
+**It happened AGAIN on 2026-09-15, and the load was MY OWN — this is the part the paragraph above got wrong.** The #1863 investigation spawned a deliberate CPU stress load (`eval 'for i in $(seq 1 16); do ( while true; do :; done ) & done'`, writing `.tmp/1863-diag/stress-trial/stress_pids_*.txt`) to reproduce a timeout. Its driver was killed; **16 busy-loops survived as PPID-1 orphans**, 1022% total CPU (~10.2 of 12 cores), load average 20 on a 12-core box, for 1h47m. I then ran a gate "alone", got 3 failures, re-ran them "in isolation", saw 2 still fail, and concluded they were REAL regressions. All three were load artifacts: after `kill`, both passed 3/3. I also nearly filed a fabricated ~2.7x `test_batch_upsert_performance` regression (8.69s vs a steady 3.2s history) that was 4.0s on the clean box.
+
+Two corrections that follow:
+1. **The dangerous orphan is the one YOUR OWN investigation spawned**, not an earlier session's. A subagent that stress-tests, benchmarks, or reproduces a load bug will leave background jobs behind when its driver dies, and it will report "no stragglers" because it swept for `pytest`/its own drivers, not for the loops it created. After ANY load/perf/concurrency investigation, sweep for orphans explicitly and by the marker path the investigation used.
+2. **"Fails in isolation" proves nothing unless the MACHINE was verified idle first.** Isolation means one test running on a quiet box, not one test running on your box. Check load BEFORE the re-run, not after the conclusion.
+
+**Distinguish a machine-wide slowdown from a per-test regression before believing either.** `.test-telemetry/test-durations-*.txt` files persist per run: compute the ratio of new/old duration across ALL common tests and take the MEDIAN. A median ratio near 1.0 with one test inflated means a real regression; a median of 1.5 means the box is slower and every "regression" is noise. Tonight: median 1.52x across 772 common tests >0.5s — conclusive, and it took one command.
 
 Before trusting OR blaming a gate run, check `ps -eo pid,etimes,pcpu,args --sort=-pcpu | head` and look for anything with large ELAPSED and high %CPU that is not yours. Confirm before killing: a no-op loop body, zero children, PPID 1, and a cmdline that cannot be doing real work. Killing an orphaned busy-loop is safe; killing something you have not identified is not (see [[feedback_own_all_repo_changes]] and the anti-rogue-checkout rule — the same caution applies to processes).
 
