@@ -133,6 +133,7 @@ class TestCleanSlotTracker:
         tracker = CleanSlotTracker(max_slots=10)
         acquired_slots = []
         lock = threading.Lock()
+        all_acquired = threading.Barrier(5)
 
         def worker():
             file_data = FileData(
@@ -145,7 +146,9 @@ class TestCleanSlotTracker:
             with lock:
                 acquired_slots.append(slot_id)
 
-            time.sleep(0.01)  # Hold slot briefly
+            # Establish overlap explicitly: no worker may release its slot
+            # until every worker has acquired one.
+            all_acquired.wait()
             tracker.release_slot(slot_id)
 
         # Start multiple threads
