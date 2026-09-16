@@ -2960,6 +2960,56 @@ def make_lifespan(
                 # visible signal.
                 _log_vsr_guard_skip(global_lifecycle_manager, snapshot_manager)
 
+            # Bug #1871: sweep individually-expired files out of the LEGACY
+            # (pre-relocation, git-tracked) snapshot-reader-lease directory.
+            # This is the SAFE replacement for the retracted "delete it at
+            # startup" plan: it never removes the directory itself -- an
+            # old-version node mid-rolling-upgrade may still recreate and
+            # renew leases there -- it only removes files whose OWN
+            # recorded ttl_seconds has already elapsed
+            # (sweep_expired_lease_files). Offloaded via
+            # anyio.to_thread.run_sync, mirroring the sibling
+            # `_run_vsr_sweep` closure immediately above, because this is a
+            # synchronous filesystem walk that must never block the event
+            # loop at fleet scale (~900 golden repos, `hard` NFSv3 mount).
+            # Backgrounded via asyncio.create_task (not awaited) because
+            # nothing later in lifespan reads the result -- the counts are
+            # only ever logged.
+            async def _run_legacy_lease_sweep() -> None:
+                try:
+                    import anyio.to_thread as _to_thread
+                    from code_indexer.global_repos.snapshot_reader_lease import (
+                        _legacy_lease_directory,
+                        sweep_expired_lease_files,
+                    )
+                    from code_indexer.server.services.cidx_meta_backup import (
+                        get_cidx_meta_path,
+                    )
+
+                    _lease_root = get_cidx_meta_path(
+                        config_service.config_manager.server_dir
+                    )
+                    _removed, _errors = await _to_thread.run_sync(
+                        lambda: sweep_expired_lease_files(
+                            _legacy_lease_directory(_lease_root)
+                        )
+                    )
+                    _log = logger.warning if _errors else logger.info
+                    _log(
+                        "Startup: Bug #1871 legacy snapshot-reader-lease "
+                        "sweep removed %d expired file(s) with %d error(s)",
+                        _removed,
+                        _errors,
+                    )
+                except Exception as _lease_sweep_exc:  # noqa: BLE001 -- startup safety
+                    logger.warning(
+                        "Startup: Bug #1871 legacy snapshot-reader-lease "
+                        "sweep failed (non-fatal): %s",
+                        _lease_sweep_exc,
+                    )
+
+            asyncio.create_task(_run_legacy_lease_sweep())
+
             def _dep_map_health_check_fn():
                 from code_indexer.server.services.dep_map_health_detector import (
                     DepMapHealthDetector,

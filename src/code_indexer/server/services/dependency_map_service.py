@@ -2775,7 +2775,27 @@ class DependencyMapService:
                     context_label=f"delta_merge:{domain_name}",
                 )
                 if verified:
-                    final_content = tmp_path.read_text(encoding="utf-8")
+                    verification_content = tmp_path.read_text(encoding="utf-8")
+                    from .dep_map_delta_journal import (
+                        parse_frontmatter,
+                        validate_rendered_frontmatter,
+                    )
+
+                    expected_fm, _ = parse_frontmatter(
+                        updated_content, domain_hint=domain_name
+                    )
+                    validation_error = validate_rendered_frontmatter(
+                        verification_content, expected_fm
+                    )
+                    if validation_error:
+                        logger.warning(
+                            "Verification produced invalid frontmatter for "
+                            "delta_merge:%s — using unverified content: %s",
+                            domain_name,
+                            validation_error,
+                        )
+                    else:
+                        final_content = verification_content
                 else:
                     logger.warning(
                         "Verification failed for delta_merge:%s — using unverified content",
@@ -2832,6 +2852,7 @@ class DependencyMapService:
         from .dep_map_delta_journal import (
             parse_frontmatter,
             render_md,
+            validate_rendered_frontmatter,
             write_atomic,
         )
 
@@ -2890,6 +2911,26 @@ class DependencyMapService:
 
             if fingerprint is not None:
                 fm, _body = parse_frontmatter(existing_text, domain_hint=domain_name)
+                if existing_text.startswith("---\n") and not fm:
+                    # Bug #1870: existing_text advertises frontmatter (starts
+                    # with the delimiter) but parse_frontmatter's fail-open
+                    # branch degraded it to {} -- i.e. the file is already
+                    # malformed. Retrying would burn a Claude call on a
+                    # deterministic input that cannot succeed differently;
+                    # skip loudly instead of silently rebuilding from an
+                    # empty base (the self-perpetuating corruption this bug
+                    # is about).
+                    logger.error(
+                        "Delta domain '%s': existing frontmatter is malformed "
+                        "YAML -- refusing to process until repaired. Skipping "
+                        "domain, no Claude invocation, no write.",
+                        domain_name,
+                    )
+                    errors.append(
+                        f"{domain_name}: existing frontmatter malformed, "
+                        "refusing delta write"
+                    )
+                    continue
                 if fm.get("last_delta_applied") == fingerprint:
                     # Already processed in a prior run — skip.
                     logger.info(
@@ -2989,7 +3030,36 @@ class DependencyMapService:
                                 new_fm["last_applied_at"] = datetime.now(
                                     timezone.utc
                                 ).isoformat()
-                                write_atomic(domain_file, render_md(new_fm, new_body))
+                                rendered = render_md(new_fm, new_body)
+                                validation_error = validate_rendered_frontmatter(
+                                    rendered, new_fm
+                                )
+                                if validation_error:
+                                    # Bug #1870: refuse to persist an invalid
+                                    # render rather than silently writing a
+                                    # duplicated/malformed block. A future
+                                    # Claude retry MAY produce a different
+                                    # new_body that validates cleanly, so this
+                                    # reuses the existing FAILED-branch retry
+                                    # loop below (unlike the deterministic
+                                    # malformed-existing-file case above,
+                                    # this failure depends on Claude's live
+                                    # response and can genuinely differ on
+                                    # retry).
+                                    logger.error(
+                                        "Delta domain '%s': refusing to write "
+                                        "invalid rendered frontmatter -- %s. "
+                                        "Preserving existing file unchanged.",
+                                        domain_name,
+                                        validation_error,
+                                    )
+                                    errors.append(
+                                        f"{domain_name}: rendered frontmatter "
+                                        f"validation failed: {validation_error}"
+                                    )
+                                    update_result = _DomainUpdateResult.FAILED
+                                else:
+                                    write_atomic(domain_file, rendered)
                         except Exception as journal_exc:
                             logger.warning(
                                 "Story #1053: frontmatter journal update failed for '%s': %s",

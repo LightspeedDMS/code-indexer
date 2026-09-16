@@ -90,6 +90,22 @@ CLAIM_HOLD_SECONDS = 1.0
 PROCESS_DEADLINE_SECONDS = 90.0
 
 
+def _test_lease_root(base) -> Path:
+    """Provide the primary lease directory required by Bug #1871 semantics
+    (an absent primary directory is now ambiguous, not "no live reader") --
+    mirrors the identical fix in
+    test_cleanup_manager_backend_delete_bug1084.py's own `_test_lease_root`
+    helper. None of these tests exercise real lease acquisition; they only
+    need the directory to EXIST so CleanupManager doesn't defer cleanup
+    before ever reaching the daemon-delete-failure-classification behavior
+    under test."""
+    lease_root = Path(base) / "cidx-meta"
+    (lease_root.parent / ".scratch" / "snapshot-reader-leases").mkdir(
+        parents=True, exist_ok=True
+    )
+    return lease_root
+
+
 # ---------------------------------------------------------------------------
 # Two-process (two-node) support -- module level so `spawn` can import it
 # ---------------------------------------------------------------------------
@@ -151,7 +167,7 @@ def cluster_node_worker(
     # set_snapshot_manager and set_lease_root together (see
     # global_repos_lifecycle.py); this test's fake snapshot manager reports
     # is_versioned_snapshot=True for its fixture path, so it must too.
-    manager.set_lease_root(Path(versioned_base) / "cidx-meta")
+    manager.set_lease_root(_test_lease_root(versioned_base))
 
     # Both nodes must have hydrated the shared durable row BEFORE either
     # starts processing -- otherwise the winner could remove the row before
@@ -247,7 +263,7 @@ def _run_one_cleanup_cycle_against_daemon(
         )
         # Bug #1845 remediation round 2 (Defect 3): wire together with
         # set_snapshot_manager, matching global_repos_lifecycle.py.
-        manager.set_lease_root(Path(mount_point) / "cidx-meta")
+        manager.set_lease_root(_test_lease_root(mount_point))
         manager.schedule_cleanup(snapshot_path)
         with caplog.at_level(logging.DEBUG, logger=CLEANUP_LOGGER):
             manager._process_cleanup_queue()
@@ -445,7 +461,7 @@ class TestFailedLocalDeleteIsNotSilentlyTreatedAsSuccess:
             )
             # Bug #1845 remediation round 2 (Defect 3): wire together with
             # set_snapshot_manager, matching global_repos_lifecycle.py.
-            manager.set_lease_root(Path(mount_point) / "cidx-meta")
+            manager.set_lease_root(_test_lease_root(mount_point))
             manager.schedule_cleanup(snapshot_path)
             manager._process_cleanup_queue()
 

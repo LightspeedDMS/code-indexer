@@ -38,7 +38,7 @@ class CidxMetaBackupBootstrap:
 
     def _write_gitignore(self, cidx_meta_path: str) -> None:
         gitignore_path = Path(cidx_meta_path) / ".gitignore"
-        content = ".code-indexer/\n"
+        content = ".code-indexer/\n.snapshot-reader-leases/\n"
         if not gitignore_path.exists() or gitignore_path.read_text() != content:
             gitignore_path.write_text(content)
 

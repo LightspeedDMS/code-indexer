@@ -19,7 +19,10 @@ from typing import Any, Callable, Dict, Optional, Set
 
 from .query_tracker import QueryTracker
 from .snapshot_deletion_errors import SnapshotDeleteError, SnapshotInUseError
-from .snapshot_reader_lease import snapshot_has_live_reader
+from .snapshot_reader_lease import (
+    LeaseDirectoryAmbiguousError,
+    snapshot_has_live_reader,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -726,7 +729,26 @@ class CleanupManager:
                         "liveness rather than risk deleting a snapshot a "
                         "live reader still holds"
                     )
-                if snapshot_has_live_reader(path, lease_root=lease_root):
+                try:
+                    has_live_reader = snapshot_has_live_reader(
+                        path, lease_root=lease_root
+                    )
+                except LeaseDirectoryAmbiguousError as exc:
+                    logger.warning(
+                        "Deferring cleanup for %s: snapshot-reader lease "
+                        "directory state is ambiguous (%s)",
+                        path,
+                        exc,
+                    )
+                    self._defer_in_use(
+                        path,
+                        SnapshotInUseError(
+                            "snapshot reader lease directory is ambiguous",
+                            detail="reader lease directory ambiguity",
+                        ),
+                    )
+                    continue
+                if has_live_reader:
                     logger.debug("Skipping cleanup for %s: live snapshot reader", path)
                     self._defer_in_use(
                         path,
