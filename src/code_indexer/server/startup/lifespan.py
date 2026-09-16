@@ -453,6 +453,98 @@ def _log_vsr_guard_skip(
     )
 
 
+def _construct_hnsw_orphan_repair_sweep_scheduler(
+    golden_repo_manager: Any,  # Any: duck-typed, never imported here.
+    backend_registry: Any,  # Any: may be None -- guarded below.
+    background_job_manager: Any,  # Any: duck-typed, never imported here.
+) -> Any:
+    """Validate dependencies and build the sweep scheduler (Story #1360).
+
+    Raises:
+        RuntimeError: if either required collaborator is unavailable.
+    """
+    from code_indexer.server.services.hnsw_orphan_sweep.scheduler import (
+        HNSWOrphanRepairSweepScheduler as _HNSWOrphanRepairSweepScheduler,
+    )
+    from code_indexer.server.services.config_service import get_config_service
+
+    if backend_registry is None:
+        raise RuntimeError("backend_registry is not available")
+    if not (
+        hasattr(golden_repo_manager, "activated_repo_manager")
+        and golden_repo_manager.activated_repo_manager is not None
+    ):
+        raise RuntimeError(
+            "golden_repo_manager.activated_repo_manager is not available"
+        )
+
+    return _HNSWOrphanRepairSweepScheduler(
+        golden_repo_manager=golden_repo_manager,
+        activated_repo_manager=golden_repo_manager.activated_repo_manager,
+        state_backend=backend_registry.hnsw_orphan_sweep_state,
+        background_job_manager=background_job_manager,
+        config_service=get_config_service(),
+    )
+
+
+def _record_hnsw_orphan_repair_sweep_failure(app: Any, error: Exception) -> None:
+    """Bug #1864: make a sweep startup failure outlive the boot log.
+
+    The reason is stored on ``app.state`` (set explicitly, never left unset,
+    so the stats endpoint can tell "started cleanly" from "never reached this
+    block") and logged at ERROR -- the level ``admin_logs_query`` and the
+    Post-E2E log-audit gate select on -- instead of a WARNING that scrolls
+    away while the node boots reporting healthy.
+    """
+    app.state.hnsw_orphan_repair_sweep_scheduler = None
+    app.state.hnsw_orphan_repair_sweep_startup_error = str(error)
+    logger.error(
+        format_error_log(
+            "APP-GENERAL-090",
+            f"Failed to initialize HNSW orphan repair sweep scheduler: {error} "
+            "-- this node will NOT repair orphaned HNSW indexes; see "
+            "GET /api/admin/hnsw-orphan-sweep/stats -> local_scheduler",
+        ),
+        exc_info=True,
+    )
+
+
+def _start_hnsw_orphan_repair_sweep_scheduler(
+    app: Any,  # Any: FastAPI at runtime, but only `app.state` is touched.
+    *,
+    golden_repo_manager: Any,  # Any: duck-typed, never imported here.
+    backend_registry: Any,  # Any: may be None -- see the constructor guard.
+    background_job_manager: Any,  # Any: duck-typed, never imported here.
+) -> Optional[Any]:
+    """Start the HNSW orphan repair fleet sweep (Story #1360), recording the
+    outcome on ``app.state``. A failure DEGRADES the node rather than killing
+    boot -- but is never silent (Bug #1864).
+
+    Returns:
+        The started scheduler, or None when startup failed.
+    """
+    logger.info(
+        "Server startup: Initializing HNSW orphan repair sweep scheduler",
+        extra={"correlation_id": get_correlation_id()},
+    )
+    try:
+        scheduler = _construct_hnsw_orphan_repair_sweep_scheduler(
+            golden_repo_manager, backend_registry, background_job_manager
+        )
+        scheduler.start()
+    except Exception as e:
+        _record_hnsw_orphan_repair_sweep_failure(app, e)
+        return None
+
+    app.state.hnsw_orphan_repair_sweep_scheduler = scheduler
+    app.state.hnsw_orphan_repair_sweep_startup_error = None
+    logger.info(
+        "HNSW orphan repair sweep scheduler started",
+        extra={"correlation_id": get_correlation_id()},
+    )
+    return scheduler
+
+
 def make_lifespan(
     background_job_manager: Any,
     job_tracker: Any,
@@ -2361,49 +2453,15 @@ def make_lifespan(
 
         # Startup: Initialize HNSW Orphan Repair Fleet Sweep Scheduler
         # (Story #1360, Epic #1333 S3)
-        hnsw_orphan_repair_sweep_scheduler = None
-        logger.info(
-            "Server startup: Initializing HNSW orphan repair sweep scheduler",
-            extra={"correlation_id": get_correlation_id()},
+        # The started scheduler is stored on `app.state` by the helper (which
+        # is where the admin stats endpoint reads it from); no local binding
+        # is needed here.
+        _start_hnsw_orphan_repair_sweep_scheduler(
+            app,
+            golden_repo_manager=golden_repo_manager,
+            backend_registry=backend_registry,
+            background_job_manager=background_job_manager,
         )
-        try:
-            from code_indexer.server.services.hnsw_orphan_sweep.scheduler import (
-                HNSWOrphanRepairSweepScheduler as _HNSWOrphanRepairSweepScheduler,
-            )
-            from code_indexer.server.services.config_service import get_config_service
-
-            if backend_registry is None:
-                raise RuntimeError("backend_registry is not available")
-            if not (
-                hasattr(golden_repo_manager, "activated_repo_manager")
-                and golden_repo_manager.activated_repo_manager is not None
-            ):
-                raise RuntimeError(
-                    "golden_repo_manager.activated_repo_manager is not available"
-                )
-
-            hnsw_orphan_repair_sweep_scheduler = _HNSWOrphanRepairSweepScheduler(
-                golden_repo_manager=golden_repo_manager,
-                activated_repo_manager=golden_repo_manager.activated_repo_manager,
-                state_backend=backend_registry.hnsw_orphan_sweep_state,
-                background_job_manager=background_job_manager,
-                config_service=get_config_service(),
-            )
-            hnsw_orphan_repair_sweep_scheduler.start()
-            app.state.hnsw_orphan_repair_sweep_scheduler = (
-                hnsw_orphan_repair_sweep_scheduler
-            )
-            logger.info(
-                "HNSW orphan repair sweep scheduler started",
-                extra={"correlation_id": get_correlation_id()},
-            )
-        except Exception as e:
-            logger.warning(
-                format_error_log(
-                    "APP-GENERAL-090",
-                    f"Failed to initialize HNSW orphan repair sweep scheduler: {e}",
-                )
-            )
 
         # Startup: Initialize Fleet Migration Scheduler (Story #1458,
         # Epic #1454). Ships DISABLED by default (fleet_migration_config.
@@ -2901,6 +2959,112 @@ def make_lifespan(
                 # `.versioned` snapshots must never fail to run without a
                 # visible signal.
                 _log_vsr_guard_skip(global_lifecycle_manager, snapshot_manager)
+
+            # Bug #1871: sweep individually-expired files out of the LEGACY
+            # (pre-relocation, git-tracked) snapshot-reader-lease directory.
+            # This is the SAFE replacement for the retracted "delete it at
+            # startup" plan: it never removes the directory itself -- an
+            # old-version node mid-rolling-upgrade may still recreate and
+            # renew leases there -- it only removes files whose OWN
+            # recorded ttl_seconds has already elapsed
+            # (sweep_expired_lease_files). Offloaded via
+            # anyio.to_thread.run_sync, mirroring the sibling
+            # `_run_vsr_sweep` closure immediately above, because this is a
+            # synchronous filesystem walk that must never block the event
+            # loop at fleet scale (~900 golden repos, `hard` NFSv3 mount).
+            # Backgrounded via asyncio.create_task (not awaited) because
+            # nothing later in lifespan reads the result -- the counts are
+            # only ever logged.
+            async def _run_legacy_lease_sweep() -> None:
+                try:
+                    import anyio.to_thread as _to_thread
+                    from code_indexer.global_repos.snapshot_reader_lease import (
+                        _legacy_lease_directory,
+                        sweep_expired_lease_files,
+                    )
+                    from code_indexer.server.services.cidx_meta_backup import (
+                        get_cidx_meta_path,
+                    )
+
+                    _lease_root = get_cidx_meta_path(
+                        config_service.config_manager.server_dir
+                    )
+                    _removed, _errors = await _to_thread.run_sync(
+                        lambda: sweep_expired_lease_files(
+                            _legacy_lease_directory(_lease_root)
+                        )
+                    )
+                    _log = logger.warning if _errors else logger.info
+                    _log(
+                        "Startup: Bug #1871 legacy snapshot-reader-lease "
+                        "sweep removed %d expired file(s) with %d error(s)",
+                        _removed,
+                        _errors,
+                    )
+                except Exception as _lease_sweep_exc:  # noqa: BLE001 -- startup safety
+                    logger.warning(
+                        "Startup: Bug #1871 legacy snapshot-reader-lease "
+                        "sweep failed (non-fatal): %s",
+                        _lease_sweep_exc,
+                    )
+
+            asyncio.create_task(_run_legacy_lease_sweep())
+
+            # Bug #1871 follow-up (caught by the E2E Phase 4 post-run
+            # log-audit gate): this module's own
+            # LeaseDirectoryAmbiguousError docstring already promises that
+            # "server startup unconditionally creates this directory
+            # before serving traffic" -- nothing actually did. The
+            # PRIMARY (relocated `.scratch`) lease directory was only ever
+            # created as a side effect of a WRITER taking a lease
+            # (SnapshotReaderLease.acquire -> _lease_directory(...,
+            # create=True)). On a fresh server where no reader has yet
+            # taken a lease, snapshot_has_live_reader() found the
+            # directory absent and raised LeaseDirectoryAmbiguousError;
+            # cleanup_manager.py caught that and deferred cleanup
+            # indefinitely, so snapshots accumulated without bound at the
+            # project's ~900-repo production scale. This closure closes
+            # that gap by unconditionally creating the directory here, so
+            # its later absence is genuinely anomalous -- exactly what the
+            # ambiguous-error docstring assumes and what the defer-on-
+            # ambiguous cleanup path (the actual Bug #1871 data-loss fix)
+            # requires to ever converge. Offloaded via
+            # anyio.to_thread.run_sync, mirroring the sibling
+            # `_run_legacy_lease_sweep` closure immediately above, because
+            # this is a synchronous mkdir() that must never block the
+            # event loop at fleet scale (`hard` NFSv3 mount can block a
+            # bare filesystem call forever). Backgrounded via
+            # asyncio.create_task (not awaited) because nothing later in
+            # lifespan reads the result.
+            async def _run_primary_lease_directory_bootstrap() -> None:
+                try:
+                    import anyio.to_thread as _to_thread
+                    from code_indexer.global_repos.snapshot_reader_lease import (
+                        ensure_primary_lease_directory,
+                    )
+                    from code_indexer.server.services.cidx_meta_backup import (
+                        get_cidx_meta_path,
+                    )
+
+                    _primary_lease_root = get_cidx_meta_path(
+                        config_service.config_manager.server_dir
+                    )
+                    _primary_lease_dir = await _to_thread.run_sync(
+                        lambda: ensure_primary_lease_directory(_primary_lease_root)
+                    )
+                    logger.info(
+                        "Startup: ensured primary snapshot-reader lease "
+                        "directory exists at %s",
+                        _primary_lease_dir,
+                    )
+                except Exception as _lease_dir_exc:  # noqa: BLE001 -- startup safety
+                    logger.warning(
+                        "Startup: failed to ensure primary snapshot-reader "
+                        "lease directory exists (non-fatal): %s",
+                        _lease_dir_exc,
+                    )
+
+            asyncio.create_task(_run_primary_lease_directory_bootstrap())
 
             def _dep_map_health_check_fn():
                 from code_indexer.server.services.dep_map_health_detector import (

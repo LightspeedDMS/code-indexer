@@ -1,5 +1,6 @@
 """Tests for smart indexer functionality."""
 
+import json
 import tempfile
 import time
 from pathlib import Path
@@ -1075,6 +1076,129 @@ class TestIndexingExceptionHandling:
             if temp_file2.exists():
                 temp_file2.unlink()
 
+    def _seed_failed_run_metadata(
+        self, temp_metadata_path, temp_file1, temp_file2, completed_chunk_count
+    ):
+        """Bug #1862 follow-up helper: seed metadata as if run 1 processed
+        temp_file1, then failed, leaving temp_file2 remaining for run 2."""
+        metadata = ProgressiveMetadata(temp_metadata_path)
+        git_status = {"git_available": True, "project_id": "test"}
+        metadata.start_indexing("test-provider", "test-model", git_status)
+        metadata.set_files_to_index([temp_file1, temp_file2])
+        metadata.mark_file_completed(
+            str(temp_file1), chunks_count=completed_chunk_count
+        )
+        metadata.fail_indexing(
+            "'hnswlib.Index' object has no attribute 'check_integrity'"
+        )
+        return git_status
+
+    def _run_cancelled_resume(
+        self,
+        indexer,
+        mock_filesystem_client,
+        git_status,
+        resume_batch_size,
+        resume_thread_count,
+    ):
+        """Drive the REAL _do_resume_interrupted through its cancelled-resume
+        branch, which deliberately never calls complete_indexing()."""
+        with (
+            patch.object(indexer, "get_git_status") as mock_git_status,
+            patch.object(
+                indexer, "process_files_high_throughput"
+            ) as mock_high_throughput,
+        ):
+            mock_git_status.return_value = git_status
+
+            from code_indexer.services.smart_indexer import ProcessingStats
+
+            mock_stats = ProcessingStats()
+            mock_stats.files_processed = 0
+            mock_stats.chunks_created = 0
+            mock_stats.cancelled = True  # re-interrupted mid-resume
+            mock_high_throughput.return_value = mock_stats
+
+            mock_filesystem_client.ensure_provider_aware_collection.return_value = (
+                "test_collection"
+            )
+            mock_filesystem_client.begin_indexing.return_value = None
+            mock_filesystem_client.end_indexing.return_value = {"vectors_indexed": 0}
+
+            indexer._do_resume_interrupted(
+                batch_size=resume_batch_size,
+                progress_callback=None,
+                git_status=git_status,
+                provider_name="test-provider",
+                model_name="test-model",
+                quiet=False,
+                vector_thread_count=resume_thread_count,
+            )
+
+    def test_resume_after_failed_run_clears_error_message_1862(
+        self,
+        mock_config,
+        mock_embedding_provider,
+        mock_filesystem_client,
+        temp_metadata_path,
+    ):
+        """
+        Bug #1862 follow-up: a RESUMED run that is itself interrupted again
+        must not leave run 1's error_message next to run 2's progress.
+
+        Drives the REAL _do_resume_interrupted (only get_git_status /
+        process_files_high_throughput / the vector-store client are mocked,
+        matching the sibling resume tests above) through the branch that
+        never calls complete_indexing() -- proving the resume_indexing()
+        call site is actually wired, not just that the ProgressiveMetadata
+        method exists.
+        """
+        completed_chunk_count = 5
+        resume_batch_size = 50
+        resume_thread_count = 8
+
+        temp_file1 = mock_config.codebase_dir / "test1.py"
+        temp_file2 = mock_config.codebase_dir / "test2.py"
+        temp_file1.write_text("# Test 1\n")
+        temp_file2.write_text("# Test 2\n")
+
+        git_status = self._seed_failed_run_metadata(
+            temp_metadata_path, temp_file1, temp_file2, completed_chunk_count
+        )
+        assert ProgressiveMetadata(temp_metadata_path).metadata["error_message"] == (
+            "'hnswlib.Index' object has no attribute 'check_integrity'"
+        )
+
+        indexer = SmartIndexer(
+            mock_config,
+            mock_embedding_provider,
+            mock_filesystem_client,
+            temp_metadata_path,
+        )
+
+        try:
+            self._run_cancelled_resume(
+                indexer,
+                mock_filesystem_client,
+                git_status,
+                resume_batch_size,
+                resume_thread_count,
+            )
+        finally:
+            if temp_file1.exists():
+                temp_file1.unlink()
+            if temp_file2.exists():
+                temp_file2.unlink()
+
+        # Reload from disk with a FRESH instance -- proves the persisted
+        # JSON, not just the in-memory dict, no longer carries run 1's error.
+        reloaded = ProgressiveMetadata(temp_metadata_path)
+        assert "error_message" not in reloaded.metadata
+        # Bug #467: status stays "failed" -- the cancelled-resume branch
+        # never calls complete_indexing(), and
+        # can_resume_interrupted_operation() must keep accepting "failed".
+        assert reloaded.metadata["status"] == "failed"
+
     def test_end_indexing_called_on_branch_changes_exception(
         self,
         mock_config,
@@ -1193,3 +1317,133 @@ class TestIndexingExceptionHandling:
             # CRITICAL ASSERTION: end_indexing() MUST be called on success
             mock_filesystem_client.begin_indexing.assert_called()
             mock_filesystem_client.end_indexing.assert_called()
+
+
+class TestLegacyInProgressMetadataErrorClearedBySetFilesToIndex:
+    """Bug #1862, fourth gap (found by independent Codex review): a legacy
+    on-disk metadata.json written by PRE-FIX code can hold
+    status="in_progress" plus a leftover error_message -- a combination
+    post-fix code can no longer CREATE (status="in_progress" is written in
+    exactly one place, start_indexing(), which now also pops the error) but
+    can still READ from disk, since an upgrade does not rewrite old files.
+
+    _do_incremental_index() (and _do_reconcile_with_database(), the sibling
+    flagged path) only call start_indexing() -- and therefore only pop
+    error_message -- when status != "in_progress". A legacy file already
+    sitting at "in_progress" skips that call entirely, and update_progress()
+    then rewrites the document with fresh counters next to the stale error.
+    set_files_to_index() is called unconditionally on every fresh-work path
+    (full, incremental, reconcile) including both flagged ones, so putting
+    the pop there closes the gap without adding orchestrator-level call
+    sites in smart_indexer.py.
+    """
+
+    _LEGACY_ERROR = "'hnswlib.Index' object has no attribute 'check_integrity'"
+    _STALE_TIMESTAMP_OFFSET_SECONDS = 120
+
+    def _write_legacy_metadata(self, temp_metadata_path):
+        """Write a legacy-shape metadata.json directly to disk -- what
+        PRE-FIX code could leave behind -- rather than simulating the old
+        code path in-process."""
+        legacy_metadata = {
+            "status": "in_progress",
+            "error_message": self._LEGACY_ERROR,
+            "last_index_timestamp": (
+                time.time() - self._STALE_TIMESTAMP_OFFSET_SECONDS
+            ),
+            "embedding_provider": "test-provider",
+            "embedding_model": "test-model",
+            "git_available": False,
+            "project_id": "test",
+        }
+        with open(temp_metadata_path, "w") as f:
+            json.dump(legacy_metadata, f)
+
+    def _drive_real_incremental_index(
+        self, indexer, mock_filesystem_client, modified_file
+    ):
+        """Drive the REAL _do_incremental_index() directly -- git_status is
+        an explicit parameter here (no get_git_status mock needed), and
+        is_git_available() runs for real against the non-git temp codebase
+        dir. Only process_files_high_throughput (the embedding/chunking/
+        vector-store orchestration boundary, itself backed by the already-
+        mocked embedding_provider/vector_store_client fixtures) and the
+        injected file_finder collaborator are mocked. stats.cancelled=True
+        keeps complete_indexing() -- which has its own, separately-tested
+        error_message pop -- out of the path, isolating set_files_to_index()
+        as the only thing that could clear the legacy error here."""
+        git_status = {"git_available": False, "project_id": "test"}
+
+        with (
+            patch.object(indexer, "file_finder") as mock_file_finder,
+            patch.object(
+                indexer, "process_files_high_throughput"
+            ) as mock_high_throughput,
+        ):
+            mock_file_finder.find_modified_files.return_value = [modified_file]
+
+            from code_indexer.services.smart_indexer import ProcessingStats
+
+            mock_stats = ProcessingStats()
+            mock_stats.files_processed = 0
+            mock_stats.chunks_created = 0
+            mock_stats.cancelled = True  # isolates set_files_to_index()
+            mock_high_throughput.return_value = mock_stats
+
+            mock_filesystem_client.ensure_provider_aware_collection.return_value = (
+                "test_collection"
+            )
+            mock_filesystem_client.resolve_collection_name.return_value = (
+                "test_collection"
+            )
+            mock_filesystem_client.begin_indexing.return_value = None
+            mock_filesystem_client.end_indexing.return_value = {"vectors_indexed": 0}
+
+            indexer._do_incremental_index(
+                batch_size=50,
+                progress_callback=None,
+                git_status=git_status,
+                provider_name="test-provider",
+                model_name="test-model",
+                safety_buffer_seconds=60,
+                quiet=False,
+                vector_thread_count=8,
+            )
+
+    def test_legacy_in_progress_metadata_error_cleared_by_set_files_to_index(
+        self,
+        mock_config,
+        mock_embedding_provider,
+        mock_filesystem_client,
+        temp_metadata_path,
+    ):
+        self._write_legacy_metadata(temp_metadata_path)
+
+        modified_file = mock_config.codebase_dir / "changed.py"
+        modified_file.write_text("# changed\n")
+
+        indexer = SmartIndexer(
+            mock_config,
+            mock_embedding_provider,
+            mock_filesystem_client,
+            temp_metadata_path,
+        )
+        # Sanity: the legacy shape actually loaded as expected.
+        assert indexer.progressive_metadata.metadata["status"] == "in_progress"
+        assert (
+            indexer.progressive_metadata.metadata["error_message"] == self._LEGACY_ERROR
+        )
+
+        try:
+            self._drive_real_incremental_index(
+                indexer, mock_filesystem_client, modified_file
+            )
+        finally:
+            if modified_file.exists():
+                modified_file.unlink()
+
+        # Reload from disk with a FRESH instance -- proves the persisted
+        # JSON, not just the in-memory dict, no longer carries the legacy
+        # error.
+        reloaded = ProgressiveMetadata(temp_metadata_path)
+        assert "error_message" not in reloaded.metadata

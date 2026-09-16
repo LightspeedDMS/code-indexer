@@ -20,7 +20,14 @@ Pattern YAML schema:
     tags: list[str]       (optional)
     author: str           (optional)
     created_at: str       (optional, ISO date)
-    evaluator_code: str   (required, Rust fn evaluate_node code)
+    evaluator_code: str   (required, Rust fn evaluate_node code; when
+                           execution_mode is "graph", holds a
+                           collect_facts + analyze_graph callback pair
+                           instead)
+    execution_mode: str   (optional: "legacy" | "graph". Missing means
+                           "legacy" -- ADR-001, Story #1859. All 39
+                           patterns stored before this field existed are
+                           legacy source and resolve as "legacy".)
     parameters: list      (optional, list of ParameterDecl dicts)
 
 ParameterDecl:
@@ -45,7 +52,10 @@ from code_indexer.server.services.cidx_meta_backup.branch_detect import (
 )
 from code_indexer.server.services.cidx_meta_backup.sync import CidxMetaBackupSync
 from code_indexer.server.services.config_service import get_config_service
-from code_indexer.xray.sandbox import validate_rust_evaluator
+from code_indexer.xray.sandbox import (
+    detect_evaluator_entry_points,
+    validate_rust_evaluator,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -54,6 +64,14 @@ _ALLOWED_PARAM_TYPES = frozenset({"usize", "i64", "f64", "bool", "str"})
 
 # Required top-level fields in a pattern YAML
 _REQUIRED_FIELDS = ("name", "description", "language", "evaluator_code")
+
+# Valid values for the optional execution_mode field (ADR-001, Story #1859).
+# Absence is interpreted as "legacy" everywhere this is checked -- the field
+# was added after all 39 pre-existing stored patterns were already legacy
+# evaluate_node source, and no caller written before this field existed
+# ever supplies it.
+_ALLOWED_EXECUTION_MODES = frozenset({"legacy", "graph"})
+DEFAULT_EXECUTION_MODE = "legacy"
 
 # Coarse write-lock alias for the shared cidx-meta git repo (Bug #1037).
 # Must match the alias used by MemoryStoreService and RefreshScheduler.
@@ -320,6 +338,55 @@ class XrayPatternService:
         if param_validation is not None:
             return param_validation
 
+        # 4a. Validate execution_mode if present (ADR-001, Story #1859).
+        # Absence is not an error -- it means "legacy" (see DEFAULT_EXECUTION_MODE).
+        execution_mode = spec.get("execution_mode")
+        if (
+            execution_mode is not None
+            and execution_mode not in _ALLOWED_EXECUTION_MODES
+        ):
+            return {
+                "error": "invalid_execution_mode",
+                "message": (
+                    f"execution_mode {execution_mode!r} is not allowed. "
+                    f"Allowed values: {sorted(_ALLOWED_EXECUTION_MODES)}"
+                ),
+            }
+
+        # 4b. Cross-check the declared (or defaulted) execution_mode against
+        # the callback family ACTUALLY present in evaluator_code (C4,
+        # #1858-#1861 remediation). `validate_rust_evaluator` above only
+        # confirms evaluator_code satisfies AT LEAST ONE mode's entry
+        # points -- it never checks that mode against the DECLARED
+        # execution_mode, so `execution_mode: graph` paired with
+        # legacy-only code (or vice versa) previously stored successfully
+        # and only failed much later at Rust compile/load with an
+        # unrelated, opaque error. ADR-001 names an artifact whose exports
+        # do not match its declaration as a hard error -- reject it here,
+        # at store time, reusing the SAME detection `validate_rust_
+        # evaluator` already ran (Rule 4 anti-duplication) rather than
+        # re-deriving it.
+        resolved_mode = execution_mode or DEFAULT_EXECUTION_MODE
+        has_legacy_entry_point, has_graph_entry_point = detect_evaluator_entry_points(
+            evaluator_code
+        )
+        if resolved_mode == "graph" and not has_graph_entry_point:
+            return {
+                "error": "execution_mode_mismatch",
+                "message": (
+                    "execution_mode is 'graph' but evaluator_code does not "
+                    "define both 'fn collect_facts' and 'fn analyze_graph'"
+                ),
+            }
+        if resolved_mode == "legacy" and not has_legacy_entry_point:
+            return {
+                "error": "execution_mode_mismatch",
+                "message": (
+                    "execution_mode is 'legacy' (declared or defaulted) but "
+                    "evaluator_code does not define 'fn evaluate_node'"
+                ),
+            }
+
         # 5. Resolve target path
         target_dir = self._patterns_root / scope
         target_path = target_dir / f"{name}.yaml"
@@ -447,6 +514,51 @@ class XrayPatternService:
             prepared_code = evaluator_code
 
         return prepared_code, resolved
+
+    def get_pattern_execution_mode(self, repo_alias: str, pattern_name: str) -> str:
+        """Return the declared execution_mode ("legacy" or "graph") for a
+        stored pattern, without preparing/parametrizing its evaluator code.
+
+        Resolution order matches resolve_and_prepare_pattern (repo-specific
+        scope first, then __any__) -- both go through the same _load_pattern
+        lookup, so a repo-specific override and its declared mode are never
+        resolved from two different files.
+
+        Missing execution_mode metadata resolves to DEFAULT_EXECUTION_MODE
+        ("legacy") per ADR-001: the field was added after all 39 existing
+        patterns were already stored as legacy evaluate_node source, and
+        none of them declares it.
+
+        Args:
+            repo_alias: Repository alias for resolution priority.
+            pattern_name: Name of the pattern (filename stem without .yaml).
+
+        Returns:
+            "legacy" or "graph".
+
+        Raises:
+            ValueError: "pattern_not_found" if pattern doesn't exist in
+                either scope.
+            ValueError: "path_traversal_rejected" for a repo_alias or
+                pattern_name containing path traversal sequences.
+        """
+        for field_name, field_value in [
+            ("repo_alias", repo_alias),
+            ("pattern_name", pattern_name),
+        ]:
+            if "/" in field_value or "\\" in field_value or ".." in field_value:
+                raise ValueError(
+                    f"path_traversal_rejected: {field_name} '{field_value}' "
+                    "contains path traversal sequences"
+                )
+
+        spec = self._load_pattern(repo_alias, pattern_name)
+        if spec is None:
+            raise ValueError(
+                f"pattern_not_found: pattern '{pattern_name}' not found in "
+                f"scope '{repo_alias}' or '__any__'"
+            )
+        return str(spec.get("execution_mode") or DEFAULT_EXECUTION_MODE)
 
     def ensure_seed_patterns(self) -> None:
         """Create seed patterns in __any__/ if they don't already exist.
@@ -734,6 +846,16 @@ class XrayPatternService:
                     f"pattern_parse_error: pattern file '{path}' has an "
                     f"invalid parameter declaration: {error.get('message', error)}"
                 )
+        execution_mode = spec.get("execution_mode")
+        if (
+            execution_mode is not None
+            and execution_mode not in _ALLOWED_EXECUTION_MODES
+        ):
+            raise ValueError(
+                f"pattern_parse_error: pattern file '{path}' has an invalid "
+                f"'execution_mode' value {execution_mode!r} "
+                "(must be 'legacy' or 'graph')"
+            )
 
     def _validate_parameter_declarations(
         self, params: List[Dict[str, Any]]

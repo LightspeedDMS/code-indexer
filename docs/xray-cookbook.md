@@ -9,8 +9,8 @@ its file. The current MCP and REST evaluator contract is Rust-based and is
 documented by the live tool documentation for
 [xray_search](../src/code_indexer/server/mcp/tool_docs/search/xray_search.md).
 The examples below are request shapes and contract guidance; the templates in
-"Template library: single-file (legacy mode)" are ready-to-adapt starting
-points.
+"Template library: single-file mode" and "Template library: graph mode" below
+are ready-to-adapt starting points for each execution mode.
 
 ## Reusing a stored pattern
 
@@ -37,7 +37,7 @@ An empty `Vec<EvalFinding>` means that the file matched Phase 1 but the
 evaluator found nothing to report. The evaluator is file-as-unit: it does not
 receive a separate callback for every regular-expression match.
 
-## Template library: single-file (legacy mode)
+## Template library: single-file mode
 
 Each template below is copy-pasteable as `evaluator_code`. Node kinds
 (`method_declaration`, `method_invocation`, `class_declaration`, ...) are
@@ -130,6 +130,10 @@ fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> {
 }
 ```
 
+## Template library: graph mode
+
+Each template below is copy-pasteable as both `collect_facts` and `analyze_graph` together; a graph evaluator must not define `fn evaluate_node`. See the table under the "Graph mode" section further down this document for which template answers which question.
+
 <!-- template:find-definitely-dead-symbols -->
 ```rust
 // X-Ray template: find-definitely-dead-symbols (graph mode)
@@ -163,7 +167,10 @@ fn collect_facts(node: &OwnedNode, file: &str) -> Vec<UserFact> {
 // `undecidable` as "public API"; per-visibility counts are not broken out.
 //
 // `definitely_dead` (`Some(true)`) proves only "unreferenced AND
-// explicitly declared private" -- the verdict remains falsifiable by
+// explicitly declared private" for declaration kinds whose references
+// the graph tracks (currently methods and types). Field and constant
+// declarations are never `Some(true)`: their reads are not reference
+// edges in the current extractor. The verdict remains falsifiable by
 // reflection, JNI, or dependency injection, none of which leave an
 // in-repo reference edge this graph can see, so a `Some(true)` verdict
 // is not an unconditional deletion-safety proof.
@@ -639,8 +646,17 @@ when building an HTTP request.
 
 ## Graph mode
 
-Use [analyze_graph](../src/code_indexer/server/mcp/tool_docs/search/analyze_graph.md)
-for questions that require relationships among files, such as reachability,
+| Question | Template |
+|---|---|
+| Is this symbol definitely dead code? | `find-definitely-dead-symbols` |
+| Are there reference cycles among symbols? | `find-reference-cycles` |
+| What is reachable from a given symbol? | `report-reachable-symbols-from-dense-id` |
+| Is there a path from source symbols to a sink? | `find-path-to-dense-sink` |
+| Who calls symbols matching a signature substring? | `callers-of-symbols-matching-signature-text` |
+
+Each template above is in "Template library: graph mode" earlier in this document. An MCP client holding only a served document body (no filesystem) can fetch any of them directly by filename, e.g. `get_file_content(repository_alias='code-indexer-global', file_path='docs/xray-templates/find-definitely-dead-symbols.rs')`.
+
+Use `analyze_graph` for questions that require relationships among files, such as reachability,
 dead code, layering, or blast radius. Graph mode builds a cross-file reference
 graph and is a different execution mode from single-file `xray_search`.
 
@@ -654,9 +670,8 @@ treating an empty `findings` list as a verified negative. When
 `fact_graph_complete` is false, an empty result means that the graph was too
 incomplete to trust as a clean bill of health.
 
-Read the [graph-mode tool documentation](../src/code_indexer/server/mcp/tool_docs/search/analyze_graph.md)
-for the `UserFact`, `GraphResult`, `ReduceFinding`, graph-handle, and
-completeness contracts.
+For the `UserFact`, `GraphResult`, `ReduceFinding`, graph-handle, and
+completeness contracts, fetch the full `analyze_graph` tool documentation: `get_file_content(repository_alias='code-indexer-global', file_path='src/code_indexer/server/mcp/tool_docs/search/analyze_graph.md')`.
 
 ## Choosing the mode
 
@@ -668,11 +683,9 @@ their required function contracts must not be mixed.
 
 ## Related documentation
 
-- [X-Ray Architecture](xray-architecture.md) describes the engine and its two
-  execution modes.
+- For the engine architecture, its two execution modes, and the graph node/edge model: `get_file_content(repository_alias='code-indexer-global', file_path='docs/xray-architecture.md')` (X-Ray Architecture).
 - [X-Ray Sandbox](xray-sandbox.md) describes the retained internal Python
   module and its non-contract status.
 - [xray_search MCP contract](../src/code_indexer/server/mcp/tool_docs/search/xray_search.md)
   defines the single-file request and evaluator schema.
-- [analyze_graph MCP contract](../src/code_indexer/server/mcp/tool_docs/search/analyze_graph.md)
-  defines graph extraction, reduction, and completeness semantics.
+- For graph extraction, reduction, and completeness semantics: `get_file_content(repository_alias='code-indexer-global', file_path='src/code_indexer/server/mcp/tool_docs/search/analyze_graph.md')` (analyze_graph MCP contract).

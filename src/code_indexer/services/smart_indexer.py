@@ -592,7 +592,7 @@ class SmartIndexer(HighThroughputProcessor):
                         # Update progressive metadata with new git status
                         updated_git_status = git_status.copy()
                         updated_git_status["current_branch"] = current_branch
-                        self.progressive_metadata.start_indexing(
+                        self.progressive_metadata.start_fresh_indexing(
                             provider_name, model_name, updated_git_status
                         )
 
@@ -898,7 +898,9 @@ class SmartIndexer(HighThroughputProcessor):
         # NOTE: progressive_metadata.clear() is now called earlier in smart_index() when force_full=True
 
         # Start indexing
-        self.progressive_metadata.start_indexing(provider_name, model_name, git_status)
+        self.progressive_metadata.start_fresh_indexing(
+            provider_name, model_name, git_status
+        )
 
         # Find all files
         if progress_callback:
@@ -1311,7 +1313,7 @@ class SmartIndexer(HighThroughputProcessor):
 
         # CRITICAL: Now that we know work is needed, start the indexing session
         if self.progressive_metadata.metadata["status"] != "in_progress":
-            self.progressive_metadata.start_indexing(
+            self.progressive_metadata.start_fresh_indexing(
                 provider_name, model_name, git_status
             )
 
@@ -1819,7 +1821,7 @@ class SmartIndexer(HighThroughputProcessor):
 
         # Start/update indexing metadata
         if self.progressive_metadata.metadata["status"] != "in_progress":
-            self.progressive_metadata.start_indexing(
+            self.progressive_metadata.start_fresh_indexing(
                 provider_name, model_name, git_status
             )
 
@@ -2108,6 +2110,15 @@ class SmartIndexer(HighThroughputProcessor):
         fts_manager: Optional[TantivyIndexManager] = None,
     ) -> ProcessingStats:
         """Resume a previously interrupted indexing operation."""
+
+        # Bug #1862 follow-up: resuming a "failed" run (Bug #467's
+        # can_resume_interrupted_operation() explicitly accepts it) is one
+        # of the run transitions covered by the error_message invariant
+        # stated on ProgressiveMetadata.start_indexing() -- neither
+        # start_indexing() nor complete_indexing() run on this path below,
+        # so drop the PRIOR run's error here now, or it sits next to this
+        # run's fresh progress counters indefinitely.
+        self.progressive_metadata.resume_indexing()
 
         # Ensure provider-aware collection exists for resuming
         self.vector_store_client.ensure_provider_aware_collection(

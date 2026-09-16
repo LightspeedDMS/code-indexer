@@ -111,7 +111,11 @@ def _resolve_evaluator_code_or_raise(body: "XRaySearchRequest") -> str:
         "pattern_name": body.pattern_name,
         "pattern_params": body.pattern_params,
     }
-    evaluator_code, err_resp = _resolve_evaluator_code(params, body.repository_alias)
+    evaluator_code, err_resp = _resolve_evaluator_code(
+        params,
+        body.repository_alias,
+        expected_execution_mode="legacy",
+    )
     if err_resp is not None:
         error_data = _json.loads(err_resp["content"][0]["text"])
         error_code = error_data.get("error", "pattern_resolution_failed")

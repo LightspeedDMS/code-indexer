@@ -34,6 +34,7 @@ Code-review follow-up (both closed by this file):
     TestDashboardJobFailurePathWithNullTracker below closes that gap.
 """
 
+import threading
 import time
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -80,6 +81,35 @@ class _FailingDashboardService:
         raise ValueError(_FAILURE_MESSAGE)
 
 
+class _BlockingDashboardService:
+    """
+    Deterministic dashboard_service double that blocks until released.
+
+    Bug #1866: used to force a specific thread interleaving between the
+    submitting thread (running _submit_dashboard_job) and the BGM worker
+    thread executing DependencyMapDashboardJobRunner.run, instead of
+    relying on wall-clock timing/scheduler luck to produce it.
+    """
+
+    def __init__(self, release_event: threading.Event) -> None:
+        self._release_event = release_event
+
+    def get_job_status(self, progress_callback=None) -> Dict[str, Any]:
+        released = self._release_event.wait(timeout=_POLL_TIMEOUT_SECONDS)
+        assert released, "test bug: release_event was never set"
+        if progress_callback is not None:
+            progress_callback(1, 1)
+        return {
+            "health": "Healthy",
+            "color": "GREEN",
+            "status": "idle",
+            "last_run": None,
+            "next_run": None,
+            "error_message": None,
+            "run_history": [],
+        }
+
+
 def _poll_until_terminal(
     bgm: BackgroundJobManager, job_id: str, timeout: float = _POLL_TIMEOUT_SECONDS
 ) -> Optional[Dict[str, Any]]:
@@ -92,6 +122,100 @@ def _poll_until_terminal(
             return job
         time.sleep(_POLL_INTERVAL_SECONDS)
     return job
+
+
+def _assert_job_completed(bgm: BackgroundJobManager, job_id: str) -> Dict[str, Any]:
+    """Shared poll-and-assert helper for tests that expect a clean success."""
+    job = _poll_until_terminal(bgm, job_id)
+    assert job is not None and job.get("status") == "completed", (
+        f"Expected job to reach 'completed', got status="
+        f"{job.get('status') if job else None!r}"
+    )
+    return job
+
+
+# NOTE on `cache_backend: Any` below: callers pass either one of the two real
+# production backends from the parametrized `cache_backend` fixture
+# (DependencyMapDashboardCacheBackend / FilesystemDashboardCacheBackend) or
+# the _CorrectionDelayingCacheBackend proxy defined below. All three are
+# duck-typed against the same informal get_cached()/set_job_slot()/etc.
+# surface; no shared Protocol/ABC exists anywhere in this codebase for that
+# surface, so `Any` is the accurate type here rather than a narrowing lie.
+
+
+def _assert_job_still_in_flight(bgm: BackgroundJobManager, job_id: str) -> None:
+    """Bug #1866 helper: the job must still be non-terminal at this point."""
+    tracked = bgm.get_job_status(job_id, username=_SYSTEM_USERNAME, is_admin=True)
+    assert tracked is not None
+    assert tracked.get("status") not in _TERMINAL_STATUSES, (
+        "test setup bug: job must still be in flight (non-terminal) at "
+        f"this point, got status={tracked.get('status')!r}"
+    )
+
+
+def _assert_cache_slot_holds(cache_backend: Any, expected_job_id: str) -> None:
+    """Bug #1866 helper: the cache slot must hold the real BGM job id."""
+    cached = cache_backend.get_cached()
+    assert cached is not None, "cache slot must exist after submission"
+    assert cached.get("job_id") == expected_job_id, (
+        f"Cache slot job_id {cached.get('job_id')!r} must match the real "
+        f"BGM-tracked job_id {expected_job_id!r} while the job is still "
+        "in flight -- a mismatch here means the dashboard would poll a "
+        "job id BGM has never heard of (Bug #1620's original defect)."
+    )
+
+
+def _assert_no_phantom_cache_pointer(
+    cache_backend: Any, bgm: BackgroundJobManager
+) -> None:
+    """Bug #1866 helper: the cache slot must never point at an unknown job."""
+    cached = cache_backend.get_cached()
+    assert cached is not None
+    cache_job_id = cached.get("job_id")
+    if cache_job_id is not None:
+        # If the slot holds a job_id at all, it MUST be one BGM genuinely
+        # tracks -- this is the actual #1620 invariant.
+        tracked = bgm.get_job_status(
+            cache_job_id, username=_SYSTEM_USERNAME, is_admin=True
+        )
+        assert tracked is not None, (
+            f"cache slot points at job_id {cache_job_id!r} that "
+            "BackgroundJobManager has never heard of -- this is the exact "
+            "#1620 phantom-pointer defect."
+        )
+    assert cached.get("result_json") is not None, (
+        "job reached 'completed' but no result was cached"
+    )
+
+
+class _CorrectionDelayingCacheBackend:
+    """
+    Purpose-built proxy double wrapping a real cache_backend.
+
+    Bug #1866: delays set_job_slot() -- the submitter's placeholder-to-
+    real-id correction -- until the worker's own terminal write
+    (set_cached) has landed, deterministically forcing the worker-wins
+    ordering instead of relying on scheduler luck. Every other call
+    delegates straight through to the wrapped real backend, so this reads
+    as a small dedicated collaborator rather than a runtime patch of
+    production behaviour.
+    """
+
+    def __init__(self, real_backend: Any, worker_finished: threading.Event) -> None:
+        self._real = real_backend
+        self._worker_finished = worker_finished
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._real, name)
+
+    def set_cached(self, *args: Any, **kwargs: Any) -> None:
+        self._real.set_cached(*args, **kwargs)
+        self._worker_finished.set()
+
+    def set_job_slot(self, *args: Any, **kwargs: Any) -> bool:
+        finished = self._worker_finished.wait(timeout=_POLL_TIMEOUT_SECONDS)
+        assert finished, "test bug: worker never reached set_cached"
+        return bool(self._real.set_job_slot(*args, **kwargs))
 
 
 @pytest.fixture(params=["sqlite", "filesystem"])
@@ -157,40 +281,104 @@ class TestDashboardJobCacheSlotMatchesRealJobId:
     via cache_backend.claim_job_slot(new_job_id) BEFORE submission -- can
     end up holding a job id that BackgroundJobManager has never heard of.
 
-    claim_job_slot() is compare-and-swap-if-empty: calling it again with
-    the real id after the slot is already occupied by the placeholder is a
-    silent no-op, so the mismatch previously persisted permanently.
+    claim_job_slot() is compare-and-swap-if-empty, and the correction
+    (cache_backend.set_job_slot(actual_id, expected_current=new_job_id) in
+    _submit_dashboard_job) is ALSO a CAS, keyed on the placeholder still
+    being present. That CAS races the BGM worker thread, which
+    independently and *unconditionally* clears job_id back to NULL the
+    moment the job reaches a terminal state
+    (DependencyMapDashboardJobRunner.run -> cache_backend.set_cached /
+    .mark_job_failed both unconditionally write job_id=NULL).
+
+    Bug #1866: the original version of this test asserted the correction's
+    result immediately after _submit_dashboard_job() returns, with no
+    synchronization. That silently assumed the submitting thread always
+    wins the race against the worker thread -- true on an idle box, false
+    under load, where the worker can be scheduled first and reach its
+    terminal write before the submitter's own very next line runs.
+    Observed failures under load: cached.get("job_id") is None while
+    returned_job_id is a live, running BGM job.
+
+    Investigation established this is NOT a production defect (see
+    Bug #1866 turn-8 handoff for the full trace): the front door
+    (dependency_map_routes.depmap_job_status_partial, lines ~920-935)
+    polls job status via tracker.get_job(job_id) using the real
+    BGM-returned id directly -- never via cache_backend's job_id field.
+    cache_backend.get_running_job_id() (STATE 3) reads the cache's job_id
+    only as a request-coalescing optimization to avoid re-submitting a
+    duplicate job while one is still in flight -- not a correctness
+    dependency. And the worker's unconditional terminal write always
+    represents a state that is equal-or-newer than the submitter's
+    in-flight correction would have produced: set_job_slot's CAS semantics
+    exist precisely so that a legitimate newer transition (job finished)
+    is never clobbered by a stale in-flight correction. Losing the race is
+    therefore a legitimate, harmless outcome, not corruption.
+
+    The two tests below assert the actual invariant deterministically, for
+    BOTH legitimate orderings, using a blocking dashboard-service double /
+    an ordering-delaying cache-backend proxy to force each interleaving
+    instead of racing the scheduler:
+
+      1. While the job is still verifiably in flight, the cache slot must
+         already show the real, corrected job_id -- the original #1620
+         defect (a permanently-wrong placeholder) would fail this.
+      2. If the worker's terminal write happens to land first, the cache
+         slot must never be left pointing at a job_id BGM does not track
+         -- the actual "phantom pointer" invariant #1620 exists to guard.
     """
 
-    def test_cache_slot_holds_real_bgm_job_id_after_submission(
+    def test_cache_slot_holds_corrected_job_id_while_job_still_in_flight(
         self, cache_backend, tmp_path: Path, background_job_manager_factory
     ) -> None:
-        """The cache slot's job_id must equal the job_id BGM is tracking."""
+        """
+        Forces the submitter-wins ordering: the worker is blocked inside
+        dashboard_service.get_job_status() until after this test has
+        already inspected the cache slot, so the CAS correction is
+        deterministically observed rather than caught by luck.
+        """
         bgm = background_job_manager_factory(storage_path=str(tmp_path / "jobs.json"))
-        dashboard_service = _FakeDashboardService()
+        release_event = threading.Event()
+        dashboard_service = _BlockingDashboardService(release_event)
 
         returned_job_id = _submit_dashboard_job(
             cache_backend, bgm, dashboard_service, job_tracker=None
         )
-
         assert returned_job_id is not None
 
-        cached = cache_backend.get_cached()
-        assert cached is not None, "cache slot must exist after submission"
-        assert cached.get("job_id") == returned_job_id, (
-            f"Cache slot job_id {cached.get('job_id')!r} must match the real "
-            f"BGM-tracked job_id {returned_job_id!r} -- a mismatch means the "
-            f"dashboard polls a job id BGM has never heard of."
+        # The worker thread is still blocked inside get_job_status() and
+        # therefore cannot have reached set_cached() yet -- the job is
+        # provably still in flight at this exact point, not a hopeful
+        # assumption about scheduling speed.
+        _assert_job_still_in_flight(bgm, returned_job_id)
+        _assert_cache_slot_holds(cache_backend, returned_job_id)
+
+        release_event.set()
+        _assert_job_completed(bgm, returned_job_id)
+
+    def test_cache_slot_never_left_phantom_when_worker_completes_before_correction(
+        self, cache_backend, tmp_path: Path, background_job_manager_factory
+    ) -> None:
+        """
+        Forces the worker-wins ordering: the submitter's placeholder-to-
+        real-id correction is delayed via _CorrectionDelayingCacheBackend
+        until the worker's own terminal write (set_cached) has already
+        landed, deterministically reproducing the interleaving that
+        previously only showed up under load.
+        """
+        bgm = background_job_manager_factory(storage_path=str(tmp_path / "jobs.json"))
+        dashboard_service = _FakeDashboardService()
+        worker_finished = threading.Event()
+        ordering_backend = _CorrectionDelayingCacheBackend(
+            cache_backend, worker_finished
         )
 
-        # Confirm BGM genuinely tracks the id the cache slot points to.
-        tracked = bgm.get_job_status(
-            cached["job_id"], username=_SYSTEM_USERNAME, is_admin=True
+        returned_job_id = _submit_dashboard_job(
+            ordering_backend, bgm, dashboard_service, job_tracker=None
         )
-        assert tracked is not None, (
-            f"BGM has no record of cache-slot job_id {cached['job_id']!r} -- "
-            "the cache slot points at a phantom job."
-        )
+        assert returned_job_id is not None
+
+        _assert_job_completed(bgm, returned_job_id)
+        _assert_no_phantom_cache_pointer(cache_backend, bgm)
 
 
 class TestDashboardJobFailurePathWithNullTracker:

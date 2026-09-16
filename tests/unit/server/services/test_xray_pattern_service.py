@@ -1039,3 +1039,134 @@ class TestNonStringRepoAlias:
                 repo_alias=["click-global"],  # type: ignore[arg-type]
                 pattern_name="deep-nesting",
             )
+
+
+# ---------------------------------------------------------------------------
+# C4 (#1858-#1861 remediation): store-time execution_mode/callback-family
+# cross-check, and a real store-then-recall test for a graph pattern.
+# ---------------------------------------------------------------------------
+
+GRAPH_EVALUATOR_CODE = (
+    "fn collect_facts(node: &OwnedNode, file: &str) -> Vec<UserFact> {\n"
+    "    Vec::new()\n"
+    "}\n"
+    "fn analyze_graph(g: &GraphHandle<'_>, facts: &FactsHandle<'_>) -> GraphResult {\n"
+    "    GraphResult::default()\n"
+    "}\n"
+)
+
+
+def _graph_pattern_yaml(**overrides: object) -> str:
+    """Builds a pattern YAML via `yaml.safe_dump` (never a hand-formatted
+    block-scalar string) so multi-line `evaluator_code` is always encoded
+    correctly regardless of its content.
+    """
+    spec: dict[str, object] = {
+        "name": "graph-store-recall",
+        "description": "Graph pattern stored via the real store path",
+        "language": "java",
+        "evaluator_code": GRAPH_EVALUATOR_CODE,
+    }
+    spec.update(overrides)
+    return yaml.safe_dump(spec, sort_keys=False)
+
+
+class TestStoreTimeExecutionModeCrossCheck:
+    """store_xray_pattern must reject a declared `execution_mode` that
+    contradicts the callback family actually present in `evaluator_code`,
+    not merely validate that `execution_mode` is one of the two allowed
+    strings. Without this cross-check, `execution_mode: graph` paired with
+    legacy-only code (`fn evaluate_node`) stores successfully, passes
+    analyze_graph's declared-mode gate, and only fails much later at Rust
+    compile/load with an unrelated, opaque error -- exactly the "artifact
+    whose exports do not match its declaration" case ADR-001 names as a
+    hard error.
+    """
+
+    def test_store_rejects_declared_graph_mode_with_legacy_only_code(
+        self, tmp_path: Path
+    ) -> None:
+        XrayPatternService = _import_service()
+        cidx_meta = _make_cidx_meta(tmp_path)
+        service = XrayPatternService(cidx_meta)
+
+        pattern_yaml = _graph_pattern_yaml(
+            name="graph-mismatch",
+            execution_mode="graph",
+            evaluator_code=MINIMAL_EVALUATOR,
+        )
+
+        with patch.object(service, "_git_commit"):
+            result = service.store_xray_pattern(
+                scope="__any__",
+                pattern_yaml=pattern_yaml,
+                overwrite=False,
+            )
+
+        assert result.get("success") is not True, result
+        assert "error" in result, result
+        pattern_file = cidx_meta / "xray-patterns" / "__any__" / "graph-mismatch.yaml"
+        assert not pattern_file.exists(), (
+            "a declared-mode/actual-callback-family mismatch must be "
+            "rejected BEFORE the file is written to disk"
+        )
+
+    def test_store_rejects_declared_legacy_mode_with_graph_only_code(
+        self, tmp_path: Path
+    ) -> None:
+        """Symmetric direction: omitting execution_mode (or declaring
+        "legacy") defaults to legacy, but graph-only code (no
+        `evaluate_node`) does not satisfy legacy's entry point either.
+        """
+        XrayPatternService = _import_service()
+        cidx_meta = _make_cidx_meta(tmp_path)
+        service = XrayPatternService(cidx_meta)
+
+        pattern_yaml = _graph_pattern_yaml(name="legacy-mismatch")
+
+        with patch.object(service, "_git_commit"):
+            result = service.store_xray_pattern(
+                scope="__any__",
+                pattern_yaml=pattern_yaml,
+                overwrite=False,
+            )
+
+        assert result.get("success") is not True, result
+        assert "error" in result, result
+        pattern_file = cidx_meta / "xray-patterns" / "__any__" / "legacy-mismatch.yaml"
+        assert not pattern_file.exists()
+
+    def test_store_then_recall_real_graph_pattern_round_trips(
+        self, tmp_path: Path
+    ) -> None:
+        """The store half of #1859's headline requirement -- a graph
+        evaluator CAN be stored and recalled -- exercised through the REAL
+        store_xray_pattern/resolve_and_prepare_pattern path, not the
+        test-only `_write_pattern` YAML shortcut the existing graph-mode
+        MCP handler tests use.
+        """
+        XrayPatternService = _import_service()
+        cidx_meta = _make_cidx_meta(tmp_path)
+        service = XrayPatternService(cidx_meta)
+
+        pattern_yaml = _graph_pattern_yaml(execution_mode="graph")
+
+        with patch.object(service, "_git_commit"):
+            result = service.store_xray_pattern(
+                scope="__any__",
+                pattern_yaml=pattern_yaml,
+                overwrite=False,
+            )
+        assert result.get("success") is True, result
+
+        assert (
+            service.get_pattern_execution_mode("repo-global", "graph-store-recall")
+            == "graph"
+        )
+        prepared_code, resolved_params = service.resolve_and_prepare_pattern(
+            repo_alias="repo-global",
+            pattern_name="graph-store-recall",
+        )
+        assert "fn collect_facts" in prepared_code
+        assert "fn analyze_graph" in prepared_code
+        assert resolved_params == {}

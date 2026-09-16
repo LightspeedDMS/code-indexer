@@ -29,7 +29,10 @@ fn collect_facts(node: &OwnedNode, file: &str) -> Vec<UserFact> {
 // `undecidable` as "public API"; per-visibility counts are not broken out.
 //
 // `definitely_dead` (`Some(true)`) proves only "unreferenced AND
-// explicitly declared private" -- the verdict remains falsifiable by
+// explicitly declared private" for declaration kinds whose references
+// the graph tracks (currently methods and types). Field and constant
+// declarations are never `Some(true)`: their reads are not reference
+// edges in the current extractor. The verdict remains falsifiable by
 // reflection, JNI, or dependency injection, none of which leave an
 // in-repo reference edge this graph can see, so a `Some(true)` verdict
 // is not an unconditional deletion-safety proof.

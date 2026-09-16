@@ -11,7 +11,7 @@ use super::reference::Reference;
 use super::symbol_table::SymbolTable;
 use crate::graph::bind::depth::BinderDepth;
 use crate::graph::budget::{AnalysisCompleteness, ReferencedBits};
-use crate::graph::extract::local_index::Visibility;
+use crate::graph::extract::local_index::{DeclarationKind, Visibility};
 use crate::graph::string_table::StringTable;
 use std::collections::HashMap;
 
@@ -47,6 +47,18 @@ pub struct CodeGraphBuilder {
     /// that gates `add_signature`. A dense id absent from this map reads
     /// back as `Visibility::Unknown` via `CodeGraph::visibility_for`.
     visibilities: HashMap<u32, Visibility>,
+    /// Bug #1858: per-symbol declared `DeclarationKind`, mirroring
+    /// `visibilities` exactly -- it too is analytical data
+    /// `is_definitely_dead_code` depends on directly (Field/Constant
+    /// declarations must never be reported `Some(true)`, since the
+    /// extractor cannot observe their reads), so callers MUST attach it
+    /// unconditionally regardless of budget pressure, the same way
+    /// `add_visibility` runs outside the `exceeded` early-return that
+    /// gates `add_signature`. A dense id absent from this map has no
+    /// known kind -- `CodeGraph::kind_for` returns `None` for it, which
+    /// the predicate must treat as unproven (undecidable), never as
+    /// license to report `Some(true)`.
+    kinds: HashMap<u32, DeclarationKind>,
 }
 
 #[cfg(test)]
@@ -99,6 +111,7 @@ impl CodeGraphBuilder {
             referenced: ReferencedBits::new(),
             signatures: HashMap::new(),
             visibilities: HashMap::new(),
+            kinds: HashMap::new(),
         }
     }
 
@@ -135,6 +148,14 @@ impl CodeGraphBuilder {
     /// on `visibilities` above for why.
     pub fn add_visibility(&mut self, dense_symbol_id: u32, visibility: Visibility) {
         self.visibilities.insert(dense_symbol_id, visibility);
+    }
+
+    /// Bug #1858: attaches `dense_symbol_id`'s extracted `DeclarationKind`.
+    /// Mirrors `add_visibility` exactly -- callers MUST call this
+    /// unconditionally regardless of budget pressure; see the field doc on
+    /// `kinds` above for why.
+    pub fn add_kind(&mut self, dense_symbol_id: u32, kind: DeclarationKind) {
+        self.kinds.insert(dense_symbol_id, kind);
     }
 
     /// Interns a symbol NAME string, returning its dense id in the shared
@@ -180,6 +201,7 @@ impl CodeGraphBuilder {
             self.referenced,
             self.signatures,
             self.visibilities,
+            self.kinds,
         )
     }
 }

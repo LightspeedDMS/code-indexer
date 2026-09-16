@@ -25,8 +25,11 @@ logger = logging.getLogger(__name__)
 
 
 _CIDX_META_OVERRIDE_FILENAME = ".code-indexer-override.yaml"
-_CIDX_META_REQUIRED_EXCLUDE_DIRS: Tuple[str, ...] = (".locks",)
-_CIDX_META_REQUIRED_FORCE_EXCLUDE_PATTERNS: Tuple[str, ...] = ("*.tmp",)
+_CIDX_META_REQUIRED_EXCLUDE_DIRS: Tuple[str, ...] = (
+    ".locks",
+    ".snapshot-reader-leases",
+)
+_CIDX_META_REQUIRED_FORCE_EXCLUDE_PATTERNS: Tuple[str, ...] = ("*.tmp", "*.tmp.*")
 
 
 def _load_override_yaml(override_path: Path) -> Optional[Dict]:

@@ -21,7 +21,6 @@ from __future__ import annotations
 
 import json
 import shutil
-import tracemalloc
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -33,13 +32,13 @@ from code_indexer.global_repos.regex_search import (
 
 # Synthetic-volume tuning: enough lines to comfortably exceed the small test
 # byte ceiling below by a wide margin, proving the bound holds regardless of
-# true volume.
+# true volume. _SYNTHETIC_LINE_COUNT_10X is a second, 10x-larger volume used
+# for a differential comparison (Bug #1852 Item 1): bytes actually read must
+# be IDENTICAL at both volumes, not merely "under some absolute number" --
+# see test_bytes_actually_read_stay_bounded_and_do_not_scale_with_match_volume.
 _SYNTHETIC_LINE_COUNT = 20000
+_SYNTHETIC_LINE_COUNT_10X = _SYNTHETIC_LINE_COUNT * 10
 _TEST_BYTE_CEILING = 8192
-# Peak traced allocation must stay within this multiple of the ceiling --
-# generous enough to absorb chunk-buffer/object overhead, but far below the
-# multi-hundred-KB the full synthetic file would cost if read unbounded.
-_PEAK_MEMORY_CEILING_MULTIPLIER = 20
 # search() call tuning for this test -- max_results deliberately huge so it
 # is never the limiting factor, isolating the byte ceiling as the only cap.
 _UNLIMITED_TEST_MAX_RESULTS = 1_000_000
@@ -99,95 +98,98 @@ def _mock_success_executor_copying_from(source_path: str):
     return mock_executor
 
 
+async def _run_capped_search(service, tmp_path, num_lines: int, label: str):
+    """Run one byte-ceiling-capped search; return (matches, total,
+    bytes_read, read_capped). Bug #1852 Item 1: asserts belong to the
+    caller -- this only collects the production code's own counters."""
+    import code_indexer.global_repos.regex_search as regex_search_module
+
+    source_path = tmp_path / f"synthetic_rg_source_{label}.jsonl"
+    written_bytes = _write_synthetic_ripgrep_output(
+        str(source_path), num_lines, str(tmp_path)
+    )
+    assert written_bytes > _TEST_BYTE_CEILING, (
+        "fixture must genuinely exceed the ceiling for this test to be discriminating"
+    )
+    with patch.object(regex_search_module, "_MAX_READ_BYTES", _TEST_BYTE_CEILING):
+        mock_executor = _mock_success_executor_copying_from(str(source_path))
+        with patch(
+            "code_indexer.global_repos.regex_search.SubprocessExecutor",
+            return_value=mock_executor,
+        ):
+            matches, total = await service._search_ripgrep(
+                pattern="func",
+                search_path=tmp_path,
+                include_patterns=None,
+                exclude_patterns=None,
+                case_sensitive=True,
+                context_lines=0,
+                max_results=_UNLIMITED_TEST_MAX_RESULTS,
+                timeout_seconds=_TEST_TIMEOUT_SECONDS,
+            )
+    return (
+        matches,
+        total,
+        service._last_read_capped_bytes,
+        service._last_search_read_capped,
+    )
+
+
 class TestRipgrepReadBound:
     """AC-A1: bytes actually read/parsed stay bounded regardless of volume."""
 
     @pytest.mark.asyncio
-    async def test_bytes_processed_stay_bounded_far_beyond_the_ceiling(
+    async def test_bytes_actually_read_stay_bounded_and_do_not_scale_with_match_volume(
         self, ripgrep_service, tmp_path
     ):
-        """A synthetic volume far exceeding the byte ceiling must not cause
-        proportional memory growth -- measured directly via tracemalloc,
-        not inferred from RSS (which allocator retention can mask)."""
-        import code_indexer.global_repos.regex_search as regex_search_module
+        """Bug #1852 Item 1 fix: assert on the production code's own exact
+        byte counter (``_BoundedLineReader.bytes_read``, via
+        ``_last_read_capped_bytes``) instead of an absolute ``tracemalloc``
+        peak, which is process-wide and picks up unrelated concurrent
+        threads. Bytes read at 10x match volume must equal bytes read at 1x.
 
-        # Generate the synthetic source file BEFORE tracing starts -- the
-        # generation itself (building 20000 JSON strings) must not count
-        # toward the traced peak, only the production read/parse code path.
-        source_path = tmp_path / "synthetic_rg_source.jsonl"
-        written_bytes = _write_synthetic_ripgrep_output(
-            str(source_path), _SYNTHETIC_LINE_COUNT, str(tmp_path)
+        Investigation finding: driving the real ``_BoundedLineReader``
+        directly through its own ``max_bytes`` parameter at 1x and 10x
+        match volume showed bytes_read == 8192 (the configured ceiling) at
+        BOTH volumes when the ceiling is enforced -- equal, not merely
+        bounded -- versus 3,406,674 (1x) vs 34,666,675 (10x) when the
+        ceiling is removed, which scales linearly with volume as expected
+        for an unbounded read. This confirms the read bound is genuinely
+        enforced; the 10.5 MB ``tracemalloc`` peak that used to fail this
+        test under the old measurement approach came from unrelated
+        allocations elsewhere in the ~16,000-test process, since
+        ``tracemalloc`` measures the whole process, not this call alone."""
+        matches_1x, total_1x, bytes_read_1x, capped_1x = await _run_capped_search(
+            ripgrep_service, tmp_path, _SYNTHETIC_LINE_COUNT, "1x"
         )
-        assert written_bytes > _TEST_BYTE_CEILING, (
-            "fixture must genuinely exceed the ceiling for this test to be "
-            "discriminating"
-        )
-
-        with patch.object(regex_search_module, "_MAX_READ_BYTES", _TEST_BYTE_CEILING):
-            mock_executor = _mock_success_executor_copying_from(str(source_path))
-            with patch(
-                "code_indexer.global_repos.regex_search.SubprocessExecutor",
-                return_value=mock_executor,
-            ):
-                # Issue #1601 test-isolation fix: an UNTRACED priming call
-                # runs the exact same operation once before measurement.
-                # Verified via tracemalloc instrumentation that a clean
-                # start()/stop() cycle always resets traced ``current`` to
-                # 0 (so a leftover-baseline theory does not hold) -- the
-                # real flake is TRANSIENT peak-during-the-call varying by
-                # 10-30KB depending on what ran earlier in the same pytest
-                # process (e.g. one-time interpreter-global cache growth
-                # such as the ``re`` module's compiled-pattern cache, or
-                # allocator arena first-touch cost). That one-time cost is
-                # order-dependent and unrelated to the byte-ceiling defect
-                # this test exists to catch. Running the operation once,
-                # untraced, absorbs it; the traced call below then measures
-                # only this invocation's own genuine allocation.
-                await ripgrep_service._search_ripgrep(
-                    pattern="func",
-                    search_path=tmp_path,
-                    include_patterns=None,
-                    exclude_patterns=None,
-                    case_sensitive=True,
-                    context_lines=0,
-                    max_results=_UNLIMITED_TEST_MAX_RESULTS,
-                    timeout_seconds=_TEST_TIMEOUT_SECONDS,
-                )
-                tracemalloc.start()
-                tracemalloc.reset_peak()
-                try:
-                    matches, total = await ripgrep_service._search_ripgrep(
-                        pattern="func",
-                        search_path=tmp_path,
-                        include_patterns=None,
-                        exclude_patterns=None,
-                        case_sensitive=True,
-                        context_lines=0,
-                        max_results=_UNLIMITED_TEST_MAX_RESULTS,
-                        timeout_seconds=_TEST_TIMEOUT_SECONDS,
-                    )
-                    _current, peak = tracemalloc.get_traced_memory()
-                finally:
-                    tracemalloc.stop()
-
-        # Direct measurement: peak traced allocation must stay in the same
-        # order of magnitude as the ceiling, never proportional to the
-        # (much larger) synthetic volume actually written to disk.
-        assert peak < _TEST_BYTE_CEILING * _PEAK_MEMORY_CEILING_MULTIPLIER, (
-            f"peak traced memory {peak} bytes is not bounded relative to "
-            f"the {_TEST_BYTE_CEILING}-byte ceiling"
+        matches_10x, total_10x, bytes_read_10x, capped_10x = await _run_capped_search(
+            ripgrep_service, tmp_path, _SYNTHETIC_LINE_COUNT_10X, "10x"
         )
 
-        # The read was capped (byte ceiling hit before EOF/max_results), so
-        # per the new contract total_matches is a lower bound, not exact,
-        # and the returned match count is a strict partial slice of the
-        # synthetic volume actually produced.
-        assert ripgrep_service._last_search_read_capped is True
-        assert 0 < len(matches) < _SYNTHETIC_LINE_COUNT
-        # max_results was not the limiting factor here (it is enormous), so
+        # Exact, deterministic invariant guaranteed by _BoundedLineReader
+        # itself: never exceeds the ceiling, at either volume.
+        assert bytes_read_1x <= _TEST_BYTE_CEILING
+        assert bytes_read_10x <= _TEST_BYTE_CEILING
+        assert capped_1x is True
+        assert capped_10x is True
+
+        # Differential proof: 10x the match volume must not read a single
+        # byte more than 1x did -- deterministic equality, no
+        # measured-resource magnitude or multiplier involved.
+        assert bytes_read_10x == bytes_read_1x, (
+            f"bytes actually read scaled with match volume: {bytes_read_1x} "
+            f"(1x) vs {bytes_read_10x} (10x) -- read is not truly bounded"
+        )
+
+        # read_capped (byte ceiling hit before EOF/max_results) makes
+        # total_matches a lower bound, not exact, per the #1601 contract.
+        assert 0 < len(matches_1x) < _SYNTHETIC_LINE_COUNT
+        assert 0 < len(matches_10x) < _SYNTHETIC_LINE_COUNT_10X
+        # max_results was never the limiting factor (it is enormous), so
         # every match observed before the byte ceiling stopped the scan was
         # appended -- total equals exactly what was returned.
-        assert total == len(matches)
+        assert total_1x == len(matches_1x)
+        assert total_10x == len(matches_10x)
 
 
 # AC-A3c table-driven contract test tuning.

@@ -9,23 +9,16 @@ bcrypt.checkpw against a static dummy hash instead.
 
 Wiring verification (`test_calls_real_bcrypt_checkpw`) wraps the real
 `bcrypt.checkpw` with `wraps=...` purely to assert the call arguments -- the
-real implementation still executes underneath. The GIL-release evidence
-(`TestPerformDummyPasswordWorkReleasesGil`) performs zero mocking of any
-kind: it drives the real, unpatched `perform_dummy_password_work` end to
-end and measures actual wall-clock thread scaling, mirroring the source
-report's own stated method ("workload run serially vs in 2 threads; >1.5x
-speedup = GIL released"). The pass threshold there is intentionally a bit
-looser (1.3x) than the report's 1.5x to absorb thread-scheduling/CI
-contention noise while still clearly discriminating GIL-held (~1.0x, as the
-report's own pure-Python control measured) from GIL-released (bcrypt
-measured 2.23x in the report).
+real implementation still executes underneath. A previous GIL-release test
+measured wall-clock thread scaling, but that is not a stable unit-test
+invariant: a loaded host can have no spare core, making correctly
+GIL-releasing bcrypt slower than the serial baseline. The real-bcrypt wiring
+and valid cost-factor tests below provide deterministic coverage without a
+scheduling assumption.
 """
 
 from __future__ import annotations
 
-import os
-import time
-from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import patch
 
 import bcrypt
@@ -35,12 +28,6 @@ from code_indexer.server.auth.auth_error_handler import (
     AuthErrorHandler,
     _DUMMY_BCRYPT_HASH,
 )
-
-# Real bcrypt.checkpw is ~200-350ms per call on this hardware (matches the
-# report's measured 334ms figure) -- keep the sample size small so this
-# test completes in a few seconds, not tens of seconds.
-_THREAD_SCALING_SAMPLE_SIZE = 4
-_GIL_RELEASE_SPEEDUP_THRESHOLD = 1.3
 
 
 @pytest.fixture
@@ -91,39 +78,3 @@ class TestPerformDummyPasswordWorkUsesRealBcrypt:
             error_handler.perform_dummy_password_work()
 
         mock_sha256.assert_not_called()
-
-
-class TestPerformDummyPasswordWorkReleasesGil:
-    """Real concurrent-thread evidence (zero mocking of any kind) that the
-    dummy-work path releases the GIL, matching the report's own measurement
-    methodology."""
-
-    @pytest.mark.skipif(
-        (os.cpu_count() or 1) < 2, reason="needs >=2 CPUs to observe GIL release"
-    )
-    def test_thread_scaling_shows_gil_release(
-        self, error_handler: AuthErrorHandler
-    ) -> None:
-        n = _THREAD_SCALING_SAMPLE_SIZE
-
-        serial_start = time.perf_counter()
-        for _ in range(n):
-            error_handler.perform_dummy_password_work()
-        serial_elapsed = time.perf_counter() - serial_start
-
-        # Matches the source report's own methodology: 2 concurrent threads.
-        with ThreadPoolExecutor(max_workers=2) as pool:
-            threaded_start = time.perf_counter()
-            futures = [
-                pool.submit(error_handler.perform_dummy_password_work) for _ in range(n)
-            ]
-            for fut in futures:
-                fut.result()
-            threaded_elapsed = time.perf_counter() - threaded_start
-
-        speedup = serial_elapsed / threaded_elapsed
-        assert speedup > _GIL_RELEASE_SPEEDUP_THRESHOLD, (
-            f"Expected >{_GIL_RELEASE_SPEEDUP_THRESHOLD}x speedup from "
-            f"GIL-releasing bcrypt work under threading, got {speedup:.2f}x "
-            f"(serial={serial_elapsed:.3f}s, threaded={threaded_elapsed:.3f}s)"
-        )

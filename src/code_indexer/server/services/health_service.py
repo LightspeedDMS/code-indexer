@@ -59,6 +59,10 @@ MAX_FAILURE_REASONS = 3  # Story #727 AC5: Limit displayed failure reasons
 FLEET_MIGRATION_DEDUP_STATE_MAX_ENTRIES = 50  # Story #1560 AC16
 PG_CONNECT_TIMEOUT_SECONDS = 5  # Timeout for PostgreSQL connectivity check
 
+# Bug #1864: distinguish a clean scheduler startup from a process that never
+# reached the lifespan startup block while keeping the health probe fail-open.
+_HNSW_STARTUP_ERROR_ABSENT = object()
+
 # CPU sustained threshold detection (Story #727 AC4)
 CPU_SUSTAINED_THRESHOLD = 95.0  # CPU % threshold for sustained high load detection
 MIN_CPU_READINGS_FOR_DEGRADED = 3  # Minimum readings needed for 30s assessment
@@ -423,6 +427,57 @@ class HealthCheckService:
                 f"needs admin review (Bug #1382)."
             ],
         )
+
+    def _collect_hnsw_orphan_sweep_startup_failures(
+        self,
+    ) -> Tuple[bool, bool, List[str]]:
+        """Report a failed local HNSW orphan-sweep scheduler startup.
+
+        Bug #1864: the scheduler is the mechanism that repairs the existing
+        orphan backlog, so a startup failure is a current, unresolved node
+        condition and belongs in ``failure_reasons``.  This is deliberately
+        separate from ``auto_heal_event``, which records something that has
+        already happened and is therefore not a current failure.
+
+        The app-state attribute is set explicitly by lifespan on both the
+        successful and failed paths.  A missing attribute means this process
+        never reached that startup block (for example, a unit-test or CLI
+        process); it is kept as a distinct branch and fails open rather than
+        manufacturing a health alarm.  The read is O(1) and any accessor error
+        is also fail-open so this hot health path cannot raise.
+        """
+        try:
+            from ..app import app as app_module
+
+            startup_error = getattr(
+                app_module.state,
+                "hnsw_orphan_repair_sweep_startup_error",
+                _HNSW_STARTUP_ERROR_ABSENT,
+            )
+        except Exception as exc:
+            logger.debug(
+                "HNSW orphan-sweep startup health check skipped: %s",
+                exc,
+            )
+            return False, False, []
+
+        if startup_error is _HNSW_STARTUP_ERROR_ABSENT:
+            logger.debug(
+                "HNSW orphan-sweep startup state absent; lifespan startup "
+                "block was never reached."
+            )
+            return False, False, []
+
+        if startup_error is None:
+            return False, False, []
+
+        reason = (
+            "HNSW orphan sweep startup failure: this node will NOT repair "
+            "orphaned HNSW indexes; see GET /api/admin/hnsw-orphan-sweep/"
+            "stats -> local_scheduler for local_process detail; reason: "
+            f"{startup_error}"
+        )
+        return True, False, [reason]
 
     def _read_fleet_migration_unrecoverable_aliases(self) -> List[str]:
         """
@@ -1349,6 +1404,16 @@ class HealthCheckService:
         has_warning = has_warning or grb_warn
         has_error = has_error or grb_err
         failure_reasons.extend(grb_reasons)
+
+        # Bug #1864: a failed local sweep startup is CURRENT and UNRESOLVED,
+        # so escalate it alongside the reconcile-breaker and fleet-migration
+        # failures.  It is not an auto_heal_event, which records history only.
+        hos_warn, hos_err, hos_reasons = (
+            self._collect_hnsw_orphan_sweep_startup_failures()
+        )
+        has_warning = has_warning or hos_warn
+        has_error = has_error or hos_err
+        failure_reasons.extend(hos_reasons)
 
         # Bug #1539's cidx-meta conflict-resolution quarantine escalation
         # (Bug #1555 Defect B) is RETIRED: Bug #1555's root-cause fix made

@@ -242,6 +242,8 @@ def _resolve_evaluator_code(
     repo_alias: str,
     default_evaluator: str = _DEFAULT_EVALUATOR_CODE,
     allow_default_evaluator: bool = False,
+    expected_execution_mode: Optional[str] = None,
+    cidx_meta_path: Optional[Path] = None,
 ) -> "tuple[str, Optional[Dict[str, Any]]]":
     """Resolve evaluator_code from pattern_name or raw evaluator_code.
 
@@ -285,15 +287,35 @@ def _resolve_evaluator_code(
     if pattern_name:
         from code_indexer.server.services.xray_pattern_service import XrayPatternService
 
-        cidx_meta = _get_cidx_meta_path()
+        cidx_meta = cidx_meta_path or _get_cidx_meta_path()
         svc = XrayPatternService(
             cidx_meta,
-            refresh_scheduler=_utils._get_app_refresh_scheduler(),
+            refresh_scheduler=(
+                None
+                if cidx_meta_path is not None
+                else _utils._get_app_refresh_scheduler()
+            ),
         )
-        if not _seeds_ensured:
-            svc.ensure_seed_patterns()
-            _seeds_ensured = True
         try:
+            if not _seeds_ensured:
+                svc.ensure_seed_patterns()
+                _seeds_ensured = True
+            if expected_execution_mode is not None:
+                declared_mode = svc.get_pattern_execution_mode(repo_alias, pattern_name)
+                if declared_mode != expected_execution_mode:
+                    return (
+                        "",
+                        _mcp_response(
+                            {
+                                "error": "pattern_mode_mismatch",
+                                "message": (
+                                    f"pattern '{pattern_name}' declares execution_mode "
+                                    f"'{declared_mode}', but this operation requires "
+                                    f"'{expected_execution_mode}'"
+                                ),
+                            }
+                        ),
+                    )
             evaluator_code, _ = svc.resolve_and_prepare_pattern(
                 repo_alias=repo_alias,
                 pattern_name=pattern_name,
@@ -333,6 +355,8 @@ async def _resolve_evaluator_code_off_loop(
     params: Dict[str, Any],
     repo_alias: str,
     allow_default_evaluator: bool = False,
+    expected_execution_mode: Optional[str] = None,
+    cidx_meta_path: Optional[Path] = None,
 ) -> "tuple[str, Optional[Dict[str, Any]]]":
     """H3 (consolidated review, Issue #1811/Bug #1812, Codex): async
     wrapper that runs `_resolve_evaluator_code` on the DEDICATED
@@ -362,16 +386,26 @@ async def _resolve_evaluator_code_off_loop(
     """
     pattern_name = params.get("pattern_name")
     raw_evaluator_code = (params.get("evaluator_code") or "").strip()
+    resolver_kwargs: Dict[str, Any] = {
+        "allow_default_evaluator": allow_default_evaluator,
+        "expected_execution_mode": expected_execution_mode,
+    }
+    if cidx_meta_path is not None:
+        resolver_kwargs["cidx_meta_path"] = cidx_meta_path
     if not (pattern_name and not raw_evaluator_code):
         return _resolve_evaluator_code(
-            params, repo_alias, allow_default_evaluator=allow_default_evaluator
+            params,
+            repo_alias,
+            **resolver_kwargs,
         )
     loop = asyncio.get_running_loop()
     xray_executor = _get_xray_executor()
     return await loop.run_in_executor(
         xray_executor,
         lambda: _resolve_evaluator_code(
-            params, repo_alias, allow_default_evaluator=allow_default_evaluator
+            params,
+            repo_alias,
+            **resolver_kwargs,
         ),
     )
 
@@ -698,6 +732,7 @@ async def handle_xray_search(params: Dict[str, Any], user: User) -> Dict[str, An
         params,
         _pattern_scope_alias(repo_alias_parsed),
         allow_default_evaluator=True,
+        expected_execution_mode="legacy",
     )
     if err_resp is not None:
         return err_resp
@@ -1422,6 +1457,7 @@ async def handle_xray_explore(params: Dict[str, Any], user: User) -> Dict[str, A
         params,
         _pattern_scope_alias(repo_alias_parsed),
         allow_default_evaluator=True,
+        expected_execution_mode="legacy",
     )
     if err_resp is not None:
         return err_resp

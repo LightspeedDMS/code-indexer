@@ -40,6 +40,120 @@ print_error() {
     echo -e "${RED}❌ $1${NC}"
 }
 
+# Bug #1863: pre-run load check — warn (never block) if the box is already busy
+# before this suite starts contending with itself. High load is what turned
+# pytest-timeout expiries into a gate that looked flaky; surface it up front.
+# LOAD_WARN_CORES_DIVISOR: warn once 1-min load exceeds cores / this divisor
+# (i.e. "roughly half the cores", per Bug #1863's diagnosis).
+#
+# Cross-reference: fast-automation.sh carries an identical copy of
+# check_load_before_run()/report_pytest_timeout_diagnostics() (Bug #1863).
+# Keep both copies in sync when editing either one.
+LOAD_WARN_CORES_DIVISOR=2
+# Stashed by check_load_before_run() so report_pytest_timeout_diagnostics()
+# can report load at BOTH suite start and failure time. A load reading taken
+# only after a long suite finishes is meaningless for explaining what killed
+# a test many minutes earlier.
+PRERUN_LOAD1="unknown"
+check_load_before_run() {
+    local cores load1 threshold
+    cores=$(nproc 2>/dev/null) || return 0
+    [ -n "$cores" ] || return 0
+    [ -r /proc/loadavg ] || return 0
+    load1=$(awk '{print $1}' /proc/loadavg 2>/dev/null) || return 0
+    [ -n "$load1" ] || return 0
+    PRERUN_LOAD1="$load1"
+    threshold=$(awk -v c="$cores" -v d="$LOAD_WARN_CORES_DIVISOR" 'BEGIN{printf "%.2f", c/d}') || return 0
+    [ -n "$threshold" ] || return 0
+    if awk -v l="$load1" -v t="$threshold" 'BEGIN{exit !(l > t)}'; then
+        echo ""
+        print_warning "HIGH LOAD before this suite has even started: 1-min load average"
+        print_warning "is ${load1} on ${cores} cores (warn threshold: load > ${threshold})."
+        print_warning "Results below may be UNRELIABLE under this load — this suite's own"
+        print_warning "tests have been measured running up to ~5x slower loaded vs idle"
+        print_warning "(Bug #1863). Likely offenders (top CPU consumers):"
+        ps -eo pid,etimes,pcpu,args --sort=-pcpu | head
+        print_warning "Warning only — the run will continue."
+        echo ""
+    fi
+    return 0
+}
+
+# Bug #1863: post-run diagnostic — a pytest-timeout wall-clock ceiling (suite
+# default $PYTEST_TIMEOUT via --timeout, but any individual test may override
+# it with @pytest.mark.timeout(N)) kills tests that would otherwise pass, and
+# those expiries read exactly like ordinary assertion failures in the chunk
+# summaries above, which has repeatedly cost investigation time chasing a
+# phantom regression. This labels each timeout with its ACTUAL per-test
+# ceiling. It does NOT change the exit code and is NOT A WAIVER: a timeout
+# still fails the gate, and a failed gate still needs a real resolution — this
+# only explains what kind of failure occurred so it can be triaged correctly.
+# Scoped to THIS run's own log files only (named with $TIMESTAMP), never a
+# blanket glob across .test-telemetry/.
+report_pytest_timeout_diagnostics() {
+    local logs=("$@")
+    local existing=()
+    local log
+    for log in "${logs[@]}"; do
+        [ -f "$log" ] && existing+=("$log")
+    done
+    [ ${#existing[@]} -gt 0 ] || return 0
+
+    local timeout_count
+    timeout_count=$(grep -h "from pytest-timeout" "${existing[@]}" 2>/dev/null | wc -l | tr -d ' ') || true
+    [ -n "$timeout_count" ] || timeout_count=0
+    [ "$timeout_count" -gt 0 ] || return 0
+
+    local timeout_names
+    timeout_names=$(awk '
+        /^_+ .+ _+$/ {
+            line = $0
+            sub(/^_+ /, "", line)
+            sub(/ _+$/, "", line)
+            current = line
+        }
+        /from pytest-timeout/ {
+            secs = "?"
+            if (match($0, /Timeout \(>[0-9.]+s\)/))
+                secs = substr($0, RSTART+10, RLENGTH-11)
+            print "  - " current "   [ceiling " secs "]   (" FILENAME ")"
+        }
+    ' "${existing[@]}" 2>/dev/null) || timeout_names="(timeout test names unavailable)"
+
+    local cores load1
+    cores=$(nproc 2>/dev/null) || cores="unknown"
+    load1=$(awk '{print $1}' /proc/loadavg 2>/dev/null) || load1="unknown"
+
+    echo ""
+    echo -e "${YELLOW}=================================================================="
+    echo "⏱️  PYTEST-TIMEOUT DIAGNOSTIC (Bug #1863)"
+    echo -e "==================================================================${NC}"
+    echo "THE GATE FAILED. $timeout_count of the failure(s) above were pytest-timeout"
+    echo "wall-clock expiries rather than failed assertions. This is an EXPLANATION,"
+    echo "NOT a waiver — the gate is still red and still requires a real resolution."
+    echo ""
+    echo "This suite's default ceiling is ${PYTEST_TIMEOUT}s (via --timeout), but any"
+    echo "individual test can override it with @pytest.mark.timeout(N). The ceiling"
+    echo "that actually killed each test below is shown per line:"
+    echo ""
+    echo "$timeout_names"
+    echo ""
+    echo "Load average (1m): at suite start ${PRERUN_LOAD1}   |   now ${load1}   |   cores: ${cores}"
+    echo ""
+    echo "How to read the ceiling column:"
+    echo "  - A timeout AT the suite default (${PYTEST_TIMEOUT}s) under real load is often"
+    echo "    the headroom lottery — this suite's tests have been measured running up"
+    echo "    to ~5x slower loaded vs idle (Bug #1863)."
+    echo "  - A timeout WELL ABOVE the suite default came from an explicit"
+    echo "    @pytest.mark.timeout(N) marker (commonly a deadlock/concurrency guard,"
+    echo "    e.g. the timeout(360) semaphore tests) and usually is NOT a load"
+    echo "    artifact — treat it as a real failure that needs investigation."
+    echo ""
+    echo "Re-check yourself: grep -h \"from pytest-timeout\" ${TELEMETRY_DIR}/chunk*-${TIMESTAMP}.log | wc -l"
+    echo -e "${YELLOW}==================================================================${NC}"
+    echo ""
+}
+
 # Check if we're in the right directory
 if [[ ! -f "pyproject.toml" ]]; then
     print_error "Not in project root directory (pyproject.toml not found)"
@@ -116,6 +230,7 @@ fi
 # Heavy folders each get their own chunk or pairing.
 # Chunk 5 was previously a single oversized chunk (~500s); split into 5+6 to stay under 10min.
 # All chunks share the same pytest flags but use isolated CIDX_SERVER_DATA_DIR.
+check_load_before_run
 print_step "Running server unit tests (6 parallel chunks)"
 echo "  Chunk 1: services/"
 echo "  Chunk 2: auth/"
@@ -127,6 +242,11 @@ echo "  Chunk 6: all remaining subdirs + root test files"
 # Tuning knobs — override via environment for CI or local profiling
 PYTEST_TIMEOUT="${PYTEST_TIMEOUT:-15}"
 PYTEST_DURATIONS="${PYTEST_DURATIONS:-10}"
+# Bug #1863: echo the effective ceiling once. .env/.env.local are sourced near
+# the top of this script and pytest-timeout itself also reads PYTEST_TIMEOUT
+# from the environment, so a stray override there would otherwise silently
+# weaken hang detection with no visible trace in the run's output.
+echo "⏱️  pytest-timeout ceiling for this run: ${PYTEST_TIMEOUT}s (override via PYTEST_TIMEOUT env var)"
 
 # Create telemetry directory
 TELEMETRY_DIR=".test-telemetry"
@@ -258,6 +378,7 @@ else
     done
     echo ""
     echo "Full logs: $TELEMETRY_DIR/chunk*-${TIMESTAMP}.log"
+    report_pytest_timeout_diagnostics "$L1" "$L2" "$L3" "$L4" "$L5" "$L6"
     exit 1
 fi
 

@@ -1424,6 +1424,25 @@ def _blank_out_strings_and_comments(code: str) -> str:
     return "".join(out)
 
 
+def detect_evaluator_entry_points(code: str) -> Tuple[bool, bool]:
+    """Detects which ADR-001 entry-point set(s) `code` defines.
+
+    Returns ``(has_legacy_entry_point, has_graph_entry_point)`` -- the SAME
+    regex-based detection `validate_rust_evaluator` uses to decide whether
+    a source satisfies at least one mode's entry points. Factored out (C4,
+    #1858-#1861 remediation) so a caller that needs to cross-check a
+    DECLARED `execution_mode` against the callback family actually present
+    in the code (e.g. `xray_pattern_service.py`'s store-time validation)
+    reuses this single detection rather than writing a second regex copy
+    that could silently drift from this one (Rule 4 anti-duplication).
+    """
+    has_legacy_entry_point = bool(_re.search(r"\bfn\s+evaluate_node\b", code))
+    has_graph_entry_point = bool(_re.search(r"\bfn\s+collect_facts\b", code)) and bool(
+        _re.search(r"\bfn\s+analyze_graph\b", code)
+    )
+    return has_legacy_entry_point, has_graph_entry_point
+
+
 def validate_rust_evaluator(code: str) -> ValidationResult:
     """Statically validate Rust evaluator code for required signature and forbidden constructs.
 
@@ -1452,10 +1471,7 @@ def validate_rust_evaluator(code: str) -> ValidationResult:
         ``ok=False`` with ``error_code``, ``reason``, ``offending_construct``,
         and ``offending_line`` describing the first violation found.
     """
-    has_legacy_entry_point = bool(_re.search(r"\bfn\s+evaluate_node\b", code))
-    has_graph_entry_point = bool(_re.search(r"\bfn\s+collect_facts\b", code)) and bool(
-        _re.search(r"\bfn\s+analyze_graph\b", code)
-    )
+    has_legacy_entry_point, has_graph_entry_point = detect_evaluator_entry_points(code)
     if not has_legacy_entry_point and not has_graph_entry_point:
         return ValidationResult(
             ok=False,

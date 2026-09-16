@@ -442,3 +442,59 @@ class TestStaleCrashedReaderLeaseDoesNotBlockReclamationForever:
             "reclamation indefinitely -- deletion must proceed once the "
             "lease's own bounded TTL has elapsed"
         )
+
+
+class TestAmbiguousLeaseDirectoryDefersDeletionInsteadOfCrashing:
+    def test_ambiguous_absent_lease_directory_defers_without_crashing_the_queue(
+        self, tmp_path: Path, mount_point: Path, snapshot_path: Path
+    ) -> None:
+        """Bug #1871: ``snapshot_has_live_reader()`` now raises
+        ``LeaseDirectoryAmbiguousError`` when the primary (``.scratch``)
+        lease directory is absent and no legacy evidence exists (see
+        ``snapshot_reader_lease.py``). RED on unmodified
+        ``cleanup_manager.py``: the "live reader" gate does not catch this
+        exception, so it propagates straight out of
+        ``_process_cleanup_queue()`` -- crashing the ENTIRE cleanup pass
+        (not merely skipping this one snapshot) instead of deferring this
+        snapshot exactly like a live reader would. Per the mission's
+        explicit instruction, an ambiguous liveness signal must be treated
+        identically to "live reader found" (defer via the same
+        ``_defer_in_use`` bookkeeping), never surfaced as an unhandled
+        crash that also starves every other queued snapshot in the same
+        cycle.
+        """
+        db_path = str(tmp_path / "server.db")
+        DatabaseSchema(db_path).initialize_database()
+        GoldenRepoMetadataSqliteBackend(db_path).ensure_table_exists()
+        backend = GoldenRepoMetadataSqliteBackend(db_path)
+
+        manager = CleanupManager(
+            query_tracker=QueryTracker(),
+            job_tracker=JobTracker(db_path),
+            min_retention_age_seconds=0.0,
+            persistence_backend=backend,
+        )
+        manager.set_snapshot_manager(
+            VersionedSnapshotManager(
+                versioned_base=str(mount_point),
+                clone_backend=LocalCloneBackend(versioned_base=str(mount_point)),
+            )
+        )
+        # Neither the legacy nor the relocated primary lease directory
+        # exists at all under this lease_root -- the genuinely ambiguous
+        # case (no evidence anywhere), never created here.
+        manager.set_lease_root(mount_point / "cidx-meta")
+        manager.schedule_cleanup(str(snapshot_path))
+
+        manager._process_cleanup_queue()  # must not raise
+
+        assert snapshot_path.exists(), (
+            "BUG #1871: an ambiguous (absent) lease directory must defer "
+            "deletion exactly like a live reader, never permit it"
+        )
+        assert manager._in_use_deferrals.get(str(snapshot_path), 0) >= 1, (
+            "the snapshot must be recorded as a genuine in-use deferral "
+            "(the same bookkeeping a live reader gets), not merely "
+            "survive by accident of an uncaught exception aborting the "
+            "whole queue"
+        )

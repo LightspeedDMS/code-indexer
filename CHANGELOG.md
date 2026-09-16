@@ -7,6 +7,108 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [12.61.0] - 2026-09-16
+
+### Fixed
+
+- **Bug #1871 follow-up (found by the E2E Phase 4 post-run log-audit gate)**: server startup never
+  created the relocated primary snapshot-reader lease directory. `snapshot_reader_lease.py`'s own
+  `LeaseDirectoryAmbiguousError` docstring already promised that startup creates it, but nothing did
+  - the directory only appeared as a side effect of a writer taking a lease. On a fresh server where
+  no reader had yet taken one, `snapshot_has_live_reader()` found it absent, raised
+  `LeaseDirectoryAmbiguousError`, and `CleanupManager` deferred cleanup indefinitely. Cleanup
+  therefore never converged and snapshots accumulated without bound, which at the project's ~900-repo
+  production scale is unbounded disk growth. Adds `ensure_primary_lease_directory()` and calls it
+  unconditionally from startup, offloaded via `anyio.to_thread.run_sync` so the mkdir cannot block
+  the event loop on a `hard` NFS mount, and non-fatal so a failure never takes a node down at boot.
+  The defer-on-ambiguous path itself is unchanged - deferring on a genuinely absent directory remains
+  correct, and is the original Bug #1871 data-loss fix.
+
+- **Bug #1871 follow-up (found during staging verification)**: the cidx-meta `.gitignore` was written
+  only on first bootstrap. `_write_gitignore()` had a single call site inside the
+  `if not git_dir.exists():` branch, so on every already-deployed host - where `.git` exists - the
+  `.snapshot-reader-leases/` ignore line could never be added. Latent rather than active, since
+  12.60.0 no longer writes leases to the legacy location, but any node that wrote there again would
+  have had those files re-committed into the backup mirror, recreating exactly what Bug #1871 set out
+  to end. The required entries are now defined once and converge idempotently on every bootstrap
+  invocation, including the `already_initialized` path, preserving any operator-added lines. This is
+  the Bug #1440 lesson applied: a bootstrap fix is incomplete without an automatic self-heal path for
+  hosts that are already running.
+
+## [12.60.0] - 2026-09-16
+
+### Fixed
+
+- **Bug #1870**: dependency-map domain `.md` files could have their YAML frontmatter
+  corrupted on write. Two separate writers were unguarded. `yaml.safe_load` coerced ISO-8601
+  timestamps into `datetime` objects, which PyYAML re-emitted with a space instead of `T`
+  (`last_refined: 2026-07-28 00:18:45` rather than `...T00:18:45`), matching the corruption
+  seen in production. Adds `_NoTimestampSafeLoader` so timestamps round-trip unchanged, plus a
+  fail-closed `validate_rendered_frontmatter()` gate. The delta-journal writer now refuses to
+  process a file that advertises frontmatter but parses to `{}`, and refuses to persist a render
+  that fails validation. `_update_domain_file` now validates the fact-check verification pass's
+  output through the same gate and falls back to the known-good pre-verification content (with a
+  WARNING naming the validation error) rather than writing a corrupted file to disk.
+
+- **Bug #1871**: snapshot-reader lease files were written inside the `cidx-meta` git backup
+  mirror, where they were committed to the remote and where an absent lease directory caused
+  `snapshot_has_live_reader()` to report `False` — allowing a snapshot to be deleted out from
+  under a live reader. Leases now live under `golden-repos/.scratch/snapshot-reader-leases`,
+  derived from the existing `lease_root` so no call site changes and Bug #1845's ban on
+  positional derivation is preserved. Readers check the legacy location first so a lease written
+  by an older node is still honoured; writers use only the new location. An absent primary
+  directory now raises `LeaseDirectoryAmbiguousError`, which `CleanupManager` treats as
+  "defer deletion" exactly as it treats a live reader. Expired legacy lease files are swept
+  individually by a new stdlib-only `sweep_expired_lease_files()`, offloaded via
+  `anyio.to_thread.run_sync` so it never blocks the event loop; the legacy directory itself is
+  never bulk-deleted. The cidx-meta bootstrap writer and startup exclude patterns were extended
+  so lease and `*.tmp` artifacts stop being tracked.
+
+  Deployment note: the clustered environment must be deployed by stopping all nodes, deploying,
+  then starting — not by rolling nodes one at a time. An unpatched node's cleanup cannot see a
+  lease written by a patched node, so a mixed-version window could still delete a snapshot under
+  a live reader. Single-node deployments are unaffected.
+
+## [12.59.0] - 2026-09-15
+
+### Fixed
+
+- **A dead HNSW orphan repair sweep was invisible (#1864).** A production node's `last_full_pass_completed_at` sat frozen for roughly two months with nothing flagging it. The stats endpoint read only the durable state row, so three states rendered byte-identically: scheduler alive with a pass in progress, scheduler alive but wedged, and scheduler never started. Startup compounded it -- lifespan wrapped construct-and-start in one `try/except` whose only consequence was a WARNING, so a node whose sweep failed to start booted reporting healthy. `GET /api/admin/hnsw-orphan-sweep/stats` now carries an additive `local_scheduler` block (`tick_in_progress` is the wedge discriminator; `last_cycle_skipped_reason` separates a deliberate Web-UI or operating-hours pause from a real stall; `observed_at` is the server's own clock so staleness math needs no trust in the caller's), `/health` reports DEGRADED naming the subsystem, and `APP-GENERAL-090` moved WARNING to ERROR -- which in this codebase is a gate change, since ERROR rows are what the Post-E2E log-audit gate fails a phase on. The block is per-process RAM, nested under its own key with an explicit `"scope": "local_process"` marker so it can never be misread as a fleet-wide answer; durable fleet counters are unchanged. Why the production sweep stopped is NOT diagnosed here -- that needs production reads outside this scope.
+
+- **`ProgressiveMetadata` carried a previous run's file lists into the current document (#1865).** Unlike #1862's `error_message`, these fields are read: `can_resume_interrupted_operation()` and `get_remaining_files()` both consume them. Two reachable states -- `status="completed"` sitting over the prior run's file lists, and a branch-change path that reset `files_processed` to 0 while `total_files_to_index` kept the old count, so `get_stats()["remaining_files"]` reported a number belonging to no run that ever happened. Fixed with a `start_fresh_indexing()` seam wired at the four fresh-run call sites; `start_indexing()` and `resume_indexing()` are untouched so Bug #467's resume dependence is preserved by construction. Three further items from the issue were deliberately declined, one of which would have been a regression: `current_commit` is NOT re-stamped at completion, because `refresh_scheduler.py` compares it against live git HEAD to detect the tree advanced past what was indexed -- re-stamping would point it at a HEAD whose changes were never indexed and silently mask real staleness.
+
+- **Tests asserting on wall-clock measurements rather than invariants (#1866, #1851).** A class distinct from #1863's timeout expiries and untouched by any timeout change. Each is now deterministic by synchronisation or by a relative invariant -- none was fixed by raising a threshold, adding a retry, or marking it slow. Most notably `CleanSlotTracker.test_thread_safety` was structurally unsound rather than merely threshold-sensitive: it started five threads holding a slot for 10ms and asserted all five slot ids unique while forcing no overlap, so under load slot reuse was correct behaviour and the test never established the property it named. A `threading.Barrier(5)` now blocks every release until all five have acquired. The bcrypt GIL-speedup test was deleted with argument rather than tuned -- on a saturated host there is no spare core for the released GIL to exploit, so wall-clock thread scaling is not a stable unit-test invariant.
+
+- **A test slept at a production daemon thread instead of joining it (#1867).** `time.sleep(0.3)` against a worker that was starved 546ms -- 246ms past the assertion. Worse than a late assertion: by then the `with patch(...)` scopes had unwound, so the escaped worker resolved the real process-wide job tracker and was observed touching the developer's live server data directory. Fixed with a context manager that records the thread at `Thread.start()` and joins it inside the patch scopes.
+
+## [12.58.0] - 2026-09-15
+
+### Fixed
+
+- **Indexing metadata never cleared `error_message`, so a fixed bug looked live for months (#1862).** `fail_indexing()` wrote the field and nothing ever removed it; every later run merged new fields over the old dict, so the string survived indefinitely and ended up sitting beside `"status": "completed"`. This manufactured a false production incident: an operator found a months-old hnswlib `AttributeError` (Bug #1415, filed 2026-07-15 and already fixed) in a completed run's metadata and reported it as live, and two agents were spent proving the environment was healthy. The field turns out to have zero readers anywhere in `src/` -- `get_stats()` does not expose it and `metadata_reader.py` reads only `status`/`current_commit` -- so it was effectively write-only, which is why the staleness went unnoticed. That also settles removing the key over setting it to `None`: no consumer can distinguish absent from null, and a null would have been planted permanently in every metadata file on the fleet.
+
+  The invariant is now stated rather than enumerated: `error_message` describes only the run whose metadata it sits in, so any transition that starts, resumes, records new work for, or completes a run drops the previous run's error. Four call sites enforce it -- `start_indexing()`, `set_files_to_index()`, `resume_indexing()` (new) and `complete_indexing()`. The last two exist because dual review found two *distinct* exits that "start and complete are the only transitions" does not cover. `_do_resume_interrupted` calls neither, yet is entered on `status == "failed"` (Bug #467), rewrites the document with fresh timestamps and counters, and on its cancelled and re-interrupted branches never reaches `complete_indexing()`; `start_indexing()` could not be reused there because it resets `files_processed`/`chunks_indexed` to 0 and would corrupt resume accounting. Separately, incremental and reconcile guard `start_indexing()` behind `if status != "in_progress"`, so the pop was skipped for metadata already on disk holding `{"status": "in_progress", "error_message": ...}` -- a state only pre-fix code could write, left behind by a run killed mid-flight and read back unchanged on upgrade. Placing the pop in `set_files_to_index()`, the fresh-work boundary shared by all three producers of a files list, closes both paths without touching the orchestrator.
+
+## [12.57.0] - 2026-09-14
+
+### Fixed
+
+- **Graph mode reported read fields and constants as definitely dead (#1858).** The Java extractor emits reference edges from exactly three node kinds (`method_invocation`, `object_creation_expression`, `type_identifier`); `field_access` appears nowhere in it. Fields and constants were therefore unreferenced by construction, so every `private` one satisfied "unreferenced AND private". On a production Java repository this reported 892 dead symbols whose first entries were `constant serialVersionUID` and `constant LOGGER` -- the former consumed by Java serialization and never referenced from source by design. `DeclarationKind` had never been carried into the CSR graph (only `Visibility` was), so a per-symbol kind channel now mirrors Story #1835's visibility path, and `is_definitely_dead_code` became an allowlist: only `Method` and `Type` can reach `Some(true)`; `Field`, `Constant`, `Package` and unknown kind return `None`. Extracting field references remains deliberate future work -- the bare-identifier case needs scope tracking (local vs parameter vs implicit `this` vs static import) the extractor does not have.
+
+- **`analyze_graph` on a repository with no Java returned a clean-looking empty result (#1860).** `ok: true`, `status: "ran_ok"`, empty `findings` -- indistinguishable from "nothing found", and the default experience for most repositories. Now `status: "no_supported_files"`, with `ok` left `true` because nothing failed. Note the counters involved are disjoint per file: an unrecognized extension increments `unreadable_or_unsupported_files`, not `files_with_unsupported_language`, so the condition sums both and excludes genuine read/parse failures.
+
+- **The served `analyze_graph` tool doc described the pre-#1858 predicate** and contradicted the new architecture section, with the served contract being the wrong one.
+
+### Added
+
+- **Graph-mode pattern reuse (#1859).** `execution_mode` in the pattern service per ADR-001, defaulting to `legacy` when absent so existing stored patterns keep working; `pattern_name`/`pattern_params` on `analyze_graph`. The mode gate lives in the shared resolver, so `analyze_graph` asks for `graph` while `xray_search`, `xray_explore`, the REST route and `xray_search_batch` all ask for `legacy` through one authority -- a legacy front door handed a graph pattern now fails with `pattern_mode_mismatch` instead of an opaque compile error. `store_xray_pattern` rejects a declared mode contradicting the callback family present.
+
+- **Graph-mode documentation reshelved and completed (#1861).** Five of eight cookbook templates are graph mode but sat under a single-file heading; the tool doc's cross-references were repo-relative paths an MCP client cannot resolve. The library is now split by mode, references are `get_file_content` calls naming each template, and `docs/xray-architecture.md` gains a "Graph Mode: Node and Edge Model" section stating what is a node, what is an edge, and what is invisible -- field and constant reads, reflection, JNI, DI, Lombok, JPA. Writing that section is what would have surfaced #1858 before release.
+
+### Changed
+
+- **Graph wire format `XRAYGRF2` -> `XRAYGRF3`** to carry the per-symbol declaration-kind channel. No stranded artifacts: the graph is a per-invocation temp file, a stale magic fails loud, and `XRAY_ABI_VERSION` is deliberately unchanged -- no `GraphHandle` accessor or layout changed, so a pre-existing `.so` served from the compile cache transparently calls the new host-side predicate and the fix reaches users with no cache flush.
+
 ## [12.56.0] - 2026-09-14
 
 ### Fixed

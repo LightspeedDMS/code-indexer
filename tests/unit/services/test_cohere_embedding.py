@@ -462,6 +462,7 @@ class TestCohereErrorHandling401Bug595Issue2:
         ValueError on the FIRST occurrence — before any back-off sleep — so a
         doomed pass fails in milliseconds instead of retrying max_retries times.
         """
+        import threading
         import time
         import httpx
         from unittest.mock import MagicMock
@@ -477,8 +478,20 @@ class TestCohereErrorHandling401Bug595Issue2:
         )
         mock_instance.post.side_effect = http_error
 
+        # ``time.sleep`` is a process-global attribute.  A background caller
+        # in the sequential fast lane can therefore reach this patch and
+        # corrupt a bare mock call-count assertion.  Record only calls made
+        # by this test's request thread; a real retry sleep on this path still
+        # remains observable and fails the assertion below.
+        test_thread_id = threading.get_ident()
+        sleep_calls = []
+
+        def record_test_thread_sleep(delay):
+            if threading.get_ident() == test_thread_id:
+                sleep_calls.append(delay)
+
         with patch("httpx.Client", mock_client_cls):
-            with patch.object(time, "sleep") as mock_sleep:
+            with patch.object(time, "sleep", side_effect=record_test_thread_sleep):
                 with pytest.raises(ValueError, match="CO_API_KEY"):
                     cohere_provider._make_sync_request(["test"], retry=True)
 
@@ -488,9 +501,10 @@ class TestCohereErrorHandling401Bug595Issue2:
             f"(post called {mock_instance.post.call_count} times)."
         )
         # No back-off sleep was performed.
-        assert mock_sleep.call_count == 0, (
+        assert sleep_calls == [], (
             "time.sleep was called on a 401; the auth failure must raise "
-            "before any exponential-backoff sleep."
+            "before any exponential-backoff sleep on the request thread. "
+            f"delays={sleep_calls}"
         )
 
 
@@ -965,6 +979,7 @@ class TestCohereRetryDelayCapBug602:
     def test_retry_after_header_capped_at_300s(self, cohere_provider):
         """A 429 response with Retry-After: 86400 must sleep at most 300s."""
         import httpx
+        import threading
         from unittest.mock import MagicMock, patch
 
         mock_response_429 = MagicMock()
@@ -987,9 +1002,17 @@ class TestCohereRetryDelayCapBug602:
         mock_client_instance = mock_client_cls.return_value
         mock_client_instance.post.side_effect = [mock_response_429, mock_response_ok]
 
+        # Filter sleep_calls to this thread only — leaked daemons (e.g. daemon/cache.py
+        # check loop with time.sleep(60)) would otherwise pollute the captures.
+        test_tid = threading.get_ident()
         sleep_calls = []
+
+        def _capture_if_test_thread(s):
+            if threading.get_ident() == test_tid:
+                sleep_calls.append(s)
+
         with patch("httpx.Client", mock_client_cls):
-            with patch("time.sleep", side_effect=lambda s: sleep_calls.append(s)):
+            with patch("time.sleep", side_effect=_capture_if_test_thread):
                 cohere_provider._make_sync_request(["test"])
 
         assert sleep_calls, "time.sleep must be called after a 429 response"
@@ -1000,6 +1023,7 @@ class TestCohereRetryDelayCapBug602:
     def test_5xx_backoff_capped_at_300s(self, cohere_provider):
         """A 500 response must sleep at most 300s regardless of computed backoff."""
         import httpx
+        import threading
         from unittest.mock import MagicMock, patch
 
         mock_response_500 = MagicMock()
@@ -1022,9 +1046,17 @@ class TestCohereRetryDelayCapBug602:
         mock_client_instance = mock_client_cls.return_value
         mock_client_instance.post.side_effect = [mock_response_500, mock_response_ok]
 
+        # Filter sleep_calls to this thread only — leaked daemons (e.g. daemon/cache.py
+        # check loop with time.sleep(60)) would otherwise pollute the captures.
+        test_tid = threading.get_ident()
         sleep_calls = []
+
+        def _capture_if_test_thread(s):
+            if threading.get_ident() == test_tid:
+                sleep_calls.append(s)
+
         with patch("httpx.Client", mock_client_cls):
-            with patch("time.sleep", side_effect=lambda s: sleep_calls.append(s)):
+            with patch("time.sleep", side_effect=_capture_if_test_thread):
                 cohere_provider._make_sync_request(["test"])
 
         assert sleep_calls, "time.sleep must be called after a 500 response"
@@ -1035,6 +1067,7 @@ class TestCohereRetryDelayCapBug602:
     def test_network_error_delay_capped_at_300s(self, cohere_provider):
         """A network exception must sleep at most 300s regardless of computed backoff."""
         import httpx
+        import threading
         from unittest.mock import MagicMock, patch
 
         mock_response_ok = MagicMock()
@@ -1048,9 +1081,17 @@ class TestCohereRetryDelayCapBug602:
             mock_response_ok,
         ]
 
+        # Filter sleep_calls to this thread only — leaked daemons (e.g. daemon/cache.py
+        # check loop with time.sleep(60)) would otherwise pollute the captures.
+        test_tid = threading.get_ident()
         sleep_calls = []
+
+        def _capture_if_test_thread(s):
+            if threading.get_ident() == test_tid:
+                sleep_calls.append(s)
+
         with patch("httpx.Client", mock_client_cls):
-            with patch("time.sleep", side_effect=lambda s: sleep_calls.append(s)):
+            with patch("time.sleep", side_effect=_capture_if_test_thread):
                 cohere_provider._make_sync_request(["test"])
 
         assert sleep_calls, "time.sleep must be called after a network error"

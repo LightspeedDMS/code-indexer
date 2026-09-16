@@ -20,12 +20,20 @@ from code_indexer.global_repos.query_tracker import QueryTracker
 
 #: Bug #1845 remediation round 2 (Defect 3): these tests exercise backend
 #: deletion classification, not reader-lease behavior -- no real lease is
-#: ever acquired against this path (only snapshot_has_live_reader's glob,
-#: which tolerates a nonexistent directory and returns False). Production
+#: ever acquired against this path. The primary lease directory is created
+#: explicitly below because an absent directory is now treated as ambiguous.
+#: Production
 #: always wires set_snapshot_manager and set_lease_root together
 #: (global_repos_lifecycle.py), so these mock-snapshot-manager tests must
 #: too, or CleanupManager correctly refuses to guess reader liveness.
 _UNUSED_LEASE_ROOT = Path("/nonexistent-bug1084-test-lease-root")
+
+
+def _test_lease_root(tmp_path: Path) -> Path:
+    """Provide the primary lease directory required by #1871 semantics."""
+    lease_root = tmp_path / "cidx-meta"
+    (lease_root.parent / ".scratch" / "snapshot-reader-leases").mkdir(parents=True)
+    return lease_root
 
 
 def _make_snapshot_manager(is_snapshot_for=None):
@@ -48,7 +56,7 @@ class TestSnapshotManagerWiring:
 
 
 class TestBackendDeletionBehindRefcountGate:
-    def test_held_ref_defers_backend_deletion(self):
+    def test_held_ref_defers_backend_deletion(self, tmp_path):
         """A non-zero QueryTracker refcount must DEFER deletion (no backend call)."""
         qt = QueryTracker()
         cow_path = "/mnt/cow-storage/.versioned/repo/v_1700000000"
@@ -56,7 +64,7 @@ class TestBackendDeletionBehindRefcountGate:
 
         cm = CleanupManager(query_tracker=qt, min_retention_age_seconds=0.0)
         cm.set_snapshot_manager(sm)
-        cm.set_lease_root(_UNUSED_LEASE_ROOT)
+        cm.set_lease_root(_test_lease_root(tmp_path))
         cm.schedule_cleanup(cow_path)
 
         # Hold a reference — simulates an in-flight NFS query.
@@ -68,7 +76,7 @@ class TestBackendDeletionBehindRefcountGate:
         sm.delete_snapshot.assert_not_called()
         assert cow_path in cm.get_pending_cleanups()
 
-    def test_release_triggers_backend_deletion_not_rmtree(self):
+    def test_release_triggers_backend_deletion_not_rmtree(self, tmp_path):
         """Releasing the ref triggers snapshot_manager.delete_snapshot (NOT rmtree)
         for a cow-shaped snapshot path."""
         qt = QueryTracker()
@@ -77,7 +85,7 @@ class TestBackendDeletionBehindRefcountGate:
 
         cm = CleanupManager(query_tracker=qt, min_retention_age_seconds=0.0)
         cm.set_snapshot_manager(sm)
-        cm.set_lease_root(_UNUSED_LEASE_ROOT)
+        cm.set_lease_root(_test_lease_root(tmp_path))
         cm.schedule_cleanup(cow_path)
 
         # Hold then release.
@@ -123,7 +131,7 @@ class TestBackendDeletionBehindRefcountGate:
 
         cm = CleanupManager(query_tracker=qt, min_retention_age_seconds=0.0)
         cm.set_snapshot_manager(sm)
-        cm.set_lease_root(_UNUSED_LEASE_ROOT)
+        cm.set_lease_root(_test_lease_root(tmp_path))
         cm.schedule_cleanup(local_path)
 
         cm._process_cleanup_queue()
@@ -150,7 +158,7 @@ class TestBackendDeletionBehindRefcountGate:
 
 
 class TestBackendDeletionFailureBackoff:
-    def test_backend_delete_failure_records_failure_and_keeps_queued(self):
+    def test_backend_delete_failure_records_failure_and_keeps_queued(self, tmp_path):
         """A backend delete that raises must be recorded as a failure (backoff/circuit
         breaker preserved) and the path stays queued for retry."""
         qt = QueryTracker()
@@ -160,7 +168,7 @@ class TestBackendDeletionFailureBackoff:
 
         cm = CleanupManager(query_tracker=qt, min_retention_age_seconds=0.0)
         cm.set_snapshot_manager(sm)
-        cm.set_lease_root(_UNUSED_LEASE_ROOT)
+        cm.set_lease_root(_test_lease_root(tmp_path))
         cm.schedule_cleanup(cow_path)
 
         cm._process_cleanup_queue()
