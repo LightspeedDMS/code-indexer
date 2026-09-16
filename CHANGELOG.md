@@ -7,6 +7,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [12.60.0] - 2026-09-16
+
+### Fixed
+
+- **Bug #1870**: dependency-map domain `.md` files could have their YAML frontmatter
+  corrupted on write. Two separate writers were unguarded. `yaml.safe_load` coerced ISO-8601
+  timestamps into `datetime` objects, which PyYAML re-emitted with a space instead of `T`
+  (`last_refined: 2026-07-28 00:18:45` rather than `...T00:18:45`), matching the corruption
+  seen in production. Adds `_NoTimestampSafeLoader` so timestamps round-trip unchanged, plus a
+  fail-closed `validate_rendered_frontmatter()` gate. The delta-journal writer now refuses to
+  process a file that advertises frontmatter but parses to `{}`, and refuses to persist a render
+  that fails validation. `_update_domain_file` now validates the fact-check verification pass's
+  output through the same gate and falls back to the known-good pre-verification content (with a
+  WARNING naming the validation error) rather than writing a corrupted file to disk.
+
+- **Bug #1871**: snapshot-reader lease files were written inside the `cidx-meta` git backup
+  mirror, where they were committed to the remote and where an absent lease directory caused
+  `snapshot_has_live_reader()` to report `False` — allowing a snapshot to be deleted out from
+  under a live reader. Leases now live under `golden-repos/.scratch/snapshot-reader-leases`,
+  derived from the existing `lease_root` so no call site changes and Bug #1845's ban on
+  positional derivation is preserved. Readers check the legacy location first so a lease written
+  by an older node is still honoured; writers use only the new location. An absent primary
+  directory now raises `LeaseDirectoryAmbiguousError`, which `CleanupManager` treats as
+  "defer deletion" exactly as it treats a live reader. Expired legacy lease files are swept
+  individually by a new stdlib-only `sweep_expired_lease_files()`, offloaded via
+  `anyio.to_thread.run_sync` so it never blocks the event loop; the legacy directory itself is
+  never bulk-deleted. The cidx-meta bootstrap writer and startup exclude patterns were extended
+  so lease and `*.tmp` artifacts stop being tracked.
+
+  Deployment note: the clustered environment must be deployed by stopping all nodes, deploying,
+  then starting — not by rolling nodes one at a time. An unpatched node's cleanup cannot see a
+  lease written by a patched node, so a mixed-version window could still delete a snapshot under
+  a live reader. Single-node deployments are unaffected.
+
 ## [12.59.0] - 2026-09-15
 
 ### Fixed

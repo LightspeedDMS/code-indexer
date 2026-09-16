@@ -29,11 +29,15 @@ def test_reader_writer_use_the_same_injected_lease_root(tmp_path: Path) -> None:
     lease.acquire()
     try:
         assert snapshot_has_live_reader(str(snapshot), lease_root=lease_root)
+        # Bug #1871: the primary lease directory relocated out of the
+        # git-tracked cidx-meta tree into golden-repos/.scratch/ -- this
+        # assertion used to encode the old (buggy) in-tree location.
         assert (
             _lease_directory(str(snapshot), lease_root=lease_root, create=False)
-            == lease_root / ".snapshot-reader-leases"
+            == golden_repos / ".scratch" / "snapshot-reader-leases"
         )
         assert not (golden_repos / "repo" / "cidx-meta").exists()
+        assert not (lease_root / ".snapshot-reader-leases").exists()
     finally:
         lease.release()
 

@@ -175,7 +175,7 @@ Security-sensitive changes (permission-model edits, prompt-template edits for ca
 | `server-fast-automation.sh` | Server (MCP/REST/services/auth/storage) | Touching `src/code_indexer/server/` | ~12 min (measured: two consecutive full runs at 741s and 738s on 2026-09-07, all 6 chunks passing; chunk 1 `services/` is the long-pole straggler at ~12 min while chunks 2-6 finish early, so wall time is essentially chunk 1's time) |
 | `slow-automation.sh` | `@pytest.mark.slow` unit tests (Bug #1798) | Not yet part of the required gate sequence -- see note below | ~45 min (FIRST EVER execution 2026-09-07: Phase 1 non-server 583 selected in 20:51, Phase 2 server 1,499 in 23:26; the older "2,083 tests" figure was the COMBINED collection across both phases, not one phase's selection) |
 | `rust-automation.sh` | Rust X-Ray engine (`rust/xray-core`, `rust/xray-cli`) -- `cargo test --workspace` (447 tests, incl. the AC18 PREAMBLE parity check) + `cargo clippy --workspace --all-targets -- -D warnings` | Touching `rust/` | seconds (warm build); longer on a cold `cargo build` |
-| `e2e-automation.sh` | 5-phase E2E: CLI standalone, CLI daemon, server in-process, CLI remote, fault-injection resiliency | Final regression gate -- ALL completed work | ~45-90 min |
+| `e2e-automation.sh` | 6-phase E2E: CLI standalone, CLI daemon, server in-process, CLI remote, fault-injection resiliency, PostgreSQL parity | Final regression gate -- ALL completed work | ~45-90 min |
 
 `fast-automation.sh` does NOT run server tests -- it ignores `tests/unit/server/` entirely. Touching server code without running `server-fast-automation.sh` = untested changes.
 
@@ -202,12 +202,13 @@ Security-sensitive changes (permission-model edits, prompt-template edits for ca
 ### e2e-automation.sh Usage
 
 ```bash
-./e2e-automation.sh              # All 5 phases
+./e2e-automation.sh              # All 6 phases
 ./e2e-automation.sh --phase 1    # CLI standalone
 ./e2e-automation.sh --phase 2    # CLI daemon
 ./e2e-automation.sh --phase 3    # Server in-process (FastAPI TestClient)
 ./e2e-automation.sh --phase 4    # CLI remote (live uvicorn subprocess)
 ./e2e-automation.sh --phase 5    # Fault-injection resiliency (live fault server, dual provider)
+./e2e-automation.sh --phase 6    # PostgreSQL parity (tests/e2e/pg_parity, port 8901)
 ```
 
 Credentials from `.e2e-automation` (gitignored) or env: `E2E_ADMIN_USER`, `E2E_ADMIN_PASS`, `E2E_VOYAGE_API_KEY`. Exits immediately if admin credentials missing.

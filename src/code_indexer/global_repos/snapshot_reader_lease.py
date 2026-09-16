@@ -9,14 +9,60 @@ import socket
 import time
 import uuid
 from pathlib import Path
+from typing import Tuple
 
 SNAPSHOT_READER_LEASE_TTL_SECONDS = 120.0
+
+
+class LeaseDirectoryAmbiguousError(RuntimeError):
+    """Raised when the PRIMARY lease directory is unexpectedly absent.
+
+    Bug #1871: absence of the relocated ``.scratch`` lease directory is
+    never treated as "definitely no live reader" -- that silent-False
+    behaviour is exactly what let a rolling-upgrade race delete a snapshot
+    out from under a live reader (retracted "delete it at startup" plan,
+    issue #1871 correction comment). Server startup unconditionally creates
+    this directory before serving traffic, so once a server has booted at
+    least once post-fix, its absence can only mean external interference
+    with a directory that may hold a live lease. Callers must treat this
+    identically to "live reader found" (defer), never as permission to
+    proceed -- symmetric with this module's pre-existing unwired-
+    ``lease_root`` raise.
+    """
+
+
+def _new_lease_directory(lease_root: Path) -> Path:
+    """The Bug #1871 relocated lease directory: golden-repos/.scratch/....
+
+    ``lease_root`` keeps the meaning every existing call site already
+    injects (``get_cidx_meta_path(server_dir)``, i.e.
+    ``golden_repos_dir / "cidx-meta"``), so no call site needs to change to
+    get the relocated behaviour: ``golden_repos_dir`` is derived as
+    ``lease_root.parent`` -- still no positional derivation from a
+    snapshot path (Bug #1845's fix stays intact).
+    """
+    return Path(lease_root).parent / ".scratch" / "snapshot-reader-leases"
+
+
+def _legacy_lease_directory(lease_root: Path) -> Path:
+    """The pre-#1871 lease directory, inside the git-tracked cidx-meta tree.
+
+    Never written to by this module as of Bug #1871 -- kept read-only so an
+    old-version node's lease (written by pre-fix code with no knowledge of
+    the relocated root) stays visible to new-version readers during a
+    rolling upgrade. Nothing here creates, writes to, or deletes this
+    directory itself; only individually-expired files within it are ever
+    removed (see ``snapshot_has_live_reader`` and
+    ``sweep_expired_lease_files``).
+    """
+    return Path(lease_root) / ".snapshot-reader-leases"
 
 
 def _lease_directory(
     snapshot_path: str, *, lease_root: Path, create: bool = True
 ) -> Path:
-    """Resolve the shared lease directory under an explicitly injected root.
+    """Resolve the shared PRIMARY lease directory under an explicitly
+    injected root.
 
     Bug #1845 remediation round 2 (Defect 3): the previous implementation
     derived this directory positionally (``path.parents[2]``), which on a
@@ -24,10 +70,11 @@ def _lease_directory(
     creates ``cidx-meta/`` *inside* the golden repo tree, sibling to
     ``.versioned``. There is no positional derivation that is safe for
     every valid snapshot-path depth, so the caller must resolve and inject
-    the real shared ``cidx-meta`` root explicitly (e.g. via
-    ``golden_repos_dir / "cidx-meta"``, which is byte-identical to what
-    ``get_cidx_meta_path(server_data_dir)`` would compute, since
-    ``golden_repos_dir == server_data_dir / "data" / "golden-repos"``).
+    the real shared ``cidx-meta`` root explicitly.
+
+    Bug #1871: the directory this resolves to is now the RELOCATED root
+    (``_new_lease_directory``), not the legacy in-tree one -- see that
+    function's docstring and this module's top-level design notes.
     ``snapshot_path`` is intentionally unused for the directory itself
     (identical for every snapshot under one lease_root); it stays a
     parameter so ``_snapshot_key`` derivation stays visually paired with
@@ -40,7 +87,7 @@ def _lease_directory(
             "locating a lease. No positional derivation, no fallback "
             "(Bug #1845 remediation round 2, Defect 3)."
         )
-    directory = Path(lease_root) / ".snapshot-reader-leases"
+    directory = _new_lease_directory(lease_root)
     if create:
         directory.mkdir(parents=True, exist_ok=True)
     return directory
@@ -123,13 +170,65 @@ def snapshot_has_live_reader(snapshot_path: str, *, lease_root: Path) -> bool:
     CLI-reachable via ``cleanup_manager.py``. Direct import was therefore
     rejected in favor of caller-side classification.
     """
-    directory = _lease_directory(snapshot_path, lease_root=lease_root, create=False)
-    if not directory.is_dir():
-        return False
     prefix = f"{_snapshot_key(snapshot_path)}-"
     now = time.time()
-    live = False
-    for lease_path in directory.glob(f"{prefix}*.json"):
+
+    def scan(directory: Path, pattern: str) -> bool:
+        if not directory.is_dir():
+            return False
+        for lease_path in directory.glob(pattern):
+            try:
+                data = json.loads(lease_path.read_text(encoding="utf-8"))
+                if data.get("snapshot_path") != str(Path(snapshot_path).resolve()):
+                    continue
+                age = now - float(data["updated_at"])
+                ttl_seconds = float(
+                    data.get("ttl_seconds", SNAPSHOT_READER_LEASE_TTL_SECONDS)
+                )
+            except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError):
+                continue
+            if age <= ttl_seconds:
+                return True
+            try:
+                lease_path.unlink()
+            except FileNotFoundError:
+                pass
+        return False
+
+    # During rolling upgrades, old nodes may continue renewing the legacy
+    # in-tree lease. Check it first so its liveness is never hidden by the
+    # relocated directory's state.
+    if scan(_legacy_lease_directory(lease_root), "*.json"):
+        return True
+
+    directory = _lease_directory(snapshot_path, lease_root=lease_root, create=False)
+    if not directory.is_dir():
+        raise LeaseDirectoryAmbiguousError(
+            "primary snapshot-reader lease directory is absent; refusing "
+            "to classify the snapshot as reader-free during migration"
+        )
+    return scan(directory, f"{prefix}*.json")
+
+
+def sweep_expired_lease_files(directory: Path) -> Tuple[int, int]:
+    """Remove expired lease files without removing the lease directory.
+
+    This is a synchronous, stdlib-only primitive intended to run in a worker
+    thread when called from the server startup path.  Missing directories are
+    a safe no-op: an old-version node may still recreate the legacy directory
+    during a rolling upgrade.  Files that cannot be parsed or inspected are
+    counted as errors and left in place; only a positively identified expired
+    lease is eligible for removal.
+
+    Returns ``(removed_count, error_count)``.
+    """
+    if not directory.is_dir():
+        return 0, 0
+
+    now = time.time()
+    removed_count = 0
+    error_count = 0
+    for lease_path in directory.glob("*.json"):
         try:
             data = json.loads(lease_path.read_text(encoding="utf-8"))
             age = now - float(data["updated_at"])
@@ -137,12 +236,19 @@ def snapshot_has_live_reader(snapshot_path: str, *, lease_root: Path) -> bool:
                 data.get("ttl_seconds", SNAPSHOT_READER_LEASE_TTL_SECONDS)
             )
         except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError):
+            error_count += 1
             continue
+
         if age <= ttl_seconds:
-            live = True
-        else:
-            try:
-                lease_path.unlink()
-            except FileNotFoundError:
-                pass
-    return live
+            continue
+        try:
+            lease_path.unlink()
+        except FileNotFoundError:
+            # A concurrent reader released or replaced it; that is benign.
+            continue
+        except OSError:
+            error_count += 1
+            continue
+        removed_count += 1
+
+    return removed_count, error_count
