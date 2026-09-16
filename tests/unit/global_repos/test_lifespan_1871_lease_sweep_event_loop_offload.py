@@ -49,6 +49,7 @@ _LIFESPAN_PATH = (
 
 _OFFLOAD_CALL_NAMES = ("run_sync", "to_thread", "run_in_executor")
 _SWEEP_FUNCTION_NAME = "sweep_expired_lease_files"
+_ENSURE_PRIMARY_DIR_FUNCTION_NAME = "ensure_primary_lease_directory"
 
 
 def _lifespan_source() -> str:
@@ -68,16 +69,21 @@ def _call_target_name(call_node: ast.Call) -> str:
     return ""
 
 
+def _find_calls_to(tree: ast.AST, name: str) -> List[ast.Call]:
+    """Locate EVERY call site to a given function name -- a hazard fixed at
+    one call site but reintroduced at another must still fail this test."""
+    return [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and _call_target_name(node) == name
+    ]
+
+
 def _find_sweep_calls(tree: ast.AST) -> List[ast.Call]:
     """Locate EVERY ``sweep_expired_lease_files(...)`` call site -- a
     hazard fixed at one call site but reintroduced at another must still
     fail this test."""
-    return [
-        node
-        for node in ast.walk(tree)
-        if isinstance(node, ast.Call)
-        and _call_target_name(node) == _SWEEP_FUNCTION_NAME
-    ]
+    return _find_calls_to(tree, _SWEEP_FUNCTION_NAME)
 
 
 def test_sweep_expired_lease_files_call_site_exists() -> None:
@@ -189,3 +195,36 @@ def test_sweep_is_called_against_the_legacy_lease_directory_not_the_primary_one(
             "be pointed at the relocated primary '.scratch' directory, "
             "which holds live leases from every current-version node"
         )
+
+
+def test_ensure_primary_lease_directory_call_site_exists() -> None:
+    """RED on unmodified code: `ensure_primary_lease_directory(...)` is not
+    called anywhere in `lifespan.py` yet -- server startup never
+    unconditionally creates the PRIMARY (.scratch) snapshot-reader lease
+    directory before serving traffic, so its later absence (e.g. on a
+    fresh server where no reader has yet taken a lease) is never
+    genuinely anomalous. That makes `snapshot_has_live_reader()` raise
+    `LeaseDirectoryAmbiguousError` on a perfectly healthy fresh tree, and
+    `cleanup_manager.py` defers cleanup forever as a result -- unbounded
+    snapshot accumulation at the project's ~900-repo production scale."""
+    tree = ast.parse(_lifespan_source())
+    assert _find_calls_to(tree, _ENSURE_PRIMARY_DIR_FUNCTION_NAME), (
+        "ensure_primary_lease_directory(...) is not called anywhere in "
+        "lifespan.py -- server startup does not unconditionally create "
+        "the primary snapshot-reader lease directory"
+    )
+
+
+def test_every_ensure_primary_lease_directory_call_is_offloaded_to_a_thread() -> None:
+    """Every call site found for ensure_primary_lease_directory(...) in
+    lifespan.py must satisfy the same deferred-lambda + awaited-offload
+    ancestry as the legacy sweep call -- it performs a synchronous
+    mkdir(), which must never run bare on the event loop at fleet scale
+    (hard NFSv3 mount can block a bare filesystem call forever)."""
+    tree = ast.parse(_lifespan_source())
+    call_nodes = _find_calls_to(tree, _ENSURE_PRIMARY_DIR_FUNCTION_NAME)
+    assert call_nodes, "no ensure_primary_lease_directory(...) call sites found"
+
+    parents = _build_parent_map(tree)
+    for call_node in call_nodes:
+        _assert_call_is_offloaded(call_node, parents)

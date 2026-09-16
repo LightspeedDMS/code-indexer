@@ -49,9 +49,47 @@ from code_indexer.global_repos.snapshot_reader_lease import (
     SnapshotReaderLease,
     _legacy_lease_directory,
     _new_lease_directory,
+    ensure_primary_lease_directory,
     snapshot_has_live_reader,
     sweep_expired_lease_files,
 )
+
+
+def test_after_ensure_primary_lease_directory_absence_is_no_longer_ambiguous(
+    tmp_path: Path,
+) -> None:
+    """Bug #1871 follow-up (E2E Phase 4 log-audit gate finding): server
+    startup must unconditionally create the PRIMARY (.scratch) lease
+    directory before serving traffic -- this module's own
+    LeaseDirectoryAmbiguousError docstring already promises exactly this.
+    Before this fix, nothing created the directory until the first WRITER
+    (a SnapshotReaderLease.acquire()) happened to run, so a fresh server
+    with no reader yet raised LeaseDirectoryAmbiguousError and
+    cleanup_manager.py deferred cleanup forever -- unbounded snapshot
+    accumulation at scale. Once the bootstrap has run, a fresh tree with
+    genuinely no reader must resolve to a clean False, not raise."""
+    lease_root = _make_lease_root(tmp_path)
+    snapshot = _make_snapshot(tmp_path)
+
+    assert not _new_lease_directory(lease_root).exists()
+
+    created = ensure_primary_lease_directory(lease_root)
+
+    assert created == _new_lease_directory(lease_root)
+    assert created.is_dir()
+    assert snapshot_has_live_reader(str(snapshot), lease_root=lease_root) is False
+
+
+def test_ensure_primary_lease_directory_is_idempotent(tmp_path: Path) -> None:
+    """Startup may run this bootstrap on every boot -- it must never fail
+    or duplicate work when the directory already exists from a prior run."""
+    lease_root = _make_lease_root(tmp_path)
+
+    first = ensure_primary_lease_directory(lease_root)
+    second = ensure_primary_lease_directory(lease_root)
+
+    assert first == second
+    assert first.is_dir()
 
 
 def test_absent_primary_directory_with_no_legacy_evidence_is_ambiguous(
