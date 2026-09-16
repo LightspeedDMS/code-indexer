@@ -3010,6 +3010,62 @@ def make_lifespan(
 
             asyncio.create_task(_run_legacy_lease_sweep())
 
+            # Bug #1871 follow-up (caught by the E2E Phase 4 post-run
+            # log-audit gate): this module's own
+            # LeaseDirectoryAmbiguousError docstring already promises that
+            # "server startup unconditionally creates this directory
+            # before serving traffic" -- nothing actually did. The
+            # PRIMARY (relocated `.scratch`) lease directory was only ever
+            # created as a side effect of a WRITER taking a lease
+            # (SnapshotReaderLease.acquire -> _lease_directory(...,
+            # create=True)). On a fresh server where no reader has yet
+            # taken a lease, snapshot_has_live_reader() found the
+            # directory absent and raised LeaseDirectoryAmbiguousError;
+            # cleanup_manager.py caught that and deferred cleanup
+            # indefinitely, so snapshots accumulated without bound at the
+            # project's ~900-repo production scale. This closure closes
+            # that gap by unconditionally creating the directory here, so
+            # its later absence is genuinely anomalous -- exactly what the
+            # ambiguous-error docstring assumes and what the defer-on-
+            # ambiguous cleanup path (the actual Bug #1871 data-loss fix)
+            # requires to ever converge. Offloaded via
+            # anyio.to_thread.run_sync, mirroring the sibling
+            # `_run_legacy_lease_sweep` closure immediately above, because
+            # this is a synchronous mkdir() that must never block the
+            # event loop at fleet scale (`hard` NFSv3 mount can block a
+            # bare filesystem call forever). Backgrounded via
+            # asyncio.create_task (not awaited) because nothing later in
+            # lifespan reads the result.
+            async def _run_primary_lease_directory_bootstrap() -> None:
+                try:
+                    import anyio.to_thread as _to_thread
+                    from code_indexer.global_repos.snapshot_reader_lease import (
+                        ensure_primary_lease_directory,
+                    )
+                    from code_indexer.server.services.cidx_meta_backup import (
+                        get_cidx_meta_path,
+                    )
+
+                    _primary_lease_root = get_cidx_meta_path(
+                        config_service.config_manager.server_dir
+                    )
+                    _primary_lease_dir = await _to_thread.run_sync(
+                        lambda: ensure_primary_lease_directory(_primary_lease_root)
+                    )
+                    logger.info(
+                        "Startup: ensured primary snapshot-reader lease "
+                        "directory exists at %s",
+                        _primary_lease_dir,
+                    )
+                except Exception as _lease_dir_exc:  # noqa: BLE001 -- startup safety
+                    logger.warning(
+                        "Startup: failed to ensure primary snapshot-reader "
+                        "lease directory exists (non-fatal): %s",
+                        _lease_dir_exc,
+                    )
+
+            asyncio.create_task(_run_primary_lease_directory_bootstrap())
+
             def _dep_map_health_check_fn():
                 from code_indexer.server.services.dep_map_health_detector import (
                     DepMapHealthDetector,

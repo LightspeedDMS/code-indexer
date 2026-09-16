@@ -44,6 +44,34 @@ def _new_lease_directory(lease_root: Path) -> Path:
     return Path(lease_root).parent / ".scratch" / "snapshot-reader-leases"
 
 
+def ensure_primary_lease_directory(lease_root: Path) -> Path:
+    """Idempotently create the PRIMARY (relocated ``.scratch``) lease
+    directory and return its path.
+
+    Bug #1871 follow-up (caught by the E2E Phase 4 post-run log-audit
+    gate): this module's own ``LeaseDirectoryAmbiguousError`` docstring
+    already promises that "server startup unconditionally creates this
+    directory before serving traffic" -- but nothing actually did. Before
+    this function existed, the PRIMARY directory was only ever created as
+    a side effect of a WRITER taking a lease (``_lease_directory(...,
+    create=True)`` inside ``SnapshotReaderLease.__init__``). On a fresh
+    server where no reader has yet taken a lease, ``snapshot_has_live_
+    reader()`` found the directory absent and raised
+    ``LeaseDirectoryAmbiguousError``; ``cleanup_manager.py`` caught that
+    and deferred cleanup indefinitely, so snapshots accumulated without
+    bound at the project's ~900-repo production scale.
+
+    Callers must invoke this from server startup so the directory's later
+    absence is genuinely anomalous, exactly as the docstring above
+    assumes. This is a synchronous, stdlib-only ``mkdir`` -- callers on an
+    async startup path must offload it via ``anyio.to_thread.run_sync``,
+    identically to this module's sibling ``sweep_expired_lease_files``.
+    """
+    directory = _new_lease_directory(lease_root)
+    directory.mkdir(parents=True, exist_ok=True)
+    return directory
+
+
 def _legacy_lease_directory(lease_root: Path) -> Path:
     """The pre-#1871 lease directory, inside the git-tracked cidx-meta tree.
 

@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [12.61.0] - 2026-09-16
+
+### Fixed
+
+- **Bug #1871 follow-up (found by the E2E Phase 4 post-run log-audit gate)**: server startup never
+  created the relocated primary snapshot-reader lease directory. `snapshot_reader_lease.py`'s own
+  `LeaseDirectoryAmbiguousError` docstring already promised that startup creates it, but nothing did
+  - the directory only appeared as a side effect of a writer taking a lease. On a fresh server where
+  no reader had yet taken one, `snapshot_has_live_reader()` found it absent, raised
+  `LeaseDirectoryAmbiguousError`, and `CleanupManager` deferred cleanup indefinitely. Cleanup
+  therefore never converged and snapshots accumulated without bound, which at the project's ~900-repo
+  production scale is unbounded disk growth. Adds `ensure_primary_lease_directory()` and calls it
+  unconditionally from startup, offloaded via `anyio.to_thread.run_sync` so the mkdir cannot block
+  the event loop on a `hard` NFS mount, and non-fatal so a failure never takes a node down at boot.
+  The defer-on-ambiguous path itself is unchanged - deferring on a genuinely absent directory remains
+  correct, and is the original Bug #1871 data-loss fix.
+
+- **Bug #1871 follow-up (found during staging verification)**: the cidx-meta `.gitignore` was written
+  only on first bootstrap. `_write_gitignore()` had a single call site inside the
+  `if not git_dir.exists():` branch, so on every already-deployed host - where `.git` exists - the
+  `.snapshot-reader-leases/` ignore line could never be added. Latent rather than active, since
+  12.60.0 no longer writes leases to the legacy location, but any node that wrote there again would
+  have had those files re-committed into the backup mirror, recreating exactly what Bug #1871 set out
+  to end. The required entries are now defined once and converge idempotently on every bootstrap
+  invocation, including the `already_initialized` path, preserving any operator-added lines. This is
+  the Bug #1440 lesson applied: a bootstrap fix is incomplete without an automatic self-heal path for
+  hosts that are already running.
+
 ## [12.60.0] - 2026-09-16
 
 ### Fixed
