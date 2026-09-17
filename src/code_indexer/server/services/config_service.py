@@ -522,11 +522,33 @@ class ConfigService:
         """
         Get current configuration, loading if necessary.
 
+        Bug #1889: double-checked locking. The cheap `self._config is None`
+        check runs lock-free on the hot (already-loaded) path, but the slow
+        (first-load) path re-checks INSIDE `_config_update_lock` before
+        calling load_config(). Without the inner check, two threads racing
+        this method on a freshly-constructed instance (e.g. a leaked
+        SystemMetricsCollector background thread calling get_config_service()
+        concurrently with a test's own first access) could both observe
+        `self._config is None` and both call load_config() -- which (Bug
+        #1801) unconditionally re-parses config.json and republishes a
+        BRAND NEW ServerConfig object on every call. The second, redundant
+        call silently detaches self._config from whichever object an
+        earlier caller already captured and is about to mutate, discarding
+        that caller's in-memory changes. The inner check makes the second
+        thread observe the first thread's already-published config and
+        skip load_config() entirely -- but that protection is scoped to
+        this method's own lazy-init race. It does NOT protect any other
+        direct load_config() caller: an explicit load_config() call made
+        from elsewhere still always parses config.json and publishes a
+        brand new ServerConfig object, exactly as before.
+
         Returns:
             ServerConfig object
         """
         if self._config is None:
-            self.load_config()
+            with self._config_update_lock:
+                if self._config is None:
+                    self.load_config()
         assert self._config is not None  # load_config() always sets self._config
         return self._config
 
