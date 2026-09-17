@@ -23,7 +23,16 @@ def write_json_atomic(
 ) -> None:
     """Write JSON without exposing readers to a partial target file."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    target_mode = os.stat(path).st_mode & 0o777 if path.exists() else 0o644
+    target_exists = path.exists()
+    if target_exists:
+        target_stat = os.stat(path)
+        target_mode = target_stat.st_mode & 0o777
+        target_uid = target_stat.st_uid
+        target_gid = target_stat.st_gid
+    else:
+        target_mode = 0o644
+        target_uid = None
+        target_gid = None
     tmp_fd, tmp_name = tempfile.mkstemp(dir=str(path.parent), suffix=".tmp")
     try:
         with os.fdopen(tmp_fd, "w") as destination:
@@ -33,6 +42,34 @@ def write_json_atomic(
             destination.flush()
             os.fsync(destination.fileno())
         os.chmod(tmp_name, target_mode)
+        # Bug #1896 (P1, clustered staging): mkstemp+os.replace creates a
+        # NEW inode owned by the writer. Preserving mode alone is not
+        # enough when the writer runs as a different user than the file's
+        # real owner (e.g. the root auto-updater rewriting a code-indexer
+        # server's bootstrap config.json) -- the preserved (often 0600)
+        # mode plus writer (root) ownership locks the real owner out of
+        # its own config and crash-loops the server. Restore the
+        # PRE-EXISTING owner/group on the temp file before the replace.
+        # Only attempted when the target pre-existed (a brand-new file has
+        # no prior owner to preserve -- leave it writer-owned). A
+        # non-root writer replacing a file it already owns cannot chown
+        # to a different owner and does not need to -- degrade
+        # gracefully, matching the pre-#1894 in-place open("w") semantics.
+        if target_exists:
+            # target_uid/target_gid are always set (non-None) together with
+            # target_exists above; the assert only narrows the Optional[int]
+            # type for mypy and can never fail at runtime.
+            assert target_uid is not None and target_gid is not None
+            try:
+                os.chown(tmp_name, target_uid, target_gid)
+            except PermissionError:
+                logger.debug(
+                    "write_json_atomic: cannot chown %s to (%s, %s) -- "
+                    "non-root writer, keeping writer ownership",
+                    tmp_name,
+                    target_uid,
+                    target_gid,
+                )
         os.replace(tmp_name, str(path))
     except BaseException:
         try:

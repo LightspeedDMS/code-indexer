@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [12.65.0] - 2026-09-17
+
+### Fixed
+
+- **Bug #1896 (P1, regression from #1894)**: `write_json_atomic` preserved a config
+  file's permission mode but not its ownership. When the root auto-updater rewrote the
+  server's bootstrap `config.json` through the helper, `mkstemp` + `os.replace` created a
+  root-owned inode; with the preserved `0600` mode, the non-root `code-indexer` server
+  user could no longer read its own config and the node crash-looped at startup
+  (`PermissionError`). The helper now captures the existing target's `st_uid`/`st_gid` and
+  `os.chown`s the temp file back to the original owner after `chmod` and before
+  `os.replace`, guarded to pre-existing files, with `os.chown` wrapped in
+  `except PermissionError` so a non-root writer degrades gracefully to writer ownership.
+  Mode handling is unchanged and `0600` is not loosened.
+
 ## [12.64.0] - 2026-09-17
 
 ### Fixed
