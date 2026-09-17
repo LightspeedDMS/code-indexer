@@ -148,11 +148,26 @@ class CommandModeDetector:
             with open(config_path, "r") as f:
                 config_data = json.load(f)  # Check if it's valid JSON
 
+            # Bug #1894: valid JSON that isn't an object (e.g. a bare ""
+            # left by a corrupted config.json) must be treated the same as
+            # invalid JSON -- otherwise config_data.get(...) below raises an
+            # uncaught AttributeError that crashes mode detection (and with
+            # it every CLI command, including the `cidx init --force` repair
+            # self-heal) before it ever gets a chance to regenerate it.
+            if not isinstance(config_data, dict):
+                logger.debug(f"Local config is not a JSON object: {config_path}")
+                return False
+
             # Check if proxy_mode is enabled
             self._is_proxy_mode = config_data.get("proxy_mode", False)
 
             return True
 
-        except (json.JSONDecodeError, FileNotFoundError, PermissionError) as e:
+        except (
+            json.JSONDecodeError,
+            FileNotFoundError,
+            PermissionError,
+            UnicodeDecodeError,
+        ) as e:
             logger.debug(f"Failed to validate local config: {e}")
             return False

@@ -14,7 +14,6 @@ import re
 import shutil
 import subprocess
 import logging
-import tempfile
 import time
 import threading
 import uuid
@@ -2889,24 +2888,9 @@ class GoldenRepoManager:
                 config_data = json.load(f)
             config_data["embedding_providers"] = providers
 
-            # Atomic write via tempfile.mkstemp + os.replace to avoid a truncation
-            # window.  A plain open("w") truncates config.json to 0 bytes before
-            # writing, so any concurrent reader (e.g. detect_current_mode() called
-            # by a cidx index subprocess) sees an empty file, gets JSONDecodeError,
-            # returns "uninitialized", and fails with "Command 'index' is not
-            # available in no configuration found" (Phase 3 registration race).
-            parent_dir = config_path.parent
-            tmp_fd, tmp_name = tempfile.mkstemp(dir=str(parent_dir), suffix=".tmp")
-            try:
-                with os.fdopen(tmp_fd, "w") as tmp_f:
-                    json.dump(config_data, tmp_f)
-                os.replace(tmp_name, str(config_path))
-            except Exception:
-                try:
-                    os.unlink(tmp_name)
-                except Exception:
-                    pass
-                raise
+            from code_indexer.config import write_json_atomic
+
+            write_json_atomic(config_path, config_data)
 
             logging.info("Wrote embedding_providers=%s to %s", providers, config_path)
         except Exception as exc:

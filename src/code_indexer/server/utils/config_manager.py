@@ -2141,35 +2141,14 @@ class ServerConfigManager:
             trailing_newline: if True append a bare '\\n' after the JSON
                 (save_config_dict byte-identical contract).
         """
-        import tempfile
+        from code_indexer.config import write_json_atomic
 
-        self.server_dir.mkdir(parents=True, exist_ok=True)
-        fd, tmp_path = tempfile.mkstemp(
-            dir=self.config_file_path.parent, prefix=".cfg_tmp_"
+        write_json_atomic(
+            self.config_file_path,
+            config_dict,
+            trailing_newline=trailing_newline,
+            indent=2,
         )
-        try:
-            with os.fdopen(fd, "w") as fh:
-                json.dump(config_dict, fh, indent=2)
-                if trailing_newline:
-                    fh.write("\n")
-                fh.flush()
-                os.fsync(fh.fileno())
-            # Preserve existing file mode so the auto-updater (which may run as
-            # a different OS user — see Bug #879) can still read config.json.
-            # mkstemp always creates files at 0600; we must correct that before
-            # the atomic rename.
-            if self.config_file_path.exists():
-                target_mode = os.stat(self.config_file_path).st_mode & 0o777
-            else:
-                target_mode = 0o644  # faithful to the prior umask-default behaviour
-            os.chmod(tmp_path, target_mode)
-            os.replace(tmp_path, self.config_file_path)
-        except Exception:
-            try:
-                os.unlink(tmp_path)
-            except OSError:
-                pass
-            raise
 
     def save_config(self, config: ServerConfig) -> None:
         """

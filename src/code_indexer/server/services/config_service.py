@@ -6,6 +6,7 @@ All settings persist to ~/.cidx-server/config.json via ServerConfigManager.
 """
 
 from code_indexer.server.middleware.correlation import get_correlation_id
+from code_indexer.config import write_json_atomic
 
 import copy
 import json
@@ -3060,8 +3061,7 @@ class ConfigService:
                 with open(cidx_config_path, "r") as f:
                     repo_config = json.load(f)
                 repo_config["file_extensions"] = cli_exts
-                with open(cidx_config_path, "w") as f:
-                    json.dump(repo_config, f, indent=2)
+                write_json_atomic(cidx_config_path, repo_config, indent=2)
                 logger.info("Cascaded file_extensions to %s", alias)
             except Exception as e:
                 logger.warning("Could not cascade extensions to %s: %s", alias, e)
@@ -3090,8 +3090,7 @@ class ConfigService:
             with open(cidx_config_path, "r") as f:
                 repo_config = json.load(f)
             repo_config["file_extensions"] = cli_exts
-            with open(cidx_config_path, "w") as f:
-                json.dump(repo_config, f, indent=2)
+            write_json_atomic(cidx_config_path, repo_config, indent=2)
             logger.info("Seeded file_extensions from server config for %s", repo_path)
         except Exception as e:
             logger.warning("Could not seed extensions for %s: %s", repo_path, e)
@@ -3133,8 +3132,7 @@ class ConfigService:
             added = server_exts_bare - current_exts_bare
             removed = current_exts_bare - server_exts_bare
             repo_config["file_extensions"] = [ext.lstrip(".") for ext in server_exts]
-            with open(cidx_config_path, "w") as f:
-                json.dump(repo_config, f, indent=2)
+            write_json_atomic(cidx_config_path, repo_config, indent=2)
             logger.info(
                 "Synced drifted file_extensions for %s (%d added, %d removed)",
                 repo_path,

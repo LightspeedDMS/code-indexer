@@ -1946,6 +1946,19 @@ class RefreshScheduler:
         Returns:
             Job ID if submitted to BackgroundJobManager, None if executed directly
         """
+        # Bug #1894: local-repo repair quarantine must gate the job submission
+        # itself.  Checking only inside _execute_refresh() still submits a
+        # failed global_repo_refresh job every poll, producing the tight retry
+        # storm this breaker is meant to stop.  A valid config means an
+        # external repair succeeded; clear the consecutive-failure state and
+        # allow the normal refresh to proceed.
+        if (
+            submitter_username == "system"
+            and not force_reset
+            and self._scheduled_local_repo_repair_is_quarantined(alias_name)
+        ):
+            return None
+
         if not self.background_job_manager:
             # Fallback to direct execution if no job manager (CLI mode)
             self._execute_refresh(alias_name, force_reset=force_reset)
@@ -1977,6 +1990,41 @@ class RefreshScheduler:
         )
         logger.info(f"Submitted refresh job {job_id} for {alias_name}")
         return job_id
+
+    def _scheduled_local_repo_repair_is_quarantined(self, alias_name: str) -> bool:
+        """Return whether scheduled submission must be suppressed for *alias_name*.
+
+        The persisted local-repair breaker is checked before creating a
+        ``global_repo_refresh`` job.  If the config became valid since the
+        quarantine was recorded, this is a successful recovery and clears the
+        state so subsequent scheduled refreshes use the ordinary path.
+        """
+        try:
+            state = self.golden_repo_metadata.get_local_repo_repair_failure_state(
+                alias_name
+            )
+        except Exception as exc:
+            logger.warning(
+                "Bug #1894: could not read local-repo repair quarantine for %s: %s",
+                alias_name,
+                exc,
+            )
+            return False
+        if (
+            state is None
+            or state.get("consecutive_failure_count", 0)
+            < _LOCAL_REPO_REPAIR_QUARANTINE_THRESHOLD
+        ):
+            return False
+
+        repo_name = alias_name.removesuffix("-global")
+        config_path = (
+            self.golden_repos_dir / repo_name / ".code-indexer" / "config.json"
+        )
+        if self._is_local_config_valid(config_path):
+            self._reset_local_repo_repair_quarantine(alias_name)
+            return False
+        return True
 
     def refresh_repo(self, alias_name: str) -> None:
         """
@@ -3977,10 +4025,10 @@ class RefreshScheduler:
         Check whether a local repo's .code-indexer/config.json is present and
         parseable (Bug #1253).
 
-        Mirrors CommandModeDetector._validate_local_config()'s leniency: any
-        valid JSON file is accepted (mode detection does not require specific
-        fields). A missing file or invalid JSON means `cidx index` would fail
-        mode validation with "no configuration found".
+        Mirrors CommandModeDetector._validate_local_config()'s requirement
+        that the parsed value is a JSON object. A missing file, invalid JSON,
+        or a valid non-object value means `cidx index` would fail mode
+        validation with "no configuration found".
 
         Args:
             config_json_path: Path to the candidate .code-indexer/config.json
@@ -3992,9 +4040,9 @@ class RefreshScheduler:
             return False
         try:
             with open(config_json_path) as f:
-                json.load(f)
-            return True
-        except (json.JSONDecodeError, OSError) as e:
+                config_data = json.load(f)
+            return isinstance(config_data, dict)
+        except (json.JSONDecodeError, OSError, UnicodeDecodeError) as e:
             logger.debug(f"Invalid local config at {config_json_path}: {e}")
             return False
 

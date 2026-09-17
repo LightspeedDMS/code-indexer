@@ -19,6 +19,7 @@ from code_indexer.utils.subprocess_env import build_cidx_subprocess_env
 from code_indexer.utils.subprocess_diagnostics import (
     format_completed_process_diagnostic,
 )
+from code_indexer.config import write_json_atomic
 
 import json
 import os
@@ -4846,8 +4847,7 @@ class ActivatedRepoManager:
             config_data["voyage_ai"] = {"model": "voyage-code-3"}
 
             # Write updated config
-            with open(config_file, "w") as f:
-                json.dump(config_data, f, indent=2)
+            write_json_atomic(config_file, config_data, indent=2)
 
             self.logger.info(
                 f"Updated composite config with FilesystemVectorStore for {composite_path}"

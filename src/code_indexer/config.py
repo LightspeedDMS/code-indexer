@@ -2,6 +2,8 @@
 
 import json
 import logging
+import os
+import tempfile
 import threading as _threading
 import yaml  # type: ignore
 from pathlib import Path
@@ -10,6 +12,34 @@ from typing import List, Optional, Any, Literal, Tuple, Dict
 from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
 
 logger = logging.getLogger(__name__)
+
+
+def write_json_atomic(
+    path: Path,
+    data: Any,
+    *,
+    trailing_newline: bool = False,
+    **dump_kwargs: Any,
+) -> None:
+    """Write JSON without exposing readers to a partial target file."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    target_mode = os.stat(path).st_mode & 0o777 if path.exists() else 0o644
+    tmp_fd, tmp_name = tempfile.mkstemp(dir=str(path.parent), suffix=".tmp")
+    try:
+        with os.fdopen(tmp_fd, "w") as destination:
+            json.dump(data, destination, **dump_kwargs)
+            if trailing_newline:
+                destination.write("\n")
+            destination.flush()
+            os.fsync(destination.fileno())
+        os.chmod(tmp_name, target_mode)
+        os.replace(tmp_name, str(path))
+    except BaseException:
+        try:
+            os.unlink(tmp_name)
+        except OSError:
+            pass
+        raise
 
 
 # Story #1082 Scenario 3: codebase_dir mismatch WARNING de-spam.
@@ -845,6 +875,25 @@ class ConfigVerificationError(ValueError):
     """
 
 
+class ConfigCorruptionError(ValueError):
+    """Raised by `ConfigManager.load()` ONLY for genuine config.json
+    corruption -- invalid JSON, or valid JSON that is not a top-level
+    object (Bug #1894 P2 review finding).
+
+    Deliberately NARROW: PermissionError/OSError and pydantic schema
+    validation failures (e.g. a legacy field, an out-of-range value) are
+    NOT corruption and must propagate with their native type instead of
+    being wrapped here. `cidx init --force`'s self-heal (which runs
+    autonomously across ~900 production repos via RefreshScheduler) catches
+    ONLY this exception before blindly regenerating a config with defaults
+    -- an over-broad catch would silently destroy recoverable user config
+    on a transient permission error (Anti-Fallback / Anti-Silent-Failure).
+
+    Subclasses `ValueError` so existing `except ValueError` callers that
+    only cared about "load failed" keep working unchanged.
+    """
+
+
 class ConfigManager:
     """Manages configuration loading, saving, and validation."""
 
@@ -867,58 +916,78 @@ class ConfigManager:
     def load(self) -> Config:
         """Load configuration from file or create default with dynamic path resolution."""
         if self.config_path.exists():
-            try:
-                with open(self.config_path, "r") as f:
+            # Bug #1894 P2 review finding: only genuine corruption (invalid
+            # JSON, or valid JSON that isn't a top-level object) is
+            # classified as ConfigCorruptionError. PermissionError/OSError
+            # opening the file, and schema/legacy-field ValueErrors below,
+            # are NOT corruption and must propagate with their native type
+            # so `cidx init --force`'s self-heal (Bug #1894 RC2) never
+            # mistakes a transient/recoverable failure for corruption and
+            # blindly regenerates a config with defaults across the fleet
+            # (Anti-Fallback / Anti-Silent-Failure).
+            with open(self.config_path, "r") as f:
+                try:
                     data = json.load(f)
+                except json.JSONDecodeError as e:
+                    raise ConfigCorruptionError(
+                        f"Failed to load config from {self.config_path}: {e}"
+                    ) from e
 
-                # Validate no legacy configuration options BEFORE attempting to parse
-                _validate_no_legacy_config(data)
+            if not isinstance(data, dict):
+                raise ConfigCorruptionError(
+                    f"Failed to load config from {self.config_path}: "
+                    "config.json does not contain a JSON object"
+                )
 
-                # Ensure absolute path for codebase_dir
-                if "codebase_dir" in data:
-                    # Convert to absolute path if needed
-                    path = Path(data["codebase_dir"])
-                    if not path.is_absolute():
-                        # If relative, resolve relative to config directory
-                        config_dir = self.config_path.parent.parent
-                        path = (config_dir / path).resolve()
-                    data["codebase_dir"] = str(path)
-                    # Bug #1033: reconcile against actual config file location.
-                    # On NFS clusters, nodes may mount the same share at different paths.
-                    actual_dir = self.config_path.resolve().parent.parent
-                    if path.is_absolute() and actual_dir != path.resolve():
-                        # Story #1082: the reconciliation (override) below is
-                        # LOAD-BEARING and runs every load; only the WARNING is
-                        # de-spammed to at most once per distinct config path so
-                        # the per-query hot path no longer floods the log
-                        # (e.g. 9,634 warnings in one run). No normalized
-                        # codebase_dir is persisted to shared state -- the memo
-                        # is process-local config-path bookkeeping only.
-                        if _should_warn_codebase_dir_mismatch(str(self.config_path)):
-                            logger.warning(
-                                "codebase_dir mismatch: stored=%s, actual=%s. "
-                                "Using actual path (config at %s). This warning "
-                                "is logged once per config path; the per-node "
-                                "override is applied on every load.",
-                                path,
-                                actual_dir,
-                                self.config_path,
-                            )
-                        path = actual_dir
-                        data["codebase_dir"] = str(path)
+            # Validate no legacy configuration options BEFORE attempting to parse.
+            # Raises native ValueError (recoverable -- not corruption).
+            _validate_no_legacy_config(data)
 
-                self._config = Config(**data)
-
-                # Ensure codebase_dir is absolute even when absent from JSON.
-                # Config() defaults codebase_dir to Path(".") which is relative.
-                # Resolve it against the project root (parent of .code-indexer/).
-                if not self._config.codebase_dir.is_absolute():
+            # Ensure absolute path for codebase_dir
+            if "codebase_dir" in data:
+                # Convert to absolute path if needed
+                path = Path(data["codebase_dir"])
+                if not path.is_absolute():
+                    # If relative, resolve relative to config directory
                     config_dir = self.config_path.parent.parent
-                    self._config.codebase_dir = (
-                        config_dir / self._config.codebase_dir
-                    ).resolve()
-            except Exception as e:
-                raise ValueError(f"Failed to load config from {self.config_path}: {e}")
+                    path = (config_dir / path).resolve()
+                data["codebase_dir"] = str(path)
+                # Bug #1033: reconcile against actual config file location.
+                # On NFS clusters, nodes may mount the same share at different paths.
+                actual_dir = self.config_path.resolve().parent.parent
+                if path.is_absolute() and actual_dir != path.resolve():
+                    # Story #1082: the reconciliation (override) below is
+                    # LOAD-BEARING and runs every load; only the WARNING is
+                    # de-spammed to at most once per distinct config path so
+                    # the per-query hot path no longer floods the log
+                    # (e.g. 9,634 warnings in one run). No normalized
+                    # codebase_dir is persisted to shared state -- the memo
+                    # is process-local config-path bookkeeping only.
+                    if _should_warn_codebase_dir_mismatch(str(self.config_path)):
+                        logger.warning(
+                            "codebase_dir mismatch: stored=%s, actual=%s. "
+                            "Using actual path (config at %s). This warning "
+                            "is logged once per config path; the per-node "
+                            "override is applied on every load.",
+                            path,
+                            actual_dir,
+                            self.config_path,
+                        )
+                    path = actual_dir
+                    data["codebase_dir"] = str(path)
+
+            # Config(**data) raises pydantic ValidationError (a ValueError
+            # subclass) natively on schema violations -- NOT wrapped here.
+            self._config = Config(**data)
+
+            # Ensure codebase_dir is absolute even when absent from JSON.
+            # Config() defaults codebase_dir to Path(".") which is relative.
+            # Resolve it against the project root (parent of .code-indexer/).
+            if not self._config.codebase_dir.is_absolute():
+                config_dir = self.config_path.parent.parent
+                self._config.codebase_dir = (
+                    config_dir / self._config.codebase_dir
+                ).resolve()
         else:
             self._config = Config()
 
@@ -952,8 +1021,7 @@ class ConfigManager:
         # Store absolute path for clarity and reliability
         config_dict["codebase_dir"] = str(Path(config.codebase_dir).absolute())
 
-        with open(self.config_path, "w") as f:
-            json.dump(config_dict, f, indent=2)
+        write_json_atomic(self.config_path, config_dict, indent=2)
 
     def save_with_documentation(self, config: Optional[Config] = None) -> None:
         """Save configuration with documentation and helpful comments."""
@@ -1069,8 +1137,7 @@ code-indexer index --clear
 """
 
         # Write clean JSON config (no comments to avoid parsing issues)
-        with open(self.config_path, "w") as f:
-            json.dump(config_dict, f, indent=2, sort_keys=True)
+        write_json_atomic(self.config_path, config_dict, indent=2, sort_keys=True)
 
         # Create a separate README file with documentation
         readme_path = self.config_path.parent / "README.md"
