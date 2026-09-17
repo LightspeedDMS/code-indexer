@@ -15,6 +15,12 @@ from pathlib import Path
 from code_indexer.server.auth.user_manager import User
 from . import _utils
 from code_indexer.server.services.config_service import get_config_service
+from code_indexer.server.services.file_listing_paths import (
+    normalize_listing_path,
+    compute_direct_children_of,
+    escape_gitwildmatch_literal,
+    is_absolute_path_pattern,
+)
 from code_indexer.server.services.query_admission_gate import (
     check_query_admission,
     memory_pressure_mcp_payload,
@@ -368,13 +374,19 @@ def _build_path_pattern(
     path: str, recursive: bool, user_path_pattern: Optional[str]
 ) -> Optional[str]:
     """Build path pattern for list_files from path + user pattern."""
-    path = path.rstrip("/") if path else ""
+    # Bug #1886 (R2): see _build_browse_path_pattern's identical comment.
+    path = normalize_listing_path(path)
     if path:
+        # Bug #1886 (R4): escape gitwildmatch metacharacters in the LITERAL
+        # path component (e.g. a Next.js dynamic-route dir "app/[slug]")
+        # before splicing it into the pattern -- `user_path_pattern` is a
+        # caller-supplied pattern by contract and is never auto-escaped.
+        escaped_path = escape_gitwildmatch_literal(path)
         if user_path_pattern:
             if recursive:
-                return f"{path}/**/{user_path_pattern}"
-            return f"{path}/{user_path_pattern}"
-        return f"{path}/**/*" if recursive else f"{path}/*"
+                return f"{escaped_path}/**/{user_path_pattern}"
+            return f"{escaped_path}/{user_path_pattern}"
+        return f"{escaped_path}/**/*" if recursive else f"{escaped_path}/*"
     if user_path_pattern:
         return user_path_pattern
     return None
@@ -428,22 +440,27 @@ def _build_browse_path_pattern(
 
     Differs from _build_path_pattern in handling absolute patterns.
     """
-    path = path.rstrip("/") if path else ""
+    # Bug #1886 (R2): normalize leading/trailing "/" and a leading "./" so
+    # a request like path="/src" or path="./src/" builds the same pattern
+    # as path="src" -- pathspec's gitwildmatch does not treat a leading
+    # "./" as a no-op (it silently fails to match).
+    path = normalize_listing_path(path)
 
-    is_absolute_pattern = False
-    if user_path_pattern:
-        is_absolute_pattern = "/" in user_path_pattern or user_path_pattern.startswith(
-            "**"
-        )
+    is_absolute_pattern = is_absolute_path_pattern(user_path_pattern)
 
     if path:
+        # Bug #1886 (R4): escape gitwildmatch metacharacters in the LITERAL
+        # path component (e.g. a Next.js dynamic-route dir "app/[slug]")
+        # before splicing it into the pattern -- `user_path_pattern` is a
+        # caller-supplied pattern by contract and is never auto-escaped.
+        escaped_path = escape_gitwildmatch_literal(path)
         if user_path_pattern:
             if is_absolute_pattern:
                 return user_path_pattern
             if recursive:
-                return f"{path}/**/{user_path_pattern}"
-            return f"{path}/{user_path_pattern}"
-        return f"{path}/**/*" if recursive else f"{path}/*"
+                return f"{escaped_path}/**/{user_path_pattern}"
+            return f"{escaped_path}/{user_path_pattern}"
+        return f"{escaped_path}/**/*" if recursive else f"{escaped_path}/*"
     if user_path_pattern:
         return user_path_pattern
     return None
@@ -826,12 +843,31 @@ def list_files(params: Dict[str, Any], user: User) -> Dict[str, Any]:
         recursive = params.get("recursive", True)
         user_path_pattern = params.get("path_pattern")
 
+        normalized_list_path = normalize_listing_path(path)
         final_path_pattern = _build_path_pattern(path, recursive, user_path_pattern)
+
+        # Bug #1886 (R3): recursive=False is documented ("direct children
+        # only") but was never enforced -- same fix as browse_directory's
+        # R1/R2, sharing the identical helper.
+        #
+        # Bug #1886 (R4): list_files NEVER overrides a non-empty `path`
+        # with an absolute user pattern (path_pattern is always relative to
+        # path, per its own tool doc -- see the round-3 review note); the
+        # built pattern only stands alone, verbatim, when `path` itself is
+        # empty and a pattern was supplied. That is the ONLY scenario in
+        # which final_path_pattern is safe to re-parse for a depth base --
+        # every other case was built by escaping+prefixing normalized_path,
+        # so the base must come from normalized_path directly.
+        pattern_overrides_path = bool(user_path_pattern) and not normalized_list_path
+        direct_children_of = compute_direct_children_of(
+            normalized_list_path, recursive, final_path_pattern, pattern_overrides_path
+        )
 
         query_params = FileListQueryParams(
             page=_DEFAULT_PAGE,
             limit=_MAX_MCP_FILE_LIMIT,
             path_pattern=final_path_pattern,
+            direct_children_of=direct_children_of,
         )
 
         if repository_alias and repository_alias.endswith("-global"):
@@ -1115,12 +1151,46 @@ def browse_directory(params: Dict[str, Any], user: User) -> Dict[str, Any]:
             bp["path"], bp["recursive"], bp["user_path_pattern"]
         )
 
+        # Bug #1886: recursive=False means "immediate children only" -- the
+        # glob pattern built above cannot express that on its own (gitignore-
+        # style matching doesn't anchor a bare "*" at "/"), so pass an
+        # explicit depth restriction that FileListingService applies BEFORE
+        # limit truncation. recursive=True (default) passes None: no
+        # restriction, byte-for-byte unchanged behavior.
+        #
+        # R1 (round 2): when user_path_pattern is "absolute" (overrides
+        # `path` entirely -- see _build_browse_path_pattern above), the
+        # depth base must come from final_path_pattern's own literal
+        # directory prefix, not from `path` (which may be irrelevant or
+        # simply wrong, e.g. path="wrong/path" + an absolute pattern).
+        #
+        # Bug #1886 (R4): `pattern_overrides_path` is the explicit signal
+        # for that override case -- an absolute user pattern, OR `path`
+        # itself being empty (the pattern then stands alone, verbatim).
+        # Every other pattern was built by escaping+prefixing
+        # normalized_browse_path (escape_gitwildmatch_literal), so
+        # re-parsing it for a depth base would either see an escaped
+        # metachar as "still a glob" (wrongly disabling the restriction) or
+        # yield a base that never equals a real file's unescaped dirname.
+        normalized_browse_path = normalize_listing_path(bp["path"])
+        user_path_pattern = bp["user_path_pattern"]
+        pattern_overrides_path = bool(user_path_pattern) and (
+            is_absolute_path_pattern(user_path_pattern) or not normalized_browse_path
+        )
+        direct_children_of = compute_direct_children_of(
+            normalized_browse_path,
+            bp["recursive"],
+            final_path_pattern,
+            pattern_overrides_path,
+        )
+
         query_params = FileListQueryParams(
             page=_DEFAULT_PAGE,
             limit=bp["limit"],
             path_pattern=final_path_pattern,
             language=bp["language"],
             sort_by=bp["sort_by"],
+            direct_children_of=direct_children_of,
         )
 
         if is_global_repo:
@@ -1140,7 +1210,7 @@ def browse_directory(params: Dict[str, Any], user: User) -> Dict[str, Any]:
             serialized_files, repository_alias, user
         )
 
-        path_normalized = (bp["path"].rstrip("/") if bp["path"] else "") or "/"
+        path_normalized = normalized_browse_path or "/"
         structure = {
             "path": path_normalized,
             "files": serialized_files,

@@ -585,7 +585,38 @@ class FileListingService:
                 if f.language and f.language.lower() == target_language
             ]
 
+        # Bug #1886: single-level depth restriction (browse_directory's
+        # recursive=False). Gitignore-style glob matching (used above for
+        # path_pattern) generally DOES anchor correctly -- "examples/*.java"
+        # matches only direct children ending in .java, never
+        # "examples/sub/Nested.java". The one leaky shape is a trailing BARE
+        # "*" segment: "examples/*" still matches "examples/sub/Nested.java"
+        # because pathspec's directory-containment semantics don't anchor an
+        # unsuffixed "*" to stop at "/". This explicit restriction closes
+        # that gap (and is a second, independent guarantee for every other
+        # pattern shape besides). Applied here (BEFORE
+        # _apply_sorting/_apply_pagination) so a limit truncation can never
+        # starve real direct children behind alphabetically-earlier nested
+        # files.
+        if query_params.direct_children_of is not None:
+            base = query_params.direct_children_of
+            filtered_files = [
+                f for f in filtered_files if self._dirname_of(f.path) == base
+            ]
+
         return filtered_files
+
+    @staticmethod
+    def _dirname_of(path: str) -> str:
+        """Return the parent directory of a repo-relative path (posix "/").
+
+        Mirrors Path(path).parent behavior for the forward-slash-joined
+        relative paths FileInfo.path always holds (built via
+        ``Path.relative_to()`` in ``_collect_files_uncached``): a top-level
+        file's dirname is "" (the repository root).
+        """
+        idx = path.rfind("/")
+        return path[:idx] if idx != -1 else ""
 
     def _apply_sorting(
         self, files: List[FileInfo], sort_by: Optional[str]
