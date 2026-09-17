@@ -1065,18 +1065,15 @@ async def sse_event_generator():
     yield {"data": "connected"}
 
 
-def get_optional_user(
+async def get_optional_user(
     request: Request,
     credentials: Optional[HTTPAuthorizationCredentials] = Depends(security),
 ) -> Optional[User]:
     """
     Optional user dependency that returns None for unauthenticated requests.
 
-    Wraps get_current_user() to handle authentication failures gracefully
-    instead of raising HTTPException.
-
-    Used for endpoints that need to distinguish between authenticated
-    and unauthenticated requests (e.g., MCP SSE endpoint per RFC 9728).
+    Uses the same auth chain as POST /mcp (get_current_user_for_mcp) so
+    gateway identity_forward JWTs are accepted on GET /mcp SSE too.
 
     Args:
         request: HTTP request object for cookie extraction
@@ -1088,9 +1085,8 @@ def get_optional_user(
     from fastapi import HTTPException
 
     try:
-        return get_current_user(request, credentials)
+        return await get_current_user_for_mcp(request)
     except HTTPException:
-        # Authentication failed - return None to indicate unauthenticated
         return None
 
 
