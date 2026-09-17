@@ -5,7 +5,72 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [12.62.0] - 2026-09-17
+
+### Fixed
+
+- **Bug #1876**: `regex_search` and `xray_search` now honour `include_patterns`/`exclude_patterns`
+  on trigram-indexed repositories - both tools previously ignored them silently on an indexed repo,
+  returning results outside the caller's requested scope with no error or warning. Glob pattern
+  semantics are now consistent across every engine (indexed matcher, unindexed ripgrep walk, and the
+  grep fallback):
+  - A leading `*/` is rewritten to `**/` (matches at any depth: `*/tests/*` matches `tests/foo.py`,
+    `src/tests/foo.py`, and `a/b/tests/foo.py` alike, not just exactly one path segment before
+    `tests`) - this any-depth widening is intended policy, not a bug.
+  - A single-segment trailing slash (`docs/`) matches identically to the bare token (`docs`): the
+    name itself at any depth, plus everything recursively under it.
+  - A multi-segment trailing slash (`src/main/`) is root-anchored instead: it matches only starting
+    from the repository root, never at any depth (`modA/src/main/App.java` is not matched by
+    `src/main/`).
+  - Patterns are normalized identically regardless of surrounding whitespace (`" *.py "` behaves
+    like `"*.py"`) across every engine.
+  - The grep fallback now matches include/exclude patterns against repository-relative paths
+    (matching every other engine) instead of paths relative to a narrowed search scope, and its
+    batched subprocess invocations now share one deadline instead of each batch getting the full
+    timeout budget.
+  - `regex_search`'s `context_lines` no longer attaches trailing context from a different file, and
+    a multiline match's trailing context window is now bounded by the match's END line rather than
+    its start line.
+  - `include_patterns`/`exclude_patterns` must be a list (or tuple) of strings; a bare string is now
+    rejected up front instead of being silently iterated character-by-character.
+
+- **Bug #1886**: MCP `browse_directory` and `list_files` now honour their own documented
+  `recursive:false` contract - it previously returned the whole subtree regardless. `recursive:false`
+  now restricts results to direct children only, with `path` (and an absolute `path_pattern`)
+  normalised for a leading `/` or `./` so those forms behave the same as an unprefixed path -
+  except when the effective pattern's own directory part carries a wildcard (e.g. `**/*.py`,
+  `src/*/x.py`), which already expresses its own depth and is left unrestricted. REST
+  `GET /api/repositories/{repo_id}/files` now honours `path` as a subtree filter for non-composite
+  repositories (an absolute `path_pattern` still overrides it); `recursive` remains composite-repo-only
+  there and is never applied as a depth restriction to non-composite listings. Glob metacharacters
+  (`[`, `]`, `!`, `*`, `?`, `#`, `\`) in `path` are now escaped before being matched, so a real
+  directory whose name happens to contain them (most commonly a Next.js/SvelteKit/Nuxt/Astro
+  dynamic-route folder like `app/[slug]/`) is matched literally instead of being mis-parsed as a
+  glob - previously MCP `browse_directory` and `list_files` silently lost such a directory's files
+  and returned an unrelated sibling that accidentally satisfied the glob instead (the REST route
+  ignored `path` entirely before this release, so the escaping applies to its new subtree filter).
+
+- **Bugs #1873 and #1875**: X-Ray `analyze_graph` no longer reports live Java code as definitely
+  dead. Method references (`this::m`, `Type::m`, `X::new`) now emit reference edges; constructors
+  receive inbound edges from `new X(...)`, `this(...)` and `super(...)`; `super.m()` resolves against
+  the superclass instead of binding to the overriding method itself; and a call never binds to a
+  private method declared in a different top-level type. Genuine ambiguity (same-arity overloads)
+  still references every candidate, preserving the dead-code contract of under-reporting.
+
+- **Bug #1891 (security)**: file access through the server is now confined to the repository
+  root on every front door. `GET /api/repositories/{repo_id}/files?content=true`, MCP
+  `get_file_content`, MCP `directory_tree` and the file create/edit/delete operations resolve the
+  requested path (following symlinks) and refuse any target outside the repository, including
+  sibling directories whose names share a prefix with the repository, and any target inside the
+  repository's `.git` directory reached through a symlink. Rejections return the same response as
+  a missing file. Malformed paths (NUL bytes, symlink loops, overlong components) now return a
+  4xx instead of a 500. Deleting an in-repository symlink removes only the link. The confinement
+  primitive lives in the dependency-free `code_indexer.utils.path_confinement` module.
+
+- **Bug #1889**: `ConfigService.get_config()` lazy initialisation is now thread-safe. Two threads
+  racing on first access (for example a request and the system-metrics refresh thread) could both
+  load the configuration, and the second load replaced the object the first caller had already
+  obtained, silently discarding changes made to it.
 
 ## [12.61.0] - 2026-09-16
 

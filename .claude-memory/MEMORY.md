@@ -32,6 +32,7 @@
 ## Quality Standards
 - [feedback_zero_failures_no_excuses.md](feedback_zero_failures_no_excuses.md) - never dismiss failures as "pre-existing"
 - [feedback_fix_every_issue_found_no_deferral.md](feedback_fix_every_issue_found_no_deferral.md) - fix every issue found in the same session, even out-of-scope
+- [feedback_review_findings_fix_p1_p2_tolerate_p3_p4.md](feedback_review_findings_fix_p1_p2_tolerate_p3_p4.md) - review findings block shipping only at P1-P2; P3-P4 get filed as follow-ups (rubric inside)
 - [feedback_epic_fix_all_bugs_found.md](feedback_epic_fix_all_bugs_found.md) - on an epic, fix all bugs found incl. pre-existing flaky tests
 - [feedback_e2e_not_code_inspection.md](feedback_e2e_not_code_inspection.md) - E2E means executing real functionality, never code inspection
 - [feedback_e2e_verify_indexes_work.md](feedback_e2e_verify_indexes_work.md) - E2E must verify indexes exist on disk AND return results
@@ -106,6 +107,7 @@
 - [project_staging_solo_concurrent_chaos_test.md](project_staging_solo_concurrent_chaos_test.md) - another agent may be chaos-testing staging solo; check first
 - [project_backlog_clear_to_zero_mandate.md](project_backlog_clear_to_zero_mandate.md) - standing goal: clear the bug backlog, running discovered-vs-closed tally
 - [project_backlog_clear_ends_with_staging_e2e.md](project_backlog_clear_ends_with_staging_e2e.md) - at priority-4-only, raise staging E2E as the closing step (discuss first)
+- [project_release_1873_1876_overnight_state.md](project_release_1873_1876_overnight_state.md) - resume state for the 2026-09-16 overnight #1873/#1875/#1876/#1886 release — read first after a reset
 - [project_backlog_session_paused_2026_08_27.md](project_backlog_session_paused_2026_08_27.md) - resume state for the backlog sweep paused 2026-08-27 — read this first
 - [project_backlog_session_paused_for_vm_migration.md](project_backlog_session_paused_for_vm_migration.md) - superseded by the 2026-08-27 entry above
 - [project_pytest_tmp_accumulates_unbounded.md](project_pytest_tmp_accumulates_unbounded.md) - pytest tmp grows to 70+ GB; safe to clean dirs >15min old

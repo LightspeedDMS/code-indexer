@@ -67,7 +67,10 @@ pub struct BinderDepth {
 impl BinderDepth {
     /// A fresh depth report for `language`, claiming NO levels reached yet.
     pub fn new(language: impl Into<String>) -> Self {
-        BinderDepth { language: language.into(), levels_reached: 0 }
+        BinderDepth {
+            language: language.into(),
+            levels_reached: 0,
+        }
     }
 
     /// Records that `level_bit` was genuinely exercised (real evidence was
@@ -153,7 +156,10 @@ mod tests {
 
         depth.mark(LEVEL_4_OVERLOAD_DISCRIMINATION);
         assert!(depth.reached(LEVEL_4_OVERLOAD_DISCRIMINATION));
-        assert!(depth.reached(LEVEL_3_INHERITANCE_FAMILY), "marking level 4 must not clear level 3");
+        assert!(
+            depth.reached(LEVEL_3_INHERITANCE_FAMILY),
+            "marking level 4 must not clear level 3"
+        );
         assert!(!depth.reached(LEVEL_0_BARE_NAME));
         assert!(!depth.reached(LEVEL_1_ARITY));
         assert!(!depth.reached(LEVEL_2_IMPORT_CONTEXT));
@@ -181,7 +187,10 @@ mod tests {
 
         depth.mark(LEVEL_7_SAME_CLASS_OR_SUPER);
         assert!(depth.reached(LEVEL_7_SAME_CLASS_OR_SUPER));
-        assert!(depth.reached(LEVEL_6_RECEIVER_TYPE), "marking level 7 must not clear level 6");
+        assert!(
+            depth.reached(LEVEL_6_RECEIVER_TYPE),
+            "marking level 7 must not clear level 6"
+        );
         assert!(!depth.reached(LEVEL_0_BARE_NAME));
         assert!(!depth.reached(LEVEL_1_ARITY));
         assert!(!depth.reached(LEVEL_2_IMPORT_CONTEXT));

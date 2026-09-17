@@ -53,6 +53,8 @@ from ..auth import dependencies
 from ..managers.composite_file_listing import _list_composite_files
 from ..services.stats_service import stats_service
 from ..services.file_service import file_service
+from ..services.file_listing_paths import build_non_composite_path_pattern
+from code_indexer.utils.path_confinement import resolve_confined_path
 from ..services.search_service import search_service
 from ..app_helpers import _execute_repository_sync, _get_composite_details
 
@@ -785,8 +787,18 @@ def register_repos_v2_routes(
         List files in repository with pagination and filtering.
 
         Supports both single and composite repository file listing.
-        For composite repos, use path and recursive parameters.
-        For single repos, use existing pagination and filtering.
+        `recursive` is COMPOSITE-ONLY: it controls _list_composite_files'
+        walk depth for composite repos and is otherwise ignored entirely
+        (Bug #1886, R3 revision -- a prior round applied it as a
+        non-composite depth restriction too, which regressed two absolute
+        path_pattern shapes and silently broke every deployed
+        `cidx repos files` call, since the CLI client always sends
+        recursive=false).
+        For single (non-composite) repos, `path` narrows results to a
+        subtree (see file_listing_paths.build_non_composite_path_pattern
+        for the exact rule: an absolute path_pattern still overrides
+        `path` entirely);
+        `path_pattern`/`language`/`sort_by`/pagination apply as before.
         If content=True and path points to a single file, return file content.
         Uses real file system operations following CLAUDE.md Foundation #1.
         """
@@ -805,7 +817,19 @@ def register_repos_v2_routes(
             )
 
             repo = ActivatedRepository.from_dict(repo_dict)
-            file_path = Path(repo.path) / path
+
+            # Bug #1891: confine the resolved target to repo.path BEFORE any
+            # exists()/is_file()/open() touches the filesystem. A caller-
+            # supplied `path` containing parent-directory segments, an
+            # absolute path, or a symlink pointing outside the repository
+            # must never reach the filesystem calls below. The 404 here is
+            # byte-identical to the ordinary not-found response so an
+            # escape attempt cannot be distinguished from a legitimately
+            # missing file.
+            try:
+                file_path = resolve_confined_path(Path(repo.path), path)
+            except PermissionError:
+                raise HTTPException(status_code=404, detail=f"File '{path}' not found")
 
             if not file_path.exists():
                 raise HTTPException(status_code=404, detail=f"File '{path}' not found")
@@ -858,7 +882,11 @@ def register_repos_v2_routes(
                 current_user.username, repo_id
             )
             if repo_dict and repo_dict.get("is_composite", False):
-                # Composite repository - use simple file listing
+                # Composite repository - use simple file listing.
+                # Bug #1886 (R3 revision): byte-identical to HEAD --
+                # `recursive` is a plain bool again (composite-only,
+                # unaffected by the non-composite path-pattern change
+                # below).
                 repo = ActivatedRepository.from_dict(repo_dict)
                 files = _list_composite_files(
                     repo, path=path or "", recursive=recursive
@@ -888,10 +916,22 @@ def register_repos_v2_routes(
             )
 
         try:
+            # Bug #1886 (R3 revision): `path` narrows a non-composite
+            # listing to a subtree (see
+            # file_listing_paths.build_non_composite_path_pattern);
+            # `recursive` is composite-only and never consulted here.
+            # BACKWARD COMPATIBILITY: `path` absent/root -> path_pattern
+            # passed through unchanged, exactly HEAD's behavior. No
+            # direct_children_of / depth restriction is ever applied on
+            # this route.
+            effective_path_pattern = build_non_composite_path_pattern(
+                path, path_pattern
+            )
+
             query_params = FileListQueryParams(
                 page=page,
                 limit=limit,
-                path_pattern=path_pattern,
+                path_pattern=effective_path_pattern,
                 language=language,
                 sort_by=sort_by,
             )

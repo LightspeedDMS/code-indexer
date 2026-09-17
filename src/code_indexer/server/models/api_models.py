@@ -310,6 +310,18 @@ class FileListQueryParams(BaseModel):
     sort_by: Optional[str] = Field(
         default="path", description="Sort field: path, size, modified_at"
     )
+    direct_children_of: Optional[str] = Field(
+        default=None,
+        description=(
+            "When set, restrict results to files whose parent directory equals "
+            "this value exactly (empty string means the repository root). Used "
+            "by browse_directory's and list_files' recursive=False mode "
+            "(Bug #1886) so a single glob pattern doesn't have to (and, via "
+            "gitignore-style matching, cannot) express a single-level depth "
+            "boundary on its own. None (the default) applies no depth "
+            "restriction, preserving prior behavior for every other caller."
+        ),
+    )
 
 
 # Repository Status Models for Repository Management

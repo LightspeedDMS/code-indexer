@@ -77,26 +77,90 @@ Not every node kind participates equally in analysis. `CodeGraph::is_definitely_
 
 ### What becomes an edge
 
-An edge (a `Reference` in the CSR arena) is produced by exactly three tree-sitter node kinds, dispatched in `java.rs`'s node-walk:
+An edge (a `Reference` in the CSR arena) is produced by these Java tree-sitter
+node kinds, dispatched in `java.rs`'s node-walk:
 
 - `method_invocation` -- a method call.
-- `object_creation_expression` -- a `new` expression.
+- `method_reference` -- a reference such as `this::m`, `Type::m`, `expr::m`,
+  `super::m`, or `Type::new`. Named method references retain every candidate
+  overload rather than making an unsound choice.
+- `object_creation_expression` -- a `new` expression. It references both the
+  constructed type and every constructor that could accept the call.
+- `explicit_constructor_invocation` -- `this(...)` or `super(...)`, which
+  references every compatible constructor on the current or superclass type.
 - `type_identifier` -- a bare type reference.
+- `marker_annotation` / `annotation` -- an annotation usage (`@Marker`,
+  `@Marker(...)`, `@Outer.Marker`), which references the annotation TYPE's
+  own declaration by its last name segment.
 
-No other syntax construct produces a reference edge. In particular, `field_access` is not handled anywhere in the graph extraction code -- reading or writing a field or a constant never creates an inbound edge to that field's or constant's declaration, regardless of how many places in the codebase touch it.
+Constructor candidates are deliberately kept conservatively: same-arity
+overloads and varargs candidates remain referenced when the source syntax
+cannot soundly identify one target. A `super.m()` or `super::m` call resolves
+only against the enclosing type's recorded superclass family, never against
+the enclosing type itself -- so an external superclass with a KNOWN,
+recorded `extends` edge produces no self-edge to the overriding method in
+the current type. The conservative "no evidence -> leave every candidate
+referenced" fallback applies ONLY when the type has NO recorded supertype
+edge at all -- neither an `extends` clause nor an `implements` clause. A
+class with no `extends` clause but a real `implements` clause DOES narrow:
+`implements` edges are recorded regardless of whether a `superclass` is
+also present, so `super`-class narrowing sees a non-empty, complete
+supertype set (the declared interfaces) and applies its normal hard filter
+against them, exactly as it would for a class that also extends something.
+The fallback is reserved for the narrower case of a class with NEITHER
+clause: Java's implicit `java.lang.Object` superclass is never tracked as a
+recorded edge, so a `super.m()` call there falls into the same "no
+supertype evidence at all" case as a genuine extraction gap, and the
+deliberately conservative fallback (leave every candidate referenced rather
+than risk deleting a real target) can produce a self-loop when the sole
+matching candidate happens to be the enclosing type's own method -- e.g.
+`class Foo { public String toString() { return super.toString(); } }` with
+no other `toString` anywhere in the repo. Distinct from a genuine extraction
+gap (a `superclass`/`implements` clause that exists syntactically but could
+not be resolved to a name, e.g. an unhandled tree-sitter shape, OR a
+supertype whose bare name textually collides with the subtype's own bare
+name -- two different declared types this bare-name-only extractor cannot
+locally disambiguate): that case is tracked explicitly as "incomplete
+supertype evidence" for the type, and `super`-class narrowing skips
+narrowing entirely whenever it applies, regardless of whether some OTHER,
+correctly-resolved supertype edge would otherwise make the candidate set
+look non-empty and narrowable. During Java
+binding, a private candidate declared in a different known top-level type is
+discarded as Java-inaccessible, while nested types under the same top-level
+type retain private access. Incomplete or ambiguous nesting evidence is kept
+instead of guessed away.
+
+No other syntax construct produces a reference edge. In particular,
+`field_access` is not handled anywhere in the graph extraction code -- reading
+or writing a field or a constant never creates an inbound edge to that field's
+or constant's declaration, regardless of how many places in the codebase
+touch it.
 
 ### What is invisible to the graph
 
-Because edges come from exactly the three syntactic constructs above, the following are structurally invisible, not merely unhandled:
+Because edges come only from the syntactic constructs above, the following are
+structurally invisible, not merely unhandled:
 
 - Field and constant reads/writes (no `field_access` edge exists at all).
 - Reflection (`Class.forName`, method-handle invocation, dynamic proxies) -- these are string values or runtime API calls, not `method_invocation`/`object_creation_expression`/`type_identifier` nodes naming the target.
 - JNI-bound native methods -- the native implementation is outside any parsed Java source the extractor walks.
 - Dependency-injection wiring -- an injected field is an ordinary field declaration, and its DI-driven construction happens outside any `object_creation_expression` this repository's source contains.
 - Lombok-generated members (e.g. `@Data`-generated getters/setters/constructors) -- the extractor walks the tree-sitter parse of the source AS WRITTEN; Lombok's annotation processor generates bytecode the parser never sees, so a call to a Lombok-generated method has no corresponding declaration node to resolve against in the first place.
-- JPA and other annotation-driven use (e.g. an entity field read only through reflection-backed ORM mapping). Annotations are captured by the extractor as metadata attached to a declaration, but no annotation node dispatches to a reference-producing code path -- annotations never create edges.
+- JPA and other annotation-driven use (e.g. an entity field read only through reflection-backed ORM mapping). An annotation usage creates an edge only to the annotation TYPE's own declaration; whatever the annotation causes a framework to read or call at runtime creates no edge.
+- Enum-constant construction. An enum constant's implicit call to an explicit
+  enum constructor is not an `object_creation_expression`, so it currently
+  creates no constructor edge.
+- Implicit superclass-constructor calls. A constructor without an explicit
+  `this(...)` or `super(...)` invocation has an implicit `super()` call in
+  Java, but only explicit constructor-invocation syntax currently creates an
+  edge.
 
-A symbol reachable only through any of the above shows zero inbound edges and, if it is an unreferenced private `Method` or `Type`, WILL be reported as `is_definitely_dead_code == Some(true)` even though it has a real, live caller the graph cannot see. Fields, constants, packages, and unknown-kind symbols remain `None` under the allowlist regardless of visibility. This is a hard boundary of this tool to design around, not a defect to file.
+A symbol reachable only through any of the above shows zero inbound edges and,
+if it is an unreferenced private `Method` or `Type`, can be reported as
+`is_definitely_dead_code == Some(true)` even though it has a real, live caller
+the graph cannot see. Fields, constants, packages, and unknown-kind symbols
+remain `None` under the allowlist regardless of visibility. This is a hard
+boundary of this tool to design around, not a defect to file.
 
 ### CSR arena layout
 

@@ -22,6 +22,10 @@ from pathlib import Path
 from typing import Dict, Any, Optional, TYPE_CHECKING
 
 from code_indexer.utils.file_locking import nfs_safe_fsync
+from code_indexer.utils.path_confinement import (
+    reject_if_within_git_directory,
+    resolve_confined_path,
+)
 
 if TYPE_CHECKING:
     from code_indexer.server.repositories.activated_repo_manager import (
@@ -322,8 +326,20 @@ class FileCRUDService:
         # Resolve repository path (checks write exceptions first - Story #197)
         repo_path = self._resolve_repo_path(repo_alias, username)
 
-        # Construct full file path
-        full_path = repo_path / file_path
+        # Bug #1891: resolve + confine BEFORE any exists()/open() call.
+        # _validate_crud_path() above only rejects literal ".." components
+        # and absolute paths -- it does not catch a symlink already
+        # present inside the repository (e.g. tracked in the underlying
+        # git repo) that points outside the repository root.
+        full_path = resolve_confined_path(repo_path, file_path)
+
+        # Bug #1891 (final SECURITY round): a symlink tracked INSIDE the
+        # repository (e.g. "gitlink" -> ".git") is itself confined to
+        # repo_path, so resolve_confined_path() above does not catch it --
+        # the RESOLVED target can still land inside ".git" (e.g.
+        # repo_path/.git/hooks/pre-commit), letting a write-mode user
+        # plant a hook that executes on the server's next `git commit`.
+        reject_if_within_git_directory(repo_path, full_path, "create_file")
 
         # Check if file already exists
         if full_path.exists():
@@ -398,8 +414,17 @@ class FileCRUDService:
         # Resolve repository path (checks write exceptions first - Story #197)
         repo_path = self._resolve_repo_path(repo_alias, username)
 
-        # Construct full file path
-        full_path = repo_path / file_path
+        # Bug #1891: resolve + confine BEFORE any exists()/open() call.
+        # _validate_crud_path() above only rejects literal ".." components
+        # and absolute paths -- it does not catch a symlink already
+        # present inside the repository (e.g. tracked in the underlying
+        # git repo) that points outside the repository root.
+        full_path = resolve_confined_path(repo_path, file_path)
+
+        # Bug #1891 (final SECURITY round): see create_file's identical
+        # comment -- a tracked in-repo symlink (e.g. "gitlink" -> ".git")
+        # is confined to repo_path yet still resolves into ".git".
+        reject_if_within_git_directory(repo_path, full_path, "edit_file")
 
         if not full_path.exists():
             raise FileNotFoundError(f"File not found: {file_path}")
@@ -487,8 +512,61 @@ class FileCRUDService:
         # Resolve repository path (checks write exceptions first - Story #197)
         repo_path = self._resolve_repo_path(repo_alias, username)
 
-        # Construct full file path
-        full_path = repo_path / file_path
+        # Bug #1891: resolve + confine BEFORE any exists()/open() call.
+        # _validate_crud_path() above only rejects literal ".." components
+        # and absolute paths -- it does not catch a symlink already
+        # present inside the repository (e.g. tracked in the underlying
+        # git repo) that points outside the repository root.
+        full_path = resolve_confined_path(repo_path, file_path)
+
+        # Bug #1891 round 2 (S3): the actual removal below MUST target the
+        # LEXICAL (unresolved) path the caller named, never the RESOLVED
+        # `full_path`. os.remove()/unlink() never follows a symlink at its
+        # FINAL path component -- removing via the lexical path deletes
+        # only the symlink node itself, matching what the caller asked to
+        # delete. Removing via `full_path` (the confinement-resolved
+        # target) deleted the symlink's TARGET file instead and left the
+        # symlink dangling -- a round-1 regression. `full_path` remains the
+        # correct path for the containment decision and for reading
+        # content (hash validation, below).
+        #
+        # Bug #1891 round 3 (D1): a naive lexical_path = Path(repo_path) /
+        # file_path is STILL not safe to pass to os.remove() as-is. The OS
+        # follows symlinks in every PARENT path component when resolving a
+        # path (only the FINAL component is left un-followed by
+        # os.remove()/unlink()). If a PARENT component is itself a symlink
+        # escaping the repository (e.g. a tracked "link_to_parent -> .."
+        # inside the repo), the lexical path can resolve -- at the kernel
+        # level, when os.remove() is called -- to a node OUTSIDE the
+        # repository, even though `full_path` above (which follows ALL
+        # symlinks, including the final one) happens to land back inside
+        # the repo and passes containment (e.g. file_path=
+        # "link_to_parent/pointer" where the outside "pointer" symlink
+        # happens to point at a file inside the repo). Confining the
+        # PARENT directory separately (following ITS symlinks) and then
+        # joining the final component's literal NAME onto that
+        # confinement-verified parent closes this gap: an escaping parent
+        # symlink is rejected here, while a same-repo final-component
+        # symlink (no escaping parent) still resolves the parent to its
+        # own real, in-repo location and joins the literal name onto it --
+        # removing only the symlink node, never its target, exactly as
+        # round 2 intended.
+        name = Path(file_path).name
+        if name in ("", ".", ".."):
+            raise PermissionError("Access denied")
+        confined_parent = resolve_confined_path(repo_path, str(Path(file_path).parent))
+        lexical_path = confined_parent / name
+
+        # Bug #1891 (final SECURITY round): see create_file's identical
+        # comment -- a tracked in-repo symlink (e.g. "gitlink" -> ".git")
+        # is confined to repo_path yet still resolves into ".git". Check
+        # BOTH the resolved containment target (full_path) and the actual
+        # node os.remove() will operate on (lexical_path) -- they can
+        # differ (e.g. file_path="gitlink" resolves full_path to
+        # repo_path/.git itself, while lexical_path is the "gitlink"
+        # symlink node; either landing inside/at ".git" is forbidden).
+        reject_if_within_git_directory(repo_path, full_path, "delete_file")
+        reject_if_within_git_directory(repo_path, lexical_path, "delete_file")
 
         if not full_path.exists():
             raise FileNotFoundError(f"File not found: {file_path}")
@@ -511,9 +589,10 @@ class FileCRUDService:
                     "File may have been modified since hash was computed."
                 )
 
-        # Delete file
+        # Delete file (the symlink/file node the caller named -- see the
+        # lexical_path comment above)
         try:
-            os.remove(str(full_path))
+            os.remove(str(lexical_path))
         except Exception as e:
             raise CRUDOperationError(
                 f"Failed to delete file '{file_path}': {str(e)}"

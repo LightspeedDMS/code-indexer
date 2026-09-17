@@ -15,7 +15,9 @@
 //! worse than an explicit, observable "not yet supported" signal.
 
 pub mod java;
+mod java_invocations;
 mod java_receiver;
+mod java_type_names;
 pub mod local_index;
 
 use crate::owned_node::OwnedNode;
@@ -55,7 +57,10 @@ mod tests {
 
     #[test]
     fn java_extension_is_supported() {
-        assert!(matches!(extractor_for_language("java"), ExtractorLookup::Supported(_)));
+        assert!(matches!(
+            extractor_for_language("java"),
+            ExtractorLookup::Supported(_)
+        ));
     }
 
     /// Python IS a supported engine language (`crate::languages`) but has
@@ -64,11 +69,17 @@ mod tests {
     /// extractor and produces an empty `LocalIndex`.
     #[test]
     fn an_engine_supported_language_without_an_extractor_yet_is_explicitly_unsupported() {
-        assert!(matches!(extractor_for_language("py"), ExtractorLookup::Unsupported));
+        assert!(matches!(
+            extractor_for_language("py"),
+            ExtractorLookup::Unsupported
+        ));
     }
 
     #[test]
     fn a_totally_unknown_extension_is_also_explicitly_unsupported() {
-        assert!(matches!(extractor_for_language("xyz"), ExtractorLookup::Unsupported));
+        assert!(matches!(
+            extractor_for_language("xyz"),
+            ExtractorLookup::Unsupported
+        ));
     }
 }

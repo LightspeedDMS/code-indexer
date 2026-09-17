@@ -28,6 +28,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -46,6 +47,18 @@ logger = logging.getLogger(__name__)
 
 # Default timeout for search operations (5 minutes)
 DEFAULT_SEARCH_TIMEOUT_SECONDS = 300
+
+# Bug #1876 N2: the grep-fallback glob-filtered path resolves include/
+# exclude patterns to an explicit candidate file list (ripgrep applies
+# -g/--glob filters at the OS-level walk; grep has no equivalent, so the
+# candidate list is passed on the command line instead). Placing an
+# unbounded file list on one command line risks the OS's
+# "argument list too long" (E2BIG) once a repository's matched-file count
+# grows large. Chunking into bounded batches (one grep invocation per
+# batch) keeps each invocation's argv comfortably small regardless of
+# repository size -- 500 paths, even at a generous ~200 bytes/path, is
+# ~100 KB, far under any platform's ARG_MAX.
+_GREP_FILE_LIST_BATCH_SIZE = 500
 
 # Issue #1601: hard byte-size backstop on how much ripgrep/grep output this
 # service will ever read/parse into memory for a single call, independent
@@ -477,6 +490,14 @@ class RegexMatch:
     line_content: str
     context_before: List[str] = field(default_factory=list)
     context_after: List[str] = field(default_factory=list)
+    # Bug #1876 F3: the LAST line the match's own text spans (relevant
+    # only for a multiline match, whose text can cover more than one
+    # line) -- None for every non-ripgrep-multiline call site, in which
+    # case it is equivalent to line_number. Never serialized/exposed
+    # beyond this module; used only to window trailing context correctly
+    # in _process_ripgrep_context_event (set in
+    # _process_ripgrep_match_event immediately below).
+    end_line_number: Optional[int] = None
 
 
 @dataclass
@@ -709,8 +730,35 @@ class RegexSearchService:
 
         Raises:
             ValueError: If path doesn't exist or PCRE2 unavailable
+            InvalidPatternError: If include_patterns/exclude_patterns
+                contains a non-string item, a malformed glob (unbalanced
+                brace), or gitignore negation/comment syntax (``!x``,
+                ``#x``) that would otherwise silently invert an include
+                into an exclude (ripgrep's own ``-g`` negation syntax) or
+                fail open on the unindexed path with zero signal.
             TimeoutError: If search exceeds timeout_seconds
         """
+        # Bug #1876 N5: validate ONCE here, in the service layer, before
+        # ANY dispatch work (PCRE2 probe, path-existence check, trigram
+        # pre-filter, engine dispatch) -- so every front door (MCP, REST,
+        # CLI) that calls this method gets IDENTICAL validation and
+        # IDENTICAL structured errors, instead of each front door having
+        # to remember to call PathPatternMatcher.compile_patterns() itself.
+        # The MCP handler (_validate_regex_args) already does this at its
+        # own front door and is unaffected -- it never reaches here on an
+        # invalid pattern. Before this fix, only the INDEXED (trigram
+        # candidate-file) path happened to validate, via the selector
+        # _search_ripgrep builds internally -- the plain unindexed ripgrep
+        # `-g` walk validated nothing at all, so e.g.
+        # include_patterns=["!*.md"] silently reached ripgrep as ITS OWN
+        # negation syntax (an exclude), inverting the caller's intent with
+        # no error, while the exact same input raised on an indexed repo.
+        from code_indexer.services.path_pattern_matcher import PathPatternMatcher
+
+        _pattern_matcher = PathPatternMatcher()
+        _pattern_matcher.compile_patterns(include_patterns)
+        _pattern_matcher.compile_patterns(exclude_patterns)
+
         # Story #4 AC2: Regex metrics tracked at MCP handler layer with
         # correct username attribution (_legacy.py:245). Removed duplicate
         # increment_regex_search() call here that caused _anonymous attribution.
@@ -1011,9 +1059,13 @@ class RegexSearchService:
 
         submatches = match_data.get("submatches", [])
         column = submatches[0]["start"] + 1 if submatches else 1
-        bounded_content = _bounded_match_content(
-            self._extract_line_text(match_data["lines"])
-        )
+        raw_text = self._extract_line_text(match_data["lines"])
+        # Bug #1876 F3: a multiline match's own text can span more than
+        # one line -- computed from the UNBOUNDED raw text (never the
+        # truncated bounded_content below) so a huge match doesn't lose
+        # its true end line to the 256 KiB content cap.
+        end_line_number = match_data["line_number"] + raw_text.count("\n")
+        bounded_content = _bounded_match_content(raw_text)
         if not budget.try_reserve(bounded_content):
             return True, len(matches) + 1, context_before
 
@@ -1025,6 +1077,7 @@ class RegexSearchService:
                 line_content=bounded_content,
                 context_before=context_before.copy(),
                 context_after=[],
+                end_line_number=end_line_number,
             )
         )
         return False, total + 1, []
@@ -1034,6 +1087,8 @@ class RegexSearchService:
         data: dict,
         matches: List[RegexMatch],
         context_before: List[str],
+        can_attach_context_after: bool,
+        context_lines: int,
         budget: Optional["_ResultContentBudget"] = None,
     ) -> tuple:
         """Handle one ripgrep --json 'context' event.
@@ -1046,6 +1101,34 @@ class RegexSearchService:
         the whole scan rather than accumulating further context lines
         that a subsequent match would never even get a chance to check.
 
+        ``can_attach_context_after`` is reset by each ripgrep ``begin``
+        event and enabled only after a match in that same file.  This uses
+        ripgrep's stream boundary rather than resolving the context event's
+        path through the filesystem for every context line (Bug #1876).
+
+        Bug #1876 N8: ``can_attach_context_after`` alone is NOT enough to
+        decide trailing-vs-leading WITHIN one file -- it stays True for the
+        rest of the file once any match has occurred, so a second match
+        further away than ``context_lines`` had its own LEADING context
+        lines silently swallowed into the FIRST match's context_after, and
+        the second match's context_before was left empty. A context event
+        is trailing context for ``matches[-1]`` only while its own
+        ``line_number`` still falls within that match's trailing window
+        (``line_number <= matches[-1].end_line_number + context_lines``);
+        beyond that window it is leading context for whichever match comes
+        next. When ``line_number`` is absent (defensive; ripgrep always
+        emits it), fall back to the pre-fix boolean-only behavior rather
+        than guessing.
+
+        Bug #1876 F3: the window is anchored on ``end_line_number`` (the
+        LAST line a possibly-multiline match's own text spans), not the
+        bare start ``line_number`` -- a multiline match (``multiline=True``)
+        can itself span several lines, and bounding the trailing window
+        by its START line silently dropped genuine trailing context that
+        falls after the match's end but still within ``context_lines`` of
+        it. ``end_line_number`` equals ``line_number`` for every
+        single-line match, so this is a no-op change for that case.
+
         Returns: (context_before, stop).
         """
         if budget is None:
@@ -1053,7 +1136,19 @@ class RegexSearchService:
         ctx = _bounded_match_content(self._extract_line_text(data["data"]["lines"]))
         if not budget.try_reserve(ctx):
             return context_before, True
-        if matches and data["data"]["line_number"] > matches[-1].line_number:
+        line_number = data["data"].get("line_number")
+        is_trailing_context_for_last_match = can_attach_context_after and matches
+        if is_trailing_context_for_last_match and line_number is not None:
+            last_match = matches[-1]
+            match_end_line = (
+                last_match.end_line_number
+                if last_match.end_line_number is not None
+                else last_match.line_number
+            )
+            is_trailing_context_for_last_match = (
+                line_number <= match_end_line + context_lines
+            )
+        if is_trailing_context_for_last_match:
             matches[-1].context_after.append(ctx)
             return context_before, False
         context_before.append(ctx)
@@ -1078,6 +1173,7 @@ class RegexSearchService:
         matches: List[RegexMatch] = []
         total = 0
         context_before: List[str] = []
+        can_attach_context_after = False
 
         lines = output.splitlines() if isinstance(output, str) else output
         for line in lines:
@@ -1090,15 +1186,29 @@ class RegexSearchService:
                 continue
 
             event_type = data.get("type")
-            if event_type == "match":
+            if event_type == "begin":
+                # Ripgrep emits begin/end for every file.  Reset both pieces
+                # of parser state here so a prior file's trailing context can
+                # never attach to the next file's match, and so a next file's
+                # leading context cannot attach backwards.
+                context_before = []
+                can_attach_context_after = False
+            elif event_type == "match":
+                prior_match_count = len(matches)
                 stop, total, context_before = self._process_ripgrep_match_event(
                     data, matches, total, max_results, context_before, budget
                 )
+                can_attach_context_after = len(matches) > prior_match_count
                 if stop:
                     break
             elif event_type == "context" and context_lines > 0:
                 context_before, stop = self._process_ripgrep_context_event(
-                    data, matches, context_before, budget
+                    data,
+                    matches,
+                    context_before,
+                    can_attach_context_after,
+                    context_lines,
+                    budget,
                 )
                 if stop:
                     break
@@ -1371,12 +1481,34 @@ class RegexSearchService:
         if context_lines > 0:
             cmd.extend(["-C", str(context_lines)])
 
+        # Bug #1876 item 3: apply the SAME canonical normalization
+        # (leading './' stripped, leading '*/' -> '**/', bare-directory
+        # token -> recursive selector) the indexed matcher applies, so a
+        # glob produces the same file set whether the walk is indexed or
+        # not. Brace groups are left untouched here -- ripgrep expands
+        # them itself.
+        #
+        # Bug #1876 F7: the indexed matcher strips surrounding whitespace
+        # from every pattern exactly once, in
+        # PathPatternMatcher._validate_and_expand -- this ripgrep -g
+        # argument construction is the one other place a raw,
+        # caller-supplied pattern is turned into a real engine argument,
+        # so it must apply the SAME strip before normalizing, or
+        # " *.py " (whitespace-padded) silently diverges: matched files
+        # indexed, matched nothing via ripgrep's own -g glob (which
+        # treats the leading/trailing spaces as literal characters).
+        from code_indexer.services.path_pattern_matcher import (
+            normalize_glob_pattern,
+        )
+
         if include_patterns:
             for pat in include_patterns:
-                cmd.extend(["-g", pat])
+                for normalized in normalize_glob_pattern(pat.strip()):
+                    cmd.extend(["-g", normalized])
         if exclude_patterns:
             for pat in exclude_patterns:
-                cmd.extend(["-g", f"!{pat}"])
+                for normalized in normalize_glob_pattern(pat.strip()):
+                    cmd.extend(["-g", f"!{normalized}"])
 
         # Always exclude CIDX internal directories (Bug #158)
         cmd.extend(["-g", "!.code-indexer/**"])
@@ -1384,8 +1516,31 @@ class RegexSearchService:
 
         if candidate_files is not None:
             # Trigram pre-filter narrowed the search to specific files; ripgrep
-            # searches those directly (gitignore is irrelevant for explicit paths,
-            # and the candidates already came from a gitignore-aware index).
+            # does NOT apply -g/--glob filters to explicit file arguments, so
+            # the include/exclude filtering must happen here instead, before
+            # the command line is built. PathPatternMatcher's create_selector
+            # (Bug #1876 items 3/5/6) is the SAME shared selector every other
+            # glob-filtering call site in this codebase (xray_graph.py's
+            # directory walk, search_engine.py's filename walk) now uses --
+            # built ONCE for this whole candidate list, not once per file.
+            from code_indexer.services.path_pattern_matcher import (
+                PathPatternMatcher,
+            )
+
+            selector = PathPatternMatcher().create_selector(
+                include_patterns, exclude_patterns
+            )
+
+            filtered_candidates = [
+                candidate
+                for candidate in candidate_files
+                if selector.select(candidate.relative_to(self.repo_path).as_posix())
+            ]
+
+            candidate_files = filtered_candidates
+            if not candidate_files:
+                return [], 0
+
             cmd.append("--")
             cmd.extend(str(f) for f in candidate_files)
         else:
@@ -1620,6 +1775,36 @@ class RegexSearchService:
         if not path_exists:
             raise ValueError(f"Search path does not exist: {search_path}")
 
+        # Bug #1876 F4: computed ONCE, up front, and used for BOTH (a)
+        # telling glob_files.py the repo-relative prefix to match
+        # include/exclude patterns against (below, config["match_prefix"])
+        # and (b) re-anchoring the returned (search_path-relative) file
+        # list onto repo_path afterward (Bug #1876 N2, unchanged). Before
+        # this fix, glob_files.py matched patterns against paths relative
+        # to search_path itself -- disagreeing with every other engine
+        # (indexed matcher, Python multiline walk, real ripgrep -g), all
+        # of which match against REPO-relative paths.
+        repo_relative_prefix: Optional[Path] = None
+        if search_path != self.repo_path:
+            try:
+                repo_relative_prefix = search_path.relative_to(self.repo_path)
+            except ValueError:
+                logger.warning(
+                    "glob search_path %s is not relative to repo_path %s; "
+                    "matching include/exclude patterns unprefixed and "
+                    "returning glob results unprefixed -- a subsequent "
+                    "grep invocation rooted at repo_path may fail to "
+                    "locate them",
+                    search_path,
+                    self.repo_path,
+                )
+        match_prefix = (
+            repo_relative_prefix.as_posix()
+            if repo_relative_prefix is not None
+            and str(repo_relative_prefix) not in ("", ".")
+            else ""
+        )
+
         # Create temp files for config and output
         config_fd, config_path = tempfile.mkstemp(suffix=".json", prefix="glob_config_")
         output_fd, output_path = tempfile.mkstemp(suffix=".json", prefix="glob_output_")
@@ -1627,11 +1812,27 @@ class RegexSearchService:
         os.close(output_fd)
 
         try:
+            # Bug #1876 N2 (Bug #158 restoration): this glob-filtered path
+            # enumerates every file under search_path via a plain
+            # rglob("*") walk (scripts/glob_files.py) with no awareness of
+            # CIDX's own internal directories -- unlike the ripgrep engine,
+            # which always appends "-g '!.code-indexer/**'" and
+            # "-g '!.git/**'" (Bug #158), and unlike this method's sibling
+            # "no filters" branch below, which passes --exclude-dir
+            # explicitly. An exclude-only call (include_patterns widened to
+            # ["**/*"] by the caller) previously surfaced real content from
+            # both directories with no way to filter it back out. Combine
+            # the caller's excludes with the same two hardcoded patterns so
+            # every engine agrees.
+            combined_exclude_patterns = list(exclude_patterns or [])
+            combined_exclude_patterns.extend([".code-indexer/**", ".git/**"])
+
             # Write glob config to temp file
             config = {
                 "search_path": str(search_path),
                 "include_patterns": include_patterns,
-                "exclude_patterns": exclude_patterns,
+                "exclude_patterns": combined_exclude_patterns,
+                "match_prefix": match_prefix,
             }
             with open(config_path, "w") as f:
                 json.dump(config, f)
@@ -1652,8 +1853,13 @@ class RegexSearchService:
             if not script_exists:
                 raise RuntimeError(f"glob_files.py script not found at {script_path}")
 
-            # Execute glob script with subprocess executor for timeout + async protection
-            cmd = ["python3", str(script_path), config_path]
+            # Execute glob script with subprocess executor for timeout + async protection.
+            # Bug #1876: use sys.executable (the server's own interpreter),
+            # not a bare "python3" looked up on PATH -- glob_files.py now
+            # imports code_indexer.services (pathspec etc.), and a
+            # PATH-resolved python3 that differs from this process's own
+            # interpreter may lack that dependency entirely.
+            cmd = [sys.executable, str(script_path), config_path]
 
             executor = SubprocessExecutor(max_workers=self._subprocess_max_workers)
             try:
@@ -1686,9 +1892,12 @@ class RegexSearchService:
                 # anyio.to_thread.run_sync so it never blocks the event
                 # loop, mirroring _read_and_parse_ripgrep/
                 # _read_and_parse_grep's identical offload rationale.
-                files, decode_error = await anyio.to_thread.run_sync(
+                glob_result: Tuple[
+                    List[str], Optional[str]
+                ] = await anyio.to_thread.run_sync(
                     self._read_and_parse_glob_output, output_path
                 )
+                files, decode_error = glob_result
 
                 # Bug #1608 follow-up (F3): the glob script emits ONE
                 # atomic JSON document (a single print(json.dumps(files))
@@ -1706,6 +1915,23 @@ class RegexSearchService:
                     logger.warning(
                         f"Failed to parse glob output as JSON: {decode_error}"
                     )
+
+                # Bug #1876 N2: glob_files.py reports paths relative to
+                # THIS call's search_path, but every caller of this method
+                # invokes its own subsequent subprocess (grep) with
+                # working_dir=str(self.repo_path) -- the repo ROOT, not
+                # search_path. When ``path`` narrows search_path below the
+                # repo root (search() line ~771: search_path = repo_path /
+                # path), a bare relative name like "a.ts" resolves to
+                # nothing at the repo root even though the file exists at
+                # "src/a.ts". Re-anchor every returned path onto
+                # self.repo_path so it is valid from wherever the caller's
+                # subprocess actually runs -- reusing the SAME prefix
+                # already computed above for config["match_prefix"] (Bug
+                # #1876 F4). A no-op when search_path is already
+                # self.repo_path (the common, non-narrowed case).
+                if match_prefix:
+                    files = [f"{match_prefix}/{f}" for f in files]
                 return files
 
             finally:
@@ -2000,7 +2226,14 @@ class RegexSearchService:
         this file raises -- before the walk can proceed to another file
         once the deadline has passed.
         """
-        from fnmatch import fnmatch
+        from code_indexer.services.path_pattern_matcher import PathPatternMatcher
+
+        # Bug #1876 items 5/6: built ONCE for the whole walk, not once per
+        # file -- the same shared selector every other glob-filtering call
+        # site in this codebase now uses.
+        selector = PathPatternMatcher().create_selector(
+            include_patterns, exclude_patterns
+        )
 
         deadline: Optional[float] = (
             time.monotonic() + timeout_seconds if timeout_seconds is not None else None
@@ -2048,13 +2281,7 @@ class RegexSearchService:
                     # path as file_path -- skip the file (already warned).
                     continue
 
-                if include_patterns and not any(
-                    fnmatch(fname, p) for p in include_patterns
-                ):
-                    continue
-                if exclude_patterns and any(
-                    fnmatch(fname, p) for p in exclude_patterns
-                ):
+                if not selector.select(rel_path):
                     continue
 
                 try:
@@ -2094,6 +2321,122 @@ class RegexSearchService:
         self._last_read_capped_bytes = _MAX_READ_BYTES if any_file_capped else None
         return matches, total
 
+    async def _run_one_grep_command(
+        self,
+        cmd: List[str],
+        timeout: int,
+        max_results: int,
+        context_lines: int,
+        pattern: str,
+        search_path: Path,
+    ) -> tuple:
+        """Execute exactly ONE grep subprocess invocation and parse its
+        output.
+
+        Extracted from ``_search_grep`` (Bug #1876 N2) so the glob-filtered
+        branch can issue one invocation PER BOUNDED BATCH of candidate
+        files instead of a single invocation carrying the entire
+        (potentially huge) file list on its command line -- see
+        ``_GREP_FILE_LIST_BATCH_SIZE``. The "no glob filters" recursive
+        fast path continues to call this exactly once, with behavior
+        byte-for-byte unchanged from before this extraction.
+
+        Returns ``(matches, total, read_capped, read_capped_bytes)``. A
+        clean "no matches" (grep exit code 1, no stderr) returns
+        ``([], 0, False, None)`` rather than raising, matching the
+        pre-existing behavior.
+        """
+        temp_fd, temp_path = tempfile.mkstemp(suffix=".txt", prefix="grep_search_")
+        os.close(temp_fd)
+
+        try:
+            # Execute with SubprocessExecutor for async + timeout protection.
+            # Issue #1601 (Fix direction 4a): max_output_bytes makes the
+            # executor terminate grep itself if its output crosses the byte
+            # ceiling WHILE STILL RUNNING, not merely bound a later read.
+            executor = SubprocessExecutor(max_workers=self._subprocess_max_workers)
+            try:
+                result = await executor.execute_with_limits(
+                    command=cmd,
+                    working_dir=str(self.repo_path),
+                    timeout_seconds=timeout,
+                    output_file_path=temp_path,
+                    max_output_bytes=_MAX_READ_BYTES,
+                )
+
+                if result.timed_out:
+                    raise TimeoutError(
+                        f"Search timed out after {result.timeout_seconds} seconds "
+                        f"(pattern='{pattern}', path='{search_path}')"
+                    )
+
+                if result.status == ExecutionStatus.ERROR:
+                    # Bug #173: Differentiate exit code 1 (no matches) from actual errors
+                    if result.exit_code == 1 and not result.stderr_output:
+                        # Exit code 1 with no stderr = no matches found (normal grep behavior)
+                        logger.debug("grep found no matches (exit code 1)")
+                        return [], 0, False, None
+                    else:
+                        # Exit code 2+ or stderr present = actual error (Finding 3.1, v10.4.4)
+                        stderr = result.stderr_output or result.error_message or ""
+                        raise RipgrepExecutionError(
+                            f"grep failed: exit_code={result.exit_code}, stderr={stderr}"
+                        )
+
+                # Issue #1601 remediation (Priority 2): offload the
+                # synchronous read+parse to a worker thread (see
+                # _search_ripgrep's identical rationale above).
+                (
+                    matches,
+                    total,
+                    bytes_read,
+                    reader_read_capped,
+                    content_capped,
+                ) = await anyio.to_thread.run_sync(
+                    self._read_and_parse_grep,
+                    temp_path,
+                    max_results,
+                    context_lines,
+                )
+                # See _search_ripgrep's identical comment: read_capped is
+                # the OR of the executor's early-kill signal (direct
+                # attribute access -- a future rename fails loud rather
+                # than being silently masked), this read's own
+                # byte-ceiling signal, and the aggregate result-content
+                # budget signal (Issue #1601 round 5, Priority 1).
+                read_capped = (
+                    bool(result.output_capped) or reader_read_capped or content_capped
+                )
+                # Issue #1601 Priority 9: see _search_ripgrep's identical
+                # rationale -- report the real output file size when the
+                # subprocess itself was killed, not the reader's own
+                # (potentially much smaller) bytes_read.
+                if result.output_capped:
+                    try:
+                        read_capped_bytes = os.path.getsize(temp_path)
+                    except OSError as size_error:
+                        logger.debug(
+                            "Could not stat capped output file %s (%s); "
+                            "falling back to reader bytes_read (%d)",
+                            temp_path,
+                            size_error,
+                            bytes_read,
+                        )
+                        read_capped_bytes = bytes_read
+                else:
+                    read_capped_bytes = bytes_read
+
+                return matches, total, read_capped, read_capped_bytes
+
+            finally:
+                # Issue #1601 round 5 (Priority 2): offload this
+                # synchronous, potentially-blocking call off the event loop.
+                await anyio.to_thread.run_sync(executor.shutdown, True)
+        finally:
+            # Clean up temp file
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+
     async def _search_grep(
         self,
         pattern: str,
@@ -2125,7 +2468,7 @@ class RegexSearchService:
         # file already is -- previously nothing here enforced any time
         # budget at all, regardless of what the caller requested.
         if multiline:
-            return await anyio.to_thread.run_sync(
+            multiline_result: tuple = await anyio.to_thread.run_sync(
                 self._search_python_multiline,
                 pattern,
                 search_path,
@@ -2135,126 +2478,112 @@ class RegexSearchService:
                 max_results,
                 timeout,
             )
+            return multiline_result
 
-        has_path_patterns = include_patterns and any(
-            "/" in pat for pat in include_patterns
-        )
-
-        if has_path_patterns:
-            # Use find to get files matching all patterns (both path and simple)
-            # Type assertion: include_patterns is not None here (checked by has_path_patterns)
-            assert include_patterns is not None
+        if include_patterns or exclude_patterns:
+            # grep's --include/--exclude grammar is not the shared
+            # gitwildmatch/ripgrep-glob policy used by the other engines.
+            # Resolve every globbed fallback search through the selector-backed
+            # subprocess instead, including bare filename patterns and
+            # exclude-only calls. ``**/*`` means every repository file when
+            # an exclude is the only supplied filter.
             file_list = await self._find_files_by_patterns(
-                search_path, include_patterns, exclude_patterns, timeout
+                search_path,
+                include_patterns or ["**/*"],
+                exclude_patterns,
+                timeout,
             )
             if not file_list:
                 return [], 0
 
-            cmd = self._build_grep_command(
-                pattern, case_sensitive, context_lines, False, file_list
-            )
-        else:
-            # Original behavior: recursive grep with --include/--exclude
-            cmd = self._build_grep_command(pattern, case_sensitive, context_lines, True)
-            if include_patterns:
-                for pat in include_patterns:
-                    cmd.extend(["--include", pat])
-            if exclude_patterns:
-                for pat in exclude_patterns:
-                    cmd.extend(["--exclude", pat])
-            # Always exclude CIDX internal directories (Bug #158)
-            cmd.extend(["--exclude-dir", ".code-indexer"])
-            cmd.extend(["--exclude-dir", ".git"])
-            cmd.append(str(search_path))
-
-        # Create temp file for output
-        temp_fd, temp_path = tempfile.mkstemp(suffix=".txt", prefix="grep_search_")
-        os.close(temp_fd)
-
-        try:
-            # Execute with SubprocessExecutor for async + timeout protection.
-            # Issue #1601 (Fix direction 4a): max_output_bytes makes the
-            # executor terminate grep itself if its output crosses the byte
-            # ceiling WHILE STILL RUNNING, not merely bound a later read.
-            executor = SubprocessExecutor(max_workers=self._subprocess_max_workers)
-            try:
-                result = await executor.execute_with_limits(
-                    command=cmd,
-                    working_dir=str(self.repo_path),
-                    timeout_seconds=timeout,
-                    output_file_path=temp_path,
-                    max_output_bytes=_MAX_READ_BYTES,
+            # Bug #1876 N2: never place the whole candidate file list on
+            # one grep command line -- a large repository risks the OS's
+            # "argument list too long". Issue one grep invocation per
+            # bounded batch (_GREP_FILE_LIST_BATCH_SIZE), stopping as soon
+            # as max_results is reached -- mirrors every other engine's
+            # early-stop-on-capacity behavior in this module.
+            #
+            # Bug #1876 F5: ``timeout`` is the caller's TOTAL budget for
+            # this batch phase, not a per-batch allowance -- applying it
+            # unconditionally to every batch (the pre-fix behavior) let a
+            # repository spanning N batches run for up to N * timeout
+            # seconds. Track a single shared deadline instead, and hand
+            # each batch only its REMAINING share -- computed immediately
+            # before dispatch, so command-construction time is never
+            # silently donated to the batch's allowance -- as the
+            # precise float, never rounded up (a batch must never be
+            # handed more time than is actually left in the shared
+            # budget). Raise TimeoutError (the same sentinel every other
+            # engine path in this file raises) once the deadline is
+            # exhausted, mirroring how the single-invocation ("no glob
+            # filters") path below reports a timeout via
+            # ``result.timed_out``.
+            batch_deadline = time.monotonic() + timeout
+            all_matches: List[RegexMatch] = []
+            total = 0
+            any_capped = False
+            capped_bytes: Optional[int] = None
+            for batch_start in range(0, len(file_list), _GREP_FILE_LIST_BATCH_SIZE):
+                if len(all_matches) >= max_results:
+                    break
+                batch = file_list[
+                    batch_start : batch_start + _GREP_FILE_LIST_BATCH_SIZE
+                ]
+                batch_cmd = self._build_grep_command(
+                    pattern, case_sensitive, context_lines, False, batch
                 )
-
-                if result.timed_out:
+                remaining = max_results - len(all_matches)
+                remaining_time = batch_deadline - time.monotonic()
+                if remaining_time <= 0:
                     raise TimeoutError(
-                        f"Search timed out after {result.timeout_seconds} seconds "
+                        f"Search timed out after {timeout} seconds "
                         f"(pattern='{pattern}', path='{search_path}')"
                     )
-
-                if result.status == ExecutionStatus.ERROR:
-                    # Bug #173: Differentiate exit code 1 (no matches) from actual errors
-                    if result.exit_code == 1 and not result.stderr_output:
-                        # Exit code 1 with no stderr = no matches found (normal grep behavior)
-                        logger.debug("grep found no matches (exit code 1)")
-                        return [], 0
-                    else:
-                        # Exit code 2+ or stderr present = actual error (Finding 3.1, v10.4.4)
-                        stderr = result.stderr_output or result.error_message or ""
-                        raise RipgrepExecutionError(
-                            f"grep failed: exit_code={result.exit_code}, stderr={stderr}"
-                        )
-
-                # Issue #1601 remediation (Priority 2): offload the
-                # synchronous read+parse to a worker thread (see
-                # _search_ripgrep's identical rationale above).
+                # _run_one_grep_command's timeout parameter is int
+                # (matching SubprocessExecutor.execute_with_limits'
+                # contract). remaining_time is already proven > 0 above,
+                # so math.ceil alone -- no additional floor -- always
+                # yields >= 1, bounding the rounding-up overage to under
+                # 1 second rather than an unbounded floor value.
+                batch_timeout = math.ceil(remaining_time)
                 (
-                    matches,
-                    total,
-                    bytes_read,
-                    reader_read_capped,
-                    content_capped,
-                ) = await anyio.to_thread.run_sync(
-                    self._read_and_parse_grep,
-                    temp_path,
-                    max_results,
+                    batch_matches,
+                    batch_total,
+                    batch_capped,
+                    batch_capped_bytes,
+                ) = await self._run_one_grep_command(
+                    batch_cmd,
+                    batch_timeout,
+                    remaining,
                     context_lines,
+                    pattern,
+                    search_path,
                 )
-                # See _search_ripgrep's identical comment: read_capped is
-                # the OR of the executor's early-kill signal (direct
-                # attribute access -- a future rename fails loud rather
-                # than being silently masked), this read's own
-                # byte-ceiling signal, and the aggregate result-content
-                # budget signal (Issue #1601 round 5, Priority 1).
-                self._last_search_read_capped = (
-                    bool(result.output_capped) or reader_read_capped or content_capped
-                )
-                # Issue #1601 Priority 9: see _search_ripgrep's identical
-                # rationale -- report the real output file size when the
-                # subprocess itself was killed, not the reader's own
-                # (potentially much smaller) bytes_read.
-                if result.output_capped:
-                    try:
-                        self._last_read_capped_bytes = os.path.getsize(temp_path)
-                    except OSError as size_error:
-                        logger.debug(
-                            "Could not stat capped output file %s (%s); "
-                            "falling back to reader bytes_read (%d)",
-                            temp_path,
-                            size_error,
-                            bytes_read,
-                        )
-                        self._last_read_capped_bytes = bytes_read
-                else:
-                    self._last_read_capped_bytes = bytes_read
+                all_matches.extend(batch_matches)
+                total += batch_total
+                any_capped = any_capped or batch_capped
+                if batch_capped_bytes is not None:
+                    capped_bytes = batch_capped_bytes
 
-            finally:
-                # Issue #1601 round 5 (Priority 2): offload this
-                # synchronous, potentially-blocking call off the event loop.
-                await anyio.to_thread.run_sync(executor.shutdown, True)
-        finally:
-            # Clean up temp file
-            if os.path.exists(temp_path):
-                os.remove(temp_path)
+            self._last_search_read_capped = any_capped
+            self._last_read_capped_bytes = capped_bytes
+            return all_matches[:max_results], total
 
+        # No glob filters: preserve grep's direct recursive fast path.
+        cmd = self._build_grep_command(pattern, case_sensitive, context_lines, True)
+        # Always exclude CIDX internal directories (Bug #158)
+        cmd.extend(["--exclude-dir", ".code-indexer"])
+        cmd.extend(["--exclude-dir", ".git"])
+        cmd.append(str(search_path))
+
+        (
+            matches,
+            total,
+            read_capped,
+            read_capped_bytes,
+        ) = await self._run_one_grep_command(
+            cmd, timeout, max_results, context_lines, pattern, search_path
+        )
+        self._last_search_read_capped = read_capped
+        self._last_read_capped_bytes = read_capped_bytes
         return matches, total

@@ -6,7 +6,7 @@
 
 use super::scope::build_file_scope;
 use super::FileForBind;
-use crate::graph::extract::local_index::DeclarationKind;
+use crate::graph::extract::local_index::{DeclarationKind, Visibility};
 use crate::graph::identity::SymbolId;
 use std::collections::HashMap;
 
@@ -37,6 +37,9 @@ pub(crate) struct DeclInfo {
     /// constructor, or a method whose return type could not be
     /// determined) -- never a guessed value.
     pub(crate) return_type: Option<String>,
+    /// D2: copied from the extraction-time declaration visibility. Unknown
+    /// remains conservative and is never filtered as private.
+    pub(crate) visibility: Visibility,
 }
 
 /// Repo-wide bare-name index. Never mutated after `build` returns.
@@ -63,17 +66,28 @@ impl RepoNameIndex {
                 .map(|record| (record.method_symbol, record.return_type.as_str()))
                 .collect();
             for decl in &file.index.declarations {
-                by_name.entry(decl.name.clone()).or_default().push(DeclInfo {
-                    symbol: decl.symbol,
-                    file_id: file.file_id,
-                    package: package.clone(),
-                    kind: decl.kind,
-                    param_count: decl.param_count,
-                    enclosing_type: owners_by_symbol.get(&decl.symbol).map(|t| t.to_string()),
-                    param_types: decl.param_types.clone(),
-                    is_varargs: decl.is_varargs,
-                    return_type: return_types_by_symbol.get(&decl.symbol).map(|t| t.to_string()),
-                });
+                by_name
+                    .entry(decl.name.clone())
+                    .or_default()
+                    .push(DeclInfo {
+                        symbol: decl.symbol,
+                        file_id: file.file_id,
+                        package: package.clone(),
+                        kind: decl.kind,
+                        param_count: decl.param_count,
+                        enclosing_type: owners_by_symbol.get(&decl.symbol).map(|t| t.to_string()),
+                        param_types: decl.param_types.clone(),
+                        is_varargs: decl.is_varargs,
+                        return_type: return_types_by_symbol
+                            .get(&decl.symbol)
+                            .map(|t| t.to_string()),
+                        visibility: file
+                            .index
+                            .visibilities
+                            .get(&decl.symbol)
+                            .copied()
+                            .unwrap_or(Visibility::Unknown),
+                    });
             }
         }
         RepoNameIndex { by_name }
@@ -113,12 +127,18 @@ mod tests {
     fn finds_declarations_by_name_and_filters_by_kind() {
         let mut index = LocalIndex::new();
         index.declarations.push(method_decl("run", 1));
-        let files = vec![FileForBind { file_id: 1, language: "java".to_string(), index }];
+        let files = vec![FileForBind {
+            file_id: 1,
+            language: "java".to_string(),
+            index,
+        }];
 
         let name_index = RepoNameIndex::build(&files);
         assert_eq!(name_index.lookup("run", DeclarationKind::Method).len(), 1);
         assert!(name_index.lookup("run", DeclarationKind::Type).is_empty());
-        assert!(name_index.lookup("doesNotExist", DeclarationKind::Method).is_empty());
+        assert!(name_index
+            .lookup("doesNotExist", DeclarationKind::Method)
+            .is_empty());
     }
 
     /// AC1/AC2 (Story #1793, S4): `DeclInfo` must expose which TYPE
@@ -131,7 +151,8 @@ mod tests {
     /// hand-built fixture that never populated `method_owners`) must get
     /// `enclosing_type: None`, never a fabricated guess.
     #[test]
-    fn decl_info_carries_enclosing_type_from_method_owner_records_and_param_shape_from_declaration() {
+    fn decl_info_carries_enclosing_type_from_method_owner_records_and_param_shape_from_declaration()
+    {
         use crate::graph::extract::local_index::MethodOwnerRecord;
 
         let mut index = LocalIndex::new();
@@ -144,9 +165,10 @@ mod tests {
             param_types: vec!["String".to_string()],
             is_varargs: true,
         });
-        index
-            .method_owners
-            .push(MethodOwnerRecord { method_symbol: make_symbol_id(1, 0), enclosing_type: "Repo".to_string() });
+        index.method_owners.push(MethodOwnerRecord {
+            method_symbol: make_symbol_id(1, 0),
+            enclosing_type: "Repo".to_string(),
+        });
         // A second method with no owner record at all -- a DISTINCT symbol
         // (local index 1) from "save"'s (local index 0), so the two are
         // never accidentally aliased in `owners_by_symbol`.
@@ -160,7 +182,11 @@ mod tests {
             is_varargs: false,
         });
 
-        let files = vec![FileForBind { file_id: 1, language: "java".to_string(), index }];
+        let files = vec![FileForBind {
+            file_id: 1,
+            language: "java".to_string(),
+            index,
+        }];
         let name_index = RepoNameIndex::build(&files);
 
         let save = &name_index.lookup("save", DeclarationKind::Method)[0];
@@ -169,7 +195,10 @@ mod tests {
         assert!(save.is_varargs);
 
         let orphan = &name_index.lookup("orphan", DeclarationKind::Method)[0];
-        assert_eq!(orphan.enclosing_type, None, "a method with no MethodOwnerRecord must never get a guessed type");
+        assert_eq!(
+            orphan.enclosing_type, None,
+            "a method with no MethodOwnerRecord must never get a guessed type"
+        );
     }
 
     /// AC2 (Story #1806, S2b): `DeclInfo.return_type` is joined from
@@ -190,9 +219,10 @@ mod tests {
             param_types: Vec::new(),
             is_varargs: false,
         });
-        index
-            .method_return_types
-            .push(MethodReturnTypeRecord { method_symbol: make_symbol_id(1, 0), return_type: "Foo".to_string() });
+        index.method_return_types.push(MethodReturnTypeRecord {
+            method_symbol: make_symbol_id(1, 0),
+            return_type: "Foo".to_string(),
+        });
         index.declarations.push(Declaration {
             kind: DeclarationKind::Method,
             name: "orphanReturn".to_string(),
@@ -203,13 +233,20 @@ mod tests {
             is_varargs: false,
         });
 
-        let files = vec![FileForBind { file_id: 1, language: "java".to_string(), index }];
+        let files = vec![FileForBind {
+            file_id: 1,
+            language: "java".to_string(),
+            index,
+        }];
         let name_index = RepoNameIndex::build(&files);
 
         let get_foo = &name_index.lookup("getFoo", DeclarationKind::Method)[0];
         assert_eq!(get_foo.return_type.as_deref(), Some("Foo"));
 
         let orphan = &name_index.lookup("orphanReturn", DeclarationKind::Method)[0];
-        assert_eq!(orphan.return_type, None, "a method with no MethodReturnTypeRecord must never get a guessed type");
+        assert_eq!(
+            orphan.return_type, None,
+            "a method with no MethodReturnTypeRecord must never get a guessed type"
+        );
     }
 }

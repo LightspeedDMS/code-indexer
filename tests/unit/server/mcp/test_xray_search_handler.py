@@ -294,6 +294,31 @@ class TestXraySearchHandlerParamValidation:
         data = _parse_response(result)
         assert data.get("error") == "timeout_out_of_range"
 
+    async def test_invalid_include_patterns_rejected_by_real_handler(self):
+        """Bug #1876 item 4: a non-string include_patterns item is rejected
+        by the REAL handle_xray_search dispatch path (not merely the
+        standalone _validate_xray_search_patterns helper in isolation)."""
+        user = _make_user(UserRole.NORMAL_USER)
+        params = {**VALID_PARAMS, "include_patterns": [None]}
+
+        handler = _import_handler()
+        result = await handler(params, user)
+
+        data = _parse_response(result)
+        assert data.get("error") == "include_patterns_invalid"
+
+    async def test_invalid_exclude_patterns_rejected_by_real_handler(self):
+        """Bug #1876 item 4: a malformed exclude_patterns glob (unbalanced
+        brace) is rejected by the REAL handle_xray_search dispatch path."""
+        user = _make_user(UserRole.NORMAL_USER)
+        params = {**VALID_PARAMS, "exclude_patterns": ["*.{ts,md"]}
+
+        handler = _import_handler()
+        result = await handler(params, user)
+
+        data = _parse_response(result)
+        assert data.get("error") == "exclude_patterns_invalid"
+
     async def test_max_results_zero_rejected(self):
         """max_results=0 is rejected with max_results_out_of_range."""
         user = _make_user(UserRole.NORMAL_USER)

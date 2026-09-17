@@ -128,6 +128,32 @@ async def test_analyze_graph_missing_repository_alias_returns_structured_error()
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("field_name", "patterns", "expected_error"),
+    [
+        ("include_patterns", ["*.{ts,md"], "include_patterns_invalid"),
+        ("include_patterns", ["!*.md"], "include_patterns_invalid"),
+        ("exclude_patterns", ["#generated"], "exclude_patterns_invalid"),
+        ("exclude_patterns", ["*.{ts,md"], "exclude_patterns_invalid"),
+    ],
+)
+async def test_analyze_graph_rejects_malformed_globs_before_repo_resolution(
+    field_name: str, patterns: list[str], expected_error: str
+) -> None:
+    """Bug #1876 item 4: malformed include/exclude globs must fail loudly
+    at the real MCP handler, before an invalid exclusion can fail open."""
+    handler = _import_handler()
+    params = {**VALID_PARAMS, field_name: patterns}
+    with patch(
+        "code_indexer.server.mcp.handlers.xray_graph._resolve_repo_path"
+    ) as mock_resolve:
+        result = await handler(params, _make_user())
+
+    mock_resolve.assert_not_called()
+    assert _parse_response(result)["error"] == expected_error
+
+
+@pytest.mark.asyncio
 async def test_analyze_graph_unresolvable_alias_returns_repository_not_found() -> None:
     handler = _import_handler()
     with patch(

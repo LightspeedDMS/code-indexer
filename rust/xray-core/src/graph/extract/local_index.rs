@@ -183,10 +183,20 @@ pub enum ReceiverExpr {
     /// all. AC3: resolved against the enclosing class and its supertypes.
     #[default]
     None,
-    /// An explicit `this.foo()`/`super.foo()` -- same resolution path as
-    /// `None` (AC3), captured as a distinct variant purely for
-    /// observability (never conflated with a genuinely bare call).
+    /// An explicit `this.foo()` -- same resolution path as `None` (AC3),
+    /// captured as a distinct variant purely for observability (never
+    /// conflated with a genuinely bare call). `super.foo()` is NOT this
+    /// variant -- see `Super` below.
     SelfOrSuper,
+    /// D3: an explicit `super.foo()` (or a `super::foo` method reference).
+    /// Resolved ONLY against the enclosing type's transitive supertypes,
+    /// NEVER against the enclosing type itself: `SelfOrSuper` originally
+    /// conflated `this` and `super`, resolving both against
+    /// `enclosing_type` -- for `super`, that produced a false self-loop
+    /// whenever the enclosing type declared its own same-named override.
+    /// An external/unresolvable superclass must produce no candidate at
+    /// all rather than silently falling back to the enclosing type.
+    Super,
     /// A simple identifier receiver (`obj.foo()`): a local variable,
     /// field, or parameter name -- resolved at bind time against the
     /// file's own declared-type substrate (`LocalIndex.typed_names`).
@@ -196,7 +206,10 @@ pub enum ReceiverExpr {
     /// `Chained { method_name: "realm", receiver: Box::new(Identifier("auth")) }`.
     /// Resolved at bind time by first resolving `receiver`'s type, then
     /// following THAT type's `method_name` declared return type.
-    Chained { method_name: String, receiver: Box<ReceiverExpr> },
+    Chained {
+        method_name: String,
+        receiver: Box<ReceiverExpr>,
+    },
     /// Any other receiver shape (array access, parenthesized expression,
     /// a receiver chain deeper than this extractor's bounded cap, ...)
     /// this slice does not attempt to type -- never fabricated evidence
@@ -249,15 +262,28 @@ pub struct ConstructionSite {
     pub line: usize,
 }
 
-/// AC1 (Story #1793, S4): links one method's `symbol` to the bare name of
-/// its immediately enclosing type. Deliberately a SEPARATE record (never a
-/// new field on `Declaration`, which every `DeclarationKind` shares) --
-/// only methods need this, and adding it here avoids touching the many
-/// existing `Declaration { .. }` construction sites across the crate.
+/// AC1 (Story #1793, S4): links one method-shaped declaration's `symbol` to
+/// the bare name of its immediately enclosing type. This includes Java
+/// constructors, whose declarations use `DeclarationKind::Method` so the
+/// existing invocation binder can resolve constructor call sites. Deliberately
+/// a SEPARATE record (never a new field on `Declaration`, which every
+/// `DeclarationKind` shares) -- only methods need this, and adding it here
+/// avoids touching the many existing `Declaration { .. }` construction sites
+/// across the crate.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MethodOwnerRecord {
     pub method_symbol: SymbolId,
     pub enclosing_type: String,
+}
+
+/// Java private-access domain for one declared type. `type_name` remains a
+/// bare name because the extractor's existing owner/inheritance substrate is
+/// bare-name based; consumers must treat an ambiguous mapping as unknown,
+/// never as grounds to remove an edge.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TypeNestingRecord {
+    pub type_name: String,
+    pub top_level_type: String,
 }
 
 /// AC2 (Story #1806, S2b): links one method's `symbol` to its declared
@@ -320,10 +346,13 @@ pub struct LocalIndex {
     /// `crate::graph::bind::budget_bind::intern_declarations_and_attach_signatures`
     /// and `CodeGraph::visibility_for`.
     pub visibilities: HashMap<SymbolId, Visibility>,
-    /// AC1 (Story #1793, S4): one record per method declaration in this
-    /// file whose immediately enclosing type is known (top-level methods
-    /// with no enclosing type produce no record here).
+    /// AC1 (Story #1793, S4): one record per method-shaped declaration in
+    /// this file whose immediately enclosing type is known (top-level
+    /// declarations with no enclosing type produce no record here).
     pub method_owners: Vec<MethodOwnerRecord>,
+    /// One record for every Java type declaration, preserving the top-level
+    /// private-access domain for nested types.
+    pub type_nesting: Vec<TypeNestingRecord>,
     /// AC1: bare names of every type declared as an INTERFACE in this
     /// file (`interface_declaration`, not `class`/`enum`/`record`) --
     /// the substrate the family binder's `is_interface` check reads.
@@ -334,6 +363,19 @@ pub struct LocalIndex {
     /// AC1 (Story #1806, S2b): one record per local variable, field, or
     /// parameter in this file whose declared type is known.
     pub typed_names: Vec<TypedNameRecord>,
+    /// N1 (#1873/#1875 second-review rework): bare names of every type
+    /// declared in this file whose recorded superclass/`implements` type-list
+    /// evidence is known to be INCOMPLETE -- a `superclass` node existed
+    /// syntactically but its type could not be resolved to a name, or a
+    /// `type_list` entry (an `implements`/`extends_interfaces` clause) could
+    /// not be resolved. `TypeIndex::has_incomplete_supertype_evidence`
+    /// (bind/families.rs) is the sole consumer: `apply_super_class_narrowing`
+    /// (bind/narrowing.rs) must skip narrowing entirely for such a type,
+    /// never trusting a `supertypes_of` result that might be missing the
+    /// real, unparseable supertype. Never removed once added -- a type can
+    /// appear here even when some OTHER supertype edge for it WAS recorded
+    /// (the two are independent facts).
+    pub incomplete_supertypes: Vec<String>,
 }
 
 impl LocalIndex {
@@ -390,6 +432,7 @@ mod tests {
         assert!(index.method_owners.is_empty());
         assert!(index.method_return_types.is_empty());
         assert!(index.typed_names.is_empty());
+        assert!(index.incomplete_supertypes.is_empty());
     }
 
     /// AC1 (Story #1793, S4): a `Declaration` for a method carries the
@@ -410,7 +453,10 @@ mod tests {
 
     #[test]
     fn method_owner_record_links_a_method_symbol_to_its_declaring_type_by_name() {
-        let owner = MethodOwnerRecord { method_symbol: make_symbol_id(1, 0), enclosing_type: "Foo".to_string() };
+        let owner = MethodOwnerRecord {
+            method_symbol: make_symbol_id(1, 0),
+            enclosing_type: "Foo".to_string(),
+        };
         assert_eq!(owner.enclosing_type, "Foo");
         assert_eq!(owner.method_symbol, make_symbol_id(1, 0));
     }
@@ -484,7 +530,10 @@ mod tests {
             receiver: Box::new(ReceiverExpr::Identifier("auth".to_string())),
         };
         match receiver {
-            ReceiverExpr::Chained { method_name, receiver } => {
+            ReceiverExpr::Chained {
+                method_name,
+                receiver,
+            } => {
                 assert_eq!(method_name, "realm");
                 assert_eq!(*receiver, ReceiverExpr::Identifier("auth".to_string()));
             }
@@ -522,16 +571,30 @@ mod tests {
         let field = TypedNameRecord {
             name: "count".to_string(),
             declared_type: "int".to_string(),
-            scope: NameScope::Field { enclosing_type: "Counter".to_string() },
+            scope: NameScope::Field {
+                enclosing_type: "Counter".to_string(),
+            },
         };
-        assert_eq!(field.scope, NameScope::Field { enclosing_type: "Counter".to_string() });
+        assert_eq!(
+            field.scope,
+            NameScope::Field {
+                enclosing_type: "Counter".to_string()
+            }
+        );
 
         let local = TypedNameRecord {
             name: "s".to_string(),
             declared_type: "String".to_string(),
-            scope: NameScope::Local { enclosing_method: make_symbol_id(1, 0) },
+            scope: NameScope::Local {
+                enclosing_method: make_symbol_id(1, 0),
+            },
         };
-        assert_eq!(local.scope, NameScope::Local { enclosing_method: make_symbol_id(1, 0) });
+        assert_eq!(
+            local.scope,
+            NameScope::Local {
+                enclosing_method: make_symbol_id(1, 0)
+            }
+        );
     }
 
     /// AC2: `MethodReturnTypeRecord` links a method's symbol to its
@@ -539,7 +602,10 @@ mod tests {
     /// own construction/assertion shape exactly.
     #[test]
     fn method_return_type_record_links_a_method_symbol_to_its_declared_return_type() {
-        let record = MethodReturnTypeRecord { method_symbol: make_symbol_id(1, 0), return_type: "Foo".to_string() };
+        let record = MethodReturnTypeRecord {
+            method_symbol: make_symbol_id(1, 0),
+            return_type: "Foo".to_string(),
+        };
         assert_eq!(record.return_type, "Foo");
         assert_eq!(record.method_symbol, make_symbol_id(1, 0));
     }

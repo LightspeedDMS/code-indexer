@@ -25,12 +25,23 @@ inputSchema:
       type: array
       items:
         type: string
-      description: Glob patterns for files to include.
+      description: >-
+        Glob patterns for files to include. Supports brace groups
+        (e.g. "*.{ts,tsx}"), including nested/multiple groups, capped at
+        64 expanded variants per pattern. A bare name with no "/" (e.g.
+        "docs") matches that name at any depth AND everything under it;
+        a single-segment trailing "/" (e.g. "docs/") matches identically
+        -- name itself plus contents, at any depth. A MULTI-segment
+        trailing "/" (e.g. "src/main/") is root-anchored instead: it
+        matches only starting from the repository root, never at any
+        depth. See "Glob Pattern Semantics" below.
     exclude_patterns:
       type: array
       items:
         type: string
-      description: Glob patterns for files to exclude.
+      description: >-
+        Glob patterns for files to exclude. Same brace-group and
+        bare-directory semantics as include_patterns.
     case_sensitive:
       type: boolean
       description: Case-sensitive matching.
@@ -158,6 +169,60 @@ Exhaustive regex pattern search on repository files without using indexes. Slowe
 KEY DIFFERENCE: regex_search searches files directly (comprehensive, slower) vs search_code FTS mode which uses indexes (fast, approximate). Use regex_search when you need guaranteed complete results.
 
 EXAMPLE: regex_search(repository_alias='backend-global', pattern='def authenticate')
+
+### Glob Pattern Semantics
+
+`include_patterns`/`exclude_patterns` are gitignore-style globs, normalized identically whether the
+repository is trigram-indexed or not (both paths produce the same file set for the same pattern):
+
+- A leading `./` is stripped (`./src/*.ts` behaves like `src/*.ts`).
+- A "bare token" with no `/`, no glob metacharacter, and no `.` (e.g. `docs`, `Makefile`) is
+  ambiguous — it could be a directory name or an extension-less filename — so it matches BOTH the
+  name itself at any depth AND everything recursively under it (`**/docs`, `**/docs/**`).
+- A pattern with no `/` at all is never anchored to a directory level, even when it carries a glob
+  metacharacter or a `.` (unlike the bare-token case above, which requires the ABSENCE of both) —
+  `*.py` matches the basename at any depth: `foo.py`, `src/foo.py`, and `src/sub/foo.py` all match.
+- A pattern ending in `/` with exactly one path segment (e.g. `docs/`) behaves IDENTICALLY to the
+  bare token above — the trailing slash adds no meaning for a single segment: `docs/` also matches
+  `docs`, exactly like `docs` does.
+- The same any-depth rule applies when that single segment ALSO carries a wildcard (e.g.
+  `tests*/`, `build-*/`, `*.d/`) — it is never root-anchored: `tests*/` matches `tests/foo.py`
+  (root), `a/tests/foo.py` (nested), and `lib/src/tests_unit/foo.py` (deeply nested, different
+  `tests*` variant) alike, not only files directly under a root-level `tests`-prefixed directory.
+- A pattern ending in `/` with MORE than one path segment (e.g. `src/main/`) is different: it is an
+  explicit, ROOT-ANCHORED directory marker — unlike every case above, it does NOT match at any
+  depth. `src/main/` matches `src/main` and everything under it starting from the repository root
+  only; `modA/src/main/App.java` (nested under a submodule) is NOT matched. The same rule makes
+  `src/*/` match only files inside a NAMED subdirectory of `src/` (`src/sub/x.py`,
+  `src/sub/sub2/x.py`), never a file directly in `src/` itself (`src/x.py` does NOT match).
+- `*` matches a single path segment; a leading `*/` is rewritten to `**/` (matches at any depth)
+  regardless of how many further `/` the rest of the pattern contains, and regardless of whether the
+  pattern ends in a wildcard or a bare trailing `/` — `*/tests/*` and `*/tests/` both match
+  `tests/foo.py` (zero segments before `tests`), `src/tests/foo.py` (one segment), and
+  `a/b/tests/foo.py` (two-or-more segments) alike, not just exactly one segment before `tests`.
+  `**` matches multiple path segments recursively.
+- Brace groups are supported, including nested and multiple groups in one pattern (e.g.
+  `*.{ts,tsx}`, `src/{a,b}/**/*.{js,{jsx,mjs}}`). Each pattern's brace expansion is capped at 64
+  variants — a pattern expanding past that cap is rejected as an invalid pattern (see below) rather
+  than silently truncated.
+
+### Invalid Pattern Errors
+
+A malformed `include_patterns`/`exclude_patterns` entry is rejected up front, before any search
+runs — it is never silently skipped or allowed to widen the search. The response is:
+
+```json
+{"success": false, "error": "invalid include_patterns: <reason>"}
+```
+
+(or `invalid exclude_patterns: <reason>` for that field). Triggers: a non-string list item (e.g.
+`[null]`); an unbalanced brace group (e.g. `*.{ts,md`); gitignore negation/comment syntax used as a
+standalone pattern (`!*.md`, `#x`), which has no meaningful effect as an include/exclude pattern
+here; or a brace group expanding to more than 64 variants.
+
+**No zero-match-pattern warning**: unlike `xray_search`, `regex_search` does not probe
+`include_patterns` for zero-match patterns — an include pattern that matches nothing simply
+returns zero matches, with no warning field in the response.
 
 ### Reranking Parameters (Optional)
 

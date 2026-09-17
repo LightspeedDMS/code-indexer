@@ -11,15 +11,22 @@ counting how many candidate paths are actually EXAMINED against the glob
 patterns, not merely asserting the final list is short -- a naive
 collect-then-slice implementation would examine every file but still
 return a short list).
+
+Bug #1876 item 6 wired the walk onto a `PathSelector` built ONCE per query
+(`PathPatternMatcher.create_selector`) instead of calling
+`matches_any_pattern` per file per pattern list -- so the per-file
+interception point instrumented below is `PathSelector.select`, not the
+pre-#1876 `matches_any_pattern` (which is no longer called per file at all).
 """
 
 from __future__ import annotations
 
-import fnmatch as fnmatch_module
+import inspect
 from pathlib import Path
 from unittest.mock import patch
 
 from code_indexer.server.mcp.handlers.xray_graph import _collect_graph_candidate_files
+from code_indexer.services.path_pattern_matcher import PathSelector
 
 _TOTAL_FILES = 10
 _CAP = 3
@@ -38,18 +45,23 @@ def test_collection_stops_examining_files_once_cap_is_reached(
     the cap, not equal to the full file count -- proving the walk itself
     stops early rather than collecting everything and slicing the result
     afterward."""
+    assert (
+        "path_matcher"
+        not in inspect.signature(_collect_graph_candidate_files).parameters
+    )
     repo_root = tmp_path / "repo"
     repo_root.mkdir()
     _build_flat_fixture(repo_root, _TOTAL_FILES)
 
-    examined_count = {"value": 0}
-    real_fnmatch = fnmatch_module.fnmatch
+    examined_count = 0
+    real_select = PathSelector.select
 
-    def _counting_fnmatch(name: str, pattern: str) -> bool:
-        examined_count["value"] += 1
-        return real_fnmatch(name, pattern)
+    def count_select(selector: PathSelector, path: str) -> bool:
+        nonlocal examined_count
+        examined_count += 1
+        return real_select(selector, path)
 
-    with patch.object(fnmatch_module, "fnmatch", _counting_fnmatch):
+    with patch.object(PathSelector, "select", count_select):
         paths, truncated = _collect_graph_candidate_files(
             repo_root, ["*.py"], [], max_files=_CAP
         )
@@ -57,8 +69,8 @@ def test_collection_stops_examining_files_once_cap_is_reached(
     # Guard: prove the instrumentation actually intercepted real calls --
     # otherwise a count of 0 would make the bounded-count assertion below
     # pass vacuously regardless of whether the implementation stops early.
-    assert examined_count["value"] > 0, (
-        "fnmatch patch never intercepted any call -- instrument the real "
+    assert examined_count > 0, (
+        "PathSelector.select was never invoked -- instrument the real "
         "matching seam _collect_graph_candidate_files uses"
     )
     assert len(paths) == _CAP, (
@@ -67,11 +79,11 @@ def test_collection_stops_examining_files_once_cap_is_reached(
     assert truncated is True, (
         "collection must report that more files existed beyond the cap"
     )
-    assert examined_count["value"] <= _CAP + 1, (
+    assert examined_count <= _CAP + 1, (
         f"the walk must STOP examining files once the cap is reached -- "
-        f"examined {examined_count['value']} files against a cap of {_CAP} "
-        f"out of {_TOTAL_FILES} total matching files, indicating the full "
-        f"tree was walked before truncating"
+        f"examined {examined_count} files against a cap "
+        f"of {_CAP} out of {_TOTAL_FILES} total matching files, indicating "
+        f"the full tree was walked before truncating"
     )
 
 
